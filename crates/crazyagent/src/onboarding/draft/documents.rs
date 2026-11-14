@@ -1,4 +1,4 @@
-use super::names::{paths_in, secret_like, source_file};
+use super::names::{paths_in, secret_like, source_file, under};
 use super::{
     Document, ENTRY_NAME_BYTES_MAX, Evidence, Folder, FoundKind, SKIPPED_ENTRIES, clip, file_text,
     open_folder, open_in,
@@ -289,34 +289,6 @@ pub(super) fn screen(repo: &Path, evidence: &mut Evidence, hidden: &[String]) {
     if let Some(text) = &mut evidence.graph {
         keep(text, true);
     }
-}
-
-/// The project's `hidden` folders as paths below `repo`, with `/` between names, for the
-/// mapping to leave out. Takes the folder and the hidden folders. Returns the paths, or
-/// `None` when one is not below the folder or not UTF-8, so nothing is cleared.
-pub(super) fn below_root(repo: &Path, hidden: &[std::path::PathBuf]) -> Option<Vec<String>> {
-    let root = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
-    hidden
-        .iter()
-        .map(|folder| {
-            let below = folder
-                .strip_prefix(&root)
-                .or_else(|_| folder.strip_prefix(repo))
-                .ok()?;
-            let text = below.to_str()?;
-            (!text.is_empty()).then(|| text.to_owned())
-        })
-        .collect()
-}
-
-/// Whether `path`, below the project folder and with an optional closing `/`, is one of the
-/// `hidden` folders or lies inside one. Takes the path and the folders. Returns the answer.
-fn under(path: &str, hidden: &[String]) -> bool {
-    let path = path.trim_end_matches('/');
-    hidden.iter().any(|folder| {
-        path.strip_prefix(folder.as_str())
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-    })
 }
 
 /// Whether `path` may name a file below the project folder for git to check: not from the

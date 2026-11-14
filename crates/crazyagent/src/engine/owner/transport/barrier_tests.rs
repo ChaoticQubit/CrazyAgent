@@ -9,6 +9,7 @@ const SWEPT_FILES: usize = 40_000;
 const PATIENT_WAIT_MS: u64 = 30_000;
 const SWEEP_TIME_MAX: Duration = Duration::from_secs(60);
 const LAPSE_WAIT_MS: u64 = 250;
+const QUEUED_WAIT_MS: u64 = 3000;
 const PUBLISHED_WAIT: Duration = Duration::from_secs(5);
 
 /// The owner control that revokes one client kind at its current epoch.
@@ -536,6 +537,83 @@ async fn a_folder_add_whose_grant_is_revoked_after_its_plan_moves_nothing() {
         "an add whose grant was revoked moves nothing"
     );
     drop(controller);
+    owner.stop().await;
+}
+
+/// RV-DS241-76: an owner request admitted while a revocation waits on the owner barrier,
+/// and queued behind it, creates nothing once that revocation lapsed and closed the client:
+/// the generic owner path checks the grant again under the barrier, as the foreground path
+/// does. The request is sent halfway through the revocation's wait, so it is admitted
+/// before the lapse and its own deadline outlasts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_owner_request_queued_behind_a_lapsed_revocation_creates_nothing() {
+    let owner = Usage::start_waiting(QUEUED_WAIT_MS).await;
+    let runtime = owner.runtime();
+    let read = owner
+        .client
+        .request(OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new("queued-read").unwrap(),
+            expected_revision: Cursor::new(0),
+            operation: OwnerOperation::Read {
+                query: OwnerRead::Capabilities,
+            },
+        })
+        .await
+        .unwrap();
+    let OwnerResponse::Read { state } = read.response else {
+        panic!("the revision read failed: {read:?}");
+    };
+    let holder = runtime.engine.owner_egress.write().await;
+    let mut revoke = Box::pin(runtime.control(revocation(
+        runtime,
+        OwnerClientKind::Tui,
+        "revoke-behind-a-holder",
+    )));
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, &mut revoke).await.is_err(),
+        "the revocation waits on the held barrier"
+    );
+    tokio::time::sleep(Duration::from_millis(QUEUED_WAIT_MS / 2)).await;
+    let project = ProjectId::new("queued-project").unwrap();
+    let mut created = Box::pin(owner.client.request(OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: RequestId::new("queued-create").unwrap(),
+        expected_revision: state.revision,
+        operation: OwnerOperation::Apply {
+            mutation: OwnerMutation::CreateProject {
+                project_id: project.clone(),
+                spec: ProjectSpec {
+                    name: "queued".into(),
+                    repositories: vec![],
+                },
+            },
+        },
+    }));
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, &mut created).await.is_err(),
+        "the request is admitted and waits on the held barrier"
+    );
+    let lapsed = tokio::time::timeout(Duration::from_millis(QUEUED_WAIT_MS), revoke)
+        .await
+        .expect("the revocation lapses at its owner wait");
+    assert!(lapsed.is_err(), "{lapsed:?}");
+    assert!(!admitted(runtime, &owner.client));
+    drop(holder);
+    let answered = tokio::time::timeout(Duration::from_millis(QUEUED_WAIT_MS), created).await;
+    storage_settled(&owner).await;
+    let stored: i64 = rusqlite::Connection::open(owner.engine_root.join("engine.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM projects WHERE id=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stored, 0,
+        "the request admitted before the lapsed revocation created nothing: {answered:?}"
+    );
     owner.stop().await;
 }
 

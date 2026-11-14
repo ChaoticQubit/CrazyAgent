@@ -1237,3 +1237,193 @@ fn under_the_gate_root_a_probed_folder_outside_the_gate_mac_is_dropped() {
     );
     assert_eq!(probed_kept(probed.clone(), None, Some(&home)), probed);
 }
+
+/// An engine data folder whose `engine.db` is in WAL and written once, as an engine leaves
+/// it, holding one project setup per folder. Inputs: the data folder and the project folders.
+/// Output: none.
+fn engine_with_projects(root: &Path, folders: &[&Path]) {
+    std::fs::create_dir_all(root).unwrap();
+    let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let mode: String = connection
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    crate::project_setup::initialize(&connection).unwrap();
+    for (index, folder) in folders.iter().enumerate() {
+        let project = crate::protocol::ProjectId::new(format!("project-{index}")).unwrap();
+        let setup = crate::project_setup::StoredSetup {
+            project_id: project.clone(),
+            name: "Project".into(),
+            about: String::new(),
+            tech_stack: vec![],
+            platforms: vec![],
+            research: vec![],
+            pool: None,
+            team: crate::project_setup::TeamPlan {
+                master: "codex".into(),
+                master_tools: false,
+                sub_harnesses: vec![],
+                min_agents: 1,
+                max_agents: 1,
+            },
+            documents: vec![],
+            folder: folder.display().to_string(),
+            created_ms: 1,
+            revision: 1,
+        };
+        connection
+            .execute(
+                "INSERT INTO project_setups(project, body) VALUES (?1, ?2)",
+                [
+                    project.as_str(),
+                    serde_json::to_string(&setup).unwrap().as_str(),
+                ],
+            )
+            .unwrap();
+    }
+}
+
+/// RV-DS241-23: an agent of a project can write the whole project folder, so a folder in a
+/// project the engine set up is agent-writable with no `.crazyagent` folder in it, and a
+/// project set up after the engine's places were first built counts at the next build.
+#[test]
+fn a_folder_in_a_set_up_project_without_a_crazyagent_folder_is_agent_writable() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    let older = home.join("work/older");
+    let later = home.join("work/later");
+    for project in [&older, &later] {
+        std::fs::create_dir_all(project.join("bin")).unwrap();
+        assert!(!project.join(".crazyagent").exists());
+    }
+    engine_with_projects(&root, &[&older]);
+    let places = Places::at_roots(Some(&root), None);
+    assert!(places.agent_writable(&older.join("bin")));
+    assert!(places.agent_writable(&older));
+    assert!(!places.agent_writable(&later.join("bin")));
+    assert!(!places.agent_writable(&home.join("work")));
+    assert!(!places.agent_writable(&root.join("setup/bin")));
+
+    std::fs::remove_file(root.join("engine.db")).unwrap();
+    let _ = std::fs::remove_file(root.join("engine.db-wal"));
+    let _ = std::fs::remove_file(root.join("engine.db-shm"));
+    engine_with_projects(&root, &[&older, &later]);
+    let rebuilt = Places::at_roots(Some(&root), None);
+    assert!(
+        rebuilt.agent_writable(&later.join("bin")),
+        "read per build, never cached"
+    );
+}
+
+/// RV-DS241-23 r2: what the engine's places read of its set-up projects. No `engine.db` yet,
+/// or one with no setups table, is no project; a database that cannot be read or more setups
+/// than the cap give none, never a partial list. A setup is read for its folder alone, so one
+/// written by another version still counts, and a row that names no folder is skipped alone.
+#[test]
+fn the_set_up_projects_are_read_row_by_row_and_whole_only_when_the_database_is_unread() {
+    let (_folder, home) = scratch();
+    let project = home.join("work/app");
+    std::fs::create_dir_all(&project).unwrap();
+    let root = home.join("engine");
+    std::fs::create_dir_all(&root).unwrap();
+    assert_eq!(registered_projects(&root), Some(Vec::new()));
+
+    engine_with_projects(&root, &[&project]);
+    assert_eq!(registered_projects(&root), Some(vec![project.clone()]));
+
+    let bare = home.join("bare");
+    std::fs::create_dir_all(&bare).unwrap();
+    rusqlite::Connection::open(bare.join("engine.db"))
+        .unwrap()
+        .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE projects(id TEXT PRIMARY KEY, body TEXT NOT NULL);")
+        .unwrap();
+    assert_eq!(registered_projects(&bare), Some(Vec::new()));
+
+    let broken = home.join("broken");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::write(
+        broken.join("engine.db"),
+        "not a database, just text long enough to read",
+    )
+    .unwrap();
+    assert_eq!(registered_projects(&broken), None);
+
+    let skipped = home.join("skipped");
+    engine_with_projects(&skipped, &[&project]);
+    let connection = rusqlite::Connection::open(skipped.join("engine.db")).unwrap();
+    for (index, body) in ["{}", "not json", "{\"folder\": 7}", "[]", "\"\""]
+        .iter()
+        .enumerate()
+    {
+        connection
+            .execute(
+                "INSERT INTO project_setups(project, body) VALUES (?1, ?2)",
+                [format!("bad-{index}").as_str(), *body],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    assert_eq!(
+        registered_projects(&skipped),
+        Some(vec![project.clone()]),
+        "each bad row is skipped alone"
+    );
+
+    let other = home.join("work/other");
+    std::fs::create_dir_all(&other).unwrap();
+    let drifted = home.join("drifted");
+    engine_with_projects(&drifted, &[&project]);
+    let body = serde_json::json!({
+        "folder": other.join(".crazyagent").display().to_string(),
+        "added_later": {"kind": "field"},
+    });
+    rusqlite::Connection::open(drifted.join("engine.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO project_setups(project, body) VALUES ('drifted', ?1)",
+            [body.to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        registered_projects(&drifted),
+        Some(vec![project.clone(), other.clone()]),
+        "a setup another version wrote counts its folder"
+    );
+
+    let many = home.join("many");
+    engine_with_projects(&many, &[]);
+    rusqlite::Connection::open(many.join("engine.db"))
+        .unwrap()
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i < ?1)
+             INSERT INTO project_setups(project, body) SELECT 'p' || i, '{}' FROM n",
+            [PROJECT_ROOTS_MAX as i64],
+        )
+        .unwrap();
+    assert_eq!(registered_projects(&many), None);
+}
+
+/// RV-DS241-23, failing closed: when the set-up projects cannot be read, every place under
+/// HOME counts as agent-writable except the engine's own data folder, and places outside HOME
+/// keep the usual rules.
+#[test]
+fn unread_projects_make_every_place_under_home_but_the_engine_agent_writable() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    let places = Places {
+        projects: None,
+        engine_roots: engine_roots(Some(&root)),
+        ..Places::new(Vec::new(), Some(home.clone()))
+    };
+    assert!(places.agent_writable(&home.join(".local/bin")));
+    assert!(places.agent_writable(&home.join("work/app/bin")));
+    assert!(!places.agent_writable(&root.join("setup/bin")));
+    assert!(!places.agent_writable(Path::new("/opt/homebrew/bin")));
+    assert!(!places.agent_writable(Path::new("/usr/bin")));
+
+    let read = Places {
+        projects: Some(Vec::new()),
+        ..places.clone()
+    };
+    assert!(!read.agent_writable(&home.join(".local/bin")));
+}

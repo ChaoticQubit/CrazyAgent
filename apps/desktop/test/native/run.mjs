@@ -10,7 +10,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
 import { endTerminals, freeLowPort } from "./e2e-harness.mjs";
-import { chooseHome, clearWebStore, createRunDirectories, lockHome, refusedToolHome, runProjects } from "./run-layout.mjs";
+import { chooseHome, clearWebStore, createRunDirectories, lockHome, nodeSuiteHome, refusedToolHome, runProjects } from "./run-layout.mjs";
 import { prepareSpeedSide, speedSide } from "./speed-seed.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -56,7 +56,8 @@ function binary(path) {
 
 async function environment() {
   createRunDirectories(evidence);
-  const { home, prepared } = suite === "refused-tool" ? refusedToolHome() : chooseHome(join(evidence, "home"));
+  const { home, prepared } = suite === "refused-tool" ? refusedToolHome()
+    : suite === "first-run-harnesses-node" ? nodeSuiteHome() : chooseHome(join(evidence, "home"));
   await lockHome(home, { label: `run.mjs ${suite} ${evidence}` });
   clearWebStore(home);
   return { projects: runProjects(home), env: {
@@ -198,19 +199,16 @@ function captured(entry) {
 }
 
 /** The engine's environment for one suite: the run's own, or for the Node suite a clean Mac's:
- * a Codex the app's npm put in the engine prefix `<engine root>/setup/harnesses`, the one folder
- * the resolver accepts here (it refuses PATH folders in a project or a temp folder), no Node on
- * PATH and an empty clean-Mac gate root; the suite's home is never written. The refused-tool suite
- * gets the system PATH and an empty gate root, so the only graphify is the one in its home.
- * Input: the run environment. Output: the engine environment. */
+ * no Node on PATH and an empty clean-Mac gate root, so the only Codex is the owner's npm one in
+ * its fresh home ([`nodeSuiteHome`]). The refused-tool suite gets the system PATH and an empty
+ * gate root, so the only graphify is the one in its home. Nothing is written under the engine
+ * root, which the fixture needs empty. Input: the run environment. Output: the engine
+ * environment. */
 function engineEnvironment(env) {
   if (suite === "refused-tool") {
     return { ...env, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", CRAZYAGENT_GATE_SYSTEM_ROOT: mkdtempSync(join(evidence, "gate-")) };
   }
   if (suite !== "first-run-harnesses-node") return env;
-  const bin = join(engineRoot, "setup", "harnesses", "bin");
-  mkdirSync(bin, { recursive: true, mode: 0o700 });
-  writeFileSync(join(bin, "codex"), "#!/usr/bin/env node\n", { mode: 0o755 });
   const gate = mkdtempSync(join(evidence, "gate-"));
   return { ...env, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", CRAZYAGENT_GATE_SYSTEM_ROOT: gate };
 }

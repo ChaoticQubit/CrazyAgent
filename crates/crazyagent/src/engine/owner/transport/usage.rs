@@ -2,11 +2,12 @@ use super::*;
 use crate::protocol::{CredentialRef, ProjectId, encode_frame};
 use crate::usage::extras::LimitExtras;
 use crate::usage::metrics::Metrics;
-use crate::usage::money::MoneySettings;
+use crate::usage::money::{MoneyChoice, MoneySettings};
 use crate::usage::report::UsageReport;
-use crate::usage::spend::SpendSettings;
+use crate::usage::spend::{SpendChoice, SpendSettings};
 use crate::usage::{self, WindowKind};
 use serde::{Deserialize, Serialize};
+use tokio::sync::OwnedRwLockWriteGuard;
 
 const REQUEST_BYTES_MAX: usize = 1024;
 pub(super) const USAGE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -65,6 +66,9 @@ enum Action {
     SetMoney {
         settings: MoneySettings,
     },
+    SetMoneyOne {
+        choice: MoneyChoice,
+    },
     DecideRecount {
         use_new: bool,
     },
@@ -74,6 +78,9 @@ enum Action {
     },
     SetSpend {
         settings: SpendSettings,
+    },
+    SetSpendOne {
+        choice: SpendChoice,
     },
 }
 
@@ -193,6 +200,16 @@ impl OwnerClient {
         }
     }
 
+    /// Stores one of the owner's dollars and Metrics page choices and keeps the other two as
+    /// stored. Input: the choice and its value. Output: done; an engine before this request
+    /// answers `usage_request_invalid`.
+    pub async fn usage_set_money_one(&self, choice: MoneyChoice) -> Result<(), EngineError> {
+        match self.usage_exchange(Action::SetMoneyOne { choice }).await? {
+            Reply::Done => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
     /// Applies the owner's choice of the recount, once. Input: whether to use the new
     /// numbers. Output: done, or `usage_recount_not_ready`.
     pub async fn usage_decide_recount(&self, use_new: bool) -> Result<(), EngineError> {
@@ -227,6 +244,16 @@ impl OwnerClient {
     /// limited and Claude free resets. Input: the settings. Output: done.
     pub async fn usage_set_spend(&self, settings: SpendSettings) -> Result<(), EngineError> {
         match self.usage_exchange(Action::SetSpend { settings }).await? {
+            Reply::Done => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Stores one of the owner's Pools settings and keeps the other two as stored. Input:
+    /// the setting and its value. Output: done; an engine before this request answers
+    /// `usage_request_invalid`.
+    pub async fn usage_set_spend_one(&self, choice: SpendChoice) -> Result<(), EngineError> {
+        match self.usage_exchange(Action::SetSpendOne { choice }).await? {
             Reply::Done => Ok(()),
             _ => Err(unknown()),
         }
@@ -302,16 +329,19 @@ enum Change {
     Refresh,
     SetReset(CredentialRef, WindowKind, Option<i64>),
     SetMoney(MoneySettings),
+    SetMoneyOne(MoneyChoice),
     DecideRecount(bool),
     Spend(CredentialRef, bool),
     SetSpend(SpendSettings),
+    SetSpendOne(SpendChoice),
 }
 
-/// Serves one usage request. The report is built first; then, under the owner barrier, the
-/// grant is checked again, any change is made and the reply is written, so a revocation
-/// that returned saw every change and reply admitted before it and lets none through after.
-/// Inputs: the connection, engine, authority, packet, admission and request body.
-/// Output: done once the reply is written.
+/// Serves one usage request. The report is built first; then the owner barrier is waited
+/// for at most the engine timeout and held while the grant is checked again, any change is
+/// made and the reply is written, so a revocation that returned saw every change and reply
+/// admitted before it and lets none through after, even when the request is cut short while
+/// its change commits. Inputs: the connection, engine, authority, packet, admission and
+/// request body. Output: done once the reply is written.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -321,11 +351,12 @@ pub(super) async fn serve(
     bytes: &[u8],
 ) -> Result<(), EngineError> {
     let prepared = prepare(engine, authority, packet, admission, bytes).await;
-    let _barrier = engine.owner_egress.write().await;
-    let reply = match finish(authority, packet, admission, prepared).await {
-        Ok(reply) => reply,
-        Err(error) => Reply::Rejected { code: error.0 },
+    let barrier = Arc::clone(&engine.owner_egress).write_owned();
+    let (answer, _barrier) = match tokio::time::timeout(engine.timeout, barrier).await {
+        Ok(barrier) => finish(authority, packet, admission, prepared, barrier).await,
+        Err(_) => (Err(failure("owner_busy")), None),
     };
+    let reply = answer.unwrap_or_else(|error| Reply::Rejected { code: error.0 });
     let frame = match encode_frame(&reply) {
         Ok(frame) => frame,
         Err(_) => encode_frame(&Reply::Rejected {
@@ -424,11 +455,13 @@ async fn prepare(
             at_ms,
         } => Prepared::Change(root, Change::SetReset(account, window, at_ms)),
         Action::SetMoney { settings } => Prepared::Change(root, Change::SetMoney(settings)),
+        Action::SetMoneyOne { choice } => Prepared::Change(root, Change::SetMoneyOne(choice)),
         Action::DecideRecount { use_new } => Prepared::Change(root, Change::DecideRecount(use_new)),
         Action::Spend { account, confirmed } => {
             Prepared::Change(root, Change::Spend(account, confirmed))
         }
         Action::SetSpend { settings } => Prepared::Change(root, Change::SetSpend(settings)),
+        Action::SetSpendOne { choice } => Prepared::Change(root, Change::SetSpendOne(choice)),
     })
 }
 
@@ -487,53 +520,85 @@ async fn saved_connections(
     }
 }
 
-/// Answers a prepared request under the owner barrier its caller holds: checks the grant
-/// again, then makes any change. Inputs: the authority, packet, admission and the prepared
-/// request. Output: the reply, or the refusal.
+/// Answers a prepared request under the owner barrier it is handed: checks the grant again,
+/// then makes any write on a blocking thread that owns the barrier until the write returns,
+/// so a request cut short never lets a revocation pass a change still committing
+/// (RV-DS241-68). Inputs: the authority, packet, admission, prepared request and barrier.
+/// Output: the reply or refusal, with the barrier to hold while it is written; no barrier
+/// when the blocking thread failed.
 async fn finish(
     authority: &Authority,
     packet: &[u8; 37],
     admission: &Admission,
     prepared: Result<Prepared, EngineError>,
-) -> Result<Reply, EngineError> {
-    let prepared = prepared?;
-    if &authority.authenticate(packet)? != admission {
-        return Err(failure("owner_grant_stale_or_revoked"));
-    }
-    let (root, change) = match prepared {
-        Prepared::Report(report) => return Ok(Reply::Report { report }),
-        Prepared::Metrics(metrics) => return Ok(Reply::Metrics { metrics }),
-        Prepared::Extras(accounts, None) => return Ok(Reply::Extras { accounts }),
-        Prepared::Extras(accounts, Some(root)) => {
-            tokio::task::spawn_blocking(move || {
-                usage::extras::request_detail(&usage::open(&root)?, crate::team::now_ms())
-            })
-            .await
-            .map_err(|_| failure("usage_unavailable"))??;
-            return Ok(Reply::Extras { accounts });
+    barrier: OwnedRwLockWriteGuard<()>,
+) -> (
+    Result<Reply, EngineError>,
+    Option<OwnedRwLockWriteGuard<()>>,
+) {
+    let admitted = prepared.and_then(|prepared| {
+        if &authority.authenticate(packet)? != admission {
+            return Err(failure("owner_grant_stale_or_revoked"));
         }
-        Prepared::Change(root, change) => (root, change),
+        Ok(prepared)
+    });
+    let (root, change) = match admitted {
+        Err(error) => return (Err(error), Some(barrier)),
+        Ok(Prepared::Report(report)) => return (Ok(Reply::Report { report }), Some(barrier)),
+        Ok(Prepared::Metrics(metrics)) => return (Ok(Reply::Metrics { metrics }), Some(barrier)),
+        Ok(Prepared::Extras(accounts, None)) => {
+            return (Ok(Reply::Extras { accounts }), Some(barrier));
+        }
+        Ok(Prepared::Extras(accounts, Some(root))) => {
+            return owned_write(barrier, root, move |db| {
+                usage::extras::request_detail(db, crate::team::now_ms())?;
+                Ok(Reply::Extras { accounts })
+            })
+            .await;
+        }
+        Ok(Prepared::Change(root, change)) => (root, change),
     };
-    tokio::task::spawn_blocking(move || {
-        let db = usage::open(&root)?;
-        match change {
-            Change::Refresh => usage::service::request_refresh(&db, crate::team::now_ms()),
+    owned_write(barrier, root, move |db| {
+        let written = match change {
+            Change::Refresh => usage::service::request_refresh(db, crate::team::now_ms()),
             Change::SetReset(account, window, at_ms) => {
-                usage::set_reset_override(&db, &account, window, at_ms)
+                usage::set_reset_override(db, &account, window, at_ms)
             }
-            Change::SetMoney(settings) => usage::money::write(&db, settings),
+            Change::SetMoney(settings) => usage::money::write(db, settings),
+            Change::SetMoneyOne(choice) => usage::money::write_one(db, choice),
             Change::DecideRecount(use_new) => {
-                usage::recount::decide(&db, use_new, crate::team::now_ms())
+                usage::recount::decide(db, use_new, crate::team::now_ms())
             }
             Change::Spend(account, confirmed) => {
-                usage::spend::request(&db, &account, confirmed, crate::team::now_ms())
+                usage::spend::request(db, &account, confirmed, crate::team::now_ms())
             }
-            Change::SetSpend(settings) => usage::spend::write(&db, settings),
-        }
+            Change::SetSpend(settings) => usage::spend::write(db, settings),
+            Change::SetSpendOne(choice) => usage::spend::write_one(db, choice),
+        };
+        written.map(|_| Reply::Done)
     })
     .await
-    .map_err(|_| failure("usage_unavailable"))??;
-    Ok(Reply::Done)
+}
+
+/// Runs one usage write on a blocking thread that owns the owner barrier until the write
+/// returns. Inputs: the barrier, the engine root and the write over the usage store.
+/// Output: the write's reply or refusal, with the barrier; no barrier when the blocking
+/// thread failed.
+async fn owned_write(
+    barrier: OwnedRwLockWriteGuard<()>,
+    root: PathBuf,
+    write: impl FnOnce(&rusqlite::Connection) -> Result<Reply, EngineError> + Send + 'static,
+) -> (
+    Result<Reply, EngineError>,
+    Option<OwnedRwLockWriteGuard<()>>,
+) {
+    let written = tokio::task::spawn_blocking(move || {
+        (usage::open(&root).and_then(|db| write(&db)), barrier)
+    });
+    match written.await {
+        Ok((result, barrier)) => (result, Some(barrier)),
+        Err(_) => (Err(failure("usage_unavailable")), None),
+    }
 }
 
 #[cfg(test)]
@@ -611,5 +676,215 @@ mod spend_request_tests {
             matches!(action, Action::Spend { ref account, confirmed: true } if account.as_str() == "codex-a")
         );
         assert!(USAGE_CODES.contains(&"usage_spend_unconfirmed"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod spend_one_tests {
+    use super::super::usage_tests::Usage;
+    use super::*;
+    use crate::usage::spend::{AllLimited, ResetsSource, SpendConfirm};
+    use serde_json::{Value, json};
+
+    fn decoded(usage: Value) -> Result<Action, serde_json::Error> {
+        serde_json::from_value::<Envelope>(json!({ "usage": usage })).map(|envelope| envelope.usage)
+    }
+
+    #[test]
+    fn spend_one_requests_name_one_known_field_and_its_value_and_nothing_else() {
+        for field in ["confirm", "all_limited", "resets_source"] {
+            let value = if field == "all_limited" {
+                "no_hint"
+            } else {
+                "off"
+            };
+            let sent =
+                json!({ "kind": "set_spend_one", "choice": { "field": field, "value": value } });
+            assert!(decoded(sent).is_ok(), "{field}");
+        }
+        for refused in [
+            json!({ "kind": "set_spend_one", "choice": { "field": "colour", "value": "off" } }),
+            json!({ "kind": "set_spend_one", "choice": { "field": "confirm", "value": "sometimes" } }),
+            json!({ "kind": "set_spend_one", "choice": { "field": "confirm" } }),
+            json!({ "kind": "set_spend_one", "choice": { "field": "confirm", "value": "off", "extra": 1 } }),
+            json!({ "kind": "set_spend_one", "choice": { "field": "confirm", "value": "off" }, "settings": {} }),
+        ] {
+            assert!(decoded(refused.clone()).is_err(), "{refused}");
+        }
+        assert!(USAGE_CODES.contains(&"usage_request_invalid"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spend_one_changes_its_own_setting_and_keeps_the_other_two() {
+        let usage = Usage::start().await;
+        let send = |field: &str, value: &str| {
+            decoded(
+                json!({ "kind": "set_spend_one", "choice": { "field": field, "value": value } }),
+            )
+            .expect("the engine reads a one-setting request")
+        };
+        let fresh = usage
+            .client
+            .usage_exchange(send("confirm", "off"))
+            .await
+            .unwrap();
+        assert!(matches!(fresh, Reply::Done));
+        let report = usage.client.usage_report(None, None, 0).await.unwrap();
+        assert_eq!(
+            report.spend.settings,
+            SpendSettings {
+                confirm: SpendConfirm::Off,
+                ..SpendSettings::default()
+            },
+            "a first one-setting save keeps the defaults of the other two"
+        );
+        let all = SpendSettings {
+            confirm: SpendConfirm::OneClick,
+            all_limited: AllLimited::NoHint,
+            resets_source: ResetsSource::AsClaudeCode,
+        };
+        usage.client.usage_set_spend(all).await.unwrap();
+        for (field, value, expected) in [
+            (
+                "resets_source",
+                "off",
+                SpendSettings {
+                    resets_source: ResetsSource::Off,
+                    ..all
+                },
+            ),
+            (
+                "all_limited",
+                "auto_spend",
+                SpendSettings {
+                    all_limited: AllLimited::AutoSpend,
+                    resets_source: ResetsSource::Off,
+                    ..all
+                },
+            ),
+            (
+                "confirm",
+                "confirm_each",
+                SpendSettings {
+                    confirm: SpendConfirm::ConfirmEach,
+                    all_limited: AllLimited::AutoSpend,
+                    resets_source: ResetsSource::Off,
+                },
+            ),
+        ] {
+            let reply = usage
+                .client
+                .usage_exchange(send(field, value))
+                .await
+                .unwrap();
+            assert!(matches!(reply, Reply::Done), "{field}");
+            let report = usage.client.usage_report(None, None, 0).await.unwrap();
+            assert_eq!(report.spend.settings, expected, "{field}");
+        }
+        usage.stop().await;
+    }
+}
+
+#[cfg(all(test, unix))]
+mod money_one_tests {
+    use super::super::usage_tests::Usage;
+    use super::*;
+    use crate::usage::money::{MainNumber, PriceSource, ProjectLimits};
+    use serde_json::{Value, json};
+
+    fn decoded(usage: Value) -> Result<Action, serde_json::Error> {
+        serde_json::from_value::<Envelope>(json!({ "usage": usage })).map(|envelope| envelope.usage)
+    }
+
+    #[test]
+    fn money_one_requests_name_one_known_field_and_its_value_and_nothing_else() {
+        for (field, value) in [
+            ("main_number", "tokens"),
+            ("prices", "off"),
+            ("project_limits", "shown"),
+        ] {
+            let sent =
+                json!({ "kind": "set_money_one", "choice": { "field": field, "value": value } });
+            assert!(decoded(sent).is_ok(), "{field}");
+        }
+        for refused in [
+            json!({ "kind": "set_money_one", "choice": { "field": "currency", "value": "off" } }),
+            json!({ "kind": "set_money_one", "choice": { "field": "main_number", "value": "euros" } }),
+            json!({ "kind": "set_money_one", "choice": { "field": "prices" } }),
+            json!({ "kind": "set_money_one", "choice": { "field": "prices", "value": "off", "extra": 1 } }),
+            json!({ "kind": "set_money_one", "choice": { "field": "prices", "value": "off" }, "settings": {} }),
+        ] {
+            assert!(decoded(refused.clone()).is_err(), "{refused}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn money_one_changes_its_own_choice_and_keeps_the_other_two() {
+        let usage = Usage::start().await;
+        let send = |field: &str, value: &str| {
+            decoded(
+                json!({ "kind": "set_money_one", "choice": { "field": field, "value": value } }),
+            )
+            .expect("the engine reads a one-choice request")
+        };
+        let fresh = usage
+            .client
+            .usage_exchange(send("prices", "off"))
+            .await
+            .unwrap();
+        assert!(matches!(fresh, Reply::Done));
+        let report = usage.client.usage_report(None, None, 0).await.unwrap();
+        assert_eq!(
+            report.money.settings,
+            MoneySettings {
+                prices: PriceSource::Off,
+                ..MoneySettings::default()
+            },
+            "a first one-choice save keeps the defaults of the other two"
+        );
+        let all = MoneySettings {
+            main_number: MainNumber::Tokens,
+            prices: PriceSource::Off,
+            project_limits: ProjectLimits::Shown,
+        };
+        usage.client.usage_set_money(all).await.unwrap();
+        for (field, value, expected) in [
+            (
+                "project_limits",
+                "hidden",
+                MoneySettings {
+                    project_limits: ProjectLimits::Hidden,
+                    ..all
+                },
+            ),
+            (
+                "main_number",
+                "dollars",
+                MoneySettings {
+                    main_number: MainNumber::Dollars,
+                    project_limits: ProjectLimits::Hidden,
+                    ..all
+                },
+            ),
+            (
+                "prices",
+                "bundled",
+                MoneySettings {
+                    main_number: MainNumber::Dollars,
+                    prices: PriceSource::Bundled,
+                    project_limits: ProjectLimits::Hidden,
+                },
+            ),
+        ] {
+            let reply = usage
+                .client
+                .usage_exchange(send(field, value))
+                .await
+                .unwrap();
+            assert!(matches!(reply, Reply::Done), "{field}");
+            let report = usage.client.usage_report(None, None, 0).await.unwrap();
+            assert_eq!(report.money.settings, expected, "{field}");
+        }
+        usage.stop().await;
     }
 }

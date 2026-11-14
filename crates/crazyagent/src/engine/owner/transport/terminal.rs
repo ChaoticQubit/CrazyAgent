@@ -235,6 +235,26 @@ impl OwnerRuntimeHandle {
     pub fn terminal(&self) -> Result<Arc<dyn Host>, EngineError> {
         self.engine.terminal(&engine_root(&self.authority)?)
     }
+
+    /// Gives [`OwnerRuntimeHandle::terminal`] from a blocking thread, for async callers: the
+    /// tmux look can wait on `tmux -V`, which must never hold an async worker. Returns the
+    /// host, or `terminal_unavailable`.
+    pub async fn terminal_off_worker(&self) -> Result<Arc<dyn Host>, EngineError> {
+        terminal_off_worker(&self.engine, &self.authority).await
+    }
+}
+
+/// Gives the engine's terminal host ([`Engine::terminal`]) from a blocking thread, so an
+/// async worker never waits on the tmux look. Takes the engine and the authority. Returns
+/// the host, or `terminal_unavailable`.
+async fn terminal_off_worker(
+    engine: &Arc<Engine>,
+    authority: &Arc<Authority>,
+) -> Result<Arc<dyn Host>, EngineError> {
+    let (engine, root) = (engine.clone(), engine_root(authority)?);
+    tokio::task::spawn_blocking(move || engine.terminal(&root))
+        .await
+        .map_err(|_| failure("terminal_unavailable"))?
 }
 
 impl Engine {
@@ -249,28 +269,33 @@ impl Engine {
 
     /// Gives the terminal host on the tmux program `find` gives, as [`Engine::terminal`] does
     /// with the program found now: the kept host while that program is its program, else a
-    /// new host on it, kept in its place. `find` runs while the host's lock is held, so a
-    /// caller that found an older program never replaces a host opened on a newer one. Takes
-    /// the engine root and the finder, none when tmux is not installed. Returns the host, or
-    /// `terminal_unavailable`.
+    /// new host on it, kept in its place. `find` runs with the host's lock free, so no read
+    /// or other look waits on `tmux -V`; each look is numbered before it runs, and a look
+    /// older than the one that found the kept host's program returns that host and never
+    /// replaces it. Takes the engine root and the finder, none when tmux is not installed.
+    /// Returns the host, or `terminal_unavailable`.
     #[cfg(unix)]
     pub(super) fn terminal_on(
         &self,
         root: &Path,
         find: impl FnOnce() -> Option<std::path::PathBuf>,
     ) -> Result<Arc<dyn Host>, EngineError> {
+        let look = self
+            .terminal_looks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let found = find();
         let mut slot = self
             .terminal
             .lock()
             .map_err(|_| failure("terminal_unavailable"))?;
-        let found = find();
-        if let Some((program, host)) = slot.as_ref()
-            && *program == found
+        if let Some((program, host, newest)) = slot.as_mut()
+            && (*program == found || *newest > look)
         {
+            *newest = (*newest).max(look);
             return Ok(host.clone());
         }
         let host = crate::terminal::tmux_host(root, found.clone());
-        *slot = Some((found, host.clone()));
+        *slot = Some((found, host.clone(), look));
         Ok(host)
     }
 
@@ -292,7 +317,7 @@ impl Engine {
             .terminal
             .lock()
             .ok()
-            .and_then(|slot| slot.as_ref().map(|(_, host)| host.clone()));
+            .and_then(|slot| slot.as_ref().map(|(_, host, _)| host.clone()));
         let data = match (data, host) {
             (OwnerData::TeamGraph { mut graph }, Some(host)) => {
                 tokio::task::spawn_blocking(move || {
@@ -451,7 +476,7 @@ async fn open(
         _ => return Err(failure("terminal_request_invalid")),
     };
     let member = agent_id.team_agent().filter(|_| pane.is_none());
-    let engine_host = engine.terminal(&engine_root(authority)?)?;
+    let engine_host = terminal_off_worker(engine, authority).await?;
     let host = match &pane {
         Some(pane) => crate::terminal::pane_view(engine_host, pane)?,
         None => engine_host,

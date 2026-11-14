@@ -2474,6 +2474,7 @@ fn first_run_shows_only_the_command_for_a_refused_graphify_when_unused_tools_is_
 }
 
 const DOWN_KEY: &[u8] = b"\x1b[B";
+const UP_KEY: &[u8] = b"\x1b[A";
 const KEY_TIME: Duration = Duration::from_millis(300);
 const UPDATE_TIME: Duration = Duration::from_secs(120);
 const SIGN_IN_TIME: Duration = Duration::from_secs(90);
@@ -2495,6 +2496,34 @@ fn version_arm(line: Option<String>) -> String {
         || "--version) exit 0 ;;".to_owned(),
         |line| format!("--version) echo \"{line}\" ;;"),
     )
+}
+
+/// DEC-166: a private test HOME for harness stand-ins where the engine takes a harness: on
+/// macOS this user's cache folder, never the shared temp folder, whose `ca-` folders are the
+/// agents' own and which every user can write, nor the engine's own temp folder, which agents
+/// with the owner's temp folder grant write; elsewhere the temp folder. Input: a name prefix.
+/// Output: the folder, removed when dropped.
+fn harness_home(prefix: &str) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let base = if cfg!(target_os = "macos") {
+        let cache = crazyagent::spawn_gate::output(
+            Command::new("/usr/bin/getconf")
+                .arg("DARWIN_USER_CACHE_DIR")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        PathBuf::from(String::from_utf8(cache.stdout).unwrap().trim())
+    } else {
+        std::env::temp_dir()
+    };
+    let home = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(std::fs::canonicalize(base).unwrap())
+        .unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    home
 }
 
 /// DEC-166: puts a self-updating Claude Code stand-in and an npm Codex stand-in under a test
@@ -2560,35 +2589,46 @@ fn stand_in_engine(prefix: &str, home: &Path, path: String) -> Engine {
     engine
 }
 
-/// DEC-166: whether a row of the screen is the picked one of a list and names the label: the
-/// list marker, at most a provider mark, then the label. Inputs: the screen and the label.
-/// Output: the answer.
+/// DEC-166: whether a row of the screen is the picked one of a list or menu and names the
+/// label as a whole: the list's `> ` marker or a menu item's focus bar, at most a provider
+/// mark, then the label, ended by a space or the line's end, so `OpenAI` never matches
+/// `OpenAI-compatible URL`. Inputs: the screen and the label. Output: the answer.
 fn picked_row(screen: &str, label: &str) -> bool {
     screen.lines().any(|line| {
         line.find(label).is_some_and(|at| {
             let before = &line[..at];
-            before.contains("> ")
-                && before
-                    .rsplit("> ")
-                    .next()
-                    .is_some_and(|between| between.trim().chars().count() <= 2)
+            let whole = line[at + label.len()..]
+                .chars()
+                .next()
+                .is_none_or(char::is_whitespace);
+            whole
+                && ["> ", "\u{258c} ", "| "].iter().any(|marker| {
+                    before.contains(marker)
+                        && before
+                            .rsplit(marker)
+                            .next()
+                            .is_some_and(|between| between.trim().chars().count() <= 2)
+                })
         })
     })
 }
 
-/// DEC-166: moves down a list until the label is the picked row, then chooses it. Inputs: the
-/// TUI and the label. Output: none.
+/// DEC-166: moves down a list, then up it, until the label is the picked row, then chooses
+/// it, so a list whose cursor opens below the label still reaches it. Inputs: the TUI and the
+/// label. Output: none.
 fn choose_row(pty: &mut ScriptPty, label: &str) {
     pty.until(&format!("{label} is listed"), |screen| {
         screen.contains(label)
     });
-    for _ in 0..STEPS_MAX {
-        if picked_row(&pty.screen(), label) {
-            pty.type_bytes(b"\r");
-            return;
+    for key in [DOWN_KEY, UP_KEY] {
+        for _ in 0..STEPS_MAX {
+            if picked_row(&pty.screen(), label) {
+                pty.type_bytes(b"\r");
+                return;
+            }
+            pty.type_bytes(key);
+            std::thread::sleep(KEY_TIME);
         }
-        pty.type_bytes(DOWN_KEY);
-        std::thread::sleep(KEY_TIME);
     }
     panic!("{label} never became the picked row:\n{}", pty.screen());
 }
@@ -2631,7 +2671,7 @@ fn too_old_then_updated_in_the_tui(
     claude: (Option<&str>, &str),
     codex: (Option<&str>, &str),
 ) {
-    let home = scratch(&format!("{prefix}home-"));
+    let home = harness_home(&format!("{prefix}home-"));
     let path = old_harnesses(home.path(), claude, codex);
     let mut engine = stand_in_engine(prefix, home.path(), path);
     let mut pty = start_sign_in(&engine, home.path(), pick.0, pick.1);
@@ -2701,7 +2741,7 @@ fn a_codex_below_its_sign_in_minimum_updates_from_the_tui_then_signs_in() {
 /// as before, with no too-old line.
 #[test]
 fn harnesses_with_an_unknown_version_sign_in_from_the_tui_as_before() {
-    let home = scratch("ca-e2e-min-unknown-home-");
+    let home = harness_home("ca-e2e-min-unknown-home-");
     let path = old_harnesses(home.path(), (None, "2.1.268"), (None, "0.56.0"));
     let mut engine = stand_in_engine("ca-e2e-min-unknown-", home.path(), path);
     let mut pty = start_sign_in(

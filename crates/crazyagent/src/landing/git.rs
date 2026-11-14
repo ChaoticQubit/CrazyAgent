@@ -287,6 +287,10 @@ impl Repo {
         let keys = crate::research::runner::listed_filter_keys(&listing)
             .ok_or_else(|| failure("changes_git_failed"))?;
         assert!(keys.len() < listing.len());
+        if crate::research::runner::listed_hook(keys).is_some() {
+            eprintln!("landing_config_hook_refused");
+            return Err(failure("changes_git_hooks"));
+        }
         repo.overrides = crate::research::runner::filter_overrides(keys)
             .map_err(|_| failure("changes_git_unsupported"))?;
         assert!(repo.overrides.len().is_multiple_of(8));

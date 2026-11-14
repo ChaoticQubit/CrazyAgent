@@ -1,8 +1,8 @@
 use super::*;
 use crate::protocol::{CredentialRef, ProjectId};
-use crate::usage::money::MoneySettings;
+use crate::usage::money::MoneyChoice;
 use crate::usage::report::UsageReport;
-use crate::usage::spend::SpendSettings;
+use crate::usage::spend::SpendChoice;
 
 impl OwnerController {
     fn usage_client(&self) -> Result<&OwnerClient, EngineError> {
@@ -40,9 +40,10 @@ impl OwnerController {
         self.usage_client()?.usage_refresh().await
     }
 
-    /// Stores the owner's main number and price source. Input: the settings. Output: done.
-    pub async fn usage_set_money(&self, settings: MoneySettings) -> Result<(), EngineError> {
-        self.usage_client()?.usage_set_money(settings).await
+    /// Stores one of the owner's dollars and Metrics page choices and keeps the other two.
+    /// Input: the choice and its value. Output: done.
+    pub async fn usage_set_money_one(&self, choice: MoneyChoice) -> Result<(), EngineError> {
+        self.usage_client()?.usage_set_money_one(choice).await
     }
 
     /// Asks the engine to spend one free reset on an account; its outcome appears in the
@@ -56,9 +57,10 @@ impl OwnerController {
         self.usage_client()?.usage_spend(account, confirmed).await
     }
 
-    /// Stores the owner's spend settings. Input: the settings. Output: done.
-    pub async fn usage_set_spend(&self, settings: SpendSettings) -> Result<(), EngineError> {
-        self.usage_client()?.usage_set_spend(settings).await
+    /// Stores one of the owner's Pools settings and keeps the other two. Input: the setting
+    /// and its value. Output: done.
+    pub async fn usage_set_spend_one(&self, choice: SpendChoice) -> Result<(), EngineError> {
+        self.usage_client()?.usage_set_spend_one(choice).await
     }
 
     /// Applies the owner's choice of the recount, once. Input: whether to use the new numbers.

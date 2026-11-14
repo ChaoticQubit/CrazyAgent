@@ -2427,3 +2427,147 @@ fn an_imported_project_memory_is_recalled_in_its_project_only() {
     );
     assert!(recalled(&mut db, &beta, "").is_empty());
 }
+
+/// SA research id reuse (owner decision 11-14): the owner keeps a project's research, removes
+/// the project and adds a different folder that gets the same id; the new project's agents
+/// never get the removed project's kept research.
+#[tokio::test]
+async fn removed_project_kept_research_does_not_reach_a_project_reusing_the_id() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let mut generation = 0;
+    let mut next = || {
+        generation += 1;
+        generation
+    };
+    let reused = create_project(&mut owner, "mem-reuse", next()).await;
+    std::fs::write(
+        engine
+            .folder("mem-reuse")
+            .join("context/research/market_research.md"),
+        "# Market\n\nDummy research note R1.\n",
+    )
+    .unwrap();
+    assert_eq!(
+        result(
+            owner
+                .remember_research(reused.clone(), ResearchKind::MarketResearch, None, next())
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    let research = |memories: &ApprovedMemories| {
+        memories.items.iter().any(|item| {
+            item.scope == ApprovedScope::Project
+                && item.kind == ApprovedKind::Research
+                && item.text.contains("Dummy research note R1")
+        })
+    };
+    assert!(
+        research(&approved_direct(&engine, &reused)),
+        "the kept research reaches the project's own agents"
+    );
+    assert_eq!(
+        result(owner.remove_project(reused.clone(), next()).await.unwrap()),
+        OwnerResult::Applied
+    );
+    let setup = ProjectSetup {
+        about: "Plans weekly meals.".into(),
+        tech_stack: vec!["rust".into()],
+        platforms: vec![Platform::Website],
+        research: vec![ResearchKind::MarketResearch],
+        pool: None,
+        team: None,
+        documents: vec![],
+    };
+    let spec = ProjectSpec {
+        name: "Project mem-reuse two".into(),
+        repositories: vec![],
+    };
+    assert_eq!(
+        result(
+            owner
+                .setup_project(reused.clone(), spec, setup, next())
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    assert!(
+        !research(&approved_direct(&engine, &reused)),
+        "the removed project's kept research never reaches the project reusing its id"
+    );
+    assert!(
+        !tables_holding(&engine.database(), "Dummy research note R1")
+            .iter()
+            .any(|table| table.starts_with("knowledge_")),
+        "no knowledge row of the removed project is left"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// SA research id reuse: knowledge rows a build before the fix left for a removed project's
+/// id, kept research among them, are gone once a project is created under that id, so its
+/// agents never get them.
+#[test]
+fn a_project_created_under_a_removed_projects_id_starts_with_none_of_its_knowledge() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut db = rusqlite::Connection::open(directory.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    db.execute_batch(
+        "INSERT INTO knowledge_sources(project,id) VALUES ('mem-left','s1');
+        INSERT INTO knowledge_entries VALUES ('e1',1,'mem-left','{}');
+        INSERT INTO knowledge_heads VALUES ('e1',1,'mem-left');
+        INSERT INTO knowledge_globals(id,entry,version,hash,body) VALUES ('g1','e1',1,'h','{}');
+        INSERT INTO knowledge_activity(id,project,source,body) VALUES ('a1','mem-left','s1','');
+        INSERT INTO knowledge_nominations VALUES ('n1','mem-left','{}');
+        INSERT INTO knowledge_jobs VALUES ('j1','mem-left','d','{}');
+        INSERT INTO knowledge_watermarks VALUES ('mem-left','d',1);
+        INSERT INTO knowledge_heads VALUES ('e2',1,'mem-kept');",
+    )
+    .unwrap();
+    let tx = db.transaction().unwrap();
+    let spec = ProjectSpec {
+        name: "Project mem-left two".into(),
+        repositories: vec![],
+    };
+    assert_eq!(
+        crate::storage::create_project(&tx, &ProjectId::new("mem-left").unwrap(), &spec).unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    for table in [
+        "knowledge_sources",
+        "knowledge_entries",
+        "knowledge_heads",
+        "knowledge_activity",
+        "knowledge_nominations",
+        "knowledge_jobs",
+        "knowledge_watermarks",
+    ] {
+        let left: i64 = db
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE project='mem-left'"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "{table} keeps a row of the removed project");
+    }
+    let globals: i64 = db
+        .query_row("SELECT COUNT(*) FROM knowledge_globals", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(globals, 0, "an app-wide candidate of its entry is left");
+    let other: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM knowledge_heads WHERE project='mem-kept'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(other, 1, "another project's knowledge stays");
+}

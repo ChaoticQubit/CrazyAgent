@@ -320,6 +320,7 @@ fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
         "changes_stale",
         "changes_branch_moved",
         "changes_branch_not_above_base",
+        "changes_git_hooks",
         "changes_git_unsupported",
         "changes_merge_unsafe",
         "changes_restore_expired",

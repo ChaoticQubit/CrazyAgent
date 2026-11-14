@@ -64,9 +64,9 @@ use crazyagent::team::cleanup::FinishedAgent;
 use crazyagent::team::{TeamGraph, TeamStatus, TerminalsPerWindow};
 use crazyagent::terminal::TerminalRequest;
 use crazyagent::usage::metrics::Metrics;
-use crazyagent::usage::money::MoneySettings;
+use crazyagent::usage::money::MoneyChoice;
 use crazyagent::usage::report::UsageReport;
-use crazyagent::usage::spend::SpendSettings;
+use crazyagent::usage::spend::SpendChoice;
 use std::sync::Arc;
 use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
@@ -1827,15 +1827,27 @@ async fn desktop_terminal_attach(
     terminal_window(&webview)?;
     let agent = bridge::terminal::agent(&agent)?;
     let pane = pane.as_deref().map(bridge::terminal::pane).transpose()?;
-    if webview.label() != "main" {
-        let id = id.ok_or_else(|| engine_failure("window_denied"))?;
-        terminal_window_for(&webview, &id)?;
-        let graph = read(&state).await?.team_graph(&id).await?;
-        if !bridge::terminal::graph_shows(&graph, &agent) {
-            return Err(engine_failure("window_denied"));
+    let id = match webview.label() {
+        "main" => None,
+        _ => {
+            let id = id.ok_or_else(|| engine_failure("window_denied"))?;
+            terminal_window_for(&webview, &id)?;
+            Some(id)
         }
-    }
-    let room = terminals.0.room(webview.label(), &agent)?;
+    };
+    let shows = async {
+        if let Some(id) = id {
+            let graph = read(&state).await?.team_graph(&id).await?;
+            if !bridge::terminal::graph_shows(&graph, &agent) {
+                return Err(engine_failure("window_denied"));
+            }
+        }
+        Ok::<(), BridgeError>(())
+    };
+    let room = terminals
+        .0
+        .checked_room(webview.label(), &agent, shows)
+        .await?;
     let session = lock(&state).await?.open_terminal(agent, pane).await?;
     room.attach(session, output)
 }
@@ -3778,10 +3790,10 @@ fn desktop_usage_notices(webview: Webview) -> Result<&'static str, BridgeError> 
 async fn desktop_usage_set_money(
     webview: Webview,
     state: State<'_, NativeState>,
-    settings: MoneySettings,
+    choice: MoneyChoice,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.usage_set_money(settings)?;
+    let call = lock(&state).await?.usage_set_money_one(choice)?;
     call.await
 }
 
@@ -3801,10 +3813,10 @@ async fn desktop_usage_spend(
 async fn desktop_usage_set_spend(
     webview: Webview,
     state: State<'_, NativeState>,
-    settings: SpendSettings,
+    choice: SpendChoice,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.usage_set_spend(settings)?;
+    let call = lock(&state).await?.usage_set_spend_one(choice)?;
     call.await
 }
 

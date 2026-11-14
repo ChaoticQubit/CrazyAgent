@@ -12,8 +12,8 @@ use crate::tui::text::{styled, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::buttons;
 use crate::usage::spend::{
-    AllLimited, AttemptState, LimitedPool, ResetsSource, SpendAttempt, SpendConfirm, SpendSettings,
-    SpendView,
+    AllLimited, AttemptState, LimitedPool, ResetsSource, SpendAttempt, SpendChoice, SpendConfirm,
+    SpendSettings, SpendView,
 };
 use ratatui::text::Line;
 use std::collections::HashMap;
@@ -375,24 +375,19 @@ impl Spend {
         match key {
             Key::Char('c') => send(
                 ctx,
-                SettingsJob::SetSpend(SpendSettings {
-                    confirm: next_confirm(settings.confirm),
-                    ..settings
-                }),
+                SettingsJob::SetSpendOne(SpendChoice::Confirm(next_confirm(settings.confirm))),
             ),
             Key::Char('l') => send(
                 ctx,
-                SettingsJob::SetSpend(SpendSettings {
-                    all_limited: next_all_limited(settings.all_limited),
-                    ..settings
-                }),
+                SettingsJob::SetSpendOne(SpendChoice::AllLimited(next_all_limited(
+                    settings.all_limited,
+                ))),
             ),
             Key::Char('f') => send(
                 ctx,
-                SettingsJob::SetSpend(SpendSettings {
-                    resets_source: next_resets_source(settings.resets_source),
-                    ..settings
-                }),
+                SettingsJob::SetSpendOne(SpendChoice::ResetsSource(next_resets_source(
+                    settings.resets_source,
+                ))),
             ),
             Key::Char('u') => {
                 let Some(account) = self.target(ctx) else {
