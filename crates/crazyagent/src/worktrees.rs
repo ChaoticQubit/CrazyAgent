@@ -3703,4 +3703,20 @@ mod tests {
             "git_metadata_capacity"
         );
     }
+
+    /// The engine's worktree git, asked outright for the signature of an owner commit in any
+    /// armor, runs none of the repository's signature programs (RV-DS241-39).
+    #[test]
+    fn engine_worktree_git_runs_no_repository_signature_program_in_any_armor() {
+        use crate::landing::signature_tests::{Armor, signed};
+        for armor in Armor::ALL {
+            let signed = signed(armor);
+            git(
+                &signed.root,
+                &["log", "--show-signature", "-1", "--format=%s"],
+            )
+            .unwrap();
+            assert_eq!(signed.ran(), Vec::<String>::new(), "{armor:?}");
+        }
+    }
 }
