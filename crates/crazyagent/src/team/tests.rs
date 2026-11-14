@@ -4674,7 +4674,7 @@ fn late_columns(connection: &Connection) -> Vec<(String, String)> {
         .prepare(
             "SELECT m.name,p.name FROM sqlite_schema m, pragma_table_info(m.name) p
              WHERE m.type='table' AND m.name IN ('team_agents','team_tasks','team_task_pins')
-             AND p.name IN ('pane','mode','hookless','held') ORDER BY 1,2",
+             AND p.name IN ('pane','mode','hookless','held','resolve') ORDER BY 1,2",
         )
         .unwrap();
     statement
@@ -4720,6 +4720,7 @@ fn an_engine_db_from_before_lead_modes_gains_its_late_columns_once() {
         ("team_agents", "mode"),
         ("team_agents", "pane"),
         ("team_task_pins", "held"),
+        ("team_task_pins", "resolve"),
         ("team_tasks", "mode"),
     ]
     .iter()
@@ -4746,6 +4747,14 @@ fn an_engine_db_from_before_lead_modes_gains_its_late_columns_once() {
         held, 0,
         "a pin from before the mark counts as its task's own"
     );
+    let resolve: i64 = connection
+        .query_row(
+            "SELECT resolve FROM team_task_pins WHERE task=7",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(resolve, 0, "a pin from before the mark is no resolve");
 }
 
 #[test]
