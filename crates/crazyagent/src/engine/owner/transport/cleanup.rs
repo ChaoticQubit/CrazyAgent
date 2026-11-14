@@ -14,6 +14,7 @@ const SWEEP_EVERY: Duration = Duration::from_secs(30 * 60);
 /// connection's it travels on.
 pub const CLEANUP_CODES: &[&str] = &[
     "changes_git_failed",
+    "changes_git_hooks",
     "changes_git_unsupported",
     "changes_unavailable",
     "cleanup_agent_has_task",

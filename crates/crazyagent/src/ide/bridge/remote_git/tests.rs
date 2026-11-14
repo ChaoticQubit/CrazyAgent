@@ -1039,3 +1039,102 @@ fn a_planted_commondir_runs_no_command_from_another_folder_s_config() {
         std::fs::remove_file(&planted).unwrap();
     }
 }
+
+/// Writes one config hook into `file` that touches `marker` when git fires `event`, as git
+/// 2.54 reads `hook.<name>.command` and `hook.<name>.event`. Inputs: the config file, the
+/// hook name, the event and the marker.
+fn config_hook(file: &Path, name: &str, event: &str, marker: &Path) {
+    for (key, value) in [
+        ("command", format!("touch '{}'", marker.display())),
+        ("event", event.to_owned()),
+    ] {
+        ok(
+            file.parent().unwrap(),
+            &[
+                "config",
+                "--file",
+                file.to_str().unwrap(),
+                &format!("hook.{name}.{key}"),
+                &value,
+            ],
+        );
+    }
+}
+
+/// A hook key in the project's own `.git/config`, which git 2.54 runs whatever
+/// `core.hooksPath` says, refuses the push before git runs, with a line naming the key and
+/// the file; nothing is pushed and no hook runs (RV-DS241-39 r2 F1, QUESTION-09:50 A).
+#[test]
+fn a_hook_in_the_project_config_refuses_the_push_naming_the_key_and_the_file() {
+    let project = Project::new();
+    let commit = project.commit("a.txt", "a\n");
+    let marker = project.root.join("ran-x");
+    config_hook(
+        &project.folder.join(".git").join("config"),
+        "x",
+        "pre-push",
+        &marker,
+    );
+    let outcome = project.git(&["push", "origin", "main"]).unwrap();
+    assert_ne!(outcome.code, 0, "{outcome:?}");
+    assert!(
+        outcome.stderr.contains("hook.x.command") && outcome.stderr.contains(".git/config"),
+        "{outcome:?}"
+    );
+    assert!(!marker.exists());
+    assert_ne!(project.served("main"), Some(commit));
+}
+
+/// A hook key in the owner's own global config is switched off for the run with
+/// `hook.<name>.enabled=false`, so the owner's push lands and the hook never runs
+/// (RV-DS241-39 r2 F1, QUESTION-09:50 A).
+#[test]
+fn a_hook_in_the_owner_global_config_never_runs_and_the_push_lands() {
+    let project = Project::new();
+    let commit = project.commit("a.txt", "a\n");
+    let global = project.home.join(".gitconfig");
+    let markers = [
+        project.root.join("ran-pre-push"),
+        project.root.join("ran-reference"),
+    ];
+    config_hook(&global, "owner-push", "pre-push", &markers[0]);
+    config_hook(&global, "owner-ref", "reference-transaction", &markers[1]);
+    landed(project.git(&["push", "origin", "main"]));
+    assert_eq!(project.served("main"), Some(commit));
+    for marker in &markers {
+        assert!(!marker.exists(), "{}", marker.display());
+    }
+}
+
+/// A hook name no `-c` can carry, here one holding `=`, refuses the run even from the
+/// owner's global config, since no switch can turn that hook off (RV-DS241-39 r2 F1,
+/// QUESTION-09:50 A).
+#[test]
+fn a_hook_name_no_switch_can_carry_refuses_the_push() {
+    let project = Project::new();
+    let commit = project.commit("a.txt", "a\n");
+    let marker = project.root.join("ran-odd");
+    config_hook(&project.home.join(".gitconfig"), "a=b", "pre-push", &marker);
+    let outcome = project.git(&["push", "origin", "main"]).unwrap();
+    assert_ne!(outcome.code, 0, "{outcome:?}");
+    assert!(!marker.exists());
+    assert_ne!(project.served("main"), Some(commit));
+}
+
+/// A hook key the project's `.git/config` reaches through `include.path` from a file
+/// outside the project never runs, refused or switched off, whatever origin git shows for
+/// it (RV-DS241-39 r2 F1, QUESTION-09:50 A).
+#[test]
+fn a_hook_reached_through_an_include_of_the_project_config_never_runs() {
+    let project = Project::new();
+    project.commit("a.txt", "a\n");
+    let included = project.root.join("outside.inc");
+    let marker = project.root.join("ran-included");
+    config_hook(&included, "inc", "pre-push", &marker);
+    ok(
+        &project.folder,
+        &["config", "include.path", included.to_str().unwrap()],
+    );
+    let _ = project.git(&["push", "origin", "main"]);
+    assert!(!marker.exists());
+}

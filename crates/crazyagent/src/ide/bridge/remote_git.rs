@@ -70,6 +70,7 @@ const CONFIG_BYTES_MAX: usize = 512 * 1024;
 const CHECK_TIME: Duration = Duration::from_secs(20);
 const DRAIN_TIME: Duration = Duration::from_secs(2);
 const REMOTES_MAX: usize = 64;
+const HOOKS_MAX: usize = 64;
 const DEPTH_DIGITS_MAX: usize = 9;
 const POLL: Duration = Duration::from_millis(20);
 /// The most `ide.git` calls one owner server runs at once, across its projects, and for
@@ -448,10 +449,12 @@ pub(super) fn owner_path(value: &OsStr, denied: &[&Path]) -> OsString {
 /// the IDE sandbox cannot write; every remote reached is configured there with a URL; and
 /// every URL it fetches from or pushes to, `insteadOf` applied, uses https, http, ssh or
 /// git. git runs the [`engine_args`], so a pull only fetches, with [`HARDENING`] (no hooks,
-/// fsmonitor, pager, askpass, submodules, replace objects or automatic maintenance), the
-/// [`owner_env`] environment and its own process group, which is killed at `limit`.
-/// Inputs: the canonical project folder, the environment, the plan, git's arguments and
-/// the time limit. Output: the outcome, or
+/// fsmonitor, pager, askpass, submodules, replace objects or automatic maintenance), every
+/// config hook of the owner's own config switched off ([`hooks_off`]), the [`owner_env`]
+/// environment and its own process group, which is killed at `limit`. A config hook git
+/// cannot be kept from running ends the command before git runs, with git's usual failure
+/// code and a line naming the key and its file. Inputs: the canonical project folder, the
+/// environment, the plan, git's arguments and the time limit. Output: the outcome, or
 /// `ide_git_config_refused`, `ide_git_remote_unknown`, `ide_git_transport_refused`,
 /// `ide_git_unavailable` or `ide_git_outcome_unknown`.
 pub(super) fn run(
@@ -472,6 +475,17 @@ pub(super) fn run(
     {
         return Err(failure("ide_git_config_refused"));
     }
+    let hooks = match hooks_off(&entries, folder) {
+        Ok(hooks) => hooks,
+        Err(line) => {
+            eprintln!("ide_git_hook_refused");
+            return Ok(GitOutcome {
+                code: HOOK_REFUSED_CODE,
+                stdout: String::new(),
+                stderr: text(line.as_bytes(), OUTPUT_BYTES_MAX),
+            });
+        }
+    };
     let known = remotes(&entries);
     if known.len() > REMOTES_MAX {
         return Err(failure("ide_git_config_refused"));
@@ -498,7 +512,8 @@ pub(super) fn run(
             return Err(failure("ide_git_transport_refused"));
         }
     }
-    let argv = engine_args(plan, args, default.as_deref());
+    let mut argv = hooks;
+    argv.extend(engine_args(plan, args, default.as_deref()));
     let ran = ran(git(folder, env, &argv), OUTPUT_BYTES_MAX, limit)?;
     let code = ran
         .status
@@ -641,6 +656,67 @@ fn origin_allowed(origin: &str, folder: &Path) -> bool {
     };
     let git = folder.join(".git");
     !real.starts_with(folder) || real == git.join("config") || real == git.join("config.worktree")
+}
+
+/// The exit code of an IDE git command refused for a config hook, the one git itself
+/// ends a failed command with.
+const HOOK_REFUSED_CODE: i32 = 128;
+
+/// The `-c` arguments that switch off, for one engine git run, every config hook
+/// `hook.<name>.command` the owner's own config names, which git 2.54 runs whatever
+/// `core.hooksPath` says (RV-DS241-39 r2 F1). A hook key read from a file inside the project
+/// folder, its `.git/config` or `.git/config.worktree`, refuses the run instead, as does a
+/// name no `-c` can carry (empty, holding `=` or a control character) and more than
+/// [`HOOKS_MAX`] names. Inputs: the entries [`config`] read and the canonical project
+/// folder. Output: the arguments, or the line naming the key and its file.
+fn hooks_off(entries: &[Entry], folder: &Path) -> Result<Vec<String>, String> {
+    let mut names: Vec<&str> = Vec::new();
+    for entry in entries {
+        let Some((name, _)) = entry
+            .key
+            .strip_prefix("hook.")
+            .and_then(|rest| rest.rsplit_once('.'))
+        else {
+            continue;
+        };
+        let inside = entry.origin.strip_prefix("file:").is_some_and(|file| {
+            crate::sandbox::canonical(&folder.join(file))
+                .ok()
+                .is_none_or(|real| real.starts_with(folder))
+        });
+        let carried =
+            !name.is_empty() && !name.contains('=') && !name.chars().any(char::is_control);
+        let new = !names.contains(&name);
+        if inside || !carried || (new && names.len() == HOOKS_MAX) {
+            return Err(hook_line(entry));
+        }
+        if new {
+            names.push(name);
+        }
+    }
+    let arguments: Vec<String> = names
+        .iter()
+        .flat_map(|name| ["-c".to_owned(), format!("hook.{name}.enabled=false")])
+        .collect();
+    assert_eq!(arguments.len(), names.len() * 2);
+    assert!(names.len() <= HOOKS_MAX);
+    Ok(arguments)
+}
+
+/// The line an IDE git command refused for a config hook shows as git's output: the file
+/// and the key, each control character shown as `?`. Input: the entry. Output: the line.
+fn hook_line(entry: &Entry) -> String {
+    let shown = |text: &str| -> String {
+        text.chars()
+            .map(|c| if c.is_control() { '?' } else { c })
+            .collect()
+    };
+    let file = entry.origin.strip_prefix("file:").unwrap_or(&entry.origin);
+    format!(
+        "crazyagent: {} sets {}, a Git hook that runs whatever core.hooksPath says. CrazyAgent runs no hook here, so remove it from that file, then try again.\n",
+        shown(file),
+        shown(&entry.key)
+    )
 }
 
 /// The configured remotes: every name with a `remote.<name>.url` entry, sorted, each once.
