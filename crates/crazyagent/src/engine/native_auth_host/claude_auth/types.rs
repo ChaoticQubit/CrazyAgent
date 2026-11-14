@@ -67,6 +67,7 @@ pub(crate) enum ClaudeAuthFailure {
     InputInvalid,
     DestinationUnsupported,
     CredentialExpiring,
+    HarnessTooOld,
 }
 
 impl ClaudeAuthFailure {
@@ -83,6 +84,7 @@ impl ClaudeAuthFailure {
             Self::InputInvalid => "native_auth_claude_input_invalid",
             Self::DestinationUnsupported => "native_auth_claude_destination_unsupported",
             Self::CredentialExpiring => "native_auth_claude_credential_expiring",
+            Self::HarnessTooOld => "native_auth_harness_too_old",
         }
     }
 }

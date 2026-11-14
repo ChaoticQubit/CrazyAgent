@@ -985,6 +985,7 @@ fn missing(id: &str, install: Option<&str>, guide: &str) -> HarnessVersions {
         running: false,
         last: None,
         needs: None,
+        sign_in_min: None,
     }
 }
 

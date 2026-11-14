@@ -27,11 +27,12 @@ const UNANSWERED_CHECK_CODES: [&str; 5] = [
 /// The failure codes a sign-in custodian may name that its settled attempt records (OP-7):
 /// each tells the owner something a plain retry does not, and the app has a sentence for
 /// each. Any other cause a custodian names settles the attempt as `native_auth_interrupted`.
-pub(crate) const CUSTODIAN_CODES: [&str; 9] = [
+pub(crate) const CUSTODIAN_CODES: [&str; 10] = [
     "native_auth_bootstrap_timeout",
     "native_auth_cancelled",
     "native_auth_codex_deadline",
     "native_auth_codex_exited_before_observation",
+    "native_auth_harness_too_old",
     "native_auth_host_executable_changed",
     "native_auth_host_executable_unsafe",
     "native_profile_custody_unsafe",

@@ -6,14 +6,16 @@ import {
   signInMethodFor, signInWay, signInWayUnavailable, validateClaudeAuthCode,
   type NativeAuthCommand, type NativeAuthMethod, type NativeAuthState, type NativeAuthView, type SignInWay,
 } from "../../native-auth";
+import { harnessVersions, loadHarnessUpdateSettings, pollWhileRunning, readForConfirm, updateHarness, type HarnessVersions, type UpdateMode } from "../../api-harness-updates";
 import { useAppSession } from "../../state";
 import { Button, Icon, Notice, SecretField } from "../../ui";
-import { HarnessFile } from "./harnesses";
+import { HarnessFile, lastLine, refusalLine, UpdateConfirm } from "./harnesses";
 
 type Challenge = NonNullable<NativeAuthView["challenge"]>;
 type Account = NonNullable<NativeAuthView["account"]>;
 export type SubscriptionProvider = "chatgpt" | "claude";
-export type FailureHint = "retry" | "check" | "expired" | "missing" | "sign_in";
+export type FailureHint = "retry" | "check" | "expired" | "missing" | "sign_in" | "too_old";
+export const TOO_OLD = "native_auth_harness_too_old";
 export const CHECK_LINE = "Checking the sign-in this account already has in CrazyAgent. Nothing else on this Mac is read.";
 export const CHECK_SIGNED_OUT = "This account isn't signed in. Choose Sign in again.";
 
@@ -66,11 +68,40 @@ const SIGN_IN_TEXT: Record<string, string> = {
 };
 export const POLL_MS = 2000;
 
+/** Tells whether an installed version reads lower than a minimum, number by number with a
+ * missing number counting as zero; a version that is not two to six numbers is unknown, so never
+ * below. Inputs: the installed version and the minimum. Output: the answer. */
+export function versionBelow(installed: string, minimum: string): boolean {
+  const plain = /^\d+(\.\d+){1,5}$/;
+  if (!plain.test(installed) || !plain.test(minimum)) return false;
+  const one = installed.split(".").map(Number);
+  const other = minimum.split(".").map(Number);
+  for (let index = 0; index < Math.max(one.length, other.length); index += 1) {
+    const [mine, theirs] = [one[index] ?? 0, other[index] ?? 0];
+    if (mine !== theirs) return mine < theirs;
+  }
+  return false;
+}
+
+/** The line for a sign-in refused because the harness is older than its sign-in minimum
+ * (DEC-166): its version and the minimum when known, else how to fix it. Inputs: the harness
+ * name and its versions row, if read. Output: the line, the same words as the TUI's. */
+export function tooOldLine(harness: string, versions?: HarnessVersions | null): string {
+  const minimum = versions?.sign_in_min;
+  if (!minimum) return `${harness} is too old to sign in from CrazyAgent. Update ${harness}, then choose Check again.`;
+  const installed = versions.installed;
+  return installed && versionBelow(installed, minimum)
+    ? `${harness} ${installed} is too old to sign in from CrazyAgent; it needs ${minimum} or newer.`
+    : `${harness} is too old to sign in from CrazyAgent; it needs ${minimum} or newer.`;
+}
+
 /** Turns a sign-in failure code into one plain sentence and the action that fits it.
- * Inputs: the code, the provider and, for a sign-in refused because another still runs, that
- * account's name when known. Output: the copy and its hint. */
-export function signInFailure(code: string, provider: SubscriptionProvider, running?: string): { text: string; hint: FailureHint } {
+ * Inputs: the code, the provider, for a sign-in refused because another still runs that
+ * account's name when known, and for a harness too old to sign in its versions row.
+ * Output: the copy and its hint. */
+export function signInFailure(code: string, provider: SubscriptionProvider, running?: string, versions?: HarnessVersions | null): { text: string; hint: FailureHint } {
   const [harness, name] = provider === "chatgpt" ? ["Codex", "ChatGPT"] : ["Claude Code", "Claude"];
+  if (code === TOO_OLD) return { text: tooOldLine(harness, versions), hint: "too_old" };
   if (code === "native_auth_sign_in_running") {
     return { text: running ? `${running}'s sign-in is still running. Wait for it to finish, or open ${running} and cancel its sign-in, then try again.`
       : plainError(code), hint: "retry" };
@@ -405,6 +436,98 @@ function ClaudeCode({ onSend }: { onSend: (code: string) => Promise<void> }) {
   </form>;
 }
 
+/** What the too-old panel offers for updating the harness, as Settings, Harnesses would: an
+ * Update button, the command to run in Terminal, a line saying why not, that its update runs, or
+ * nothing. Inputs: the versions row and the update mode, each null until read. Output: the offer. */
+export type UpdateOffer = { kind: "button" } | { kind: "command"; command: string } | { kind: "line"; line: string } | { kind: "running" } | { kind: "nothing" };
+
+/** Picks the too-old panel's update offer, the same choice the TUI makes. Inputs: the versions
+ * row and the update mode, null until read. Output: the offer. */
+export function updateOffer(versions: HarnessVersions | null, mode: UpdateMode | null): UpdateOffer {
+  if (versions === null || mode === null) return { kind: "nothing" };
+  if (versions.running) return { kind: "running" };
+  if (versions.command !== null) return mode === "check_and_update" ? { kind: "button" } : { kind: "command", command: versions.command };
+  const line = refusalLine(versions);
+  return line === null ? { kind: "nothing" } : { kind: "line", line };
+}
+
+/** The panel for a sign-in refused because the harness is too old: the line, Update with that
+ * harness's own update where the settings allow it, else how to update it, and Check again.
+ * Pure on its props. Inputs: the harness name, the line, the versions row and update mode (null
+ * until read), whether the update is starting, and the two actions. Output: the panel. */
+export function TooOldView({ name, line, versions, mode, pending, onUpdate, onCheck, after }: {
+  name: string; line: string; versions: HarnessVersions | null; mode: UpdateMode | null; pending: boolean;
+  onUpdate: () => void; onCheck: () => void; after?: string | null;
+}) {
+  const offer = updateOffer(versions, mode);
+  return <div className="stack-small">
+    <Notice tone="danger" alert>{line}</Notice>
+    {offer.kind === "running" && <p className="live" role="status"><Icon name="loader-circle" spin />{`Updating ${name}...`}</p>}
+    {offer.kind === "command" && <>
+      <p>{`To update ${name}, run this in Terminal:`}</p>
+      <pre className="mono">{offer.command}</pre>
+    </>}
+    {offer.kind === "line" && <p>{offer.line}</p>}
+    {after && offer.kind !== "running" && <p role="status">{after}</p>}
+    <div className="row">
+      {(offer.kind === "button" || offer.kind === "running") &&
+        <Button variant="primary" disabled={offer.kind === "running" || pending} onClick={onUpdate}>{`Update ${name}`}</Button>}
+      <Button onClick={onCheck}>Check again</Button>
+    </div>
+  </div>;
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** The too-old panel with its reads: the harness's versions row and update settings, Update
+ * behind the same confirm Settings, Harnesses shows, and Check again. Inputs: the provider and
+ * the Check again action. Output: the panel and its confirm. */
+export function TooOldPanel({ provider, onCheck }: { provider: SubscriptionProvider; onCheck: () => void }) {
+  const [id, name] = provider === "chatgpt" ? ["codex", "Codex"] : ["claude-code", "Claude Code"];
+  const [versions, setVersions] = useState<HarnessVersions | null>(null);
+  const [mode, setMode] = useState<UpdateMode | null>(null);
+  const [asking, setAsking] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [updated, setUpdated] = useState(false);
+  const [problem, setProblem] = useState<string>();
+  const alive = useRef(true);
+  const take = useCallback((read: Result<HarnessVersions>) => {
+    if (alive.current && read.kind === "ok") setVersions(read.value);
+    return read;
+  }, []);
+  useEffect(() => {
+    alive.current = true;
+    void harnessVersions(id, false).then(take);
+    void loadHarnessUpdateSettings().then((read) => { if (alive.current && read.kind === "ok") setMode(read.value.mode); });
+    return () => { alive.current = false; };
+  }, [id, take]);
+  const ask = async () => {
+    const fresh = await readForConfirm(id, "update", harnessVersions);
+    take(fresh.read);
+    if (alive.current && fresh.open) setAsking(true);
+  };
+  const start = async () => {
+    setPending(true);
+    const started = await updateHarness(id);
+    if (!alive.current) return;
+    setPending(false);
+    setAsking(false);
+    if (started.kind !== "ok") return setProblem(started.kind === "not_ready" ? "Updating harnesses isn't ready yet in this build." : started.message);
+    setProblem(undefined);
+    setUpdated(true);
+    await pollWhileRunning(id, (one, look) => harnessVersions(one, look).then(take), wait, () => alive.current);
+  };
+  return <>
+    <TooOldView name={name} line={signInFailure(TOO_OLD, provider, undefined, versions).text} versions={versions} mode={mode} pending={pending}
+      after={updated && versions ? lastLine(versions, name) : null} onUpdate={() => void ask()} onCheck={onCheck} />
+    {problem && <Notice tone="danger" alert>{problem}</Notice>}
+    {versions?.command && <UpdateConfirm versions={versions} name={name} open={asking} pending={pending}
+      onConfirm={() => void start()} onCancel={() => setAsking(false)} />}
+  </>;
+}
+
 /** The managed sign-in panel for one subscription account. Pure on its props, so tests
  * render it from real reducer states. Inputs: provider, method, state, the actions, and idle
  * (no account yet, so it shows the start buttons). */
@@ -430,6 +553,7 @@ export function SignInPanel({ provider, method, state, onStart, onCancel, onChec
   if (stage.kind === "failed") {
     const checkMethod = signInMethodFor(signInHarness(provider), "check");
     const retry = stage.hint === "expired" ? "Get a new code" : stage.hint === "check" ? "Check again" : stage.hint === "sign_in" ? "Sign in again" : "Try again";
+    if (stage.hint === "too_old") return <TooOldPanel provider={provider} onCheck={() => onStart(method)} />;
     if (stage.hint === "missing") return <div className="stack-small">
       <Notice tone="danger" alert>{stage.text}</Notice>
       <HarnessFile id={provider === "chatgpt" ? "codex" : "claude-code"} name={provider === "chatgpt" ? "Codex" : "Claude Code"} onFound={() => onStart(method)} readyLabel="Try again" />

@@ -56,6 +56,11 @@ pub enum ProtocolError {
 
 const AUTH_STATUS_STRING_BYTES_MAX: usize = 4096;
 
+/// The oldest Claude Code that signs in from CrazyAgent: 2.1.268 is the first whose
+/// `auth status` names `configDirectory`, which proves the sign-in landed in the account's
+/// own folder (DEC-166).
+pub const SIGN_IN_MIN: &str = "2.1.268";
+
 /// How close to its access token's expiry Claude Code 2.1.309 refreshes it: it renews only
 /// a token that lapses within five minutes, and leaves any other untouched.
 #[cfg(unix)]
@@ -174,6 +179,31 @@ pub fn decode_auth_status(stdout: &[u8]) -> Result<AuthStatus, ProtocolError> {
         org_name: auth_status_optional_text(&value, "orgName")?,
         subscription_type: auth_status_optional_text(&value, "subscriptionType")?,
     })
+}
+
+/// Tells whether `auth status` output is the status of a Claude Code too old to name its
+/// settings folder: a bounded JSON object with `loggedIn`, `authMethod` and `apiProvider` and
+/// no `configDirectory`, as Claude Code before 2.1.268 prints it (DEC-166).
+/// Input: the output. Output: the answer; any other text is false.
+pub fn auth_status_lacks_config_directory(stdout: &[u8]) -> bool {
+    if stdout.len() > FRAME_BYTES_MAX {
+        return false;
+    }
+    let Ok(StrictValue(value)) = serde_json::from_slice(stdout) else {
+        return false;
+    };
+    let mut nodes = 0;
+    if validate_shape(&value, 0, &mut nodes).is_err() || auth_status_string_bounds(&value).is_err()
+    {
+        return false;
+    }
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.get("loggedIn").is_some_and(Value::is_boolean)
+        && object.get("authMethod").is_some_and(Value::is_string)
+        && object.get("apiProvider").is_some_and(Value::is_string)
+        && !object.contains_key("configDirectory")
 }
 
 fn auth_status_required_text(value: &Value, name: &str) -> Result<AuthStatusText, ProtocolError> {

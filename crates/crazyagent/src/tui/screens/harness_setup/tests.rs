@@ -98,6 +98,7 @@ fn versions(id: &str, install: Option<&str>, refusal: Option<&str>) -> HarnessVe
         running: false,
         last: None,
         needs: None,
+        sign_in_min: None,
     }
 }
 

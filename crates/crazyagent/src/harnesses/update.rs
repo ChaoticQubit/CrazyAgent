@@ -97,8 +97,9 @@ pub struct LastUpdate {
 
 /// Everything a client shows on one harness row about versions. `command` is the exact update
 /// line of an installed harness, `install` the exact install line of a missing one, `refusal`
-/// the code for why a button is not offered, `guide` the vendor's page for that case and
-/// `needs` what an installed harness lacks before it can run, as the tool resolver reads it.
+/// the code for why a button is not offered, `guide` the vendor's page for that case,
+/// `needs` what an installed harness lacks before it can run, as the tool resolver reads it,
+/// and `sign_in_min` the oldest version CrazyAgent signs in with, for a harness that signs in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessVersions {
@@ -114,6 +115,8 @@ pub struct HarnessVersions {
     pub last: Option<LastUpdate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs: Option<HarnessNeeds>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in_min: Option<String>,
 }
 
 /// What an installed harness lacks before it can run, from the tool resolver
@@ -1054,6 +1057,15 @@ fn higher(candidate: &str, installed: &str) -> bool {
         })
         .find(|order| order.is_ne())
         .is_some_and(|order| order.is_gt())
+}
+
+/// Tells whether an installed version reads lower than a minimum, number by number with a
+/// missing number counting as zero. Inputs: the installed version and the plain minimum.
+/// Output: true only when the installed version is plain and lower; an installed version that
+/// is not plain is unknown, so never below.
+pub fn below(installed: &str, minimum: &str) -> bool {
+    assert!(plain_version(minimum), "minimum {minimum:?}");
+    plain_version(installed) && higher(minimum, installed)
 }
 
 fn unreadable() -> Latest {

@@ -327,6 +327,35 @@ impl NativeAuthDispatchHost {
 
     /// Keeps the failure code the custodian named before it exited, for the release that
     /// settles its attempt. Input: the code. Output: Ok once kept in this dispatch's slot.
+    /// Whether the harness this sign-in would run reads older than its sign-in minimum
+    /// (DEC-166), from the version Settings, Harnesses shows for it. An unknown version, a
+    /// harness with no minimum or a failed read is not too old, so the sign-in runs as before.
+    /// Inputs: the stored harness name and the real file the sign-in runs. Output: the answer.
+    pub(crate) async fn harness_too_old(&self, harness: &str, runs: &Path) -> bool {
+        let Some(id) = crate::harnesses::spec(harness).map(|spec| spec.id) else {
+            return false;
+        };
+        if crate::harnesses::sign_in_min(id).is_none() {
+            return false;
+        }
+        let Ok(authority) = self.authority() else {
+            return false;
+        };
+        let root = super::changes::engine_root(&authority);
+        let search = OwnerRuntimeHandle {
+            engine: self.engine.clone(),
+            authority,
+        }
+        .harness_search();
+        let (Ok(root), Ok(search)) = (root, search) else {
+            return false;
+        };
+        let installed =
+            super::harness_catalog::sign_in_version(&self.engine, root, search, id, runs.into())
+                .await;
+        crate::harnesses::sign_in_too_old(id, installed.as_deref())
+    }
+
     pub(crate) fn record_custodian_failure(&self, code: &str) -> Result<(), EngineError> {
         let authority = self
             .authority

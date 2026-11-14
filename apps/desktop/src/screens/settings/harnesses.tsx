@@ -125,7 +125,9 @@ function statusWord(entry: HarnessEntry): string {
   }
 }
 
-function lastLine(versions: HarnessVersions, name: string): string | null {
+/** What the last update or install of a harness did, in one line. Inputs: the versions and the
+ * harness name. Output: the line, or null when there is no record. */
+export function lastLine(versions: HarnessVersions, name: string): string | null {
   const last = versions.last;
   if (last === null) return null;
   if (last.ok && last.from === null) return last.to === null ? "It is installed now. New agents use it; no restart needed." : `Version ${last.to} is installed now. New agents use it; no restart needed.`;
@@ -134,7 +136,9 @@ function lastLine(versions: HarnessVersions, name: string): string | null {
   return updateCopy(last.code ?? "harness_update_failed");
 }
 
-function refusalLine(versions: HarnessVersions): string | null {
+/** Why a harness has no Update button, in one line. Input: the versions. Output: the line, or
+ * null when Update is offered or nothing refuses it. */
+export function refusalLine(versions: HarnessVersions): string | null {
   if (versions.method.kind === "with_app") return updateCopy("harness_update_with_app");
   if (versions.refusal === null || versions.command !== null) return null;
   const line = updateCopy(versions.refusal);
@@ -176,6 +180,7 @@ export function HarnessRowView({ entry, versions, mode, problem, checking = fals
         <span>Accounts it can use: {entry.account_kinds.map((kind) => KIND_LABEL[kind]).join(", ") || "None"}</span>
         {blocked !== null && <span className="pj-error">{blocked}</span>}
         {shown !== null && shown.method.kind !== "with_app" && <span>{versionLine(shown)}</span>}
+        {versions?.sign_in_min && <span>{`Sign-in needs ${versions.sign_in_min} or newer.`}</span>}
         {refusal !== null && <span>{refusal}</span>}
         {running && <span role="status">{missing ? "Installing..." : "Updating..."}</span>}
         {last !== null && <span role="status">{last}</span>}
