@@ -18126,6 +18126,113 @@ fn an_asleep_agent_with_a_waking_message_gets_one_pinned_wake_task() {
     team.workers.clear();
 }
 
+/// The owner cancels a queued task while a dispatch pass is still handing out the tasks it
+/// read before it: the cancel lands as the pass starts the earlier task, as a trigger does
+/// here. The cancelled task stays cancelled, its agent gets no turn and stays idle, and the
+/// earlier task runs as before (RV-DS241-124).
+#[test]
+fn an_owner_cancel_during_a_dispatch_pass_keeps_the_task_cancelled_and_sends_no_turn() {
+    let fixture = Fixture::new(2);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let first_agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let second_agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let mut queued = |agent: i64, prompt: &str| -> (i64, Receiver<Order>) {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,?2,'queued',1)",
+                params![PROJECT, prompt],
+            )
+            .unwrap();
+        let task = fixture.connection.last_insert_rowid();
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+                params![task, PROJECT, agent],
+            )
+            .unwrap();
+        let mut worker = between_turns(&project, AgentRole::Sub, true, true);
+        let (orders, turns) = channel();
+        worker.orders = orders;
+        team.workers.insert(agent, worker);
+        (task, turns)
+    };
+    let (first, first_turns) = queued(first_agent, "Write the index page.");
+    let (second, second_turns) = queued(second_agent, "Delete the release branch.");
+    fixture
+        .connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER owner_cancel_mid_pass AFTER UPDATE OF status ON team_tasks
+             WHEN NEW.id={first} AND NEW.status='running'
+             BEGIN
+               UPDATE team_tasks SET status='cancelled', finished_ms=2, error='Cancelled by the owner', cancel_by='task'
+               WHERE id={second} AND status IN ('queued','needs_pool');
+             END;"
+        ))
+        .unwrap();
+
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+
+    assert!(
+        matches!(first_turns.try_recv(), Ok(Order::Turn(..))),
+        "the earlier task still gets its turn"
+    );
+    assert!(
+        second_turns.try_recv().is_err(),
+        "the cancelled task is typed to no agent"
+    );
+    let status = |task: i64| -> (String, Option<i64>, i64) {
+        fixture
+            .connection
+            .query_row(
+                "SELECT status,agent,attempts FROM team_tasks WHERE id=?1",
+                [task],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(status(first), ("running".to_owned(), Some(first_agent), 1));
+    assert_eq!(status(second), ("cancelled".to_owned(), None, 0));
+    assert!(team.workers[&second_agent].busy.is_none());
+    team.workers.clear();
+}
+
+/// A dispatch failure written for a task the owner cancelled meanwhile leaves it cancelled
+/// with the owner's reason (RV-DS241-124).
+#[test]
+fn failing_a_task_the_owner_cancelled_keeps_it_cancelled() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,error,cancel_by,finished_ms,created_ms)
+             VALUES (?1,'master','codex',0,'Delete the release branch.','cancelled','Cancelled by the owner','task',2,1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+
+    team.fail_task(task, "The sub-agent could not start: no account")
+        .unwrap();
+
+    let (status, error): (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT status,error FROM team_tasks WHERE id=?1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (status.as_str(), error.as_deref()),
+        ("cancelled", Some("Cancelled by the owner"))
+    );
+}
+
 /// F30: the Task-start reminder marks the start of a task, not every turn. While the setting
 /// is On, a kept session's turn that only carries its team messages (`WAKE_TASK`) gets no
 /// reminder, while a real task pinned to the same kind of kept session still gets it once.
