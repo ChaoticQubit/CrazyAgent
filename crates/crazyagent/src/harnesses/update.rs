@@ -845,7 +845,7 @@ fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<(), &'static s
                 return Err(TOOL_UNSAFE);
             }
         }
-        at = interpreter;
+        at = &**interpreter;
     }
     Err(TOOL_UNSAFE)
 }

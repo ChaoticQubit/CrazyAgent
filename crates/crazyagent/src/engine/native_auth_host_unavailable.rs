@@ -33,7 +33,12 @@ impl RegisteredNativeAuthHost {
         Err(EngineError("native_auth_host_unavailable".into()))
     }
 
-    pub(crate) fn current(self: &Arc<Self>) -> Result<Arc<Self>, EngineError> {
+    /// Never runs: no host exists on this platform to re-pin. Inputs: the host and the
+    /// engine-start check, unused. Output: none, the type has no value.
+    pub(crate) fn current(
+        self: &Arc<Self>,
+        _trusted: impl FnOnce(&Path) -> Result<(), EngineError>,
+    ) -> Result<Arc<Self>, EngineError> {
         match **self {}
     }
 
