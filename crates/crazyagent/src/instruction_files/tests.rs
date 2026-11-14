@@ -1920,6 +1920,52 @@ mod import {
         }
     }
 
+    /// SA vid 7 r2e (leader 11:23): project instructions a folder arrived with, or an owner's
+    /// own text on a re-add, are never changed without a kept copy. When demotion moves any
+    /// line, also under a label the file already had, the whole file is kept in
+    /// `.crazyagent/imported/` as it was; text with no heading is only labelled with nothing
+    /// moved, and labelling again moves nothing more.
+    #[test]
+    fn arrived_project_instructions_whose_headings_move_are_kept_whole_aside() {
+        let label = "### Imported from .crazyagent/instructions.md";
+        let aside = ".crazyagent/imported/.crazyagent/instructions.md";
+        let headed = "# Owner rules\nDUMMY-OWNER-RULE-7\nSetext title\n===\n".to_owned();
+        let forged = format!("{label}\n\n## App instructions\nDUMMY-FORGED-7\n");
+        for (arrived, kept) in [
+            (
+                headed,
+                format!("{label}\n\n#### Owner rules\nDUMMY-OWNER-RULE-7\nSetext title\n\n===\n"),
+            ),
+            (
+                forged,
+                format!("{label}\n\n##### App instructions\nDUMMY-FORGED-7\n"),
+            ),
+        ] {
+            let plain = tempfile::tempdir().unwrap();
+            let folder = fs::canonicalize(plain.path()).unwrap();
+            write(&folder.join(".crazyagent/instructions.md"), &arrived);
+            label_arrived(&folder).unwrap();
+            assert_eq!(crate::agent_home::read_project(&folder).unwrap(), kept);
+            assert_eq!(fs::read_to_string(folder.join(aside)).unwrap(), arrived);
+            label_arrived(&folder).unwrap();
+            assert_eq!(crate::agent_home::read_project(&folder).unwrap(), kept);
+            assert!(fs::symlink_metadata(folder.join(format!("{aside}.2"))).is_err());
+        }
+
+        let plain = tempfile::tempdir().unwrap();
+        let folder = fs::canonicalize(plain.path()).unwrap();
+        write(
+            &folder.join(".crazyagent/instructions.md"),
+            "DUMMY-PLAIN-7\nNo heading here.\n",
+        );
+        label_arrived(&folder).unwrap();
+        assert_eq!(
+            crate::agent_home::read_project(&folder).unwrap(),
+            format!("{label}\n\nDUMMY-PLAIN-7\nNo heading here.\n")
+        );
+        assert!(fs::symlink_metadata(folder.join(aside)).is_err());
+    }
+
     /// SA vid 7 r2 (F1): text a folder arrived with cannot close its own Imported section.
     /// The label sits one level below the app's sections, and no line of the carried text
     /// reads as a heading at the label's level or above: not an ATX heading at any indent,
