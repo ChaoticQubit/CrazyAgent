@@ -1302,16 +1302,16 @@ fn a_kept_port_linux_could_pick_refuses_every_landlock_launch_but_no_closed_bubb
     .unwrap();
     assert_eq!(
         port_probe(&bubblewrap, &case, LISTENERS, &[]),
-        "bind0=listened\nlisten=listened\nunix=listened\n"
+        "bind0=listened\nlisten=listened\nunix=refused\n"
     );
 }
 
 /// REL220-F2: a limited launch whose kept ports lie outside the range Linux picks from
-/// starts, and its agent keeps every listen: a bare TCP listen on a port Linux picks, and,
-/// on bubblewrap, a Unix socket listen. A bind stays refused on Landlock, which allows a
-/// limited agent no bind port, and the socket filter opens no Unix socket for any Landlock
-/// agent, as `a_linux_agent_reaches_ip_endpoints_but_no_unix_socket_in_the_engine_runtime`
-/// shows.
+/// starts, and its agent keeps every TCP listen: a bare listen on a port Linux picks, and,
+/// on bubblewrap, a bound one. A bind stays refused on Landlock, which allows a limited
+/// agent no bind port, and the socket filter opens no Unix socket for any agent, on
+/// Landlock as `a_linux_agent_reaches_ip_endpoints_but_no_unix_socket_in_the_engine_runtime`
+/// shows and on bubblewrap, which starts every agent through the filter.
 #[test]
 fn a_limited_network_agent_with_kept_ports_outside_the_picked_ones_keeps_its_listeners() {
     let case = case();
@@ -1355,7 +1355,7 @@ fn a_limited_network_agent_with_kept_ports_outside_the_picked_ones_keeps_its_lis
     .unwrap();
     assert_eq!(
         port_probe(&bubblewrap, &case, LISTENERS, &[]),
-        "bind0=listened\nlisten=listened\nunix=listened\n"
+        "bind0=listened\nlisten=listened\nunix=refused\n"
     );
 }
 
