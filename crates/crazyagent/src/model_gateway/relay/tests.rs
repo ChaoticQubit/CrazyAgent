@@ -694,3 +694,31 @@ fn an_open_agent_never_listens_on_a_model_relay_port() {
         }
     }
 }
+
+/// A relay port the system keeps from this user, as a Windows excluded port range answers
+/// a bind with `PermissionDenied`, or one it cannot give (`AddrNotAvailable`), is skipped
+/// as a taken one is, so the relay binds the next port of its block; any other bind error
+/// still ends the start, and a block with no port left says every port is taken (rv-code4
+/// relay-port r1 F1).
+#[test]
+fn a_relay_port_the_system_refuses_is_skipped_for_the_next_one() {
+    use std::io::{Error, ErrorKind};
+    let ports = [41_428, 41_429, 41_430, 41_431];
+    let asked = Mutex::new(Vec::new());
+    let refusing = |address: SocketAddr| -> std::io::Result<TcpListener> {
+        asked.lock().unwrap().push(address.port());
+        match address.port() {
+            41_428 => Err(Error::from(ErrorKind::PermissionDenied)),
+            41_429 => Err(Error::from(ErrorKind::AddrNotAvailable)),
+            41_430 => Err(Error::from(ErrorKind::AddrInUse)),
+            _ => crate::spawn_gate::bind_tcp_std("127.0.0.1:0"),
+        }
+    };
+    let bound = first_bound(&ports, 0, refusing).unwrap();
+    assert!(bound.local_addr().unwrap().ip().is_loopback());
+    assert_eq!(*asked.lock().unwrap(), ports.to_vec());
+    let excluded = first_bound(&ports, 1, |_| Err(Error::from(ErrorKind::PermissionDenied)));
+    assert_eq!(excluded.unwrap_err().kind(), ErrorKind::AddrInUse);
+    let broken = first_bound(&ports, 2, |_| Err(Error::other("no sockets")));
+    assert_eq!(broken.unwrap_err().kind(), ErrorKind::Other);
+}

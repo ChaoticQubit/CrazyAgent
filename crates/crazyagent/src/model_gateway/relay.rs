@@ -228,25 +228,33 @@ static NEXT_RELAY_PORT: AtomicUsize = AtomicUsize::new(0);
 /// without `SO_REUSEADDR` so a wildcard listener of this user counts as holding it. Every
 /// Open-network sandbox denies binding the whole block, so no agent can take the port, not
 /// even after the relay ended while a kept pane still sends there (SA241 vid 9). Output:
-/// the listener, a bind error other than a taken port, or `AddrInUse` saying every model
-/// relay port is taken.
+/// the listener, or the [`first_bound`] error.
 fn relay_listener() -> std::io::Result<TcpListener> {
     let block = crate::sandbox::model_proxy::RELAY_PORTS;
     let ports: Vec<u16> = block.clone().collect();
-    assert!(!ports.is_empty());
     let start = NEXT_RELAY_PORT
         .fetch_add(1, Ordering::SeqCst)
         .wrapping_add(usize::try_from(std::process::id()).unwrap_or(0));
+    let listener = first_bound(&ports, start, crate::spawn_gate::bind_tcp_std_exclusive)?;
+    assert!(block.contains(&listener.local_addr()?.port()));
+    Ok(listener)
+}
+
+/// The listener `bind` gives on 127.0.0.1 for the first of `ports`, going round from
+/// `start`, skipping a port some socket already holds. Inputs: the ports, at least one,
+/// where to start and the bind. Output: the listener, the first bind error that is not a
+/// skipped one, or `AddrInUse` saying every model relay port is taken.
+fn first_bound(
+    ports: &[u16],
+    start: usize,
+    bind: impl Fn(SocketAddr) -> std::io::Result<TcpListener>,
+) -> std::io::Result<TcpListener> {
+    assert!(!ports.is_empty());
     for step in 0..ports.len() {
         let port = ports[(start % ports.len() + step) % ports.len()];
-        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-        match crate::spawn_gate::bind_tcp_std_exclusive(address) {
+        match bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port))) {
             Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
-            Err(error) => return Err(error),
-            Ok(listener) => {
-                assert!(block.contains(&listener.local_addr()?.port()));
-                return Ok(listener);
-            }
+            bound => return bound,
         }
     }
     Err(std::io::Error::new(
