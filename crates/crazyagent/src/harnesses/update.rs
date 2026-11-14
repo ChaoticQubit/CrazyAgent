@@ -1080,13 +1080,20 @@ fn numbers(text: &str) -> Option<Vec<u64>> {
 }
 
 /// Asks an installed harness for its version under the engine's own HOME, as the updates
-/// check does. Input: the harness executable. Output: the version, None when the harness
-/// cannot be asked, prints no plain version, or HOME is unset or relative.
+/// check does, and only where the tool resolver would run it and every interpreter its
+/// first line names (`version_if_runs`), so the usage User-Agent read never starts a file or
+/// an interpreter copy agents or other users can change. Input: the harness executable.
+/// Output: the version, None when the harness is refused or cannot be asked, prints no plain
+/// version, or HOME is unset or relative.
 pub(crate) fn version_under_home(executable: &Path) -> Option<String> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|home| home.is_absolute())?;
-    state::version_of(executable, &home)
+    state::version_if_runs(
+        executable,
+        &home,
+        &crate::tools::Places::from_environment(None),
+    )
 }
 
 /// Tells whether text is a plain version: two to six numbers joined by single dots, at most

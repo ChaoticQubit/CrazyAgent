@@ -216,13 +216,6 @@ fn failed(code: &str) -> Latest {
     Latest::Failed { code: code.into() }
 }
 
-/// Asks a harness for its version with `--version`, bounded like every other run.
-/// Inputs: the harness executable and the home folder. Output: the version, None when the
-/// harness cannot be asked or prints no plain version.
-pub(super) fn version_of(executable: &Path, home: &Path) -> Option<String> {
-    version_ran(&version_command(executable)?, home)
-}
-
 /// The command that asks a harness for its version: the harness with `--version` and its
 /// own folder as the search. Input: the harness executable. Output: the command, or none for
 /// a relative path or one with no folder.
@@ -358,7 +351,7 @@ fn updated(
 /// ([`super::vetted`]), so a file agents can write, or one whose program is missing, is never
 /// started for a version. Inputs: the harness executable, the home folder and the resolver's
 /// places. Output: the version, or none.
-fn version_if_runs(
+pub(super) fn version_if_runs(
     executable: &Path,
     home: &Path,
     places: &crate::tools::Places,
