@@ -1831,7 +1831,7 @@ async fn stored_retry(engine: &Engine) -> crazyagent::provider_retry::ProviderRe
     settings.choice
 }
 
-/// Opens Settings, Setup through Go to, presses p and saves the option `keys` move to,
+/// Opens Settings, Setup through Go to, presses e and saves the option `keys` move to,
 /// waiting until the page names it, and returns what the engine then keeps. Inputs: the
 /// TUI, the runtime, the engine, the arrow keys and the option's title. Output: the
 /// stored option.
@@ -1842,9 +1842,9 @@ fn save_retry(
     keys: &[&str],
     title: &str,
 ) -> crazyagent::provider_retry::ProviderRetry {
-    pty.keys(&["p"]);
+    pty.keys(&["e"]);
     pty.until(
-        "p asks what harnesses do, with each harness line",
+        "e asks what harnesses do, with each harness line",
         |screen| {
             screen.contains("When a model provider can't be reached: what harnesses do.")
                 && screen.contains("Harness default")

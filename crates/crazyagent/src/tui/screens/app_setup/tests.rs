@@ -1854,8 +1854,8 @@ fn settings_show_retry_briefly_by_default_with_the_three_options_and_each_harnes
     ] {
         assert!(shown.contains(line), "{line} in {shown}");
     }
-    assert!(bar(&rows).contains("p Retries"));
-    shell.key(Key::Char('p'));
+    assert!(bar(&rows).contains("e Retry"));
+    shell.key(Key::Char('e'));
     let rows = render(&mut shell, 200, 80);
     find(
         &rows,
@@ -1902,7 +1902,7 @@ fn each_provider_retry_option_is_saved_when_picked_and_shown_once_stored() {
         (ProviderRetry::RetryBriefly, Key::Up, 1, "Retry briefly"),
     ];
     for (choice, key, presses, title) in picks {
-        shell.key(Key::Char('p'));
+        shell.key(Key::Char('e'));
         for _ in 0..presses {
             shell.key(key.clone());
         }
@@ -1932,11 +1932,11 @@ fn each_provider_retry_option_is_saved_when_picked_and_shown_once_stored() {
 #[test]
 fn esc_and_a_refused_save_leave_the_provider_retry_setting_as_it_was() {
     let mut shell = settings(200, 80);
-    shell.key(Key::Char('p'));
+    shell.key(Key::Char('e'));
     shell.key(Key::Up);
     shell.key(Key::Esc);
     assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
-    shell.key(Key::Char('p'));
+    shell.key(Key::Char('e'));
     shell.key(Key::Up);
     shell.key(Key::Enter);
     assert_eq!(retry_chosen(&mut shell), ProviderRetry::StopAtOnce);
@@ -1956,7 +1956,7 @@ fn a_stored_provider_retry_setting_this_version_does_not_know_is_not_offered() {
     let row = find(&rows, "Provider retry  ");
     assert!(row.contains("Failed to read it."), "{row}");
     assert!(row.contains("not one this version knows"), "{row}");
-    shell.key(Key::Char('p'));
+    shell.key(Key::Char('e'));
     assert!(jobs(&mut shell).is_empty());
     assert_eq!(lead(&shell), "The provider retry setting is not known yet.");
 }
@@ -1968,8 +1968,8 @@ fn the_provider_retry_row_and_its_ask_fit_a_120_by_40_terminal() {
     let mut shell = settings(120, 40);
     let rows = render(&mut shell, 120, 40);
     assert!(find(&rows, "Provider retry  ").contains("Retry briefly"));
-    assert!(bar(&rows).contains("p Retries"));
-    shell.key(Key::Char('p'));
+    assert!(bar(&rows).contains("e Retry"));
+    shell.key(Key::Char('e'));
     let rows = render(&mut shell, 120, 40);
     find(
         &rows,
