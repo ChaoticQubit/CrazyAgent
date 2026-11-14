@@ -770,6 +770,7 @@ fn evidence_holds_the_readme_a_manifest_the_tree_and_research_within_its_bound()
     }];
     let pack = evidence(
         folder.path(),
+        &[],
         &research,
         &["src/main.rs".to_owned(), "src/search.rs".to_owned()],
     );
@@ -806,7 +807,7 @@ fn evidence_keeps_its_bounds_when_the_tree_and_the_research_are_larger_than_the_
             text: "^".repeat(20_000),
         },
     ];
-    let pack = evidence(folder.path(), &research, &tree);
+    let pack = evidence(folder.path(), &[], &research, &tree);
     assert!(pack.len() <= EVIDENCE_BYTES_MAX);
     assert!(pack.contains("# Alpha"));
     assert!(pack.contains("src/kept.rs"));
@@ -1138,7 +1139,7 @@ fn no_backtick_run_in_research_closes_its_fence_in_the_evidence() {
             path: "docs/research.md".into(),
             text: format!("Before.\n{}\nAfter.\n", "`".repeat(run)),
         }];
-        let pack = evidence(folder.path(), &research, &[]);
+        let pack = evidence(folder.path(), &[], &research, &[]);
         assert!(pack.len() <= EVIDENCE_BYTES_MAX);
         let part = &pack[pack.find("# Competitor research").unwrap()..];
         assert!(part.contains("Before."), "run of {run}");
@@ -1434,6 +1435,72 @@ fn a_run_without_competitor_research_never_asks_for_or_writes_the_competitors_ta
     assert!(asked.contains("~~~competitors"));
     assert!(asked.contains("Current competitors:"));
     assert!(asked.contains("Beta is faster at search."));
+}
+
+/// RV-DS241-78 and -79: what a writing run sends the model provider keeps the onboarding
+/// mapping's skip rules: no document, file path or research file in a folder the owner hid
+/// from the project's agents, and no file path that looks like it holds a secret, while
+/// the rest of the evidence stays.
+#[cfg(unix)]
+#[test]
+fn a_writing_run_is_shown_nothing_in_a_hidden_folder_and_no_secret_looking_path() {
+    let (db, project, folder) = case();
+    let notes = folder.path().join("notes");
+    std::fs::create_dir(&notes).unwrap();
+    std::fs::write(
+        notes.join("acquisition-plan.md"),
+        "# Plan\n\nBuy Beta quietly.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        folder.path().join("guide.md"),
+        "# Guide\n\nSearch papers fast.\n",
+    )
+    .unwrap();
+    let hidden =
+        crate::sandbox::hidden_paths::checked(notes.to_str().unwrap(), folder.path()).unwrap();
+    crate::sandbox::hidden_paths::save(&db, project.as_str(), &[hidden]).unwrap();
+    let research = [
+        Research {
+            path: "notes/rivals.md".into(),
+            text: "Gamma pricing leak.\n".into(),
+        },
+        Research {
+            path: "docs/research-competitors.md".into(),
+            text: "Beta is faster at search.\n".into(),
+        },
+    ];
+    let tree = [
+        "src/main.rs",
+        ".env.production",
+        "deploy/id_rsa",
+        "k8s/kubeconfig",
+        "credentials",
+        "id_ed25519",
+        "notes/acquisition-plan.md",
+    ]
+    .map(str::to_owned);
+    let (asked, _) = brief(&db, &project, folder.path(), &research, &tree, 0).unwrap();
+    for kept in [
+        "Search papers fast.",
+        "Beta is faster at search.",
+        "src/main.rs",
+    ] {
+        assert!(asked.contains(kept), "{kept} is in the evidence");
+    }
+    for gone in [
+        "Buy Beta quietly.",
+        "acquisition-plan",
+        "Gamma pricing leak.",
+        "notes/rivals.md",
+        ".env.production",
+        "id_rsa",
+        "kubeconfig",
+        "credentials",
+        "id_ed25519",
+    ] {
+        assert!(!asked.contains(gone), "{gone} reached the provider");
+    }
 }
 
 #[test]
