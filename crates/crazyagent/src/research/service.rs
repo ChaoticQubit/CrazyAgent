@@ -1012,7 +1012,7 @@ mod tests {
     /// port, in order, with a runner that can run Codex and a hidden-folders table that cannot
     /// be read, so a status run that gets past its reach check stops at the hidden-folders
     /// check before any agent starts. Input: the ports. Output: the folder guard, the runner,
-    /// the connection and the resolve the research loop gets.
+    /// the connection and the resolver over the pool.
     #[cfg(target_os = "macos")]
     fn engine_with_loopback_pool(
         ports: &[u16],
@@ -1020,7 +1020,7 @@ mod tests {
         tempfile::TempDir,
         Arc<ResearchRunner>,
         rusqlite::Connection,
-        Arc<impl Fn(&str, &str, Reach) -> Option<(PathBuf, AccountPick)> + Send + Sync + 'static>,
+        SettingsResolver,
     ) {
         let private = || std::fs::Permissions::from_mode(0o700);
         let temp = tempfile::Builder::new()
@@ -1073,25 +1073,24 @@ mod tests {
         std::fs::write(&global, text).unwrap();
         std::fs::write(&project, "").unwrap();
         let resolver = SettingsResolver::new(&global, &project, &projects, &database).unwrap();
-        let resolve = Arc::new(move |id: &str, harness: &str, reach: Reach| {
-            resolver.resolve_with(id, harness, reach)
-        });
-        (temp, Arc::new(runner), db, resolve)
+        (temp, Arc::new(runner), db, resolver)
     }
 
     /// Starts one roadmap check and one overview run for alpha through the research loop's
-    /// starts, waits for both runs and reads the line each stored. Inputs: the runner, the
-    /// connection and the resolve. Output: the roadmap check's problem and the overview
-    /// run's failure.
+    /// starts, on the resolve the engine gives the loop, waits for both runs and reads the
+    /// line each stored. Inputs: the runner, the connection and the resolver. Output: the
+    /// roadmap check's problem and the overview run's failure.
     #[cfg(target_os = "macos")]
-    fn upkeep_lines<F>(
+    fn upkeep_lines(
         runner: &Arc<ResearchRunner>,
         db: &rusqlite::Connection,
-        resolve: &Arc<F>,
-    ) -> [Option<String>; 2]
-    where
-        F: Fn(&str, &str, Reach) -> Option<(PathBuf, AccountPick)> + Send + Sync + 'static,
-    {
+        resolver: &SettingsResolver,
+    ) -> [Option<String>; 2] {
+        let resolver = resolver.clone();
+        let resolve = Arc::new(move |id: &str, harness: &str, reach: Reach| {
+            resolver.resolve_with(id, harness, reach)
+        });
+        let resolve = &resolve;
         let project = ProjectId::new("alpha").unwrap();
         crate::roadmap_status::refresh(db, &project).unwrap();
         crate::project_overview::refresh(db, &project).unwrap();
@@ -1134,11 +1133,11 @@ mod tests {
     fn status_runs_pick_again_in_their_thread_and_take_the_next_member_when_the_first_one_is_down()
     {
         let (_held, down) = crate::spawn_gate::refusing_tcp_port().unwrap();
-        let up = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let up = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let up_port = up.local_addr().unwrap().port();
-        let (_temp, runner, db, resolve) = engine_with_loopback_pool(&[down, up_port]);
+        let (_temp, runner, db, resolver) = engine_with_loopback_pool(&[down, up_port]);
         assert_eq!(
-            upkeep_lines(&runner, &db, &resolve),
+            upkeep_lines(&runner, &db, &resolver),
             [
                 Some(crate::roadmap_status::run::HIDDEN_UNREADABLE.to_owned()),
                 Some(crate::project_overview::agent::HIDDEN_UNREADABLE.to_owned()),
@@ -1153,12 +1152,12 @@ mod tests {
     fn status_runs_with_every_members_provider_down_store_the_first_ones_line() {
         let (_first, first) = crate::spawn_gate::refusing_tcp_port().unwrap();
         let (_second, second) = crate::spawn_gate::refusing_tcp_port().unwrap();
-        let (_temp, runner, db, resolve) = engine_with_loopback_pool(&[first, second]);
+        let (_temp, runner, db, resolver) = engine_with_loopback_pool(&[first, second]);
         let line = format!(
             "Can't reach the model provider at 127.0.0.1:{first}. Start it or pick another account in this pool, then try again."
         );
         assert_eq!(
-            upkeep_lines(&runner, &db, &resolve),
+            upkeep_lines(&runner, &db, &resolver),
             [Some(line.clone()), Some(line)]
         );
     }

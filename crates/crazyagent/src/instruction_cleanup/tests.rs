@@ -342,7 +342,7 @@ fn loopback_pool(
 fn edit_with_ai_runs_on_the_next_member_when_the_first_ones_provider_refuses_connects() {
     use crate::research::runner::{ResearchAccount, ResearchHarness};
     let (_held, down) = crate::spawn_gate::refusing_tcp_port().unwrap();
-    let up = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let up = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let up_port = up.local_addr().unwrap().port();
     let (_folder, resolver) = loopback_pool(&[down, up_port]);
     let picked = pool("pool-a");

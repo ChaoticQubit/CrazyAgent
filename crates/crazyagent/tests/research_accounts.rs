@@ -909,7 +909,7 @@ fn a_read_only_pick_passes_over_a_member_whose_loopback_provider_refuses_connect
     let runtime =
         research_support::EngineRuntime::with_projects(&[("project-a", "Sells house plants.")]);
     let (_held, down) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
-    let up = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let up = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let up_port = up.local_addr().unwrap().port();
     let resolver = loopback_resolver(&runtime, &[down, up_port]);
     let pool = CredentialRef::new("local-pool").unwrap();

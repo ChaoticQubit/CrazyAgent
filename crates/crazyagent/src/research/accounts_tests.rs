@@ -147,7 +147,7 @@ fn a_down_providers_line_outranks_a_pause_and_the_first_line_found_is_kept() {
 #[test]
 fn a_read_only_pick_with_the_reachable_member_paused_keeps_the_down_providers_line() {
     let (_held, down) = crate::spawn_gate::refusing_tcp_port().unwrap();
-    let up = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let up = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let up_port = up.local_addr().unwrap().port();
     let access = ModelAccess {
         accounts: vec![reference("owner-account")],
