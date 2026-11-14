@@ -249,18 +249,35 @@ export function judge(base, candidate, shares) {
     if (REPORT_ONLY.has(metric)) return { metric, status: "report", ...sides };
     assert.ok(Object.hasOwn(shares, metric), `a noise for ${metric}; run the noise mode first`);
     const share = margin(shares[metric]);
-    const result = verdict({ ...sides, margin: share, floor: floorFor(metric) });
-    return { metric, status: result.pass ? "pass" : "fail", margin: share, ...sides, reasons: result.reasons };
+    const floor = floorFor(metric);
+    const result = verdict({ ...sides, margin: share, floor });
+    return { metric, status: result.pass ? "pass" : "fail", margin: share, floor, ...sides, reasons: result.reasons };
   });
   assert.equal(rows.length, metrics.length);
   return rows;
+}
+
+/** The metrics timed from a process start, which take the launch floor. */
+const LAUNCHES = ["launch_ms", "engine_start_ms", "tui_launch_ms"];
+
+/** Joins one TUI run's times (row U1, tui_speed.py) to the same slot's app sample. Inputs: the
+ * app sample and the TUI's `{ tui_<step>_ms: ms }`. Output: one sample holding both. */
+export function joinSample(sample, tui) {
+  for (const [metric, value] of Object.entries(tui)) {
+    assert.match(metric, /^tui_[a-z_]+_ms$/, `a TUI time is named tui_<step>_ms: ${metric}`);
+    assert.ok(Number.isFinite(value) && value >= 0, `${metric} is a reading: ${value}`);
+    assert.ok(!Object.hasOwn(sample, metric), `${metric} is read once a run`);
+  }
+  const joined = { ...sample, ...tui };
+  assert.equal(Object.keys(joined).length, Object.keys(sample).length + Object.keys(tui).length);
+  return joined;
 }
 
 /** The floor a metric's gap must pass to fail. Input: the metric. Output: the floor. */
 function floorFor(metric) {
   assert.match(metric, /_(ms|mb)$/, `a metric with a unit: ${metric}`);
   if (metric.startsWith("memory_")) return FLOOR.memory_mb;
-  if (metric === "launch_ms" || metric === "engine_start_ms") return FLOOR.launch_ms;
+  if (LAUNCHES.includes(metric)) return FLOOR.launch_ms;
   if (metric.startsWith("round_trip_")) return FLOOR.round_trip_ms;
   return FLOOR.page_ms;
 }

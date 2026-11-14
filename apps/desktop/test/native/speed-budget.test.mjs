@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { KEPT_MIN, REFUSED_EXIT, countFindings, judge, margin, noise, noiseShares, quiet, sampleMetrics, schedule, stayedQuiet, summary, verdict } from "./speed-budget.mjs";
+import { KEPT_MIN, REFUSED_EXIT, countFindings, joinSample, judge, margin, noise, noiseShares, quiet, sampleMetrics, schedule, stayedQuiet, summary, verdict } from "./speed-budget.mjs";
 
 const QUIET = { load1: 0.8, compilers: [], memoryLevel: 80, onAC: true, screenLocked: false, busy: false };
 
@@ -162,4 +162,18 @@ test("judge passes, fails, reports and leaves unmeasured each metric by its rule
 test("judge refuses a timed metric with no noise reading", () => {
   const side = Array.from({ length: KEPT_MIN }, () => ({ launch_ms: 1000 }));
   assert.throws(() => judge(side, side, {}), /noise for launch_ms/);
+});
+
+test("judge rows carry their floor: launches and engine start 100 ms, TUI keys and pages 20 ms, memory 10 MB", () => {
+  const side = Array.from({ length: KEPT_MIN }, () => ({ tui_launch_ms: 300, tui_settings_ms: 30, engine_start_ms: 200, memory_engine_mb: 50 }));
+  const rows = judge(side, side, { tui_launch_ms: 0, tui_settings_ms: 0, engine_start_ms: 0, memory_engine_mb: 0 });
+  const floors = Object.fromEntries(rows.map((row) => [row.metric, row.floor]));
+  assert.deepEqual(floors, { engine_start_ms: 100, memory_engine_mb: 10, tui_launch_ms: 100, tui_settings_ms: 20 });
+});
+
+test("a TUI sample joins a run's sample under its own names only", () => {
+  const joined = joinSample({ launch_ms: 900, memory_app_mb: 80 }, { tui_launch_ms: 300, tui_home_ms: 12 });
+  assert.deepEqual(joined, { launch_ms: 900, memory_app_mb: 80, tui_launch_ms: 300, tui_home_ms: 12 });
+  assert.throws(() => joinSample({ launch_ms: 900 }, { launch_ms: 1 }), /tui_<step>_ms/);
+  assert.throws(() => joinSample({ launch_ms: 900 }, { tui_home_ms: -1 }), /a reading/);
 });

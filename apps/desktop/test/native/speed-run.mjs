@@ -6,12 +6,16 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { endTerminals, start, stop } from "./e2e-harness.mjs";
 import {
-  KEPT_MIN, REFUSED_EXIT, judge, noiseShares, quiet, readQuiet, sampleMetrics, schedule, stayedQuiet,
+  KEPT_MIN, REFUSED_EXIT, joinSample, judge, noiseShares, quiet, readQuiet, sampleMetrics, schedule,
+  stayedQuiet,
 } from "./speed-budget.mjs";
+import { PROJECT } from "./speed-seed.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const RUN = join(appRoot, "test", "native", "run.mjs");
+const TUI = resolve(appRoot, "../../scripts/qualification/tui_speed.py");
 const QUIET_WAIT_MS = 10 * 60000;
 const QUIET_LOOK_MS = 15000;
 const TAINTED_MAX = 3;
@@ -54,6 +58,24 @@ async function waitQuiet() {
   return reasons;
 }
 
+/** Runs one child to its end, bounded by `RUN_MS_MAX`, keeping the tail of its output. Inputs:
+ * the program, its arguments and its environment. Output: `{ code, out, err }`. */
+async function finished(program, args, env) {
+  const child = spawn(program, args, { cwd: appRoot, env, stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  let err = "";
+  child.stdout.on("data", (chunk) => { out = (out + chunk).slice(-OUTPUT_BYTES_MAX); });
+  child.stderr.on("data", (chunk) => { err = (err + chunk).slice(-OUTPUT_BYTES_MAX); });
+  const timer = setTimeout(() => child.kill("SIGTERM"), RUN_MS_MAX);
+  try {
+    const code = await new Promise((done, fail) => { child.once("error", fail); child.once("close", done); });
+    assert.ok(out.length <= OUTPUT_BYTES_MAX && err.length <= OUTPUT_BYTES_MAX);
+    return { code, out, err };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Runs one speed launch through run.mjs's speed suite and reads its records. Inputs: the side
  * and its state. Output: the run's evidence folder and its two records. */
 async function runOnce(side, state) {
@@ -61,14 +83,7 @@ async function runOnce(side, state) {
     CRAZYAGENT_DESKTOP_TEST_APP: join(side.folder, "bin", "crazyagent-desktop"),
     CRAZYAGENT_DESKTOP_TEST_FIXTURE: join(side.folder, "bin", "desktop-owner-fixture"),
     CRAZYAGENT_E2E_HOME: join(state, "home"), SPEED_SIDE: side.folder, SPEED_STATE: state };
-  const child = spawn(process.execPath, [RUN], { cwd: appRoot, env, stdio: ["ignore", "pipe", "pipe"] });
-  let out = "";
-  let err = "";
-  child.stdout.on("data", (chunk) => { out = (out + chunk).slice(-OUTPUT_BYTES_MAX); });
-  child.stderr.on("data", (chunk) => { err = (err + chunk).slice(-OUTPUT_BYTES_MAX); });
-  const timer = setTimeout(() => child.kill("SIGTERM"), RUN_MS_MAX);
-  const code = await new Promise((done) => child.on("close", done));
-  clearTimeout(timer);
+  const { code, out, err } = await finished(process.execPath, [RUN], env);
   const report = out.trim().split("\n").at(-1) ?? "";
   assert.ok(code === 0 && report.endsWith("completion.json"), `run.mjs speed failed (${code}): ${err.slice(-3000)}`);
   const completion = JSON.parse(readFileSync(report, "utf8"));
@@ -76,6 +91,36 @@ async function runOnce(side, state) {
   const evidence = dirname(report);
   const read = (name) => JSON.parse(readFileSync(join(evidence, name), "utf8"));
   return { evidence, engine: read("speed-engine.json"), app: read("speed-app.json") };
+}
+
+/** Runs row U1 on a side's kept state right after its app run, in the same slot: starts the
+ * side's engine on that state as the owner's launchd engine runs, times the TUI through
+ * tui_speed.py, then stops the engine and its agent terminals. Inputs: the side, its state and
+ * the app run's evidence folder. Output: the TUI's `{ tui_<step>_ms: ms }`. */
+async function tuiOnce(side, state, evidence) {
+  const runtime = join(state, "engine");
+  const home = join(state, "home");
+  assert.ok(existsSync(join(state, "seeded.json")), "the app run seeded this side first");
+  const tmp = join(evidence, "tui-tmp");
+  mkdirSync(tmp, { mode: 0o700 });
+  const env = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: home,
+    CFFIXED_USER_HOME: home, TMPDIR: tmp, LANG: "en_US.UTF-8" };
+  const engine = join(side.folder, "bin", "crazyagent");
+  const argv = ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"),
+    "engine.sock", "--writable-settings"];
+  const { child } = await start(engine, argv, { ...env, NO_COLOR: "1" }, evidence, "tui-engine", /^ready$/m);
+  try {
+    const python = { ...env, PATH: process.env.PATH, PYTHONDONTWRITEBYTECODE: "1" };
+    const { code, out, err } = await finished("python3", [TUI, engine, join(runtime, "engine.sock"), PROJECT], python);
+    writeFileSync(join(evidence, "tui-speed.err"), err, { flag: "wx", mode: 0o600 });
+    assert.equal(code, 0, `tui_speed.py failed (${code}): ${err.slice(-3000)}`);
+    const times = JSON.parse(out.trim().split("\n").at(-1));
+    assert.ok(Object.keys(times).length > 0, "tui_speed.py timed its steps");
+    return times;
+  } finally {
+    await stop(child);
+    await endTerminals(runtime);
+  }
 }
 
 /** Writes a JSON record into the output folder. Inputs: the folder, the name and the value.
@@ -110,10 +155,11 @@ async function collect(mode, sides, kept, out) {
       const busy = await waitQuiet();
       if (busy) refuse(out, busy, runs);
       const run = await runOnce(sides[side], states[side]);
+      const tui = await tuiOnce(sides[side], states[side], run.evidence);
       const after = stayedQuiet(readQuiet());
       runs.push({ side, warm, evidence: run.evidence, quiet_after: after.quiet, reasons: after.reasons });
       if (!after.quiet) continue;
-      if (!warm) samples[side].push(sampleMetrics(run.engine, run.app));
+      if (!warm) samples[side].push(joinSample(sampleMetrics(run.engine, run.app), tui));
       break;
     }
   }
