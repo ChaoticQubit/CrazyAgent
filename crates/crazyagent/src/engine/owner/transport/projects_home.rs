@@ -259,6 +259,21 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
     )
 }
 
+/// Reads a grant check made while a change is answered. Inputs: the check, the admission
+/// the request came with and whether the disk already changed. Output: Ok while the grant
+/// is the same, else the check's refusal.
+pub(super) fn regranted(
+    checked: Result<Admission, EngineError>,
+    a: &Admission,
+    _changed: bool,
+) -> Result<(), EngineError> {
+    match checked {
+        Ok(current) if &current == a => Ok(()),
+        Ok(_) => Err(failure("owner_grant_stale_or_revoked")),
+        Err(e) => Err(e),
+    }
+}
+
 /// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, SetupProject, CreateDemo
 /// and FolderSize for one owner. A client's change claims its request id first: a resend of
 /// one this engine still runs answers `InProgress` and plans nothing (DEC-159); the intake
@@ -413,9 +428,8 @@ pub(super) async fn serve(
     let trashed = deleted.is_some();
     let answer = async {
         let mut barrier = Some(engine.owner_egress.write().await);
-        let mut result = match authority.authenticate(packet) {
-            Ok(current) if &current == a => finish(engine, a, request, step).await,
-            Ok(_) => Err(failure("owner_grant_stale_or_revoked")),
+        let mut result = match regranted(authority.authenticate(packet), a, trashed) {
+            Ok(()) => finish(engine, a, request, step).await,
             Err(e) => Err(e),
         };
         drop(after.landing.take());
@@ -429,12 +443,11 @@ pub(super) async fn serve(
             drop(barrier.take());
             let cleared = tokio::task::spawn_blocking(move || old.clear()).await;
             barrier = Some(engine.owner_egress.write().await);
-            result = match authority.authenticate(packet) {
-                Ok(current) if &current == a => match cleared {
+            result = match regranted(authority.authenticate(packet), a, true) {
+                Ok(()) => match cleared {
                     Ok(Ok(())) => result,
                     _ => Err(failure(OLD_FOLDER_LEFT)),
                 },
-                Ok(_) => Err(failure("owner_grant_stale_or_revoked")),
                 Err(e) => Err(e),
             };
         }

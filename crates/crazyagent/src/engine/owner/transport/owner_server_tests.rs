@@ -550,3 +550,40 @@ fn a_move_whose_old_folder_was_left_reaches_the_client_as_its_code() {
         }
     );
 }
+
+/// RV-CODE combo-five r1 move F1: a grant found stale or revoked once a Delete everything's
+/// folders reached the Trash, or once a project move was recorded, never reaches the client
+/// as Rejected, which says nothing changed; it is an outcome to reconcile. A grant found
+/// stale before any change stays Rejected with its code, and a same grant passes.
+#[test]
+fn a_grant_found_stale_after_the_disk_changed_is_an_outcome_to_reconcile() {
+    let id = RequestId::new("delete-1").unwrap();
+    let admission = |owner_epoch| crate::engine::owner::Admission {
+        db_instance: "db".into(),
+        engine_epoch: "engine".into(),
+        owner_id: "owner".into(),
+        owner_epoch,
+    };
+    let answer = |checked: Result<crate::engine::owner::Admission, EngineError>, changed| {
+        let refused = projects_home::regranted(checked, &admission(1), changed).unwrap_err();
+        let frame = owner_reply_frame(Err(refused), id.clone(), true).unwrap();
+        serde_json::from_slice::<OwnerReply>(&frame[4..])
+            .unwrap()
+            .response
+    };
+    let unknown = OwnerResponse::OutcomeUnknown {
+        operation_id: id.clone(),
+    };
+    assert_eq!(answer(Ok(admission(2)), true), unknown);
+    assert_eq!(
+        answer(Err(failure("owner_grant_stale_or_revoked")), true),
+        unknown
+    );
+    assert_eq!(
+        answer(Ok(admission(2)), false),
+        OwnerResponse::Rejected {
+            code: "owner_grant_stale_or_revoked".into()
+        }
+    );
+    assert!(projects_home::regranted(Ok(admission(1)), &admission(1), true).is_ok());
+}
