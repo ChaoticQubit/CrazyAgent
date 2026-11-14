@@ -595,9 +595,10 @@ fn dont_read_forgets_the_stored_claude_free_resets_and_keeps_codex() {
     assert_eq!(codex.resets.map(|resets| resets.count), Some(2));
 }
 
-/// The detail call names the installed Claude Code: its `--version` is read once per
-/// executable and again after the executable changes, Don't read never asks it, and an
-/// executable that prints no version names the pinned one (DEC-154 addendum).
+/// The detail call names the installed Claude Code, found under the engine's harness id
+/// `claude-code`: its `--version` is read once per executable and again after the executable
+/// changes, Don't read never asks it, and an executable that prints no version names the
+/// pinned one (DEC-154 addendum, secreview r1 F1).
 #[cfg(unix)]
 #[test]
 fn the_detail_user_agent_names_the_installed_claude_code_and_reads_it_again_after_an_update() {
@@ -631,7 +632,7 @@ fn the_detail_user_agent_names_the_installed_claude_code_and_reads_it_again_afte
         &root.path().join("engine.db"),
         &team,
         Box::new(|| None),
-        BTreeMap::from([("claude", claude.clone())]),
+        BTreeMap::from([("claude-code", claude.clone())]),
     )
     .unwrap();
     for source in [ResetsSource::ThroughClaudeCode, ResetsSource::AsClaudeCode] {

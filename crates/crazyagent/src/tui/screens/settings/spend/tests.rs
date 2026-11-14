@@ -196,7 +196,7 @@ fn option_claude_free_resets_through_claude_code_says_it_asks_as_claude_code_for
     ));
     let text = shown(&spend, &ctx);
     assert!(text.contains(
-        "Claude free resets (f): Through Claude Code. CrazyAgent asks Claude Code first. Claude Code can't report free resets yet, so CrazyAgent asks Anthropic as Claude Code."
+        "Claude free resets (f): Through Claude Code. Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code."
     ), "{text}");
     assert!(keys(&spend, &ctx).contains(&"f".to_owned()));
 }

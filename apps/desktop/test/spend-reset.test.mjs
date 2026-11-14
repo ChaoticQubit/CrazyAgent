@@ -76,7 +76,7 @@ test("the Claude free resets setting shows its three options, the default first,
     ["off", "Don't read"],
   ]);
   assert.equal(client.SPEND_DEFAULTS.resets_source, "through_claude_code");
-  assert.equal(section.resetsSourceHelp("through_claude_code"), "CrazyAgent asks Claude Code first. Claude Code can't report free resets yet, so CrazyAgent asks Anthropic as Claude Code.");
+  assert.equal(section.resetsSourceHelp("through_claude_code"), "Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code.");
   assert.equal(section.resetsSourceHelp("as_claude_code"), "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks.");
   assert.equal(section.resetsSourceHelp("off"), "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings.");
   const markup = renderToStaticMarkup(createElement(section.SpendSettingsView, { settings: client.SPEND_DEFAULTS, refused: "", onChange: noop }));

@@ -23,7 +23,7 @@ const APP = "How every pool picks an account";
 const POOL_ORDER = "Account order";
 const SOURCE = "Claude free resets";
 const SOURCE_HELP = {
-  through_claude_code: "CrazyAgent asks Claude Code first. Claude Code can't report free resets yet, so CrazyAgent asks Anthropic as Claude Code.",
+  through_claude_code: "Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code.",
   as_claude_code: "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks.",
   off: "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings.",
 };
