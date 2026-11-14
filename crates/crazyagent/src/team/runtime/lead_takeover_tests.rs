@@ -75,14 +75,11 @@ fn a_native_lead_taken_over_past_its_run_time_ends_at_the_deadline_before_any_ha
     for (first, granted_home) in cases {
         let taken = matches!(first, Order::Turn(..));
         let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
-        let home = granted_home.unwrap_or_else(|| {
-            let home = fixture.base.join(format!("lead-home-{id}"));
-            std::fs::create_dir(&home).unwrap();
-            std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
-            home
-        });
+        let home = fixture.base.join(format!("lead-home-{id}"));
+        std::fs::create_dir(&home).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
         let state = home.join(crate::launch_context::STATE);
-        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir(&state).unwrap();
         std::fs::write(state.join("mcp-secret.json"), "{}").unwrap();
         let limits = LaunchLimits::default();
         let mut record = fixture.pane(&host, id);
@@ -101,7 +98,7 @@ fn a_native_lead_taken_over_past_its_run_time_ends_at_the_deadline_before_any_ha
             limits,
             live: false,
             managed: Some(Managed {
-                home: home.clone(),
+                home: granted_home.unwrap_or_else(|| home.clone()),
                 executable: PathBuf::from("/bin/sh"),
             }),
             access: AgentAccess::Sandboxed,

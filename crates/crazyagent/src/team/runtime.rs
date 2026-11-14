@@ -12182,7 +12182,7 @@ fn per_turn(
 ) -> Option<String> {
     let mut resume = plan.resume.clone();
     while let Next::Turn(prompt, grant, rules) = next_turn(orders, cancel, None) {
-        if rules.limit.is_some_and(|limit| limit.is_zero()) {
+        if rules.limit == Some(Duration::ZERO) {
             let _ = reports.send(Report::Finished {
                 text: String::new(),
                 end: TurnEnd::TimedOut,
