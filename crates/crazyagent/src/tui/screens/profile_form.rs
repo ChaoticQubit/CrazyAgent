@@ -675,7 +675,9 @@ mod tests {
         assert_eq!(form.profile(), Err(Slot::Stack));
         assert_eq!(
             form.stack.error.as_deref(),
-            Some("List up to 12 different technologies, each up to 40 characters.")
+            Some(
+                "List up to 12 different technologies, each on one line, up to 40 bytes, with no hidden characters."
+            )
         );
         assert_eq!(form.focus(), Some(Slot::Stack));
     }
