@@ -1,4 +1,4 @@
-use super::runner::{ResearchAccount, ResearchHarness};
+use super::runner::{ResearchAccount, ResearchHarness, unreached_provider_here};
 use crate::config::{
     AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint,
 };
@@ -163,7 +163,8 @@ fn scheduled_pick(
 }
 
 /// Picks the first of `members` that `harness` can use and that is not paused, in the
-/// schedule's order. Takes the model access, the members in pool order, the harness id,
+/// schedule's order, under [`Reach::Reachable`] also passing over, with one log line each,
+/// a member whose loopback provider refuses connects. Takes the model access, the members in pool order, the harness id,
 /// the signed-in check for managed connections, the pause lookup and the scheduling
 /// choice and the reach rule. Returns the account, else the kept wait of
 /// [`AccountPick::or_wait`], else [`AccountPick::NoUsableAccount`].
@@ -174,7 +175,7 @@ fn members_pick<'a>(
     signed_in: &impl Fn(&ModelConnection) -> bool,
     paused_until: &impl Fn(&CredentialRef) -> Option<i64>,
     choice: &Choice,
-    _reach: Reach,
+    reach: Reach,
 ) -> AccountPick {
     let mut fitting = Vec::new();
     for member in members {
@@ -204,6 +205,13 @@ fn members_pick<'a>(
         let (connection, account) = &fitting[index];
         match paused_until(&connection.id) {
             None => {
+                if reach == Reach::Reachable
+                    && let Some(line) = unreached_provider_here(account)
+                {
+                    eprintln!("{}", skipped_line(&connection.id, &line));
+                    waiting = waiting.or_wait(AccountPick::Unreached { line });
+                    continue;
+                }
                 return AccountPick::Account {
                     connection: connection.id.clone(),
                     account: Box::new(account.clone()),
@@ -212,7 +220,18 @@ fn members_pick<'a>(
             Some(until_ms) => waiting = waiting.or_wait(AccountPick::Paused { until_ms }),
         }
     }
+    assert!(reach == Reach::Reachable || !matches!(waiting, AccountPick::Unreached { .. }));
     waiting
+}
+
+/// The engine log line for a pool member a read-only pick passed over: its connection id and
+/// the owner's line, which names only the provider's host and port, so no key, URL path or
+/// account detail reaches the log. Inputs: the connection id and the line. Output: the line.
+fn skipped_line(connection: &CredentialRef, line: &str) -> String {
+    format!(
+        "read_only_pick_skipped connection={} {line}",
+        connection.as_str()
+    )
 }
 
 /// Picks the first member of `pool` that `harness` can use, in member order,

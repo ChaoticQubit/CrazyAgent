@@ -193,3 +193,23 @@ fn a_read_only_pick_with_the_reachable_member_paused_keeps_the_down_providers_li
         AccountPick::Account { connection, .. } if connection.as_str() == "down"
     ));
 }
+
+/// The log line for a member a read-only pick passed over names the member and its
+/// provider's host and port only: no key reference and no URL path.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_log_line_of_a_passed_over_member_names_it_and_its_providers_host_and_port_only() {
+    let (_held, down) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let account = ResearchAccount::Endpoint {
+        base_url: format!("http://127.0.0.1:{down}/private/v1"),
+        model: "some-model".into(),
+        key: Some(reference("owner-key")),
+    };
+    let line = unreached_provider_here(&account).unwrap();
+    assert_eq!(
+        skipped_line(&reference("member-0"), &line),
+        format!(
+            "read_only_pick_skipped connection=member-0 Can't reach the model provider at 127.0.0.1:{down}. Start it or pick another account in this pool, then try again."
+        )
+    );
+}
