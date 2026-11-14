@@ -15212,6 +15212,53 @@ fn a_folder_swapped_for_a_link_while_a_reset_puts_files_back_writes_nothing_outs
     assert_eq!(hits, 0, "planted.bin was written outside the worktree");
 }
 
+/// On a Linux that cannot hold the Landlock file rules, here with no helper, every landing
+/// git step on an agent's worktree refuses with `changes_git_unsupported` before git runs and
+/// never runs unconfined: both confined steps, the turn end's git add and a reset's
+/// read-tree, which leaves the master's worktree where it was.
+#[cfg(target_os = "linux")]
+#[test]
+fn without_landlock_every_landing_git_step_on_an_agent_worktree_refuses() {
+    let case = Case::new();
+    git::LANDLOCK_HELPER.with(|helper| {
+        *helper.borrow_mut() = Some(PathBuf::from("/nonexistent/crazyagent-landlock"));
+    });
+    let repo = git::Repo::open(
+        &case.repo,
+        &case.workspace.git_dir,
+        Some(&case.workspace.worktree),
+    )
+    .unwrap();
+    for writes in [git::Writes::Objects, git::Writes::WorkTree] {
+        assert_eq!(
+            repo.confined(writes).err().map(|error| error.0).as_deref(),
+            Some("changes_git_unsupported")
+        );
+    }
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    assert_eq!(
+        turn_outcome(&case, &case.workspace),
+        "changes_git_unsupported"
+    );
+    let master = master_agent(&case);
+    let agent = flow::open_agent(
+        &case.db,
+        AgentKind::Master,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    let from = agent.head().unwrap();
+    let target = case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    assert_eq!(
+        refused(flow::reset_agent(&agent, &from, &target)),
+        "changes_git_unsupported"
+    );
+    assert_eq!(agent.head().unwrap(), from);
+    git::LANDLOCK_HELPER.with(|helper| *helper.borrow_mut() = None);
+}
+
 /// An owner repository whose config names a thousand stale branches lists more keys than
 /// the listing bound holds (ScholarScope, v2.2.1 item 8): an agent's own clone of it is
 /// still made, since engine git asks only for the filter keys it reads.
