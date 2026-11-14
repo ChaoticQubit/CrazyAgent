@@ -153,6 +153,7 @@ const COPY: Record<string, string> = {
   setup_checksum_mismatch: "The download didn't match its checksum, so it wasn't installed.",
   setup_download_failed: "The download failed. Check your connection and try again.",
   setup_homebrew_missing: "Homebrew isn't installed. Install tmux yourself, then run setup again.",
+  setup_homebrew_unsafe: "Another account can change Homebrew's files, so setup didn't run it. Install tmux yourself, then run setup again.",
   setup_install_failed: "The installer didn't finish. Try again.",
   setup_timeout: "The install took too long and was stopped. Try again.",
   setup_version_mismatch: "A different version from the pinned one is installed.",

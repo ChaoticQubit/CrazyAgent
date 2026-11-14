@@ -138,12 +138,13 @@ const GITHUB_CODES: [&str; 35] = [
     "not_connected",
 ];
 
-const SETUP_CODES: [&str; 42] = [
+const SETUP_CODES: [&str; 43] = [
     "owner_outcome_unknown_reconcile_same_identity",
     "stale_revision",
     "setup_checksum_mismatch",
     "setup_download_failed",
     "setup_homebrew_missing",
+    "setup_homebrew_unsafe",
     "setup_install_failed",
     "setup_timeout",
     "setup_version_mismatch",
