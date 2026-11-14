@@ -1266,9 +1266,9 @@ pub fn start_for_engine(
 }
 
 /// The graphify an engine's graph step runs, looked up again on each step the way
-/// setup finds it: `<engine root>/setup/bin`, where setup installs it, first, then
-/// the system folders setup searches. Input: the engine root. Output: the program,
-/// or `None` when neither has one.
+/// setup finds it ([`crate::tools::Places::engine`]): the app's folder and the owner's own
+/// installs first, then `<engine root>/setup/bin`, where setup installs it, last. Input:
+/// the engine root. Output: the program, or `None` when none of them has one.
 #[cfg(unix)]
 pub(crate) fn engine_graphify(runtime: &Path) -> Option<PathBuf> {
     crate::setup::platform_installer(runtime).program(crate::setup::Dependency::Graphify.program())
