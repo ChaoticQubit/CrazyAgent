@@ -475,9 +475,10 @@ impl Shell {
         }
     }
 
-    /// Handles one key: overlays first, then a screen in raw mode takes every
-    /// key, then the global keys, then the top screen; an Esc the screen
-    /// ignores goes back.
+    /// Handles one key: below the smallest window only Ctrl+Q or Ctrl+C acts
+    /// ([`Self::small_key`]); otherwise overlays first, then a screen in raw mode
+    /// takes every key, then the global keys, then the top screen; an Esc the
+    /// screen ignores goes back.
     /// Input: the key. Output: none; check `quitting` afterwards.
     pub fn key(&mut self, key: Key) {
         self.take_key(key);
@@ -485,6 +486,9 @@ impl Shell {
     }
 
     fn take_key(&mut self, key: Key) {
+        if self.ctx.width < MIN_WIDTH || self.ctx.height < MIN_HEIGHT {
+            return self.small_key(&key);
+        }
         if let Some(overlay) = self.overlay.take() {
             self.overlay_key(overlay, &key);
             return;
@@ -534,6 +538,20 @@ impl Shell {
         match flow {
             Flow::Ignored if key == Key::Esc => self.apply(Flow::Back),
             other => self.apply(other),
+        }
+    }
+
+    /// The one key a window below [`MIN_WIDTH`] x [`MIN_HEIGHT`] acts on, where the shell
+    /// draws only the bigger-window notice and no screen or overlay: Ctrl+Q or Ctrl+C quits
+    /// as it does elsewhere, past a quit question already open, so no screen, overlay or raw
+    /// terminal takes a key it could not show (DS-99 r2). Input: the key. Output: none.
+    fn small_key(&mut self, key: &Key) {
+        if global(key, false) != Some(Global::Quit) {
+            return;
+        }
+        match self.overlay.take() {
+            Some(Overlay::Quit(_)) => self.quit = true,
+            _ => self.ask_quit(),
         }
     }
 
