@@ -238,12 +238,16 @@ async fn a_usage_change_cut_short_keeps_the_owner_barrier_until_it_commits() {
         expected_epoch: runtime.epoch(OwnerClientKind::Tui).unwrap(),
         decision: OwnerDecision::Revoke,
     }));
-    let revoke_waited = tokio::time::timeout(IN_FLIGHT, &mut revoke).await.is_err();
+    let first = tokio::time::timeout(IN_FLIGHT, &mut revoke).await;
+    let revoke_waited = first.is_err();
     held.execute_batch("ROLLBACK").unwrap();
-    let revoked = tokio::time::timeout(Duration::from_secs(10), revoke)
-        .await
-        .expect("the revocation runs once the change commits")
-        .unwrap();
+    let revoked = match first {
+        Ok(done) => done,
+        Err(_) => tokio::time::timeout(Duration::from_secs(10), revoke)
+            .await
+            .expect("the revocation runs once the change commits"),
+    }
+    .unwrap();
     assert!(
         still_held,
         "the change still owns the owner barrier after its request is cut"
