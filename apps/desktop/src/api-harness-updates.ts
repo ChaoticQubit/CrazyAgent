@@ -6,7 +6,7 @@ export interface LastUpdate { ok: boolean; code: string | null; output: string; 
 /** What an installed harness lacks before it can run, as the engine's tool resolver reads it: the
  * program its first line asks for, such as node, and the resolver's one owner line. */
 export interface HarnessNeeds { program: string | null; line: string }
-export interface HarnessVersions { id: string; method: UpdateMethod; installed: string | null; latest: LatestVersion; command: string | null; install: string | null; refusal: string | null; guide: string | null; running: boolean; last: LastUpdate | null; needs?: HarnessNeeds | null }
+export interface HarnessVersions { id: string; method: UpdateMethod; installed: string | null; latest: LatestVersion; command: string | null; install: string | null; refusal: string | null; guide: string | null; running: boolean; last: LastUpdate | null; needs?: HarnessNeeds | null; sign_in_min?: string | null }
 export type UpdateMode = "check_and_update" | "check_only" | "off";
 export type CheckWhen = "on_button" | "on_open";
 export type OnlineLookup = "on" | "off";

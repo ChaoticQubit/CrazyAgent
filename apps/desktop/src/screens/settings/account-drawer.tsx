@@ -5,7 +5,7 @@ import { Button, Drawer, Notice, ProviderMark, StatusBadge, TextField } from "..
 import { displayText } from "../conversation";
 import { nameError } from "./add-account";
 import { CHECK_SIGN_IN, signInMethodFor, type SignInWay } from "../../native-auth";
-import { cancelSignIn, freshSignIn, signInHarness, signOut, SignInPanel, signInRunning, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
+import { cancelSignIn, freshSignIn, signInHarness, signOut, SignInPanel, signInRunning, signInStage, TOO_OLD, TooOldPanel, useSignIn, type SubscriptionProvider } from "./sign-in";
 
 /** Joins names for a sentence: "A", "A and B", "A, B and C". Input: the names. Output: the text. */
 export function andList(names: readonly string[]): string {
@@ -143,6 +143,7 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
   const [cancelling, setCancelling] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [inUse, setInUse] = useState<AccountUse>();
+  const [tooOld, setTooOld] = useState(false);
   const [error, setError] = useState<string>();
   const accountId = account?.id;
   useEffect(() => {
@@ -151,6 +152,7 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
     setSigningIn(signIn ? "code" : false);
     setCheckLine(undefined);
     setInUse(undefined);
+    setTooOld(false);
     setError(undefined);
   }, [accountId, signIn]);
 
@@ -190,6 +192,7 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
 
   const signOutAccount = async (stopFirst: boolean) => {
     setSigningOut(true);
+    setTooOld(false);
     setError(undefined);
     if (stopFirst) {
       const released = session.noteResult(await releaseAccount(account.id));
@@ -215,6 +218,7 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
       return setInUse(used.kind === "ok" ? used.value : { agents: [], holders: [] });
     }
     setSigningOut(false);
+    if (result.kind === "error" && result.code === TOO_OLD && subscription) return setTooOld(true);
     setError(result.kind === "not_ready" ? "Signing out isn't ready yet in this build." : result.message);
   };
 
@@ -244,6 +248,7 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
         <span><Button icon="refresh-cw" onClick={() => setSigningIn("check")}>{CHECK_SIGN_IN}</Button></span>}
       {canSignOut(account) && !signingIn && inUse === undefined &&
         <span><Button icon="log-out" pending={signingOut} pendingLabel="Signing out..." onClick={() => void signOutAccount(false)}>Sign out</Button></span>}
+      {tooOld && subscription && <TooOldPanel provider={account.provider as SubscriptionProvider} onCheck={() => void signOutAccount(false)} />}
       {inUse !== undefined && <InUseNotice used={inUse} projects={session.projects.kind === "ok" ? session.projects.value : undefined}
         pending={signingOut} onStop={() => void signOutAccount(true)} />}
       {subscription && signingIn && <SignInAgain account={account} way={signingIn} onStarted={() => onChanged()} onSignedIn={() => { onChanged({ ...account, status: "signed_in", status_label: "Signed in" }); }} />}

@@ -1,5 +1,6 @@
 use super::settings::draw_page;
 use super::settings_accounts::{Accounts, plain, provider_word, send, settings_event};
+use super::settings_harnesses::{last_line, plain_update, refusal};
 use super::{Flow, Screen, SettingsSection};
 use crate::accounts::{
     AccountDraft, AccountStatus, AccountView, Field, MethodEntry, Provider, ProviderEntry,
@@ -7,6 +8,7 @@ use crate::accounts::{
 };
 use crate::config::POOL_MEMBERS_MAX;
 use crate::engine::owner::{AccountSecret, NativeAuthMethod, NativeAuthPhase, SignInWay};
+use crate::harnesses::update::{HarnessVersions, UpdateMode};
 use crate::protocol::CredentialRef;
 use crate::tui::client::accounts::{AccountsReply, AccountsRequest};
 use crate::tui::client::settings::{
@@ -32,6 +34,9 @@ const URL_CHARS_MAX: usize = crate::accounts::ACCOUNT_URL_MAX;
 const MODEL_CHARS_MAX: usize = crate::accounts::ACCOUNT_MODEL_MAX;
 const NAME_CHARS_MAX: usize = crate::accounts::ACCOUNT_NAME_MAX;
 const FAST_READS_MAX: u32 = 30;
+const UPDATE_POLLS_MAX: u32 = 240;
+/// The code of a sign-in refused because the harness is older than its sign-in minimum.
+const TOO_OLD: &str = "native_auth_harness_too_old";
 const MODELS_SHOWN_MAX: usize = 8;
 /// The title of a check of the sign-in an account already has (DEC-141 PA-13).
 pub(super) const CHECK_TITLE: &str = crate::tui::native_auth::CHECK_SIGN_IN;
@@ -506,6 +511,19 @@ struct SignIn {
     opened: bool,
     reads: u32,
     problem: Option<String>,
+    old: Option<TooOld>,
+}
+
+/// What a sign-in refused because the harness is too old shows (DEC-166): the harness's
+/// versions row and update mode once read, whether the Update confirm is open, whether this
+/// panel started an update, and the reads of a running one.
+#[derive(Default)]
+struct TooOld {
+    versions: Option<HarnessVersions>,
+    mode: Option<UpdateMode>,
+    confirming: bool,
+    updated: bool,
+    polls: u32,
 }
 
 impl SignIn {
@@ -521,6 +539,7 @@ impl SignIn {
             opened: false,
             reads: 0,
             problem: None,
+            old: None,
         }
     }
 
@@ -620,8 +639,9 @@ impl SignIn {
                 }
             }
         }
-        match &self.problem {
-            Some(problem) => {
+        match (&self.problem, &self.old) {
+            (Some(_), Some(old)) => lines.extend(old.lines(self.choice.native, limit, ctx)),
+            (Some(problem), None) => {
                 for part in wrap(problem, limit) {
                     lines.push(styled(part, Role::Error, theme));
                 }
@@ -633,9 +653,58 @@ impl SignIn {
                     },
                 ));
             }
-            None => lines.push(waiting),
+            (None, _) => lines.push(waiting),
         }
         (lines, cursor)
+    }
+}
+
+impl TooOld {
+    /// The too-old panel: the line, the update offer or its confirm, how a finished update
+    /// went, and which key checks again. Inputs: the sign-in method, the width and context.
+    /// Output: the lines.
+    fn lines(&self, native: Option<NativeAuthMethod>, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        let theme = &ctx.theme;
+        let (harness, _) = harness_words(native);
+        let mut lines: Vec<Line<'static>> = wrap(&too_old_line(native, self.versions.as_ref()), limit)
+            .into_iter()
+            .map(|part| styled(part, Role::Error, theme))
+            .collect();
+        let offer = update_offer(self.versions.as_ref(), self.mode);
+        let command = self.versions.as_ref().and_then(|versions| versions.command.clone());
+        match (&offer, command) {
+            (UpdateOffer::Button, Some(command)) if self.confirming => {
+                lines.push(Line::default());
+                lines.push(Line::raw(format!("Update {harness}? CrazyAgent runs exactly this line:")));
+                lines.extend(wrap(&format!("  {command}"), limit).into_iter().map(Line::raw));
+                lines.push(Line::raw("Press Enter to update, or Esc to go back."));
+                return lines;
+            }
+            (UpdateOffer::Running, _) => lines.push(Line::from(vec![
+                Span::styled(ctx.spinner(), theme.running),
+                Span::raw(format!(" Updating {harness}...")),
+            ])),
+            (UpdateOffer::Command(command), _) => {
+                lines.push(Line::raw(format!("To update {harness}, run this in Terminal:")));
+                lines.extend(wrap(&format!("  {command}"), limit).into_iter().map(Line::raw));
+            }
+            (UpdateOffer::Line(line), _) => lines.extend(wrap(line, limit).into_iter().map(Line::raw)),
+            _ => {}
+        }
+        if let Some(after) = self
+            .versions
+            .as_ref()
+            .filter(|versions| self.updated && !versions.running)
+            .and_then(|versions| last_line(versions, harness))
+        {
+            lines.extend(wrap(&after, limit).into_iter().map(Line::raw));
+        }
+        lines.push(Line::raw(if offer == UpdateOffer::Button {
+            format!("Press u to update {harness}, or n to check again.")
+        } else {
+            "Press n to check again.".to_owned()
+        }));
+        lines
     }
 }
 
@@ -762,6 +831,9 @@ enum Waiting {
     Models,
     SignIn,
     Finish,
+    Versions,
+    UpdateMode,
+    Update,
 }
 
 /// Settings, Add account: provider, then that provider's sign-in methods,
@@ -865,6 +937,7 @@ impl AddAccount {
         sign_in.ticket = None;
         sign_in.view = None;
         sign_in.problem = None;
+        sign_in.old = None;
         sign_in.opened = false;
         sign_in.reads = 0;
         sign_in.code.clear();
@@ -1094,6 +1167,10 @@ impl AddAccount {
         let Stage::SignIn(sign_in) = &mut self.stage else {
             return;
         };
+        let too_old = matches!(result, Ok((_, view)) if view.phase == NativeAuthPhase::Failed && view.problem.as_deref() == Some(TOO_OLD));
+        if too_old && sign_in.old.is_none() {
+            sign_in.old = Some(TooOld::default());
+        }
         match result {
             Ok((ticket, view)) => {
                 sign_in.ticket = Some(ticket.clone());
@@ -1133,6 +1210,61 @@ impl AddAccount {
                 }
             }
             Err(code) => sign_in.problem = Some(refused_sign_in(code, sign_in.choice.native)),
+        }
+        if too_old {
+            self.read_harness(ctx);
+        }
+    }
+
+    /// Reads the versions row of the harness a too-old sign-in runs, then its update mode
+    /// once. Input: the context. Output: none; the replies fill the too-old panel.
+    fn read_harness(&mut self, ctx: &mut Ctx) {
+        if self.waiting != Waiting::Nothing {
+            return;
+        }
+        let Stage::SignIn(sign_in) = &self.stage else {
+            return;
+        };
+        let Some(old) = &sign_in.old else {
+            return;
+        };
+        let id = harness_id(sign_in.choice.native).to_owned();
+        if old.versions.is_some() && old.mode.is_none() {
+            self.waiting = Waiting::UpdateMode;
+            send(ctx, SettingsJob::HarnessUpdateSettings);
+        } else {
+            self.waiting = Waiting::Versions;
+            send(ctx, SettingsJob::HarnessVersions { id, look: false });
+        }
+    }
+
+    /// Takes a reply the too-old panel waits for: the versions row, the update mode, or the
+    /// start of the update it confirmed. Inputs: the reply and the context. Output: none.
+    fn too_old_reply(&mut self, event: &SettingsEvent, ctx: &mut Ctx) {
+        let Stage::SignIn(sign_in) = &mut self.stage else {
+            return;
+        };
+        let native = sign_in.choice.native;
+        let Some(old) = sign_in.old.as_mut() else {
+            return;
+        };
+        match event {
+            SettingsEvent::HarnessVersions(id, Ok(versions)) if id == harness_id(native) => {
+                old.versions = Some(versions.clone());
+                if old.mode.is_none() {
+                    self.read_harness(ctx);
+                }
+            }
+            SettingsEvent::HarnessUpdateSettings(Ok(settings)) => old.mode = Some(settings.mode),
+            SettingsEvent::HarnessUpdated(id, Ok(())) if id == harness_id(native) => {
+                old.updated = true;
+                old.polls = 0;
+                self.read_harness(ctx);
+            }
+            SettingsEvent::HarnessUpdated(_, Err(code)) => {
+                ctx.say(Message::error(plain_update(code), ""));
+            }
+            _ => {}
         }
     }
 
@@ -1209,6 +1341,12 @@ impl AddAccount {
             }
             (Waiting::Finish, SettingsEvent::PoolsJoined(result)) => {
                 self.finished(result.as_ref().err(), ctx)
+            }
+            (Waiting::Versions, SettingsEvent::HarnessVersions(..))
+            | (Waiting::UpdateMode, SettingsEvent::HarnessUpdateSettings(_))
+            | (Waiting::Update, SettingsEvent::HarnessUpdated(..)) => {
+                self.waiting = Waiting::Nothing;
+                self.too_old_reply(event, ctx);
             }
             _ => {}
         }
@@ -1350,6 +1488,32 @@ impl AddAccount {
         };
         let claude = sign_in.choice.native == Some(NativeAuthMethod::ClaudeOfficial);
         let accepts = sign_in.view.as_ref().and_then(|view| view.claude_prompt);
+        if sign_in.problem.is_some()
+            && let Some(old) = sign_in.old.as_mut()
+        {
+            let offer = update_offer(old.versions.as_ref(), old.mode);
+            match key {
+                Key::Esc if old.confirming => {
+                    old.confirming = false;
+                    return Flow::Handled;
+                }
+                Key::Enter if old.confirming => {
+                    old.confirming = false;
+                    if offer == UpdateOffer::Button && self.waiting == Waiting::Nothing {
+                        self.waiting = Waiting::Update;
+                        let id = harness_id(sign_in.choice.native).to_owned();
+                        send(ctx, SettingsJob::HarnessUpdate { id });
+                    }
+                    return Flow::Handled;
+                }
+                _ if old.confirming => return Flow::Handled,
+                Key::Char('u') if offer == UpdateOffer::Button => {
+                    old.confirming = true;
+                    return Flow::Handled;
+                }
+                _ => {}
+            }
+        }
         match key {
             Key::Esc => {
                 if let Some(ticket) = sign_in.ticket.clone()
@@ -1591,7 +1755,7 @@ impl AddAccount {
 /// the app names its own button, and the TUI says that the engine clears it on a later try
 /// or after an engine restart. `{harness}` and `{name}` stand for the harness and provider of the
 /// sign-in method.
-const SIGN_IN_SENTENCES: [(&str, &str); 30] = [
+const SIGN_IN_SENTENCES: [(&str, &str); 31] = [
     (
         "native_auth_bootstrap_timeout",
         "CrazyAgent's account helper didn't start in time. Try again.",
@@ -1655,6 +1819,10 @@ const SIGN_IN_SENTENCES: [(&str, &str); 30] = [
         "Codex gave an answer CrazyAgent couldn't use. Update Codex, then try again.",
     ),
     (
+        "native_auth_harness_too_old",
+        "{harness} is too old to sign in from CrazyAgent. Update {harness}, then choose Check again.",
+    ),
+    (
         "native_auth_host_executable_changed",
         "{harness} changed on this Mac after CrazyAgent checked it, perhaps from an update. Try again.",
     ),
@@ -1705,11 +1873,10 @@ const SIGN_IN_SENTENCES: [(&str, &str); 30] = [
     ),
 ];
 
-/// The plain sentence for a sign-in failure code. Inputs: the code and the sign-in method,
-/// which names the harness. Output: the listed sentence, the TUI's own for a code the engine
-/// does not record, the config sentence, or the coded fallback.
-fn plain_sign_in(code: &str, native: Option<NativeAuthMethod>) -> String {
-    let (harness, name) = match native {
+/// The harness and provider a sign-in method names. Input: the method, None for Claude.
+/// Output: the harness name and the provider name.
+fn harness_words(native: Option<NativeAuthMethod>) -> (&'static str, &'static str) {
+    match native {
         Some(
             NativeAuthMethod::CodexBrowser
             | NativeAuthMethod::CodexDeviceCode
@@ -1718,7 +1885,74 @@ fn plain_sign_in(code: &str, native: Option<NativeAuthMethod>) -> String {
         Some(NativeAuthMethod::ClaudeOfficial | NativeAuthMethod::ClaudeExisting) | None => {
             ("Claude Code", "Claude")
         }
+    }
+}
+
+/// The catalog id of the harness a sign-in method runs. Input: the method, None for Claude.
+/// Output: "codex" or "claude-code".
+fn harness_id(native: Option<NativeAuthMethod>) -> &'static str {
+    match harness_words(native).0 {
+        "Codex" => "codex",
+        _ => "claude-code",
+    }
+}
+
+/// The line for a sign-in refused because the harness is older than its sign-in minimum
+/// (DEC-166), word for word as the app says it: the version and the minimum when the
+/// versions row names them, else how to fix it. Inputs: the sign-in method and the versions
+/// row, if read. Output: the line.
+pub(super) fn too_old_line(native: Option<NativeAuthMethod>, versions: Option<&HarnessVersions>) -> String {
+    let (harness, _) = harness_words(native);
+    let Some(minimum) = versions
+        .and_then(|versions| versions.sign_in_min.as_deref())
+        .filter(|minimum| crate::harnesses::update::plain_version(minimum))
+    else {
+        return plain_sign_in(TOO_OLD, native);
     };
+    match versions
+        .and_then(|versions| versions.installed.as_deref())
+        .filter(|installed| crate::harnesses::update::below(installed, minimum))
+    {
+        Some(installed) => format!(
+            "{harness} {installed} is too old to sign in from CrazyAgent; it needs {minimum} or newer."
+        ),
+        None => format!("{harness} is too old to sign in from CrazyAgent; it needs {minimum} or newer."),
+    }
+}
+
+/// What the too-old panel offers for updating the harness, the same choice the app makes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum UpdateOffer {
+    Button,
+    Command(String),
+    Line(String),
+    Running,
+    Nothing,
+}
+
+/// Picks the too-old panel's update offer as Settings, Harnesses would: Update where updates
+/// may run and the harness has an update line, else that line to run in Terminal, else why it
+/// can't be updated here. Inputs: the versions row and update mode, None until read.
+/// Output: the offer.
+pub(super) fn update_offer(versions: Option<&HarnessVersions>, mode: Option<UpdateMode>) -> UpdateOffer {
+    let (Some(versions), Some(mode)) = (versions, mode) else {
+        return UpdateOffer::Nothing;
+    };
+    if versions.running {
+        return UpdateOffer::Running;
+    }
+    match (&versions.command, mode) {
+        (Some(_), UpdateMode::CheckAndUpdate) => UpdateOffer::Button,
+        (Some(command), _) => UpdateOffer::Command(command.clone()),
+        (None, _) => refusal(versions).map_or(UpdateOffer::Nothing, UpdateOffer::Line),
+    }
+}
+
+/// The plain sentence for a sign-in failure code. Inputs: the code and the sign-in method,
+/// which names the harness. Output: the listed sentence, the TUI's own for a code the engine
+/// does not record, the config sentence, or the coded fallback.
+fn plain_sign_in(code: &str, native: Option<NativeAuthMethod>) -> String {
+    let (harness, name) = harness_words(native);
     if let Some((_, sentence)) = SIGN_IN_SENTENCES.iter().find(|(listed, _)| *listed == code) {
         return sentence
             .replace("{harness}", harness)
@@ -1841,6 +2075,24 @@ impl Screen for AddAccount {
                 hint("Tab", "Next field"),
                 hint("Esc", "Back"),
             ],
+            Stage::SignIn(sign_in)
+                if sign_in.problem.is_some()
+                    && sign_in.old.as_ref().is_some_and(|old| old.confirming) =>
+            {
+                vec![hint("Enter", "Update"), hint("Esc", "Back")]
+            }
+            Stage::SignIn(sign_in) if sign_in.problem.is_some() && sign_in.old.is_some() => {
+                let mut hints = Vec::new();
+                if let Some(old) = &sign_in.old
+                    && update_offer(old.versions.as_ref(), old.mode) == UpdateOffer::Button
+                {
+                    let (harness, _) = harness_words(sign_in.choice.native);
+                    hints.push(hint("u", &format!("Update {harness}")));
+                }
+                hints.push(hint("n", "Check again"));
+                hints.push(hint("Esc", "Cancel sign-in"));
+                hints
+            }
             Stage::SignIn(sign_in) if sign_in.problem.is_some() => {
                 let label = if sign_in.choice.native == Some(NativeAuthMethod::CodexDeviceCode) {
                     "New code"
@@ -1930,6 +2182,15 @@ impl Screen for AddAccount {
             } else {
                 self.read_sign_in(ctx);
             }
+        }
+        if let Stage::SignIn(sign_in) = &mut self.stage
+            && let Some(old) = sign_in.old.as_mut()
+            && old.versions.as_ref().is_some_and(|versions| versions.running)
+            && old.polls < UPDATE_POLLS_MAX
+            && self.waiting == Waiting::Nothing
+        {
+            old.polls += 1;
+            self.read_harness(ctx);
         }
     }
 

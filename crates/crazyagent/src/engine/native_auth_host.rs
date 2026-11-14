@@ -441,6 +441,10 @@ fn custodian_command(
 /// The longest failure code a custodian may name: the bound of a stored sign-in fact's code.
 const CAUSE_BYTES_MAX: usize = 128;
 
+/// The code of a sign-in the engine refuses before any custodian runs, because the harness
+/// it would run is older than that harness's sign-in minimum (DEC-166).
+const TOO_OLD: &str = "native_auth_harness_too_old";
+
 /// What a custodian wrote on its error stream, kept up to one code and its line end and read
 /// without ever waiting, so a custodian that writes more never blocks on a full pipe.
 struct CustodianCause {
@@ -529,8 +533,17 @@ pub(in crate::engine) async fn dispatch(
         Some(harness) => handed(harness, &kind, &work.fact().action).await,
         None => None,
     };
+    let too_old = match harness.as_ref().map(|(harness, _)| harness.verified_path()) {
+        Some(Ok(runs)) => host.harness_too_old(&kind, runs).await,
+        _ => false,
+    };
     let runtime_dir = host.owner_runtime_dir()?;
     let launch = host.prepare_native_auth_custody(work).await?;
+    if too_old {
+        host.record_custodian_failure(TOO_OLD)?;
+        drop(launch);
+        return Err(EngineError(TOO_OLD.into()));
+    }
     let mut command = custodian_command(
         executable.verified_path()?,
         &runtime_dir,

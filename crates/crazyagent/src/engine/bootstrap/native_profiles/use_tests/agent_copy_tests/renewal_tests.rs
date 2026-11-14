@@ -552,3 +552,54 @@ fn live_a_lapsing_managed_claude_account_is_renewed_and_its_expiry_moves() {
         Err(error) => panic!("the renewal ended with {} after {elapsed:?}", error.0),
     }
 }
+
+/// DEC-166 (leader 00:23): background renewal is not held to the sign-in minimum, so a lapsed
+/// ChatGPT record is still renewed by a Codex that reports a version below it, and the agent
+/// gets the renewed record as before.
+#[test]
+fn a_codex_below_the_sign_in_minimum_still_renews_a_lapsed_record_in_the_background() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut case = UseCase::new();
+    let home = case.home();
+    private_file(&home.join("auth.json"), &codex_auth(now() - 60));
+    let renewed = now() + 3 * 86_400;
+    let bin = case.state.join("old-codex");
+    private_directory(&bin);
+    private_file(&bin.join("renewed.json"), &codex_auth(renewed));
+    let old = bin.join("codex");
+    std::fs::write(
+        &old,
+        r#"#!/bin/sh
+case "$1" in --version) echo "codex-cli 0.40.0"; exit 0 ;; esac
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | /usr/bin/sed -n 's/^.*"id":\([0-9][0-9]*\).*$/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{"userAgent":"old-codex","codexHome":"%s","platformFamily":"unix","platformOs":"macos"}}\n' "$id" "$CODEX_HOME" ;;
+    *'"method":"account/read"'*)
+      (umask 077; /bin/cat "${0%/*}/renewed.json" > "$CODEX_HOME/auth.json.new" && /bin/mv "$CODEX_HOME/auth.json.new" "$CODEX_HOME/auth.json")
+      printf '{"id":%s,"result":{"account":null,"requiresOpenaiAuth":true}}\n' "$id" ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let version = std::process::Command::new(&old)
+        .arg("--version")
+        .output()
+        .unwrap();
+    let installed =
+        crate::harnesses::update::installed_version(&String::from_utf8_lossy(&version.stdout));
+    assert!(crate::harnesses::sign_in_too_old("codex", installed.as_deref()));
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard.hand_to_agent(&agent, TURN, &old).unwrap();
+    assert_eq!(
+        read_json(&agent.join("auth.json"))["tokens"]["access_token"],
+        token(renewed).as_str(),
+        "the old Codex renewed the record and the agent got it"
+    );
+    drop(copy);
+    drop(guard);
+}

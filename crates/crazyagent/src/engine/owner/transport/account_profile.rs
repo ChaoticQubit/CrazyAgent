@@ -786,6 +786,37 @@ fn hex_id(value: &str) -> bool {
 mod managed_capabilities_tests {
     use super::*;
 
+    /// DEC-166: every harness that signs in from CrazyAgent has a sign-in minimum that is a
+    /// plain version, under its catalog id and every connection name, and a harness with no
+    /// managed sign-in has none.
+    #[test]
+    fn every_harness_that_signs_in_has_a_sign_in_minimum() {
+        let catalog =
+            crate::harnesses::catalog(&crate::harnesses::Search::new(Vec::new(), None, Vec::new()));
+        let mut signing = 0;
+        for entry in catalog {
+            let names: Vec<String> = std::iter::once(entry.id.clone())
+                .chain(entry.aliases.clone())
+                .collect();
+            let signs_in = names
+                .iter()
+                .any(|name| !managed_capabilities(name, &ProducerCapability::Available).is_empty());
+            for name in &names {
+                let minimum = crate::harnesses::sign_in_min(name);
+                assert_eq!(minimum.is_some(), signs_in, "{name}");
+                if let Some(minimum) = minimum {
+                    assert_eq!(
+                        crate::harnesses::update::installed_version(minimum).as_deref(),
+                        Some(minimum),
+                        "{name}"
+                    );
+                    signing += 1;
+                }
+            }
+        }
+        assert_eq!(signing, 3, "claude-code, its connection name claude, and codex");
+    }
+
     #[test]
     fn both_subscription_harnesses_offer_a_browser_sign_in_and_a_check() {
         let methods = |harness: &str| -> Vec<NativeAuthMethod> {

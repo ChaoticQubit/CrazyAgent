@@ -2431,3 +2431,260 @@ fn first_run_shows_only_the_command_for_a_refused_graphify_when_unused_tools_is_
     drop(pty);
     engine.stop();
 }
+
+const DOWN_KEY: &[u8] = b"\x1b[B";
+const KEY_TIME: Duration = Duration::from_millis(300);
+const UPDATE_TIME: Duration = Duration::from_secs(120);
+const SIGN_IN_TIME: Duration = Duration::from_secs(90);
+const TOO_OLD_WORDS: &str = "is too old to sign in";
+
+/// DEC-166: writes one stand-in harness script only its owner can change. Inputs: the path
+/// and the script. Output: none.
+fn stand_in(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// DEC-166: the `--version` arm of a stand-in: the version line, or nothing for a harness
+/// whose version CrazyAgent can't read. Input: the line. Output: the shell arm.
+fn version_arm(line: Option<String>) -> String {
+    line.map_or_else(
+        || "--version) exit 0 ;;".to_owned(),
+        |line| format!("--version) echo \"{line}\" ;;"),
+    )
+}
+
+/// DEC-166: puts a self-updating Claude Code stand-in and an npm Codex stand-in under a test
+/// HOME. Each prints its old version (or none), updates to its new one with its own updater
+/// (`claude update`, `npm install`), and fails every other call, a sign-in included. Inputs:
+/// the HOME and each harness's old and new version. Output: the PATH the engine runs with.
+fn old_harnesses(
+    home: &Path,
+    claude: (Option<&str>, &str),
+    codex: (Option<&str>, &str),
+) -> String {
+    let text = home.to_str().unwrap();
+    assert!(!text.contains('\'') && !text.contains('"'));
+    let versions = home.join(".local/share/claude/versions");
+    let bin = home.join(".local/bin");
+    let first = versions.join(claude.0.unwrap_or("0.0.0"));
+    let next = versions.join(claude.1);
+    let (to, next_text, link) = (claude.1, next.display(), bin.join("claude"));
+    stand_in(
+        &first,
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  {}\n  update) printf '#!/bin/sh\\ncase \"$1\" in --version) echo \"{to} (Claude Code)\" ;; *) exit 1 ;; esac\\n' > '{next_text}' && /bin/chmod 755 '{next_text}' && /bin/ln -sfn '{next_text}' '{link}.next' && /bin/mv -f '{link}.next' '{link}' && echo \"Updated to {to}\" ;;\n  *) exit 1 ;;\nesac\n",
+            version_arm(claude.0.map(|from| format!("{from} (Claude Code)"))),
+            link = link.display(),
+        ),
+    );
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&first, &link).unwrap();
+    assert!(first.starts_with(home) && next.starts_with(home));
+    let prefix = home.join(".npm-global");
+    let harness = prefix.join("lib/node_modules/@openai/codex/bin/codex");
+    stand_in(
+        &harness,
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  {}\n  *) exit 1 ;;\nesac\n",
+            version_arm(codex.0.map(|from| format!("codex-cli {from}")))
+        ),
+    );
+    std::fs::create_dir_all(prefix.join("bin")).unwrap();
+    std::os::unix::fs::symlink(
+        "../lib/node_modules/@openai/codex/bin/codex",
+        prefix.join("bin/codex"),
+    )
+    .unwrap();
+    let (to, harness) = (codex.1, harness.display());
+    stand_in(
+        &prefix.join("bin/npm"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  view) echo {to} ;;\n  install) printf '#!/bin/sh\\ncase \"$1\" in --version) echo \"codex-cli {to}\" ;; *) exit 1 ;; esac\\n' > '{harness}.new' && /bin/chmod 755 '{harness}.new' && /bin/mv -f '{harness}.new' '{harness}' ;;\n  *) exit 2 ;;\nesac\n"
+        ),
+    );
+    format!(
+        "{}:{}:/usr/bin:/bin",
+        prefix.join("bin").display(),
+        bin.display()
+    )
+}
+
+/// DEC-166: starts the real engine with the stand-ins' HOME and a PATH that holds only them
+/// and the system folders, so no harness installed on this Mac is ever found or run. Inputs:
+/// the prefix, the HOME and the PATH. Output: the running engine.
+fn stand_in_engine(prefix: &str, home: &Path, path: String) -> Engine {
+    let mut engine = Engine::new(prefix);
+    engine.home = Some(home.to_path_buf());
+    engine.env.push(("PATH", path.into()));
+    engine.launch();
+    engine
+}
+
+/// DEC-166: whether a row of the screen is the picked one of a list and names the label: the
+/// list marker, at most a provider mark, then the label. Inputs: the screen and the label.
+/// Output: the answer.
+fn picked_row(screen: &str, label: &str) -> bool {
+    screen.lines().any(|line| {
+        line.find(label).is_some_and(|at| {
+            let before = &line[..at];
+            before.contains("> ")
+                && before
+                    .rsplit("> ")
+                    .next()
+                    .is_some_and(|between| between.trim().chars().count() <= 2)
+        })
+    })
+}
+
+/// DEC-166: moves down a list until the label is the picked row, then chooses it. Inputs: the
+/// TUI and the label. Output: none.
+fn choose_row(pty: &mut ScriptPty, label: &str) {
+    pty.until(&format!("{label} is listed"), |screen| screen.contains(label));
+    for _ in 0..STEPS_MAX {
+        if picked_row(&pty.screen(), label) {
+            pty.type_bytes(b"\r");
+            return;
+        }
+        pty.type_bytes(DOWN_KEY);
+        std::thread::sleep(KEY_TIME);
+    }
+    panic!("{label} never became the picked row:\n{}", pty.screen());
+}
+
+/// DEC-166: takes a fresh engine through first run to Add account, then picks the provider
+/// tile and its sign-in method, which starts the sign-in. Inputs: the engine, the TUI's HOME,
+/// the tile and the method. Output: the TUI on the sign-in step.
+fn start_sign_in(engine: &Engine, home: &Path, tile: &str, method: &str) -> ScriptPty {
+    let mut pty = reach_accounts_step(engine, home);
+    pty.type_bytes(b" ");
+    pty.until("Space unticks the guide", |screen| {
+        screen.contains("[ ] Show the guide on Home")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Add account opens on its providers", |screen| {
+        screen.contains("Where does the model come from?")
+    });
+    choose_row(&mut pty, tile);
+    choose_row(&mut pty, method);
+    pty
+}
+
+/// DEC-166: whether the screen shows a sign-in that ran the harness: its failure line with
+/// the key to try again and no too-old line. Input: the screen. Output: the answer.
+fn ran_the_harness(screen: &str) -> bool {
+    !screen.contains(TOO_OLD_WORDS)
+        && (screen.contains("Press n to try again.") || screen.contains("Press n for a new code."))
+}
+
+/// DEC-166: one harness below its sign-in minimum in the TUI: the sign-in stops with the
+/// app's words, u opens the Update confirm, Enter runs the harness's own update, and n then
+/// starts a sign-in that runs the harness at its minimum. Inputs: the prefix, the tile, the
+/// method, the harness name, its old version and its minimum, with the other harness current.
+fn too_old_then_updated_in_the_tui(
+    prefix: &str,
+    pick: (&str, &str),
+    name: &str,
+    old: &str,
+    minimum: &str,
+    claude: (Option<&str>, &str),
+    codex: (Option<&str>, &str),
+) {
+    let home = scratch(&format!("{prefix}home-"));
+    let path = old_harnesses(home.path(), claude, codex);
+    let mut engine = stand_in_engine(prefix, home.path(), path);
+    let mut pty = start_sign_in(&engine, home.path(), pick.0, pick.1);
+    let line = format!(
+        "{name} {old} is too old to sign in from CrazyAgent; it needs {minimum} or newer."
+    );
+    pty.until_within("the too-old line with Update and Check again", SIGN_IN_TIME, |screen| {
+        line.split("; ").all(|part| screen.contains(part))
+            && screen.contains(&format!("Update {name}"))
+            && screen.contains("Check again")
+            && !screen.contains("Press n to try again.")
+    });
+    pty.type_bytes(b"u");
+    pty.until("the Update confirm", |screen| {
+        screen.contains(&format!("Update {name}? CrazyAgent runs exactly this line:"))
+    });
+    pty.type_bytes(b"\r");
+    pty.until_within("the finished update", UPDATE_TIME, |screen| {
+        screen.contains(&format!("Updated from {old} to {minimum}."))
+    });
+    pty.type_bytes(b"n");
+    pty.until_within(
+        "a sign-in that runs the harness at its minimum",
+        SIGN_IN_TIME,
+        ran_the_harness,
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// DEC-166: Claude Code 2.1.200 is refused as too old in the TUI with its version and 2.1.268,
+/// its own update runs after the confirm, and Check again then signs in with it.
+#[test]
+fn a_claude_code_below_its_sign_in_minimum_updates_from_the_tui_then_signs_in() {
+    too_old_then_updated_in_the_tui(
+        "ca-e2e-min-claude-",
+        ("Anthropic", "Sign in with your Claude subscription"),
+        "Claude Code",
+        "2.1.200",
+        "2.1.268",
+        (Some("2.1.200"), "2.1.268"),
+        (Some("0.169.0"), "0.169.0"),
+    );
+}
+
+/// DEC-166: Codex 0.50.0 is refused as too old in the TUI with its version and 0.56.0, npm
+/// updates it after the confirm, and Check again then signs in with it.
+#[test]
+fn a_codex_below_its_sign_in_minimum_updates_from_the_tui_then_signs_in() {
+    too_old_then_updated_in_the_tui(
+        "ca-e2e-min-codex-",
+        ("OpenAI", "Sign in with ChatGPT"),
+        "Codex",
+        "0.50.0",
+        "0.56.0",
+        (Some("2.1.325"), "2.1.325"),
+        (Some("0.50.0"), "0.56.0"),
+    );
+}
+
+/// DEC-166: a Claude Code and a Codex whose version CrazyAgent can't read sign in from the TUI
+/// as before, with no too-old line.
+#[test]
+fn harnesses_with_an_unknown_version_sign_in_from_the_tui_as_before() {
+    let home = scratch("ca-e2e-min-unknown-home-");
+    let path = old_harnesses(home.path(), (None, "2.1.268"), (None, "0.56.0"));
+    let mut engine = stand_in_engine("ca-e2e-min-unknown-", home.path(), path);
+    let mut pty = start_sign_in(
+        &engine,
+        home.path(),
+        "Anthropic",
+        "Sign in with your Claude subscription",
+    );
+    pty.until_within(
+        "a Claude sign-in that runs Claude Code",
+        SIGN_IN_TIME,
+        ran_the_harness,
+    );
+    for _ in 0..STEPS_MAX {
+        if pty.screen().contains("Where does the model come from?") {
+            break;
+        }
+        pty.type_bytes(ESC_KEY);
+        std::thread::sleep(KEY_TIME);
+    }
+    choose_row(&mut pty, "OpenAI");
+    choose_row(&mut pty, "Sign in with ChatGPT");
+    pty.until_within(
+        "a ChatGPT sign-in that runs Codex",
+        SIGN_IN_TIME,
+        ran_the_harness,
+    );
+    drop(pty);
+    engine.stop();
+}

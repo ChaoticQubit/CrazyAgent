@@ -279,6 +279,34 @@ async fn entry(
         .ok_or_else(|| failure(UNKNOWN_HARNESS))
 }
 
+/// The installed version of a harness as its Settings, Harnesses row reads it, for the
+/// sign-in minimum check (DEC-166): the catalog entry's version when that entry is the file
+/// the sign-in runs, else unknown. Inputs: the engine, the engine root, the catalog search,
+/// the catalog id and the real file the sign-in runs. Output: the version, or None.
+pub(crate) async fn sign_in_version(
+    engine: &Arc<Engine>,
+    root: PathBuf,
+    search: Search,
+    id: &str,
+    runs: PathBuf,
+) -> Option<String> {
+    let entry = entry(engine, search, id, false).await.ok()?;
+    let updates = engine.harness_updates.clone();
+    tokio::task::spawn_blocking(move || {
+        let listed = std::fs::canonicalize(entry.executable.as_deref()?).ok()?;
+        if listed != std::fs::canonicalize(&runs).ok()? {
+            return None;
+        }
+        let db = open(&root).ok()?;
+        updates
+            .versions(&db, &entry, &Roots::engine(&root), false)
+            .installed
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Runs one blocking piece of harness update work off the request path.
 /// Input: the work. Output: its answer, or `harness_update_unavailable` when it could not
 /// finish.

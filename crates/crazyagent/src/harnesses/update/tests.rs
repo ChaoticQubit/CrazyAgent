@@ -2229,3 +2229,57 @@ fn the_prefix_node_follows_a_homebrew_upgrade_that_removes_the_old_keg() {
         "a sandboxed agent can still read the harness package"
     );
 }
+
+/// DEC-166: an installed version is below a sign-in minimum only when it reads lower number
+/// by number, a missing number counting as zero; a version that is not plain is unknown and
+/// never below.
+#[test]
+fn an_installed_version_is_below_a_sign_in_minimum_only_when_it_reads_lower() {
+    assert!(below("2.1.267", "2.1.268"));
+    assert!(below("2.1.41", "2.1.268"));
+    assert!(below("2.1", "2.1.268"));
+    assert!(below("0.55.9", "0.56.0"));
+    assert!(!below("2.1.268", "2.1.268"));
+    assert!(!below("2.1.325", "2.1.268"));
+    assert!(!below("2.10.0", "2.9.9"));
+    assert!(!below("0.56", "0.56.0"));
+    for unknown in ["", "garbage", "2.1.x", "v2.1.0", "2"] {
+        assert!(!below(unknown, "2.1.268"), "{unknown:?}");
+    }
+}
+
+/// DEC-166: a sign-in is refused as too old only for a harness that has a minimum and a
+/// known installed version below it; an unknown version runs as before.
+#[test]
+fn a_sign_in_is_too_old_only_below_the_harness_minimum_with_a_known_version() {
+    assert!(crate::harnesses::sign_in_too_old("claude", Some("2.1.200")));
+    assert!(crate::harnesses::sign_in_too_old("claude-code", Some("2.1.40")));
+    assert!(!crate::harnesses::sign_in_too_old("claude", Some("2.1.268")));
+    assert!(!crate::harnesses::sign_in_too_old("claude-code", Some("2.1.325")));
+    assert!(!crate::harnesses::sign_in_too_old("claude", None));
+    assert!(crate::harnesses::sign_in_too_old("codex", Some("0.55.0")));
+    assert!(!crate::harnesses::sign_in_too_old(
+        "codex",
+        Some(crate::adapters::codex::SIGN_IN_MIN)
+    ));
+    assert!(!crate::harnesses::sign_in_too_old("codex", None));
+    assert!(!crate::harnesses::sign_in_too_old("gemini-cli", Some("0.0.1")));
+    assert!(!crate::harnesses::sign_in_too_old("not-a-harness", Some("0.0.1")));
+}
+
+/// DEC-166: the versions row of a harness that signs in names its sign-in minimum, installed
+/// or not, and the row of a harness with no sign-in names none.
+#[test]
+fn a_versions_row_names_the_sign_in_minimum_of_a_harness_that_signs_in() {
+    let row = |id: &str| Case::new(Machine::new(), entry(id, None), None).versions(false);
+    assert_eq!(row("claude-code").sign_in_min.as_deref(), Some("2.1.268"));
+    assert_eq!(
+        row("codex").sign_in_min.as_deref(),
+        Some(crate::adapters::codex::SIGN_IN_MIN)
+    );
+    assert_eq!(row("gemini-cli").sign_in_min, None);
+    let machine = Machine::new();
+    let claude = machine.program("brew/bin/claude", 0o755);
+    let installed = Case::new(machine, entry("claude-code", Some(claude)), None).versions(false);
+    assert_eq!(installed.sign_in_min.as_deref(), Some("2.1.268"));
+}

@@ -834,6 +834,27 @@ pub fn spec(id: &str) -> Option<&'static HarnessSpec> {
     specs().iter().find(|spec| spec.id == id)
 }
 
+/// The oldest version of a harness that CrazyAgent can sign in with, from that harness's
+/// adapter (DEC-166). Input: a catalog id or a stored harness name ("claude").
+/// Output: the plain minimum, or None for a harness that never signs in from CrazyAgent.
+pub fn sign_in_min(id: &str) -> Option<&'static str> {
+    match spec(id)?.id {
+        "claude-code" => Some(crate::adapters::claude::SIGN_IN_MIN),
+        "codex" => Some(crate::adapters::codex::SIGN_IN_MIN),
+        _ => None,
+    }
+}
+
+/// Tells whether a sign-in must be refused because the installed harness is older than its
+/// sign-in minimum. Inputs: the harness id or stored name and the installed version, None
+/// when unknown. Output: true only for a known version below a known minimum.
+pub fn sign_in_too_old(id: &str, installed: Option<&str>) -> bool {
+    match (sign_in_min(id), installed) {
+        (Some(minimum), Some(installed)) => update::below(installed, minimum),
+        _ => false,
+    }
+}
+
 /// Tells whether two harness names, as a team plan, agent row or connection stores them,
 /// name the same harness: one catalog entry by its id or an alias ("claude" and
 /// "claude-code"), or the same text for names the catalog does not know.
