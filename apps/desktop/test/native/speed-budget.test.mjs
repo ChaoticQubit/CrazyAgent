@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { REFUSED_EXIT, countFindings, margin, noise, quiet, summary, verdict } from "./speed-budget.mjs";
+import { KEPT_MIN, REFUSED_EXIT, countFindings, judge, margin, noise, noiseShares, quiet, sampleMetrics, schedule, stayedQuiet, summary, verdict } from "./speed-budget.mjs";
 
 const QUIET = { load1: 0.8, compilers: [], memoryLevel: 80, onAC: true, screenLocked: false, busy: false };
 
@@ -97,6 +97,69 @@ test("load, compilers, memory pressure, battery, a locked screen or busy slots e
   }
 });
 
+test("after a run the run's own load never taints it, every outside sign still does", () => {
+  assert.deepEqual(stayedQuiet({ ...QUIET, load1: 6.5 }), { quiet: true, reasons: [] });
+  for (const change of [{ compilers: ["rustc"] }, { memoryLevel: 30 }, { onAC: false }, { screenLocked: true }, { busy: true }]) {
+    const result = stayedQuiet({ ...QUIET, load1: 6.5, ...change });
+    assert.equal(result.quiet, false, JSON.stringify(change));
+    assert.doesNotMatch(result.reasons.join("\n"), /load/);
+  }
+});
+
 test("REFUSED exits 75 (EX_TEMPFAIL), never 0 or 1", () => {
   assert.equal(REFUSED_EXIT, 75);
+});
+
+const ENGINE = { engine_start_ms: 310, seeded: { project: "p", sessions: 50 }, round_trip_ms: { desktop_master_state: [3, 1, 2], desktop_open_project: [5, 4, 6] } };
+const APP = {
+  launch: { ms: 1450, first_look_usable: false },
+  big: { open_ms: 120, conversation_ms: 80, sessions_ms: 200 },
+  switch_cold: { home: 40, metrics: 90 },
+  switch_warm: { home: 30, metrics: 60 },
+  memory: { engine_mb: 60.5, app_mb: 120, webkit_mb: [200, 30], webkit_pids: [11, 12] },
+};
+
+test("a run's records flatten into one value per metric, round trips as their median", () => {
+  assert.deepEqual(sampleMetrics(ENGINE, APP), {
+    launch_ms: 1450, engine_start_ms: 310,
+    big_open_ms: 120, big_conversation_ms: 80, big_sessions_ms: 200,
+    switch_cold_home_ms: 40, switch_cold_metrics_ms: 90, switch_warm_home_ms: 30, switch_warm_metrics_ms: 60,
+    round_trip_desktop_master_state_ms: 2, round_trip_desktop_open_project_ms: 5,
+    memory_engine_mb: 60.5, memory_app_mb: 120, memory_webkit_mb: 230,
+  });
+});
+
+test("a launch whose first look already found Home usable has no launch time", () => {
+  const metrics = sampleMetrics(ENGINE, { ...APP, launch: { ms: 1450, first_look_usable: true } });
+  assert.equal(Object.hasOwn(metrics, "launch_ms"), false);
+  assert.equal(metrics.engine_start_ms, 310);
+});
+
+test("the schedule warms each side once, then alternates them", () => {
+  assert.deepEqual(schedule(2), [
+    { side: "base", warm: true }, { side: "candidate", warm: true },
+    { side: "base", warm: false }, { side: "candidate", warm: false },
+    { side: "base", warm: false }, { side: "candidate", warm: false },
+  ]);
+  assert.throws(() => schedule(0), /kept runs/);
+});
+
+test("noise shares compare a side with itself metric by metric", () => {
+  const first = Array.from({ length: KEPT_MIN }, () => ({ launch_ms: 1000, memory_app_mb: 100 }));
+  const second = Array.from({ length: KEPT_MIN }, () => ({ launch_ms: 1050, memory_app_mb: 100 }));
+  assert.deepEqual(noiseShares(first, second), { launch_ms: 0.05, memory_app_mb: 0 });
+});
+
+test("judge passes, fails, reports and leaves unmeasured each metric by its rule", () => {
+  const base = Array.from({ length: KEPT_MIN }, (_, index) => ({ launch_ms: 1000 + index, switch_cold_home_ms: 40, memory_webkit_mb: 200, memory_app_mb: 100 }));
+  const candidate = Array.from({ length: KEPT_MIN }, (_, index) => ({ launch_ms: 1400 + index, switch_cold_home_ms: 42, memory_webkit_mb: 260, memory_app_mb: 101,
+    ...(index < 2 ? {} : { round_trip_x_ms: 1 }) }));
+  const rows = judge(base, candidate, { launch_ms: 0.02, switch_cold_home_ms: 0.01, memory_app_mb: 0, memory_webkit_mb: 0 });
+  const by = Object.fromEntries(rows.map((row) => [row.metric, row.status]));
+  assert.deepEqual(by, { launch_ms: "fail", memory_app_mb: "pass", memory_webkit_mb: "report", round_trip_x_ms: "unmeasured", switch_cold_home_ms: "pass" });
+});
+
+test("judge refuses a timed metric with no noise reading", () => {
+  const side = Array.from({ length: KEPT_MIN }, () => ({ launch_ms: 1000 }));
+  assert.throws(() => judge(side, side, {}), /noise for launch_ms/);
 });

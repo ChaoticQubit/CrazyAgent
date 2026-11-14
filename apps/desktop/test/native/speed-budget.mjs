@@ -118,6 +118,17 @@ export function quiet(reading) {
   return { quiet: reasons.length === 0, reasons };
 }
 
+/** Judges whether the Mac stayed quiet through a timed run. The run itself (app, WebKit,
+ * engine, WebDriver) lifts the load, so load is left to the gate before the next run; every
+ * outside sign still taints the run. Input: one reading taken right after the run. Output:
+ * as `quiet`. */
+export function stayedQuiet(reading) {
+  assert.ok(Number.isFinite(reading.load1) && reading.load1 >= 0, "a load reading");
+  const result = quiet({ ...reading, load1: 0 });
+  assert.ok(result.reasons.every((reason) => !reason.startsWith("load")));
+  return result;
+}
+
 /** Runs one fixed-path read-only command. Input: the program and its arguments. Output: its
  * standard output. */
 function output(program, args) {
@@ -164,4 +175,92 @@ export function footprintMb(pid) {
   const megabytes = Number(found[1]) * { KB: 1 / 1024, MB: 1, GB: 1024 }[found[2]];
   assert.ok(Number.isFinite(megabytes) && megabytes > 0);
   return round(megabytes);
+}
+
+/** Fewest valid samples per side a metric needs to be judged (DEC-169 keeps 10). */
+export const KEPT_MIN = 8;
+/** Metrics read and shown but never failing a run until their reading is proven (DEC-169 Q9). */
+export const REPORT_ONLY = new Set(["memory_webkit_mb"]);
+const KEPT_MAX = 32;
+
+/** Flattens one speed run's records into one value per metric. Inputs: run.mjs's
+ * speed-engine.json and the spec's speed-app.json. Output: `{ metric: value }`; a launch the
+ * first look already found usable is left out, as its time is only an upper bound. */
+export function sampleMetrics(engine, app) {
+  assert.ok(Number.isFinite(engine.engine_start_ms), "an engine start time");
+  assert.ok(app.launch && app.big && app.switch_cold && app.switch_warm && app.memory, "a complete app record");
+  const metrics = {};
+  if (!app.launch.first_look_usable) metrics.launch_ms = app.launch.ms;
+  metrics.engine_start_ms = engine.engine_start_ms;
+  for (const [name, ms] of Object.entries(app.big)) metrics[`big_${name}`] = ms;
+  for (const [page, ms] of Object.entries(app.switch_cold)) metrics[`switch_cold_${page}_ms`] = ms;
+  for (const [page, ms] of Object.entries(app.switch_warm)) metrics[`switch_warm_${page}_ms`] = ms;
+  for (const [cmd, times] of Object.entries(engine.round_trip_ms)) metrics[`round_trip_${cmd}_ms`] = summary(times).median;
+  metrics.memory_engine_mb = app.memory.engine_mb;
+  metrics.memory_app_mb = app.memory.app_mb;
+  metrics.memory_webkit_mb = round(app.memory.webkit_mb.reduce((total, mb) => total + mb, 0));
+  for (const [metric, value] of Object.entries(metrics)) assert.ok(Number.isFinite(value) && value >= 0, `${metric} is a reading: ${value}`);
+  return metrics;
+}
+
+/** The run order: one untimed warm-up launch per side (the first exec of a new binary waits in
+ * syspolicyd), then the sides alternate so drift on the Mac lands on both. Input: kept runs per
+ * side. Output: `[{ side, warm }]`. */
+export function schedule(kept) {
+  assert.ok(Number.isInteger(kept) && kept >= 1 && kept <= KEPT_MAX, `1 to ${KEPT_MAX} kept runs per side`);
+  const order = [{ side: "base", warm: true }, { side: "candidate", warm: true }];
+  for (let index = 0; index < kept; index += 1) order.push({ side: "base", warm: false }, { side: "candidate", warm: false });
+  assert.equal(order.length, 2 * kept + 2);
+  return order;
+}
+
+/** The values one metric has across a side's samples. Inputs: the samples and the metric.
+ * Output: the values, in run order. */
+function valuesOf(samples, metric) {
+  return samples.filter((sample) => Object.hasOwn(sample, metric)).map((sample) => sample[metric]);
+}
+
+/** Self-noise per metric: one build's two runs of samples against each other. Inputs: the two
+ * sample lists. Output: `{ metric: share }` for each metric both measured at least
+ * `KEPT_MIN` times. */
+export function noiseShares(first, second) {
+  assert.ok(first.length >= 1 && second.length >= 1, "two sample lists");
+  const shares = {};
+  for (const metric of new Set([...first, ...second].flatMap((sample) => Object.keys(sample)))) {
+    const left = valuesOf(first, metric);
+    const right = valuesOf(second, metric);
+    if (Math.min(left.length, right.length) >= KEPT_MIN) shares[metric] = noise(summary(left), summary(right));
+  }
+  assert.ok(Object.values(shares).every((share) => share >= 0));
+  return shares;
+}
+
+/** Judges every metric of the candidate against the base (DEC-169 section 3). Inputs: both
+ * sides' samples and the self-noise shares. Output: one row per metric, sorted: status pass,
+ * fail, report (report-only) or unmeasured (fewer than `KEPT_MIN` valid samples a side), with
+ * both summaries and the reasons. */
+export function judge(base, candidate, shares) {
+  assert.ok(Array.isArray(base) && Array.isArray(candidate), "two sample lists");
+  const metrics = [...new Set([...base, ...candidate].flatMap((sample) => Object.keys(sample)))].sort();
+  const rows = metrics.map((metric) => {
+    const kept = Math.min(valuesOf(base, metric).length, valuesOf(candidate, metric).length);
+    if (kept < KEPT_MIN) return { metric, status: "unmeasured", kept };
+    const sides = { base: summary(valuesOf(base, metric).slice(0, kept)), candidate: summary(valuesOf(candidate, metric).slice(0, kept)) };
+    if (REPORT_ONLY.has(metric)) return { metric, status: "report", ...sides };
+    assert.ok(Object.hasOwn(shares, metric), `a noise for ${metric}; run the noise mode first`);
+    const share = margin(shares[metric]);
+    const result = verdict({ ...sides, margin: share, floor: floorFor(metric) });
+    return { metric, status: result.pass ? "pass" : "fail", margin: share, ...sides, reasons: result.reasons };
+  });
+  assert.equal(rows.length, metrics.length);
+  return rows;
+}
+
+/** The floor a metric's gap must pass to fail. Input: the metric. Output: the floor. */
+function floorFor(metric) {
+  assert.match(metric, /_(ms|mb)$/, `a metric with a unit: ${metric}`);
+  if (metric.startsWith("memory_")) return FLOOR.memory_mb;
+  if (metric === "launch_ms" || metric === "engine_start_ms") return FLOOR.launch_ms;
+  if (metric.startsWith("round_trip_")) return FLOOR.round_trip_ms;
+  return FLOOR.page_ms;
 }
