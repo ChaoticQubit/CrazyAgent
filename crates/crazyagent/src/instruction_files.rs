@@ -1020,12 +1020,16 @@ pub const CARRIED_NOTICE: &str = "The folder came with its own .crazyagent/instr
 
 /// The project text a folder arrived with as one [`imported`] section under
 /// [`CARRIED_HEADING`], a label it starts with taken off first; empty text stays. Past the
-/// limit it is cut, back a line or to nothing when the cut end would read as a heading, the
-/// whole file kept aside. Input: the project text. Output: the text and whether it was cut.
+/// limit it is cut, back a line or to nothing when the cut end would read as a heading.
+/// Input: the project text. Output: the text, and whether the file must be kept aside first
+/// because it was cut or a line was demoted (SA vid 7 r2e, leader 11:23).
 fn carried(existing: &str) -> (String, bool) {
     assert_eq!(CARRIED_HEADING, format!("{IMPORTED_LABEL}{CARRIED_PATH}"));
-    let body = existing.strip_prefix(CARRIED_HEADING).unwrap_or(existing);
-    let part = demoted(body.trim());
+    let body = existing
+        .strip_prefix(CARRIED_HEADING)
+        .unwrap_or(existing)
+        .trim();
+    let part = demoted(body);
     if part.is_empty() {
         return (existing.to_owned(), false);
     }
@@ -1047,7 +1051,7 @@ fn carried(existing: &str) -> (String, bool) {
     assert_eq!(demoted(kept), kept);
     let text = imported(CARRIED_PATH, kept);
     assert!(text.starts_with(CARRIED_HEADING) && text.len() <= crate::agent_home::TEXT_BYTES_MAX);
-    (text, end < part.len())
+    (text, end < part.len() || part != body)
 }
 
 /// One imported text as the project instructions keep it: under [`IMPORTED_LABEL`] naming
@@ -1122,8 +1126,9 @@ pub fn carried_in(folder: &Path) -> bool {
 /// Labels the project instructions a new project's folder arrived with, before the app has
 /// written any: a non-empty `.crazyagent/instructions.md`, git or not, is saved under
 /// [`CARRIED_HEADING`] ([`carried`]), the whole file moved aside into
-/// `.crazyagent/imported/` first when the heading leaves it no room. Text that cannot be
-/// read is left as it is, since no agent launch reads it either. Input: the project folder.
+/// `.crazyagent/imported/` first when the heading leaves it no room or a line is demoted.
+/// Text that cannot be read is left as it is, since no agent launch reads it either. Input:
+/// the project folder.
 /// Output: unit, or a plain code when the label cannot be saved, so the start is refused
 /// rather than giving agents the text unlabelled.
 pub fn label_arrived(folder: &Path) -> Result<(), EngineError> {
@@ -1144,12 +1149,12 @@ pub fn label_arrived(folder: &Path) -> Result<(), EngineError> {
     let Ok(existing) = crate::agent_home::read_project(&root) else {
         return Ok(());
     };
-    let (kept, cut) = carried(&existing);
+    let (kept, aside) = carried(&existing);
     if kept == existing {
         return Ok(());
     }
     assert!(kept.starts_with(CARRIED_HEADING) && kept.len() <= crate::agent_home::TEXT_BYTES_MAX);
-    if cut {
+    if aside {
         move_aside(&root, &state, CARRIED_PATH)?;
     }
     crate::agent_home::save_project(&root, &kept)
