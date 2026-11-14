@@ -1065,12 +1065,11 @@ fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
     ports
 }
 
-/// The bubblewrap command for a closed agent, up to its harness: its own session, process,
-/// IPC and network namespaces when nothing is allowed, the system folders read-only but the
-/// name resolver's ([`RESOLVER_ROOT`]), the grants, then the helper bound read-only and
-/// started to install the socket filter ([`FILTER_SOCKETS`]). Inputs: bwrap, the helper, the
-/// grants, the working folder and the network. Output: the command, which the harness
-/// follows after `--`.
+/// The bubblewrap command for a closed agent up to its harness: its own namespaces, the
+/// system folders read-only but the name resolver's ([`RESOLVER_ROOT`]), the grants, then
+/// the helper bound read-only and started to install the socket filter ([`FILTER_SOCKETS`]).
+/// Inputs: bwrap, the helper, the grants, the working folder and the network. Output: the
+/// command, which the harness follows after `--`.
 fn bwrap_command(
     bwrap: &Path,
     helper: &Path,
@@ -1096,10 +1095,13 @@ fn bwrap_command(
     if matches!(network, SandboxNetwork::Only(remotes) if remotes.is_empty()) {
         command.arg("--unshare-net");
     }
-    for &root in SYSTEM_READ_ROOTS
+    let system: Vec<&str> = SYSTEM_READ_ROOTS
         .iter()
-        .filter(|root| **root != RESOLVER_ROOT)
-    {
+        .copied()
+        .filter(|root| *root != RESOLVER_ROOT)
+        .collect();
+    assert_eq!(system.len() + 1, SYSTEM_READ_ROOTS.len());
+    for root in system {
         command.args(["--ro-bind-try", root, root]);
     }
     for root in &grants.read {
@@ -1111,7 +1113,6 @@ fn bwrap_command(
     command.arg("--ro-bind").arg(helper).arg(helper);
     command.arg("--chdir").arg(cwd);
     command.arg("--").arg(helper).arg(FILTER_SOCKETS);
-    assert!(command.get_args().all(|arg| arg != RESOLVER_ROOT));
     command
 }
 
