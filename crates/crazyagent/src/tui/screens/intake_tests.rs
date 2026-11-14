@@ -1567,8 +1567,8 @@ fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
 }
 
 #[test]
-fn a_repository_that_came_with_its_own_project_instructions_says_so_in_the_desktop_words() {
-    let notice = "The repository came with its own .crazyagent/instructions.md. CrazyAgent gives it to your agents under the heading Imported from .crazyagent/instructions.md. Check it in Process before you start the team.";
+fn a_folder_that_came_with_its_own_project_instructions_says_so_in_the_desktop_words() {
+    let notice = "The folder came with its own .crazyagent/instructions.md. CrazyAgent gives it to your agents under the heading Imported from .crazyagent/instructions.md. Check it in Process before you start the team.";
     let wrapped = crate::tui::text::wrap(notice, 76);
     assert!(wrapped.len() > 1);
     let (mut plain, _) = review_with(|_| {});
@@ -1593,6 +1593,94 @@ fn a_repository_that_came_with_its_own_project_instructions_says_so_in_the_deskt
         desktop.contains(notice),
         "the desktop onboarding review shows the same notice"
     );
+}
+
+/// SA vid 7 (leader 09:27 A): a folder that arrives with its own .crazyagent/instructions.md,
+/// committed, with no git or with a git folder that cannot be read, starts onboarding with
+/// those instructions under their Imported heading and a review that says so in the desktop
+/// words, and the import Process runs later never labels the owner's text again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_folder_that_arrives_with_project_instructions_starts_onboarding_with_them_labelled() {
+    let notice = "The folder came with its own .crazyagent/instructions.md. CrazyAgent gives it to your agents under the heading Imported from .crazyagent/instructions.md. Check it in Process before you start the team.";
+    let wrapped = crate::tui::text::wrap(notice, 76);
+    let mut engine = Engine::start().await;
+    let home = engine.set_home().await;
+    for (name, git) in [
+        ("tracked", Some(true)),
+        ("plain", None),
+        ("broken", Some(false)),
+    ] {
+        let folder = home.join(name);
+        std::fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+        std::fs::write(
+            folder.join(".crazyagent/instructions.md"),
+            format!("DUMMY-ARRIVED-{name}\n"),
+        )
+        .unwrap();
+        match git {
+            Some(true) => {
+                git_in(&folder, &["init", "-q", "-b", "main"]);
+                git_in(&folder, &["add", "-f", ".crazyagent/instructions.md"]);
+                git_in(
+                    &folder,
+                    &[
+                        "-c",
+                        "user.name=Repo",
+                        "-c",
+                        "user.email=repo@example.invalid",
+                        "-c",
+                        "commit.gpgSign=false",
+                        "commit",
+                        "-q",
+                        "-m",
+                        "carried",
+                    ],
+                );
+            }
+            Some(false) => std::fs::write(
+                folder.join(".git"),
+                format!("gitdir: {}\n", folder.join("missing.git").display()),
+            )
+            .unwrap(),
+            None => {}
+        }
+        let mut ctx = screen_ctx(&engine.user());
+        let screen = open(
+            &Place::Onboarding {
+                path: folder.to_str().unwrap().into(),
+                name: name.into(),
+                project: None,
+            },
+            &mut ctx,
+        );
+        let mut shell = Shell::with(ctx, screen);
+        let mut connection = engine.connect();
+        assert_eq!(pump(&mut shell, &mut connection).await, ["pools"]);
+        shell.key(Key::Enter);
+        let sent = pump(&mut shell, &mut connection).await;
+        assert_eq!(
+            &sent[..2],
+            ["start onboarding", "onboarding"],
+            "{name}: {sent:?}"
+        );
+        assert_eq!(
+            crate::agent_home::read_project(&folder).unwrap(),
+            format!("## Imported from .crazyagent/instructions.md\n\nDUMMY-ARRIVED-{name}\n"),
+            "{name}: the arrived instructions are labelled at the start"
+        );
+        let rows = render(&mut shell, 200, 40);
+        for line in &wrapped {
+            assert!(shows(&rows, line), "{name}: {line:?} in {rows:#?}");
+        }
+        crate::agent_home::save_project(&folder, "OWNER-EDIT\n").unwrap();
+        std::fs::write(folder.join("AGENTS.md"), "NEW-RULE\n").unwrap();
+        crate::instruction_files::import(&folder).unwrap();
+        assert_eq!(
+            crate::agent_home::read_project(&folder).unwrap(),
+            "OWNER-EDIT\n\n## Imported from AGENTS.md\n\nNEW-RULE\n",
+            "{name}: a later import never labels again"
+        );
+    }
 }
 
 #[test]

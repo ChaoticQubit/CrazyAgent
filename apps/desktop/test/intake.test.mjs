@@ -766,12 +766,12 @@ test("an overview the engine did not write is shown apart and labelled, never as
   assert.doesNotMatch(found, />Overview</);
 });
 
-test("a project instructions file the repository came with is named in the review, never shown as the owner's (SA vid 7)", () => {
+test("a project instructions file the folder came with is named in the review, never shown as the owner's (SA vid 7)", () => {
   const catalog = ok({ tech_stack: [], platforms: [], research: [], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
   const base = { name: "Plant shop", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop, draft: null };
   const carried = html(OnboardingReviewView, { ...base, view: ok(view({ carried: true })) });
-  assert.match(carried, /The repository came with its own \.crazyagent\/instructions\.md\. CrazyAgent gives it to your agents under the heading Imported from \.crazyagent\/instructions\.md\. Check it in Process before you start the team\./);
-  assert.doesNotMatch(html(OnboardingReviewView, { ...base, view: ok(view()) }), /The repository came with its own/);
+  assert.match(carried, /The folder came with its own \.crazyagent\/instructions\.md\. CrazyAgent gives it to your agents under the heading Imported from \.crazyagent\/instructions\.md\. Check it in Process before you start the team\./);
+  assert.doesNotMatch(html(OnboardingReviewView, { ...base, view: ok(view()) }), /The folder came with its own/);
 });
 
 test("a setup saved without the mapping's answers offers them in the review", () => {
