@@ -3221,7 +3221,10 @@ fn waiting_results_make_room_at_the_task_cap_after_delivered_history() {
                ('team-tasks','sub','codex',1,'working',1,1);",
         )
         .unwrap();
-    let insert = |tx: &Transaction<'_>, session: Option<&str>, parent: Option<i64>, delivered: i64| {
+    let insert = |tx: &Transaction<'_>,
+                  session: Option<&str>,
+                  parent: Option<i64>,
+                  delivered: i64| {
         tx.execute(
             "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,session,parent,created_ms) VALUES ('team-tasks','master','codex',0,'step','done',?1,?2,?3,0)",
             params![delivered, session, parent],
@@ -3238,9 +3241,18 @@ fn waiting_results_make_room_at_the_task_cap_after_delivered_history() {
     for _ in 5..TASKS_PER_PROJECT_MAX {
         insert(&tx, None, None, 1);
     }
-    let first = admit(&tx, &pool, &setup, None, "first", TaskSource::Owner, None, 1)
-        .unwrap()
-        .unwrap();
+    let first = admit(
+        &tx,
+        &pool,
+        &setup,
+        None,
+        "first",
+        TaskSource::Owner,
+        None,
+        1,
+    )
+    .unwrap()
+    .unwrap();
     let rows = project_rows(&tx, "team_tasks", "team-tasks");
     assert_eq!(rows.len() as i64, TASKS_PER_PROJECT_MAX);
     assert_eq!(
@@ -3248,7 +3260,10 @@ fn waiting_results_make_room_at_the_task_cap_after_delivered_history() {
         [parked, stopped_lead, running_lead, live_master],
         "waiting results outlive newer delivered history"
     );
-    assert!(!rows.contains(&delivered), "the oldest delivered row made room");
+    assert!(
+        !rows.contains(&delivered),
+        "the oldest delivered row made room"
+    );
     assert_eq!(rows.last(), Some(&first));
 
     tx.execute(
@@ -3259,16 +3274,37 @@ fn waiting_results_make_room_at_the_task_cap_after_delivered_history() {
     while (project_rows(&tx, "team_tasks", "team-tasks").len() as i64) < TASKS_PER_PROJECT_MAX {
         insert(&tx, Some("parked-session"), None, 0);
     }
-    let second = admit(&tx, &pool, &setup, None, "second", TaskSource::Owner, None, 2)
-        .unwrap()
-        .unwrap();
+    let second = admit(
+        &tx,
+        &pool,
+        &setup,
+        None,
+        "second",
+        TaskSource::Owner,
+        None,
+        2,
+    )
+    .unwrap()
+    .unwrap();
     let rows = project_rows(&tx, "team_tasks", "team-tasks");
     assert_eq!(rows.len() as i64, TASKS_PER_PROJECT_MAX);
-    assert!(!rows.contains(&parked), "the oldest waiting result made room");
+    assert!(
+        !rows.contains(&parked),
+        "the oldest waiting result made room"
+    );
     assert!(rows.contains(&stopped_lead));
-    let third = admit(&tx, &pool, &setup, None, "third", TaskSource::Owner, None, 3)
-        .unwrap()
-        .unwrap();
+    let third = admit(
+        &tx,
+        &pool,
+        &setup,
+        None,
+        "third",
+        TaskSource::Owner,
+        None,
+        3,
+    )
+    .unwrap()
+    .unwrap();
     let rows = project_rows(&tx, "team_tasks", "team-tasks");
     assert_eq!(rows.len() as i64, TASKS_PER_PROJECT_MAX);
     assert!(
@@ -3284,7 +3320,17 @@ fn waiting_results_make_room_at_the_task_cap_after_delivered_history() {
     )
     .unwrap();
     assert_eq!(
-        admit(&tx, &pool, &setup, None, "refused", TaskSource::Owner, None, 4).unwrap(),
+        admit(
+            &tx,
+            &pool,
+            &setup,
+            None,
+            "refused",
+            TaskSource::Owner,
+            None,
+            4
+        )
+        .unwrap(),
         Err("team_task_limit")
     );
     assert_eq!(
