@@ -1027,6 +1027,30 @@ fn the_name_of_a_status_run_is_read_back_as_its_own_projects_only() {
     }
 }
 
+/// Two projects whose ids differ only in bytes a state name cannot hold, or only after the
+/// bytes a state name has room for, never read each other's status runs as their own, so a
+/// delete of one leaves the other's running check alone (RV-DS241-45).
+#[test]
+fn projects_whose_ids_a_state_name_cannot_tell_apart_keep_their_status_runs_apart() {
+    let long = "a".repeat(100);
+    let pairs = [
+        ("v1.2".to_owned(), "v1_2".to_owned()),
+        ("team:one".to_owned(), "team_one".to_owned()),
+        (format!("{long}-first"), format!("{long}-other")),
+    ];
+    for (one, two) in pairs {
+        let one = ProjectId::new(one).unwrap();
+        let two = ProjectId::new(two).unwrap();
+        assert_ne!(run_stem(&one), run_stem(&two), "{one:?} {two:?}");
+        for (project, other) in [(&one, &two), (&two, &one)] {
+            let name = run::run_name(project, NOW);
+            assert!(name.len() <= RUN_NAME_BYTES_MAX, "{name}");
+            assert!(names_run(project, &name), "{name}");
+            assert!(!names_run(other, &name), "{other:?} {name}");
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_status_run_names_only_its_own_folder_and_profile_for_removal() {
