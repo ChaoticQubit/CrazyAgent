@@ -241,7 +241,9 @@ fn relay_listener() -> std::io::Result<TcpListener> {
 }
 
 /// The listener `bind` gives on 127.0.0.1 for the first of `ports`, going round from
-/// `start`, skipping a port some socket already holds. Inputs: the ports, at least one,
+/// `start`, skipping a port some socket already holds (`AddrInUse`), one the system keeps
+/// from this user, as a Windows excluded port range does (`PermissionDenied`), and one it
+/// cannot give (`AddrNotAvailable`) (relay-port r1 F1). Inputs: the ports, at least one,
 /// where to start and the bind. Output: the listener, the first bind error that is not a
 /// skipped one, or `AddrInUse` saying every model relay port is taken.
 fn first_bound(
@@ -249,11 +251,16 @@ fn first_bound(
     start: usize,
     bind: impl Fn(SocketAddr) -> std::io::Result<TcpListener>,
 ) -> std::io::Result<TcpListener> {
+    use std::io::ErrorKind;
     assert!(!ports.is_empty());
     for step in 0..ports.len() {
         let port = ports[(start % ports.len() + step) % ports.len()];
         match bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port))) {
-            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::AddrInUse | ErrorKind::PermissionDenied | ErrorKind::AddrNotAvailable
+                ) => {}
             bound => return bound,
         }
     }
