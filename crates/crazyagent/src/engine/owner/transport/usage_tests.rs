@@ -243,11 +243,12 @@ async fn a_usage_change_cut_short_keeps_the_owner_barrier_until_it_commits() {
     held.execute_batch("ROLLBACK").unwrap();
     let revoked = match first {
         Ok(done) => done,
-        Err(_) => tokio::time::timeout(Duration::from_secs(10), revoke)
+        Err(_) => tokio::time::timeout(Duration::from_secs(10), &mut revoke)
             .await
             .expect("the revocation runs once the change commits"),
     }
     .unwrap();
+    drop(revoke);
     assert!(
         still_held,
         "the change still owns the owner barrier after its request is cut"
