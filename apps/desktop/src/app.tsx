@@ -45,7 +45,13 @@ function UpdateLink() {
   </>;
 }
 
-function EngineDown({ onRetry }: { onRetry: () => void }) {
+/** The full-window state for an engine that isn't running: why the last start found none when
+ * it says more, Try again, Restart engine, which reinstalls the login service for this app's
+ * engine when it names a gone or temporary app path (RV-DS241-118), the support details and
+ * Check for updates. Inputs: the retry handler and the start's problem. */
+function EngineDown({ onRetry, problem }: { onRetry: () => void; problem: string | null }) {
+  const [restart, restartNow] = useEngineRestart(onRetry);
+  const update = useSyncExternalStore(updateStore.subscribe, updateStore.get, updateStore.get);
   const [copied, setCopied] = useState<"idle" | "copied" | { failed: string }>("idle");
   async function copy() {
     const details = supportDetails(window.innerWidth, window.innerHeight, new Date());
@@ -62,8 +68,10 @@ function EngineDown({ onRetry }: { onRetry: () => void }) {
       <Icon name="wifi-off" size={28} />
       <h1>CrazyAgent's engine isn't running</h1>
       <p className="secondary">Projects, accounts and agents live in the engine. Start it, then try again.</p>
+      {problem && <p role="alert">{displayText(problem)}</p>}
       <span className="row"><Button variant="primary" icon="refresh-cw" onClick={onRetry}>Try again</Button>
         <Button icon="copy" onClick={() => void copy()}>Copy details for support</Button></span>
+      <RestartEngine restart={restart} onRestart={restartNow} disabled={blocking(update)} />
       <UpdateLink />
       {copied === "copied" && <p className="secondary" role="status">Copied. Paste it into your message to support.</p>}
       {typeof copied === "object" && <><p className="secondary" role="alert">Couldn't copy. Select the details below and copy them.</p>
@@ -169,7 +177,7 @@ function ShellSidebar({ route, projects, profileName, session }: { route: Route;
 export function AppView({ session, route, alerts, working, under, back }: { session: Session; route: Route; alerts?: Map<string, number>; working?: ReadonlyMap<string, number>; under?: Route; back?: string }) {
   const open = useUserDialog();
   const updates = route.name === "settings" && route.tab === "updates" || open === "updates";
-  if (session.engine === "down") return updates ? <UpdatesAlone session={session} /> : <EngineDown onRetry={session.retry} />;
+  if (session.engine === "down") return updates ? <UpdatesAlone session={session} /> : <EngineDown onRetry={session.retry} problem={session.engineProblem ?? null} />;
   if (session.engine === "outdated") return updates ? <UpdatesAlone session={session} /> : <EngineOutdated onRetry={session.retry} />;
   if (session.engine === "connecting" || session.profile.kind === "loading") return updates ? <UpdatesAlone session={session} /> : <Launching />;
   const profile = session.profile.kind === "ok" ? session.profile.value : undefined;

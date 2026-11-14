@@ -58,7 +58,7 @@ test("the engine-down state offers Restart engine, which repairs the login servi
   assert.match(markup, /<h1>CrazyAgent&#x27;s engine isn&#x27;t running<\/h1>/);
   assert.match(markup, /role="alert"[^>]*>Move CrazyAgent to your Applications folder, then open it again\./);
   assert.match(markup, /class="btn primary"[^>]*>[\s\S]*Try again<\/button>/);
-  assert.match(markup, /class="btn secondary"[^>]*>(?:(?!<\/button>).)*Restart engine<\/button>/);
+  assert.match(markup, /class="btn"[^>]*>(?:(?!<\/button>).)*Restart engine<\/button>/);
   const plain = render({ engine: "down", engineProblem: null });
   assert.match(plain, /Restart engine<\/button>/);
   assert.doesNotMatch(plain, /role="alert"/);

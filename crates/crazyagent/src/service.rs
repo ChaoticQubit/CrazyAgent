@@ -579,7 +579,29 @@ WantedBy=default.target\n",
     /// AppTranslocation folder: a definition naming it can never be started as it is.
     /// Output: none when nothing readable is installed or the program it names is usable.
     pub fn broken_program(&self) -> Option<PathBuf> {
-        None
+        self.installed_program()
+            .filter(|program| transient(program) || !program.is_file())
+    }
+
+    /// The program the installed definition runs, read back as it was written: the first
+    /// `ProgramArguments` string of a plist or the first word of a systemd `ExecStart=`.
+    /// Output: none when nothing readable is installed, the program is not an absolute path,
+    /// or on Windows, whose task runs the program through `cmd.exe` and is UTF-16.
+    fn installed_program(&self) -> Option<PathBuf> {
+        let installed = bounded_text(&self.definition)?;
+        let program = match self.platform {
+            Platform::MacOs => installed
+                .lines()
+                .skip_while(|line| !line.contains("<key>ProgramArguments</key>"))
+                .find_map(plist_string)?,
+            Platform::Linux => systemd_unquoted(
+                installed
+                    .lines()
+                    .find_map(|line| line.strip_prefix("ExecStart="))?,
+            )?,
+            Platform::Windows => return None,
+        };
+        Some(PathBuf::from(program)).filter(|program| program.is_absolute())
     }
 
     /// What to do with the engine service when no engine answers: install this definition
@@ -590,10 +612,22 @@ WantedBy=default.target\n",
     /// and is refused otherwise. Inputs: the bundled engine, whether a definition is installed
     /// and whether the owner asked for a reinstall. Output: the repair.
     pub fn repair(&self, bundled: &Path, installed: bool, reinstall: bool) -> Repair {
-        if reinstall || !installed || self.stale(bundled) {
-            Repair::Install
-        } else {
+        let broken = installed && self.broken_program().is_some();
+        let replace = reinstall
+            || !installed
+            || broken
+            || self.stale(bundled)
+            || (self.runs_another_program() && self.may_replace());
+        if !replace {
+            return Repair::Start;
+        }
+        if !transient(&self.executable) {
+            return Repair::Install;
+        }
+        if installed && !broken && !reinstall {
             Repair::Start
+        } else {
+            Repair::Refuse
         }
     }
 
@@ -653,12 +687,8 @@ WantedBy=default.target\n",
     /// read as text. Output: none when either file is not plain text, is larger than its cap,
     /// or the plist names no app bundle.
     fn installed_bundle_version(&self) -> Option<String> {
-        let installed = bounded_text(&self.definition)?;
-        let program = installed
-            .lines()
-            .skip_while(|line| !line.contains("<key>ProgramArguments</key>"))
-            .find_map(plist_string)?;
-        let bundle = Path::new(&program).ancestors().find(|folder| {
+        let program = self.installed_program()?;
+        let bundle = program.ancestors().find(|folder| {
             folder
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
@@ -699,6 +729,9 @@ WantedBy=default.target\n",
     /// name, so the engine starts now and at every login. Output: an error naming the
     /// failing step.
     pub fn install(&self) -> Result<(), ServiceError> {
+        if transient(&self.executable) {
+            return Err(transient_refused(&self.executable));
+        }
         if !self.executable.is_file() {
             return Err(failure(format!(
                 "{}: the engine executable is missing",
@@ -752,12 +785,21 @@ WantedBy=default.target\n",
         Ok(())
     }
 
-    /// Starts the installed engine service. Output: an error when it is not installed.
+    /// Starts the installed engine service. Output: an error when it is not installed, or
+    /// when it names a program that is gone or [`transient`] ([`Self::broken_program`]),
+    /// which is never started as it is.
     pub fn start(&self) -> Result<(), ServiceError> {
         if !self.definition.is_file() {
             return Err(failure(
                 "the engine service is not installed; run: crazyagent service install",
             ));
+        }
+        if let Some(program) = self.broken_program() {
+            return Err(failure(format!(
+                "the engine service runs {}, which is gone or on a disk image, another disk or \
+                 a temporary folder; reinstall it: crazyagent service install",
+                program.display()
+            )));
         }
         let loaded = self.platform == Platform::MacOs && self.loaded()?;
         run_checked(&self.start_command(current_uid(), loaded))
@@ -980,8 +1022,21 @@ pub(crate) fn changeable_past_sticky(_path: &Path) -> Option<PathBuf> {
 /// the app is moved, and which another disk of the same name could later take the place of.
 /// Read as written, without touching the file system. Input: the path. Output: the answer.
 pub fn transient(path: &Path) -> bool {
-    let _ = path;
-    false
+    path.starts_with("/Volumes")
+        || path
+            .components()
+            .any(|part| part.as_os_str() == "AppTranslocation")
+}
+
+/// The refusal for a login service that would run an engine on a disk image, another disk
+/// or a temporary folder ([`transient`]). Input: the engine. Output: the error saying to
+/// move the app to Applications first.
+pub fn transient_refused(executable: &Path) -> ServiceError {
+    failure(format!(
+        "{}: a login service never runs the engine from a disk image, another disk or a \
+         temporary folder; move CrazyAgent to Applications, then open it again",
+        executable.display()
+    ))
 }
 
 /// Refuses an engine that a login service or the command line link would keep running
@@ -1186,6 +1241,27 @@ fn plist_string(line: &str) -> Option<String> {
             .replace("&apos;", "'")
             .replace("&amp;", "&"),
     )
+}
+
+/// Reads back the first word of an ExecStart= line as [`systemd_quoted`] wrote it.
+/// Input: the line after `ExecStart=`. Output: the word, or none when it is not quoted so.
+fn systemd_unquoted(text: &str) -> Option<String> {
+    let mut characters = text.strip_prefix('"')?.chars();
+    let mut word = String::new();
+    while let Some(character) = characters.next() {
+        match character {
+            '"' => return Some(word),
+            '\\' => word.push(characters.next()?),
+            '%' | '$' => {
+                if characters.next()? != character {
+                    return None;
+                }
+                word.push(character);
+            }
+            other => word.push(other),
+        }
+    }
+    None
 }
 
 /// Quotes one word of an ExecStart= line, where systemd also expands `$` variables, so a
@@ -1497,7 +1573,11 @@ pub async fn ensure_running(
     layout.prepare()?;
     let since = log_length(layout);
     if service.status()?.installed {
-        service.start()?;
+        match service.repair(executable, true, false) {
+            Repair::Start => service.start()?,
+            Repair::Install => service.install()?,
+            Repair::Refuse => return Err(transient_refused(&service.executable)),
+        }
         wait_started(layout, service, bound, since).await?;
         return Ok(Started::Service);
     }
