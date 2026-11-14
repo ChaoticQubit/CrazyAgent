@@ -1854,7 +1854,7 @@ fn settings_show_retry_briefly_by_default_with_the_three_options_and_each_harnes
     ] {
         assert!(shown.contains(line), "{line} in {shown}");
     }
-    assert!(bar(&rows).contains("p Provider retry"));
+    assert!(bar(&rows).contains("p Retries"));
     shell.key(Key::Char('p'));
     let rows = render(&mut shell, 200, 80);
     find(
@@ -1968,7 +1968,7 @@ fn the_provider_retry_row_and_its_ask_fit_a_120_by_40_terminal() {
     let mut shell = settings(120, 40);
     let rows = render(&mut shell, 120, 40);
     assert!(find(&rows, "Provider retry  ").contains("Retry briefly"));
-    assert!(bar(&rows).contains("p Provider retry"));
+    assert!(bar(&rows).contains("p Retries"));
     shell.key(Key::Char('p'));
     let rows = render(&mut shell, 120, 40);
     find(

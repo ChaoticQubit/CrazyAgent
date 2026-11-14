@@ -2213,7 +2213,7 @@ impl Screen for AppSetup {
             hints.push(hint("m", "Master steps"));
             hints.push(hint("t", "Master time"));
             hints.push(hint("z", "Master frame"));
-            hints.push(hint("p", "Provider retry"));
+            hints.push(hint("p", "Retries"));
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
