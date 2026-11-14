@@ -1337,6 +1337,55 @@ fn a_sticky_store_passes_only_above_parts_this_user_or_root_owns() {
     );
 }
 
+/// rv-sec2 corrections F2 (DS-89): a file directly in a sticky store such as /nix/store,
+/// where nix-darwin's /opt/homebrew/bin/brew link resolves, passes: the store's group cannot
+/// unlink or rename an entry root owns there. A group-writable parent with no sticky bit, a
+/// sticky one another user owns, one over a missing entry, and a world-writable sticky one
+/// such as /tmp as the entry's own folder still count.
+#[cfg(unix)]
+#[test]
+fn a_file_directly_in_a_sticky_group_store_passes_and_an_unsticky_parent_does_not() {
+    const ME: u32 = 501;
+    const OTHER: u32 = 502;
+    const NIXBLD: u32 = 30_000;
+    let found = |owner, group, mode, folder| Part::Found {
+        owner,
+        group,
+        mode,
+        folder,
+        link: false,
+    };
+    let system = found(0, 0, 0o755, true);
+    let brew = found(0, 0, 0o555, false);
+    let store = found(0, NIXBLD, 0o1775, true);
+    for open_stores in [true, false] {
+        assert_eq!(
+            first_changeable_part(&[brew, store, system, system], ME, open_stores),
+            None,
+            "open_stores {open_stores}"
+        );
+    }
+    let unsticky = found(0, NIXBLD, 0o775, true);
+    assert_eq!(
+        first_changeable_part(&[brew, unsticky, system, system], ME, true),
+        Some(1)
+    );
+    let theirs = found(OTHER, NIXBLD, 0o1775, true);
+    assert_eq!(
+        first_changeable_part(&[brew, theirs, system, system], ME, true),
+        Some(1)
+    );
+    assert_eq!(
+        first_changeable_part(&[Part::Missing, store, system, system], ME, true),
+        Some(1)
+    );
+    let tmp = found(0, 0, 0o1777, true);
+    assert_eq!(
+        first_changeable_part(&[brew, tmp, system], ME, true),
+        Some(1)
+    );
+}
+
 /// R2-L1: a file a group other than root's can write counts as changeable, like a folder,
 /// for the engine service and for the tools the resolver runs: a 0775 staff file in this
 /// user's 0755 folder is refused, 0755 or a root-group 0775 passes, and a link's own mode is
