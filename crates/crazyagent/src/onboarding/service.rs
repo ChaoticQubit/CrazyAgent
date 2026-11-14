@@ -621,8 +621,10 @@ struct Refresh {
 /// project ([`refreshable`]) whose absolute folder holds a `.crazyagent` folder and whose
 /// published graph is missing or was built at another tip than its main branch holds now,
 /// which covers every landing and the owner's own commits, or while the project hid other
-/// folders than it hides now. The first pass runs at engine start. Takes the work, the
-/// worker's database, what earlier passes saw and `halted`. Returns whether a build ran.
+/// folders than it hides now, and never in a folder a project move holds, asked under the
+/// refresh's mark ([`Refreshing`]), which the move waits for. The first pass runs at engine
+/// start. Takes the work, the worker's database, what earlier passes saw and `halted`.
+/// Returns whether a build ran.
 #[cfg(unix)]
 fn refresh_step(
     work: &Work,
@@ -667,6 +669,10 @@ fn refresh_step(
             &tip,
             &main_graph::hidden_digest(&hidden),
         ) {
+            continue;
+        }
+        let _refreshing = Refreshing::start(repo);
+        if held(database, repo) {
             continue;
         }
         match refresh_build(work, database, project, repo, tip, &hidden, halted) {
@@ -718,14 +724,16 @@ fn step_waits(database: &Connection) -> bool {
         .unwrap_or(false)
 }
 
-/// The stop a main graph refresh build polls (DEC-123): yes once the engine halts, or once
+/// The stop a main graph refresh build polls (DEC-123): yes once the engine halts, once
 /// an onboarding step waits to be claimed ([`step_waits`]), so a new project's onboarding
-/// never waits behind a refresh. The table is read at most every [`STEP_POLL`], and a yes
-/// stays yes. Takes the worker's database and `halted`. Returns the stop.
+/// never waits behind a refresh, or once a project move holds the folder it builds in
+/// ([`held`]), so the move never waits long. The table is read at most every
+/// [`STEP_POLL`], and a yes stays yes. Takes the worker's database, the folder and `halted`.
+/// Returns the stop.
 #[cfg(unix)]
 fn gives_way<'a>(
     database: &'a Connection,
-    _folder: &'a Path,
+    folder: &'a Path,
     halted: &'a dyn Fn() -> bool,
 ) -> impl Fn() -> bool + 'a {
     let read: Cell<Option<Instant>> = Cell::new(None);
@@ -736,14 +744,30 @@ fn gives_way<'a>(
         }
         if !waits.get() && read.get().is_none_or(|at| at.elapsed() >= STEP_POLL) {
             read.set(Some(Instant::now()));
-            waits.set(step_waits(database));
+            waits.set(step_waits(database) || held(database, folder));
         }
         waits.get()
     }
 }
 
-/// One main graph refresh in flight in a project folder, seen by [`refreshing_in`] until
-/// it is dropped. Built only by [`Refreshing::start`].
+/// Whether a pending project move holds `folder`
+/// ([`crate::projects_home::project_move_holds`]). A hold that cannot be read counts as
+/// held, so no refresh writes into a folder that may be moving. Takes the worker's database
+/// and the folder. Returns the answer.
+#[cfg(unix)]
+fn held(database: &Connection, folder: &Path) -> bool {
+    crate::projects_home::project_move_holds(database, folder).unwrap_or(true)
+}
+
+/// The project folders a main graph refresh builds or publishes in now, each with how many
+/// refreshes hold it, so a project move waits for them ([`refreshing_in`]).
+static REFRESHING: std::sync::Mutex<std::collections::BTreeMap<PathBuf, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// One main graph refresh in flight in a project folder, at its real path when it resolves,
+/// seen by [`refreshing_in`] until it is dropped. A refresh takes it before it asks for a
+/// project move's hold, so a move planned meanwhile either sees the mark or holds the folder
+/// before the refresh asks. Built only by [`Refreshing::start`].
 #[cfg(unix)]
 #[derive(Debug)]
 pub(crate) struct Refreshing(PathBuf);
@@ -752,21 +776,49 @@ pub(crate) struct Refreshing(PathBuf);
 impl Refreshing {
     /// Marks a refresh in flight in `repo`. Input: the project folder. Output: the mark.
     pub(crate) fn start(repo: &Path) -> Self {
-        Self(repo.to_path_buf())
+        let folder = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+        let mut marks = REFRESHING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *marks.entry(folder.clone()).or_insert(0) += 1;
+        assert!(marks.len() <= ONBOARDED_MAX as usize);
+        Self(folder)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Refreshing {
+    fn drop(&mut self) {
+        let mut marks = REFRESHING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let left = {
+            let count = marks.get_mut(&self.0).expect("a refresh mark is counted");
+            assert!(*count > 0);
+            *count -= 1;
+            *count
+        };
+        if left == 0 {
+            marks.remove(&self.0);
+        }
     }
 }
 
 /// Tells whether a main graph refresh builds or publishes in `folder` or inside it now.
-/// Input: the folder. Output: the answer.
-pub(crate) fn refreshing_in(_folder: &Path) -> bool {
-    false
+/// Input: the folder, at its real path. Output: the answer.
+pub(crate) fn refreshing_in(folder: &Path) -> bool {
+    REFRESHING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .keys()
+        .any(|marked| marked.starts_with(folder))
 }
 
 /// The projects whose main graph the refresh looks after, with their folders, at most
 /// `ONBOARDED_MAX` in project order: each onboarded project whose graph step is over, at its
 /// onboarding folder, and each project with no onboarding row that declares a repository,
-/// its first repository standing in for its folder as the trash guards read it. Takes the
-/// worker's database. Returns the list.
+/// its first repository standing in for its folder as the trash guards read it, leaving out
+/// a folder a project move holds ([`held`]). Takes the worker's database. Returns the list.
 #[cfg(unix)]
 fn refreshable(database: &Connection) -> rusqlite::Result<Vec<(String, PathBuf)>> {
     let mut statement = database.prepare(
@@ -782,7 +834,11 @@ fn refreshable(database: &Connection) -> rusqlite::Result<Vec<(String, PathBuf)>
             PathBuf::from(row.get::<_, String>(1)?),
         ))
     })?;
-    rows.collect()
+    let listed = rows.collect::<rusqlite::Result<Vec<(String, PathBuf)>>>()?;
+    Ok(listed
+        .into_iter()
+        .filter(|(_, repo)| !held(database, repo))
+        .collect())
 }
 
 /// The tip a project's main graph is built at ([`crate::landing::main_tip`]), only a commit
@@ -803,8 +859,8 @@ fn main_tip(database: &Connection, project: &str, repo: &Path) -> Option<String>
 enum Refreshed {
     /// Built and published.
     Published,
-    /// Stopped for a waiting onboarding step or the engine's stop; never a failure, so the
-    /// project is tried again at its next check.
+    /// Stopped for a waiting onboarding step, a project move of its folder or the engine's
+    /// stop; never a failure, so the project is tried again at its next check.
     GaveWay,
     /// Failed, timed out, did not start or was not published.
     Failed,
@@ -813,7 +869,8 @@ enum Refreshed {
 /// Rebuilds one project's main graph in place through the confined graph build and
 /// publishes it at `tip` with the folders it hid ([`publish_main`]), then removes the
 /// build's run folder and profile unless its processes may still run. The build stops as
-/// soon as an onboarding step waits ([`gives_way`]). Takes the work, the worker's database,
+/// soon as an onboarding step waits or a project move holds the folder ([`gives_way`]), and
+/// a build a move holds by its end is not published. Takes the work, the worker's database,
 /// the project, its folder, the tip read before the build, the project's hidden folders
 /// and `halted`. Returns how the refresh ended.
 #[cfg(unix)]
@@ -843,6 +900,7 @@ fn refresh_build(
         forget_run(work.runner.state(), &name);
     }
     match ending {
+        Ok(GraphEnding::Built) if held(database, repo) => Refreshed::GaveWay,
         Ok(GraphEnding::Built) if publish_main(repo, tip, hidden) => Refreshed::Published,
         Ok(GraphEnding::Stopped) => Refreshed::GaveWay,
         _ => Refreshed::Failed,

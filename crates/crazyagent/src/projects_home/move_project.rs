@@ -148,9 +148,9 @@ impl ProjectMove {
     }
 
     /// Runs the plan with a bounded wait: nothing moves while an agent of the project
-    /// runs (`move_project_busy` past the wait), then the folder is placed by
-    /// [`AddPlan::place`], which leaves the source whole. Input: the wait. Output: the
-    /// outcome.
+    /// runs or a main graph refresh works in its folder (`move_project_busy` past the
+    /// wait), then the folder is placed by [`AddPlan::place`], which leaves the source
+    /// whole. Input: the wait. Output: the outcome.
     pub(crate) fn run_with(self, wait: Duration) -> Result<Moved, EngineError> {
         let landing = self.ready(wait)?;
         let placed = self.add.place(&Tally::default())?;
@@ -167,7 +167,9 @@ impl ProjectMove {
         Ok(Moved { placed, landing })
     }
 
-    /// Waits until no agent of the project runs and no landing work runs in its
+    /// Waits until no agent of the project runs, no main graph refresh builds or publishes
+    /// in its folder (one gives way to the move's hold within a poll,
+    /// [`crate::onboarding::service::refreshing_in`]) and no landing work runs in its
     /// repositories, takes the landing holds, then asks again, under the move's hold, what
     /// [`busy`] asked at the plan: work that started since (a master session's working
     /// copy, a change set step, an onboarding step, research) refuses the move before
@@ -183,7 +185,9 @@ impl ProjectMove {
         db.busy_timeout(Duration::from_secs(5))
             .map_err(unavailable)?;
         let deadline = Instant::now() + wait;
-        while active_agents(&db, &self.project).map_err(unavailable)? > 0 {
+        while active_agents(&db, &self.project).map_err(unavailable)? > 0
+            || crate::onboarding::service::refreshing_in(self.add.source())
+        {
             if Instant::now() >= deadline {
                 return Err(refused("move_project_busy"));
             }
