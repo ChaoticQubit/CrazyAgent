@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -74,4 +75,10 @@ test("the review of a proposal for a tab from the project's files never says the
   const html = renderToStaticMarkup(createElement(view.ProposalReview, { label: "Features", state, busy: false, note: "", onAccept: () => {}, onReject: () => {}, onClose: () => {} }));
   assert.ok(text(html).includes(FOREIGN_REVIEW));
   assert.doesNotMatch(html, /You edited this tab/);
+});
+
+test("the TUI says the same words for a tab from the project's files (DEC-141)", () => {
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_view.rs", import.meta.url), "utf8");
+  assert.equal(view.FOREIGN_TAB, FOREIGN);
+  assert.ok(tui.includes(`"${FOREIGN}"`), "the TUI's line differs");
 });

@@ -865,10 +865,15 @@ fn overview_blocked(tab: OverviewTab, code: &str) -> String {
     )
 }
 
+/// What a tab whose file came with the project's files says above its text, the desktop's
+/// words (RV-DS241-2, DEC-141): CrazyAgent didn't write it and the owner didn't save it here.
+const FOREIGN_TAB: &str =
+    "This tab's file came with the project's files: CrazyAgent didn't write it and you didn't save it. Check it before you use its commands.";
+
 /// The lines above the picked Overview tab's text and the text itself, as Markdown.
 /// A project outside the CrazyAgent folder and a blocked tab get their one line and no text;
-/// the README is shown either way.
-/// Takes the overview and the picked tab's index in `OVERVIEW_TAB_LABELS`.
+/// the README is shown either way, and a tab whose file came with the project's files says
+/// so first. Takes the overview and the picked tab's index in `OVERVIEW_TAB_LABELS`.
 /// Returns the plain notes to show first and the Markdown, None when there is none.
 fn overview_picked(overview: &Overview, picked: usize) -> (Vec<String>, Option<&str>) {
     assert!(picked < OVERVIEW_TAB_LABELS.len());
@@ -892,6 +897,9 @@ fn overview_picked(overview: &Overview, picked: usize) -> (Vec<String>, Option<&
         return (vec![overview_blocked(*tab, code)], None);
     }
     let mut notes = Vec::new();
+    if state.foreign && state.text.is_some() {
+        notes.push(FOREIGN_TAB.to_owned());
+    }
     if state.proposal.is_some() {
         notes.push("A refresh proposes changes. Review them in the desktop app.".to_owned());
     }

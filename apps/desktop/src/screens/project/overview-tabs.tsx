@@ -103,6 +103,11 @@ const DIFF_CHANGED = "This tab changed since this diff was made. The diff now sh
 const FIRST: StripId = "quick_info";
 const LOADING = "Loading the Overview tabs...";
 const READ_ONLY = "This is the project's own file. Edit it in the project.";
+/** What a tab whose file came with the project's files says above its text, the TUI's words
+ * (RV-DS241-2, DEC-141): CrazyAgent didn't write it and the owner didn't save it here. */
+export const FOREIGN_TAB = "This tab's file came with the project's files: CrazyAgent didn't write it and you didn't save it. Check it before you use its commands.";
+/** What the review of a proposal for such a tab says in place of the owner's-edit line. */
+const FOREIGN_REVIEW = "This tab's file came with the project's files. Accept replaces it with the proposal; Reject keeps it.";
 const CUT = "Showing the first part of a long file.";
 const NO_README = "This project has no README file.";
 const WRITING = "Writing now";
@@ -467,6 +472,7 @@ export function ProposalReview({ label, state, busy, note, onAccept, onReject, o
   const added = rows?.filter((row) => row.kind === "added").length ?? 0;
   return <section className="pj-stack-s ov-review" id={REVIEW_PANEL} tabIndex={-1} aria-label={`Proposed changes to ${label}`}>
     {state.edited && <p className="pj-note warn">You edited this tab. Accept replaces your text with the proposal; Reject keeps yours.</p>}
+    {state.foreign && <p className="pj-note warn">{FOREIGN_REVIEW}</p>}
     {rows !== null ? <>
       <p className="pj-secondary">{`${removed} ${removed === 1 ? "line" : "lines"} removed, ${added} added. Nothing changes until you accept.`}</p>
       <div className="process-text pr-diff" role="group" aria-label="Proposed changes">
@@ -597,7 +603,8 @@ function CompetitorsPanel({ data, overview, state, onSelect }: { data: ProjectDa
 
 /** The body of one generated tab that can be shown: Competitors with its source, Quick info
  * through the project's own description, else its Markdown or what will write it; Install &
- * use gets Copy and Run on its command lines.
+ * use gets Copy and Run on its command lines. A tab whose file came with the project's files
+ * says so first, and its commands get Copy only (RV-DS241-2).
  * Inputs: the project data, the overview, the tab's state, the Run mode, the tab pick handler
  * and how Quick info renders a text. Output: the body. */
 function TabBody({ data, overview, state, runMode, onSelect, quickInfo }: {
@@ -609,10 +616,12 @@ function TabBody({ data, overview, state, runMode, onSelect, quickInfo }: {
   quickInfo: (text: string | null) => ReactNode;
 }) {
   const facts = state.tab === "quick_info";
-  if (state.tab === "competitors") return <CompetitorsPanel data={data} overview={overview} state={state} onSelect={onSelect} />;
+  const from = state.foreign && state.text !== null && <p className="pj-note warn">{FOREIGN_TAB}</p>;
+  if (state.tab === "competitors") return <>{from}<CompetitorsPanel data={data} overview={overview} state={state} onSelect={onSelect} /></>;
   if (state.text === null) return <><p className="pj-muted">{unwritten(overview)}</p>{facts && quickInfo(null)}</>;
-  if (facts) return <>{quickInfo(state.text)}</>;
-  return <MarkdownView source={state.text} onOpenLink={(href) => void openLink(href)} codeAction={state.tab === "install_and_use" ? commandAction(data.id, runMode) : undefined} />;
+  if (facts) return <>{from}{quickInfo(state.text)}</>;
+  const mode = state.foreign ? "off" : runMode;
+  return <>{from}<MarkdownView source={state.text} onOpenLink={(href) => void openLink(href)} codeAction={state.tab === "install_and_use" ? commandAction(data.id, mode) : undefined} /></>;
 }
 
 /** The banner of a tab whose refresh proposal waits, or the open review of it. Accept sends

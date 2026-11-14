@@ -5237,6 +5237,7 @@ mod overview_tabs {
                     text: None,
                     version: String::new(),
                     edited: false,
+                    foreign: false,
                     proposal: None,
                     proposal_version: String::new(),
                     blocked: None,
