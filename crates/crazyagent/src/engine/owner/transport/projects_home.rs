@@ -280,11 +280,12 @@ pub(super) fn regranted(
 }
 
 /// Whether the disk changed before the first grant check of an answer: a Delete whose
-/// folders reached the Trash. Inputs: whether the Trash move ran, whether the request moves
-/// the projects home or one project, and whether its disk work ran. Output: the answer,
-/// which [`regranted`] reads.
+/// folders reached the Trash, or a projects home or project move whose disk work ran, even
+/// one that failed, so a grant found stale there is an outcome to reconcile (rv-code3 r1 F1).
+/// Inputs: whether the Trash move ran, whether the request moves the projects home or one
+/// project, and whether its disk work ran. Output: the answer, which [`regranted`] reads.
 pub(super) fn disk_changed(trashed: bool, moving: bool, moving_project: bool, ran: bool) -> bool {
-    trashed
+    trashed || ((moving || moving_project) && ran)
 }
 
 /// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, SetupProject, CreateDemo
