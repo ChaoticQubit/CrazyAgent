@@ -111,7 +111,7 @@ fn failures_retry_until_the_attempt_limit_then_stay_failed() {
 fn a_failure_line_keeps_every_byte_up_to_its_bound_and_a_longer_one_is_cut_on_a_character() {
     let (_temp, path) = store();
     let jobs = ResearchJobs::open(&path).unwrap();
-    let host = format!("{}.test", ["a".repeat(61); 4].join("."));
+    let host = format!("{}.test", ["a".repeat(61).as_str(); 4].join("."));
     let reach = format!(
         "Can't reach the model provider at {host}:443. Check the address or the network, or pick another account in this pool, then try again."
     );
