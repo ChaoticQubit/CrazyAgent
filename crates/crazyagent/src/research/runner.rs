@@ -4626,9 +4626,7 @@ mod tests {
     /// never named, and no check waits on a remote host.
     #[test]
     fn a_loopback_provider_that_refuses_connections_is_named_at_once_and_a_listening_one_is_not() {
-        let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-        let port = closed.local_addr().unwrap().port();
-        drop(closed);
+        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
         let open = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let listening = open.local_addr().unwrap().port();
         let codex = |base_url: String| ResearchAccount::Endpoint {
@@ -4680,9 +4678,7 @@ mod tests {
     /// keeps its place.
     #[test]
     fn the_reach_check_here_names_a_refusing_provider_only_where_confined_runs_exist() {
-        let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-        let port = closed.local_addr().unwrap().port();
-        drop(closed);
+        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
         let account = ResearchAccount::Endpoint {
             base_url: format!("http://127.0.0.1:{port}/v1"),
             model: "local-model".into(),
@@ -4711,6 +4707,25 @@ mod tests {
         assert!(!refused(Err(Error::from_raw_os_error(libc::EMFILE))));
         assert!(!refused(Err(Error::from(ErrorKind::AddrNotAvailable))));
         assert!(!refused(Err(Error::from(ErrorKind::PermissionDenied))));
+    }
+
+    /// REACH-FLAKE: the port a reach row names for a down provider stays in use while the row
+    /// runs, so the system gives it to no port-0 bind and refuses a bind that names it without
+    /// `SO_REUSEADDR`, and every connect to it is refused at once: the row never finds a
+    /// provider it did not start on that port.
+    #[test]
+    fn a_port_kept_for_a_down_provider_refuses_connects_and_no_plain_bind_takes_it() {
+        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+        let taken = crate::spawn_gate::bind_tcp_std_exclusive(address);
+        assert_eq!(
+            taken.as_ref().map(drop).map_err(std::io::Error::kind),
+            Err(std::io::ErrorKind::AddrInUse),
+            "a plain bind took the port the row named for a down provider"
+        );
+        assert!(refused(
+            crate::spawn_gate::connect_tcp_std_timeout(&address, PROVIDER_REACH_TIME).map(drop)
+        ));
     }
 
     #[test]
