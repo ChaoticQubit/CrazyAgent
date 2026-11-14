@@ -15293,6 +15293,161 @@ fn a_confined_step_on_linux_meets_a_held_index_lock_as_git_does() {
     assert!(!lock.exists());
 }
 
+/// What an agent could leave where a confined Linux step keeps its copy of the index, or
+/// where the engine reads the index: a link to a file outside, a link to an endless device, a
+/// FIFO, a second hard link of a file outside and a folder with a file in it. Input: the file
+/// outside. Output: each plant's name and how to make it at a path.
+#[cfg(target_os = "linux")]
+fn index_plants(outside: &Path) -> Vec<(&'static str, Box<dyn Fn(&Path)>)> {
+    let mut plants: Vec<(&'static str, Box<dyn Fn(&Path)>)> = Vec::new();
+    let linked = outside.to_path_buf();
+    plants.push((
+        "a link to a file outside",
+        Box::new(move |path: &Path| std::os::unix::fs::symlink(&linked, path).unwrap()),
+    ));
+    plants.push((
+        "a link to an endless device",
+        Box::new(|path: &Path| std::os::unix::fs::symlink("/dev/zero", path).unwrap()),
+    ));
+    plants.push((
+        "a FIFO",
+        Box::new(|path: &Path| {
+            let made = crate::spawn_gate::status(
+                Command::new("/usr/bin/mkfifo")
+                    .arg(path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .unwrap();
+            assert!(made.success());
+        }),
+    ));
+    let hard = outside.to_path_buf();
+    plants.push((
+        "a second hard link of a file outside",
+        Box::new(move |path: &Path| std::fs::hard_link(&hard, path).unwrap()),
+    ));
+    plants.push((
+        "a folder with a file in it",
+        Box::new(|path: &Path| {
+            std::fs::create_dir(path).unwrap();
+            write(&path.join("index"), "planted\n");
+        }),
+    ));
+    assert_eq!(plants.len(), 5);
+    plants
+}
+
+/// LINUX-GIT-CONFINE r1 F1: a link, FIFO, second hard link or folder that a raced work-tree
+/// step leaves as its copy of the index is never taken as the worktree's index. The step
+/// refuses with `changes_git_failed`; the index, its lock and the file outside stay as they
+/// were, the step folder keeps nothing, and the next step runs.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_step_on_linux_never_takes_a_link_or_a_special_file_as_the_index() {
+    let case = Case::new();
+    let outside = case.home.join("outside");
+    write(&outside, "owner secret\n");
+    let index = case.workspace.git_dir.join("index");
+    let lock = case.workspace.git_dir.join("index.lock");
+    let copy = case.workspace.git_dir.join("crazyagent-step").join("index");
+    let before = std::fs::read(&index).unwrap();
+    let placed = std::fs::symlink_metadata(&index).unwrap().ino();
+    for (name, plant) in index_plants(&outside) {
+        let repo = confined_agent(&case, git::Writes::WorkTree);
+        let left = repo.swapped(|| {
+            std::fs::remove_file(&copy).unwrap();
+            plant(&copy);
+            Ok(git::Output {
+                code: 0,
+                stdout: Vec::new(),
+                overflow: false,
+            })
+        });
+        assert_eq!(
+            left.err().map(|error| error.0).as_deref(),
+            Some("changes_git_failed"),
+            "{name}"
+        );
+        assert_eq!(std::fs::read(&index).unwrap(), before, "{name}");
+        assert_eq!(
+            std::fs::symlink_metadata(&index).unwrap().ino(),
+            placed,
+            "{name}"
+        );
+        assert!(std::fs::symlink_metadata(&lock).is_err(), "{name}");
+        assert!(std::fs::symlink_metadata(&copy).is_err(), "{name}");
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "owner secret\n",
+            "{name}"
+        );
+        assert_eq!(std::fs::metadata(&outside).unwrap().nlink(), 1, "{name}");
+        let next = repo
+            .exec(
+                &["diff-index", "--quiet", "--cached", "HEAD"],
+                None,
+                &[],
+                4096,
+            )
+            .unwrap();
+        assert_eq!(next.code, 0, "{name}: the next step did not run");
+    }
+}
+
+/// The other half of LINUX-GIT-CONFINE r1 F1: an index that already is a link, FIFO, second
+/// hard link or folder is never read or copied by a confined Linux step. The step refuses
+/// with `changes_git_failed` before git runs, at once even for a FIFO, and nothing from
+/// outside reaches the step folder.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_step_on_linux_never_copies_an_index_that_is_a_link_or_a_special_file() {
+    let case = Case::new();
+    let outside = case.home.join("outside");
+    write(&outside, "owner secret\n");
+    let index = case.workspace.git_dir.join("index");
+    let lock = case.workspace.git_dir.join("index.lock");
+    let copy = case.workspace.git_dir.join("crazyagent-step").join("index");
+    let before = std::fs::read(&index).unwrap();
+    let repo = confined_agent(&case, git::Writes::WorkTree);
+    let gone = |path: &Path| {
+        if std::fs::symlink_metadata(path).unwrap().is_dir() {
+            std::fs::remove_dir_all(path).unwrap();
+        } else {
+            std::fs::remove_file(path).unwrap();
+        }
+    };
+    for (name, plant) in index_plants(&outside) {
+        gone(&index);
+        plant(&index);
+        let ran = std::cell::Cell::new(false);
+        let refused = repo.swapped(|| {
+            ran.set(true);
+            Ok(git::Output {
+                code: 0,
+                stdout: Vec::new(),
+                overflow: false,
+            })
+        });
+        assert_eq!(
+            refused.err().map(|error| error.0).as_deref(),
+            Some("changes_git_failed"),
+            "{name}"
+        );
+        assert!(!ran.get(), "{name}: the step ran on a copy of it");
+        assert!(std::fs::symlink_metadata(&copy).is_err(), "{name}");
+        assert!(std::fs::symlink_metadata(&lock).is_err(), "{name}");
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "owner secret\n",
+            "{name}"
+        );
+        gone(&index);
+        std::fs::write(&index, &before).unwrap();
+    }
+}
+
 /// An owner repository whose config names a thousand stale branches lists more keys than
 /// the listing bound holds (ScholarScope, v2.2.1 item 8): an agent's own clone of it is
 /// still made, since engine git asks only for the filter keys it reads.

@@ -531,7 +531,7 @@ impl Repo {
     /// when the lock is already held, or `changes_git_failed` when the index cannot be
     /// locked, copied or put back.
     #[cfg(target_os = "linux")]
-    fn swapped(
+    pub(super) fn swapped(
         &self,
         step: impl FnOnce() -> Result<Output, EngineError>,
     ) -> Result<Output, EngineError> {
