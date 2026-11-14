@@ -994,6 +994,50 @@ fn rollout(sessions: &Path, day: &str, name: &str, cwd: &Path, lines: &[&str]) -
     path
 }
 
+/// RV-DS241-60: a Codex master that swaps its home's `sessions` folder for a link to a
+/// sessions folder outside its home, such as the owner's own `~/.codex/sessions`, gets none
+/// of the rollouts there: a reader adopting its pane never takes one, a resume is refused,
+/// and the conversation and typed readers read nothing through the link, though they read
+/// the same record where it really lies.
+#[test]
+fn a_codex_sessions_folder_swapped_for_a_link_is_never_read_through() {
+    let case = Case::new();
+    let started = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+    let typed = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Owner words"}]}}"#;
+    let done =
+        r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Done"}}"#;
+    let owner = case.path().join("owner").join("sessions");
+    let real = rollout(
+        &owner,
+        "2026/10/23",
+        "rollout-owner.jsonl",
+        &case.work(),
+        &[started, typed, done],
+    );
+    assert!(!conversation_messages("codex", &real).is_empty());
+    assert!(typed_past("codex", &real, 0).is_some());
+    let home = case.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let sessions = home.join("sessions");
+    std::os::unix::fs::symlink(&owner, &sessions).unwrap();
+    let source = Transcript::CodexRollouts {
+        sessions: sessions.clone(),
+    };
+
+    let mut adopted =
+        TranscriptReader::adopted(source.clone(), &case.work(), SystemTime::UNIX_EPOCH);
+    assert_eq!(adopted.read().unwrap(), Vec::new());
+    assert_eq!(adopted.conversation(), None);
+    let record = sessions.join("2026/10/23/rollout-owner.jsonl");
+    assert_eq!(
+        TranscriptReader::resumed(source, &case.work(), &record, None).err(),
+        Some(LaunchError("launch_resume_unavailable".to_owned(), None))
+    );
+    assert_eq!(conversation_messages("codex", &record), Vec::new());
+    assert_eq!(typed_after("codex", &record, 0), None);
+    assert_eq!(typed_past("codex", &record, 0), None);
+}
+
 #[test]
 fn codex_rollout_of_this_working_folder_is_found_and_read() {
     let case = Case::new();
