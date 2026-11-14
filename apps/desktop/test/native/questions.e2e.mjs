@@ -187,8 +187,13 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
 
         await me.type(`${TAB_CARD} textarea`, ANSWER);
         await me.click("Answer", `${TAB_CARD} button`);
-        await me.waitFor("the answered question", (text) => text.includes(`Answer: ${ANSWER}`) && !text.includes("Your answer"));
-        const answered = await page.evaluate(`document.querySelector("section.qs-card")?.innerText ?? ""`);
+        const askerCard = `${TAB_CARD}[aria-label=${JSON.stringify(`Question from ${label}`)}]`;
+        let answered = "";
+        for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
+          answered = await page.evaluate(`document.querySelector(${JSON.stringify(askerCard)})?.innerText ?? ""`);
+          if (answered.includes(`Answer: ${ANSWER}`) && !answered.includes("Your answer")) break;
+          assert.ok(Date.now() < deadline, `the answered question's card on the Questions tab shows the answer: ${answered}`);
+        }
         assert.ok(!answered.includes("Urgent") && !answered.includes(PAUSED), `an answered question holds neither mark (V241-QUESTION-UX P3): ${answered}`);
         await me.capture("questions-answered");
         const sent = log.trail.filter((call) => call.cmd === "desktop_answer_question");
