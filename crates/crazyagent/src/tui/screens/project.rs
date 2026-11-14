@@ -707,6 +707,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub confirm_move: bool,
     pub removal: Option<crate::team::cleanup::RemovalPreview>,
     pub remove_choice: RemoveChoice,
+    remove_everything: bool,
     pub remove_typed: String,
     pub confirm_plan: Option<SetupAction>,
     pub adding: Option<AddFile>,
@@ -798,6 +799,7 @@ impl ProjectScreen {
             confirm_move: false,
             removal: None,
             remove_choice: RemoveChoice::Dashboard,
+            remove_everything: false,
             remove_typed: String::new(),
             confirm_plan: None,
             adding: None,
@@ -1200,7 +1202,10 @@ impl ProjectScreen {
                 if self.confirm_remove {
                     if !preview.can_delete {
                         self.remove_choice = RemoveChoice::Dashboard;
+                    } else if self.remove_everything {
+                        self.remove_choice = RemoveChoice::Everything;
                     }
+                    self.remove_everything = false;
                     self.removal = Some(*preview);
                 }
             }
@@ -2485,7 +2490,20 @@ impl ProjectScreen {
         self.confirm_remove = false;
         self.removal = None;
         self.remove_choice = RemoveChoice::Dashboard;
+        self.remove_everything = false;
         self.remove_typed.clear();
+    }
+
+    /// Opens the remove ask for a delete an engine stop cut short, as x does, with Delete
+    /// everything picked once the engine's preview offers it; the exact name is still typed.
+    /// Takes the screen. Returns nothing.
+    pub fn ask_delete_again(&mut self) {
+        self.close_remove();
+        self.confirm_remove = true;
+        self.removal_read_ms = None;
+        self.remove_everything = true;
+        assert!(self.removal.is_none());
+        assert_eq!(self.remove_choice, RemoveChoice::Dashboard);
     }
 
     /// Moves the pool picker or settles it. The rows are the pools, then "No pool" last.
@@ -2947,6 +2965,7 @@ impl ProjectScreen {
             );
         }
         assert!(self.confirm_remove || (self.removal.is_none() && self.remove_typed.is_empty()));
+        assert!(!self.remove_everything || (self.confirm_remove && self.removal.is_none()));
         assert!(self.remove_typed.len() <= NAME_BYTES_MAX);
         if let Some(review) = &self.review {
             assert!(review.scroll < review.lines().len().max(1));

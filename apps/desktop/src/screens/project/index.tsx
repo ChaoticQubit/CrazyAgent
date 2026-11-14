@@ -214,8 +214,13 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   const setup = valueOf(data.setup);
   const settingsSection = section ?? hashSection();
   const [importMoves, setImportMoves] = useState(0);
+  const [deleteAsks, setDeleteAsks] = useState(0);
   const [questionsShown] = useState(readQuestionsShown);
   const select =(next: TabId) => navigate(`/projects/${encodeURIComponent(projectId)}/${next}`);
+  const deleteAgain = () => {
+    navigate(`/projects/${encodeURIComponent(projectId)}/settings?section=remove&ask=delete`);
+    setDeleteAsks((count) => count + 1);
+  };
 
   useCloseIde(projectId, data.notify);
 
@@ -275,7 +280,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       about={setup?.about ?? ""} meta={meta} working={working} questions={questions} actions={<ProjectMenu data={data} replaced={replacedTabs(view)} />} current={active} scrolled={scrolled}
       tabs={tabs.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     <div className="pj-banners">
-      <RecoveryBanner key={projectId} project={projectId} />
+      <RecoveryBanner key={projectId} project={projectId} onDeleteAgain={deleteAgain} />
       <IdeUnavailable view={view} failure={failure} busy={busy} onAction={() => void (failure ? readIde() : fetchIde())} />
       {ideHideProblem && <p className="ide-problem" role="alert">{ideHideProblem}</p>}
       {active !== review && <WaitingChanges projectId={projectId} place={review} />}
@@ -292,7 +297,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "context" && <ContextTab data={data} />}
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "metrics" && <MetricsView key={data.id} projectId={data.id} />}
-      {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
+      {active === "settings" && <SettingsTab key={`${settingsSection ?? ""}-${deleteAsks}`} data={data} section={settingsSection} />}
       {active === "ide" && <IdeTab key={data.id} projectId={projectId} onView={(value) => setIde({ kind: "ok", value })} onHideProblem={setIdeHideProblem} />}
     </div>
     {replaces && <IdeConfirm data={data} />}

@@ -2741,6 +2741,7 @@ fn remove(
         [project_id.as_str()],
     )
     .map_err(error)?;
+    crate::projects_home::delete_mark::forget(tx, project_id)?;
     let removed = tx
         .execute("DELETE FROM projects WHERE id=?1", [project_id.as_str()])
         .map_err(error)?;

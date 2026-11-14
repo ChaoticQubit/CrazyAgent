@@ -27,8 +27,10 @@ enum Pick {
 /// One project's interrupted work above its tabs: what an engine stop cut short, what
 /// resumed, what failed, and the ledger notices that wait for the owner. Ctrl-N picks the
 /// next failed resume or notice; Ctrl-R retries the picked failed resume and Ctrl-D
-/// dismisses the picked notice, the first of each until one is picked. Shows nothing once
-/// every run resumed and every notice is dismissed. Sends one request at a time.
+/// dismisses the picked notice, the first of each until one is picked. On a delete cut
+/// short Ctrl-D keeps the project and Ctrl-X asks for the delete again, which the project
+/// page opens. Shows nothing once every run resumed and every notice is dismissed. Sends
+/// one request at a time.
 pub(in crate::tui) struct ProjectRecovery {
     project: ProjectId,
     banner: Option<RecoveryBanner>,
@@ -38,6 +40,7 @@ pub(in crate::tui) struct ProjectRecovery {
     queued: Option<RecoveryQuery>,
     sent: Option<RecoveryQuery>,
     read_ms: Option<i64>,
+    delete_again: bool,
 }
 
 impl ProjectRecovery {
@@ -52,7 +55,16 @@ impl ProjectRecovery {
             queued: None,
             sent: None,
             read_ms: None,
+            delete_again: false,
         }
+    }
+
+    /// Whether the owner asked for a delete cut short to run again since the last call, which
+    /// the project page answers by opening its remove ask. Output: true once per Ctrl-X.
+    pub(in crate::tui) fn take_delete_again(&mut self) -> bool {
+        let asked = std::mem::take(&mut self.delete_again);
+        assert!(!self.delete_again);
+        asked
     }
 
     /// The next request to send, once nothing is in flight: an owner action first, then a
@@ -121,13 +133,22 @@ impl ProjectRecovery {
         self.sent.is_some() || self.queued.is_some()
     }
 
-    /// Handles Ctrl-R (retry the picked failed resume), Ctrl-D (dismiss the picked notice)
-    /// and, with more than one of them, Ctrl-N (pick the next failed resume or notice) while
-    /// the banner shows one. Input: the key. Output: whether the key was the banner's.
+    /// Handles Ctrl-R (retry the picked failed resume), Ctrl-D (dismiss the picked notice),
+    /// Ctrl-X on a picked delete cut short (ask for the delete again, sending nothing) and,
+    /// with more than one of them, Ctrl-N (pick the next failed resume or notice) while the
+    /// banner shows one. Input: the key. Output: whether the key was the banner's.
     pub(in crate::tui) fn key(&mut self, key: &Key) -> bool {
         let Some(banner) = self.banner.as_ref().filter(|banner| open(banner)) else {
             return false;
         };
+        if *key == Key::Ctrl('x') {
+            let cut_short = self
+                .dismissed(banner)
+                .is_some_and(|notice| notice.action_kind == ActionKind::ProjectDelete);
+            self.delete_again = cut_short;
+            assert!(!self.delete_again || !banner.notices.is_empty());
+            return cut_short;
+        }
         let action = match key {
             Key::Ctrl('r') => self.retried(banner).map(|run| RecoveryQuery::Retry {
                 project: self.project.clone(),
@@ -292,8 +313,13 @@ impl ProjectRecovery {
         if let Some(run) = self.retried(banner) {
             keys.push(format!("Ctrl-R Retry {}", run.label));
         }
-        if let Some(notice) = self.dismissed(banner) {
-            keys.push(format!("Ctrl-D Dismiss {}", notice_subject(notice)));
+        match self.dismissed(banner) {
+            Some(notice) if notice.action_kind == ActionKind::ProjectDelete => {
+                keys.push("Ctrl-D Keep the project".to_owned());
+                keys.push("Ctrl-X Delete again".to_owned());
+            }
+            Some(notice) => keys.push(format!("Ctrl-D Dismiss {}", notice_subject(notice))),
+            None => {}
         }
         if picks(banner).len() > 1 {
             keys.push("Ctrl-N Next item".to_owned());
@@ -407,6 +433,7 @@ fn notice_subject(notice: &BannerNotice) -> String {
         ActionKind::AgentSpawn => format!("{agent}'s start"),
         ActionKind::WorktreeCreate => format!("{agent}'s worktree"),
         ActionKind::LandingAccept => format!("change set {set}"),
+        ActionKind::ProjectDelete => "this project's delete".into(),
         ActionKind::Message | ActionKind::Dispatch => "this notice".into(),
     }
 }
@@ -414,6 +441,9 @@ fn notice_subject(notice: &BannerNotice) -> String {
 fn notice_item(notice: &BannerNotice) -> String {
     let subject = notice_subject(notice);
     match (notice.action_kind, notice.shown) {
+        (ActionKind::ProjectDelete, _) => {
+            "A delete was cut short. Some folders may already be in the Trash.".into()
+        }
         (ActionKind::AgentSpawn, NoticeShown::Unknown) => {
             format!("{subject} may or may not have run; check the agent first")
         }
@@ -434,6 +464,10 @@ fn done_note(query: &RecoveryQuery, banner: Option<&RecoveryBanner>) -> String {
                 .map_or_else(|| "The agent".to_owned(), |run| run.label.clone());
             format!("{label} will try to resume again.")
         }
+        RecoveryQuery::Dismiss {
+            kind: ActionKind::ProjectDelete,
+            ..
+        } => "The project stays.".into(),
         RecoveryQuery::Dismiss { .. } => "Dismissed.".into(),
         RecoveryQuery::Read { .. } => unreachable!("a read is answered with the banner"),
     }

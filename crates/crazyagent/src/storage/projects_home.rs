@@ -1,7 +1,7 @@
 use super::*;
 use crate::projects_home::{
     self as home, AddMode, AddOverride, AddPlan, FoundProject, HomeAction, HomeEffect, HomeWatch,
-    MovePlan, ProjectsHome, Registered,
+    MovePlan, ProjectsHome, Registered, delete_mark,
 };
 use std::ffi::OsStr;
 use std::path::{Component, PathBuf};
@@ -640,18 +640,32 @@ pub(super) fn sweep_home(db: &Connection) -> Result<usize, EngineError> {
 }
 
 /// Forgets a Delete everything's plan once its exchange ended, whatever its outcome, so a
-/// projects home move may go again; with no exchange, as the engine starts, it forgets every
-/// plan an earlier engine process left. Inputs: the connection and the exchange. Output: Ok,
-/// or any SQLite failure.
+/// projects home move may go again, and ends its mark in the same write; with no exchange, as
+/// the engine starts, it forgets every plan an earlier engine process left and turns each
+/// mark of a project still there into "A delete was cut short" on its banner, continuing
+/// nothing. Inputs: the connection and the exchange. Output: Ok, or any SQLite or ledger
+/// failure, with nothing changed.
 pub(super) fn delete_settle(db: &Connection, exchange: Option<u64>) -> Result<(), EngineError> {
+    let tx = db.unchecked_transaction().map_err(error)?;
     match exchange {
-        Some(exchange) => db.execute(
-            "DELETE FROM projects_delete_pending WHERE exchange=?1",
-            [i64::try_from(exchange).map_err(error)?],
-        ),
-        None => db.execute("DELETE FROM projects_delete_pending", []),
+        Some(exchange) => {
+            let exchange = i64::try_from(exchange).map_err(error)?;
+            delete_mark::settle(&tx, exchange)?;
+            tx.execute(
+                "DELETE FROM projects_delete_pending WHERE exchange=?1",
+                [exchange],
+            )
+        }
+        None => {
+            let shown = delete_mark::start(&tx)?;
+            eprintln!("project_delete_cut_short count={shown}");
+            tx.execute("DELETE FROM projects_delete_pending", [])
+        }
     }
     .map_err(error)?;
+    tx.commit().map_err(error)?;
+    assert!(exchange.is_some() || !delete_planned(db)?);
+    assert!(exchange.is_none_or(|exchange| exchange > 0));
     Ok(())
 }
 
@@ -835,6 +849,7 @@ pub(super) fn delete_plan(
     };
     let agents = ids("SELECT id FROM team_agents WHERE project=?1 ORDER BY id LIMIT ?2")?;
     let research = ids("SELECT id FROM research_jobs WHERE project=?1 ORDER BY id LIMIT ?2")?;
+    delete_mark::begin(&tx, project_id, exchange)?;
     crate::team::pause(&tx, project_id, crate::team::now_ms())?;
     tx.execute(
         "INSERT INTO projects_delete_pending(exchange) VALUES (?1)",

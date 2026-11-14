@@ -18,7 +18,8 @@ pub const PENDING_MAX: usize = 512;
 pub const FINISHED_KEPT: usize = 1024;
 
 /// The engine actions the ledger records before their effect, so a restart can tell
-/// whether each one happened. On the owner wire each is its stored snake_case name.
+/// whether each one happened, and ProjectDelete, a Delete everything an engine stop may cut
+/// short. On the owner wire each is its stored snake_case name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind {
@@ -27,6 +28,7 @@ pub enum ActionKind {
     WorktreeCreate,
     AgentSpawn,
     LandingAccept,
+    ProjectDelete,
 }
 
 /// The id the ledger gave one action when its intent was recorded.
@@ -92,6 +94,7 @@ impl ActionKind {
             Self::WorktreeCreate => "worktree_create",
             Self::AgentSpawn => "agent_spawn",
             Self::LandingAccept => "landing_accept",
+            Self::ProjectDelete => "project_delete",
         }
     }
 }
