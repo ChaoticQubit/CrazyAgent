@@ -1000,18 +1000,23 @@ pub fn pending(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
 /// Where the project instructions file sits in a project folder.
 const CARRIED_PATH: &str = ".crazyagent/instructions.md";
 /// The heading project instructions a folder arrived with are kept under: the app did not
-/// write them, so they are whoever wrote them, not the owner (SA vid 7, leader 09:27 A).
-pub const CARRIED_HEADING: &str = "## Imported from .crazyagent/instructions.md";
+/// write them, so they are whoever wrote them, not the owner (SA vid 7, leader 09:27 A). It
+/// sits one level below the app's own sections, inside the project instructions, and
+/// nothing carried under it reads as a heading at its level or above (SA vid 7 r2).
+pub const CARRIED_HEADING: &str = "### Imported from .crazyagent/instructions.md";
 /// What the setup review tells the owner when the project instructions came with the
 /// folder, word for word in the desktop and the TUI (DEC-141).
 pub const CARRIED_NOTICE: &str = "The folder came with its own .crazyagent/instructions.md. CrazyAgent gives it to your agents under the heading Imported from .crazyagent/instructions.md. Check it in Process before you start the team.";
 
-/// The project text a folder arrived with, under [`CARRIED_HEADING`] unless it is empty or
-/// already starts with it; text the heading leaves no room for is cut at the limit.
-/// Input: the project text. Output: the text to keep and whether it was cut.
+/// The project text a folder arrived with, under [`CARRIED_HEADING`] once, a label it
+/// already starts with taken off first, and with its headings moved below the label
+/// ([`demoted`]); empty text stays as it is. Text the heading leaves no room for is cut at
+/// the limit, back to a whole line when the cut line would read as a heading. Input: the
+/// project text. Output: the text to keep and whether it was cut.
 fn carried(existing: &str) -> (String, bool) {
-    let part = existing.trim();
-    if part.is_empty() || existing.starts_with(CARRIED_HEADING) {
+    let body = existing.strip_prefix(CARRIED_HEADING).unwrap_or(existing);
+    let part = demoted(body.trim());
+    if part.is_empty() {
         return (existing.to_owned(), false);
     }
     let room = crate::agent_home::TEXT_BYTES_MAX - CARRIED_HEADING.len() - 3;
@@ -1019,9 +1024,65 @@ fn carried(existing: &str) -> (String, bool) {
     while !part.is_char_boundary(end) {
         end -= 1;
     }
-    let text = format!("{CARRIED_HEADING}\n\n{}\n", part[..end].trim_end());
+    let mut kept = part[..end].trim_end();
+    if demoted(kept) != kept {
+        assert!(end < part.len());
+        let line = kept
+            .rfind(|c: char| c == '\n' || c == '\r')
+            .expect("only the line a cut ends in can read as a heading");
+        kept = kept[..line].trim_end();
+    }
+    assert_eq!(demoted(kept), kept);
+    let text = format!("{CARRIED_HEADING}\n\n{kept}\n");
     assert!(text.len() <= crate::agent_home::TEXT_BYTES_MAX);
     (text, end < part.len())
+}
+
+/// Carried text with no line an agent reads as a heading at the Imported label's level or
+/// above: a line whose first visible characters are one to three `#` then a space or its
+/// end gets three more, and a line of only `=` or only `-` under a non-blank line gets a
+/// blank line of the same ending above it, so it heads nothing (SA vid 7 r2). A second pass
+/// changes nothing. Input: the text. Output: the text, the same when it has no such line.
+fn demoted(text: &str) -> String {
+    let lead = |c: char| {
+        c.is_whitespace() || matches!(c, '\u{200B}'..='\u{200F}' | '\u{2060}' | '\u{FEFF}')
+    };
+    let mut out = String::with_capacity(text.len());
+    let (mut above, mut above_ending) = ("", "\n");
+    let mut rest = text;
+    while !rest.is_empty() {
+        let end = rest
+            .find(|c: char| c == '\n' || c == '\r')
+            .unwrap_or(rest.len());
+        let line = &rest[..end];
+        let ending = match &rest[end..] {
+            after if after.starts_with("\r\n") => &after[..2],
+            after => &after[..after.len().min(1)],
+        };
+        let body = line.trim_start_matches(lead);
+        let hashes = body.len() - body.trim_start_matches('#').len();
+        let rule = body.trim();
+        let underline = !rule.is_empty()
+            && (rule.bytes().all(|byte| byte == b'=') || rule.bytes().all(|byte| byte == b'-'));
+        if underline && !above.trim().is_empty() {
+            out.push_str(above_ending);
+        }
+        out.push_str(&line[..line.len() - body.len()]);
+        if (1..=3).contains(&hashes)
+            && body[hashes..]
+                .chars()
+                .next()
+                .is_none_or(char::is_whitespace)
+        {
+            out.push_str("###");
+        }
+        out.push_str(body);
+        out.push_str(ending);
+        (above, above_ending) = (line, ending);
+        rest = &rest[end + ending.len()..];
+    }
+    assert!(out.len() >= text.len());
+    out
 }
 
 /// Whether a project's instructions came with its folder: they start with
