@@ -683,8 +683,9 @@ impl ProjectPlugins {
         let fixed = reserve + panel.len() + footer.len();
         let free = room.saturating_sub(fixed).max(3);
         let listed_hooks = self.hook_rows();
-        let hook_rows = listed_hooks.len().max(1).min((free / 3).max(1));
-        let free = free.saturating_sub(hook_rows).max(2);
+        let hooks_wanted = listed_hooks.len().max(1);
+        let first_hook_rows = hooks_wanted.min((free / 3).max(1));
+        let free = free.saturating_sub(first_hook_rows).max(2);
         let wanted_servers = self.servers.len().max(1).min(free / 2);
         let skill_rows = self
             .skills
@@ -692,7 +693,16 @@ impl ProjectPlugins {
             .max(1)
             .min(free.saturating_sub(wanted_servers))
             .max(1);
-        let server_rows = free.saturating_sub(skill_rows).max(1);
+        let server_rows = self
+            .servers
+            .len()
+            .max(1)
+            .min(free.saturating_sub(skill_rows))
+            .max(1);
+        let unused = free.saturating_sub(skill_rows + server_rows);
+        let hook_rows = hooks_wanted.min(first_hook_rows + unused);
+        assert!(hook_rows >= first_hook_rows);
+        assert!(hook_rows + skill_rows + server_rows <= first_hook_rows + free.max(skill_rows + 1));
         let widths = if wide {
             vec![
                 NAME_WIDTH,
