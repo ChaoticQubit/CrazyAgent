@@ -199,6 +199,11 @@ pub(crate) fn save(tx: &Transaction<'_>, profile: &OwnerProfile) -> Result<Outco
     Ok(Outcome::Applied)
 }
 
+/// Reads the stored owner profile with its hidden characters taken out. A name that
+/// cleaning leaves blank, one stored only of hidden characters before they were refused,
+/// counts as no profile, so the owner gets the first-run page and saves a new one instead
+/// of a refusal on every read and master turn (RV-DS241-134).
+/// Input: the transaction. Output: the profile, None, or a code.
 pub(crate) fn load(tx: &Transaction<'_>) -> Result<Option<OwnerProfile>, EngineError> {
     let body: Option<Option<String>> = tx
         .query_row(
@@ -208,17 +213,20 @@ pub(crate) fn load(tx: &Transaction<'_>) -> Result<Option<OwnerProfile>, EngineE
         )
         .optional()
         .map_err(error)?;
-    body.map(|body| {
-        let body = body.ok_or_else(|| error("owner_profile_bounds"))?;
-        let profile: OwnerProfile = serde_json::from_str::<OwnerProfile>(&body)
-            .map_err(|_| error("owner_profile_invalid"))?
-            .without_hidden();
-        profile
-            .validate()
-            .map_err(|_| error("owner_profile_invalid"))?;
-        Ok(profile)
-    })
-    .transpose()
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    let body = body.ok_or_else(|| error("owner_profile_bounds"))?;
+    let profile: OwnerProfile = serde_json::from_str::<OwnerProfile>(&body)
+        .map_err(|_| error("owner_profile_invalid"))?
+        .without_hidden();
+    if profile.name.trim().is_empty() {
+        return Ok(None);
+    }
+    profile
+        .validate()
+        .map_err(|_| error("owner_profile_invalid"))?;
+    Ok(Some(profile))
 }
 
 pub(crate) fn read(tx: &Transaction<'_>) -> Result<OwnerData, EngineError> {
