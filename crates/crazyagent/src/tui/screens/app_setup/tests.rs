@@ -2281,17 +2281,17 @@ fn at_80x24_with_every_tool_missing_the_approval_note_and_pack_rows_stay_on_scre
     assert!(rows.last().unwrap().contains("Enter Install and continue"));
 }
 
-/// DS-99 r2 (rv-sec2 F1): below 80x24 the shell draws only "Window too small", so no key
-/// reaches Setup: Enter, Space, arrows, Tab, Esc, the global keys and a paste install,
-/// approve, untick or open nothing the owner cannot see. Back at 80x24 the same Setup shows,
-/// and Enter installs.
+/// DS-99 r2 (rv-sec2 F1): below 80x24 the shell draws only "CrazyAgent needs a bigger
+/// window", so no key reaches Setup: Enter, Space, arrows, Tab, Esc, the global keys and a
+/// paste install, approve, untick or open nothing the owner cannot see. Back at 80x24 the
+/// same Setup shows, and Enter installs.
 #[test]
 fn below_80x24_no_key_reaches_setup_so_enter_installs_and_approves_nothing() {
     for (width, height) in [(79, 24), (80, 23)] {
         let mut shell = first_run(80, 24);
         jobs(&mut shell);
         let before = render(&mut shell, 80, 24);
-        find(&render(&mut shell, width, height), "Window too small");
+        find(&render(&mut shell, width, height), "needs a bigger window");
         for key in [
             Key::Enter,
             Key::Char(' '),
