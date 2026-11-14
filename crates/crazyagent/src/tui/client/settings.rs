@@ -179,6 +179,10 @@ pub(in crate::tui) enum PluginChange {
         id: String,
         enabled: bool,
     },
+    SetHooks {
+        ids: Vec<String>,
+        enabled: bool,
+    },
     SetSkill {
         id: String,
         enabled: bool,
@@ -1027,6 +1031,17 @@ impl NativeOwner {
             }
             PluginChange::SetHook { id, enabled } => {
                 controller.set_hook_enabled(id, enabled).await.map(|_| None)
+            }
+            PluginChange::SetHooks { ids, enabled } => {
+                assert!(!ids.is_empty());
+                let mut done = Ok(None);
+                for id in ids {
+                    done = controller.set_hook_enabled(id, enabled).await.map(|_| None);
+                    if done.is_err() {
+                        break;
+                    }
+                }
+                done
             }
             PluginChange::SetSkill {
                 id,
