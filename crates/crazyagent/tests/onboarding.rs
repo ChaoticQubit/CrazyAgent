@@ -2499,7 +2499,7 @@ async fn starting_onboarding_moves_the_instruction_files_and_the_view_lists_them
     );
     assert_eq!(
         fs::read_to_string(bench.repo.join(".crazyagent").join("instructions.md")).unwrap(),
-        "## Imported from CLAUDE.md\n\n# Rules\n\nONBOARD-CLAUDE-RULE-83\n\n## Imported from AGENTS.md\n\nONBOARD-AGENTS-RULE-84\n"
+        "### Imported from CLAUDE.md\n\n#### Rules\n\nONBOARD-CLAUDE-RULE-83\n\n### Imported from AGENTS.md\n\nONBOARD-AGENTS-RULE-84\n"
     );
     assert_eq!(
         git(&bench.repo, &["status", "--porcelain"]),

@@ -704,7 +704,7 @@ fn hidden_at(chars: &[char], at: usize) -> bool {
     hidden_char(chars[at]) && !emoji_part(chars, at)
 }
 
-fn hidden_char(c: char) -> bool {
+pub(crate) fn hidden_char(c: char) -> bool {
     (c.is_control() && c != '\n' && c != '\t')
         || matches!(
             c,

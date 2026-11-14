@@ -1552,6 +1552,7 @@ fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
         folder_overview: None,
         finished: false,
         imported: Vec::new(),
+        carried: false,
         proposed: None,
     };
     let mut draft = draft;
@@ -1563,6 +1564,148 @@ fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
         Ok(IntakeView::Onboarding(Box::new(draft))),
     ));
     (shell, project)
+}
+
+#[test]
+fn a_folder_that_came_with_its_own_project_instructions_says_so_in_the_desktop_words() {
+    let notice = "The folder came with its own .crazyagent/instructions.md. CrazyAgent gives it to your agents under the heading Imported from .crazyagent/instructions.md. Check it in Process before you start the team.";
+    let wrapped = crate::tui::text::wrap(notice, 76);
+    assert!(wrapped.len() > 1);
+    let (mut plain, _) = review_with(|_| {});
+    let rows = render(&mut plain, 200, 40);
+    assert!(!shows(&rows, &wrapped[0]), "{rows:#?}");
+    let (mut shell, _) = review_with(|view| {
+        let mut value = serde_json::to_value(&*view).unwrap();
+        value["carried"] = serde_json::Value::Bool(true);
+        *view = serde_json::from_value(value)
+            .expect("the onboarding view says whether its instructions came with the repository");
+    });
+    let rows = render(&mut shell, 200, 40);
+    for line in &wrapped {
+        assert!(shows(&rows, line), "{line:?} in {rows:#?}");
+    }
+    let desktop = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/desktop/src/screens/intake/onboarding.tsx"),
+    )
+    .unwrap();
+    assert!(
+        desktop.contains(notice),
+        "the desktop onboarding review shows the same notice"
+    );
+}
+
+/// SA vid 7 (leader 09:27 A): a folder that arrives with its own .crazyagent/instructions.md,
+/// committed, with no git or with a git folder that cannot be read, starts onboarding with
+/// those instructions under their Imported heading and a review that says so in the desktop
+/// words, and the import Process runs later never labels the owner's text again; one whose
+/// label cannot be saved is refused, so no project holds the text unlabelled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_folder_that_arrives_with_project_instructions_starts_onboarding_with_them_labelled() {
+    let notice = "The folder came with its own .crazyagent/instructions.md. CrazyAgent gives it to your agents under the heading Imported from .crazyagent/instructions.md. Check it in Process before you start the team.";
+    let wrapped = crate::tui::text::wrap(notice, 76);
+    let mut engine = Engine::start().await;
+    let home = engine.set_home().await;
+    let mut problems = Vec::new();
+    for (name, git) in [
+        ("tracked", Some(true)),
+        ("plain", None),
+        ("broken", Some(false)),
+        ("locked", None),
+    ] {
+        let folder = home.join(name);
+        let state = folder.join(".crazyagent");
+        for layout in crate::projects_home::LAYOUT {
+            std::fs::create_dir_all(state.join(layout)).unwrap();
+        }
+        std::fs::write(
+            state.join("instructions.md"),
+            format!("DUMMY-ARRIVED-{name}\n"),
+        )
+        .unwrap();
+        match git {
+            Some(true) => {
+                git_in(&folder, &["init", "-q", "-b", "main"]);
+                git_in(&folder, &["add", "-f", ".crazyagent/instructions.md"]);
+                git_in(
+                    &folder,
+                    &[
+                        "-c",
+                        "user.name=Repo",
+                        "-c",
+                        "user.email=repo@example.invalid",
+                        "-c",
+                        "commit.gpgSign=false",
+                        "commit",
+                        "-q",
+                        "-m",
+                        "carried",
+                    ],
+                );
+            }
+            Some(false) => std::fs::write(
+                folder.join(".git"),
+                format!("gitdir: {}\n", folder.join("missing.git").display()),
+            )
+            .unwrap(),
+            None => {}
+        }
+        let locked = name == "locked";
+        if locked {
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        let mut ctx = screen_ctx(&engine.user());
+        let screen = open(
+            &Place::Onboarding {
+                path: folder.to_str().unwrap().into(),
+                name: name.into(),
+                project: None,
+            },
+            &mut ctx,
+        );
+        let mut shell = Shell::with(ctx, screen);
+        let mut connection = engine.connect();
+        assert_eq!(pump(&mut shell, &mut connection).await, ["pools"]);
+        shell.key(Key::Enter);
+        let sent = pump(&mut shell, &mut connection).await;
+        let started = matches!(
+            shell.place(),
+            Some(Place::Onboarding {
+                project: Some(_),
+                ..
+            })
+        );
+        let text = crate::agent_home::read_project(&folder).unwrap();
+        if locked {
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if started || text != "DUMMY-ARRIVED-locked\n" {
+                problems.push(format!(
+                    "locked: a label that cannot be saved started a project ({started}) holding {text:?}, sent {sent:?}"
+                ));
+            }
+            continue;
+        }
+        let labelled =
+            format!("### Imported from .crazyagent/instructions.md\n\nDUMMY-ARRIVED-{name}\n");
+        if !started || text != labelled {
+            problems.push(format!(
+                "{name}: started {started}, text {text:?}, sent {sent:?}"
+            ));
+            continue;
+        }
+        let rows = render(&mut shell, 200, 40);
+        if !wrapped.iter().all(|line| shows(&rows, line)) {
+            problems.push(format!("{name}: the review shows no notice: {rows:#?}"));
+        }
+        crate::agent_home::save_project(&folder, "OWNER-EDIT\n").unwrap();
+        std::fs::write(folder.join("AGENTS.md"), "NEW-RULE\n").unwrap();
+        crate::instruction_files::import(&folder).unwrap();
+        let again = crate::agent_home::read_project(&folder).unwrap();
+        if again != "OWNER-EDIT\n\n### Imported from AGENTS.md\n\nNEW-RULE\n" {
+            problems.push(format!("{name}: a later import labelled again: {again:?}"));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
 #[test]

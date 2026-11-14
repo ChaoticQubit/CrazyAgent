@@ -720,6 +720,14 @@ impl OnboardingPage {
         let mut lines =
             Self::step_line("Build the code graph", &review.onboarding.graph, limit, ctx);
         lines.push(Line::default());
+        if review.onboarding.carried {
+            lines.extend(
+                wrap(crate::instruction_files::CARRIED_NOTICE, limit)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Warning, theme)),
+            );
+            lines.push(Line::default());
+        }
         if !review.onboarding.imported.is_empty() {
             lines.extend(
                 wrap(
