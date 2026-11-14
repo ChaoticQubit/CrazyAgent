@@ -6,7 +6,7 @@ import { Button, LoadError, Notice, RadioCard, SettingLine, SettingSection } fro
 /** The setting's options in list order, each with its title and what it does. */
 export const PROVIDER_RETRY_CHOICES: { choice: ProviderRetry; title: string; summary: string }[] = [
   { choice: "stop_at_once", title: "Stop at once", summary: "Runs fail with the provider's error instead of retrying, where the harness allows it." },
-  { choice: "retry_briefly", title: "Retry briefly", summary: "Harnesses keep their own retries, but none waits for the network without end, except the Codex master for now." },
+  { choice: "retry_briefly", title: "Retry briefly", summary: "Harnesses keep their own retries, but none waits for the network without end." },
   { choice: "harness_default", title: "Harness default", summary: "CrazyAgent sets nothing, so each harness does what it does on its own." },
 ];
 

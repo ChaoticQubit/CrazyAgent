@@ -200,7 +200,7 @@ pub(in crate::tui) fn provider_retry_words(choice: ProviderRetry) -> (&'static s
         ),
         ProviderRetry::RetryBriefly => (
             "Retry briefly",
-            "Harnesses keep their own retries, but none waits for the network without end, except the Codex master for now.",
+            "Harnesses keep their own retries, but none waits for the network without end.",
         ),
         ProviderRetry::HarnessDefault => (
             "Harness default",
