@@ -1271,6 +1271,100 @@ fn the_host_runs_a_tools_on_master_under_each_step_limit_the_owner_can_pick() {
     assert!(refused(&off));
 }
 
+/// Each connection-retry choice sets on a master command exactly the variable every Claude
+/// Code agent gets (DEC-163 Q7): `CLAUDE_CODE_MAX_RETRIES=0` under Stop at once and nothing
+/// under Retry briefly and Harness default, and the host runs it with tools off and on. That
+/// variable with any other value, and any other added variable, is refused.
+#[test]
+fn the_host_runs_a_master_under_each_retry_choice_and_no_other_variable() {
+    use crate::engine::master_host_fixture::MasterFixture;
+    use crate::provider_retry::{CLAUDE_MAX_RETRIES, ProviderRetry};
+
+    let mut fixture = MasterFixture::new("claude");
+    let profile = fixture.lease("claude-retry-choice", 1).unwrap();
+    let home = profile.profile_path().unwrap();
+    let engine = fixture.root.path().join("crazyagent");
+    let drop = home.join(crate::team::tool::DROP_FILE);
+    let mailbox = drop.with_file_name(crate::team::tool::MAILBOX_FOLDER);
+    let built = |tools_on: bool| {
+        if tools_on {
+            let tools = MasterTools {
+                engine: &engine,
+                drop: &drop,
+                mailbox: &mailbox,
+                off: &[],
+            };
+            tools_launch_command(
+                Path::new("/approved/claude"),
+                &fixture.project,
+                &home,
+                "native-default",
+                None,
+                tools,
+            )
+            .unwrap()
+        } else {
+            launch_command(
+                Path::new("/approved/claude"),
+                &fixture.project,
+                &home,
+                "native-default",
+                None,
+            )
+            .unwrap()
+        }
+    };
+    let retries = |command: &std::process::Command| {
+        command
+            .get_envs()
+            .filter(|(name, _)| *name == OsStr::new(CLAUDE_MAX_RETRIES))
+            .map(|(_, value)| value.map(|value| value.to_str().unwrap().to_owned()))
+            .collect::<Vec<_>>()
+    };
+    let refused = |command: &std::process::Command| {
+        matches!(
+            validate_command(command, &profile, &home),
+            Err(Fault::Host(
+                "claude_host_unapproved_command" | "claude_host_invalid_command"
+            ))
+        )
+    };
+    for tools_on in [false, true] {
+        let plain = built(tools_on);
+        assert!(retries(&plain).is_empty(), "{tools_on}");
+        for retry in ProviderRetry::ALL {
+            let mut command = built(tools_on);
+            limit_retries(&mut command, retry);
+            let wanted = match retry {
+                ProviderRetry::StopAtOnce => vec![Some("0".to_owned())],
+                ProviderRetry::RetryBriefly | ProviderRetry::HarnessDefault => Vec::new(),
+            };
+            assert_eq!(retries(&command), wanted, "{retry:?} {tools_on}");
+            assert!(command.get_args().eq(plain.get_args()), "{retry:?}");
+            assert_eq!(
+                command.get_envs().count(),
+                plain.get_envs().count() + wanted.len(),
+                "{retry:?} {tools_on}"
+            );
+            assert_eq!(
+                validate_command(&command, &profile, &home).ok(),
+                Some(tools_on),
+                "{retry:?} {tools_on}"
+            );
+        }
+        for (name, value) in [
+            (CLAUDE_MAX_RETRIES, "3"),
+            (CLAUDE_MAX_RETRIES, ""),
+            ("ANTHROPIC_BASE_URL", "http://127.0.0.1:9"),
+            ("CLAUDE_CODE_EXTRA", "0"),
+        ] {
+            let mut command = built(tools_on);
+            command.env(name, value);
+            assert!(refused(&command), "{name}={value:?} {tools_on}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
     use crate::engine::master_host_fixture::MasterFixture;
