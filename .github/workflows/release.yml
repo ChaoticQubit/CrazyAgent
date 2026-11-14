@@ -581,18 +581,23 @@ jobs:
           set -euo pipefail
           short="${GITHUB_SHA:0:7}"
           if [ "$CHANNEL" = stable ]; then
-            printf 'CrazyAgent %s\n' "$VERSION" > notes.txt
+            printf 'CrazyAgent %s\n' "$VERSION" > update-notes.txt
           else
-            printf 'Dev build %s of %s.\n' "$VERSION" "$short" > notes.txt
+            printf 'Dev build %s of %s.\n' "$VERSION" "$short" > update-notes.txt
           fi
           for file in signing/*.txt; do
             if [ "$(cat "$file")" = unsigned ]; then
-              printf 'Not code signed: %s\n' "$(basename "$file" .txt)" >> notes.txt
+              printf 'Not code signed: %s\n' "$(basename "$file" .txt)" >> update-notes.txt
             fi
           done
+          cp update-notes.txt notes.txt
+          section="$(node scripts/release/notes.mjs CHANGELOG.md "$VERSION")"
+          if [ -n "$section" ]; then
+            printf '\n%s\n' "$section" >> notes.txt
+          fi
           cat notes.txt
       - name: Write update manifests and checksums
-        run: node scripts/release/manifest.mjs --dir dist --version "$VERSION" --channel "$CHANNEL" --commit "$GITHUB_SHA" --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$ASSET_TAG" --notes "$(cat notes.txt)" --targets aarch64-apple-darwin,x86_64-apple-darwin,x86_64-unknown-linux-gnu
+        run: node scripts/release/manifest.mjs --dir dist --version "$VERSION" --channel "$CHANNEL" --commit "$GITHUB_SHA" --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$ASSET_TAG" --notes "$(cat update-notes.txt)" --targets aarch64-apple-darwin,x86_64-apple-darwin,x86_64-unknown-linux-gnu
       - name: Publish dev build
         if: needs.prepare.outputs.channel == 'dev'
         env:
