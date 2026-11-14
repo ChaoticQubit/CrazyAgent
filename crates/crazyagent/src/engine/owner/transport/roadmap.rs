@@ -330,6 +330,6 @@ fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "roadmap_tests.rs"]
 mod tests;

@@ -591,6 +591,7 @@ fn a_row_with_documents_found_still_reads_on_18_14_and_the_view_keeps_them() {
 
 /// While a project move is pending for a project's folder, its waiting step is not claimed;
 /// it is once the move is finished or forgotten.
+#[cfg(unix)]
 #[test]
 fn a_step_of_a_project_whose_folder_is_being_moved_is_not_claimed() {
     let database = database();

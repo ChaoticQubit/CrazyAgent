@@ -767,5 +767,5 @@ fn table_exists(connection: &Connection, name: &str) -> rusqlite::Result<bool> {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

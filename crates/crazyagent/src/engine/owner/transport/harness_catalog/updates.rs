@@ -283,6 +283,7 @@ async fn entry(
 /// sign-in minimum check (DEC-166): the catalog entry's version when that entry is the file
 /// the sign-in runs, else unknown. Inputs: the engine, the engine root, the catalog search,
 /// the catalog id and the real file the sign-in runs. Output: the version, or None.
+#[cfg(unix)]
 pub(crate) async fn sign_in_version(
     engine: &Arc<Engine>,
     root: PathBuf,

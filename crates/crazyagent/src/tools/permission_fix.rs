@@ -1,7 +1,7 @@
 use super::{Places, Refusal, Refused};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 pub const TOOL_FIX_REFUSED: &str = "tool_fix_refused";
 pub const TOOL_FIX_TOO_LARGE: &str = "tool_fix_too_large";
@@ -174,6 +174,7 @@ pub fn fix(target: &Target, places: &Places) -> Result<Report, &'static str> {
 /// Removes group and other write from a tree inside the engine's own setup folder after
 /// setup installs into it, since uv writes files under the process umask (DEC-162 R2).
 /// Inputs: the setup folder and the tree. Output: the report, or the code as for [`fix`].
+#[cfg(unix)]
 pub(crate) fn tighten_setup(setup: &Path, tree: &Path) -> Result<Report, &'static str> {
     if tree == setup || !tree.starts_with(setup) {
         return Err(TOOL_FIX_REFUSED);
@@ -218,6 +219,7 @@ fn walk(
     owned: &dyn Fn(u32, u64) -> bool,
 ) -> Result<Report, &'static str> {
     use rustix::fs::{AtFlags, FileType};
+    use std::path::Component;
     let rest = target.strip_prefix(anchor).map_err(|_| TOOL_FIX_REFUSED)?;
     let names: Vec<&OsStr> = rest
         .components()
