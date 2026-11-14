@@ -2035,6 +2035,60 @@ fn a_harness_that_still_needs_a_program_is_never_asked_its_version_until_the_res
     );
 }
 
+/// security-audit run-1 (version read): a harness file the tool resolver refuses as one
+/// agents can write, such as a codex planted in a project's `node_modules/.bin`, is never run
+/// for its version: the read starts nothing and names the resolver's refusal, as a launch
+/// refuses the file. Without the project marker the same file is read once, so the resolver
+/// decides the outcome, not a failed start.
+#[test]
+fn a_harness_the_resolver_refuses_as_agent_writable_is_never_asked_its_version() {
+    for project in [true, false] {
+        let machine = Machine::new();
+        std::fs::create_dir_all(machine.roots().home).unwrap();
+        let work = machine.root.path().join("proj");
+        if project {
+            std::fs::create_dir_all(work.join(".crazyagent")).unwrap();
+        }
+        let ran = machine.root.path().join("ran");
+        let real = work.join("node_modules/@openai/codex/bin/codex.js");
+        executable(
+            &real,
+            &format!(
+                "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+                ran.display()
+            ),
+        );
+        let link = work.join("node_modules/.bin/codex");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(matches!(
+            method("codex", &real, &machine.roots()),
+            Method::Npm { .. }
+        ));
+        let resolved = crate::tools::resolve_entry(&link, &machine.roots().places);
+        let case = Case::new(machine, entry("codex", Some(link)), None);
+        let versions = case.versions(false);
+        if project {
+            let refused = resolved.unwrap_err();
+            assert_eq!(refused.reason, crate::tools::Reason::Refused);
+            assert_eq!(
+                refused.refused.as_ref().map(|refused| refused.why.clone()),
+                Some(crate::tools::Refusal::AgentsCanWrite)
+            );
+            assert_eq!(versions.installed, None);
+            assert_eq!(
+                versions.needs.as_ref().map(|needs| needs.line.clone()),
+                Some(refused.line())
+            );
+            assert!(!ran.exists(), "a refused harness file is never run");
+        } else {
+            assert!(resolved.is_ok());
+            assert_eq!(versions.needs, None);
+            assert_eq!(versions.installed.as_deref(), Some("0.167.1"));
+            assert_eq!(std::fs::read_to_string(&ran).unwrap().lines().count(), 1);
+        }
+    }
+}
+
 fn listed(ids: &[&str]) -> Vec<String> {
     ids.iter().map(|id| (*id).to_owned()).collect()
 }

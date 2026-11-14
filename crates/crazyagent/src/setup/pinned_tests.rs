@@ -286,6 +286,29 @@ fn environments(home: &Path) -> usize {
     std::fs::read_dir(home).map_or(0, |entries| entries.count())
 }
 
+/// security-audit run-1 (installer PATH): the programs setup starts as the owner, such as uv
+/// looking for a Python by version, get a PATH without the folders the tool resolver refuses:
+/// a folder inside a project, which agents write, is never on it, while setup's own `bin`
+/// stays first and an owner folder stays after it.
+#[test]
+fn the_programs_setup_starts_never_get_a_project_folder_on_their_path() {
+    let root = private_root();
+    let work = root.path().join("proj");
+    std::fs::create_dir_all(work.join(".crazyagent")).unwrap();
+    let planted = work.join("node_modules/.bin");
+    let owner = root.path().join("owner/bin");
+    std::fs::create_dir_all(&planted).unwrap();
+    std::fs::create_dir_all(&owner).unwrap();
+    let installer = PinnedInstaller::with_paths(root.path(), vec![planted, owner.clone()]);
+    let (_, path) = installer
+        .env()
+        .into_iter()
+        .find(|(name, _)| *name == "PATH")
+        .unwrap();
+    let folders: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    assert_eq!(folders, [root.path().join("setup/bin"), owner]);
+}
+
 #[test]
 fn a_locked_tool_installs_only_files_whose_sha256_its_lock_lists() {
     let uv = found("uv");
