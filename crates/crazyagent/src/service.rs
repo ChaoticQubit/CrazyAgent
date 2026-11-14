@@ -615,29 +615,31 @@ WantedBy=default.target\n",
     /// ([`Self::may_replace`], judged on the app's own engine and not on an AppImage's private
     /// copy) is kept on a forced reinstall and started as it is otherwise (RV-DS241-129, DS-118
     /// r2 F1). So is any usable definition while this service runs such a private copy, one
-    /// path every AppImage shares, which keeps a newer engine's bytes while one is known
-    /// ([`persistable`], DS-118 r3 F1). Else this definition is installed when asked, when none
-    /// is installed, when the installed one names a broken program ([`Self::broken_program`])
-    /// or another program, or when it is [`Self::stale`]; otherwise the installed one starts
-    /// as it is. An engine that is itself [`transient`] is never installed: it starts a usable
-    /// installed definition and is refused otherwise. Inputs: the bundled engine, whether a
-    /// definition is installed and whether the owner asked for a reinstall. Output: the repair.
+    /// path every AppImage shares, which keeps a newer engine's bytes while one is known there
+    /// ([`newer_engine_at`], [`persistable`], DS-118 r3 F1). Else this definition is installed
+    /// when asked, when none is installed, when the installed one names a broken program
+    /// ([`Self::broken_program`]) or another program, or when it is [`Self::stale`]; otherwise
+    /// the installed one starts as it is. An engine that is itself [`transient`] is never
+    /// installed: it starts a usable installed definition and is refused otherwise. Inputs:
+    /// the bundled engine, whether a definition is installed and whether the owner asked for a
+    /// reinstall. Output: the repair.
     pub fn repair(&self, bundled: &Path, installed: bool, reinstall: bool) -> Repair {
         let broken = installed && self.broken_program().is_some();
         let another = installed && !broken && self.runs_another_program();
-        let copied = installed && !broken && self.executable != bundled;
-        if another || copied {
-            let judged = Service {
+        let newer_copy =
+            installed && !broken && self.executable != bundled && newer_engine_at(&self.root);
+        let replaceable = !another
+            || Service {
                 executable: bundled.to_path_buf(),
                 ..self.clone()
-            };
-            if !judged.may_replace() {
-                return if reinstall {
-                    Repair::Keep
-                } else {
-                    Repair::Start
-                };
             }
+            .may_replace();
+        if newer_copy || !replaceable {
+            return if reinstall {
+                Repair::Keep
+            } else {
+                Repair::Start
+            };
         }
         let replace = reinstall || !installed || broken || another || self.stale(bundled);
         if !replace {
@@ -1101,12 +1103,13 @@ fn persisted(executable: &Path) -> Result<(), ServiceError> {
 /// (leader 20:15), one stable path across versions, each file refreshed by an atomic rename
 /// whenever it differs. The copy an older version kept in `<data root>/bin` stays, since a
 /// login service may still name it; `service start` retires it after the service names this
-/// one ([`retire_old_copies`]). While the data root reports a newer engine, this user's
-/// private copy is kept as it is, so an older AppImage never puts its bytes over the engine
-/// every AppImage runs there (DS-118 r3 F1). Nothing is ever copied from another folder, so an
-/// engine other users can change is returned as it is and refused where it would be kept.
-/// Inputs: the bundled engine, the layout and the AppImage mount folder when there is one.
-/// Output: the executable to keep.
+/// one ([`retire_old_copies`]). The version written goes in `<data root>/setup/bin-version`,
+/// and while a newer engine is known there ([`newer_engine_at`]) this user's private copy is
+/// kept as it is, so an older AppImage never puts its bytes over the engine every AppImage
+/// runs there (DS-118 r3 F1). Nothing is ever copied from another folder, so an engine other
+/// users can change is returned as it is and refused where it would be kept. Inputs: the
+/// bundled engine, the layout and the AppImage mount folder when there is one. Output: the
+/// executable to keep.
 pub fn persistable(
     executable: &Path,
     layout: &Layout,
@@ -1136,9 +1139,7 @@ pub fn persistable(
     let copies = layout.root().join("setup").join("bin");
     crate::paths::private_folder(&copies)?;
     let installed = copies.join(main);
-    let newer = crate::engine::bootstrap::reported_engine_version(layout.root())
-        .is_some_and(|known| newer_than_this(&known));
-    if newer && private_file(&installed) {
+    if newer_engine_at(layout.root()) && private_file(&installed) {
         return Ok(installed);
     }
     for name in &names {
@@ -1154,8 +1155,42 @@ pub fn persistable(
         copy_private(&source.join(name), &staged).map_err(fail)?;
         std::fs::rename(&staged, &copy).map_err(fail)?;
     }
+    let recorded = copy_version_file(layout.root());
+    if bounded_text(&recorded).as_deref().map(str::trim) != Some(crate::version::VERSION) {
+        let fail = |error: std::io::Error| failure(format!("{}: {error}", recorded.display()));
+        let staged = recorded.with_file_name(format!(".bin-version.{}", std::process::id()));
+        if std::fs::symlink_metadata(&staged).is_ok() {
+            std::fs::remove_file(&staged).map_err(fail)?;
+        }
+        std::fs::write(&staged, crate::version::VERSION).map_err(fail)?;
+        std::fs::rename(&staged, &recorded).map_err(fail)?;
+    }
     assert!(installed.starts_with(&copies) && installed.is_file());
     Ok(installed)
+}
+
+/// The file in which [`persistable`] records the version of the engine it last put in
+/// `<root>/setup/bin`. Input: the data root. Output: the path.
+fn copy_version_file(root: &Path) -> PathBuf {
+    root.join("setup").join("bin-version")
+}
+
+/// Whether an engine newer than this one is known at the data root `root`: the one whose
+/// locator is there while it runs ([`crate::engine::bootstrap::reported_engine_version`]), or
+/// the one whose bytes [`persistable`] last put in `<root>/setup/bin`, as its version file says
+/// after it stopped. A version file that holds no version counts for nothing. Input: the data
+/// root. Output: the answer.
+fn newer_engine_at(root: &Path) -> bool {
+    let recorded = bounded_text(&copy_version_file(root))
+        .map(|text| text.trim().to_owned())
+        .filter(|known| crate::update::is_newer(known, crate::version::VERSION).is_ok());
+    [
+        crate::engine::bootstrap::reported_engine_version(root),
+        recorded,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|known| newer_than_this(&known))
 }
 
 /// Whether a known engine version is newer than this engine, or cannot be read as a version,
