@@ -82,8 +82,8 @@ pub enum Repair {
     /// ([`Service::refuse`]).
     Refuse,
     /// Neither, for a forced reinstall: the installed definition runs another program that
-    /// still exists and this engine may not replace it ([`Service::may_replace`]), as with a
-    /// newer engine known at the data root or a dev build, so the definition is kept.
+    /// still exists and the app's engine may not replace it ([`Service::may_replace`]), as
+    /// with a newer engine known at the data root or a dev build, so the definition is kept.
     Keep,
 }
 
@@ -609,23 +609,33 @@ WantedBy=default.target\n",
         Some(PathBuf::from(program)).filter(|program| program.is_absolute())
     }
 
-    /// What to do with the engine service when no engine answers: install this definition
-    /// when asked, when none is installed, when the installed one names a broken program
-    /// ([`Self::broken_program`]), when it is [`Self::stale`], or when it runs another program
-    /// this engine may replace ([`Self::may_replace`]); otherwise start it as it is. A forced
-    /// reinstall keeps another program that still exists and this engine may not replace
-    /// (RV-DS241-129). An engine that is itself [`transient`] is never installed: it starts a
-    /// usable installed definition and is refused otherwise. Inputs: the bundled engine,
-    /// whether a definition is installed and whether the owner asked for a reinstall. Output:
-    /// the repair.
+    /// What to do with the engine service when no engine answers. Another program the
+    /// installed definition runs that still exists and the `bundled` engine may not replace
+    /// ([`Self::may_replace`], judged on the app's own engine and not on an AppImage's private
+    /// copy) is kept on a forced reinstall and started as it is otherwise (RV-DS241-129, DS-118
+    /// r2 F1). Else this definition is installed when asked, when none is installed, when the
+    /// installed one names a broken program ([`Self::broken_program`]) or another program, or
+    /// when it is [`Self::stale`]; otherwise the installed one starts as it is. An engine that
+    /// is itself [`transient`] is never installed: it starts a usable installed definition and
+    /// is refused otherwise. Inputs: the bundled engine, whether a definition is installed and
+    /// whether the owner asked for a reinstall. Output: the repair.
     pub fn repair(&self, bundled: &Path, installed: bool, reinstall: bool) -> Repair {
         let broken = installed && self.broken_program().is_some();
         let another = installed && !broken && self.runs_another_program();
-        let replaceable = another && self.may_replace();
-        if reinstall && another && !replaceable {
-            return Repair::Keep;
+        if another {
+            let judged = Service {
+                executable: bundled.to_path_buf(),
+                ..self.clone()
+            };
+            if !judged.may_replace() {
+                return if reinstall {
+                    Repair::Keep
+                } else {
+                    Repair::Start
+                };
+            }
         }
-        let replace = reinstall || !installed || broken || self.stale(bundled) || replaceable;
+        let replace = reinstall || !installed || broken || another || self.stale(bundled);
         if !replace {
             return Repair::Start;
         }
