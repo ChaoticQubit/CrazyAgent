@@ -31144,6 +31144,205 @@ fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shar
     );
 }
 
+/// An agent leaves no shell code in its own home for its next start (SA vid 12). In its
+/// installed profile a tools-on agent cannot write a zsh, bash or sh startup file there, in
+/// any letter case, compiled or as a link, while it still writes the folders whose scripts
+/// Claude Code and Codex source ahead of each shell command, its shell history and the rest
+/// of its home. The next launch then removes those folders and a startup file an earlier
+/// build let it plant, so the shells that start later in its profile run nothing planted.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
+    let fixture = Fixture::new(1);
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    let home = agent_home(&runtime.state, id);
+    let work = plan.working_dir.clone();
+    let marker = work.join("planted.txt");
+    let plant = format!("echo planted >> {}", marker.display());
+    let session = home
+        .join("session-env")
+        .join("0b6f1c2e-5d4a-4f3e-9a8b-7c6d5e4f3a2b");
+    let tried = work.join("tried.txt");
+    let script = work.join("plant.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "try() {{ name=$1; shift; \"$@\" 2>/dev/null; echo \"$name=$?\" >> {tried}; }}\n\
+             try zshenv sh -c \"printf '{plant}\\n' >> '{home}/.zshenv'\"\n\
+             try zshenv_case sh -c \"printf '{plant}\\n' >> '{home}/.ZshEnv'\"\n\
+             try zshrc sh -c \"printf '{plant}\\n' > '{home}/.zshrc'\"\n\
+             try zprofile_compiled sh -c \"printf x > '{home}/.zprofile.zwc'\"\n\
+             try bash_profile sh -c \"printf '{plant}\\n' > '{home}/.bash_profile'\"\n\
+             try profile sh -c \"printf '{plant}\\n' > '{home}/.profile'\"\n\
+             try link ln -s '{script}' '{home}/.zlogin'\n\
+             try control_launch sh -c \"printf x > '{home}/settings.json'\"\n\
+             try session sh -c \"mkdir -p '{session}' && printf '{plant}\\n' > '{session}/sessionstart-hook-0.sh'\"\n\
+             try snapshot sh -c \"mkdir -p '{home}/shell-snapshots' && printf '{plant}\\n' > '{home}/shell-snapshots/snapshot-zsh-1-dummy.sh'\"\n\
+             try codex_snapshot sh -c \"mkdir -p '{home}/shell_snapshots' && printf '{plant}\\n' > '{home}/shell_snapshots/dummy.sh'\"\n\
+             try history sh -c \"printf ok > '{home}/.zsh_history'\"\n\
+             try control_note sh -c \"printf ok > '{home}/note'\"\n",
+            home = home.display(),
+            session = session.display(),
+            script = script.display(),
+            tried = tried.display(),
+        ),
+    )
+    .unwrap();
+    let planted = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&plan.sandbox_profile)
+            .arg("/bin/sh")
+            .arg(&script)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(planted.status.success(), "{planted:?}");
+    let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
+    std::fs::write(home.join(".zshenv"), format!("{plant}\n")).unwrap();
+
+    let context = runtime
+        .context(
+            &fixture.setup.project_id,
+            id,
+            AgentRole::Sub,
+            true,
+            Layout::Linked,
+        )
+        .unwrap();
+    let installed = context.install("claude-code", &home, true).unwrap();
+    drop(installed);
+    let mut shells = Vec::new();
+    let mut problems = Vec::new();
+    for (shell, arguments) in [
+        ("/bin/zsh", &["-c", "true"][..]),
+        ("/bin/zsh", &["-l", "-c", "true"][..]),
+        ("/bin/bash", &["-l", "-c", "true"][..]),
+    ] {
+        let ran = crate::spawn_gate::output(
+            Command::new(crate::sandbox::SANDBOX_EXEC)
+                .arg("-f")
+                .arg(&plan.sandbox_profile)
+                .arg(shell)
+                .args(arguments)
+                .current_dir(&work)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        shells.push(format!("{shell} {arguments:?}: {:?}", ran.status));
+        if !ran.status.success() {
+            problems.push(format!("{shell} {arguments:?} failed: {ran:?}"));
+        }
+    }
+
+    let exit = |attempt: &str| {
+        attempts
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{attempt}=")))
+            .map(str::to_owned)
+    };
+    for attempt in [
+        "zshenv",
+        "zshenv_case",
+        "zshrc",
+        "zprofile_compiled",
+        "bash_profile",
+        "profile",
+        "link",
+        "control_launch",
+    ] {
+        if !exit(attempt).is_some_and(|code| code != "0") {
+            problems.push(format!("{attempt} written: {:?}", exit(attempt)));
+        }
+    }
+    for attempt in [
+        "session",
+        "snapshot",
+        "codex_snapshot",
+        "history",
+        "control_note",
+    ] {
+        if exit(attempt).as_deref() != Some("0") {
+            problems.push(format!("{attempt} refused: {:?}", exit(attempt)));
+        }
+    }
+    for entry in [
+        ".zshenv",
+        ".zshrc",
+        ".zprofile.zwc",
+        ".bash_profile",
+        ".profile",
+        ".zlogin",
+        "session-env",
+        "shell-snapshots",
+        "shell_snapshots",
+    ] {
+        if std::fs::symlink_metadata(home.join(entry)).is_ok() {
+            problems.push(format!("{entry} kept by the launch"));
+        }
+    }
+    for entry in [".zsh_history", "note"] {
+        if std::fs::symlink_metadata(home.join(entry)).is_err() {
+            problems.push(format!("{entry} removed by the launch"));
+        }
+    }
+    if marker.exists() {
+        problems.push(format!(
+            "a later shell ran planted code: {:?}",
+            std::fs::read_to_string(&marker).unwrap_or_default()
+        ));
+    }
+    assert!(
+        problems.is_empty(),
+        "an agent left shell code in its own home {} for its next start:\n{}\nattempts:\n{attempts}\nshells: {shells:?}",
+        home.display(),
+        problems.join("\n")
+    );
+}
+
 /// A native lead's temp files are out of its teammates' reach (TPH-2 residual). The lead
 /// starts with its own temp folder empty, though an earlier start left a file there, and in
 /// its installed profile stages a file in it. A teammate in its installed profile can
