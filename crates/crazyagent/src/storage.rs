@@ -375,6 +375,9 @@ impl Storage {
                     if let Err(e) = projects_home::delete_settle(&connection, None) {
                         eprintln!("project_delete_not_settled cause={}", e.0);
                     }
+                    if let Err(e) = projects_home::sweep_home(&connection) {
+                        eprintln!("home_staging_not_swept cause={}", e.0);
+                    }
                     if let Some(jobs) = delete_files_jobs
                         && let Err(e) =
                             projects_home::delete_files_finish(&connection, &path, jobs, "")

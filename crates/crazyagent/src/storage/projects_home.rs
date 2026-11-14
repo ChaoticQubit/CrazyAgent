@@ -625,6 +625,20 @@ pub(crate) fn delete_recheck(
     Ok(delete_blocked(tx, project, &projects, moved)?.map(|refusal| refusal.code))
 }
 
+/// Removes the staging folders that adds and New Projects an engine stop cut short left in
+/// the saved projects home, whether or not an add row names them. Run at engine start,
+/// after a pending home move settled and before any plan, so none is live. Input: the
+/// connection. Output: how many were removed, 0 with no home saved.
+pub(super) fn sweep_home(db: &Connection) -> Result<usize, EngineError> {
+    let Some(saved) = home::load(db)? else {
+        return Ok(0);
+    };
+    assert!(saved.is_absolute());
+    let removed = home::sweep_staging(&saved);
+    eprintln!("home_staging_swept count={removed}");
+    Ok(removed)
+}
+
 /// Forgets a Delete everything's plan once its exchange ended, whatever its outcome, so a
 /// projects home move may go again; with no exchange, as the engine starts, it forgets every
 /// plan an earlier engine process left. Inputs: the connection and the exchange. Output: Ok,

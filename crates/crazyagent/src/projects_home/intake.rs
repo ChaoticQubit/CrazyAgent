@@ -616,20 +616,17 @@ fn still_in_icloud(step: &str) -> EngineError {
 /// The most entries of one folder the staging sweep reads.
 const STAGING_SCAN_MAX: usize = 65_536;
 
-/// Removes the staging folders that adds cut short by an engine stop left in a folder,
-/// links never followed. Run at engine start, before any add plans, so none is live.
-/// Input: the folder, the projects home an add copied into. Output: how many were removed.
+/// Removes the staging folders that adds and New Projects cut short by an engine stop left
+/// directly in a folder, links never followed. Run at engine start, before any add or New
+/// Project plans, so none is live. Input: the folder, the projects home. Output: how many
+/// were removed.
 pub fn sweep_staging(folder: &Path) -> usize {
     let Ok(entries) = fs::read_dir(folder) else {
         return 0;
     };
     let mut removed = 0;
     for entry in entries.take(STAGING_SCAN_MAX).flatten() {
-        if !entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".crazyagent-adding-")
-        {
+        if !staging_name(&entry.file_name().to_string_lossy()) {
             continue;
         }
         let path = entry.path();
@@ -649,6 +646,17 @@ pub fn sweep_staging(folder: &Path) -> usize {
     }
     assert!(removed <= STAGING_SCAN_MAX);
     removed
+}
+
+/// True for a name only the engine gives a staging folder: an add's `.crazyagent-adding-`
+/// name, or a New Project's `.crazyagent-new-` followed by the engine's 64-hex id. Input:
+/// the entry's name. Output: the answer.
+fn staging_name(name: &str) -> bool {
+    assert!(!name.is_empty());
+    let id = name.strip_prefix(".crazyagent-new-");
+    let new = id.is_some_and(crate::engine::owner::is_hex_id);
+    assert!(!new || name.len() == ".crazyagent-new-".len() + 64);
+    new || name.starts_with(".crazyagent-adding-")
 }
 
 /// Where an add an engine stop cut short stands on disk, read without changing anything:
