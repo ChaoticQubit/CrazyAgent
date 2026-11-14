@@ -169,3 +169,108 @@ fn a_task_queued_by_a_lead_the_owner_stopped_waits_for_the_lead() {
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
+
+/// RV-DS241-125: the owner stops a sub-agent while it is stopping to load changed
+/// instructions. The restart is dropped with one team note: the agent is not started again
+/// and the owner's stop stays, so only the owner's Wake starts it (AW-1).
+#[test]
+fn an_owner_stop_during_an_instruction_restart_keeps_the_agent_stopped() {
+    let fixture = Fixture::new(2);
+    let _home = committed_project(&fixture);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let agent = idle_sub_agent(&fixture, &mut team);
+    let project = fixture.setup.project_id.clone();
+    let worker = team.workers.get_mut(&agent).expect("the agent runs");
+    worker.restarting = true;
+    worker.stop_for("engine_stop:instructions");
+    let _ = worker.orders.send(Order::Stop);
+    team.instruction_restarts.insert(agent, project.clone());
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::StopAgent {
+            project_id: project.clone(),
+            agent,
+        }],
+    );
+    let began = Instant::now();
+    while team.workers.contains_key(&agent) {
+        assert!(began.elapsed() < Duration::from_secs(20), "the agent ends");
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    idle_ticks(&mut team);
+    assert!(
+        !team.workers.contains_key(&agent),
+        "it is not started again"
+    );
+    assert_eq!(fixture.agent_status(agent).0, AgentStatus::Stopped);
+    assert!(crate::team::owner_stopped(&fixture.connection, agent).unwrap());
+    assert_eq!(
+        noted(
+            &fixture,
+            "An agent that stopped to load your changed instructions was stopped meanwhile, so it was not started again."
+        ),
+        1
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// RV-DS241-126: the owner switches the Master run time to No limit while the runtime ends a
+/// live master past it, as a second connection flipping it between No limit and the default
+/// does here. Ending the run never panics on a run time read twice: whichever value it
+/// read, the call returns.
+#[test]
+fn a_run_time_switched_to_no_limit_while_the_master_run_ends_never_panics() {
+    const ROUNDS: u32 = 2000;
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let secs = crate::team::master_limits::RUN_DEFAULT_SECS;
+    choose_run_time(&fixture, Some(secs));
+    let (mut team, id) = idle_live_master(&fixture, &host, Duration::from_secs(3600));
+    stand_in_work(&fixture);
+    owner_last_seen(&fixture, now_ms() - i64::from(secs) * 1000 - 1000);
+    fixture
+        .connection
+        .busy_timeout(Duration::from_secs(5))
+        .unwrap();
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flipper = {
+        let done = done.clone();
+        let path = fixture.base.join("engine.db");
+        std::thread::spawn(move || {
+            let connection = Connection::open(path).unwrap();
+            connection.busy_timeout(Duration::from_secs(5)).unwrap();
+            let began = Instant::now();
+            let mut flips = 0_u64;
+            while !done.load(Ordering::SeqCst) && began.elapsed() < Duration::from_secs(60) {
+                let run = if flips % 2 == 0 { 0 } else { i64::from(secs) };
+                if connection
+                    .execute(
+                        "UPDATE team_master_limits SET run_secs=?2 WHERE project=?1",
+                        params![PROJECT, run],
+                    )
+                    .is_err()
+                {
+                    break;
+                }
+                flips += 1;
+            }
+            flips
+        })
+    };
+    for _ in 0..ROUNDS {
+        team.end_master_run(&fixture.setup).unwrap();
+        team.workers
+            .get_mut(&id)
+            .expect("the master's worker stays until a tick")
+            .stopping = false;
+        super::super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true)
+            .unwrap();
+    }
+    done.store(true, Ordering::SeqCst);
+    assert!(flipper.join().unwrap() > 0, "the run time was flipped");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}

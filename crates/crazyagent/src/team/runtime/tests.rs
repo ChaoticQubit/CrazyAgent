@@ -33,8 +33,8 @@ mod live_terminal_probe_tests;
 mod freeze_tests;
 
 #[cfg(target_os = "macos")]
-#[path = "lead_stop_tests.rs"]
-mod lead_stop_tests;
+#[path = "stop_race_tests.rs"]
+mod stop_race_tests;
 
 const PROJECT: &str = "team-panes";
 
