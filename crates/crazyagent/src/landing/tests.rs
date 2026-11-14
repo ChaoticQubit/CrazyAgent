@@ -15502,18 +15502,17 @@ fn a_confined_step_on_linux_never_takes_a_link_or_a_special_file_as_the_index() 
     }
 }
 
-/// LINUX-GIT-CONFINE r1 F2 (rv-code): an engine stopped during a confined Linux step leaves
-/// its `index.lock` beside the step folder in the agent worktree's git folder. The sweep the
-/// engine runs once at start removes that lock, so the agent's steps run again, and keeps
-/// the lock of a worktree with no step folder, which the engine did not take.
+/// LINUX-GIT-CONFINE r1 F2 (rv-code), RV-DS241-135: an engine stopped during a confined Linux
+/// step leaves its `index.lock`, naming that engine process by id and start, beside the step
+/// folder in the agent worktree's git folder. The sweep the engine runs once at start removes
+/// that lock once no running process is the one it names, gone or its id now another
+/// process's, so the agent's steps run again, and keeps a lock another git took.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_engine_start_clears_the_index_lock_a_stopped_confined_step_left() {
     let case = Case::new();
     let master = master_agent(&case);
     let left = master.git_dir.join("index.lock");
-    std::fs::create_dir(master.git_dir.join("crazyagent-step")).unwrap();
-    write(&left, "");
     let kept = case.workspace.git_dir.join("index.lock");
     write(&kept, "owner git\n");
     let repo = git::Repo::open(&master.repository, &master.git_dir, Some(&master.worktree))
@@ -15530,12 +15529,77 @@ fn the_engine_start_clears_the_index_lock_a_stopped_confined_step_left() {
         .unwrap()
         .code
     };
-    assert_eq!(diff(), 128, "the left lock holds the master's steps");
-    assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 1);
-    assert!(std::fs::symlink_metadata(&left).is_err());
-    assert_eq!(std::fs::read_to_string(&kept).unwrap(), "owner git\n");
-    assert_eq!(diff(), 0, "the master's steps run again");
+    let reused = std::process::id();
+    for (pid, started) in [(i32::MAX.unsigned_abs(), "1"), (reused, "0")] {
+        std::fs::create_dir_all(master.git_dir.join("crazyagent-step")).unwrap();
+        write(&left, &format!("crazyagent-step {pid} {started}\n"));
+        assert_eq!(diff(), 128, "the left lock holds the master's steps");
+        assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 1);
+        assert!(std::fs::symlink_metadata(&left).is_err());
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "owner git\n");
+        assert_eq!(diff(), 0, "the master's steps run again");
+    }
     assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 0);
+}
+
+/// RV-DS241-135: a confined Linux step that finds the worktree's `index.lock` held answers
+/// exit 128 and leaves no empty step folder of its own beside that lock, and leaves a step
+/// folder holding another step's copy of the index to that step.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_step_on_linux_that_meets_a_held_lock_leaves_no_step_folder() {
+    let case = Case::new();
+    let repo = confined_agent(&case, git::Writes::WorkTree);
+    let step = case.workspace.git_dir.join("crazyagent-step");
+    let lock = case.workspace.git_dir.join("index.lock");
+    let diff = || {
+        repo.exec(
+            &["diff-index", "--quiet", "--cached", "HEAD"],
+            None,
+            &[],
+            4096,
+        )
+        .unwrap()
+        .code
+    };
+    assert!(step.is_dir(), "confining makes the step folder");
+    write(&lock, "");
+    assert_eq!(diff(), 128);
+    assert!(
+        std::fs::symlink_metadata(&step).is_err(),
+        "the step folder stayed beside a lock the engine did not take"
+    );
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), "");
+    std::fs::create_dir(&step).unwrap();
+    write(&step.join("index"), "another step's copy\n");
+    assert_eq!(diff(), 128);
+    assert_eq!(
+        std::fs::read_to_string(step.join("index")).unwrap(),
+        "another step's copy\n"
+    );
+}
+
+/// RV-DS241-135: the start sweep never removes an `index.lock` another git took beside a step
+/// folder an earlier engine left, whether that git has just made it or written its index
+/// there, nor one an engine still running took; each lock stays as it was.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_engine_start_keeps_a_foreign_index_lock_beside_a_left_step_folder() {
+    let case = Case::new();
+    let master = master_agent(&case);
+    let lock = master.git_dir.join("index.lock");
+    std::fs::create_dir(master.git_dir.join("crazyagent-step")).unwrap();
+    let index = std::fs::read(master.git_dir.join("index")).unwrap();
+    let pid = i32::try_from(std::process::id()).unwrap();
+    let running = crate::storage::harness_groups::start_identity(pid)
+        .unwrap()
+        .unwrap();
+    let engine = format!("crazyagent-step {pid} {running}\n").into_bytes();
+    for held in [Vec::new(), b"owner git\n".to_vec(), index, engine] {
+        std::fs::write(&lock, &held).unwrap();
+        assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 0);
+        assert_eq!(std::fs::read(&lock).unwrap(), held);
+    }
 }
 
 /// The other half of LINUX-GIT-CONFINE r1 F1: an index that already is a link, FIFO, second
