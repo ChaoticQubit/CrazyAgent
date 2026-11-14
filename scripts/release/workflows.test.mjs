@@ -1102,3 +1102,21 @@ test("the secret guard also catches a called workflow's secrets key and a workfl
   ].join("\n");
   assert.deepEqual(runnerProblems(runners), ["odd: runner line - runner: [ubuntu-22.04, self-hosted]", "tail: runner line runner: self-hosted # pinned"]);
 });
+
+test("a run block line that starts with # is script text GitHub still expands, so a secret there exposes its job; only a comment at job-key indent is passed over (RV-DS241-38 r2b)", () => {
+  const scripted = [
+    "jobs:",
+    "  # the jobs",
+    "  build:",
+    "    runs-on: ubuntu-22.04",
+    "  publish:",
+    "    runs-on: ubuntu-22.04",
+    "    steps:",
+    "      - run: |",
+    "          # token ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}",
+    "          echo done",
+    "",
+  ].join("\n");
+  assert.deepEqual(exposedJobs(scripted), ["publish"]);
+  assert.deepEqual(runnerProblems(scripted), []);
+});
