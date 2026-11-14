@@ -225,6 +225,19 @@ export function takeRemoveAsk(projectId: string): RemoveChoice | null {
   return asked === "delete" ? "everything" : asked === "remove" ? "dashboard" : null;
 }
 
+/** Opens the Remove dialog for each ask a route carries: the one in the address when the
+ * section mounts and any a later route brings while it stays mounted, each taken once. Inputs:
+ * the project id and what to do with the asked choice. Output: the call that stops listening. */
+export function watchRemoveAsk(projectId: string, onAsk: (choice: RemoveChoice) => void): () => void {
+  const take = () => {
+    const asked = takeRemoveAsk(projectId);
+    if (asked !== null) onAsk(asked);
+  };
+  take();
+  window.addEventListener("hashchange", take);
+  return () => window.removeEventListener("hashchange", take);
+}
+
 /** Settings' Remove project: the section, and its dialog, opened by the button or by a route
  * asking for it; a route asking for a delete again, after one an engine stop cut short, opens it
  * on Delete everything once the preview offers it. Inputs: the project and its stored setup. */
@@ -239,12 +252,10 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
   const [note, setNote] = useState("");
   const line = removeLine(setup ? projectFolder(setup.folder) : null);
   const read = preview?.kind === "ok" ? preview.value : null;
-  useEffect(() => {
-    const asked = takeRemoveAsk(data.id);
-    if (asked === null) return;
+  useEffect(() => watchRemoveAsk(data.id, (asked) => {
     wanted.current = asked;
     setConfirming(true);
-  }, [data.id]);
+  }), [data.id]);
   useEffect(() => {
     if (!confirming) return;
     let live = true;
