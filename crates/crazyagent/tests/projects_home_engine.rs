@@ -1369,6 +1369,44 @@ async fn a_second_start_attaches_to_the_running_job_and_another_folder_waits_for
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_add_is_refused_the_destination_a_running_add_planned() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let (first, second) = (place.join("sources/site"), place.join("other/site"));
+    fs::create_dir(&home).unwrap();
+    tree(&first, 100, 100);
+    tree(&second, 2, 2);
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    client
+        .intake_start(id("intake-site"), text(&first), AddMode::Copy, Vec::new())
+        .await
+        .unwrap();
+    job_until(&owner.controller, copying).await;
+    let mut other = Owner {
+        controller: engine.owner().await,
+        generation: 0,
+    };
+    assert_eq!(
+        other.apply(add(&second, AddMode::Copy)).await,
+        rejected("home_add_in_progress"),
+        "a folder of the same name while the first add copies"
+    );
+    job_until(&owner.controller, |job| job.state == JobState::Done).await;
+    assert_eq!(
+        fs::read_to_string(home.join("site/p99/f99.txt")).unwrap(),
+        "99 99\n"
+    );
+    assert_eq!(
+        fs::read_to_string(second.join("p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_engine_stop_ends_a_running_intake_job_with_no_copy_left() {
     let disk = tempfile::tempdir().unwrap();
     let place = disk.path().canonicalize().unwrap();
