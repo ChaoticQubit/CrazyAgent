@@ -870,30 +870,13 @@ async fn a_server_whose_check_home_holds_many_files_answers_its_removal_at_once(
     case.close().await;
 }
 
-/// A free loopback TCP port below every range the OS hands out by itself (Linux from 32768,
-/// macOS from 49152) and apart from the owner's fixed ports, as a configured local model
-/// port must be for the Linux boundary to keep it (LPF1-M1). Output: the port.
-fn free_low_port() -> u16 {
-    let start = 20_000 + (std::process::id() % 4_000) as u16;
-    let port = (start..30_000)
-        .chain(20_000..start)
-        .find(|port| crazyagent::spawn_gate::bind_tcp_std(("127.0.0.1", *port)).is_ok())
-        .expect("a free loopback port between 20000 and 30000");
-    assert!((20_000..30_000).contains(&port));
-    port
-}
-
 /// A checked server gets the open network agents get, but while the owner's local model
 /// server is down it cannot listen on that configured endpoint's port and answer the
 /// prompts sent there; another loopback port stays free for it to bind.
 #[tokio::test]
 async fn a_server_check_cannot_listen_on_a_configured_local_model_port() {
-    let kept = free_low_port();
-    let other = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let kept = crazyagent::spawn_gate::free_low_tcp_port().unwrap();
+    let other = crazyagent::spawn_gate::free_low_tcp_port().unwrap();
     assert_ne!(kept, other);
     let case = Case::with_settings(&local_model_settings(kept)).await;
     let controller = case.controller().await;
