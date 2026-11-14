@@ -53,6 +53,22 @@ test("the app reads the job every second while it runs and at the found-folder p
   assert.equal(intake.jobRunning(null), false);
 });
 
+test("a failed start goes Home only for a job adding this folder that runs, or ended done and is not the job read before the start", () => {
+  const read = (value) => ({ kind: "ok", value });
+  const older = job({ state: "done" });
+  const newer = job({ state: "done" }, { id: "add-2" });
+  const unread = { kind: "error", code: "owner_timeout", message: "The engine didn't answer in time." };
+  assert.equal(intake.startReached(SOURCE, job(copying(1)), read(older)), true);
+  assert.equal(intake.startReached(SOURCE, job(copying(1)), unread), true);
+  assert.equal(intake.startReached(SOURCE, newer, read(older)), true);
+  assert.equal(intake.startReached(SOURCE, newer, read(null)), true);
+  assert.equal(intake.startReached(SOURCE, older, read(older)), false, "the add that ended before this start");
+  assert.equal(intake.startReached(SOURCE, newer, unread), false, "no read before: an ended job may be older");
+  assert.equal(intake.startReached(SOURCE, job(failed("home_copy_failed", "copying"), { id: "add-2" }), read(null)), false);
+  assert.equal(intake.startReached("/Users/mira/Desktop/other", job(copying(1)), read(null)), false);
+  assert.equal(intake.startReached(SOURCE, null, read(null)), false);
+});
+
 test("a job's end is said once, when the read after a running one shows that job ended", () => {
   const running = job(copying(3));
   const done = job({ state: "done" });
