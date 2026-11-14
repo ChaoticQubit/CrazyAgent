@@ -26,6 +26,9 @@ pub const KEEPERS_MAX: usize = 2;
 pub const KEEPER_STARTED_MAX: usize = 64;
 const SETTLE_WAIT: Duration = Duration::from_secs(10);
 const REPLAY_READS_MAX: u64 = 4096;
+/// The longest an adoption reads a pane's record before the session exists, when the
+/// launch's run time leaves longer (RV-DS241-72).
+const REPLAY_WAIT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(100);
 const ESCAPE: &[u8] = b"\x1b";
 
@@ -253,10 +256,12 @@ impl PaneRecord {
 
 /// Reads an adopted pane's record on to its end to learn whether a turn is open there.
 /// No byte count ends it (owner 11-11): it reads until a read finds nothing new, at most
-/// `REPLAY_READS_MAX` reads more than the record held when it was opened, and a harness
-/// that writes faster than that leaves the rest to the session's own polls. Takes the
-/// reader. Returns whether a turn is open, none when no fact says, or the reader's problem.
-fn replay(reader: &mut TranscriptReader) -> Result<Option<bool>, LaunchError> {
+/// `REPLAY_READS_MAX` reads more than the record held when it was opened, and never past
+/// `until`, so a record an agent grows without end cannot keep its pane from Stop and its
+/// run time (RV-DS241-72). A harness that writes faster, or a record longer than `until`
+/// allows, leaves the rest to the session's own polls. Takes the reader and when to stop.
+/// Returns whether a turn is open, none when no fact says, or the reader's problem.
+fn replay(reader: &mut TranscriptReader, until: Instant) -> Result<Option<bool>, LaunchError> {
     let mut open = None;
     let mut reads_max: Option<u64> = None;
     let mut reads: u64 = 0;
@@ -280,11 +285,25 @@ fn replay(reader: &mut TranscriptReader) -> Result<Option<bool>, LaunchError> {
             REPLAY_READS_MAX + reader.unread().unwrap_or(0) / READ_BYTES_MAX as u64
         });
         assert!(max >= REPLAY_READS_MAX);
-        if reads >= max {
+        if reads >= max || Instant::now() >= until {
             eprintln!("launch_adopt_replay_cut reads={reads}");
             return Ok(open);
         }
     }
+}
+
+/// Whether a pane still runs the process its record names: it is alive and the host names
+/// the record's pid as its first process, as a thaw checks, so a number the system gave
+/// again is never taken for the pane's (RV-DS241-75). A failed look at the pid counts as
+/// not. Inputs: the host, the pane and the record. Output: the answer, or the host's
+/// failure to list its panes.
+fn still_recorded(
+    host: &dyn Host,
+    agent: &AgentId,
+    record: &PaneRecord,
+) -> Result<bool, LaunchError> {
+    Ok(host.alive().map_err(host_failure)?.contains(agent)
+        && host.pane_pid(agent).ok().flatten() == Some(record.pid))
 }
 
 impl TerminalSession {
@@ -324,7 +343,9 @@ impl TerminalSession {
     /// pane that does not count, a turn that does not end ends the pane, with
     /// `launch_adopt_unsettled` once its processes are confirmed gone and
     /// `launch_adopt_cleanup_uncertain` when they are not. The launch's run time and event
-    /// budget go on counting from its start. A Codex pane still on its folder access screen
+    /// budget go on counting from its start, and the record is read only while that run time
+    /// lasts, at most `REPLAY_WAIT`. A pane whose first process is not the record's, before
+    /// or after that read, is `launch_closed` and is left as it is. A Codex pane still on its folder access screen
     /// is not ready: it goes on with its launch's one Enter before any prompt is typed. A
     /// failed look at the screen counts as not on it, so it cannot end the pane. The
     /// key and context files are removed when the session stops, or at once when the pane
@@ -341,16 +362,17 @@ impl TerminalSession {
         if let Some(code) = super::agent_pane_unavailable(std::env::consts::OS) {
             return Err(failure(code));
         }
-        if !host.alive().map_err(host_failure)?.contains(&agent) {
+        if !still_recorded(host.as_ref(), &agent, record)? {
             return Err(failure("launch_closed"));
         }
+        let until = Instant::now() + REPLAY_WAIT.min(record.run_time_left(limits.run_time));
         let mut reader = match &record.resumed {
             Some((file, from)) => {
                 TranscriptReader::resumed(record.transcript(), &record.cwd, file, Some(*from))?
             }
             None => TranscriptReader::adopted(record.transcript(), &record.cwd, record.since()),
         };
-        let open = replay(&mut reader)? == Some(true);
+        let open = replay(&mut reader, until)? == Some(true);
         let stale = open
             && reader
                 .silent()
@@ -379,12 +401,15 @@ impl TerminalSession {
                 ));
             }
             if settled {
-                replay(&mut reader)?;
+                replay(&mut reader, until)?;
             }
         }
         let took_none = open && !settled;
         if took_none {
             reader.drop_turn();
+        }
+        if !still_recorded(host.as_ref(), &agent, record)? {
+            return Err(failure("launch_closed"));
         }
         let unkept = host.unkept(&agent);
         let unconfined = !matches!(
