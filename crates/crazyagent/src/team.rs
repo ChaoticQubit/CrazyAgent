@@ -43,6 +43,12 @@ pub const MESSAGES_WAITING_MAX: i64 = 64;
 const MESSAGE_HISTORY: &str = "state NOT IN ('pending','sent')";
 const TASK_HISTORY: &str =
     "status IN ('done','failed','cancelled') AND (source='owner' OR delivered=1)";
+/// Finished master results their recipient cannot take now (DEC-170 addendum 4): one bound
+/// to a session other than the live one, given as `?2`, or one for a lead that is not
+/// running. They make room once no `TASK_HISTORY` row is left.
+const TASK_WAITING: &str = "status IN ('done','failed','cancelled') AND source='master' AND delivered=0
+     AND CASE WHEN parent IS NULL THEN session IS NOT NULL AND session IS NOT ?2
+     ELSE parent NOT IN (SELECT id FROM team_agents WHERE status IN ('starting','idle','working')) END";
 pub const STATUS_TASKS_MAX: i64 = 100;
 pub const STATUS_MESSAGES_MAX: i64 = 50;
 pub const STATUS_AGENTS_MAX: i64 = 80;
@@ -1982,27 +1988,13 @@ pub fn admit(
     if active_tasks(tx, &stored.project_id, None)? >= TASKS_ACTIVE_MAX {
         return Ok(Err("team_queue_full"));
     }
-    let kept: i64 = tx
-        .query_row(
-            &format!("SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND NOT ({TASK_HISTORY})"),
-            [stored.project_id.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(error)?;
-    if kept >= TASKS_PER_PROJECT_MAX {
-        return Ok(Err("team_task_limit"));
+    if let Err(code) = task_room(tx, &stored.project_id)? {
+        return Ok(Err(code));
     }
     let status = match eligible_accounts(access, &stored.project_id, launch) {
         Accounts::Usable(accounts) if !accounts.is_empty() => TaskStatus::Queued,
         _ => TaskStatus::NeedsPool,
     };
-    make_room(
-        tx,
-        "team_tasks",
-        TASK_HISTORY,
-        &stored.project_id,
-        TASKS_PER_PROJECT_MAX,
-    )?;
     tx.execute(
         "INSERT INTO team_tasks(project,source,turn,harness,tools,prompt,status,created_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
@@ -2036,7 +2028,8 @@ pub fn admit(
 /// replaces, so the global task cap never refuses a merge already made. The update is
 /// the owner's, so it clears the owner stop of that sub-agent alone; the agents it leads
 /// stay stopped. Takes the transaction, project, agent, prompt and time. Returns Ok, or a
-/// plain refusal code.
+/// plain refusal code, `team_task_limit` when the task window holds only work it keeps;
+/// on a refusal the caller rolls the transaction back.
 pub fn admit_resolve(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -2091,13 +2084,9 @@ pub fn admit_resolve(
         .map_err(error)?;
         return Ok(Ok(()));
     }
-    make_room(
-        tx,
-        "team_tasks",
-        TASK_HISTORY,
-        project,
-        TASKS_PER_PROJECT_MAX,
-    )?;
+    if let Err(code) = task_room(tx, project)? {
+        return Ok(Err(code));
+    }
     tx.execute(
         "INSERT INTO team_tasks(project,source,turn,harness,tools,prompt,status,created_ms) VALUES (?1,?2,NULL,?3,?4,?5,?6,?7)",
         params![
@@ -2303,6 +2292,63 @@ fn make_room(
     }
     assert!(count(tx)? < max, "team_live_rows_fill_the_window");
     Ok(())
+}
+
+/// Makes room for one more task of a project within `TASKS_PER_PROJECT_MAX` (DEC-170
+/// addendum 4): the oldest `TASK_HISTORY` rows go first, then the oldest `TASK_WAITING`
+/// results; open tasks and results the live master or a running lead can take are kept.
+/// Takes the transaction and the project. Returns Ok, `team_task_limit` with nothing
+/// deleted when kept tasks fill the window, or any SQLite failure.
+fn task_room(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+) -> Result<Result<(), &'static str>, EngineError> {
+    let live = crate::master_sessions::live_session(tx, project)?;
+    let kept: i64 = tx
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND NOT ({TASK_HISTORY}) AND NOT ({TASK_WAITING})"
+            ),
+            params![project.as_str(), live],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if kept >= TASKS_PER_PROJECT_MAX {
+        return Ok(Err("team_task_limit"));
+    }
+    let excess = || -> Result<i64, EngineError> {
+        tx.query_row(
+            "SELECT COUNT(*) FROM team_tasks WHERE project=?1",
+            [project.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count + 1 - TASKS_PER_PROJECT_MAX)
+        .map_err(error)
+    };
+    let over = excess()?;
+    if over > 0 {
+        tx.execute(
+            &format!(
+                "DELETE FROM team_tasks WHERE id IN
+                 (SELECT id FROM team_tasks WHERE project=?1 AND ({TASK_HISTORY}) ORDER BY id LIMIT ?2)"
+            ),
+            params![project.as_str(), over],
+        )
+        .map_err(error)?;
+    }
+    let over = excess()?;
+    if over > 0 {
+        tx.execute(
+            &format!(
+                "DELETE FROM team_tasks WHERE id IN
+                 (SELECT id FROM team_tasks WHERE project=?1 AND ({TASK_WAITING}) ORDER BY id LIMIT ?3)"
+            ),
+            params![project.as_str(), live, over],
+        )
+        .map_err(error)?;
+    }
+    assert!(excess()? <= 0, "team_live_rows_fill_the_window");
+    Ok(Ok(()))
 }
 
 /// Appends one message to a project's team conversation, keeping its newest

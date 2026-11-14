@@ -2529,7 +2529,7 @@ const DELETE_NAME_BYTES_MAX: usize = 1024;
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 54] = [
+const REMOVED_WITH_PROJECT: [&str; 57] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2558,6 +2558,9 @@ const REMOVED_WITH_PROJECT: [&str; 54] = [
     "team_reask_empty",
     "team_master_idle_stop",
     "team_master_live_terminal",
+    "team_live_masters",
+    "team_done_quiet",
+    "team_notifications",
     "team_wall",
     "team_catch_up_main",
     "team_reuse_idle",
@@ -2723,8 +2726,8 @@ fn set_agent_policy(
 /// Removes a project from CrazyAgent and leaves its folder on disk where it is.
 /// Takes the transaction, the project and the revision before the removal. Its open master
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
-/// tasks, settings (sub-agent nesting and the new folder limit among them), wake rules and
-/// ended agents are deleted, so a waiting step is never
+/// tasks, settings (sub-agent nesting and the new folder limit among them), live master
+/// switch, done-quiet choice, owner notifications, wake rules and ended agents are deleted, so a waiting step is never
 /// claimed and a running one stops; its read folders, agent access, agent settings and its
 /// agents' own instructions go too. Its project-scoped MCP servers, skills, secrets and
 /// per-project switches are cleared too, and so are the memories its agents saved, so a new

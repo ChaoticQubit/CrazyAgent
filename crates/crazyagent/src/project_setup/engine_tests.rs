@@ -3185,6 +3185,67 @@ async fn owner_removal_takes_the_team_limits_budget_spread_and_teammates_with_it
     engine.stop().await;
 }
 
+/// A project added again under a removed project's id starts with the live master switch
+/// off, the default done-quiet time and no notifications: the removal takes the live
+/// master row, the done-quiet choice and the owner notifications with it (RV-DS241-12).
+#[tokio::test]
+async fn owner_removal_takes_the_live_master_done_quiet_and_notifications_with_it() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.execute(
+        "INSERT INTO team_live_masters(project,live,turns) VALUES ('setup-pooled',0,3)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO team_done_quiet(project,secs) VALUES ('setup-pooled',600)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO team_notifications(project,kind,text,created_ms) VALUES ('setup-pooled','escalation','Old project question',1)",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let tables = ["team_live_masters", "team_done_quiet", "team_notifications"];
+    for table in tables {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            1,
+            "{table} holds the project's row before removal"
+        );
+    }
+
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    for table in tables {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            0,
+            "{table} goes with the project"
+        );
+    }
+    drop(owner);
+    engine.stop().await;
+}
+
 /// A live agent keeps its row when its project is removed, and the status it writes after
 /// that logs nothing: the removal already took the project's history (HB-S5-I).
 #[tokio::test]

@@ -198,6 +198,33 @@ fn a_teammates_server_pin_record_missing_or_for_another_socket_refuses_every_ser
     );
 }
 
+/// A record write never collides with another writer's staged file (RV-DS241-22): a file
+/// staged under the name this process once used for every write, as a concurrent writer or
+/// an earlier engine with the same pid left it, neither fails the write nor is removed by it.
+#[cfg(unix)]
+#[test]
+fn a_record_write_leaves_another_writers_staged_file_alone_and_lands() {
+    let root = tempfile::tempdir().unwrap();
+    let kept = root.path().join("lead.pid");
+    let theirs = kept.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&theirs, "staged by another writer").unwrap();
+    assert_eq!(keep_record(&kept, "mine"), Ok(()));
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), "mine");
+    assert_eq!(
+        std::fs::read_to_string(&theirs).unwrap(),
+        "staged by another writer"
+    );
+    let staged: Vec<_> = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        staged.len(),
+        2,
+        "{staged:?}: the write leaves no staged file of its own"
+    );
+}
+
 /// A native lead's teammates' server pid record (PLC c PC-L1) is read back for the socket it
 /// was kept for, holds nothing for a later start's socket, and refuses every server once it
 /// is damaged or swapped for a link.

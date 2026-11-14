@@ -72,6 +72,41 @@ fn no_line_of_the_owners_text_can_close_the_prompts_fence() {
 }
 
 #[test]
+fn texts_with_long_tilde_runs_within_the_size_cap_still_get_a_prompt() {
+    let tildes = "~".repeat(TEXT_BYTES_MAX);
+    let run = "~".repeat(1000);
+    let filler = "- Keep it.\n".repeat((TEXT_BYTES_MAX - 1100) / 11);
+    let near_cap = format!("{filler}{run}\n");
+    assert!(near_cap.len() <= TEXT_BYTES_MAX);
+    for (scope, app, project, longest) in [
+        (Scope::App, tildes.as_str(), "", TEXT_BYTES_MAX),
+        (Scope::Project, near_cap.as_str(), near_cap.as_str(), 1000),
+        (
+            Scope::Project,
+            tildes.as_str(),
+            tildes.as_str(),
+            TEXT_BYTES_MAX,
+        ),
+    ] {
+        let text = prompt(scope, app, project);
+        let fence = "~".repeat(longest + 1);
+        let fenced_app = format!(
+            "{fence}\n{app}{}{fence}\n",
+            if app.ends_with('\n') { "" } else { "\n" }
+        );
+        assert!(text.contains(&fenced_app));
+        if scope == Scope::Project {
+            let fenced_project = format!(
+                "{fence}\n{project}{}{fence}\n",
+                if project.ends_with('\n') { "" } else { "\n" }
+            );
+            assert!(text.ends_with(&fenced_project));
+        }
+        assert!(text.contains(&format!("fenced by {fence} lines")));
+    }
+}
+
+#[test]
 fn a_proposal_is_the_fenced_reply_text_within_the_bound() {
     assert_eq!(
         proposal("Here it is.\n~~~markdown\n- Run make check.\n~~~\n").unwrap(),

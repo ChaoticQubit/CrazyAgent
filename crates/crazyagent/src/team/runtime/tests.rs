@@ -23718,6 +23718,36 @@ fn native_lead_own_turn_reports_result_and_lands() {
     runtime.shutdown().unwrap();
 }
 
+/// A lead's own turn that ends while results the master can take fill the task window is
+/// left unrecorded with the limit logged, where it used to trip the retention assert
+/// (RV-DS241-14).
+#[test]
+fn a_leads_own_turn_at_the_task_cap_is_not_recorded_and_does_not_panic() {
+    use crate::team::TASKS_PER_PROJECT_MAX;
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut runtime = fixture.runtime();
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    for index in 0..TASKS_PER_PROJECT_MAX {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,created_ms) VALUES (?1,'master','codex',0,'Waiting step','done',0,?2)",
+                params![PROJECT, index],
+            )
+            .unwrap();
+    }
+    let all_tasks = "SELECT COUNT(*) FROM team_tasks WHERE project=?1";
+    let own_tasks = "SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND agent IS NOT NULL";
+
+    runtime
+        .own_turn_ended(lead, &project, 1, "The page is done.", TurnEnd::Success)
+        .unwrap();
+    assert_eq!(count(&fixture.connection, all_tasks), TASKS_PER_PROJECT_MAX);
+    assert_eq!(count(&fixture.connection, own_tasks), 0);
+    runtime.shutdown().unwrap();
+}
+
 #[test]
 fn reap_skips_lead_with_working_teammate_or_sent_message() {
     let fixture = Fixture::new(1);

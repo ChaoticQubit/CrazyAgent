@@ -7224,9 +7224,10 @@ impl TeamRuntime {
     /// Records a turn a kept native lead's app started by itself, such as after messages
     /// from its teammates: a finished task of the lead's own with the turn's reply as its
     /// result, which reaches the master as any finished master task does, then lands what
-    /// the turn changed in the lead's clone as a change set for the master. Takes the lead,
-    /// its project, when the turn started, its reply text and how it ended. Returns any
-    /// SQLite failure.
+    /// the turn changed in the lead's clone as a change set for the master. When kept tasks
+    /// fill the project's task window the turn is logged and neither recorded nor landed.
+    /// Takes the lead, its project, when the turn started, its reply text and how it ended.
+    /// Returns any SQLite failure.
     fn own_turn_ended(
         &mut self,
         id: i64,
@@ -7250,13 +7251,10 @@ impl TeamRuntime {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
-        super::make_room(
-            &tx,
-            "team_tasks",
-            super::TASK_HISTORY,
-            project,
-            super::TASKS_PER_PROJECT_MAX,
-        )?;
+        if let Err(code) = super::task_room(&tx, project)? {
+            eprintln!("team lead {id} own turn not recorded: {code}");
+            return Ok(());
+        }
         let added = tx
             .execute(
                 "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,parent,attempts,
