@@ -2540,6 +2540,51 @@ async fn desktop_icloud_cancel(
 }
 
 #[tauri::command]
+async fn desktop_intake_start(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    path: String,
+    mode: AddMode,
+    overrides: Vec<AddOverride>,
+) -> Result<crazyagent::projects_home::job::JobView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.intake_start(path, mode, overrides)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_intake_status(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<Option<crazyagent::projects_home::job::JobView>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.intake_status()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_intake_stop(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.intake_stop(id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_intake_dismiss(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.intake_dismiss(id)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_setup_status(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -2570,6 +2615,36 @@ async fn desktop_install_dependency(
     lock(&state)
         .await?
         .install_dependency(name, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_fix_tool_permissions(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: crazyagent::setup::Dependency,
+    tree: String,
+    recursive: bool,
+    generation: u64,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .fix_tool_permissions(name, tree, recursive, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_set_refused_tool(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    choice: crazyagent::setup::RefusedTool,
+    generation: u64,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_refused_tool(choice, generation)
         .await
 }
 
@@ -3047,6 +3122,29 @@ async fn desktop_set_quit_settings(
     lock(&state)
         .await?
         .set_quit_settings(settings, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_provider_retry(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::provider_retry::ProviderRetryView, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.provider_retry().await
+}
+
+#[tauri::command]
+async fn desktop_set_provider_retry(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    choice: crazyagent::provider_retry::ProviderRetry,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_provider_retry(choice, generation)
         .await
 }
 
@@ -4110,6 +4208,35 @@ async fn desktop_notify_question(
 }
 
 #[tauri::command]
+async fn desktop_notify_intake(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    notices: State<'_, Notices>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    bridge::notify::available()?;
+    if webview.window().is_focused().unwrap_or(false) {
+        return Ok(());
+    }
+    let call = lock(&state).await?.intake_status()?;
+    let Some(job) = call.await? else {
+        return Ok(());
+    };
+    if job.id.as_str() != id {
+        return Ok(());
+    }
+    let Some(notice) = bridge::notify::intake_notice(&job) else {
+        return Ok(());
+    };
+    let Some(number) = notices.claim_job(&id)? else {
+        return Ok(());
+    };
+    bridge::notify::show(tauri::Manager::app_handle(&webview), number, &notice)
+        .inspect_err(|_| notices.release_job(&id, number))
+}
+
+#[tauri::command]
 async fn desktop_notification_target(
     webview: Webview,
     notices: State<'_, Notices>,
@@ -4974,9 +5101,15 @@ native_commands! {
     desktop_icloud_download,
     desktop_icloud_progress,
     desktop_icloud_cancel,
+    desktop_intake_start,
+    desktop_intake_status,
+    desktop_intake_stop,
+    desktop_intake_dismiss,
     desktop_setup_status,
     desktop_run_setup,
     desktop_install_dependency,
+    desktop_fix_tool_permissions,
+    desktop_set_refused_tool,
     desktop_set_pack_entry,
     desktop_remove_pack_entry,
     desktop_project_memories,
@@ -5039,6 +5172,8 @@ native_commands! {
     desktop_set_cleanup_settings,
     desktop_quit_settings,
     desktop_set_quit_settings,
+    desktop_provider_retry,
+    desktop_set_provider_retry,
     desktop_learning_progress,
     desktop_set_learning_mark,
     desktop_master_step_settings,
@@ -5104,6 +5239,7 @@ native_commands! {
     desktop_dismiss_questions,
     desktop_question_counts,
     desktop_notify_question,
+    desktop_notify_intake,
     desktop_notification_target,
     desktop_system_notifications,
     desktop_process_text,

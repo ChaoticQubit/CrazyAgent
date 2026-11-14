@@ -1,4 +1,5 @@
-use super::intake::{ask, event, not_ready};
+use super::intake::{ask, copy, event, not_ready};
+use super::intake_job::{self, JobAction};
 use super::new_project::display_path;
 use super::new_project_page::kept_draft;
 use super::settings_accounts::{load_accounts, plain, send};
@@ -6,11 +7,12 @@ use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::accounts::AccountStatus;
 use crate::learning::{LearningProgress, MarkStep, StepId, Topic};
 use crate::pools::PoolSummary;
+use crate::projects_home::job::JobView;
 use crate::projects_home::{FoundProject, FoundState, ProjectsHome};
 use crate::setup::{Dependency, DependencyState, SetupStatus};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::app_setup::AppSetupJob;
-use crate::tui::client::intake::{IntakeQuery, IntakeView};
+use crate::tui::client::intake::{IntakeQuery, IntakeView, start_id};
 use crate::tui::client::learning::LearningQuery;
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::clock;
@@ -152,9 +154,11 @@ fn hide(ctx: &mut Ctx) -> u64 {
 
 /// One row of the project list: the New project draft kept after leaving the
 /// wizard, a projects folder entry that is not a ready project, or a project.
-/// Input: the kept draft, the found folders and the store. Output: drawn as a
-/// four-row card; Enter continues the draft, sets up the folder or opens the project.
+/// Input: the engine's intake job, the kept draft, the found folders and the store. Output:
+/// drawn as a four-row card; Enter does the job's first action, continues the draft, sets up
+/// the folder or opens the project.
 enum Entry {
+    Job(JobView),
     Draft(String),
     Folder(FoundProject),
     Project(ProjectCard),
@@ -244,6 +248,12 @@ fn checking(status: &SetupStatus) -> bool {
 /// there is no pack row beside it. Input: the setup status. Output: the names of tools not
 /// found, bundled or installed.
 fn missing_tools(status: &SetupStatus) -> Vec<String> {
+    unready(status).into_iter().map(home_name).collect()
+}
+
+/// The tools Get set up still waits for, in the setup check's order, leaving out Node.
+/// Input: the setup status. Output: the rows not found, bundled or installed.
+fn unready(status: &SetupStatus) -> Vec<&crate::setup::DependencyStatus> {
     status
         .dependencies
         .iter()
@@ -257,11 +267,38 @@ fn missing_tools(status: &SetupStatus) -> Vec<String> {
                     | DependencyState::Installed { .. }
             )
         })
-        .map(|tool| match tool.name {
-            Dependency::Graphify => "Graphify".into(),
-            _ => tool.label.clone(),
-        })
         .collect()
+}
+
+fn home_name(tool: &crate::setup::DependencyStatus) -> String {
+    match tool.name {
+        Dependency::Graphify => "Graphify".into(),
+        _ => tool.label.clone(),
+    }
+}
+
+/// Home's line for the tools Get set up waits for: the missing ones, then the ones found and
+/// not used (DEC-162), which only setup can fix. Input: the setup status. Output: the line,
+/// empty when every tool is ready.
+fn tools_line(status: &SetupStatus) -> String {
+    let (unused, missing): (Vec<_>, Vec<_>) = unready(status)
+        .into_iter()
+        .partition(|tool| matches!(tool.state, DependencyState::Refused { .. }));
+    let names = |tools: Vec<&crate::setup::DependencyStatus>| {
+        tools
+            .into_iter()
+            .map(home_name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut parts = Vec::new();
+    if !missing.is_empty() {
+        parts.push(format!("Missing: {}.", names(missing)));
+    }
+    if !unused.is_empty() {
+        parts.push(format!("Found, not used: {}.", names(unused)));
+    }
+    parts.join(" ")
 }
 
 /// Home: the project list and, until setup is done, the "Get set up" panel.
@@ -279,6 +316,8 @@ pub struct Home {
     hiding: Option<u64>,
     folder: Load<ProjectsHome>,
     found: Load<Vec<FoundProject>>,
+    sent: Option<IntakeQuery>,
+    job_shown: bool,
 }
 
 impl Default for Home {
@@ -303,6 +342,8 @@ impl Home {
             hiding: None,
             folder: Load::Idle,
             found: Load::Idle,
+            sent: None,
+            job_shown: false,
         }
     }
 
@@ -460,25 +501,109 @@ impl Home {
             })
             .cloned()
             .map(Entry::Project);
-        draft.into_iter().chain(folders).chain(projects).collect()
+        let job = ctx.store.intake.clone().map(Entry::Job);
+        job.into_iter()
+            .chain(draft)
+            .chain(folders)
+            .chain(projects)
+            .collect()
+    }
+
+    /// The intake job when its card is the picked one: it is always the first card and no
+    /// filter hides it. Input: the context. Output: the job, or None.
+    fn picked_job<'a>(&self, ctx: &'a Ctx) -> Option<&'a JobView> {
+        let picked = self.panel == Panel::Projects && self.selected == 0 && !self.filtering;
+        let job = ctx.store.intake.as_ref().filter(|_| picked);
+        assert!(job.is_none() || ctx.store.intake.is_some());
+        job.filter(|_| ctx.store.projects.ready().is_some())
+    }
+
+    /// Does what Enter or d asks of the engine's intake job: stop it, start it again with its
+    /// folder, mode and overrides, answer its soft refusal in Add folder, or forget it. The
+    /// request is kept so a failure is said.
+    /// Inputs: the job, an action it offers and the context. Output: the flow.
+    fn job_action(&mut self, job: &JobView, action: JobAction, ctx: &mut Ctx) -> Flow {
+        assert!(intake_job::actions(job).contains(&action));
+        let query = match action {
+            JobAction::Stop => IntakeQuery::JobStop { id: job.id.clone() },
+            JobAction::Retry => match start_id() {
+                Ok(id) => IntakeQuery::JobStart {
+                    id,
+                    source: job.source.clone(),
+                    mode: job.mode,
+                    overrides: job.overrides.clone(),
+                },
+                Err(code) => {
+                    ctx.say(Message::error(RETRY_FAILED, &copy(&code)));
+                    return Flow::Handled;
+                }
+            },
+            JobAction::Dismiss => IntakeQuery::JobDismiss { id: job.id.clone() },
+            JobAction::Answer => {
+                return Flow::Open(Place::AnswerAdd {
+                    job: job.id.clone(),
+                });
+            }
+        };
+        self.sent = Some(query.clone());
+        ask(ctx, query);
+        assert!(self.sent.is_some());
+        Flow::Handled
+    }
+
+    /// d on the picked intake job forgets it once it ended. Input: the context. Output:
+    /// handled when the job was asked to be dismissed, else ignored.
+    fn dismiss_picked(&mut self, ctx: &mut Ctx) -> Flow {
+        let Some(job) = self.picked_job(ctx).cloned() else {
+            return Flow::Ignored;
+        };
+        if !intake_job::actions(&job).contains(&JobAction::Dismiss) {
+            return Flow::Ignored;
+        }
+        self.job_action(&job, JobAction::Dismiss, ctx)
+    }
+
+    /// Keeps the same card picked when the job card comes first or goes, since it is always
+    /// the first card. Input: the context with the intake job read. Output: none.
+    fn follow_job_card(&mut self, ctx: &Ctx) {
+        let card = ctx.store.intake.is_some();
+        if card == self.job_shown {
+            return;
+        }
+        self.job_shown = card;
+        self.selected = if card {
+            self.selected + 1
+        } else {
+            self.selected.saturating_sub(1)
+        };
+        self.keep_in_range(ctx);
+        assert_eq!(self.job_shown, ctx.store.intake.is_some());
+    }
+
+    /// Keeps the picked card inside the list after it changed, and in view. Input: the
+    /// context. Output: none.
+    fn keep_in_range(&mut self, ctx: &Ctx) {
+        let count = self.entries(ctx).len();
+        if self.selected >= count {
+            self.selected = count.saturating_sub(1);
+        }
+        self.follow(ctx);
+        assert!(self.selected < count.max(1));
     }
 
     fn items(ctx: &Ctx) -> [(bool, &'static str, Vec<String>, Place); 4] {
         let setup = Self::setup(ctx).unwrap_or_default();
-        let missing = ctx
+        let line = ctx
             .store
             .setup
             .ready()
             .filter(|status| !checking(status))
-            .map(missing_tools)
+            .map(tools_line)
             .unwrap_or_default();
-        let tools = if missing.is_empty() {
+        let tools = if line.is_empty() {
             vec!["Agents need tmux, uv and".into(), "Graphify.".into()]
         } else {
-            wrap(
-                &format!("Missing: {}.", missing.join(", ")),
-                TOOLS_TEXT_CHARS,
-            )
+            wrap(&line, TOOLS_TEXT_CHARS)
         };
         let harness = match &ctx.store.harnesses {
             Load::Ready((ready, all)) => vec![
@@ -593,6 +718,46 @@ impl Home {
             ]),
             Line::default(),
         ]
+    }
+
+    fn job_card(job: &JobView, limit: usize, selected: bool, ctx: &Ctx) -> Vec<Line<'static>> {
+        let theme = &ctx.theme;
+        let (kind, word) = intake_job::badge(job);
+        let badge = Line::from(Span::styled(
+            format!("{} {word}", ctx.glyphs.status(kind)),
+            theme.style(kind.role()),
+        ));
+        let name_role = if selected {
+            Role::Accent
+        } else {
+            Role::Heading
+        };
+        let lines = vec![
+            join([
+                Self::gutter(selected, ctx),
+                row(
+                    limit - 2,
+                    styled(intake_job::name(job), name_role, theme),
+                    badge,
+                    ctx.glyphs,
+                ),
+            ]),
+            join([
+                Self::gutter(selected, ctx),
+                pad(Line::raw(intake_job::line(job)), limit - 2, ctx.glyphs),
+            ]),
+            join([
+                Self::gutter(selected, ctx),
+                pad(
+                    styled(intake_job::next(job), Role::Muted, theme),
+                    limit - 2,
+                    ctx.glyphs,
+                ),
+            ]),
+            Line::default(),
+        ];
+        assert_eq!(lines.len(), CARD_ROWS);
+        lines
     }
 
     fn folder_card(
@@ -773,7 +938,10 @@ impl Home {
             .then(|| styled("Pick your projects folder with f.", Role::Warning, theme));
         match &ctx.store.projects {
             Load::Ready(projects)
-                if projects.is_empty() && kept_draft().is_none() && self.folders().is_empty() =>
+                if projects.is_empty()
+                    && ctx.store.intake.is_none()
+                    && kept_draft().is_none()
+                    && self.folders().is_empty() =>
             {
                 let mut lines = vec![title(None), Line::default(), Line::raw("No projects yet.")];
                 lines.extend(
@@ -841,6 +1009,7 @@ impl Home {
                 {
                     let selected = focused && index == self.selected && !self.filtering;
                     lines.extend(match entry {
+                        Entry::Job(job) => Self::job_card(job, limit, selected, ctx),
                         Entry::Draft(name) => Self::draft_card(name, limit, selected, ctx),
                         Entry::Folder(folder) => Self::folder_card(folder, limit, selected, ctx),
                         Entry::Project(card) => self.card(card, limit, selected, ctx),
@@ -1070,6 +1239,7 @@ impl Home {
                 self.follow(ctx);
                 Flow::Handled
             }
+            Key::Char('d') => self.dismiss_picked(ctx),
             Key::Enter => self.open_selected(ctx),
             _ => Flow::Ignored,
         }
@@ -1108,7 +1278,7 @@ impl Home {
         self.was_done = Some(setup.done());
     }
 
-    fn open_selected(&self, ctx: &mut Ctx) -> Flow {
+    fn open_selected(&mut self, ctx: &mut Ctx) -> Flow {
         if self.panel == Panel::Setup
             && let Some(guide) = Self::guide(ctx)
         {
@@ -1128,6 +1298,10 @@ impl Home {
             };
         }
         match self.entries(ctx).into_iter().nth(self.selected) {
+            Some(Entry::Job(job)) => match intake_job::actions(&job).first() {
+                Some(&action) => self.job_action(&job, action, ctx),
+                None => Flow::Handled,
+            },
             Some(Entry::Draft(_)) => Flow::Open(Place::NewProject),
             Some(Entry::Folder(folder)) => match folder.state {
                 FoundState::Missing => Flow::Handled,
@@ -1203,11 +1377,18 @@ impl Screen for Home {
             ]);
             return hints;
         }
-        let mut hints = vec![
-            hint("n", "New project"),
-            hint("a", "Add project"),
-            hint("Enter", "Open"),
-        ];
+        let mut hints = vec![hint("n", "New project"), hint("a", "Add project")];
+        match self.picked_job(ctx).map(intake_job::actions) {
+            Some(offered) => {
+                if let Some(&first) = offered.first() {
+                    hints.push(hint("Enter", intake_job::label(first)));
+                }
+                if offered.len() > 1 && offered.contains(&JobAction::Dismiss) {
+                    hints.push(hint("d", "Dismiss"));
+                }
+            }
+            None => hints.push(hint("Enter", "Open")),
+        }
         if Self::suggestions(ctx) > 0 {
             hints.push(hint("m", "Review memories"));
         }
@@ -1260,6 +1441,13 @@ impl Screen for Home {
             }
         }
         if let Some(reply) = event(arrival) {
+            self.follow_job_card(ctx);
+            if self.sent.as_ref() == Some(&reply.query) {
+                self.sent = None;
+                if let Err(code) = &reply.result {
+                    ctx.say(Message::error(job_failed(&reply.query), &copy(code)));
+                }
+            }
             match (&reply.query, &reply.result) {
                 (IntakeQuery::Home, Ok(IntakeView::Home(home))) => {
                     self.folder = Load::Ready(home.clone());
@@ -1273,12 +1461,9 @@ impl Screen for Home {
                 }
                 (IntakeQuery::Found, Ok(IntakeView::Found(found))) => {
                     self.found = Load::Ready(found.clone());
-                    let count = self.entries(ctx).len();
-                    if self.selected >= count {
-                        self.selected = count.saturating_sub(1);
-                    }
-                    self.follow(ctx);
+                    self.keep_in_range(ctx);
                 }
+                (IntakeQuery::JobStatus, Ok(IntakeView::Job(_))) => self.keep_in_range(ctx),
                 (IntakeQuery::Found, Err(code)) => {
                     self.found = if not_ready(code) {
                         Load::NotReady
@@ -1297,11 +1482,7 @@ impl Screen for Home {
                 Flow::Handled
             }
             Arrival::Projects(Ok(_)) => {
-                let count = self.entries(ctx).len();
-                if self.selected >= count {
-                    self.selected = count.saturating_sub(1);
-                }
-                self.follow(ctx);
+                self.keep_in_range(ctx);
                 Flow::Handled
             }
             _ => Flow::Handled,
@@ -1309,6 +1490,7 @@ impl Screen for Home {
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {
+        self.job_shown = ctx.store.intake.is_some();
         ctx.request(Request::Projects);
         ctx.request(Request::Pools);
         let ready = ctx
@@ -1389,6 +1571,20 @@ impl Screen for Home {
 
     fn place(&self) -> Option<Place> {
         Some(Place::Home)
+    }
+}
+
+/// The lead said when Home could not start the intake job again.
+const RETRY_FAILED: &str = "Adding the folder did not start again.";
+
+/// The lead said when a request Home sent for the intake job failed. Input: the request, a
+/// stop, a start again or a dismiss. Output: the lead.
+fn job_failed(query: &IntakeQuery) -> &'static str {
+    match query {
+        IntakeQuery::JobStop { .. } => "The folder did not stop.",
+        IntakeQuery::JobStart { .. } => RETRY_FAILED,
+        IntakeQuery::JobDismiss { .. } => "The ended add was not dismissed.",
+        other => panic!("Home sends no {other:?} for the intake job"),
     }
 }
 
@@ -1485,6 +1681,7 @@ pub(in crate::tui) mod tests {
             running: false,
             notes: Vec::new(),
             version: 0,
+            refused_tool: Default::default(),
         }
     }
 
@@ -1692,6 +1889,30 @@ pub(in crate::tui) mod tests {
             note: crate::tools::BundleNote::Missing.line().to_owned(),
         };
         assert_eq!(missing_tools(&status), Vec::<String>::new());
+    }
+
+    /// DEC-162: a tool found and not used keeps Get set up open, since agents cannot use it,
+    /// and Home names it as not used, never as missing.
+    #[test]
+    fn a_tool_found_and_not_used_keeps_get_set_up_and_reads_not_used_not_missing() {
+        let mut status = tools(&[Dependency::Uv]);
+        status.dependencies[2].state = DependencyState::Refused {
+            line: "graphify can't start".into(),
+            file: "/h/g/bin/python3".into(),
+            part: None,
+            fix: None,
+            fix_failed: None,
+        };
+        assert_eq!(missing_tools(&status), ["uv", "Graphify"]);
+        assert_eq!(
+            tools_line(&status),
+            "Missing: uv. Found, not used: Graphify."
+        );
+        status.dependencies[1].state = DependencyState::Found {
+            version: Version::parse("0.13.5").unwrap(),
+        };
+        assert_eq!(tools_line(&status), "Found, not used: Graphify.");
+        assert_eq!(tools_line(&tools(&[])), "");
     }
 
     #[test]

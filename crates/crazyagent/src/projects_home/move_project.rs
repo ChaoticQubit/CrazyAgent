@@ -1,6 +1,6 @@
 use super::{
-    AddMode, AddOverride, AddPlan, GitLink, LINKED_WORKTREES_MAX, Placed, Registered, git_link,
-    in_use, linked_worktree_paths, linked_worktrees, plan_add, refused,
+    AddMode, AddOverride, AddPlan, GitLink, LINKED_WORKTREES_MAX, Placed, Registered, Tally,
+    git_link, in_use, linked_worktree_paths, linked_worktrees, plan_add, refused,
 };
 use crate::engine::EngineError;
 use crate::landing::RepositoryHolds;
@@ -153,7 +153,7 @@ impl ProjectMove {
     /// outcome.
     pub(crate) fn run_with(self, wait: Duration) -> Result<Moved, EngineError> {
         let landing = self.ready(wait)?;
-        let placed = self.add.place()?;
+        let placed = self.add.place(&Tally::default())?;
         Ok(Moved { placed, landing })
     }
 
@@ -163,7 +163,7 @@ impl ProjectMove {
     #[cfg(test)]
     pub(crate) fn run_by_copy(self, wait: Duration) -> Result<Moved, EngineError> {
         let landing = self.ready(wait)?;
-        let placed = self.add.place_by_copy()?;
+        let placed = self.add.place_by_copy(&Tally::default())?;
         Ok(Moved { placed, landing })
     }
 

@@ -46,6 +46,7 @@ fn a_keyed_research_codex_reads_its_relay_token_from_a_file_in_its_home() {
         Path::new("/home/agent"),
         false,
         &relayed,
+        crate::provider_retry::ProviderRetry::HarnessDefault,
     )
     .unwrap();
     let (args, _) = seen(&command);
@@ -72,6 +73,7 @@ fn a_keyed_research_codex_reads_its_relay_token_from_a_file_in_its_home() {
             Path::new("/home/agent"),
             false,
             &unrelayed,
+            crate::provider_retry::ProviderRetry::HarnessDefault,
         )
         .is_err(),
         "a keyed endpoint is reached only through its relay"
@@ -93,6 +95,7 @@ fn a_keyed_research_claude_gets_its_relay_token_from_an_api_key_helper() {
         false,
         None,
         &relayed,
+        crate::provider_retry::ProviderRetry::HarnessDefault,
     )
     .unwrap();
     let (args, envs) = seen(&command);

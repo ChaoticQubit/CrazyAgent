@@ -1294,9 +1294,7 @@ fn listen(
 fn a_tools_on_agent_serves_on_loopback_but_never_listens_on_an_owner_tool_port() {
     let case = case();
     let open = sandbox(&case, SandboxNetwork::Open);
-    let free = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let port = free.local_addr().unwrap().port();
-    drop(free);
+    let port = crazyagent::spawn_gate::free_low_tcp_port().unwrap();
     assert_eq!(
         listen(&open, &case, "dev-server.sb", "127.0.0.1", port, true),
         ("hello".to_owned(), String::new()),

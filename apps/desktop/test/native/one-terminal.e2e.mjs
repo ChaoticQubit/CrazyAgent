@@ -27,15 +27,20 @@ function git(folder, ...args) {
   return result.stdout.trim();
 }
 
-/** Writes one sub-agent as the engine keeps it while it rests between turns: idle, so it
- * counts as running and has a terminal name, and run by no worker of this engine. Inputs: the
- * engine root and the project. Output: its id. */
+/** The process group a resting agent's pane reported ready with: past every pid the system
+ * hands out, so no process holds it, and the engine only reads it. */
+const RESTING_GROUP = 2_000_000_000;
+
+/** Writes one sub-agent as the engine keeps it while it rests between turns: idle, with the
+ * process group its pane reported ready with, so it counts as running and the graph names its
+ * terminal (DEC-161 3b), and run by no worker of this engine. Inputs: the engine root and the
+ * project. Output: its id. */
 function restingAgent(runtime, project) {
   const store = new DatabaseSync(join(runtime, "engine.db"));
   try {
     store.exec("PRAGMA busy_timeout = 5000");
     const now = Date.now();
-    const id = Number(store.prepare("INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,turns,parent) VALUES (?,'sub','codex',1,'idle',?,?,1,NULL)")
+    const id = Number(store.prepare(`INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,turns,parent,process_group) VALUES (?,'sub','codex',1,'idle',?,?,1,NULL,${RESTING_GROUP})`)
       .run(project, now, now).lastInsertRowid);
     assert.ok(Number.isSafeInteger(id) && id > 0, "the engine numbers the team agent");
     return id;

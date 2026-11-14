@@ -1,12 +1,12 @@
-import { ADD_WARNINGS, measuredLine } from "../../api-intake";
+import { ADD_WARNINGS, intakeCopy, measuredLine } from "../../api-intake";
 import type { Result } from "../../api";
 import { receiptState, type KeptFile, type StoredSetup } from "../../api-projects";
 import type {
-  AddFolderMode, AddOverride, Dependency, DependencyName, DependencyState, FolderSize, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IcloudProgress, IntentReceipt,
-  MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, ResearchKind, SetupStatus,
+  AddFolderMode, AddOverride, Dependency, DependencyName, DependencyState, FolderSize, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IcloudProgress, IntakeJob, IntentReceipt,
+  MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, RefusedTool, ResearchKind, SetupStatus, ToolFix,
 } from "../../engine-client";
 import type { Loaded } from "../../state";
-import type { IconName, Tone } from "../../ui";
+import { formatRoute, type IconName, type SidebarProject, type Tone } from "../../ui";
 import { displayText } from "../conversation";
 import { draftOf, formatBytes, researchChoices, type ProjectDraft } from "../new-project/wizard";
 import { folderLabel } from "../project/overview";
@@ -210,6 +210,135 @@ export function icloudProgressLine(progress: IcloudProgress | null): string {
   if (progress === null || progress.total === 0) return "Downloading from iCloud...";
   if (progress.done > progress.total) throw new Error(`iCloud progress done ${progress.done} is past total ${progress.total}`);
   return `Downloading from iCloud: ${progress.done} of ${progress.total} files`;
+}
+
+/** How often the app reads the engine's intake job while one runs. */
+export const INTAKE_POLL_MS = 1000;
+
+/** Whether the intake job is still at work: downloading, copying or clearing. Input: the job,
+ * if any. Output: true while it runs. */
+export function jobRunning(job: IntakeJob | null): boolean {
+  const state = job?.state.state;
+  return state === "downloading" || state === "copying" || state === "clearing";
+}
+
+/** Whether a start that came back with an error reached the engine all the same, read from the
+ * job after it: a job adding the same folder that runs, or ended done and is not the job read
+ * just before the start. Without that read an ended job may be an older add, so it never counts.
+ * Inputs: the folder, the job read after and the read before. Output: true to go Home. */
+export function startReached(source: string, after: IntakeJob | null, before: Result<IntakeJob | null>): boolean {
+  if (after === null || after.source !== source) return false;
+  if (jobRunning(after)) return true;
+  if (after.state.state !== "done" || before.kind !== "ok") return false;
+  return before.value === null || before.value.id !== after.id;
+}
+
+/** How long until the app reads the intake job again: every second while one runs, else at
+ * the found-folder pace, so a job another client started shows up too. Input: the last read
+ * job. Output: the wait in ms. */
+export function intakePollMs(job: IntakeJob | null): number {
+  return jobRunning(job) ? INTAKE_POLL_MS : FOUND_POLL_MS;
+}
+
+/** What the intake job does now or how it ended, with the folder's name and the counts as files
+ * land. Input: the job. Output: one sentence. */
+export function jobLine(job: IntakeJob): string {
+  const name = folderName(job.source);
+  const now = job.state;
+  if (jobRunning(job) && job.stopping) return `Stopping ${name}...`;
+  switch (now.state) {
+    case "downloading": {
+      const { done, total } = now.progress;
+      if (done > total) throw new Error(`intake download done ${done} is past total ${total}`);
+      return total === 0 ? `Downloading ${name} from iCloud...` : `Downloading ${name} from iCloud: ${done} of ${total} files`;
+    }
+    case "copying": {
+      const verb = job.mode === "move" ? "Moving" : "Copying";
+      if (now.checked > 0) return `Checking the copy of ${name}: ${now.checked} files checked`;
+      return now.copied > 0 ? `${verb} ${name}: ${now.copied} files copied` : `${verb} ${name}...`;
+    }
+    case "clearing":
+      return `Removing ${name} from its old place...`;
+    case "done":
+      return `${name} is in your projects folder. Set it up from Home.`;
+    case "cancelled":
+      return `Adding ${name} stopped. Nothing was moved or copied.`;
+    case "failed":
+      return `${name}: ${intakeCopy(now.code)}`;
+    case "needs_answer":
+      return `${name} needs your answer before it is ${job.mode === "move" ? "moved" : "copied"}.`;
+  }
+}
+
+/** What Home offers for the intake job. Stop while it downloads or copies; nothing while it
+ * clears, since that never stops; Retry only when the folder did not land, since a failure while
+ * clearing means it is already in the projects folder; an answer for a soft refusal; Dismiss
+ * once it ended. Input: the job. Output: the actions in button order. */
+export function jobActions(job: IntakeJob): ("stop" | "retry" | "answer" | "dismiss")[] {
+  const now = job.state;
+  switch (now.state) {
+    case "downloading":
+    case "copying":
+      return job.stopping ? [] : ["stop"];
+    case "clearing":
+      return [];
+    case "done":
+      return ["dismiss"];
+    case "failed":
+      return now.phase === "clearing" ? ["dismiss"] : ["retry", "dismiss"];
+    case "cancelled":
+      return ["retry", "dismiss"];
+    case "needs_answer":
+      return ["answer", "dismiss"];
+  }
+}
+
+/** The sentence for a job that just ended, said once as a toast and a notification: only when
+ * the read before showed the same job running. Inputs: the read before and the read now.
+ * Output: the job's line, or null. */
+export function jobEndLine(before: IntakeJob | null, after: IntakeJob | null): string | null {
+  if (before === null || after === null || before.id !== after.id) return null;
+  return jobRunning(before) && !jobRunning(after) ? jobLine(after) : null;
+}
+
+/** The most folders not set up the sidebar lists; the rest stay on Home. */
+export const SIDEBAR_FOLDERS_MAX = 16;
+
+/** The sidebar rows for folders that are not projects yet, each opening Home: the folder the
+ * intake job is adding while it runs, then the folders found in the projects folder and not set
+ * up, by name, at most `SIDEBAR_FOLDERS_MAX`, none that is already a listed project. Inputs: the
+ * found read, the intake job and the listed project ids. Output: the rows. */
+export function sidebarFolders(found: Loaded<FoundProject[]>, job: IntakeJob | null, projects: ReadonlySet<string>): SidebarProject[] {
+  const href = formatRoute({ name: "home" });
+  const adding = job !== null && jobRunning(job) ? folderName(job.source) : null;
+  const rows: SidebarProject[] = adding === null || job === null ? [] : [{ id: `intake:${job.id}`, name: adding, note: "Adding...", href }];
+  const folders = found.kind === "ok" ? found.value : [];
+  const fresh = folders.filter((folder) => folder.state === "found" && folder.name !== adding && !(folder.project_id && projects.has(folder.project_id)))
+    .sort((left, right) => left.name.localeCompare(right.name)).slice(0, SIDEBAR_FOLDERS_MAX);
+  rows.push(...fresh.map((folder) => ({ id: `found:${folder.path}`, name: folder.name, note: "Not set up", href })));
+  if (rows.length > SIDEBAR_FOLDERS_MAX + 1) throw new Error(`sidebar folders ${rows.length} past ${SIDEBAR_FOLDERS_MAX + 1}`);
+  return rows;
+}
+
+const ANSWER_ISSUES: Record<string, AnywayIssue> = {
+  home_move_worktrees: "worktrees",
+  home_copy_linked_checkout: "linked_checkout",
+  home_copy_too_large: "too_many",
+};
+
+const OVERRIDE_ORDER: AddOverride[] = ["worktrees", "linked_checkout", "too_large"];
+
+/** The question Home asks for a job waiting on a soft refusal: the one issue the engine refused,
+ * and the overrides an answer of yes starts again with, the job's own plus the one for that
+ * issue, in the engine's order. Input: a job waiting for an answer. Output: issues and overrides. */
+export function jobQuestion(job: IntakeJob): { issues: AnywayIssue[]; overrides: AddOverride[] } {
+  if (job.state.state !== "needs_answer") throw new Error(`job ${job.id} asks nothing in state ${job.state.state}`);
+  const code = job.state.code;
+  if (!Object.hasOwn(ANSWER_ISSUES, code)) throw new Error(`job ${job.id} asks about unknown code ${code}`);
+  const asked = new Set([...job.overrides, REFUSAL_OVERRIDES[code]]);
+  const overrides = OVERRIDE_ORDER.filter((override) => asked.has(override));
+  if (overrides.length < job.overrides.length) throw new Error(`job ${job.id} lost an override`);
+  return { issues: [ANSWER_ISSUES[code]], overrides };
 }
 
 /** Why Add folder offers no Move or Copy yet while the folder read is still checking its git links. */
@@ -612,9 +741,51 @@ export function stateView(state: DependencyState): { word: string; tone: Tone; l
     case "checking": return { word: "Checking", tone: "info", line: null };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(state.reason) };
     case "unsupported": return { word: "Not supported", tone: "neutral", line: "Not supported on this system." };
+    case "refused": return { word: "Found, not used", tone: "warn", line: displayText(state.line) };
     default: return { word: "Not installed", tone: "warn", line: state.state === "missing" && state.line ? displayText(state.line) : "Setup installs it." };
   }
 }
+
+/** The fix a refused tool's row offers as a button (DEC-162): its fix while the setting is
+ * the fix button, which an engine without the setting means, and no setup run, install or
+ * check goes on. Inputs: the row and the status. Output: the fix, or null. */
+export function rowFix(dependency: Dependency, status: SetupStatus): ToolFix | null {
+  if (dependency.state.state !== "refused" || !dependency.state.fix) return null;
+  if ((status.refused_tool ?? "fix_button") !== "fix_button") return null;
+  return setupBusy(status) || toolsChecking(status) ? null : dependency.state.fix;
+}
+
+/** The command a refused tool's row shows when the setting asks for the command only.
+ * Inputs: the row and the status. Output: the command as plain text, or null. */
+export function fixCommand(dependency: Dependency, status: SetupStatus): string | null {
+  if (dependency.state.state !== "refused" || !dependency.state.fix) return null;
+  return status.refused_tool === "command_only" ? displayText(dependency.state.fix.command) : null;
+}
+
+/** Why a refused tool's last permission fix did not work, if it did not. Input: the row.
+ * Output: the sentence as plain text, or null. */
+export function fixFailed(dependency: Dependency): string | null {
+  return dependency.state.state === "refused" && dependency.state.fix_failed ? displayText(dependency.state.fix_failed) : null;
+}
+
+/** Words for the confirm before a permission fix, naming the tool, the tree it changes and the
+ * command that makes the same change. Inputs: the tool's label and the fix. Output: title,
+ * body, command, note and confirm label. */
+export function fixConfirm(label: string, fix: ToolFix): { title: string; body: string; command: string; note: string; confirm: string } {
+  const scope = fix.recursive ? " and everything in it" : "";
+  return {
+    title: `Fix permissions for ${displayText(label)}?`,
+    body: `CrazyAgent removes write access for group and others from ${displayText(fix.tree)}${scope}, the same as running this command:`,
+    command: displayText(fix.command),
+    note: "Files another user owns and links stay as they are. Nothing outside it changes.",
+    confirm: "Fix permissions",
+  };
+}
+
+export const REFUSED_TOOL_CHOICES: { value: RefusedTool; title: string; detail: string }[] = [
+  { value: "fix_button", title: "Show a fix button (recommended)", detail: "Setup offers to remove write access for others from the folder that blocks the tool, after you confirm the folder." },
+  { value: "command_only", title: "Show the command only", detail: "Setup shows the command to run yourself and never changes permissions." },
+];
 
 /** One tool row for setup. Input: the dependency. Output: its name, what it is for and its state. */
 export function dependencyView(dependency: Dependency): { title: string; about: string; word: string; tone: Tone; line: string | null } {
@@ -702,18 +873,18 @@ export function toolsChecking(status: SetupStatus): boolean {
   return status.dependencies.some((item) => item.state.state === "checking");
 }
 
-/** Tells whether a tool row offers its own Install: Node alone, while it is missing or failed
- * and no setup run, install or check goes on. Inputs: the row and the status. Output: the answer. */
+/** Tells whether a tool row offers its own Install: Node alone, while it is missing, failed or
+ * found and not used (CrazyAgent's own copy), and no setup run, install or check goes on. Inputs: the row and the status. Output: the answer. */
 export function rowInstall(dependency: Dependency, status: SetupStatus): boolean {
-  const wanted = dependency.state.state === "missing" || dependency.state.state === "failed";
+  const wanted = dependency.state.state === "missing" || dependency.state.state === "failed" || dependency.state.state === "refused";
   return INSTALL_ALONE.has(dependency.name) && wanted && !setupBusy(status) && !toolsChecking(status);
 }
 
-/** Tells whether Settings, Pack offers Install tools: a tool is missing or failed, never one
- * setup can't install on this system, and nothing is running or checking. Input: the status.
+/** Tells whether Settings, Pack offers Install tools: a tool is missing, failed or found and not
+ * used, never one setup can't install on this system, and nothing is running or checking. Input: the status.
  * Output: the answer. */
 export function toolsOffer(status: SetupStatus): boolean {
-  const wanted = status.dependencies.some((item) => item.state.state === "missing" || item.state.state === "failed");
+  const wanted = status.dependencies.some((item) => item.state.state === "missing" || item.state.state === "failed" || item.state.state === "refused");
   return wanted && !setupBusy(status) && !toolsChecking(status);
 }
 
@@ -728,7 +899,7 @@ export function setupBusy(status: SetupStatus): boolean {
 export function setupProgress(status: SetupStatus, ticked: string[]): { done: number; total: number; failed: number } {
   const states = [...status.dependencies.map((item) => item.state.state),
     ...status.pack.filter((item) => ticked.includes(item.id)).map((item) => item.state.state)];
-  const settledStates = new Set(["found", "installed", "bundled", "system", "on", "off", "failed", "unsupported"]);
+  const settledStates = new Set(["found", "installed", "bundled", "system", "on", "off", "failed", "unsupported", "refused"]);
   return { done: states.filter((state) => settledStates.has(state)).length, total: states.length, failed: states.filter((state) => state === "failed").length };
 }
 

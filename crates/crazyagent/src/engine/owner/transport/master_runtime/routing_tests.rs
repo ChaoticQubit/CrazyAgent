@@ -3063,6 +3063,40 @@ async fn a_prepared_master_turn_carries_the_saved_frame_size_limit() {
     }
 }
 
+/// Saves the owner's connection-retry choice in a fixture's engine store, as the owner's
+/// Save in Settings does. Inputs: the fixture and the choice. Output: none.
+fn store_provider_retry(case: &Fixture, choice: crate::provider_retry::ProviderRetry) {
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let saved = crate::provider_retry::save(&writer, choice).unwrap();
+    assert_eq!(saved, crate::protocol::Outcome::Applied);
+    assert_eq!(crate::provider_retry::load(&writer).unwrap(), choice);
+}
+
+/// A Codex master turn carries the owner's saved connection-retry choice to its host
+/// (DEC-163 Q7): Retry briefly before any save, and each option once the owner saved it.
+#[tokio::test]
+async fn a_prepared_master_turn_carries_the_saved_provider_retry() {
+    use crate::provider_retry::ProviderRetry;
+
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert_eq!(prepared.provider_retry, ProviderRetry::RetryBriefly);
+    for choice in ProviderRetry::ALL {
+        let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+        store_provider_retry(&case, choice);
+        case.sign_in("codex-c", true).await;
+        let prepared = case.prepared(&case.turn.id).await;
+        assert_eq!(
+            prepared.provider_retry, choice,
+            "the turn carries the saved connection-retry choice"
+        );
+    }
+}
+
 /// The stand-in of `THIRTY_STEP_HARNESS` taking another number of tool steps before DONE.
 /// Input: the number of steps. Output: the script.
 fn stepping_harness(steps: u16) -> String {

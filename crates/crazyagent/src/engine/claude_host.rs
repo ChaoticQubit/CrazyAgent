@@ -238,6 +238,47 @@ pub(in crate::engine) fn limit_steps(command: &mut Command, limit: StepLimit) {
     assert!(added == 0 || added == 2);
 }
 
+/// Sets on a master command the owner's connection-retry choice as the one variable every
+/// Claude Code agent gets for it (DEC-163 Q7): `CLAUDE_CODE_MAX_RETRIES=0` under Stop at
+/// once, nothing otherwise. Inputs: the command the engine built and the choice.
+/// Output: none.
+pub(in crate::engine) fn limit_retries(
+    command: &mut Command,
+    retry: crate::provider_retry::ProviderRetry,
+) {
+    let before = command.get_envs().count();
+    if let Some((name, value)) = retry.claude_env() {
+        assert!(
+            command
+                .get_envs()
+                .all(|(set, _)| set != std::ffi::OsStr::new(name))
+        );
+        command.env(name, value);
+    }
+    let added = command.get_envs().count() - before;
+    assert_eq!(added, usize::from(retry.claude_env().is_some()));
+}
+
+/// The retry choice a master command already carries: Stop at once when it sets exactly the
+/// variable [`limit_retries`] sets for it, else none, so a rebuilt command with that choice
+/// differs from one setting the variable to anything else. Input: the command. Output: the
+/// choice to rebuild it with.
+#[cfg(unix)]
+fn carried_retry(command: &Command) -> crate::provider_retry::ProviderRetry {
+    use crate::provider_retry::ProviderRetry;
+    let Some((name, value)) = ProviderRetry::StopAtOnce.claude_env() else {
+        unreachable!("Stop at once always sets the Claude Code retry variable");
+    };
+    let stop = command
+        .get_envs()
+        .any(|pair| pair == (OsStr::new(name), Some(OsStr::new(value))));
+    if stop {
+        ProviderRetry::StopAtOnce
+    } else {
+        ProviderRetry::HarnessDefault
+    }
+}
+
 /// Renders the strict MCP configuration of a tools-on master: one stdio server, the engine
 /// executable serving `team-mcp` on the drop file and mailbox with the tools switched off.
 /// Input: the tools. Output: the JSON text, or `claude_host_invalid_launch` for a relative
@@ -935,6 +976,7 @@ fn validate_command(
     if tools {
         limit_steps(&mut expected, steps);
     }
+    limit_retries(&mut expected, carried_retry(command));
     if command.get_args().ne(expected.get_args()) || command.get_envs().ne(expected.get_envs()) {
         return Err(Fault::Host("claude_host_unapproved_command"));
     }

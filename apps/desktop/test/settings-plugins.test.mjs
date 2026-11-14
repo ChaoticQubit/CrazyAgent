@@ -13,7 +13,7 @@ const router = await import("../src/ui/router.ts");
 const forbidden = () => { throw new Error("static rendering must not call the engine"); };
 const skill = (patch = {}) => ({ id: "skill-1", name: "frontend-design", description: "Builds polished front ends.", line: "Builds polished front ends.", scope: { kind: "global" },
   scope_label: "For every project", enabled: true, on_here: null, version: 0, source: "/Users/owner/skills/frontend-design",
-  folder: "/Users/owner/Library/CrazyAgent/plugins/skills/skill-1", refused: null, ...patch });
+  origin: "Added by you", folder: "/Users/owner/Library/CrazyAgent/plugins/skills/skill-1", refused: null, ...patch });
 const server = (patch = {}) => ({ id: "server-1", name: "github", scope: { kind: "global" }, scope_label: "For every project",
   spec: { kind: "stdio", command: "/opt/homebrew/bin/npx", args: ["-y", "@modelcontextprotocol/server-github"] },
   runs: "/opt/homebrew/bin/npx -y @modelcontextprotocol/server-github", enabled: true, status: "approved", status_label: "Approved",
@@ -47,6 +47,7 @@ test("the skills list shows each skill from the engine with its folder, switch a
   assert.match(markup, /frontend-design/);
   assert.match(markup, /Builds polished front ends\./);
   assert.match(markup, /~\/skills\/frontend-design/);
+  assert.match(markup, /Added by you/);
   assert.match(markup, /On for every project/);
   assert.match(markup, /aria-checked="true"/);
   assert.match(markup, /aria-checked="false"/);
@@ -54,6 +55,19 @@ test("the skills list shows each skill from the engine with its folder, switch a
   assert.match(markup, /aria-label="Open frontend-design"/);
   assert.match(markup, /aria-label="Open pdf"/);
   assert.doesNotMatch(markup.replace(/ href="[^"]*"/g, ""), /skill-1|skill-2/);
+});
+
+test("each skill says where it came from, in the list and in its detail", () => {
+  const packed = skill({ origin: "Default pack: superpowers", source: "/Users/owner/Library/CrazyAgent/engine/setup/pack/8c6014a36ca90e3f-2ce8aa1/skills/brainstorming" });
+  const imported = skill({ id: "skill-2", name: "notes", origin: "Imported from Claude Code", source: "/Users/owner/.claude/skills/notes" });
+  const list = renderToStaticMarkup(createElement(SkillsView, skillsProps({ kind: "ok", value: [packed, imported, skill({ id: "skill-3", name: "mine" })] })));
+  assert.match(list, /Default pack: superpowers/);
+  assert.match(list, /Imported from Claude Code/);
+  assert.match(list, /Added by you/);
+  assert.ok(list.indexOf("Default pack: superpowers") < list.indexOf("~/Library/CrazyAgent/engine/setup/pack"), "the label comes before the folder");
+  const page = renderToStaticMarkup(createElement(SkillDetailView, detailProps({ kind: "ok", value: detail({ skill: packed }) })));
+  assert.match(page, /Default pack: superpowers/);
+  assert.match(page, /For every project/);
 });
 
 test("a skill's detail renders its SKILL.md without the frontmatter, its files and its switch", () => {

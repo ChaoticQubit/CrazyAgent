@@ -1200,29 +1200,30 @@ fn only_linux_refuses_the_graph_build_with_a_plain_line() {
     assert_eq!(graph::unavailable("macos"), None);
 }
 
-/// The graph step runs the graphify setup put in `<engine root>/setup/bin` first, a stand-in
-/// here so the row reads the same in any HOME, and looks again on each step: once it is gone
-/// the engine finds what an engine with no setup install finds. macOS only: by DEC-094 a
-/// Linux host installs no graphify (`only_linux_refuses_the_graph_build_with_a_plain_line`).
+/// The graph step's installer finds the graphify setup put in `<engine root>/setup/bin`, a
+/// stand-in here, and looks again on each step: once it is gone it finds none. The installer
+/// looks only in that folder, not this Mac's own installs, which come first on the engine's
+/// places, so the row reads the same in any HOME. macOS only: by DEC-094 a Linux host
+/// installs no graphify (`only_linux_refuses_the_graph_build_with_a_plain_line`).
 #[cfg(target_os = "macos")]
 #[test]
 fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
+    use crate::setup::Installer;
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
     let bin = root.path().join("setup/bin");
+    let installer = crate::setup::pinned::PinnedInstaller::with_places(
+        root.path(),
+        Vec::new(),
+        crate::tools::Places::new(vec![bin.clone()], None),
+    );
+    let graphify = crate::setup::Dependency::Graphify.program();
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::write(bin.join("graphify"), "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::set_permissions(bin.join("graphify"), std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(
-        service::engine_graphify(root.path()),
-        Some(bin.join("graphify"))
-    );
+    assert_eq!(installer.program(graphify), Some(bin.join("graphify")));
     std::fs::remove_file(bin.join("graphify")).unwrap();
-    let elsewhere = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
-    assert_eq!(
-        service::engine_graphify(root.path()),
-        service::engine_graphify(elsewhere.path())
-    );
+    assert_eq!(installer.program(graphify), None);
 }
 
 /// Makes a stand-in graphify below `root`, laid out as uv 0.13 lays out a tool: the
@@ -2582,4 +2583,36 @@ fn a_graph_mark_longer_than_what_is_read_back_is_never_written() {
     let folder = tempfile::tempdir().unwrap();
     let long = "m".repeat(graph::MARK_BYTES_MAX as usize + 1);
     let _ = graph::write_mark(folder.path(), &long);
+}
+
+#[test]
+fn a_graph_step_whose_graphify_is_refused_fails_with_the_refused_line() {
+    let refused = crate::tools::Missing {
+        tool: "graphify".into(),
+        reason: crate::tools::Reason::Refused,
+        needs: None,
+        looked: Vec::new(),
+        refused: Some(Box::new(crate::tools::Refused {
+            file: std::path::PathBuf::from("/h/tool/bin/python3"),
+            why: crate::tools::Refusal::OthersCanChange(std::path::PathBuf::from(
+                "/h/py/bin/python3.13",
+            )),
+        })),
+    };
+    assert!(refused.line().len() <= 256, "{}", refused.line());
+    assert_ne!(refused.line(), graph::GRAPHIFY_MISSING);
+    assert_eq!(service::graphify_failure(&refused), refused.line());
+    let deep = std::path::PathBuf::from(format!("/h/{}/python3", "deep/".repeat(40)));
+    let long = crate::tools::Missing {
+        refused: Some(Box::new(crate::tools::Refused {
+            file: deep.clone(),
+            why: crate::tools::Refusal::OthersCanChange(deep),
+        })),
+        ..refused
+    };
+    assert!(long.line().len() > 256);
+    assert_eq!(service::graphify_failure(&long), service::GRAPHIFY_REFUSED);
+    assert!(service::GRAPHIFY_REFUSED.len() <= 256);
+    let missing = crate::setup::Dependency::Graphify.not_found();
+    assert_eq!(service::graphify_failure(&missing), graph::GRAPHIFY_MISSING);
 }

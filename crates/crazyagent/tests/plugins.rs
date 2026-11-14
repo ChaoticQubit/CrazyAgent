@@ -8,6 +8,7 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::plugins::{Scope, ServerSpec, ServerStatus, ServerView, plain_problem};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
+use crazyagent::setup::pack::{PackSource, default_pack, repo_key};
 use rusqlite::OptionalExtension;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -384,6 +385,60 @@ async fn a_skill_description_with_hidden_characters_is_refused_and_never_reaches
             .all(|skill| skill.name != "fmt"),
         "the refused skill can still be removed"
     );
+    case.close().await;
+}
+
+#[tokio::test]
+async fn each_skill_says_where_it_came_from() {
+    let case = Case::new().await;
+    let controller = case.controller().await;
+    let root = case.root.path().to_path_buf();
+    let entry = default_pack()
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|entry| entry.id == "superpowers")
+        .unwrap();
+    let PackSource::Git { repo, path, .. } = &entry.source else {
+        panic!("superpowers is a pinned git entry");
+    };
+    let bumped = "0".repeat(40);
+    let checkout = root
+        .join("setup")
+        .join("pack")
+        .join(format!("{}-{bumped}", repo_key(repo)));
+    let folder = checkout
+        .join(path.as_deref().unwrap_or(""))
+        .join("origin-check");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(
+        folder.join("SKILL.md"),
+        "---\nname: origin-check\ndescription: Checks origins.\n---\n\nSteps.\n",
+    )
+    .unwrap();
+    let packed = controller
+        .add_skill(Scope::Global, folder.display().to_string())
+        .await
+        .unwrap();
+    assert_eq!(
+        packed.origin, "Default pack: superpowers",
+        "a skill in a pack checkout names its entry, even from a checkout of another commit"
+    );
+    let picked = controller
+        .add_skill(Scope::Global, skill_folder(&root, "notes", "notes"))
+        .await
+        .unwrap();
+    assert_eq!(picked.origin, "Added by you");
+    let listed = controller.plugin_skills(None).await.unwrap();
+    let origins: Vec<(&str, &str)> = listed
+        .iter()
+        .map(|skill| (skill.name.as_str(), skill.origin.as_str()))
+        .collect();
+    assert!(
+        origins.contains(&("origin-check", "Default pack: superpowers")),
+        "{origins:?}"
+    );
+    assert!(origins.contains(&("notes", "Added by you")), "{origins:?}");
     case.close().await;
 }
 
@@ -815,30 +870,13 @@ async fn a_server_whose_check_home_holds_many_files_answers_its_removal_at_once(
     case.close().await;
 }
 
-/// A free loopback TCP port below every range the OS hands out by itself (Linux from 32768,
-/// macOS from 49152) and apart from the owner's fixed ports, as a configured local model
-/// port must be for the Linux boundary to keep it (LPF1-M1). Output: the port.
-fn free_low_port() -> u16 {
-    let start = 20_000 + (std::process::id() % 4_000) as u16;
-    let port = (start..30_000)
-        .chain(20_000..start)
-        .find(|port| crazyagent::spawn_gate::bind_tcp_std(("127.0.0.1", *port)).is_ok())
-        .expect("a free loopback port between 20000 and 30000");
-    assert!((20_000..30_000).contains(&port));
-    port
-}
-
 /// A checked server gets the open network agents get, but while the owner's local model
 /// server is down it cannot listen on that configured endpoint's port and answer the
 /// prompts sent there; another loopback port stays free for it to bind.
 #[tokio::test]
 async fn a_server_check_cannot_listen_on_a_configured_local_model_port() {
-    let kept = free_low_port();
-    let other = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let kept = crazyagent::spawn_gate::free_low_tcp_port().unwrap();
+    let other = crazyagent::spawn_gate::free_low_tcp_port().unwrap();
     assert_ne!(kept, other);
     let case = Case::with_settings(&local_model_settings(kept)).await;
     let controller = case.controller().await;

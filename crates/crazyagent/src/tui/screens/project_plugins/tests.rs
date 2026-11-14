@@ -52,6 +52,7 @@ fn skill(name: &str, scope: Scope, enabled: bool, on_here: Option<bool>) -> Skil
         enabled,
         on_here,
         source: format!("/Users/mira/Skills/{name}"),
+        origin: "Added by you".into(),
         folder: format!("/private/tmp/engine/skills/{name}"),
         version: 2,
         refused: None,
@@ -83,9 +84,11 @@ fn server(name: &str, scope: Scope, status: ServerStatus, on_here: Option<bool>)
 }
 
 fn lists() -> (Vec<SkillView>, Vec<ServerView>) {
+    let mut imported = skill("linear-method", Scope::Global, true, Some(false));
+    imported.origin = "Imported from Codex".into();
     let skills = vec![
         skill("frontend-design", Scope::Global, true, Some(true)),
-        skill("linear-method", Scope::Global, true, Some(false)),
+        imported,
         skill("release-notes", Scope::Global, false, Some(true)),
         skill("tidepool-style", here(), true, None),
     ];
@@ -150,7 +153,12 @@ fn both_lists_draw_what_is_on_here_at_120_and_80_columns() {
     let design = find(&wide, "> frontend-design");
     assert!(design.contains("On") && design.contains("Every project"));
     assert!(design.contains("How to do frontend-design work."));
+    assert!(
+        design.contains("Added by you  How to do frontend-design work."),
+        "a wide row says where the skill came from before what it does: {design}"
+    );
     assert!(find(&wide, "linear-method").contains("Off here"));
+    assert!(find(&wide, "linear-method").contains("Imported from Codex  How to do"));
     assert!(find(&wide, "release-notes").contains("Off in Settings"));
     assert!(find(&wide, "tidepool-style").contains("This project only"));
     assert!(wide.iter().any(|row| row.contains("MCP servers  2")));
@@ -170,6 +178,10 @@ fn both_lists_draw_what_is_on_here_at_120_and_80_columns() {
     let narrow = frame(&view, 80, 24);
     let design = find(&narrow, "> frontend-design");
     assert!(design.contains("Every project") && !design.contains("How to do"));
+    assert!(
+        !design.contains("Added by you"),
+        "a narrow row drops the origin with the description: {design}"
+    );
     assert!(find(&narrow, "release-notes").contains("Off in Settings"));
     assert!(find(&narrow, "  postgres").contains("This project only"));
     assert!(narrow.iter().all(|row| row.chars().count() <= 80));
@@ -949,6 +961,10 @@ async fn a_real_engine_project_switches_an_every_project_skill_off() {
     let rows = frame(&view, 120, 36);
     let release = find(&rows, "> release-notes");
     assert!(release.contains("On") && release.contains("Every project"));
+    assert!(
+        release.contains("Added by you  Teaches release notes."),
+        "the engine labels a skill picked from a folder as added by the owner: {release}"
+    );
     let echo = find(&rows, "  echo");
     assert!(echo.contains("Needs approval") && echo.contains("This project only"));
     frame(&view, 80, 24);

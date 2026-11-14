@@ -163,11 +163,23 @@ pub(crate) enum Job {
     HomeAddPlan(
         Admission,
         Cursor,
+        RequestId,
         String,
         crate::projects_home::AddMode,
         Vec<crate::projects_home::AddOverride>,
         oneshot::Sender<Result<crate::projects_home::AddPlan, EngineError>>,
     ),
+    HomeAddCheck(
+        Admission,
+        RequestId,
+        String,
+        crate::projects_home::AddMode,
+        Vec<crate::projects_home::AddOverride>,
+        oneshot::Sender<Result<(), EngineError>>,
+    ),
+    HomeAddSettle(RequestId, oneshot::Sender<Result<(), EngineError>>),
+    HomeAddEnded(oneshot::Sender<Result<Option<projects_home::AddEnded>, EngineError>>),
+    HomeAddForget(RequestId, oneshot::Sender<Result<(), EngineError>>),
     HomeMovePlan(
         Admission,
         Cursor,
@@ -353,6 +365,9 @@ impl Storage {
                 if !readonly {
                     if let Err(e) = projects_home::settle_pending(&mut connection, &path, None, true) {
                         eprintln!("projects_home_move_not_settled cause={}", e.0);
+                    }
+                    if let Err(e) = projects_home::add_settle(&mut connection, None) {
+                        eprintln!("home_add_not_settled cause={}", e.0);
                     }
                     if let Err(e) = projects_home::project_move_settle(&mut connection, None, true) {
                         eprintln!("project_move_not_settled cause={}", e.0);
@@ -617,11 +632,38 @@ impl Storage {
                                 &control,
                             ));
                         }
-                        Job::HomeAddPlan(admission, expected, source, mode, overrides, reply) => {
+                        Job::HomeAddPlan(admission, expected, request, source, mode, overrides, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::add_plan(&mut connection, &path, &admission, &expected, &source, mode, &overrides)
+                                projects_home::add_plan(&mut connection, &path, &admission, &expected, &request, &source, mode, &overrides)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeAddCheck(admission, request, source, mode, overrides, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::add_check(&mut connection, &path, &admission, &request, &source, mode, &overrides)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeAddSettle(request, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::add_settle(&mut connection, Some(&request)).map(drop)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeAddEnded(reply) => {
+                            let _ = reply.send(projects_home::add_ended(&connection));
+                        }
+                        Job::HomeAddForget(request, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::add_forget(&connection, &request)
                             };
                             let _ = reply.send(result);
                         }
@@ -1100,6 +1142,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::sandbox_settings::initialize(connection)?;
     crate::cleanup_settings::initialize(connection)?;
     crate::quit_settings::initialize(connection)?;
+    crate::provider_retry::initialize(connection)?;
     crate::master_step_limit::initialize(connection)?;
     crate::master_time_limit::initialize(connection)?;
     crate::master_frame_limit::initialize(connection)?;
@@ -1465,6 +1508,7 @@ fn apply(
             | Command::OwnerSandbox { .. }
             | Command::OwnerAgentCleanup { .. }
             | Command::OwnerAgentQuit { .. }
+            | Command::OwnerProviderRetry { .. }
             | Command::OwnerMasterSteps { .. }
             | Command::OwnerMasterTime { .. }
             | Command::OwnerMasterFrames { .. }
@@ -1656,6 +1700,7 @@ fn execute(
         Command::OwnerSandbox { settings } => crate::sandbox_settings::save(tx, settings),
         Command::OwnerAgentCleanup { settings } => crate::cleanup_settings::save(tx, settings),
         Command::OwnerAgentQuit { settings } => crate::quit_settings::save(tx, settings),
+        Command::OwnerProviderRetry { choice } => crate::provider_retry::save(tx, *choice),
         Command::OwnerMasterSteps { settings } => crate::master_step_limit::save(tx, settings),
         Command::OwnerMasterTime { settings } => crate::master_time_limit::save(tx, settings),
         Command::OwnerMasterFrames { settings } => crate::master_frame_limit::save(tx, settings),
@@ -2850,6 +2895,7 @@ fn owner_read(
         OwnerRead::SandboxSettings => crate::sandbox_settings::read(&tx)?,
         OwnerRead::CleanupSettings => crate::cleanup_settings::read(&tx)?,
         OwnerRead::QuitSettings => crate::quit_settings::read(&tx)?,
+        OwnerRead::ProviderRetry => crate::provider_retry::read(&tx)?,
         OwnerRead::MasterStepSettings => crate::master_step_limit::read(&tx)?,
         OwnerRead::MasterTimeSettings => crate::master_time_limit::read(&tx)?,
         OwnerRead::MasterFrameSettings => crate::master_frame_limit::read(&tx)?,

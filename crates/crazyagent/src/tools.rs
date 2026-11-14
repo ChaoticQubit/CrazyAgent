@@ -1,3 +1,4 @@
+pub mod permission_fix;
 pub mod probe;
 #[cfg(all(test, unix))]
 mod tests;

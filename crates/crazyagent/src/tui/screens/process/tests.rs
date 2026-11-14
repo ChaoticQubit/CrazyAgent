@@ -1276,6 +1276,7 @@ fn skill(id: &str, name: &str, line: &str) -> crate::plugins::SkillView {
         enabled: true,
         on_here: None,
         source: String::new(),
+        origin: "Added by you".into(),
         folder: String::new(),
         version: 0,
         refused: None,

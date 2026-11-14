@@ -119,6 +119,15 @@ fn endpoint(port: u16) -> ResearchAccount {
     }
 }
 
+/// A loopback port that takes connections and never answers, so the runner's reach check
+/// finds the provider up for a row whose stand-in harness never calls it. Input: none.
+/// Output: the listener, which the caller holds for the run.
+fn listening_provider() -> std::net::TcpListener {
+    let provider = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    assert!(provider.local_addr().unwrap().ip().is_loopback());
+    provider
+}
+
 fn project<'a>(case: &'a Case, account: Option<ResearchAccount>) -> ResearchProject<'a> {
     ResearchProject {
         id: "project-a",
@@ -979,10 +988,11 @@ fn research_for_a_project_the_engine_does_not_know_fails_without_starting_an_age
     let id = jobs
         .enqueue("project-ghost", "market_research", "codex", true)
         .unwrap();
+    let provider = listening_provider();
     let result = runner(&case, limits(Duration::from_secs(5))).run_once(&ResearchProject {
         id: "project-ghost",
         root: &case.project,
-        account: Some(endpoint(9)),
+        account: Some(endpoint(provider.local_addr().unwrap().port())),
     });
     assert!(
         matches!(&result, Err(RunError::Context(code)) if code.0 == "plugin_project_unknown"),
@@ -1125,6 +1135,8 @@ fn cancelling_research_stops_what_its_harness_detached_into_its_own_session() {
         .unwrap(),
     );
     let project_root = case.project.clone();
+    let provider = listening_provider();
+    let port = provider.local_addr().unwrap().port();
     let handle = {
         let runner = runner.clone();
         std::thread::spawn(move || {
@@ -1132,7 +1144,7 @@ fn cancelling_research_stops_what_its_harness_detached_into_its_own_session() {
                 .run_once(&ResearchProject {
                     id: "project-a",
                     root: &project_root,
-                    account: Some(endpoint(9)),
+                    account: Some(endpoint(port)),
                 })
                 .unwrap()
                 .unwrap()
@@ -1157,6 +1169,7 @@ fn research_whose_harness_exits_stops_what_it_detached_into_its_own_session() {
     let jobs = ResearchJobs::open(&case.database).unwrap();
     jobs.enqueue("project-a", "market_research", "codex", true)
         .unwrap();
+    let provider = listening_provider();
     let run = ResearchRunner::new(
         &case.database,
         &case.state,
@@ -1164,7 +1177,10 @@ fn research_whose_harness_exits_stops_what_it_detached_into_its_own_session() {
         limits(Duration::from_secs(60)),
     )
     .unwrap()
-    .run_once(&project(&case, Some(endpoint(9))))
+    .run_once(&project(
+        &case,
+        Some(endpoint(provider.local_addr().unwrap().port())),
+    ))
     .unwrap()
     .unwrap();
     assert_eq!(run.status, ResearchStatus::Failed);
@@ -1187,6 +1203,7 @@ fn research_whose_engine_dies_leaves_nothing_its_harness_detached() {
     ) {
         let state = PathBuf::from(state);
         let database = state.parent().unwrap().join("engine.db");
+        let provider = listening_provider();
         let ran = ResearchRunner::new(
             &database,
             &state,
@@ -1197,7 +1214,7 @@ fn research_whose_engine_dies_leaves_nothing_its_harness_detached() {
         .run_once(&ResearchProject {
             id: "project-a",
             root: Path::new(&project),
-            account: Some(endpoint(9)),
+            account: Some(endpoint(provider.local_addr().unwrap().port())),
         })
         .is_ok();
         panic!("the engine under test was not killed, run ok: {ran}");

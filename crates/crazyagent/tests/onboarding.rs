@@ -1939,6 +1939,121 @@ async fn a_mapping_step_whose_provider_refuses_connections_stops_at_once_with_th
     bench.stop().await;
 }
 
+/// A resolver beside the bench engine's own settings whose `local-pool` holds one keyless
+/// loopback endpoint member per `(port, model)`, in order, read with the engine's database.
+/// Inputs: the bench and the members. Output: the resolver.
+#[cfg(target_os = "macos")]
+fn loopback_resolver(bench: &Bench, members: &[(u16, &str)]) -> SettingsResolver {
+    let accounts: Vec<String> = (0..members.len())
+        .map(|n| format!("\"account-{n}\""))
+        .collect();
+    let ids: Vec<String> = (0..members.len())
+        .map(|n| format!("\"member-{n}\""))
+        .collect();
+    let mut text = format!(
+        "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [{}]\n",
+        accounts.join(", ")
+    );
+    for (n, (port, model)) in members.iter().enumerate() {
+        text.push_str(&format!("\n[[model_access.connections]]\nid = \"member-{n}\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"account-{n}\"\nendpoint = {{ kind = \"http\", url = \"http://127.0.0.1:{port}/v1\" }}\nmodel = {{ id = \"{model}\", author = \"openai-compatible\" }}\nauth = {{ method = \"none\" }}\n"));
+    }
+    text.push_str(&format!("\n[[model_access.pools]]\nid = \"{POOL}\"\nmembers = [{}]\nprojects = [\"{PROJECT}\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n", ids.join(", ")));
+    let global = bench.root.join("read-only-global.toml");
+    fs::write(&global, text).unwrap();
+    let projects = bench.root.join("projects");
+    fs::create_dir_all(&projects).unwrap();
+    SettingsResolver::new(
+        &global,
+        &bench.project_settings,
+        &projects,
+        &bench.root.join("engine.db"),
+    )
+    .unwrap()
+}
+
+/// Starts the mapping service on `resolver`'s read-only pick, the pick the engine's own
+/// mapping step makes. Inputs: the bench and the resolver. Output: the service and the
+/// agents folder.
+#[cfg(target_os = "macos")]
+fn reachable_mapping(bench: &Bench, resolver: SettingsResolver) -> (OnboardingService, PathBuf) {
+    let (runner, agents) = bench.runner();
+    let service = OnboardingService::start(
+        runner,
+        move |project: &str, pool: &CredentialRef, harnesses: &[ResearchHarness]| {
+            resolver.pool_pick_with(
+                project,
+                pool,
+                harnesses,
+                crazyagent::research::accounts::Reach::Reachable,
+            )
+        },
+        || None,
+        OnboardingLimits {
+            graph_time: Duration::from_secs(60),
+            mapping_time: Duration::from_secs(120),
+            mapping_try_time: Duration::from_secs(60),
+        },
+        Duration::from_millis(50),
+    );
+    (service, agents)
+}
+
+/// A mapping step whose pool lists a member with a stopped loopback provider first runs on
+/// the next member (DEC-091 addendum): its tries reach the second member's provider, the only
+/// one that answers, whose refusal names its model, and the owner sees no reach line.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mapping_step_runs_on_the_next_pool_member_when_the_first_ones_provider_refuses_connections()
+ {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let (_held, down) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let up = rejecting_endpoint();
+    let resolver = loopback_resolver(&bench, &[(down, "first-model"), (up, "second-model")]);
+    let (service, agents) = reachable_mapping(&bench, resolver);
+    let view = bench.settle(&project, Duration::from_secs(180)).await;
+    stop_service(service).await;
+    assert_eq!(
+        view.mapping,
+        failed(
+            "Mapping agent failed 3 tries: Agent stopped: The model closed-model does not exist"
+        ),
+        "{view:?}"
+    );
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 3);
+    assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
+/// A mapping step whose pool members all have stopped loopback providers stops at once with
+/// the first one's line, the line it showed before failover: no try runs.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mapping_step_whose_members_all_refuse_connections_stops_at_once_with_the_first_ones_line()
+ {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let (_first, first) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (_second, second) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let resolver = loopback_resolver(&bench, &[(first, "first-model"), (second, "second-model")]);
+    let started = Instant::now();
+    let (service, agents) = reachable_mapping(&bench, resolver);
+    let view = bench.settle(&project, Duration::from_secs(90)).await;
+    let took = started.elapsed();
+    stop_service(service).await;
+    assert_eq!(
+        view.mapping,
+        failed(&format!(
+            "Can't reach the model provider at 127.0.0.1:{first}. Start it or pick another account in this pool, then try again."
+        )),
+        "{view:?}"
+    );
+    assert_eq!(view.mapping_try, None);
+    assert!(took < Duration::from_secs(10), "{took:?}");
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
+    bench.stop().await;
+}
+
 /// Makes the agent state folder `name` under `agents` with a file in it, as an
 /// earlier onboarding of a project with the same id left it.
 #[cfg(target_os = "macos")]

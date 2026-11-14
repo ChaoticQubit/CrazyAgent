@@ -775,6 +775,10 @@ impl ResearchRunner {
             let status = jobs.fail(&job, line, 1)?;
             return Ok(run(status, None, None));
         }
+        if let Some(line) = unreached_provider_here(account) {
+            let status = jobs.fail_unspent(&job, &line)?;
+            return Ok(run(status, None, None));
+        }
         match self.launch(jobs, &job, project, account) {
             Ok((Ending::Exited(true), group, output)) => {
                 let report = match self.publish(&job, harness, project.root, &output) {
@@ -1115,6 +1119,7 @@ impl ResearchRunner {
                 git_identity: None,
                 limits: LaunchLimits {
                     run_time: self.limits.wall_time,
+                    provider_retry: crate::provider_retry::for_launch_at(&self.database),
                     ..LaunchLimits::default()
                 },
             };
@@ -1172,11 +1177,21 @@ impl ResearchRunner {
         let output = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("report.md");
-                codex_arguments(&mut launch, &worktree, &output, &home, job.tools, account)?;
+                let retry = crate::provider_retry::for_launch_at(&self.database);
+                codex_arguments(
+                    &mut launch,
+                    &worktree,
+                    &output,
+                    &home,
+                    job.tools,
+                    account,
+                    retry,
+                )?;
                 output
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut launch, &home, &tmp, job.tools, None, account)?;
+                let retry = crate::provider_retry::for_launch_at(&self.database);
+                claude_arguments(&mut launch, &home, &tmp, job.tools, None, account, retry)?;
                 launch.args(installed.arguments());
                 agent.join("output.md")
             }
@@ -1782,11 +1797,21 @@ impl ResearchRunner {
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("answer.md");
-                codex_arguments(&mut command, &folder, &output, &home, false, account)?;
+                let retry = crate::provider_retry::for_launch_at(&self.database);
+                codex_arguments(&mut command, &folder, &output, &home, false, account, retry)?;
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut command, &home, &tmp, false, run.output_tokens, account)?;
+                let retry = crate::provider_retry::for_launch_at(&self.database);
+                claude_arguments(
+                    &mut command,
+                    &home,
+                    &tmp,
+                    false,
+                    run.output_tokens,
+                    account,
+                    retry,
+                )?;
                 (agent.join(EVENTS_LOG), EVENTS_LOG)
             }
         };
@@ -2232,6 +2257,7 @@ fn codex_arguments(
     home: &Path,
     tools: bool,
     account: &ResearchAccount,
+    retry: crate::provider_retry::ProviderRetry,
 ) -> Result<(), RunError> {
     command
         .arg("exec")
@@ -2306,6 +2332,18 @@ fn codex_arguments(
             return Err(RunError::Invalid("account does not fit Codex".into()));
         }
     }
+    let provider = match account {
+        ResearchAccount::Endpoint { .. } => {
+            crate::provider_retry::CodexProvider::Custom("crazyagent_endpoint")
+        }
+        ResearchAccount::ManagedCodex { .. } => crate::provider_retry::CodexProvider::BuiltIn,
+        ResearchAccount::AnthropicEndpoint { .. } | ResearchAccount::ManagedClaude { .. } => {
+            return Err(RunError::Invalid("account does not fit Codex".into()));
+        }
+    };
+    for setting in retry.codex_settings(provider) {
+        command.arg("-c").arg(setting);
+    }
     command.arg("-");
     Ok(())
 }
@@ -2316,8 +2354,9 @@ fn codex_arguments(
 /// either a managed config directory or a keyless Anthropic endpoint in bare
 /// mode that never reads the keychain.
 /// Takes the command, the agent home and temp dir, the tools switch, the most
-/// output tokens of each request (`None` for Claude Code's own limit) and the
-/// account. Returns an error for an account that does not fit Claude Code.
+/// output tokens of each request (`None` for Claude Code's own limit), the
+/// account and the owner's retry option (DEC-163). Returns an error for an account
+/// that does not fit Claude Code.
 fn claude_arguments(
     command: &mut Command,
     home: &Path,
@@ -2325,7 +2364,11 @@ fn claude_arguments(
     tools: bool,
     output_tokens: Option<u32>,
     account: &ResearchAccount,
+    retry: crate::provider_retry::ProviderRetry,
 ) -> Result<(), RunError> {
+    if let Some((name, value)) = retry.claude_env() {
+        command.env(name, value);
+    }
     let key_file = match account {
         ResearchAccount::AnthropicEndpoint {
             base_url,
@@ -4374,11 +4417,15 @@ mod tests {
         let id = jobs
             .enqueue("alpha", "market_research", "codex", false)
             .unwrap();
+        let provider = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let project = ResearchProject {
             id: "alpha",
             root: &folder,
             account: Some(ResearchAccount::Endpoint {
-                base_url: "http://127.0.0.1:9/v1".into(),
+                base_url: format!(
+                    "http://127.0.0.1:{}/v1",
+                    provider.local_addr().unwrap().port()
+                ),
                 model: "local-model".into(),
                 key: None,
             }),
@@ -4697,6 +4744,65 @@ mod tests {
         );
     }
 
+    /// A research job whose pool account's loopback provider refuses every connect ends
+    /// failed at once with the reach line, starts no harness process and spends no attempt,
+    /// so the owner's Retry finds it as it was before the claim (V241-REACH-RETRY, DEC-163).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_research_job_on_a_refusing_loopback_provider_fails_at_once_without_an_attempt_or_a_harness()
+     {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        repository_git(&folder, &["init", "-q"]);
+        repository_git(&folder, &["commit", "-q", "--allow-empty", "-m", "Start"]);
+        register_project(&root.database, "alpha", &folder);
+        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let runner = ResearchRunner::new(
+            &root.database,
+            &root.state,
+            Path::new("/usr/bin/true"),
+            ResearchLimits {
+                wall_time: Duration::from_secs(10),
+                ..ResearchLimits::default()
+            },
+        )
+        .unwrap();
+        let jobs = ResearchJobs::open(&root.database).unwrap();
+        let id = jobs
+            .enqueue("alpha", "market_research", "codex", false)
+            .unwrap();
+        let project = ResearchProject {
+            id: "alpha",
+            root: &folder,
+            account: Some(ResearchAccount::Endpoint {
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                model: "local-model".into(),
+                key: None,
+            }),
+        };
+        let started = Instant::now();
+        let run = runner.run_once(&project).unwrap().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            (run.job, run.status, run.process_group),
+            (id, ResearchStatus::Failed, None)
+        );
+        let job = jobs.get(id).unwrap().unwrap();
+        assert_eq!(job.status, ResearchStatus::Failed);
+        assert_eq!(
+            job.error,
+            Some(format!(
+                "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then try again."
+            ))
+        );
+        assert_eq!((job.attempts, job.claimer), (0, None));
+    }
+
     /// MR-L1: only a refused connect proves nothing listens on a loopback provider. A
     /// success, a connect that ran out of time, too many open files or any other error never
     /// does, so such a mapping step still runs its try as before.
@@ -4853,6 +4959,70 @@ mod tests {
         );
     }
 
+    /// CONFIGURED-HOMES-GUARD: a read-only run's profile denies the folder of configured SDK
+    /// homes in the engine root, as every guarded sandbox does, and its stand-in harness,
+    /// which reads a keyed account's dummy config there, never gets the text.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_run_denies_every_configured_sdk_home() {
+        let root = engine_root();
+        let engine = root.database.parent().unwrap().to_path_buf();
+        let homes = engine.join("configured-sdk-homes");
+        let config = homes
+            .join("6".repeat(64))
+            .join(".backboard")
+            .join("config.json");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let dummy = "configured-homes-guard-dummy-read-only-config";
+        fs::write(&config, dummy).unwrap();
+        let codex = root.base.join("bin").join("codex");
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(
+            &codex,
+            format!("#!/bin/sh\ncat '{}'\nexit 0\n", config.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = codex.clone();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap()
+                .with_harness_lookup(Arc::new(move |harness: &str| {
+                    (harness == "codex").then(|| pinned.clone())
+                }));
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let run = ReadOnlyRun {
+            name: "overview-alpha-6",
+            agent: "overview",
+            project: None,
+            folder: &folder,
+            prompt: "Describe this project.",
+            account: &account,
+            wall_time: Duration::from_secs(5),
+            output_tokens: None,
+        };
+        let _ = runner.run_read_only(&run, &|| false);
+        let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-6.sb"))
+            .expect("the guarded run still installs its profile");
+        assert!(
+            profile.contains(&format!("\n  (subpath \"{}\")", homes.display())),
+            "{profile}"
+        );
+        let events = root
+            .state
+            .join("agents")
+            .join("overview-alpha-6")
+            .join("events.jsonl");
+        assert!(events.is_file());
+        assert!(!fs::read_to_string(&events).unwrap().contains(dummy));
+    }
+
     /// L4 r1 H1: a read-only run follows the project's shared folders choice too. Under
     /// Chosen an untracked local folder not picked stays closed, and a saved Read-write never
     /// opens the picked one for writes, since a read-only run only reads.
@@ -4934,11 +5104,13 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     const PROFILE_CREDENTIAL: &str = "sec-ro-guard-dummy-profile-credential";
 
     /// Writes a dummy sign-in credential where a native profile keeps its own, under
     /// `<engine>/native-profiles/<key>/home`. Input: the engine root. Output: the path of
     /// the dummy `.credentials.json`, which holds [`PROFILE_CREDENTIAL`].
+    #[cfg(target_os = "macos")]
     fn native_profile_credential(engine: &Path) -> PathBuf {
         let home = engine
             .join(crate::engine::bootstrap::NATIVE_PROFILES_FOLDER)
@@ -4954,6 +5126,7 @@ mod tests {
     /// A runner whose Codex is a stand-in at `codex` that prints the file at `target` and
     /// exits. Inputs: the engine root fixture, the stand-in path and the file it reads.
     /// Output: the runner.
+    #[cfg(target_os = "macos")]
     fn reading_runner(root: &EngineRoot, codex: &Path, target: &Path) -> ResearchRunner {
         fs::create_dir_all(codex.parent().unwrap()).unwrap();
         fs::write(
@@ -4972,6 +5145,7 @@ mod tests {
 
     /// Tells whether any regular file under `folder`, not following links, holds `text`.
     /// Input: the folder and the text. Output: true when one does.
+    #[cfg(target_os = "macos")]
     fn holds_text(folder: &Path, text: &str) -> bool {
         fs::read_dir(folder)
             .into_iter()
@@ -5125,6 +5299,7 @@ mod tests {
                 Path::new("/home"),
                 tools,
                 &account,
+                crate::provider_retry::ProviderRetry::HarnessDefault,
             )
             .unwrap();
             let args: Vec<&str> = command
@@ -5137,6 +5312,92 @@ mod tests {
                     "{tools} {setting}: {args:?}"
                 );
             }
+        }
+    }
+
+    /// DEC-163: a research run takes the owner's retry option. Codex on an endpoint
+    /// account gets its custom provider's settings, Codex on a ChatGPT sign-in the built-in
+    /// provider's, and Claude Code its retry cap as a variable, for every option.
+    #[test]
+    fn a_research_run_takes_the_owner_retry_option_for_its_harness_and_provider() {
+        use crate::provider_retry::{CLAUDE_MAX_RETRIES, CodexProvider, ProviderRetry};
+        let retries = |command: &Command| -> Vec<String> {
+            let args: Vec<String> = command
+                .get_args()
+                .map(|argument| argument.to_str().unwrap().to_owned())
+                .collect();
+            args.windows(2)
+                .filter(|pair| pair[0] == "-c")
+                .map(|pair| pair[1].clone())
+                .filter(|setting| {
+                    setting.contains("unbounded_connection_retries")
+                        || setting.contains("_max_retries=")
+                })
+                .collect()
+        };
+        let cap = |command: &Command| -> Option<String> {
+            command
+                .get_envs()
+                .find(|(name, _)| *name == CLAUDE_MAX_RETRIES)
+                .and_then(|(_, value)| value.map(|value| value.to_str().unwrap().to_owned()))
+        };
+        let endpoint = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let signed_in = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        let anthropic = ResearchAccount::AnthropicEndpoint {
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        for retry in ProviderRetry::ALL {
+            for (account, provider) in [
+                (&endpoint, CodexProvider::Custom("crazyagent_endpoint")),
+                (&signed_in, CodexProvider::BuiltIn),
+            ] {
+                let mut command = Command::new("/usr/bin/true");
+                codex_arguments(
+                    &mut command,
+                    Path::new("/work"),
+                    Path::new("/work/report.md"),
+                    Path::new("/home"),
+                    false,
+                    account,
+                    retry,
+                )
+                .unwrap();
+                assert_eq!(
+                    retries(&command),
+                    retry.codex_settings(provider),
+                    "{retry:?} {account:?}"
+                );
+                assert_eq!(
+                    command.get_args().last().and_then(|last| last.to_str()),
+                    Some("-"),
+                    "the prompt stays the last argument"
+                );
+            }
+            let mut command = Command::new("/usr/bin/true");
+            claude_arguments(
+                &mut command,
+                Path::new("/agent/home"),
+                Path::new("/agent/tmp"),
+                false,
+                None,
+                &anthropic,
+                retry,
+            )
+            .unwrap();
+            assert_eq!(
+                cap(&command),
+                retry.claude_env().map(|(_, value)| value.to_owned()),
+                "{retry:?}"
+            );
         }
     }
 
@@ -5162,6 +5423,7 @@ mod tests {
                 Path::new("/home"),
                 tools,
                 &account,
+                crate::provider_retry::ProviderRetry::HarnessDefault,
             )
             .unwrap();
             let args: Vec<&str> = command
@@ -6340,6 +6602,7 @@ mod tests {
                 tools,
                 output_tokens,
                 &account,
+                crate::provider_retry::ProviderRetry::HarnessDefault,
             )
             .unwrap();
             let arguments: Vec<String> = command

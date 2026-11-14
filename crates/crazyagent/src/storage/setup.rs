@@ -2,8 +2,9 @@ use super::*;
 #[cfg(unix)]
 use crate::plugins::{Scope, ServerSpec};
 use crate::setup::pack::{GRAPH_ENTRY, PackKind, PackManifest, PackManifestEntry};
-use crate::setup::{SetupAction, SetupStatus, progress};
+use crate::setup::{RefusedTool, SetupAction, SetupStatus, progress};
 use crate::storage::versioned;
+use crate::tools::permission_fix;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -14,6 +15,10 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS setup_pack (
 );
 CREATE TABLE IF NOT EXISTS setup_trash (
     reference TEXT PRIMARY KEY CHECK(length(reference) BETWEEN 1 AND 128)
+);
+CREATE TABLE IF NOT EXISTS setup_refused_tool (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    choice TEXT NOT NULL CHECK(choice IN ('fix_button', 'command_only'))
 );";
 const REMOVED: &str = ".removed-";
 const PRESENT: &str = "present";
@@ -593,6 +598,22 @@ pub(crate) fn apply_owner(
             }
             Ok(Outcome::Applied)
         }
+        SetupAction::FixPermissions { tree, .. } => {
+            if !fix_tree_shape(tree) {
+                return Ok(rejected(permission_fix::TOOL_FIX_CHANGED));
+            }
+            if refused_tool(tx)? == RefusedTool::CommandOnly {
+                return Ok(rejected(permission_fix::TOOL_FIX_OFF));
+            }
+            if progress::snapshot(root).running {
+                return Ok(rejected("setup_busy"));
+            }
+            Ok(Outcome::Applied)
+        }
+        SetupAction::SetRefusedTool { choice } => {
+            save_refused_tool(tx, *choice)?;
+            Ok(Outcome::Applied)
+        }
         SetupAction::Remove { id, version } => {
             let Some(known) = entry(id.as_str()) else {
                 return Ok(rejected("pack_unknown"));
@@ -625,7 +646,54 @@ pub(crate) fn status(tx: &Transaction<'_>, path: &Path) -> Result<SetupStatus, E
         running: progress.running,
         notes: Vec::new(),
         version: versioned::current(tx, &versioned::default_pack_item())?.version,
+        refused_tool: refused_tool(tx)?,
     })
+}
+
+/// The longest fix target a request may name, as the resolver bounds a path.
+const FIX_TREE_BYTES_MAX: usize = 4096;
+
+/// Whether a permission fix request names its target as a row can show it: an absolute
+/// path within [`FIX_TREE_BYTES_MAX`] with no NUL. The engine only compares it with the
+/// target it resolves itself (DEC-162 Q5). Input: the target. Output: the answer.
+fn fix_tree_shape(tree: &str) -> bool {
+    tree.starts_with('/') && tree.len() <= FIX_TREE_BYTES_MAX && !tree.contains('\0')
+}
+
+/// The owner's choice for a tool found but not used (DEC-162 Q1): Fix button before any
+/// save, and Show command only for a stored value this engine does not know, the choice
+/// that changes nothing. Input: the open transaction. Output: the choice, or the database
+/// error.
+fn refused_tool(tx: &Transaction<'_>) -> Result<RefusedTool, EngineError> {
+    let stored: Option<String> = tx
+        .query_row(
+            "SELECT choice FROM setup_refused_tool WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(match stored.as_deref() {
+        None | Some("fix_button") => RefusedTool::FixButton,
+        Some(_) => RefusedTool::CommandOnly,
+    })
+}
+
+/// Saves the owner's choice for a tool found but not used over the stored one. Inputs: the
+/// open transaction and the choice. Output: Ok, or the database error.
+fn save_refused_tool(tx: &Transaction<'_>, choice: RefusedTool) -> Result<(), EngineError> {
+    let text = match choice {
+        RefusedTool::FixButton => "fix_button",
+        RefusedTool::CommandOnly => "command_only",
+    };
+    let stored = tx
+        .execute(
+            "INSERT INTO setup_refused_tool(singleton,choice) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET choice=excluded.choice",
+            [text],
+        )
+        .map_err(error)?;
+    assert_eq!(stored, 1);
+    Ok(())
 }
 
 fn sweep(connection: &mut Connection, root: &Path) -> Result<(), EngineError> {

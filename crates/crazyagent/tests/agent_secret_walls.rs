@@ -290,6 +290,36 @@ fn guard_refuses_agent_roots_inside_engine_secrets() {
     assert!(sandbox.guard_engine(&case.runtime).is_err());
 }
 
+/// CONFIGURED-HOMES-GUARD: an agent guarded on the engine root, as jobs, team agents,
+/// read-only runs and the IDE are, has the folder of configured SDK homes denied in its
+/// profile, so a real child cannot read or list a keyed account's config there.
+#[test]
+fn a_guarded_agent_cannot_read_a_configured_sdk_home() {
+    let case = case();
+    let secret_text = format!("rcli_test{}", random_hex(18));
+    let homes = case.runtime.join("configured-sdk-homes");
+    let config = homes
+        .join("c".repeat(64))
+        .join(".backboard")
+        .join("config.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(&config, &secret_text).unwrap();
+    let sandbox = sandbox(&case).guard_engine(&case.runtime).unwrap();
+    assert!(
+        sandbox
+            .profile()
+            .contains(&format!("\n  (subpath \"{}\")", homes.display()))
+    );
+    let profile = case.profiles.join("homes.sb");
+    let read = shell(&sandbox, &profile, &format!("cat {}", quoted(&config)));
+    assert!(!read.status.success());
+    assert!(!holds(&read.stdout, &secret_text));
+    assert!(String::from_utf8_lossy(&read.stderr).contains("Operation not permitted"));
+    let list = shell(&sandbox, &profile, &format!("ls {}", quoted(&homes)));
+    assert!(!list.status.success());
+    assert!(!holds(&list.stdout, &"c".repeat(64)));
+}
+
 #[test]
 fn owner_library_is_refused_as_a_read_root_and_its_keychains_stay_hidden() {
     let home = owner_home();
@@ -629,9 +659,7 @@ fn tools_on_agent_reaches_ip_endpoints_but_no_engine_unix_socket() {
         .collect();
     let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = endpoint.local_addr().unwrap().port();
-    let free = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let served = free.local_addr().unwrap().port();
-    drop(free);
+    let served = crazyagent::spawn_gate::free_low_tcp_port().unwrap();
     let open = ProjectSandbox::new(&case.project, &case.home, &case.tmp, SandboxNetwork::Open)
         .unwrap()
         .guard_engine(&case.runtime)

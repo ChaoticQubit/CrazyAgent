@@ -6,14 +6,16 @@ use crate::master_frame_limit::MasterFrameSettings;
 use crate::master_step_limit::MasterStepSettings;
 use crate::master_time_limit::MasterTimeSettings;
 use crate::projects_home::ProjectsHome;
+use crate::provider_retry::{ProviderRetry, ProviderRetryView};
 use crate::quit_settings::QuitSettings;
 use crate::sandbox_settings::SandboxSettings;
 use crate::setup::SetupStatus;
 
-/// One request from the setup page: setup status and runs, one tool installed alone,
-/// default-pack changes, the projects home folder, the GitHub account, the sandbox settings,
-/// when finished agents' worktrees go, what quitting does to team agents and the master
-/// step, time and frame size limits.
+/// One request from the setup page: setup status and runs, one tool installed alone, a refused
+/// tool's confirmed permission fix and what setup offers for one (DEC-162), default-pack
+/// changes, the projects home folder, the GitHub account, the sandbox settings, when finished
+/// agents' worktrees go, what quitting does to team agents and the master step, time and frame
+/// size limits and what harnesses do when a model provider can't be reached.
 /// Input: built by the setup page. Output: run on the owner worker; the reply
 /// arrives as `SettingsEvent::AppSetup`.
 pub(in crate::tui) enum AppSetupJob {
@@ -71,6 +73,21 @@ pub(in crate::tui) enum AppSetupJob {
         settings: MasterFrameSettings,
         generation: u64,
     },
+    ProviderRetry,
+    SetProviderRetry {
+        choice: ProviderRetry,
+        generation: u64,
+    },
+    FixPermissions {
+        name: crate::setup::Dependency,
+        tree: String,
+        recursive: bool,
+        generation: u64,
+    },
+    SetRefusedTool {
+        choice: crate::setup::RefusedTool,
+        generation: u64,
+    },
 }
 
 /// One change to an installed default-pack entry at the pack version the page showed.
@@ -104,6 +121,10 @@ pub(in crate::tui) enum AppSetupEvent {
     MasterTimeSet(Result<(), String>),
     MasterFrames(Result<MasterFrameSettings, String>),
     MasterFramesSet(Result<(), String>),
+    ProviderRetry(Result<ProviderRetryView, String>),
+    ProviderRetrySet(Result<(), String>),
+    FixSet(Result<(), String>),
+    RefusedToolSet(Result<(), String>),
 }
 
 impl AppSetupJob {
@@ -132,6 +153,10 @@ impl AppSetupJob {
             Self::SetMasterTime { .. } => "SetMasterTime",
             Self::MasterFrames => "MasterFrames",
             Self::SetMasterFrames { .. } => "SetMasterFrames",
+            Self::ProviderRetry => "ProviderRetry",
+            Self::SetProviderRetry { .. } => "SetProviderRetry",
+            Self::FixPermissions { .. } => "FixPermissions",
+            Self::SetRefusedTool { .. } => "SetRefusedTool",
         }
     }
 }
@@ -162,6 +187,10 @@ impl AppSetupEvent {
             AppSetupJob::SetMasterTime { .. } => Self::MasterTimeSet(Err(problem)),
             AppSetupJob::MasterFrames => Self::MasterFrames(Err(problem)),
             AppSetupJob::SetMasterFrames { .. } => Self::MasterFramesSet(Err(problem)),
+            AppSetupJob::ProviderRetry => Self::ProviderRetry(Err(problem)),
+            AppSetupJob::SetProviderRetry { .. } => Self::ProviderRetrySet(Err(problem)),
+            AppSetupJob::FixPermissions { .. } => Self::FixSet(Err(problem)),
+            AppSetupJob::SetRefusedTool { .. } => Self::RefusedToolSet(Err(problem)),
         }
     }
 }
@@ -330,6 +359,38 @@ impl NativeOwner {
                 "master_frame_settings_outcome_unknown",
                 lost,
             )),
+            AppSetupJob::ProviderRetry => AppSetupEvent::ProviderRetry(
+                controller
+                    .provider_retry()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
+            AppSetupJob::SetProviderRetry { choice, generation } => {
+                AppSetupEvent::ProviderRetrySet(applied(
+                    controller.set_provider_retry(choice, generation).await,
+                    "provider_retry_outcome_unknown",
+                    lost,
+                ))
+            }
+            AppSetupJob::FixPermissions {
+                name,
+                tree,
+                recursive,
+                generation,
+            } => AppSetupEvent::FixSet(applied(
+                controller
+                    .fix_tool_permissions(name, tree, recursive, generation)
+                    .await,
+                "setup_outcome_unknown",
+                lost,
+            )),
+            AppSetupJob::SetRefusedTool { choice, generation } => {
+                AppSetupEvent::RefusedToolSet(applied(
+                    controller.set_refused_tool(choice, generation).await,
+                    "setup_outcome_unknown",
+                    lost,
+                ))
+            }
         }
     }
 }
@@ -606,6 +667,29 @@ mod tests {
                 panic!("master frame size limit required")
             };
             assert_eq!(read, settings, "{limit:?} is stored as picked");
+        }
+
+        let read_retry = AppSetupJob::ProviderRetry;
+        let AppSetupEvent::ProviderRetry(Ok(retry)) = ask(&mut native, read_retry).await else {
+            panic!("provider retry setting required")
+        };
+        assert_eq!(
+            retry,
+            crate::provider_retry::view(ProviderRetry::RetryBriefly)
+        );
+        for (generation, choice) in (20..).zip(ProviderRetry::ALL) {
+            let set = ask(
+                &mut native,
+                AppSetupJob::SetProviderRetry { choice, generation },
+            )
+            .await;
+            assert!(matches!(set, AppSetupEvent::ProviderRetrySet(Ok(()))));
+            let read_retry = AppSetupJob::ProviderRetry;
+            let AppSetupEvent::ProviderRetry(Ok(read)) = ask(&mut native, read_retry).await else {
+                panic!("provider retry setting required")
+            };
+            assert_eq!(read.choice, choice, "{choice:?} is stored as picked");
+            assert_eq!(read, crate::provider_retry::view(choice));
         }
 
         drop(native);

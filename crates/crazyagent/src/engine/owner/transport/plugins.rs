@@ -1086,9 +1086,7 @@ async fn handle(
             Reply::Skill { skill: skill.view }
         }
         Action::ImportScan => {
-            let home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .filter(|home| home.is_absolute())
+            let home = crate::skills::import::home()
                 .ok_or_else(|| failure("skill_import_home_unknown"))?;
             let mut added = Vec::new();
             let mut offset = 0;

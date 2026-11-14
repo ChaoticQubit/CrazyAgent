@@ -455,7 +455,7 @@ export type ReceiptState ={ kind: "applied" } | { kind: "rejected"; code: string
 /** Classifies an intent receipt for the screens.
  * Input: the receipt. Output: applied, rejected with a code, or unconfirmed while pending. */
 export function receiptState(receipt: IntentReceipt): ReceiptState {
-  if (receipt.pending || receipt.outcome === "uncertain" || receipt.outcome === "unknown" || receipt.outcome === "not_recorded_at_barrier") {
+  if (receipt.pending || receipt.outcome === "uncertain" || receipt.outcome === "unknown" || receipt.outcome === "in_progress" || receipt.outcome === "not_recorded_at_barrier") {
     return { kind: "unconfirmed" };
   }
   if (receipt.rejection) return { kind: "rejected", code: receipt.rejection };

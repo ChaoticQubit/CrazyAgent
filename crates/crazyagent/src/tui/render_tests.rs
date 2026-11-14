@@ -379,6 +379,37 @@ fn welcome_frames_match_the_design() {
     check("welcome-saving-80", &render(&mut shell, 80, 24), &BIO_80);
 }
 
+/// DEC-159 S7: with a folder being added, Home lists the job first and picked, Enter stops
+/// it, and the header shows its brief beside the running agents; every frame without a job
+/// stays as it was.
+#[test]
+fn home_frame_with_an_intake_job_matches_the_design() {
+    use crate::projects_home::icloud::Progress;
+    use crate::projects_home::job::{JobState, JobView};
+    let old = old_date();
+    let swaps = project_swaps(&old);
+    let mut ctx = ready(80, 24);
+    ctx.store.projects = Load::Ready(projects());
+    ctx.store.pools = Load::Ready(pools());
+    ctx.store.accounts = Load::Ready(accounts());
+    ctx.store.intake = Some(JobView {
+        id: crate::protocol::RequestId::new("add-1").unwrap(),
+        source: "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop".into(),
+        mode: crate::projects_home::AddMode::Move,
+        overrides: Vec::new(),
+        stopping: false,
+        state: JobState::Downloading {
+            progress: Progress {
+                total: 3000,
+                done: 12,
+            },
+        },
+    });
+    let mut shell = shell_at(ctx, Place::Home);
+    shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
+    check("home-job-80", &render(&mut shell, 80, 24), &swapped(&swaps));
+}
+
 #[test]
 fn home_frames_match_the_design() {
     for (width, height) in [(120, 36), (80, 24)] {

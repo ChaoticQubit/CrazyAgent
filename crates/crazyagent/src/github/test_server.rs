@@ -4,7 +4,8 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// One request the loopback server received, with lowercase header names.
+/// One request the loopback server received, with lowercase header names and a repeated
+/// header's values joined by commas, so a test sees a header sent twice.
 #[derive(Clone, Debug)]
 pub(crate) struct Seen {
     pub(crate) method: String,
@@ -103,7 +104,7 @@ fn serve(stream: TcpStream, handler: &Handler, recorded: &Mutex<Vec<Seen>>) {
         .split_once('?')
         .map(|(path, query)| (path.to_owned(), query.to_owned()))
         .unwrap_or((target.clone(), String::new()));
-    let mut headers = BTreeMap::new();
+    let mut headers: BTreeMap<String, String> = BTreeMap::new();
     loop {
         let mut header = String::new();
         reader.read_line(&mut header).unwrap();
@@ -112,7 +113,11 @@ fn serve(stream: TcpStream, handler: &Handler, recorded: &Mutex<Vec<Seen>>) {
             break;
         }
         let (name, value) = header.split_once(':').unwrap();
-        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+        let seen = headers.entry(name.trim().to_ascii_lowercase()).or_default();
+        if !seen.is_empty() {
+            seen.push_str(", ");
+        }
+        seen.push_str(value.trim());
     }
     let length = headers
         .get("content-length")

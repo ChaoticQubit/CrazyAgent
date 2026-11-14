@@ -122,6 +122,26 @@ impl Installer for LinuxInstaller {
         self.common.program(name)
     }
 
+    fn lookup_program(&self, name: &str) -> Result<PathBuf, crate::tools::Missing> {
+        self.common.lookup_program(name)
+    }
+
+    fn fix_target(
+        &self,
+        missing: &crate::tools::Missing,
+    ) -> Option<crate::tools::permission_fix::Target> {
+        self.common.fix_target(missing)
+    }
+
+    fn fix_permissions(
+        &self,
+        dep: Dependency,
+        confirmed: &str,
+        recursive: bool,
+    ) -> Result<crate::tools::permission_fix::Report, &'static str> {
+        self.common.fix_permissions(dep, confirmed, recursive)
+    }
+
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError> {
         if dep != Dependency::Tmux {
             return self.common.install(dep, pin);

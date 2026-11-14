@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createWriteStream, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
+import { connect, createServer as createTcpServer } from "node:net";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 
@@ -23,14 +24,45 @@ export function required(name, what) {
   return value;
 }
 
-/** Finds a local port nothing listens on, for the provider endpoint nobody answers.
- * Input: none. Output: the port. */
+const closedPortEnds = [];
+
+/** Holds a local port that refuses every connect for the rest of this process, for the
+ * provider endpoint nobody answers: held as refusingPort holds one, so no later listener of
+ * the run takes it, and the held connection keeps no process alive. Input: none. Output: the
+ * port. */
 export async function closedPort() {
-  const server = createServer();
+  const { port, ends } = await heldPort();
+  for (const end of ends) end.unref();
+  closedPortEnds.push(...ends);
+  return port;
+}
+
+/** Holds a free local port that refuses every connect, as a stopped model provider, until
+ * the caller frees it. Input: none. Output: the port and a function that frees it. */
+export async function refusingPort() {
+  const { port, ends } = await heldPort();
+  return { port, free: () => { for (const end of ends) end.destroy(); } };
+}
+
+/** Takes one connection from this process on a fresh local listener and stops listening, so
+ * the port stays in use by that connection, no port-0 listener gets it, and a connect is
+ * refused at once. Input: none. Output: the port and the connection's two ends. */
+async function heldPort() {
+  const server = createTcpServer();
+  const accepted = new Promise((done) => server.once("connection", done));
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   const { port } = server.address();
-  await new Promise((done) => server.close(done));
-  return port;
+  const near = connect(port, "127.0.0.1");
+  near.on("error", () => {});
+  await new Promise((done, fail) => {
+    near.once("connect", done);
+    near.once("error", fail);
+  });
+  const far = await accepted;
+  far.on("error", () => {});
+  server.close();
+  assert.equal(server.listening, false, "the held port has no listener");
+  return { port, ends: [near, far] };
 }
 
 /** Opens a local port that takes connections but answers no request, for the provider of an
@@ -43,7 +75,8 @@ export async function silentProvider() {
   return { server, port: server.address().port };
 }
 
-/** Starts a child with its output kept as evidence and waits for its ready line.
+/** Starts a child with its output kept as evidence and waits for its ready line; a child that
+ * never gets there is stopped before the failure goes up, so no caller leaks it.
  * Input: the binary, its arguments, environment, evidence folder, name and ready pattern.
  * Output: the child and the ready line's match. */
 export async function start(binary, args, env, evidence, name, ready) {
@@ -52,6 +85,7 @@ export async function start(binary, args, env, evidence, name, ready) {
   const out = createWriteStream(join(evidence, `${name}.out`), { mode: 0o600 });
   const match = await new Promise((done, fail) => {
     let seen = "";
+    child.once("error", fail);
     const timer = setTimeout(() => fail(new Error(`${name} printed no ready line in ${READY_MS} ms; see ${name}.err`)), READY_MS);
     child.stdout.on("data", (chunk) => {
       out.write(String(chunk).replace(/[0-9a-f]{64}/g, "<token>"));
@@ -66,6 +100,9 @@ export async function start(binary, args, env, evidence, name, ready) {
       clearTimeout(timer);
       fail(new Error(`${name} exited before ready: ${code ?? signal}; see ${name}.err`));
     });
+  }).catch(async (error) => {
+    if (child.pid !== undefined) await stop(child);
+    throw error;
   });
   return { child, match };
 }
@@ -336,4 +373,46 @@ export function owner({ evaluate, send }, evidence) {
     await waitFor("the Questions for you drawer", (text) => text.includes("Questions for you"));
   };
   return { seen, waitFor, click, follow, type, enter, capture, unfold, asks };
+}
+
+let nextLowPort = null;
+
+/** Picks a port from 20000 to 28999 that nothing of this user holds now on 127.0.0.1, ::1,
+ * 0.0.0.0 or ::, below every port the system hands out by itself and below both model proxy
+ * blocks, so no port-0 listener takes it before the caller's own server does. Each call
+ * starts past the last port it gave. Input: none. Output: the port. */
+export async function freeLowPort() {
+  const start = 20000;
+  const span = 9000;
+  const first = nextLowPort ?? (process.pid * 2654435761) % span;
+  for (let step = 0; step < span; step += 1) {
+    const offset = (first + step) % span;
+    let free = true;
+    for (const host of ["127.0.0.1", "::1", "0.0.0.0", "::"]) {
+      free = free && (await bindable(start + offset, host));
+    }
+    if (free) {
+      nextLowPort = (offset + 1) % span;
+      assert.ok(start + offset <= 28999);
+      return start + offset;
+    }
+  }
+  throw new Error("every low loopback port is taken");
+}
+
+/** Tells whether a listener can bind a local port on one address now. Node binds with
+ * SO_REUSEADDR, which on macOS conflicts only with a socket on that exact address, so each
+ * address is asked on its own. Input: the port and the address. Output: true when the bind
+ * worked, or when the address is IPv6 and this system has no IPv6 there. */
+async function bindable(port, host) {
+  const server = createTcpServer();
+  const error = await new Promise((done) => {
+    server.once("error", done);
+    server.listen(port, host, () => done(null));
+  });
+  if (error === null) {
+    await new Promise((done) => server.close(done));
+    return true;
+  }
+  return host.includes(":") && ["EADDRNOTAVAIL", "EAFNOSUPPORT"].includes(error.code);
 }

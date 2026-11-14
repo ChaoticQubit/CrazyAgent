@@ -440,9 +440,9 @@ fn the_closed_tops_rule_keeps_the_own_folder_open_and_refuses_names_out_of_shape
         .unwrap()
         .profile();
     let rule = format!(
-        "(require-not (regex #\"^{}/(\\.crazyagent|src)(/.*)?$\"))\n    (require-not (subpath \"{}\"))))",
-        crate::sandbox::seatbelt_pattern(&project),
-        own.display()
+        "(require-not (regex #\"^{pattern}/(\\.crazyagent|src)$\"))\n    (require-not (regex #\"^{pattern}/(\\.crazyagent|src)/\"))\n    (require-not (subpath \"{}\"))))",
+        own.display(),
+        pattern = crate::sandbox::seatbelt_pattern(&project)
     );
     let closed = profile.find(&rule).expect(&profile);
     let kept = profile

@@ -593,15 +593,17 @@ fn to_tab(pty: &Pty, project: &str, tab: &str, keys: &[&str]) {
     }
 }
 
-fn unreachable_provider(engine: &Engine) {
-    let closed = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let port = closed.local_addr().unwrap().port();
-    drop(closed);
+/// Points the engine's model access at a loopback provider that refuses every connect.
+/// Input: the engine. Output: the held port's two ends, which the row keeps until it ends so
+/// no other listener takes the port meanwhile.
+fn unreachable_provider(engine: &Engine) -> [std::net::TcpStream; 2] {
+    let (held, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
     std::fs::write(
         engine.path().join("global.toml"),
         MODEL_ACCESS.replace("PORT", &port.to_string()),
     )
     .unwrap();
+    held
 }
 
 async fn setup_status(engine: &Engine) -> SetupStatus {
@@ -659,7 +661,7 @@ fn settled(turn: &MasterTurnView) -> bool {
 #[test]
 fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui() {
     let mut engine = Engine::new("ca-e2e-flow-");
-    unreachable_provider(&engine);
+    let _provider = unreachable_provider(&engine);
     engine.launch();
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-disk-");
@@ -1956,6 +1958,476 @@ fn first_run_with_the_guide_unticked_adds_an_account_and_skips_the_guide() {
         );
         std::thread::sleep(POLL_TIME);
     }
+    drop(pty);
+    engine.stop();
+}
+
+const RESETS_ID: &str = "e2e-free-resets";
+const RESETS_PROJECT: &str = "Free resets e2e";
+
+/// The screen's words joined by single spaces, so a sentence the TUI wrapped still reads
+/// whole. Input: the screen. Output: the words.
+fn flat(screen: &str) -> String {
+    screen.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Opens Settings, Pools in the TUI on a fresh engine with a saved profile, home and one
+/// project, once the Pools spend part shows its Claude free resets line.
+/// Input: the scratch prefix. Output: the engine, the TUI and the scratch home.
+fn pools_settings(prefix: &str) -> (Engine, Pty, tempfile::TempDir) {
+    let engine = Engine::start(prefix);
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+            assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+            assert_eq!(
+                owner.create_project(RESETS_ID, RESETS_PROJECT).await,
+                OwnerResult::Applied
+            );
+            owner.controller.detach();
+        });
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, RESETS_PROJECT));
+    setup_checked(&pty);
+    pty.keys(&["s"]);
+    pty.until("s on Home opens Settings", |screen| {
+        screen.contains("Settings") && !at_home(screen, RESETS_PROJECT)
+    });
+    pty.keys(&["]"]);
+    pty.until(
+        "] steps to Pools with its Claude free resets line",
+        |screen| flat(screen).contains("Claude free resets (f):"),
+    );
+    (engine, pty, disk)
+}
+
+/// Reads where the engine keeps reading Claude free resets from, as any client reads it.
+/// Input: the engine. Output: the source.
+fn kept_source(engine: &Engine) -> crazyagent::usage::spend::ResetsSource {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(engine).await;
+            let report = owner
+                .controller
+                .owner_client()
+                .unwrap()
+                .usage_report(None, None, 0)
+                .await
+                .unwrap();
+            owner.controller.detach();
+            report.spend.settings.resets_source
+        })
+}
+
+/// Through Claude Code (the default, DEC-154 addendum): Pools says CrazyAgent asks Claude
+/// Code first and, while Claude Code can't report free resets, asks Anthropic as Claude Code.
+#[test]
+fn the_tui_reads_claude_free_resets_through_claude_code_by_default() {
+    let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-through-");
+    pty.until("the default names itself and how it asks", |screen| {
+        flat(screen).contains("Claude free resets (f): Through Claude Code.")
+            && flat(screen).contains("asks Anthropic as Claude Code.")
+    });
+    assert_eq!(
+        kept_source(&engine),
+        crazyagent::usage::spend::ResetsSource::ThroughClaudeCode
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// As Claude Code (DEC-154 addendum): f saves it in the engine, and Pools says CrazyAgent
+/// asks the way Claude Code itself asks.
+#[test]
+fn the_tui_saves_claude_free_resets_as_claude_code() {
+    let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-as-");
+    pty.keys(&["f"]);
+    pty.until("f saves As Claude Code and says how it asks", |screen| {
+        flat(screen).contains("Claude free resets (f): As Claude Code.")
+            && flat(screen).contains("the way Claude Code itself asks.")
+    });
+    assert_eq!(
+        kept_source(&engine),
+        crazyagent::usage::spend::ResetsSource::AsClaudeCode
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// Don't read (DEC-154 addendum): f twice saves it in the engine, and Pools says Claude
+/// accounts say off in Settings.
+#[test]
+fn the_tui_saves_claude_free_resets_dont_read() {
+    let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-off-");
+    pty.keys(&["f"]);
+    pty.until("the first f saves As Claude Code", |screen| {
+        flat(screen).contains("Claude free resets (f): As Claude Code.")
+    });
+    pty.keys(&["f"]);
+    pty.until(
+        "the second f saves Don't read and says what it does",
+        |screen| {
+            flat(screen).contains("Claude free resets (f): Don't read.")
+                && flat(screen).contains("Claude accounts say off in Settings.")
+        },
+    );
+    assert_eq!(
+        kept_source(&engine),
+        crazyagent::usage::spend::ResetsSource::Off
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// Reads the option the engine keeps for When a model provider can't be reached.
+/// Input: the engine. Output: the stored option.
+async fn stored_retry(engine: &Engine) -> crazyagent::provider_retry::ProviderRetry {
+    let mut owner = Owner::attach(engine).await;
+    let read = owner
+        .controller
+        .read(OwnerRead::ProviderRetry)
+        .await
+        .unwrap();
+    owner.controller.detach();
+    let OwnerData::ProviderRetry { settings } = read.data else {
+        panic!("the engine answers with the provider retry setting")
+    };
+    settings.choice
+}
+
+/// Opens Settings, Setup through Go to, presses e and saves the option `keys` move to,
+/// waiting until the page names it, and returns what the engine then keeps. Inputs: the
+/// TUI, the runtime, the engine, the arrow keys and the option's title. Output: the
+/// stored option.
+fn save_retry(
+    pty: &Pty,
+    runtime: &tokio::runtime::Runtime,
+    engine: &Engine,
+    keys: &[&str],
+    title: &str,
+) -> crazyagent::provider_retry::ProviderRetry {
+    pty.keys(&["e"]);
+    pty.until(
+        "e asks what harnesses do, with each harness line",
+        |screen| {
+            screen.contains("When a model provider can't be reached: what harnesses do.")
+                && screen.contains("Harness default")
+                && screen.contains("RCLI: one try. The engine never repeats an RCLI request.")
+                && screen.contains("Claude Code: no retries.")
+        },
+    );
+    pty.keys(keys);
+    let picked = format!("> {title}");
+    pty.until("the arrows pick the option", |screen| {
+        screen.contains(&picked)
+    });
+    pty.keys(&["Enter"]);
+    let said = format!("Provider retry: {title}.");
+    pty.until(
+        "the save names the option and the page shows it",
+        |screen| {
+            screen.contains(&said)
+                && screen
+                    .lines()
+                    .any(|line| line.contains("Provider retry  ") && line.contains(title))
+        },
+    );
+    runtime.block_on(stored_retry(engine))
+}
+
+/// One row per option of When a model provider can't be reached (DEC-163): the TUI opens
+/// Settings, Setup, shows Retry briefly on a fresh engine and each harness line in its ask,
+/// saves the option and the engine keeps it. Inputs: the scratch prefix, the arrow keys, the
+/// option's title and the option. Output: none; panics when a step fails.
+fn provider_retry_row(
+    prefix: &str,
+    keys: &[&str],
+    title: &str,
+    wanted: crazyagent::provider_retry::ProviderRetry,
+) {
+    use crazyagent::provider_retry::ProviderRetry;
+    let (mut engine, pty, _project, _disk) = switch_settings(prefix);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    assert_eq!(
+        runtime.block_on(stored_retry(&engine)),
+        ProviderRetry::RetryBriefly
+    );
+    pty.keys(&["C-k"]);
+    pty.until("Ctrl-K opens Go to", |screen| {
+        screen.contains("Projects, tabs, settings, actions. Enter goes there.")
+    });
+    pty.text("Settings / Setup");
+    pty.keys(&["Enter"]);
+    pty.until(
+        "Settings, Setup shows Provider retry at Retry briefly",
+        |screen| {
+            screen
+                .lines()
+                .any(|line| line.contains("Provider retry  ") && line.contains("Retry briefly"))
+        },
+    );
+    if title == "Retry briefly" {
+        let stored = save_retry(&pty, &runtime, &engine, &["Up"], "Stop at once");
+        assert_eq!(stored, ProviderRetry::StopAtOnce);
+    }
+    let stored = save_retry(&pty, &runtime, &engine, keys, title);
+    assert_eq!(stored, wanted, "the engine keeps {title}");
+    drop(pty);
+    engine.stop();
+}
+
+#[test]
+fn the_tui_saves_stop_at_once_for_a_model_provider_that_cant_be_reached() {
+    provider_retry_row(
+        "ca-e2e-retry-stop-",
+        &["Up"],
+        "Stop at once",
+        crazyagent::provider_retry::ProviderRetry::StopAtOnce,
+    );
+}
+
+#[test]
+fn the_tui_saves_retry_briefly_for_a_model_provider_that_cant_be_reached() {
+    provider_retry_row(
+        "ca-e2e-retry-brief-",
+        &["Down"],
+        "Retry briefly",
+        crazyagent::provider_retry::ProviderRetry::RetryBriefly,
+    );
+}
+
+#[test]
+fn the_tui_saves_harness_default_for_a_model_provider_that_cant_be_reached() {
+    provider_retry_row(
+        "ca-e2e-retry-default-",
+        &["Down"],
+        "Harness default",
+        crazyagent::provider_retry::ProviderRetry::HarnessDefault,
+    );
+}
+
+/// Makes a graphify in `home` that the resolver finds and passes over (DEC-162), laid out as
+/// uv lays out a tool: `.local/bin/graphify` links to the tool's script, whose Python links
+/// to a real `python3.9` (a copy of `/bin/bash`) in an installation whose folders the group
+/// can change (0775); a link in the installation points out to a 0777 file elsewhere in
+/// the home. Input: the home. Output: the installation folder and the file outside it.
+fn refused_graphify(home: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let mode = std::fs::Permissions::from_mode;
+    let prefix = home.join(".local/share/uv/python/cpython-9.9.9-dummy");
+    let real = prefix.join("bin");
+    let tool = home.join(".local/share/uv/tools/graphifyy/bin");
+    let bin = home.join(".local/bin");
+    for folder in [&real, &tool, &bin] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    std::fs::copy("/bin/bash", real.join("python3.9")).unwrap();
+    std::fs::set_permissions(real.join("python3.9"), mode(0o755)).unwrap();
+    symlink(real.join("python3.9"), tool.join("python")).unwrap();
+    let script = tool.join("graphify");
+    let text = format!(
+        "#!{}\necho 'graphify 0.9.9'\n",
+        tool.join("python").display()
+    );
+    std::fs::write(&script, text).unwrap();
+    std::fs::set_permissions(&script, mode(0o755)).unwrap();
+    symlink(&script, bin.join("graphify")).unwrap();
+    let elsewhere = home.join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let outside = elsewhere.join("kept");
+    std::fs::write(&outside, "kept").unwrap();
+    std::fs::set_permissions(&outside, mode(0o777)).unwrap();
+    symlink(&outside, prefix.join("outside")).unwrap();
+    for folder in [&real, &prefix] {
+        std::fs::set_permissions(folder, mode(0o775)).unwrap();
+    }
+    (prefix, outside)
+}
+
+/// A first-run home for the refused-tool rows: a Projects folder and the Shift-Enter
+/// preference saved, as the Node row makes it. Input: a scratch prefix. Output: the home.
+fn first_run_home(prefix: &str) -> tempfile::TempDir {
+    let home = scratch(prefix);
+    std::fs::create_dir(home.path().join("Projects")).unwrap();
+    let prefs = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/CrazyAgent")
+    } else {
+        home.path().join(".config/crazyagent")
+    };
+    std::fs::create_dir_all(&prefs).unwrap();
+    std::fs::write(prefs.join("tui-shift-enter"), "off").unwrap();
+    home
+}
+
+/// Starts a clean-Mac engine on `home`: the system PATH and an empty gate root, so the only
+/// graphify it can find is the one in the home. Inputs: a scratch prefix, the home and the
+/// gate root. Output: the running engine.
+fn clean_engine(prefix: &str, home: &Path, gate: &Path) -> Engine {
+    let mut engine = Engine::new(prefix);
+    engine.home = Some(home.to_path_buf());
+    engine.env.push(("PATH", SYSTEM_PATH.into()));
+    engine
+        .env
+        .push(("CRAZYAGENT_GATE_SYSTEM_ROOT", gate.into()));
+    engine.launch();
+    engine
+}
+
+/// Goes through first run to the Setup page, where the tools check shows. Inputs: the
+/// engine and the home. Output: the TUI on the Setup page.
+fn first_run_setup_page(engine: &Engine, home: &Path) -> ScriptPty {
+    let mut pty = ScriptPty::launch(&engine.socket(), home);
+    welcome_bio(&pty);
+    pty.type_bytes(b"Mira Okafor\t\t\t\t\t\t\r");
+    pty.until("the projects folder step opens", |screen| {
+        screen.contains("Your projects folder")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("the Setup page opens", |screen| {
+        screen.contains("c Continue without")
+    });
+    pty
+}
+
+fn folder_mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// DEC-162, Unused tools on Fix button (the default): first run's Setup page reads the
+/// graphify the resolver passed over as Found, not used with its line; p names the tree and
+/// the command, nothing changes before y, y removes group and other write from that tree
+/// alone, a link out of the tree leaves its file as it was, the row then reads Found and the
+/// engine logs the tree and counts. Needs the clean-Mac gate build.
+#[test]
+#[cfg_attr(
+    not(feature = "clean-mac-gate"),
+    ignore = "needs cargo test --features clean-mac-gate: the gate root hides this machine's own graphify"
+)]
+fn first_run_fixes_a_refused_graphify_only_after_the_confirm_names_its_tree() {
+    let home = first_run_home("ca-e2e-fix-home-");
+    let (prefix, outside) = refused_graphify(home.path());
+    let gate = scratch("ca-e2e-fix-gate-");
+    let mut engine = clean_engine("ca-e2e-fix-", home.path(), gate.path());
+    let mut pty = first_run_setup_page(&engine, home.path());
+    pty.until_within(
+        "the Graphify command row reads Found, not used with its line and the Setup page offers p",
+        SETTLE_TIME,
+        |screen| {
+            screen.contains("Found, not used")
+                && screen.contains("graphify can't start")
+                && screen.contains("p Fix")
+        },
+    );
+    pty.type_bytes(b"p");
+    pty.until(
+        "the confirm names the tool, the tree and the command",
+        |screen| {
+            screen.contains("Fix permissions for Graphify command?")
+                && screen.contains("cpython-9.9.9-dummy")
+                && screen.contains("chmod -R go-w")
+                && screen.contains("y Fix")
+        },
+    );
+    assert_eq!(folder_mode(&prefix), 0o775, "nothing changes before y");
+    pty.type_bytes(b"y");
+    pty.until_within(
+        "the fix ends and the Graphify command row reads Found",
+        SETTLE_TIME,
+        |screen| {
+            screen.contains("Found 0.9.9")
+                && !screen.contains("Found, not used")
+                && !screen.contains("p Fix")
+        },
+    );
+    for folder in [&prefix, &prefix.join("bin")] {
+        assert_eq!(folder_mode(folder), 0o755, "{}", folder.display());
+    }
+    assert_eq!(
+        folder_mode(&outside),
+        0o777,
+        "a link out of the tree leaves its file as it was"
+    );
+    drop(pty);
+    let log = engine.stop();
+    assert!(
+        log.contains("tool_fix_done tool=graphify") && log.contains("changed="),
+        "the engine logs the fix with its tree and counts:\n{log}"
+    );
+}
+
+/// DEC-162, Unused tools on Show the command only: first run's Setup page shows the command
+/// for the graphify the resolver passed over and no fix key, p says fixing is turned off,
+/// and the engine itself refuses a fix request with `tool_fix_off`, changing nothing. Needs
+/// the clean-Mac gate build.
+#[test]
+#[cfg_attr(
+    not(feature = "clean-mac-gate"),
+    ignore = "needs cargo test --features clean-mac-gate: the gate root hides this machine's own graphify"
+)]
+fn first_run_shows_only_the_command_for_a_refused_graphify_when_unused_tools_is_command_only() {
+    let home = first_run_home("ca-e2e-fixoff-home-");
+    let (prefix, _) = refused_graphify(home.path());
+    let gate = scratch("ca-e2e-fixoff-gate-");
+    let mut engine = clean_engine("ca-e2e-fixoff-", home.path(), gate.path());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let saved = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let generation = owner.next();
+        let reply = owner
+            .controller
+            .set_refused_tool(crazyagent::setup::RefusedTool::CommandOnly, generation)
+            .await
+            .unwrap();
+        owner.controller.detach();
+        e2e_support::result(reply)
+    });
+    assert_eq!(saved, OwnerResult::Applied);
+    let mut pty = first_run_setup_page(&engine, home.path());
+    pty.until_within(
+        "the Graphify command row shows the command and the page offers no fix key",
+        SETTLE_TIME,
+        |screen| {
+            screen.contains("Found, not used")
+                && screen.contains("To fix it, run in Terminal: chmod -R go-w")
+                && !screen.contains("p Fix")
+        },
+    );
+    pty.type_bytes(b"p");
+    pty.until("p says fixing permissions is turned off", |screen| {
+        screen.contains("Fixing permissions from CrazyAgent is turned off in Settings.")
+    });
+    let answer = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let generation = owner.next();
+        let tree = prefix.canonicalize().unwrap().display().to_string();
+        let reply = owner
+            .controller
+            .fix_tool_permissions(Dependency::Graphify, tree, true, generation)
+            .await
+            .unwrap();
+        owner.controller.detach();
+        e2e_support::result(reply)
+    });
+    assert_eq!(answer, e2e_support::rejected("tool_fix_off"));
+    assert_eq!(folder_mode(&prefix), 0o775, "a refused fix changes nothing");
     drop(pty);
     engine.stop();
 }

@@ -1008,3 +1008,65 @@ fn a_proxied_agent_s_pane_record_says_its_keeper_can_freeze_it() {
     let _ = end_left_pane(host.as_ref(), &agent, "team");
     host.close(&[]).unwrap();
 }
+
+/// DEC-158 (rv-secreview S4B r2 residual 1): a server keeper whose state `ps` cannot read
+/// is not signalled, since its id may by then name another process of the owner's, and
+/// the keepers do not count as ended, so the lead's proxy stays bound.
+#[test]
+fn a_keeper_whose_state_cannot_be_read_is_not_signalled() {
+    let mut child =
+        crate::spawn_gate::spawn(Command::new("/bin/sleep").arg("30").stdin(Stdio::null()))
+            .unwrap();
+    let pin = KeeperPin {
+        pid: child.id(),
+        started: keeper_started(child.id()).expect("the stand-in keeper's start reads"),
+        mates: false,
+    };
+    assert_eq!(keeper_seen(&pin), Some(true), "the stand-in keeper runs");
+    assert!(
+        !end_seen_keepers(std::slice::from_ref(&pin), |_| None),
+        "keepers whose state could not be read counted as ended"
+    );
+    assert_eq!(
+        child.try_wait().unwrap(),
+        None,
+        "a keeper whose state could not be read was signalled"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+/// DEC-158 (S4B psfail r1 F1, both tracks): a server keeper whose first `ps` read fails is
+/// signalled once a later read in the wait sees it running as its pin names, so a passing
+/// `ps` failure still ends the lead and frees its proxy.
+#[test]
+fn a_keeper_whose_first_read_fails_is_signalled_once_it_reads_running() {
+    use std::os::unix::process::ExitStatusExt;
+    let mut child =
+        crate::spawn_gate::spawn(Command::new("/bin/sleep").arg("30").stdin(Stdio::null()))
+            .unwrap();
+    let pin = KeeperPin {
+        pid: child.id(),
+        started: keeper_started(child.id()).expect("the stand-in keeper's start reads"),
+        mates: false,
+    };
+    let reads = std::cell::Cell::new(0_u32);
+    let ended = end_seen_keepers(std::slice::from_ref(&pin), |pin| {
+        reads.set(reads.get() + 1);
+        if reads.get() == 1 {
+            None
+        } else {
+            keeper_seen(pin)
+        }
+    });
+    assert!(reads.get() > 1, "the keeper was read only once");
+    assert!(
+        ended,
+        "a keeper read running after one failed read was not ended"
+    );
+    assert_eq!(
+        child.wait().unwrap().signal(),
+        Some(15),
+        "the keeper read running after one failed read was not sent TERM"
+    );
+}

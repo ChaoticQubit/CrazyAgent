@@ -232,6 +232,7 @@ pub struct SkillView {
     pub enabled: bool,
     pub on_here: Option<bool>,
     pub source: String,
+    pub origin: String,
     pub folder: String,
     pub version: u64,
     pub refused: Option<String>,
