@@ -2210,10 +2210,10 @@ impl Screen for AppSetup {
             hints.push(hint("l", "Linux sockets"));
             hints.push(hint("f", "Finished agents"));
             hints.push(hint("q", "Quitting"));
+            hints.push(hint("e", "Retry"));
             hints.push(hint("m", "Master steps"));
             hints.push(hint("t", "Master time"));
             hints.push(hint("z", "Master frame"));
-            hints.push(hint("p", "Retries"));
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
@@ -2291,7 +2291,7 @@ impl Screen for AppSetup {
                 self.ask_frames(ctx);
                 Flow::Handled
             }
-            Key::Char('p') if !self.first_run => {
+            Key::Char('e') if !self.first_run => {
                 self.ask_retry(ctx);
                 Flow::Handled
             }
