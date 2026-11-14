@@ -213,8 +213,9 @@ pub enum Spend {
 }
 
 /// An account's stored extras as they stand now: none for a field never read, read absent,
-/// or a count whose next expiry has passed; with when each was last read, and when a read
-/// last found more free resets than the unexpired count before it.
+/// or a count whose next expiry has passed; with when each was last read, when a read last
+/// found more free resets than the unexpired count before it, and whether the last free
+/// resets read found no count (unread, never true for an expired count).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredExtras {
@@ -223,13 +224,15 @@ pub struct StoredExtras {
     pub resets_checked_ms: Option<i64>,
     pub credits_checked_ms: Option<i64>,
     pub resets_gained_ms: Option<i64>,
+    #[serde(default)]
+    pub resets_unread: bool,
 }
 
-/// The limits contract every client shows for one account (DEC-154): the harness's display
-/// name, the account's adapter, whether its read or spend is a private call that may break,
-/// the free resets and credits (none means not reported, never 0), where to spend, the words
-/// for a field that is not reported ("not reported by <harness>"), when each field was last
-/// read, and when new free resets last arrived, for a notice shown once per time.
+/// The limits contract every client shows for one account (DEC-154): the harness's name, its
+/// adapter, whether its read or spend is a private call that may break, the free resets and
+/// credits (none means not reported, never 0), where to spend, the not reported words, when
+/// each field was last read and new resets arrived, and whether the last resets read found no
+/// count, which clients say as "couldn't read", never as none.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitExtras {
@@ -243,6 +246,8 @@ pub struct LimitExtras {
     pub resets_checked_ms: Option<i64>,
     pub credits_checked_ms: Option<i64>,
     pub resets_gained_ms: Option<i64>,
+    #[serde(default)]
+    pub resets_unread: bool,
 }
 
 /// The adapter entry of a harness for its managed sign-ins, by catalog id or the name a
@@ -743,6 +748,7 @@ pub fn extras_of(
         resets_checked_ms: row.resets_checked_ms,
         credits_checked_ms: row.credits_checked_ms,
         resets_gained_ms: row.resets_gained_ms,
+        resets_unread: false,
     })
 }
 
@@ -777,6 +783,7 @@ pub fn limit_extras(connection: &ModelConnection, stored: &StoredExtras) -> Limi
         resets_checked_ms: stored.resets_checked_ms.filter(|_| resets),
         credits_checked_ms: stored.credits_checked_ms.filter(|_| credits),
         resets_gained_ms: stored.resets_gained_ms.filter(|_| resets),
+        resets_unread: false,
     }
 }
 

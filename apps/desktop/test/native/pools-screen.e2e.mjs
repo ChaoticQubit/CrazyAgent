@@ -100,6 +100,21 @@ function seedResets(name, count) {
   }
 }
 
+/** Writes one account's free resets into the fixture engine's own store as a read that found
+ * no count leaves them: the count cleared and the read stamped now. Input: the account name.
+ * Output: none. */
+function seedUnread(name) {
+  assert.ok(ids[name], `${name} was added first`);
+  const store = new DatabaseSync(join(dirname(process.env.CRAZYAGENT_DESKTOP_SOCKET), "engine.db"));
+  try {
+    store.exec("PRAGMA busy_timeout = 5000");
+    store.prepare("INSERT OR REPLACE INTO account_limit_extras (account,resets_count,reset_kinds,resets_expire_ms,resets_checked_ms,resets_gained_ms) VALUES (?,NULL,NULL,NULL,?,NULL)")
+      .run(ids[name], Date.now());
+  } finally {
+    store.close();
+  }
+}
+
 /** Reads the free resets and credits line of each shown row. Output: the line by account name. */
 function rowExtras() {
   return browser.execute(() => Object.fromEntries([...document.querySelectorAll("main .pool-row")].filter((row) => row.getClientRects().length)
@@ -322,6 +337,18 @@ describe("Settings, Pools as one screen on the real desktop app and a writable e
     }, 75_000, "the rows did not show the engine's lines, or the new free reset was not told");
     assert.ok(Object.values(await rowExtras()).every((line) => line !== null && !/\b0\b/.test(line)), "no row reads a bare 0");
     await shot("pools-extras");
+  });
+
+  it("a Claude row whose last free resets read found no count says couldn't read, and a known 0 says No free resets (owner bug A, DEC-154)", async () => {
+    seedUnread(SIERRA);
+    const unread = "Free resets: couldn't read \u00b7 Credits: not reported by Claude Code";
+    await until(async () => (await rowExtras())[SIERRA] === unread, 75_000, "the Claude row did not say couldn't read");
+    assert.equal((await command("desktop_usage_extras", { detail: false })).find((row) => row.account === ids[SIERRA]).extras.resets_unread, true);
+    await shot("pools-extras-unread");
+    seedResets(SIERRA, 0);
+    const none = "No free resets (may break) \u00b7 Credits: not reported by Claude Code";
+    await until(async () => (await rowExtras())[SIERRA] === none, 75_000, "the Claude row did not say No free resets for a known 0");
+    assert.equal((await command("desktop_usage_extras", { detail: false })).find((row) => row.account === ids[SIERRA]).extras.resets_unread, false);
   });
 
   for (const key of ["balanced", "manual", "use"]) {

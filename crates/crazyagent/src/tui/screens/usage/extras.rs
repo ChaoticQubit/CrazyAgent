@@ -197,6 +197,7 @@ mod tests {
             resets_checked_ms: None,
             credits_checked_ms: None,
             resets_gained_ms: None,
+            resets_unread: false,
         }
     }
 
@@ -209,6 +210,33 @@ mod tests {
             }),
             ..extras()
         }
+    }
+
+    #[test]
+    fn a_resets_read_that_found_no_count_reads_couldnt_read_never_none_or_not_reported() {
+        let claude = LimitExtras {
+            harness: "Claude Code".into(),
+            adapter: Adapter::Claude,
+            may_break: true,
+            not_reported: "not reported by Claude Code".into(),
+            resets_checked_ms: Some(NOW),
+            resets_unread: true,
+            ..extras()
+        };
+        assert_eq!(resets_text(&claude, NOW, 0), "Free resets: couldn't read");
+        assert_eq!(
+            extras_line(&claude, NOW, 0),
+            "Free resets: couldn't read \u{b7} Credits: not reported by Claude Code"
+        );
+        let never = LimitExtras {
+            resets_checked_ms: None,
+            resets_unread: false,
+            ..claude
+        };
+        assert_eq!(
+            extras_line(&never, NOW, 0),
+            "Free resets and credits: not reported by Claude Code"
+        );
     }
 
     #[test]
@@ -374,6 +402,7 @@ mod tests {
                     next_expiry_ms: None,
                 }),
                 resets_gained_ms: gained,
+                resets_unread: false,
                 ..extras()
             },
         }

@@ -94,7 +94,8 @@ export interface FreeResets {
 export type SpendWay = { kind: "in_app" } | { kind: "elsewhere"; place: string } | { kind: "not_reported" };
 
 /** The engine's limits contract for one account (DEC-154): null resets or credits mean not
- * reported, never 0. `resets_gained_ms` is when the count last rose, for the new-reset notice. */
+ * reported, never 0. `resets_gained_ms` is when the count last rose, for the new-reset notice;
+ * `resets_unread` says the last resets read found no count, absent from an older engine. */
 export interface LimitExtras {
   harness: string;
   adapter: LimitAdapter;
@@ -106,6 +107,7 @@ export interface LimitExtras {
   resets_checked_ms: number | null;
   credits_checked_ms: number | null;
   resets_gained_ms?: number | null;
+  resets_unread?: boolean;
 }
 
 /** One account's limits contract, by account id. */

@@ -581,6 +581,7 @@ mod extras_request_tests {
                 resets_checked_ms: Some(i64::MAX),
                 credits_checked_ms: Some(i64::MAX),
                 resets_gained_ms: Some(i64::MAX),
+                resets_unread: false,
             },
         };
         let accounts = (0..EXTRAS_ACCOUNTS_MAX).map(entry).collect::<Vec<_>>();

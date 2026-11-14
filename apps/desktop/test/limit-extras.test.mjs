@@ -61,6 +61,15 @@ test("a count read through a private call carries may break; a count that is not
   assert.equal(resetsText(extras(claude), NOW), "Free resets: not reported by Claude Code");
 });
 
+test("a free resets read that found no count reads couldn't read, never No free resets or not reported", () => {
+  const claude = { harness: "Claude Code", adapter: "claude", may_break: true, not_reported: "not reported by Claude Code" };
+  const unread = extras({ ...claude, resets_checked_ms: NOW, resets_unread: true });
+  assert.equal(resetsText(unread, NOW), "Free resets: couldn't read");
+  assert.equal(extrasLine(unread, NOW), "Free resets: couldn't read · Credits: not reported by Claude Code");
+  assert.equal(extrasLine(extras(claude), NOW), "Free resets and credits: not reported by Claude Code");
+  assert.equal(resetsText(extras({ ...claude, resets_checked_ms: NOW }), NOW), "Free resets: not reported by Claude Code", "an engine without the flag reads as before");
+});
+
 test("credits read in the provider's words, or not reported by the harness", () => {
   assert.equal(creditsText(extras({ credits: "$4.20 left" })), "Credits: $4.20 left");
   assert.equal(creditsText(extras()), "Credits: not reported by Codex");

@@ -279,7 +279,7 @@ fn claude_detail_sums_unpaused_grants_and_takes_their_earliest_end() {
     let read = claude_resets(&body, NOW);
     assert_eq!(read, Field::Known(resets(3, vec![], Some(NEXT_DAY_8AM))));
     assert!(!format!("{read:?}").contains("grant-secret-91"));
-    let ineligible = json!({"cedar_ember": {"eligible": false, "ineligible_reason": "plan"}});
+    let ineligible = json!({"cedar_ember": {"eligible": false, "ineligible_reason": "no_grant"}});
     assert_eq!(
         claude_resets(&ineligible, NOW),
         Field::Known(resets(0, vec![], None))
@@ -541,6 +541,7 @@ fn stored_extras_keep_a_field_not_asked_clear_an_absent_one_and_replace_a_known_
         resets_checked_ms: Some(NOW),
         credits_checked_ms: Some(NOW),
         resets_gained_ms: None,
+        resets_unread: false,
     };
     assert_eq!(extras_of(&db, &account, NOW).unwrap(), stored);
     assert_eq!(
@@ -762,6 +763,7 @@ fn each_account_kind_gets_its_contract_from_the_engine() {
         resets_checked_ms: Some(NOW),
         credits_checked_ms: Some(NOW + 1),
         resets_gained_ms: Some(NOW - 1),
+        resets_unread: false,
     };
     let codex = limit_extras(&managed("codex"), &stored);
     assert_eq!(
@@ -777,6 +779,7 @@ fn each_account_kind_gets_its_contract_from_the_engine() {
             resets_checked_ms: Some(NOW),
             credits_checked_ms: Some(NOW + 1),
             resets_gained_ms: Some(NOW - 1),
+            resets_unread: false,
         }
     );
     let wire = serde_json::to_value(&codex).unwrap();
@@ -956,4 +959,98 @@ fn reset_kinds_are_deduped_and_at_most_four_on_the_wire_and_in_the_store() {
     };
     record_extras(&db, &account, &doubled, NOW + 1).unwrap();
     assert_eq!(extras_of(&db, &account, NOW + 1).unwrap().resets, None);
+}
+
+/// An ineligible Claude account holds no free resets only when Anthropic's reason is about the
+/// account; a reason about who asks, a missing one or one this version does not know reads
+/// absent, never 0 (owner bug A, DEC-154 addendum on ineligible reasons).
+#[test]
+fn an_ineligible_claude_account_reads_none_only_for_a_reason_about_the_account() {
+    for reason in ["no_grant", "tier", "seat", "tenure"] {
+        let body = json!({"cedar_ember": {"eligible": false, "ineligible_reason": reason}});
+        assert_eq!(
+            claude_resets(&body, NOW),
+            Field::Known(resets(0, vec![], None)),
+            "{reason}"
+        );
+    }
+    for reason in [
+        "surface",
+        "cli_version",
+        "mobile",
+        "config_off",
+        "other_experiment",
+        "unavailable",
+        "unknown",
+        "plan",
+    ] {
+        let body = json!({"cedar_ember": {"eligible": false, "ineligible_reason": reason}});
+        assert_eq!(claude_resets(&body, NOW), Field::Absent, "{reason}");
+    }
+    for body in [
+        json!({"cedar_ember": {"eligible": false}}),
+        json!({"cedar_ember": {"eligible": false, "ineligible_reason": null}}),
+        json!({"cedar_ember": {"eligible": false, "ineligible_reason": 7}}),
+    ] {
+        assert_eq!(claude_resets(&body, NOW), Field::Absent, "{body}");
+    }
+}
+
+/// A free resets read that found no count leaves the account unread until a count is read
+/// again; an account never read, a credits read alone and an expired count are not unread.
+#[test]
+fn a_resets_read_that_found_no_count_is_unread_and_an_expired_count_is_not() {
+    let (_root, db) = store();
+    let account = reference("claude-main");
+    assert!(!extras_of(&db, &account, NOW).unwrap().resets_unread);
+    let credits = Extras {
+        resets: Field::NotAsked,
+        credits: Field::Known("Extra usage: off".into()),
+    };
+    record_extras(&db, &account, &credits, NOW).unwrap();
+    assert!(
+        !extras_of(&db, &account, NOW).unwrap().resets_unread,
+        "a credits read is no resets read"
+    );
+    let absent = Extras {
+        resets: Field::Absent,
+        credits: Field::NotAsked,
+    };
+    record_extras(&db, &account, &absent, NOW + 1).unwrap();
+    let unread = extras_of(&db, &account, NOW + 1).unwrap();
+    assert_eq!(unread.resets, None);
+    assert_eq!(unread.resets_checked_ms, Some(NOW + 1));
+    assert!(unread.resets_unread);
+    record_extras(&db, &account, &credits, NOW + 2).unwrap();
+    assert!(extras_of(&db, &account, NOW + 2).unwrap().resets_unread);
+    let one = Extras {
+        resets: Field::Known(resets(1, vec![], Some(NOW + HOUR))),
+        credits: Field::NotAsked,
+    };
+    record_extras(&db, &account, &one, NOW + 3).unwrap();
+    assert!(!extras_of(&db, &account, NOW + 3).unwrap().resets_unread);
+    let expired = extras_of(&db, &account, NOW + HOUR).unwrap();
+    assert_eq!(expired.resets, None);
+    assert!(!expired.resets_unread, "an expired count is no failed read");
+}
+
+/// The contract says unread only for an adapter that reads free resets, and a reply from an
+/// engine without the flag reads as not unread, so a newer client keeps working on it.
+#[test]
+fn the_contract_says_unread_only_where_free_resets_are_read_and_an_older_reply_reads_not_unread() {
+    let stored = StoredExtras {
+        resets_checked_ms: Some(NOW),
+        resets_unread: true,
+        ..StoredExtras::default()
+    };
+    assert!(limit_extras(&managed("claude"), &stored).resets_unread);
+    assert!(limit_extras(&managed("codex"), &stored).resets_unread);
+    assert!(!limit_extras(&keyed("https://openrouter.ai/api/v1", true), &stored).resets_unread);
+    let mut wire = serde_json::to_value(limit_extras(&managed("claude"), &stored)).unwrap();
+    assert_eq!(
+        wire.as_object_mut().unwrap().remove("resets_unread"),
+        Some(true.into())
+    );
+    let older: LimitExtras = serde_json::from_value(wire).unwrap();
+    assert!(!older.resets_unread);
 }

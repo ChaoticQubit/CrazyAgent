@@ -1654,6 +1654,7 @@ mod tests {
             resets_checked_ms: Some(gained_ms),
             credits_checked_ms: None,
             resets_gained_ms: Some(gained_ms),
+            resets_unread: false,
         };
         Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
             SettingsEvent::Extras(Ok(vec![crate::engine::owner::AccountExtras {
