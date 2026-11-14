@@ -2389,13 +2389,15 @@ fn a_check_program_agents_or_other_users_can_change_up_its_path_is_refused() {
 
 /// security-audit run-1 (npm prefix, test A): a Check of an npm harness outside the engine's
 /// own prefix never starts a `node` the resolver would not run: npm's `env node` first line
-/// finds the prefix's node, which leads into a folder every user can write, so the check is
-/// refused or runs a vetted node, and that node never runs.
+/// finds the prefix's node first on the child's PATH, and that node leads into a folder every
+/// user can write, so the check is refused, even with a good node elsewhere in the places the
+/// resolver vets npm with, and the prefix's node never runs.
 #[test]
 fn a_check_never_runs_an_npm_prefix_node_others_can_change() {
     let machine = Machine::new();
     let home = machine.roots().home;
     std::fs::create_dir_all(&home).unwrap();
+    let vetted = machine.program("brew/bin/node", 0o755);
     let real = machine.program("node/lib/node_modules/@openai/codex/bin/codex.js", 0o755);
     let cli = machine
         .root
@@ -2412,9 +2414,10 @@ fn a_check_never_runs_an_npm_prefix_node_others_can_change() {
     executable(&open.join("node"), "#!/bin/sh\n: > \"$HOME/marker\"\n");
     std::os::unix::fs::symlink(open.join("node"), bin.join("node")).unwrap();
     let resolved = crate::tools::resolve_entry(&bin.join("npm"), &machine.roots().places);
-    let missing = resolved.unwrap_err();
-    assert_eq!(missing.reason, crate::tools::Reason::NeedsInterpreter);
-    assert_eq!(missing.needs.as_deref(), Some("node"));
+    match resolved.unwrap().kind {
+        crate::tools::Kind::Script { interpreter, .. } => assert_eq!(interpreter.entry, vetted),
+        crate::tools::Kind::Native => panic!("npm is a script"),
+    }
     match check_command("codex", &real, &machine.roots()) {
         Ok(Some(fixed)) => {
             let _ = run(&fixed, &home, CHECK_TIME);
