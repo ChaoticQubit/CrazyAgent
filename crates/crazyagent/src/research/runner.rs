@@ -4853,6 +4853,70 @@ mod tests {
         );
     }
 
+    /// CONFIGURED-HOMES-GUARD: a read-only run's profile denies the folder of configured SDK
+    /// homes in the engine root, as every guarded sandbox does, and its stand-in harness,
+    /// which reads a keyed account's dummy config there, never gets the text.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_run_denies_every_configured_sdk_home() {
+        let root = engine_root();
+        let engine = root.database.parent().unwrap().to_path_buf();
+        let homes = engine.join("configured-sdk-homes");
+        let config = homes
+            .join("6".repeat(64))
+            .join(".backboard")
+            .join("config.json");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let dummy = "configured-homes-guard-dummy-read-only-config";
+        fs::write(&config, dummy).unwrap();
+        let codex = root.base.join("bin").join("codex");
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(
+            &codex,
+            format!("#!/bin/sh\ncat '{}'\nexit 0\n", config.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = codex.clone();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap()
+                .with_harness_lookup(Arc::new(move |harness: &str| {
+                    (harness == "codex").then(|| pinned.clone())
+                }));
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let run = ReadOnlyRun {
+            name: "overview-alpha-6",
+            agent: "overview",
+            project: None,
+            folder: &folder,
+            prompt: "Describe this project.",
+            account: &account,
+            wall_time: Duration::from_secs(5),
+            output_tokens: None,
+        };
+        let _ = runner.run_read_only(&run, &|| false);
+        let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-6.sb"))
+            .expect("the guarded run still installs its profile");
+        assert!(
+            profile.contains(&format!("\n  (subpath \"{}\")", homes.display())),
+            "{profile}"
+        );
+        let events = root
+            .state
+            .join("agents")
+            .join("overview-alpha-6")
+            .join("events.jsonl");
+        assert!(events.is_file());
+        assert!(!fs::read_to_string(&events).unwrap().contains(dummy));
+    }
+
     /// L4 r1 H1: a read-only run follows the project's shared folders choice too. Under
     /// Chosen an untracked local folder not picked stays closed, and a saved Read-write never
     /// opens the picked one for writes, since a read-only run only reads.

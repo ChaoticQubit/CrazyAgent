@@ -316,6 +316,7 @@ const ENGINE_SECRET_FOLDERS: &[&str] = &[
     crate::terminal::FOLDER,
     crate::ide::FOLDER,
     crate::engine::bootstrap::NATIVE_PROFILES_FOLDER,
+    crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER,
 ];
 
 const RUNTIME_ENTRIES_MAX: usize = 1024;
@@ -886,6 +887,7 @@ pub struct ProjectSandbox {
     kept_ports: Vec<u16>,
     owner_home: PathBuf,
     engine_secrets: Vec<PathBuf>,
+    carved_home: Option<PathBuf>,
     checkout: Option<Checkout>,
     clone: Option<PathBuf>,
     sockets: Vec<PathBuf>,
@@ -972,6 +974,7 @@ impl ProjectSandbox {
             kept_ports: Vec::new(),
             owner_home: owner,
             engine_secrets: Vec::new(),
+            carved_home: None,
             checkout: None,
             clone: None,
             sockets: Vec::new(),
@@ -1202,8 +1205,9 @@ impl ProjectSandbox {
 
     /// Names the engine runtime folder whose secrets this agent must never read or write:
     /// the engine database, the owner socket, the GitHub sign-in and settings files, the
-    /// saved account keys, the native sign-in profiles, the terminal and IDE server folders
-    /// and every engine socket and socket folder found in it now. The agent's own home and
+    /// saved account keys, the native sign-in profiles, the configured SDK homes with their
+    /// keys, the terminal and IDE server folders and every engine socket and socket folder
+    /// found in it now. The agent's own home and
     /// temp dirs may sit inside it, but no granted root may hold or sit inside a secret.
     /// Input: the existing runtime folder. Output: the guarded sandbox, or a refusal.
     pub fn guard_engine(mut self, runtime: &Path) -> Result<Self, SandboxError> {
@@ -1226,9 +1230,12 @@ impl ProjectSandbox {
 
     /// Adds the engine root's secrets for an agent whose runtime folder is one folder in it,
     /// as an owner generation is for a master: every entry guard_engine would name for the
-    /// engine root except that folder itself, where the agent's home lives. Call it after
-    /// guard_engine on the runtime folder, whose secrets stay. Inputs: the engine root and
-    /// the runtime folder. Output: the guarded sandbox, or a refusal.
+    /// engine root except that folder itself, where the agent's home lives. An rcli master's
+    /// home may instead be one configured SDK home directly in the engine root's folder of
+    /// them: that folder stays a secret and only this home is carved back out of it, so every
+    /// other home, even one made later, stays denied. Call it after guard_engine on the
+    /// runtime folder, whose secrets stay. Inputs: the engine root and the runtime folder.
+    /// Output: the guarded sandbox, or a refusal.
     pub fn guard_engine_around(
         mut self,
         engine: &Path,
@@ -1244,9 +1251,17 @@ impl ProjectSandbox {
                 "engine root must be the existing folder around the runtime",
             ));
         }
+        let homes = engine.join(crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER);
+        let carved =
+            (self.agent_home.parent() == Some(homes.as_path())).then(|| self.agent_home.clone());
         let secrets: Vec<PathBuf> = engine_secrets_in(&engine)?
             .into_iter()
             .filter(|secret| *secret != runtime)
+            .collect();
+        let around_home: Vec<PathBuf> = secrets
+            .iter()
+            .filter(|secret| **secret != homes)
+            .cloned()
             .collect();
         for root in self
             .writable_roots()
@@ -1254,7 +1269,11 @@ impl ProjectSandbox {
             .chain(self.tool_roots.iter())
             .chain(self.tool_files.iter())
         {
-            clear_of_secrets(root, &secrets)?;
+            if carved.as_ref() == Some(root) {
+                clear_of_secrets(root, &around_home)?;
+            } else {
+                clear_of_secrets(root, &secrets)?;
+            }
         }
         for secret in secrets {
             if !self.engine_secrets.contains(&secret) {
@@ -1262,6 +1281,16 @@ impl ProjectSandbox {
             }
         }
         assert!(!self.engine_secrets.contains(&runtime));
+        if let Some(home) = carved {
+            assert!(self.engine_secrets.contains(&homes));
+            assert!(
+                self.secret_paths()
+                    .iter()
+                    .filter(|secret| **secret != homes)
+                    .all(|secret| !home.starts_with(secret) && !secret.starts_with(&home))
+            );
+            self.carved_home = Some(home);
+        }
         Ok(self)
     }
 
@@ -2548,6 +2577,19 @@ impl ProjectSandbox {
             text.push_str(&format!("\n  (global-name \"{service}\")"));
         }
         text.push_str(")\n");
+        if let Some((home, homes)) = self
+            .carved_home
+            .as_ref()
+            .and_then(|home| Some((home, home.parent()?)))
+            .filter(|(home, _)| clean_absolute(home))
+        {
+            assert!(self.engine_secrets.iter().any(|secret| secret == homes));
+            text.push_str(&format!(
+                "(allow file-read* file-write*\n  (subpath \"{}\"))\n(allow file-read-metadata\n  (literal \"{}\"))\n",
+                home.display(),
+                homes.display()
+            ));
+        }
         if !self.hidden.is_empty() {
             text.push_str("(deny file-read* file-write* process-exec file-link file-clone");
             for folder in self.hidden.iter().filter(|folder| clean_absolute(folder)) {

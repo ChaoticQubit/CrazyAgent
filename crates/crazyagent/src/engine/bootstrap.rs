@@ -44,6 +44,11 @@ pub(crate) use native_profiles::{remove_generated_home, remove_sign_in};
 /// with its credentials. Agent sandboxes deny it as an engine secret.
 pub(crate) const NATIVE_PROFILES_FOLDER: &str = "native-profiles";
 
+/// The folder in the engine root that holds the SDK home the engine generates for each
+/// configured RCLI account, with its key. Agent sandboxes deny it as an engine secret; an
+/// rcli master keeps only its own home in it.
+pub(crate) const CONFIGURED_SDK_HOMES_FOLDER: &str = "configured-sdk-homes";
+
 const LOCATOR: &str = "owner-current";
 #[cfg(unix)]
 const LOCATOR_MAX: usize = 2048;
