@@ -272,6 +272,97 @@ fn a_move_on_one_disk_stopped_before_it_starts_ends_cancelled_and_moves_nothing(
     assert!(!tally.clearing());
 }
 
+fn regular_files(folder: &Path) -> Vec<Vec<u8>> {
+    let mut files = Vec::new();
+    let mut stack = vec![folder.to_path_buf()];
+    while let Some(folder) = stack.pop() {
+        let Ok(listing) = fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in listing.flatten() {
+            let path = entry.path();
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_dir() => stack.push(path),
+                Ok(metadata) if metadata.is_file() => files.push(fs::read(&path).unwrap()),
+                _ => {}
+            }
+        }
+    }
+    files
+}
+
+/// Source entries swapped for links to things outside the source while a copy runs, a file
+/// for a link to an owner secret and a folder for a link to a folder holding one, never put
+/// the secret's bytes in the copy (RV-DS241-41): each entry is read through the folder the
+/// copy opened, never through its path again. A copy that finishes holds the source's own
+/// bytes.
+#[test]
+fn a_copy_never_reads_through_a_source_entry_swapped_for_a_link() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let root = tempfile::tempdir().unwrap();
+    let base = fs::canonicalize(root.path()).unwrap();
+    let source = base.join("source");
+    let outside = base.join("outside");
+    fs::create_dir_all(source.join("sub")).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(source.join("kept"), "inside\n").unwrap();
+    fs::write(source.join("data"), "inside\n").unwrap();
+    fs::write(source.join("sub/data"), "inside\n").unwrap();
+    fs::write(outside.join("data"), "secret\n").unwrap();
+    std::os::unix::fs::symlink(outside.join("data"), source.join("spare")).unwrap();
+    std::os::unix::fs::symlink(&outside, source.join("spare-folder")).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let stop = Arc::clone(&stop);
+        let source = source.clone();
+        std::thread::spawn(move || {
+            let mut swaps = 0_u64;
+            while !stop.load(Ordering::Relaxed) {
+                for (one, other) in [("data", "spare"), ("sub", "spare-folder")] {
+                    rustix::fs::renameat_with(
+                        rustix::fs::CWD,
+                        source.join(one),
+                        rustix::fs::CWD,
+                        source.join(other),
+                        rustix::fs::RenameFlags::EXCHANGE,
+                    )
+                    .unwrap();
+                }
+                swaps += 1;
+            }
+            swaps
+        })
+    };
+    let mut reached = Vec::new();
+    let mut finished = 0_u32;
+    for attempt in 0..4000 {
+        let copy = base.join(format!("copy-{attempt}"));
+        let copied = copy_tree(&source, &copy);
+        let files = regular_files(&copy);
+        if files.iter().any(|bytes| bytes == b"secret\n") {
+            reached.push(attempt);
+        } else if copied.is_ok() {
+            finished += 1;
+            assert_eq!(
+                fs::read(copy.join("kept")).unwrap(),
+                b"inside\n",
+                "attempt {attempt}"
+            );
+            assert!(files.iter().all(|bytes| bytes == b"inside\n"));
+        }
+        let _ = fs::remove_dir_all(&copy);
+    }
+    stop.store(true, Ordering::Relaxed);
+    assert!(swapper.join().unwrap() > 0);
+    assert_eq!(
+        reached,
+        Vec::<i32>::new(),
+        "attempts whose copy held the outside file's bytes"
+    );
+    assert!(finished > 0, "some copies finished");
+}
+
 #[test]
 fn the_staging_sweep_removes_only_add_staging_folders_and_follows_no_link() {
     use std::os::unix::fs::PermissionsExt;
