@@ -1003,6 +1003,9 @@ fn a_run_closed_after_its_time_or_whose_project_was_removed_no_longer_holds_its_
     );
 }
 
+/// A status run's state name is read back as its own project's only, for ids that differ
+/// only in `.`, `:` or `_` and ids that differ only past the cut, so Delete everything of one
+/// project takes no other project's run (RV-DS241-80 r1 F1).
 #[test]
 fn the_name_of_a_status_run_is_read_back_as_its_own_projects_only() {
     let demo = ProjectId::new("demo").unwrap();
@@ -1013,6 +1016,26 @@ fn the_name_of_a_status_run_is_read_back_as_its_own_projects_only() {
         let other = ProjectId::new(other).unwrap();
         assert!(!names_run(&other, &name), "{other:?}");
         assert!(!names_run(&demo, &run::run_name(&other, NOW)), "{other:?}");
+    }
+    let past = |end: &str| ProjectId::new(format!("{}{end}", "a".repeat(100))).unwrap();
+    for (one, two) in [
+        ("web.app", "web_app"),
+        ("web:app", "web_app"),
+        ("web.app", "web:app"),
+        ("x.y", "x_2ey"),
+    ]
+    .map(|(one, two)| (ProjectId::new(one).unwrap(), ProjectId::new(two).unwrap()))
+    .into_iter()
+    .chain([(past("b"), past("c"))])
+    {
+        assert!(
+            !names_run(&one, &run::run_name(&two, NOW)),
+            "{one:?} takes the runs of {two:?}"
+        );
+        assert!(
+            !names_run(&two, &run::run_name(&one, NOW)),
+            "{two:?} takes the runs of {one:?}"
+        );
     }
     for odd in [
         "roadmap-status-demo",

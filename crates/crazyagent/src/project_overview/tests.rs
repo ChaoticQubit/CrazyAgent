@@ -2077,8 +2077,9 @@ fn a_finished_overview_run_is_removed_like_a_status_run() {
 }
 
 /// RV-DS241-80: a writing run's state name is read back as its own project's only, for a
-/// project id long enough to be cut too, whatever the digits of its start time, so Delete
-/// everything takes no other project's run and every run of its own.
+/// project id long enough to be cut too, ids that differ only in `.`, `:` or `_`, and ids
+/// that differ only past the cut, whatever the digits of its start time, so Delete
+/// everything takes no other project's run and every run of its own (r1 F1).
 #[cfg(unix)]
 #[test]
 fn the_name_of_an_overview_run_is_read_back_as_its_own_projects_only() {
@@ -2099,6 +2100,26 @@ fn the_name_of_an_overview_run_is_read_back_as_its_own_projects_only() {
         let name = run_name(&long, time);
         assert!(name.len() <= 96 && names_run(&long, &name), "{name}");
         assert!(!names_run(&demo, &name));
+    }
+    let past = |end: &str| ProjectId::new(format!("{}{end}", "a".repeat(100))).unwrap();
+    for (one, two) in [
+        ("web.app", "web_app"),
+        ("web:app", "web_app"),
+        ("web.app", "web:app"),
+        ("x.y", "x_2ey"),
+    ]
+    .map(|(one, two)| (ProjectId::new(one).unwrap(), ProjectId::new(two).unwrap()))
+    .into_iter()
+    .chain([(past("b"), past("c"))])
+    {
+        assert!(
+            !names_run(&one, &run_name(&two, 1_794_000_000_000)),
+            "{one:?} takes the runs of {two:?}"
+        );
+        assert!(
+            !names_run(&two, &run_name(&one, 1_794_000_000_000)),
+            "{two:?} takes the runs of {one:?}"
+        );
     }
     for odd in [
         "overview-demo",
