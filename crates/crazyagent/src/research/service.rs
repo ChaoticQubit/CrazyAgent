@@ -1161,4 +1161,44 @@ mod tests {
             [Some(line.clone()), Some(line)]
         );
     }
+    /// The status upkeep's start removes every status run folder an engine before 2.4.1
+    /// left, named without the run-id hash, with its profile, whatever project it held: no
+    /// run of this engine has such a name, and Delete everything no longer matches it.
+    /// Status runs named with the hash, research job runs and other folders stay
+    /// (RV-DS241-45 r2, rv-secreview F1).
+    #[test]
+    fn the_status_upkeep_start_removes_status_runs_older_engines_left_and_nothing_else() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = temp.path().canonicalize().unwrap();
+        let state = engine.join("research");
+        std::fs::create_dir_all(state.join("profiles")).unwrap();
+        let demo = crate::protocol::ProjectId::new("demo").unwrap();
+        let hashed = format!("{}-1700000000000", crate::roadmap_status::run_stem(&demo));
+        let made = |name: &str| {
+            std::fs::create_dir_all(state.join("agents").join(name).join("home")).unwrap();
+            let profile = state.join("profiles").join(format!("{name}.sb"));
+            std::fs::write(profile, "(version 1)").unwrap();
+        };
+        let old = [
+            "roadmap-status-demo-1700000000000",
+            "roadmap-status-v1_2-1700000000001",
+            "roadmap-status-team_one-5",
+        ];
+        let kept = [hashed.as_str(), "job-1-1", "job-2-1-3"];
+        for name in old.iter().chain(&kept) {
+            made(name);
+        }
+        let _upkeep = StatusUpkeep::open(&engine.join("engine.db"));
+        for name in old {
+            let folder = state.join("agents").join(name);
+            let profile = state.join("profiles").join(format!("{name}.sb"));
+            assert!(std::fs::symlink_metadata(folder).is_err(), "{name}");
+            assert!(std::fs::symlink_metadata(profile).is_err(), "{name}");
+        }
+        for name in kept {
+            assert!(state.join("agents").join(name).join("home").is_dir(), "{name}");
+            let profile = state.join("profiles").join(format!("{name}.sb"));
+            assert!(profile.is_file(), "{name}");
+        }
+    }
 }
