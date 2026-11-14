@@ -467,24 +467,22 @@ async fn answer(
     }
 }
 
-/// Queues a list of harnesses for install, then starts the one drain thread that installs
-/// them through `start`. Inputs: the update state, the engine folder, the ids and what
-/// starts one install. Output: Started, or the refusal.
+/// Queues a list of harnesses for install and starts the one drain thread that installs
+/// them through `start`, both in the same blocking work, so a request cut while the list
+/// queues still drains it and the queue never stays full with no drain (RV-DS241-74).
+/// Inputs: the update state, the engine folder, the ids and what starts one install.
+/// Output: Started, or the refusal.
 async fn install_many(
     updates: Arc<Updates>,
     root: PathBuf,
     ids: Vec<String>,
     start: impl FnMut(&'static str) -> Result<(), &'static str> + Send + 'static,
 ) -> Result<WireReply, EngineError> {
-    let queue = updates.clone();
     blocking(move || {
-        queue
-            .queue(&open(&root)?, &ids)
-            .map(|_| WireReply::Started)
-            .map_err(failure)
+        updates.queue(&open(&root)?, &ids).map_err(failure)?;
+        drain_on_thread(updates, start)
     })
-    .await?;
-    drain_on_thread(updates, start)
+    .await
 }
 
 /// Starts the thread that drains the install queue through `start`; when no thread starts,
