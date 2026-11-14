@@ -92,7 +92,7 @@ pub(crate) async fn sent(
     text: String,
 ) -> Result<serde_json::Value, EngineError> {
     let database = database(runtime)?;
-    let host = runtime.terminal()?;
+    let host = runtime.terminal_off_worker().await?;
     let project = project.clone();
     let sent = tokio::task::spawn_blocking(move || {
         let connection = open(&database, OpenFlags::SQLITE_OPEN_READ_WRITE)?;

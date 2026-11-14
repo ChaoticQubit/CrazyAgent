@@ -1153,7 +1153,13 @@ async fn change_call(
         let root = runtime.ide()?.root;
         match call {
             IdeCall::Comment { .. } => {
-                comments::answer(root, runtime.terminal().ok(), project.clone(), call).await
+                comments::answer(
+                    root,
+                    runtime.terminal_off_worker().await.ok(),
+                    project.clone(),
+                    call,
+                )
+                .await
             }
             call => changes::answer(root, project.clone(), call).await,
         }
