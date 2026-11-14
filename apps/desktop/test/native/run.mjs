@@ -10,6 +10,8 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
 import { chooseHome, clearWebStore, createRunDirectories, lockHome, refusedToolHome, runProjects } from "./run-layout.mjs";
+import { endTerminals } from "./e2e-harness.mjs";
+import { prepareSpeedSide, speedSide } from "./speed-seed.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const workRoot = resolve(appRoot, "../../.local-state/desktop-execution");
@@ -24,9 +26,9 @@ const app = process.env.CRAZYAGENT_DESKTOP_TEST_APP;
 const fixture = process.env.CRAZYAGENT_DESKTOP_TEST_FIXTURE;
 const suite = process.env.CRAZYAGENT_DESKTOP_TEST_SUITE;
 assert(["model-access", "model-access-read-only", "native-auth", "pools-screen", "pools-spend", "first-run-guide", "first-run-skip-guide",
-  "first-run-harnesses", "first-run-harnesses-node", "learning-replay-guide", "learning-replay-first-run", "refused-tool"].includes(suite),
+  "first-run-harnesses", "first-run-harnesses-node", "learning-replay-guide", "learning-replay-first-run", "refused-tool", "speed"].includes(suite),
   "closed native suite required");
-const WEBDRIVER_SECONDS = ["pools-screen", "pools-spend", "first-run-harnesses-node", "refused-tool"].includes(suite) ? 900 : 300;
+const WEBDRIVER_SECONDS = ["pools-screen", "pools-spend", "first-run-harnesses-node", "refused-tool", "speed"].includes(suite) ? 900 : 300;
 let interrupted = false;
 
 function interrupt() {
@@ -223,23 +225,60 @@ function engineEnvironment(env) {
   return { ...env, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", CRAZYAGENT_GATE_SYSTEM_ROOT: gate };
 }
 
+/** Starts the speed suite's real engine binary on the side's kept state, as the owner's
+ * launchd engine runs before the app opens, and points the app at its socket. Inputs: the run
+ * environment and the side (from speedSide). Output: the owned engine entry. */
+function speedEngine(env, side) {
+  assert(side.engine && side.runtime, "a speed side with an engine and a runtime");
+  env.CRAZYAGENT_DESKTOP_SOCKET = join(side.runtime, "engine.sock");
+  const entry = launch("engine", side.engine,
+    ["engine", side.runtime, join(side.runtime, "global.toml"), join(side.runtime, "project.toml"),
+      "engine.sock", "--writable-settings"], env, WEBDRIVER_SECONDS + 30);
+  entry.spawnedMs = performance.now();
+  return entry;
+}
+
+/** Waits for the real engine's ready line in its captured stdout and records how long its
+ * start took (row T2). Input: the owned engine entry. Output: the start time in ms. */
+async function engineReady(entry) {
+  const deadline = performance.now() + 60000;
+  while (performance.now() < deadline) {
+    assert(!interrupted, "native test runner interrupted");
+    assert(!entry.result, "engine exited before readiness");
+    const bytes = readFileSync(entry.stdout);
+    assert(bytes.length <= 64 * 1024, "engine readiness output bound");
+    if (/^ready$/m.test(bytes.toString("utf8"))) return performance.now() - entry.spawnedMs;
+    await pause(5);
+  }
+  throw new Error("engine readiness timeout");
+}
+
 async function execute() {
   const binaries = [binary(app), binary(fixture)];
   const { env, projects } = await environment();
   const port = await unusedPort();
-  const engine = launch("engine", fixture,
+  const side = suite === "speed" ? await speedSide(app) : null;
+  const engine = side ? speedEngine(env, side) : launch("engine", fixture,
     [suite === "model-access-read-only" ? "serve" : "serve-model-access",
       engineRoot, projects], engineEnvironment(env), WEBDRIVER_SECONDS + 30);
   let failure = null;
   let code = 1;
   try {
-    await ready(engine);
+    if (side) {
+      const engineStartMs = await engineReady(engine);
+      const prepared = await prepareSpeedSide(side, env, evidence);
+      writeFileSync(join(evidence, "speed-engine.json"), JSON.stringify({ engine_start_ms: engineStartMs, ...prepared }, null, 1), { flag: "wx", mode: 0o600 });
+      env.SPEED_ENGINE_PID = String(engine.child.pid);
+    } else {
+      await ready(engine);
+    }
     env.CRAZYAGENT_DESKTOP_TEST_PORT = String(port);
     const test = launch("webdriver", process.execPath,
       ["--import", pathToFileURL(join(appRoot, "test/native/private-log-preload.mjs")).href,
         join(appRoot, "node_modules/@wdio/cli/bin/wdio.js"), "run",
         suite === "native-auth" ? "test/native/native-auth.wdio.conf.mjs"
-          : "test/native/model-access.wdio.conf.mjs"],
+          : suite === "speed" ? "test/native/speed.wdio.conf.mjs"
+            : "test/native/model-access.wdio.conf.mjs"],
       env, WEBDRIVER_SECONDS);
     const result = await test.done;
     assert(!test.reason && result.code !== null, "native test process did not exit normally");
@@ -251,13 +290,18 @@ async function execute() {
     }
     if (!engine.result) {
       engine.child.stdin.on("error", () => {});
-      engine.child.stdin.end("stop\n");
+      if (side) signalGroup(engine, "SIGTERM");
+      else engine.child.stdin.end("stop\n");
       await Promise.race([engine.done, pause(8000)]);
     }
     try { await stopOwned(engine); } catch (error) { failure ??= String(error.message); }
+    if (side) {
+      try { await endTerminals(side.runtime); } catch (error) { failure ??= String(error.message); }
+    }
   }
   if (interrupted) failure ??= "native test runner interrupted";
-  if (engine.reason || engine.result?.code !== 0) failure ??= "fixture cleanup was not successful";
+  const engineEnded = engine.result?.code === 0 || (side !== null && engine.result?.signal === "SIGTERM");
+  if (engine.reason || !engineEnded) failure ??= "fixture cleanup was not successful";
   if (await portOpen(port)) failure ??= "native driver port remains reachable";
   const report = { started, ended: new Date().toISOString(), elapsed_ms: performance.now() - began,
     binaries, engine_root: engineRoot, port, env, failure, test_exit: code,
