@@ -15,7 +15,7 @@ struct Case {
 
 impl Case {
     fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = finding::owner_folder("finding-");
         let root = std::fs::canonicalize(temp.path()).unwrap();
         let home = root.join("home");
         let engine = root.join("engine");
@@ -679,17 +679,30 @@ fn a_home_place_on_path_inside_a_temp_folder_keeps_its_path_position() {
 
 /// RV-DS241-61: a chosen harness file in the engine's own temp folder, which agents with the
 /// owner's temp folder grant can write, is refused as a file agents can write, by its path as
-/// given; the shared temp folders are already refused as folders other users can change.
+/// given and through a link from an owner folder into it; the shared temp folders are already
+/// refused as folders other users can change.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_chosen_file_in_the_engines_own_temp_folder_is_refused_as_agent_space() {
     let case = Case::new();
+    let planted = tempfile::tempdir().unwrap();
     let owner_temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-    assert!(case.root.starts_with(&owner_temp), "{:?}", case.root);
-    let real = case.file("Applications/Codex/codex", 0o755);
-    let space = finding::AgentSpace::open(&case.engine).unwrap();
+    let real = std::fs::canonicalize(planted.path())
+        .unwrap()
+        .join("Applications/Codex/codex");
+    assert!(real.starts_with(&owner_temp), "{real:?}");
+    std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+    std::fs::write(&real, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let link = case.root.join("bin/codex");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
     assert_eq!(
-        finding::check("codex", &real, &space, Some(&case.home)).map_err(|error| error.0),
+        case.check("codex", &real),
+        Err(PATH_AGENT_SPACE.to_owned())
+    );
+    assert_eq!(
+        case.check("codex", &link),
         Err(PATH_AGENT_SPACE.to_owned())
     );
 }

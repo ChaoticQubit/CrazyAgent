@@ -60,6 +60,16 @@ const AGENT_TABLES: [(&str, Names, &str); 4] = [
     ),
 ];
 
+/// The engine's own temp folder as given and real when it is the owner's private one, which
+/// the agents' temp grant gives them; none where agents get no such grant. Output: the
+/// absolute folders, at most two.
+fn owner_temp() -> Vec<PathBuf> {
+    match crate::sandbox::grants::owner_temp_folder() {
+        Ok(real) => vec![std::env::temp_dir(), real],
+        Err(_) => Vec::new(),
+    }
+}
+
 /// How one engine table names a folder agents can write: a setup body with the project
 /// folder, a project body with the repositories it declares, or a stored path. An agent
 /// worktree inside its repository or a `.crazyagent` folder is covered already and not read,
@@ -73,12 +83,15 @@ enum Names {
 
 /// The folders agents can write, where no harness file may come from: the engine folder
 /// outside its `setup` folder ([`crate::tools::in_engine_data`]) with every agent home, the
-/// agents' temp folders, any `.crazyagent` folder with its agent worktrees, and each project
-/// folder, declared repository and agent worktree the engine database names, each kept as
-/// stored and as its real path. A folder holding the owner's home is left out.
+/// agents' temp folders, the engine's own temp folder, which the agents' temp grant gives
+/// them ([`crate::sandbox::grants::owner_temp_folder`]), any `.crazyagent` folder with its
+/// agent worktrees, and each project folder, declared repository and agent worktree the
+/// engine database names, each kept as stored and as its real path. A folder holding the
+/// owner's home is left out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSpace {
     engine: Vec<PathBuf>,
+    temp: Vec<PathBuf>,
     folders: Vec<PathBuf>,
 }
 
@@ -89,7 +102,7 @@ impl AgentSpace {
     pub fn open(root: &Path) -> Result<Self, EngineError> {
         match std::fs::symlink_metadata(root.join("engine.db")) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::of(root, Vec::new()));
+                return Ok(Self::of(root, Vec::new(), &owner_temp()));
             }
             Err(_) => return Err(failure(PATH_UNREADABLE)),
             Ok(_) => {}
@@ -129,13 +142,14 @@ impl AgentSpace {
                 named.extend(folders_in(names, &text)?);
             }
         }
-        Ok(Self::of(root, named))
+        Ok(Self::of(root, named, &owner_temp()))
     }
 
-    /// Builds the space from the engine folder and the folders the database names.
-    /// Inputs: the engine folder and the named folders. Output: the space, each absolute
-    /// folder kept as named and as its real path, none that holds the owner's home.
-    fn of(root: &Path, named: Vec<PathBuf>) -> Self {
+    /// Builds the space from the engine folder, the folders the database names and the
+    /// engine's own temp folder. Inputs: the engine folder, the named folders and the temp
+    /// folder as given and real. Output: the space, each absolute folder kept as named and as
+    /// its real path, none that holds the owner's home.
+    fn of(root: &Path, named: Vec<PathBuf>, temp: &[PathBuf]) -> Self {
         let owner = crate::projects_home::owner_home().ok();
         let usable = |folder: &PathBuf| {
             folder.is_absolute()
@@ -155,9 +169,15 @@ impl AgentSpace {
         }
         folders.sort();
         folders.dedup();
+        let temp: Vec<PathBuf> = temp.iter().filter(|folder| usable(folder)).cloned().collect();
         assert!(engine.len() <= 2);
+        assert!(temp.len() <= 2);
         assert!(folders.len() <= AGENT_FOLDERS_MAX);
-        Self { engine, folders }
+        Self {
+            engine,
+            temp,
+            folders,
+        }
     }
 
     /// Whether agents could write a harness file or the link to it: the path as given, the
@@ -177,6 +197,7 @@ impl AgentSpace {
                 in_crazyagent_folder(&at)
                     || at.to_str().is_some_and(|text| text.starts_with(AGENT_TMP))
                     || crate::tools::in_engine_data(&self.engine, &at)
+                    || self.temp.iter().any(|folder| at.starts_with(folder))
                     || self.folders.iter().any(|folder| at.starts_with(folder))
             })
     }
