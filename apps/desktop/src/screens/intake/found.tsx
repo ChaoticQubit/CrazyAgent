@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { nextGeneration, type Result } from "../../api";
-import { dismissIntake, intakeCopy, loadFoundProjects, loadProjectsHome, startIntake, startOnboarding, stopIntake } from "../../api-intake";
+import { dismissIntake, intakeCopy, loadFolderSize, loadFoundProjects, loadProjectsHome, startIntake, startOnboarding, stopIntake } from "../../api-intake";
 import { loadPools, receiptState, removeProject, type PoolChoice } from "../../api-projects";
-import type { AddOverride, FoundProject, IntakeJob, IntakeJobState, ProjectsHome } from "../../engine-client";
+import type { AddOverride, FolderSize, FoundProject, IntakeJob, IntakeJobState, ProjectsHome } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, ConfirmDialog, Dialog, Icon, RadioCard, StatusBadge, formatRoute, navigate, type IconName, type Tone } from "../../ui";
 import { displayText } from "../conversation";
@@ -181,14 +181,15 @@ export function SetUpDialog({ folder, onClose, onStarted }: { folder: SetUpFolde
 }
 
 /** Home's intake job: the row for the job the session reads, Stop, Try again with the same way and
- * overrides, the Move anyway or Copy anyway question for a soft refusal, whose Use where it is
- * opens setup in place, and Dismiss. Input: what Use where it is opens. Output: the row and its
- * question, or nothing without a job. */
+ * overrides, the Move anyway or Copy anyway question for a soft refusal, asked once a fresh read
+ * of the folder says which git link or other issue it has, whose Use where it is opens setup in
+ * place, and Dismiss. Input: what Use where it is opens. Output: the row and its question, or
+ * nothing without a job. */
 function IntakeJobPanel({ onSetUp }: { onSetUp: (folder: SetUpFolder) => void }) {
   const session = useAppSession();
   const job = session.intake;
   const [busy, setBusy] = useState(false);
-  const [answering, setAnswering] = useState(false);
+  const [answering, setAnswering] = useState<{ id: string; size: Loaded<FolderSize> } | null>(null);
   if (job === null) return null;
   const run = async <T,>(call: () => Promise<Result<T>>, started: (value: T) => IntakeJob | undefined = () => undefined) => {
     if (busy) return;
@@ -200,17 +201,25 @@ function IntakeJobPanel({ onSetUp }: { onSetUp: (folder: SetUpFolder) => void })
     session.refreshIntake(result.kind === "ok" ? started(result.value) : undefined);
   };
   const restart = (overrides: AddOverride[]) => {
-    setAnswering(false);
+    setAnswering(null);
     void run(() => startIntake(job.source, job.mode, overrides), (view) => view);
   };
-  const question = job.state.state === "needs_answer" ? jobQuestion(job) : null;
+  const answer = async () => {
+    if (busy) return;
+    setBusy(true);
+    const size = await loadFolderSize(job.source);
+    setBusy(false);
+    setAnswering({ id: job.id, size });
+  };
+  const read = answering !== null && answering.id === job.id ? answering.size : null;
+  const question = job.state.state === "needs_answer" && read !== null ? jobQuestion(job, read) : null;
   const name = folderName(job.source);
   return <>
     <IntakeJobView job={job} busy={busy} onStop={() => void run(() => stopIntake(job.id))} onRetry={() => restart(job.overrides)}
-      onAnswer={() => setAnswering(true)} onDismiss={() => void run(() => dismissIntake(job.id))} />
-    {question && <AnywayDialog open={answering} way={job.mode} name={name} size={null} refused={null} issues={question.issues} busy={busy}
-      onUseHere={() => { setAnswering(false); onSetUp({ name, path: job.source }); }} onAnyway={() => restart(question.overrides)}
-      onCancel={() => setAnswering(false)} />}
+      onAnswer={() => void answer()} onDismiss={() => void run(() => dismissIntake(job.id))} />
+    {question && <AnywayDialog open way={job.mode} name={name} size={read} refused={null} issues={question.issues} busy={busy}
+      onUseHere={() => { setAnswering(null); onSetUp({ name, path: job.source }); }} onAnyway={() => restart(question.overrides)}
+      onCancel={() => setAnswering(null)} />}
   </>;
 }
 

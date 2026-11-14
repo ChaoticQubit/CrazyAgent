@@ -434,6 +434,20 @@ export function stampRead(result: Result<unknown>, started: number) {
   }
 }
 
+/** How many engine reads have started so far, a mark that tells later reads from earlier ones.
+ * Output: the count. */
+export function readsSoFar(): number {
+  return readsStarted;
+}
+
+/** Whether a read value came from a read that started after a mark from readsSoFar. Inputs: the
+ * value and the mark. Output: true when it did; false for a value no read noted. */
+export function readAfter(read: unknown, mark: number): boolean {
+  if (typeof read !== "object" || read === null) return false;
+  const started = readStarts.get(read);
+  return started !== undefined && started > mark;
+}
+
 /** The hold an applied save leaves: the pick, noted with the reads started by the time the save
  * answered, so a read begun later can end it; nothing after a refused or unconfirmed save.
  * Inputs: the held choice and the save's note. Output: the hold to keep, or null. */
@@ -449,9 +463,7 @@ export function answeredHold<T>(held: Held<T>, note: string): Held<T> | null {
 export function holdEnds<T>(held: Held<T> | null, current: T, same: (a: T, b: T) => boolean, read: unknown): boolean {
   if (held === null) return false;
   if (!same(held.from, current)) return true;
-  if (held.answered === undefined || typeof read !== "object" || read === null) return false;
-  const started = readStarts.get(read);
-  return started !== undefined && started > held.answered;
+  return held.answered !== undefined && readAfter(read, held.answered);
 }
 
 /** What a control keeps after a save: the choice once the engine applied it, so the control

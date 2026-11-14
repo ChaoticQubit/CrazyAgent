@@ -176,7 +176,8 @@ function answer(scene, command, args) {
   if (command === "desktop_usage_report") {
     usageSince = args.sinceMs;
     const limits = failing(scene.limits ?? "ok", LIMITS);
-    return limits instanceof Promise ? limits : { limits };
+    const settings = spendSent.at(-1) ?? { confirm: "confirm_each", all_limited: "notice", resets_source: "off" };
+    return limits instanceof Promise ? limits : { limits, spend: { settings, attempts: [], limited_pools: [] } };
   }
   if (command === "desktop_usage_set_spend") {
     spendSent.push(args.settings);

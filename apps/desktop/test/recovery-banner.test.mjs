@@ -110,8 +110,74 @@ test("a delete an engine stop cut short says so and offers Keep the project and 
   const index = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
   assert.match(index, /<SettingsTab key=\{`\$\{settingsSection \?\? ""\}-\$\{deleteAsks\}`\} data=\{data\} section=\{settingsSection\} \/>/);
   const settings = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
-  assert.match(settings, /const asked = hashParam\("ask"\);/);
-  assert.match(settings, /useRef<RemoveChoice>\(asked === "delete" \? "everything" : "dashboard"\)/);
+  assert.match(settings, /useEffect\(\(\) => watchRemoveAsk\(data\.id, /);
+});
+
+test("an ask that a route brings while the Remove section stays mounted opens the dialog too, once, and stops with the section", async () => {
+  const { watchRemoveAsk } = await import("../src/screens/project/settings.tsx");
+  const before = { window: globalThis.window, event: globalThis.HashChangeEvent };
+  globalThis.HashChangeEvent = class { constructor(type) { this.type = type; } };
+  const listeners = new Set();
+  const location = { hash: "#/projects/p-2/settings?section=remove" };
+  globalThis.window = {
+    location,
+    history: { replaceState: (_state, _title, next) => { location.hash = next; } },
+    addEventListener: (type, listener) => { if (type === "hashchange") listeners.add(listener); },
+    removeEventListener: (type, listener) => { if (type === "hashchange") listeners.delete(listener); },
+    dispatchEvent: (event) => { if (event.type === "hashchange") for (const listener of [...listeners]) listener(event); },
+  };
+  const route = (hash) => { location.hash = hash; globalThis.window.dispatchEvent(new HashChangeEvent("hashchange")); };
+  try {
+    const asked = [];
+    const stop = watchRemoveAsk("p-2", (choice) => asked.push(choice));
+    assert.deepEqual(asked, []);
+    route("#/projects/p-2/settings?section=remove&ask=remove");
+    assert.deepEqual(asked, ["dashboard"]);
+    assert.equal(location.hash, "#/projects/p-2/settings?section=remove");
+    route("#/projects/p-2/settings?section=remove&ask=delete");
+    assert.deepEqual(asked, ["dashboard", "everything"]);
+    stop();
+    assert.equal(listeners.size, 0);
+    route("#/projects/p-2/settings?section=remove&ask=remove");
+    assert.deepEqual(asked, ["dashboard", "everything"], "an unmounted section takes nothing");
+    const again = [];
+    const stopAgain = watchRemoveAsk("p-2", (choice) => again.push(choice));
+    assert.deepEqual(again, ["dashboard"], "a mount takes the ask already in the address");
+    assert.equal(location.hash, "#/projects/p-2/settings?section=remove");
+    stopAgain();
+  } finally {
+    globalThis.window = before.window;
+    globalThis.HashChangeEvent = before.event;
+  }
+});
+
+test("a route asking to remove or delete opens the Remove dialog once and leaves the address without its ask", async () => {
+  const { takeRemoveAsk } = await import("../src/screens/project/settings.tsx");
+  const before = { window: globalThis.window, event: globalThis.HashChangeEvent };
+  const replaced = [];
+  const fired = [];
+  globalThis.HashChangeEvent = class { constructor(type) { this.type = type; } };
+  const at = (hash) => {
+    const location = { hash };
+    globalThis.window = { location, history: { replaceState: (_state, _title, next) => { replaced.push(next); location.hash = next; } }, dispatchEvent: (event) => fired.push(event.type) };
+  };
+  try {
+    at("#/projects/p%201/settings?section=remove&ask=delete");
+    assert.equal(takeRemoveAsk("p 1"), "everything");
+    assert.deepEqual(replaced, ["#/projects/p%201/settings?section=remove"]);
+    assert.deepEqual(fired, ["hashchange"]);
+    assert.equal(takeRemoveAsk("p 1"), null, "a second mount of the section opens nothing");
+    at("#/projects/p-2/settings?section=remove&ask=remove");
+    assert.equal(takeRemoveAsk("p-2"), "dashboard");
+    at("#/projects/p-2/settings?section=remove&ask=other");
+    assert.equal(takeRemoveAsk("p-2"), null);
+    at("#/projects/p-2/settings?section=remove");
+    assert.equal(takeRemoveAsk("p-2"), null);
+    assert.deepEqual(replaced, ["#/projects/p%201/settings?section=remove", "#/projects/p-2/settings?section=remove", "#/projects/p-2/settings?section=remove"]);
+  } finally {
+    globalThis.window = before.window;
+    globalThis.HashChangeEvent = before.event;
+  }
 });
 
 test("one agent's several runs each get their own row key in every group", () => {
