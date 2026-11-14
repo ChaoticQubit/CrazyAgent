@@ -908,3 +908,106 @@ fn an_allow_after_another_socket_took_the_asked_path_grants_nothing() {
     let _again = crate::spawn_gate::bind_unix_std(&asked).unwrap();
     allow_grants_nothing(&case, question);
 }
+
+/// Asks for a socket at `path` as an agent and checks that the request gets the one
+/// refusal every failed check of a socket path gives an agent, and raises nothing.
+/// Inputs: the case and the path.
+#[cfg(target_os = "macos")]
+fn refused_alike(case: &Case, path: &Path) {
+    let asked = request(
+        &case.db,
+        &case.project,
+        &Asker::Master(7),
+        &AccessGrant::Socket {
+            path: path.to_path_buf(),
+        },
+        "the app's own socket",
+    );
+    assert_eq!(
+        asked.map(|_| ()),
+        Err("grant_socket_refused".to_owned()),
+        "{}",
+        path.display()
+    );
+    assert!(
+        crate::questions::pending(&case.db, &case.project)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// The project folder of a case, where an agent names its sockets. Input: the case.
+/// Output: the folder.
+#[cfg(target_os = "macos")]
+fn project_folder(case: &Case) -> PathBuf {
+    case._tmp.path().canonicalize().unwrap().join("project")
+}
+
+/// An agent asking for a socket in a folder that does not exist learns nothing about the
+/// folder: the refusal is the one every failed socket check gives (RV-DS241-87).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_socket_request_in_a_missing_folder_gets_the_one_socket_refusal() {
+    let case = Case::new();
+    refused_alike(&case, &project_folder(&case).join("gone").join("app.sock"));
+}
+
+/// An agent asking for a socket that is not there in a folder that is learns nothing
+/// either (RV-DS241-87).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_socket_request_for_a_missing_file_gets_the_one_socket_refusal() {
+    let case = Case::new();
+    refused_alike(&case, &project_folder(&case).join("app.sock"));
+}
+
+/// An agent asking for a plain file as a socket learns nothing about what the file is
+/// (RV-DS241-87).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_socket_request_for_a_plain_file_gets_the_one_socket_refusal() {
+    let case = Case::new();
+    let file = project_folder(&case).join("app.sock");
+    std::fs::write(&file, "not a socket").unwrap();
+    refused_alike(&case, &file);
+}
+
+/// An agent asking for a socket with a second name learns nothing about its owner or its
+/// names (RV-DS241-87).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_socket_request_for_a_socket_with_a_second_name_gets_the_one_socket_refusal() {
+    let case = Case::new();
+    let first = project_folder(&case).join("app.sock");
+    let _first = crate::spawn_gate::bind_unix_std(&first).unwrap();
+    std::fs::hard_link(&first, project_folder(&case).join("two.sock")).unwrap();
+    refused_alike(&case, &first);
+}
+
+/// An agent asking for a socket the floor refuses by its class learns nothing about which
+/// class it is (RV-DS241-87).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_socket_request_for_a_key_agent_socket_gets_the_one_socket_refusal() {
+    let case = Case::new();
+    let keys = project_folder(&case).join("S.gpg-agent");
+    let _keys = crate::spawn_gate::bind_unix_std(&keys).unwrap();
+    refused_alike(&case, &keys);
+}
+
+/// An agent asking for a socket in the engine's own data folder learns nothing about that
+/// folder (RV-DS241-87).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_socket_request_in_the_engine_data_folder_gets_the_one_socket_refusal() {
+    let case = Case::new();
+    let engine = case
+        ._tmp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("engine")
+        .join("app.sock");
+    let _engine = crate::spawn_gate::bind_unix_std(&engine).unwrap();
+    refused_alike(&case, &engine);
+}
