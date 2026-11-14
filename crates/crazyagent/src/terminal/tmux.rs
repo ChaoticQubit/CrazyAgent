@@ -1,4 +1,4 @@
-use super::buffer::{Feed, buffer, skipped_marker};
+use super::buffer::{Feed, buffer};
 pub use super::harness_socket;
 use super::{
     AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneInfo,
@@ -1824,8 +1824,12 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
         if dropped > 0 {
             if let Some(rest) = guard(&line, b"%output") {
                 let pane = rest.split(|byte| *byte == b' ').next().unwrap_or_default();
-                let lost = u64::try_from(line.len() + dropped).unwrap_or(u64::MAX);
-                deliver(&mut state, pane, &skipped_marker(lost));
+                state.viewers.retain(|viewer| {
+                    if viewer.pane != pane {
+                        return viewer.feed.open();
+                    }
+                    viewer.feed.lost()
+                });
             }
             continue;
         }
