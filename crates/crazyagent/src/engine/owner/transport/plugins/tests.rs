@@ -252,6 +252,7 @@ fn the_context_mode_check_runs_the_shared_install_agents_launch_and_never_npx() 
     };
     assert!(
         crate::context_mode::for_launch(&root, approved)
+            .ok()
             .as_ref()
             .and_then(crate::context_mode::shared_install)
             .is_some(),
