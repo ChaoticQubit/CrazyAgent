@@ -2678,10 +2678,16 @@ fn repository_setup(root: &Path) -> RepositorySetup {
 
 /// Runs one git command the engine makes in a project folder it created: the safe git
 /// options, a cleared environment with a private HOME and TMPDIR, no system config, no input
-/// or output, bounded by SETUP_TIMEOUT. Inputs: the folder, the private home and the
-/// arguments. Output: whether git succeeded, or the spawn or wait failure.
+/// or output, in a process group of its own so SETUP_TIMEOUT stops git and what it started.
+/// Inputs: the folder, the private home and the arguments. Output: whether git succeeded,
+/// or the spawn or wait failure.
 pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<bool, RunError> {
     let mut command = Command::new(GIT);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     command
         .args(GIT_SAFE)
         .args(arguments)
@@ -3273,12 +3279,14 @@ fn wait_bounded(mut child: Child, limit: Duration) -> Result<Ended, RunError> {
     }
 }
 
-/// Stops a setup command that ran past its limit: kills the process group it leads,
-/// reaps it and waits for the group to empty. Takes the command's process.
+/// Stops a setup command that ran past its limit: kills the process group it leads and
+/// the command itself, so one that leads no group still ends, reaps it and waits for the
+/// group to empty. Takes the command's process.
 #[cfg(unix)]
 fn stop_timed_out(child: &mut Child) {
     let group = child.id();
     kill_group(group);
+    let _ = child.kill();
     let _ = child.wait();
     await_group_exit(group);
 }
