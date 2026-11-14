@@ -63,7 +63,7 @@ export function runningHarness(team: Result<TeamStatus> | undefined, projectId: 
  * or running with the master's terminal node once the team lists one, and while it lists
  * none, since when the area has waited for that terminal. */
 export type Live =
-  | { kind: "starting" }
+  | { kind: "starting"; since?: number }
   | { kind: "not_ready" }
   | { kind: "refused"; code: string; copy: string }
   | { kind: "stopped"; problem: string | null; idle: boolean }
@@ -88,17 +88,18 @@ export function openOverdue(since: number | null, now: number): boolean {
   return since !== null && now - since >= OPEN_LIMIT_MS;
 }
 
-/** The area's state after a team graph read, or the master's terminal opening or closing,
- * while the switch is on: running with the master's terminal node once the team lists one,
- * and, until that terminal shows its first frame or once it closed, since when the area has
- * waited, so a start or a closed terminal restarts the clock (the TUI's rule, DEC-141); a
- * refused or missing start stays. Inputs: the state before, the master node read, the time
- * now and whether the terminal is open. Output: the state. */
+/** The area's state after a graph read or the terminal opening or closing, switch on:
+ * starting while the master has no pane yet, running with its terminal node once listed and
+ * since when the area waited for that terminal's first frame (the TUI's rule, DEC-141); a
+ * refused or missing start stays. Inputs: the prior state, the master node, now and whether
+ * the terminal is open. Output: the state. */
 export function runningState(prior: Live, node: GraphNode | null, now: number, open: boolean): Live {
   if (prior.kind === "refused" || prior.kind === "not_ready") return prior;
   const listed = node?.terminal ? node : null;
   if (listed && open) return { kind: "running", node: listed, since: null };
-  const since = prior.kind === "running" && prior.since !== null ? prior.since : now;
+  const waited = prior.kind === "running" || prior.kind === "starting" ? prior.since ?? null : null;
+  const since = waited ?? now;
+  if (!listed && node?.status === "starting") return { kind: "starting", since };
   return { kind: "running", node: listed, since };
 }
 
@@ -475,7 +476,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
   }, []);
   const moved = live.kind === "running" ? movedNote(data.team.result, data.id, now) : null;
   const limits = live.kind === "running" ? masterLimitsLine(data.team.result, data.id, now) : null;
-  const overdue = live.kind === "running" && openOverdue(live.since, now);
+  const overdue = (live.kind === "running" || live.kind === "starting") && openOverdue(live.since ?? null, now);
   if (live.kind === "refused" && live.code === NO_TERMINAL) return <ConversationTab data={data} />;
   const off = live.kind === "stopped" || live.kind === "refused";
   const startTeam = async () => {

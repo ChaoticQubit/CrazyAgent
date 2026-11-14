@@ -10,7 +10,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
 import { freeLowPort } from "./e2e-harness.mjs";
-import { chooseHome, clearWebStore, createRunDirectories, lockHome, runProjects } from "./run-layout.mjs";
+import { chooseHome, clearWebStore, createRunDirectories, lockHome, refusedToolHome, runProjects } from "./run-layout.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const workRoot = resolve(appRoot, "../../.local-state/desktop-execution");
@@ -25,9 +25,9 @@ const app = process.env.CRAZYAGENT_DESKTOP_TEST_APP;
 const fixture = process.env.CRAZYAGENT_DESKTOP_TEST_FIXTURE;
 const suite = process.env.CRAZYAGENT_DESKTOP_TEST_SUITE;
 assert(["model-access", "model-access-read-only", "native-auth", "pools-screen", "pools-spend", "first-run-guide", "first-run-skip-guide",
-  "first-run-harnesses", "first-run-harnesses-node", "learning-replay-guide", "learning-replay-first-run"].includes(suite),
+  "first-run-harnesses", "first-run-harnesses-node", "learning-replay-guide", "learning-replay-first-run", "refused-tool"].includes(suite),
   "closed native suite required");
-const WEBDRIVER_SECONDS = suite === "pools-screen" || suite === "pools-spend" || suite === "first-run-harnesses-node" ? 900 : 300;
+const WEBDRIVER_SECONDS = ["pools-screen", "pools-spend", "first-run-harnesses-node", "refused-tool"].includes(suite) ? 900 : 300;
 let interrupted = false;
 
 function interrupt() {
@@ -54,7 +54,7 @@ function binary(path) {
 
 async function environment() {
   createRunDirectories(evidence);
-  const { home, prepared } = chooseHome(join(evidence, "home"));
+  const { home, prepared } = suite === "refused-tool" ? refusedToolHome() : chooseHome(join(evidence, "home"));
   await lockHome(home, { label: `run.mjs ${suite} ${evidence}` });
   clearWebStore(home);
   return { projects: runProjects(home), env: {
@@ -198,9 +198,13 @@ function captured(entry) {
 /** The engine's environment for one suite: the run's own, or for the Node suite a clean Mac's:
  * a Codex the app's npm put in the engine prefix `<engine root>/setup/harnesses`, the one folder
  * the resolver accepts here (it refuses PATH folders in a project or a temp folder), no Node on
- * PATH and an empty clean-Mac gate root; the suite's home is never written.
+ * PATH and an empty clean-Mac gate root; the suite's home is never written. The refused-tool suite
+ * gets the system PATH and an empty gate root, so the only graphify is the one in its home.
  * Input: the run environment. Output: the engine environment. */
 function engineEnvironment(env) {
+  if (suite === "refused-tool") {
+    return { ...env, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", CRAZYAGENT_GATE_SYSTEM_ROOT: mkdtempSync(join(evidence, "gate-")) };
+  }
   if (suite !== "first-run-harnesses-node") return env;
   const bin = join(engineRoot, "setup", "harnesses", "bin");
   mkdirSync(bin, { recursive: true, mode: 0o700 });

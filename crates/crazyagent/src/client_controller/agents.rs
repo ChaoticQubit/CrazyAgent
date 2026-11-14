@@ -97,7 +97,10 @@ impl OwnerController {
                     self.send_pending().await?
                 }
             };
-            if matches!(response, OwnerResponse::OutcomeUnknown { .. }) {
+            if matches!(
+                response,
+                OwnerResponse::OutcomeUnknown { .. } | OwnerResponse::InProgress { .. }
+            ) {
                 return Err(EngineError("controller_pending_uncertain".into()));
             }
         }
