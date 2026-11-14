@@ -166,10 +166,10 @@ pub(super) fn under(path: &str, hidden: &[String]) -> bool {
 }
 
 /// Whether the evidence sent to a model provider may name `path`, below the project folder,
-/// by the onboarding documents' own skip rules: not when it names a path that looks like it
-/// holds a secret ([`names_secret`]) nor when it is or lies in one of the `hidden` folders,
-/// given below the project folder ([`below_root`]). Takes the path and the folders. Returns
-/// the answer.
+/// by the onboarding documents' own skip rules: not when any name in it looks like it holds
+/// a secret ([`secret_like`], a bare name such as `id_rsa` at the root included) nor when it
+/// is or lies in one of the `hidden` folders, given below the project folder
+/// ([`below_root`]). Takes the path and the folders. Returns the answer.
 pub(crate) fn offered(path: &str, hidden: &[String]) -> bool {
-    !names_secret(path) && !under(path, hidden)
+    !secret_like(path) && !under(path, hidden)
 }
