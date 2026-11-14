@@ -2,7 +2,7 @@ use crate::engine::owner::AgentInstructions;
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::team::graph::{LiveAction, Relation, RelationEdge};
 use crate::team::{AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamGraph};
-use crate::terminal::{AgentId, TerminalFrame};
+use crate::terminal::{AgentId, INPUT_BYTES_MAX, TerminalFrame};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::ctx::{Ctx, Link, Load};
@@ -685,6 +685,56 @@ fn a_window_resize_resizes_the_attached_terminal_once() {
     ));
     shell.resize(120, 36);
     assert!(requests(&mut shell).is_empty());
+}
+
+#[test]
+fn a_window_larger_than_the_drawn_area_resizes_the_attached_terminal_once_for_the_area_drawn() {
+    let mut shell = team();
+    shell.key(Key::Enter);
+    requests(&mut shell);
+    shell.resize(400, 150);
+    let first = requests(&mut shell);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(
+        matches!(&first[0], Request::TerminalResize { .. }),
+        "{first:?}"
+    );
+    let drawn = crate::tui::bounded_area(400, 150);
+    let mut screen = Terminal::new(TestBackend::new(drawn.width, drawn.height)).unwrap();
+    screen.draw(|frame| shell.draw(frame)).unwrap();
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    let again: Vec<Request> = requests(&mut shell)
+        .into_iter()
+        .filter(|request| matches!(request, Request::TerminalResize { .. }))
+        .collect();
+    assert!(
+        again.is_empty(),
+        "drawing the capped area sends no second resize: {again:?}"
+    );
+}
+
+#[test]
+fn a_paste_longer_than_the_request_queue_reaches_the_terminal_whole() {
+    let mut shell = team();
+    shell.key(Key::Enter);
+    requests(&mut shell);
+    let text = "é".repeat(70_000);
+    assert!(text.len() > 32 * INPUT_BYTES_MAX);
+    shell.key(Key::Paste(text.clone()));
+    let typed: Vec<u8> = requests(&mut shell)
+        .iter()
+        .filter_map(input)
+        .flat_map(|(_, bytes)| bytes.to_vec())
+        .collect();
+    let typed = String::from_utf8(typed).expect("the inputs join into the pasted text");
+    assert_eq!(
+        typed.matches('é').count(),
+        70_000,
+        "no part of the paste is dropped"
+    );
 }
 
 #[test]

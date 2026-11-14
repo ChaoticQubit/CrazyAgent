@@ -9,7 +9,7 @@ use crossterm::terminal::{
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -59,6 +59,17 @@ pub(in crate::tui) fn ask(ctx: &mut Ctx, file: PathBuf, note: Option<&'static st
 /// ran, so the caller redraws the whole screen, or the error of a terminal that could
 /// not be handed over or taken back.
 pub(in crate::tui) fn open_waiting(ctx: &mut Ctx, out: &mut impl Write) -> std::io::Result<bool> {
+    open_waiting_with(ctx, out, &crate::tui::run::KEYBOARD_PUSHED)
+}
+
+/// Opens the waiting file as `open_waiting` does, with the flag that says whether this TUI
+/// pushed the keyboard protocol. Takes the context, the terminal writer and the pushed
+/// flag. Returns whether the editor ran, or the terminal error.
+fn open_waiting_with(
+    ctx: &mut Ctx,
+    out: &mut impl Write,
+    pushed: &AtomicBool,
+) -> std::io::Result<bool> {
     let Some(edit) = ctx.editing.take() else {
         return Ok(false);
     };
@@ -70,7 +81,7 @@ pub(in crate::tui) fn open_waiting(ctx: &mut Ctx, out: &mut impl Write) -> std::
         !ctx.editor_running.swap(true, Ordering::Relaxed),
         "one editor runs at a time"
     );
-    let ran = run(out, &mut command(&editor, &edit.file));
+    let ran = run(out, &mut command(&editor, &edit.file), pushed);
     ctx.editor_running.store(false, Ordering::Relaxed);
     match ran? {
         Ok(()) => {
@@ -112,14 +123,19 @@ fn command(editor: &str, file: &Path) -> Command {
 /// Hands the terminal to the editor and takes it back: leaves raw mode, if on, and the
 /// alternate screen the way the TUI exits, runs the editor through the spawn gate with
 /// the terminal's own stdio and waits for it, then enters both again as at start.
-/// Takes the terminal writer and the command. Returns the editor's outcome as a plain
-/// problem, inside the error of a terminal that could not be handed over or taken back.
-fn run(out: &mut impl Write, command: &mut Command) -> std::io::Result<Result<(), &'static str>> {
+/// Takes the terminal writer, the command and the keyboard pushed flag. Returns the
+/// editor's outcome as a plain problem, inside the error of a terminal that could not be
+/// handed over or taken back.
+fn run(
+    out: &mut impl Write,
+    command: &mut Command,
+    pushed: &AtomicBool,
+) -> std::io::Result<Result<(), &'static str>> {
     let raw = is_raw_mode_enabled()?;
     if raw {
         disable_raw_mode()?;
     }
-    crate::tui::run::restore(out)?;
+    crate::tui::run::restore_with(out, pushed)?;
     let ran = crate::spawn_gate::status(command);
     if raw {
         enable_raw_mode()?;

@@ -56,7 +56,8 @@ impl Drop for Extras {
     }
 }
 
-static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
+/// Whether this TUI pushed the enhanced keyboard protocol and has not popped it yet.
+pub(in crate::tui) static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
 
 /// Turns on the enhanced keyboard protocol (disambiguated escape codes) under Auto when the
 /// terminal says it has it, so Shift-Enter arrives as its own key; Off never asks. The flag
@@ -124,7 +125,12 @@ pub(super) fn restore(out: &mut impl std::io::Write) -> std::io::Result<()> {
     restore_with(out, &KEYBOARD_PUSHED)
 }
 
-fn restore_with(out: &mut impl std::io::Write, pushed: &AtomicBool) -> std::io::Result<()> {
+/// Writes what `restore` writes, popping the keyboard protocol when the given flag says
+/// it was pushed. Inputs: the writer and the pushed flag. Output: the write result.
+pub(in crate::tui) fn restore_with(
+    out: &mut impl std::io::Write,
+    pushed: &AtomicBool,
+) -> std::io::Result<()> {
     let popped = pop_keyboard(out, pushed);
     execute!(
         out,

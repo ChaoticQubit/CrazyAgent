@@ -340,3 +340,46 @@ fn a_second_editor_never_starts_while_one_runs() {
     });
     let _ = open_waiting(&mut ctx, &mut Vec::new());
 }
+
+#[test]
+fn the_keyboard_protocol_popped_for_the_editor_is_pushed_again_on_the_screen_it_returns_to() {
+    let root = private_root();
+    let folder = root.path().canonicalize().unwrap();
+    let file = folder.join("notes.md");
+    std::fs::write(&file, "# Notes\n").unwrap();
+    let editor = format!("{} --wait", quoted(&script(&folder)));
+    let mut ctx = ctx(Some(&editor));
+    let mut out = screen(&folder);
+    let pushed = AtomicBool::new(true);
+    ask(&mut ctx, file.clone(), None);
+    assert!(open_waiting_with(&mut ctx, &mut out, &pushed).unwrap());
+    let written = std::fs::read_to_string(folder.join("screen")).unwrap();
+    let (before, after) = written.split_at(written.find(EDITED).expect("the editor ran"));
+    assert!(
+        before.contains("\x1b[<1u"),
+        "the protocol is popped before the editor: {before:?}"
+    );
+    let back = after
+        .find(ENTER)
+        .expect("the alternate screen was entered again");
+    assert!(
+        after[back..].contains("\x1b[>1u"),
+        "Shift-Enter is its own key again on the TUI's screen: {after:?}"
+    );
+    assert!(
+        pushed.load(Ordering::SeqCst),
+        "the next restore pops it again"
+    );
+
+    let seen = written.len();
+    let never = AtomicBool::new(false);
+    ask(&mut ctx, file, None);
+    assert!(open_waiting_with(&mut ctx, &mut out, &never).unwrap());
+    let again = std::fs::read_to_string(folder.join("screen")).unwrap();
+    assert!(
+        !again[seen..].contains("\x1b[>"),
+        "a protocol never pushed stays off: {:?}",
+        &again[seen..]
+    );
+    assert!(!never.load(Ordering::SeqCst));
+}
