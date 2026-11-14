@@ -251,9 +251,11 @@ async fn handle(
         Action::Download { path } => {
             let claim = authority.icloud.claim()?;
             let download = claim.download();
-            let files = tokio::task::spawn_blocking(move || icloud::download(&path, &download))
-                .await
-                .map_err(|_| failure("home_icloud_not_downloaded"))??;
+            let bounds = crate::projects_home::COPY_BOUNDS;
+            let files =
+                tokio::task::spawn_blocking(move || icloud::download(&path, &download, bounds))
+                    .await
+                    .map_err(|_| failure("home_icloud_not_downloaded"))??;
             drop(claim);
             Ok(Reply::Downloaded { files })
         }

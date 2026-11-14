@@ -541,15 +541,25 @@ pub fn check_add(
     {
         return Err(refused("home_copy_linked_checkout"));
     }
+    let bounds = add_bounds(overrides);
+    let destination = destination(home, name)?;
+    assert!(real.is_absolute());
+    assert!(!destination.starts_with(&real));
+    Ok(AddPlan::new(real, destination, mode, bounds))
+}
+
+/// The bounds an add's download listing and copy work within: [`FORCED_COPY_BOUNDS`] once
+/// the owner went past `too_large`, else [`COPY_BOUNDS`]. Input: the add's overrides.
+/// Output: the bounds.
+pub fn add_bounds(overrides: &[AddOverride]) -> CopyBounds {
     let bounds = if overrides.contains(&AddOverride::TooLarge) {
         FORCED_COPY_BOUNDS
     } else {
         COPY_BOUNDS
     };
-    let destination = destination(home, name)?;
-    assert!(real.is_absolute());
-    assert!(!destination.starts_with(&real));
-    Ok(AddPlan::new(real, destination, mode, bounds))
+    assert!(bounds.entries >= COPY_BOUNDS.entries);
+    assert!(bounds.depth >= COPY_BOUNDS.depth);
+    bounds
 }
 
 /// Checks a name for a folder directly inside the projects home. This one rule

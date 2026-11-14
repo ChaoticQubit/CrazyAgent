@@ -1,4 +1,5 @@
 use super::*;
+use crate::projects_home::COPY_BOUNDS;
 
 fn seconds(count: u64) -> Duration {
     Duration::from_secs(count)
@@ -170,7 +171,15 @@ fn files_that_land_while_slow_asks_still_go_are_counted_before_the_last_ask_ends
     };
     let list = |_: &Path| icloud.list();
     let poll = Duration::from_millis(10);
-    let files = run(Path::new("/icloud"), &download, &ask, &list, poll).unwrap();
+    let files = run(
+        Path::new("/icloud"),
+        &download,
+        &ask,
+        &list,
+        COPY_BOUNDS,
+        poll,
+    )
+    .unwrap();
     let total = (BATCH_PATHS_MAX * batches) as u64;
     assert_eq!(files, total);
     assert_eq!(download.progress(), Progress { total, done: total });
@@ -201,6 +210,7 @@ fn a_failed_ask_ends_the_download_with_its_code_and_asks_nothing_more() {
         &download,
         &ask,
         &list,
+        COPY_BOUNDS,
         Duration::from_millis(10),
     );
     assert_eq!(failed.unwrap_err().0, NOT_DOWNLOADED);
@@ -230,6 +240,7 @@ fn a_cancel_during_slow_asks_stops_the_ask_and_the_download_within_one_check() {
         &download,
         &ask,
         &list,
+        COPY_BOUNDS,
         Duration::from_millis(10),
     );
     assert_eq!(cancelled.unwrap_err().0, NOT_DOWNLOADED);
@@ -245,7 +256,7 @@ fn a_folder_with_no_placeholders_downloads_nothing_and_never_runs_brctl() {
     fs::write(folder.path().join("src/deep/main.rs"), "fn main() {}\n").unwrap();
     std::os::unix::fs::symlink("/", folder.path().join("root-link")).unwrap();
     assert_eq!(
-        placeholders(folder.path()).unwrap(),
+        placeholders(folder.path(), COPY_BOUNDS).unwrap(),
         Placeholders::default()
     );
     let download = Download::default();
@@ -338,7 +349,7 @@ fn placeholders_in_icloud_drive_are_counted_downloaded_and_a_cancel_stops_the_wa
         files.push(file);
     }
     probe.evict(&files);
-    let left = placeholders(&folder).unwrap();
+    let left = placeholders(&folder, COPY_BOUNDS).unwrap();
     assert_eq!(left.paths.len(), files.len());
     assert_eq!(left.largest_bytes, "probe 10\n".len() as u64);
     let measured =
@@ -357,7 +368,10 @@ fn placeholders_in_icloud_drive_are_counted_downloaded_and_a_cancel_stops_the_wa
         super::download(folder.to_str().unwrap(), &download).unwrap(),
         files.len() as u64
     );
-    assert_eq!(placeholders(&folder).unwrap(), Placeholders::default());
+    assert_eq!(
+        placeholders(&folder, COPY_BOUNDS).unwrap(),
+        Placeholders::default()
+    );
     assert_eq!(
         download.progress(),
         Progress {
@@ -408,23 +422,24 @@ fn progress_follows_files_landing_from_icloud_within_two_polls() {
         .join("Library/Mobile Documents/com~apple~CloudDocs");
     let root = folder.canonicalize().unwrap();
     assert!(folder.starts_with(&drive) && folder != drive);
-    let total = placeholders(&root).unwrap().paths.len() as u64;
+    let total = placeholders(&root, COPY_BOUNDS).unwrap().paths.len() as u64;
     assert!(total > 8 * BATCH_PATHS_MAX as u64, "evict the folder first");
     let slow = |batch: &[PathBuf], stop: &dyn Fn() -> bool| {
         std::thread::sleep(SLOW_ASK);
         request(batch, stop)
     };
+    let list = |root: &Path| placeholders(root, COPY_BOUNDS);
     let download = Download::default();
     let mut landed: Vec<(Instant, u64)> = Vec::new();
     let (mut moved_early, mut trailed) = (false, None);
     let outcome = std::thread::scope(|scope| {
-        let running = scope.spawn(|| run(&root, &download, &slow, &placeholders, POLL_EVERY));
+        let running = scope.spawn(|| run(&root, &download, &slow, &list, COPY_BOUNDS, POLL_EVERY));
         for _ in 0..30 * 60 * 4 {
             if running.is_finished() || trailed.is_some() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(250));
-            let left = placeholders(&root).unwrap().paths.len() as u64;
+            let left = placeholders(&root, COPY_BOUNDS).unwrap().paths.len() as u64;
             let now = Instant::now();
             let shown = download.progress();
             landed.push((now, total.saturating_sub(left)));
@@ -448,5 +463,8 @@ fn progress_follows_files_landing_from_icloud_within_two_polls() {
     );
     assert_eq!(outcome.unwrap(), total);
     assert!(moved_early, "progress moved only at the end");
-    assert_eq!(placeholders(&root).unwrap(), Placeholders::default());
+    assert_eq!(
+        placeholders(&root, COPY_BOUNDS).unwrap(),
+        Placeholders::default()
+    );
 }

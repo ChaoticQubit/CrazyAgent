@@ -235,8 +235,8 @@ async fn check(engine: &Engine, a: &Admission, job: &IntakeJob) -> Result<(), En
     let (id, source) = (job.id().clone(), job.source().to_owned());
     let (mode, overrides) = (job.mode(), job.overrides().to_vec());
     assert!(!source.is_empty());
-    let ask = engine
-        .owner_job(|reply| Job::HomeAddCheck(a.clone(), id, source, mode, overrides, reply));
+    let ask =
+        engine.owner_job(|reply| Job::HomeAddCheck(a.clone(), id, source, mode, overrides, reply));
     let checked = tokio::time::timeout(engine.timeout, ask)
         .await
         .map_err(|_| failure(UNKNOWN))?;
@@ -272,12 +272,13 @@ async fn fetch(authority: &Arc<Authority>, job: &Arc<IntakeJob>) -> Result<(), E
     let claim = authority.icloud.claim_for(job.download())?;
     let download = claim.download();
     let path = job.source().to_owned();
-    let fetched = tokio::task::spawn_blocking(move || icloud::download(&path, &download))
+    let bounds = crate::projects_home::add_bounds(job.overrides());
+    let fetched = tokio::task::spawn_blocking(move || icloud::download(&path, &download, bounds))
         .await
         .map_err(|_| failure("home_icloud_not_downloaded"));
     drop(claim);
     let files = fetched??;
-    assert!(files <= crate::projects_home::COPY_BOUNDS.entries);
+    assert!(files <= bounds.entries);
     Ok(())
 }
 
