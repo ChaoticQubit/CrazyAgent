@@ -116,6 +116,12 @@ async function openTab(page, site, me, project, label) {
   await me.click(label, "[role=tab]");
 }
 
+/** The Overview tabs' own status line as the page shows it, apart from the roadmap's "Checked"
+ * line on the same route. Input: the page. Output: its trimmed text, or "" when none shows. */
+function tabsStatus(page) {
+  return page.evaluate(`(() => (document.querySelector(".ov-bar [role=status]")?.innerText ?? "").trim())()`);
+}
+
 /** Says whether a button with this exact label is on the page and whether it is disabled.
  * Inputs: the page and the label. Output: null when it is not there, else its disabled state. */
 function button(page, label) {
@@ -311,7 +317,10 @@ test("A tab file changed outside CrazyAgent shows its new text when its tab is p
   await onEngine(t, "ca-overview-outside-", async ({ project, me, page, site, bridge }) => {
     await openTab(page, site, me, project, "Features");
     await written(bridge, project);
-    await me.waitFor("the written Features tab from a read after the run, so the page polls no more", (seen) => seen.includes("Sells fruit") && /Checked /.test(seen));
+    await me.waitFor("the written Features tab", (seen) => seen.includes("Sells fruit"));
+    for (const deadline = Date.now() + RUN_MS; !(await tabsStatus(page)).startsWith("Checked "); await pause(POLL_MS)) {
+      assert.ok(Date.now() < deadline, "the tabs never showed a read after the run, so the page may still poll");
+    }
     writeFileSync(join(await repoOf(bridge, project), ".crazyagent", "overview", "features.md"), `- ${OUTSIDE}\n`);
     await until(bridge, project, "the engine never read the outside edit", (read) => (tabOf(read, "features").text ?? "").includes(OUTSIDE), STEP_MS);
     await me.click("Quick info", "[role=tab]");
