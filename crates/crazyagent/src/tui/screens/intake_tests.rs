@@ -2995,3 +2995,99 @@ fn home_keeps_the_picked_project_when_the_job_card_comes_and_goes() {
         })
     );
 }
+
+/// Confirms a review page as the owner left it: the stored setup at revision 7 arrives,
+/// then Tab moves from the name to Confirm and Enter sends the change. Input: the page.
+/// Output: the setup the confirm sends.
+fn confirmed_setup(shell: &mut Shell, project: &ProjectId, typed_in_about: &str) -> ProjectSetup {
+    while shell.ctx.next_request().is_some() {}
+    let stored = crate::project_setup::StoredSetup {
+        project_id: project.clone(),
+        name: "notes".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: crate::project_setup::TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: "/Users/owner/Projects/notes".into(),
+        created_ms: 0,
+        revision: 7,
+    };
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        SetupEvent {
+            query: SetupQuery::Setup {
+                project: project.clone(),
+            },
+            result: Ok(crate::project_setup::SetupView::Setup(Some(Box::new(
+                stored,
+            )))),
+        },
+    )))));
+    shell.key(Key::Tab);
+    keys(shell, typed_in_about);
+    for _ in 0..4 {
+        shell.key(Key::Tab);
+    }
+    shell.key(Key::Enter);
+    let Some(Request::Setup(SetupQuery::Change { action, .. })) = shell.ctx.next_screen_request()
+    else {
+        panic!("confirm sends the setup change");
+    };
+    let SetupAction::Update { setup, .. } = action else {
+        panic!("confirm updates the project setup");
+    };
+    setup
+}
+
+/// RV-DS241-107: a drafted About of several paragraphs, a tab and more than 2000
+/// characters, and a full tech stack of 32 long entries, reach the engine whole when the
+/// owner confirms the review without touching them.
+#[test]
+fn a_review_confirmed_untouched_saves_the_drafted_about_and_stack_whole() {
+    let paragraph = "Plans weekly meals for a household and keeps the shopping list.\t";
+    let about = format!("{}\n\n{}", paragraph.repeat(20), paragraph.repeat(20));
+    assert!(about.len() > 2_000 && about.len() <= crate::project_setup::ABOUT_BYTES_MAX);
+    let stack: Vec<String> = (0..crate::project_setup::TECH_ENTRIES_MAX)
+        .map(|index| format!("{index:02}{}", "s".repeat(58)))
+        .collect();
+    assert!(stack.join(", ").chars().count() > 1_000);
+    assert!(
+        stack
+            .iter()
+            .all(|entry| entry.len() <= crate::project_setup::TECH_ENTRY_BYTES_MAX)
+    );
+    let (mut shell, project) = review_with(|view| {
+        view.draft.about = about.clone();
+        view.draft.tech_stack = stack.clone();
+    });
+    let setup = confirmed_setup(&mut shell, &project, "");
+    assert_eq!(
+        setup.about, about,
+        "the untouched About is saved as drafted"
+    );
+    assert_eq!(
+        setup.tech_stack, stack,
+        "the untouched tech stack is saved as drafted"
+    );
+}
+
+/// RV-DS241-107: an About the owner edits in the review keeps its line breaks.
+#[test]
+fn an_about_edited_in_the_review_keeps_its_paragraphs() {
+    let (mut shell, project) = review_with(|view| {
+        view.draft.about = "Plans weekly meals.\n\nKeeps the shopping list.".into();
+    });
+    let setup = confirmed_setup(&mut shell, &project, " Shares it.");
+    assert_eq!(
+        setup.about,
+        "Plans weekly meals.\n\nKeeps the shopping list. Shares it."
+    );
+}
