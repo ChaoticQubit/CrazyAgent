@@ -10,12 +10,12 @@ const harnesses = await import("../src/screens/settings/harnesses.tsx");
 const LINES = {
   stop_at_once: [
     "Claude Code: no retries.",
-    "Codex: no retries on an API key or address account. With a ChatGPT sign-in Codex takes no retry count, so it only stops waiting for the network without end. The Codex master keeps its own retries for now.",
+    "Codex: no retries on an API key or address account. With a ChatGPT sign-in Codex takes no retry count, so it only stops waiting for the network without end.",
     "RCLI: one try. The engine never repeats an RCLI request.",
   ],
   retry_briefly: [
     "Claude Code: its own retries, up to 10 with longer waits each time.",
-    "Codex: its own retries, without waiting for the network without end. The Codex master keeps its own retries and that wait for now.",
+    "Codex: its own retries, without waiting for the network without end.",
     "RCLI: one try. The engine never repeats an RCLI request.",
   ],
   harness_default: [
