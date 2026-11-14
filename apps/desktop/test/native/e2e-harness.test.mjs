@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { connect, createServer } from "node:net";
-import { closedPort, freeLowPort } from "./e2e-harness.mjs";
+import { closedPort, freeLowPort, refusingPort } from "./e2e-harness.mjs";
 
 /** The processes lsof names for a local TCP port in one state, either end of a connection
  * included. Input: the port and the TCP state. Output: the distinct pids. */
@@ -25,6 +25,15 @@ test("a closed port refuses a connect, nothing listens there, and this process k
   assert.equal(refused, "ECONNREFUSED");
   assert.deepEqual(holders(port, "LISTEN"), []);
   assert.deepEqual(holders(port, "ESTABLISHED"), [process.pid], `port ${port} is not held`);
+});
+
+test("a refusing port stays held with no listener until it is freed, and then nothing holds it", async () => {
+  const { port, free } = await refusingPort();
+  assert.deepEqual(holders(port, "LISTEN"), []);
+  assert.deepEqual(holders(port, "ESTABLISHED"), [process.pid], `port ${port} is not held`);
+  free();
+  await new Promise((done) => setTimeout(done, 200));
+  assert.deepEqual(holders(port, "ESTABLISHED"), []);
 });
 
 test("a process that took a closed port still ends on its own", () => {
