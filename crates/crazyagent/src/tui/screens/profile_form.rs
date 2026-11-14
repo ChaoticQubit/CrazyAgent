@@ -1,6 +1,6 @@
 use crate::owner_profile::{
     AnswerDetail, BIO_BYTES_MAX, Initiative, NAME_BYTES_MAX, OwnerProfile, ROLE_BYTES_MAX,
-    WorkingStyle, plain_problem,
+    WorkingStyle, plain_problem, stack_item_problem,
 };
 use crate::tui::ctx::Ctx;
 use crate::tui::keys::{Key, ShiftArrows, ShiftEnter};
@@ -260,6 +260,15 @@ impl ProfileForm {
         self.check(Slot::Name);
         if self.name.error.is_some() {
             return Err(Slot::Name);
+        }
+        if let Some(sentence) = self
+            .stack_items()
+            .iter()
+            .find_map(|item| stack_item_problem(item))
+        {
+            self.stack.error = Some(sentence);
+            self.focus = Some(Slot::Stack);
+            return Err(Slot::Stack);
         }
         let profile = OwnerProfile {
             name: self.name.value().trim().to_owned(),

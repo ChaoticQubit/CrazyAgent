@@ -176,6 +176,25 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
     }
 }
 
+/// The sentence for one preferred-stack entry the profile save would refuse, naming the
+/// entry with its hidden characters shown as escapes, in the desktop chip input's words, so
+/// the owner sees which entry to fix (RV-DS241-136, DEC-141). Input: one trimmed entry.
+/// Output: the sentence, or None when the entry fits.
+pub fn stack_item_problem(item: &str) -> Option<String> {
+    let shown = crate::memory::visible_text(item);
+    if !single_line(item) || crate::memory::hidden_text(item) {
+        return Some(format!(
+            "{shown} has a hidden or special character. Type it again without it."
+        ));
+    }
+    (item.len() > STACK_ITEM_BYTES_MAX).then(|| {
+        format!(
+            "{shown} is over {STACK_ITEM_BYTES_MAX} bytes (about {STACK_ITEM_BYTES_MAX} English letters or {} Chinese, Hindi or Thai ones). Shorten it.",
+            STACK_ITEM_BYTES_MAX / 3
+        )
+    })
+}
+
 #[cfg(unix)]
 pub(crate) fn initialize(tx: &Transaction<'_>) -> Result<(), EngineError> {
     tx.execute_batch(TABLE).map_err(error)
@@ -201,10 +220,10 @@ pub(crate) fn save(tx: &Transaction<'_>, profile: &OwnerProfile) -> Result<Outco
 
 /// Reads the stored owner profile with its hidden characters taken out. A name that
 /// cleaning leaves blank, one stored only of hidden characters before they were refused,
-/// counts as no profile, so the owner gets the first-run page and saves a new one instead
-/// of a refusal on every read and master turn (RV-DS241-134).
-/// Input: the transaction. Output: the profile, None, or a code.
-pub(crate) fn load(tx: &Transaction<'_>) -> Result<Option<OwnerProfile>, EngineError> {
+/// comes back empty with the rest kept, for the first-run page to show (RV-DS241-134).
+/// Input: the transaction. Output: the cleaned profile, None when none is stored, or a code
+/// when the stored body does not fit or parse or a field other than the name is refused.
+fn stored(tx: &Transaction<'_>) -> Result<Option<OwnerProfile>, EngineError> {
     let body: Option<Option<String>> = tx
         .query_row(
             "SELECT CASE WHEN length(CAST(body AS BLOB))<=8192 THEN body END FROM user_profile WHERE singleton=1",
@@ -217,20 +236,44 @@ pub(crate) fn load(tx: &Transaction<'_>) -> Result<Option<OwnerProfile>, EngineE
         return Ok(None);
     };
     let body = body.ok_or_else(|| error("owner_profile_bounds"))?;
-    let profile: OwnerProfile = serde_json::from_str::<OwnerProfile>(&body)
+    let mut profile: OwnerProfile = serde_json::from_str::<OwnerProfile>(&body)
         .map_err(|_| error("owner_profile_invalid"))?
         .without_hidden();
-    if profile.name.trim().is_empty() {
-        return Ok(None);
+    let named = !profile.name.trim().is_empty();
+    if !named {
+        profile.name = String::new();
     }
-    profile
+    let checked = if named {
+        profile.clone()
+    } else {
+        OwnerProfile {
+            name: "Owner".into(),
+            ..profile.clone()
+        }
+    };
+    checked
         .validate()
         .map_err(|_| error("owner_profile_invalid"))?;
     Ok(Some(profile))
 }
 
+/// The owner profile the master prompt is built with: the stored one, cleaned, or None when
+/// none is stored or cleaning left its name blank, so no master turn is refused for it
+/// (RV-DS241-134). Input: the transaction. Output: a profile that validates, None, or a code.
+pub(crate) fn load(tx: &Transaction<'_>) -> Result<Option<OwnerProfile>, EngineError> {
+    let profile = stored(tx)?.filter(|profile| !profile.name.is_empty());
+    assert!(profile.as_ref().is_none_or(|profile| profile.validate().is_ok()));
+    Ok(profile)
+}
+
+/// The owner's profile read: the stored profile, cleaned, whose name is empty when cleaning
+/// left it blank, so both apps open the first-run page prefilled with the stored role, bio,
+/// stack and style instead of saving over them unseen (RV-DS241-134 r2).
+/// Input: the transaction. Output: the read answer, or a code.
 pub(crate) fn read(tx: &Transaction<'_>) -> Result<OwnerData, EngineError> {
-    Ok(OwnerData::OwnerProfile { profile: load(tx)? })
+    Ok(OwnerData::OwnerProfile {
+        profile: stored(tx)?,
+    })
 }
 
 #[cfg(test)]
