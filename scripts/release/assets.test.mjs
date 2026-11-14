@@ -4,7 +4,7 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 import { cliArchiveName, collectDesktop, packageCli, sidecars, signFile, stageSidecars, verifySignature } from "./assets.mjs";
 
@@ -12,9 +12,21 @@ const REPO = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const TAURI = join(REPO, "apps/desktop/node_modules/@tauri-apps/cli/tauri.js");
 const VERSION = "0.2.0-dev.202610251607";
 
+const SCRATCH = new Set();
+
+/**
+ * Makes a scratch folder under the temp folder and removes it after the last test, so no run
+ * leaves one behind, throwaway signing keys included. Input: the name prefix. Output: the path.
+ */
 async function scratch(prefix) {
-  return mkdtemp(join(tmpdir(), prefix));
+  const folder = await mkdtemp(join(tmpdir(), prefix));
+  SCRATCH.add(folder);
+  return folder;
 }
+
+after(async () => {
+  for (const folder of SCRATCH) await rm(folder, { recursive: true, force: true });
+});
 
 async function keyPair(root) {
   const path = join(root, "updater.key");
