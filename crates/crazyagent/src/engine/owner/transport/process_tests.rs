@@ -2068,3 +2068,46 @@ fn only_a_proposal_request_is_served_past_the_owner_exchange() {
         cleanup::WALL_TIME + Duration::from_secs(30)
     );
 }
+
+/// SA vid 7 (leader 09:47): the import Process confirms takes the project text as it is, so
+/// text in a `.crazyagent/instructions.md` the project's git tracks, here the owner's with
+/// the Imported heading taken off, stays first and unlabelled after the import.
+#[test]
+fn process_import_never_labels_the_project_text() {
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    fs::write(folder.join(".crazyagent/instructions.md"), "OWNER-TEXT-7\n").unwrap();
+    fs::write(folder.join("CLAUDE.md"), "REPO-RULE-7\n").unwrap();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["add", "-f", ".crazyagent/instructions.md", "CLAUDE.md"][..],
+        &[
+            "-c",
+            "user.name=Repo",
+            "-c",
+            "user.email=repo@example.invalid",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-q",
+            "-m",
+            "carried",
+        ][..],
+    ] {
+        let done = crate::spawn_gate::output(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&folder)
+                .args(args),
+        )
+        .unwrap();
+        assert!(done.status.success(), "{done:?}");
+    }
+    let project = with_project(&root, &folder);
+    run(&root, Action::ConfirmImport { project }, None).unwrap();
+    assert_eq!(
+        crate::agent_home::read_project(&folder).unwrap(),
+        "OWNER-TEXT-7\n\n## Imported from CLAUDE.md\n\nREPO-RULE-7\n"
+    );
+}
