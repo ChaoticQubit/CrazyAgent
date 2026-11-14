@@ -68,12 +68,13 @@ const SIGN_IN_TEXT: Record<string, string> = {
 };
 export const POLL_MS = 2000;
 
+const PLAIN_VERSION = /^\d+(\.\d+){1,5}$/;
+
 /** Tells whether an installed version reads lower than a minimum, number by number with a
  * missing number counting as zero; a version that is not two to six numbers is unknown, so never
  * below. Inputs: the installed version and the minimum. Output: the answer. */
 export function versionBelow(installed: string, minimum: string): boolean {
-  const plain = /^\d+(\.\d+){1,5}$/;
-  if (!plain.test(installed) || !plain.test(minimum)) return false;
+  if (!PLAIN_VERSION.test(installed) || !PLAIN_VERSION.test(minimum)) return false;
   const one = installed.split(".").map(Number);
   const other = minimum.split(".").map(Number);
   for (let index = 0; index < Math.max(one.length, other.length); index += 1) {
@@ -88,8 +89,8 @@ export function versionBelow(installed: string, minimum: string): boolean {
  * name and its versions row, if read. Output: the line, the same words as the TUI's. */
 export function tooOldLine(harness: string, versions?: HarnessVersions | null): string {
   const minimum = versions?.sign_in_min;
-  if (!minimum) return `${harness} is too old to sign in from CrazyAgent. Update ${harness}, then choose Check again.`;
-  const installed = versions.installed;
+  if (!minimum || !PLAIN_VERSION.test(minimum)) return `${harness} is too old to sign in from CrazyAgent. Update ${harness}, then choose Check again.`;
+  const installed = versions?.installed;
   return installed && versionBelow(installed, minimum)
     ? `${harness} ${installed} is too old to sign in from CrazyAgent; it needs ${minimum} or newer.`
     : `${harness} is too old to sign in from CrazyAgent; it needs ${minimum} or newer.`;

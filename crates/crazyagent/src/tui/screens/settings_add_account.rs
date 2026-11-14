@@ -1168,7 +1168,7 @@ impl AddAccount {
             return;
         };
         let too_old = matches!(result, Ok((_, view)) if view.phase == NativeAuthPhase::Failed && view.problem.as_deref() == Some(TOO_OLD));
-        if too_old {
+        if too_old && sign_in.old.is_none() {
             sign_in.old = Some(TooOld::default());
         }
         match result {
@@ -1903,7 +1903,10 @@ fn harness_id(native: Option<NativeAuthMethod>) -> &'static str {
 /// row, if read. Output: the line.
 pub(super) fn too_old_line(native: Option<NativeAuthMethod>, versions: Option<&HarnessVersions>) -> String {
     let (harness, _) = harness_words(native);
-    let Some(minimum) = versions.and_then(|versions| versions.sign_in_min.as_deref()) else {
+    let Some(minimum) = versions
+        .and_then(|versions| versions.sign_in_min.as_deref())
+        .filter(|minimum| crate::harnesses::update::plain_version(minimum))
+    else {
         return plain_sign_in(TOO_OLD, native);
     };
     match versions

@@ -1024,7 +1024,7 @@ fn numbers(text: &str) -> Option<Vec<u64>> {
 
 /// Tells whether text is a plain version: two to six numbers joined by single dots, at most
 /// `VERSION_BYTES_MAX` bytes and nothing else. Input: text. Output: the answer.
-fn plain_version(text: &str) -> bool {
+pub fn plain_version(text: &str) -> bool {
     numbers(text).is_some_and(|parts| parts.len() >= 2)
 }
 
