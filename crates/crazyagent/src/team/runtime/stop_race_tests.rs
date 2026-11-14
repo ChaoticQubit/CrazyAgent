@@ -170,6 +170,81 @@ fn a_task_queued_by_a_lead_the_owner_stopped_waits_for_the_lead() {
     host.close(&[]).unwrap();
 }
 
+/// RV-DS241-122 r2 (rv-code4 F1): more queued tasks than dispatch reads at once are held for
+/// a lead the owner stopped, and a task queued after them with no lead still starts: held
+/// tasks stay out of dispatch's window, and every one of them says it waits for the lead.
+#[test]
+fn tasks_held_for_an_owner_stopped_lead_never_fill_the_dispatch_window() {
+    let fixture = Fixture::new(2);
+    let _home = committed_project(&fixture);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = idle_sub_agent(&fixture, &mut team);
+    let prompt = "Write the notes page.";
+    let (queued, refused) = lead_spawn_answer(&fixture, lead, prompt);
+    assert!(!refused, "{queued}");
+    let held = DISPATCH_TASKS_MAX + 1;
+    for copy in 1..held {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,turn,harness,tools,prompt,status,created_ms,parent,mode)
+                 SELECT project,source,turn,harness,tools,?2,'queued',created_ms,parent,mode
+                 FROM team_tasks WHERE prompt=?1",
+                params![prompt, format!("Write the notes page, part {copy}.")],
+            )
+            .unwrap();
+    }
+    let of_lead = |fixture: &Fixture| -> i64 {
+        fixture
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM team_tasks WHERE parent=?1 AND status='queued'",
+                [lead],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(of_lead(&fixture), held, "the lead's tasks are queued");
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::StopAgent {
+            project_id: fixture.setup.project_id.clone(),
+            agent: lead,
+        }],
+    );
+    fixture.until(&mut team, "the owner's stop ends the lead", |f| {
+        f.agent_status(lead).0 == AgentStatus::Stopped
+    });
+    let later = "Write the index page.";
+    owner(&fixture, &[hand_off(&fixture, later)]);
+    fixture.until(
+        &mut team,
+        "a task queued after the held ones starts",
+        |f| task_of(f, later).0 != "queued",
+    );
+    let waiting: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_tasks WHERE parent=?1 AND status='queued' AND wait=?2",
+            params![lead, WAIT_LEAD_OWNER_STOPPED],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        (of_lead(&fixture), waiting),
+        (held, held),
+        "every held task waits for its lead, none waits behind the window"
+    );
+    assert_eq!(
+        workers_of(&fixture, lead),
+        0,
+        "no worker of the stopped lead"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 /// RV-DS241-125: the owner stops a sub-agent while it is stopping to load changed
 /// instructions. The restart is dropped with one team note: the agent is not started again
 /// and the owner's stop stays, so only the owner's Wake starts it (AW-1).
