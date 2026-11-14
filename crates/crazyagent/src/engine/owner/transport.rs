@@ -2469,6 +2469,9 @@ async fn serve_admitted(
         }
         let submitted = request.clone();
         let _barrier = engine.owner_egress.write().await;
+        if authority.authenticate(auth)? != a {
+            return Err(failure("owner_grant_stale_or_revoked"));
+        }
         if let Err(error) = authority.master_dispatch.lock().await.room(&submitted) {
             return write_owner_reply(stream, Err(error), id, mutation)
                 .await
