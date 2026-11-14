@@ -188,10 +188,11 @@ export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen
 }
 
 /** Drops the frontmatter block at the top of a SKILL.md: the detail view shows it as the
- * skill's name and description, plus any other header line agents read. Input: the file text.
- * Output: the Markdown body. */
+ * skill's name and description, plus any other header line agents read. CRLF line ends read
+ * as plain line ends, as the TUI shows them; a lone carriage return stays for the view to
+ * escape. Input: the file text. Output: the Markdown body. */
 export function skillBody(text: string): string {
-  const source = text.replace(/^\uFEFF/, "");
+  const source = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
   const lines = source.split("\n");
   if (lines[0]?.trimEnd() !== "---") return source;
   const end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
