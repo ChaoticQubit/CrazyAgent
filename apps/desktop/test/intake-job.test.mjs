@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 const intake = await import("../src/screens/intake/intake.ts");
+const api = await import("../src/api-intake.ts");
 
 const SOURCE = "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop";
 const job = (state, extra = {}) => ({ id: "add-1", source: SOURCE, mode: "move", overrides: [], stopping: false, state, ...extra });
@@ -80,15 +81,36 @@ test("a job's end is said once, when the read after a running one shows that job
   assert.equal(intake.jobEndLine(running, { ...done, id: "add-2" }), null);
 });
 
+const folderRead = (value = {}) => ({ kind: "ok", value: { bytes: 10, worktrees: 0, worktree_paths: [], movable: true, copyable: true, git: true, same_volume: true, ...value } });
+
 test("answering a soft refusal on Home asks about that issue and keeps the job's own overrides", () => {
-  assert.deepEqual(intake.jobQuestion(job({ state: "needs_answer", code: "home_copy_too_large" }, { mode: "copy", overrides: ["linked_checkout"] })),
+  assert.deepEqual(intake.jobQuestion(job({ state: "needs_answer", code: "home_copy_too_large" }, { mode: "copy", overrides: ["linked_checkout"] }), folderRead()),
     { issues: ["too_many"], overrides: ["linked_checkout", "too_large"] });
-  assert.deepEqual(intake.jobQuestion(job({ state: "needs_answer", code: "home_move_worktrees" }, { overrides: ["too_large"] })),
+  assert.deepEqual(intake.jobQuestion(job({ state: "needs_answer", code: "home_move_worktrees" }, { overrides: ["too_large"] }), folderRead({ movable: false, git_link: "worktrees" })),
     { issues: ["worktrees"], overrides: ["worktrees", "too_large"] });
-  assert.deepEqual(intake.jobQuestion(job({ state: "needs_answer", code: "home_copy_linked_checkout" }, { mode: "copy", overrides: ["linked_checkout"] })),
+  assert.deepEqual(intake.jobQuestion(job({ state: "needs_answer", code: "home_copy_linked_checkout" }, { mode: "copy", overrides: ["linked_checkout"] }), folderRead()),
     { issues: ["linked_checkout"], overrides: ["linked_checkout"] });
-  assert.throws(() => intake.jobQuestion(job({ state: "done" })));
-  assert.throws(() => intake.jobQuestion(job({ state: "needs_answer", code: "intake_failed" })));
+  assert.throws(() => intake.jobQuestion(job({ state: "done" }), folderRead()));
+  assert.throws(() => intake.jobQuestion(job({ state: "needs_answer", code: "intake_failed" }), folderRead()));
+  assert.throws(() => intake.jobQuestion(job({ state: "needs_answer", code: "home_move_worktrees" }), { kind: "loading" }));
+});
+
+test("Home's answer to a refused move names the git link the folder read found, with its data-loss warning", () => {
+  const { ADD_WARNINGS } = api;
+  const refused = job({ state: "needs_answer", code: "home_move_worktrees" });
+  const read = folderRead({ movable: false, git_link: "linked_worktree", worktree_paths: ["/Users/mira/Projects/shop-main"] });
+  const linked = intake.jobQuestion(refused, read);
+  assert.deepEqual(linked, { issues: ["linked_worktree"], overrides: ["worktrees"] });
+  const blocks = intake.anywayWarnings("move", linked.issues, read);
+  assert.ok(blocks.some((block) => block.loss && block.lines.includes(ADD_WARNINGS.linked_worktree)));
+  assert.ok(!blocks.some((block) => block.lines.includes(ADD_WARNINGS.worktrees)));
+  assert.deepEqual(intake.jobQuestion(refused, folderRead({ movable: false, git_link: "submodule" })).issues, ["submodule"]);
+  const worktrees = folderRead({ movable: false, git_link: "worktrees", worktree_paths: ["/Users/mira/Projects/shop-fix"] });
+  const listed = intake.anywayWarnings("move", intake.jobQuestion(refused, worktrees).issues, worktrees);
+  assert.ok(listed.some((block) => block.lines.includes(ADD_WARNINGS.worktrees) && block.paths.includes("/Users/mira/Projects/shop-fix")));
+  const unread = { kind: "error", code: "folder_size_failed", message: "Something went wrong. Try again." };
+  assert.deepEqual(intake.jobQuestion(refused, unread), { issues: ["git_data_unread", "git_unread"], overrides: ["worktrees"] });
+  assert.deepEqual(intake.jobQuestion(refused, folderRead({ movable: undefined, copyable: undefined })).issues, ["git_data_unread", "git_unread"]);
 });
 
 const { createElement } = await import("react");
