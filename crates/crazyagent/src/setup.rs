@@ -555,7 +555,7 @@ pub const PLATFORM_UNSUPPORTED: &str = "setup_platform_unsupported";
 /// profile reads: the Setup note, and a refused agent git step.
 pub const AGENT_GIT_NEEDS_TOOLS: &str = "agent_git_needs_tools";
 
-const REASONS: [(&str, &str); 34] = [
+const REASONS: [(&str, &str); 35] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
@@ -588,6 +588,10 @@ const REASONS: [(&str, &str); 34] = [
     (
         "setup_uv_missing",
         "uv is needed to install Graphify and it is not installed.",
+    ),
+    (
+        "setup_winget_missing",
+        "winget is needed to install uv and it is not installed. Install App Installer from the Microsoft Store, then run setup again.",
     ),
     (
         "setup_store_unavailable",

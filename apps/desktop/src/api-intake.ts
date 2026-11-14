@@ -158,6 +158,7 @@ const COPY: Record<string, string> = {
   setup_version_mismatch: "A different version from the pinned one is installed.",
   setup_version_unreadable: "The installed program didn't report its version.",
   setup_uv_missing: "uv is needed to install graphify and isn't installed.",
+  setup_winget_missing: "winget is needed to install uv and isn't installed. Install App Installer from the Microsoft Store, then run setup again.",
   setup_pin_invalid: "The pinned source isn't valid, so nothing was installed.",
   setup_tool_unsupported: "This tool can't be installed on this computer yet.",
   setup_request_bounds: "Setup couldn't take this request. Pick fewer entries and try again.",

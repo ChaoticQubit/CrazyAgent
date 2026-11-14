@@ -15,30 +15,6 @@ const INSTALL_LIMIT: Duration = Duration::from_secs(15 * 60);
 const VERSION_LIMIT: Duration = Duration::from_secs(10);
 const NAME_BYTES_MAX: usize = 64;
 
-/// The winget command that installs exactly uv `version` for the owner only, with no
-/// prompt and no administrator rights. winget checks the installer's SHA-256 against its
-/// manifest before it runs it.
-pub fn uv_command(version: &Version) -> Command {
-    let mut command = Command::new("winget");
-    command.args([
-        "install",
-        "--id",
-        UV_WINGET_ID,
-        "--exact",
-        "--version",
-        version.as_str(),
-        "--source",
-        "winget",
-        "--scope",
-        "user",
-        "--silent",
-        "--disable-interactivity",
-        "--accept-package-agreements",
-        "--accept-source-agreements",
-    ]);
-    command
-}
-
 /// The Windows installer. tmux reports as found with version `conpty`, because the
 /// built-in ConPTY host replaces it. uv comes from its winget pin, `astral-sh.uv` at the
 /// pinned version in the owner's user scope; winget checks its own manifest checksum.
@@ -120,7 +96,7 @@ impl WindowsInstaller {
             }
             command
                 .args(args)
-                .env("PATH", self.search_path())
+                .env("PATH", self.search_path(std::env::var_os("PATH").as_deref()))
                 .env("UV_CACHE_DIR", data.join("cache"))
                 .env("UV_PYTHON_INSTALL_DIR", data.join("python"))
                 .env("UV_NO_PROGRESS", "1");
@@ -193,15 +169,56 @@ impl WindowsInstaller {
             .find(|path| path.is_file())
     }
 
-    /// The winget command that installs exactly uv `version` for the owner. Inputs: the PATH
-    /// value and the version. Output: the command.
+    /// The winget command that installs exactly uv `version` for the owner only, with no
+    /// prompt and no administrator rights, started by the full path [`Self::winget_on`] finds
+    /// and with only the PATH folders setup keeps. winget checks the installer's SHA-256
+    /// against its manifest before it runs it. Inputs: the PATH value and the version.
+    /// Output: the command, or `setup_winget_missing` when no kept place holds winget.
     fn uv_command_on(
         &self,
         path: Option<&std::ffi::OsStr>,
         version: &Version,
     ) -> Result<Command, InstallError> {
-        let _ = path;
-        Ok(uv_command(version))
+        let winget = self
+            .winget_on(path)
+            .ok_or(InstallError("setup_winget_missing"))?;
+        assert!(winget.is_absolute());
+        let mut command = Command::new(winget);
+        command
+            .args([
+                "install",
+                "--id",
+                UV_WINGET_ID,
+                "--exact",
+                "--version",
+                version.as_str(),
+                "--source",
+                "winget",
+                "--scope",
+                "user",
+                "--silent",
+                "--disable-interactivity",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+            ])
+            .env("PATH", self.search_path(path));
+        Ok(command)
+    }
+
+    /// The winget setup starts: the owner's App Execution Alias in
+    /// `%LOCALAPPDATA%\Microsoft\WindowsApps`, else the first `winget.exe` in a PATH folder
+    /// the installer's places keep ([`Self::kept`]). The alias is a reparse point, so each
+    /// place is looked at without following it. Input: the PATH value. Output: the file, or
+    /// none.
+    fn winget_on(&self, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+        let alias = self
+            .local_app_data
+            .join("Microsoft")
+            .join("WindowsApps")
+            .join("winget.exe");
+        std::iter::once(alias)
+            .chain(self.kept(path).into_iter().map(|dir| dir.join("winget.exe")))
+            .find(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| !meta.is_dir()))
     }
 
     /// The PATH folders the programs setup finds and starts may use: absolute ones the
@@ -218,11 +235,11 @@ impl WindowsInstaller {
         kept
     }
 
-    /// The PATH uv gets: the engine's PATH with only the folders setup keeps ([`Self::kept`]).
-    /// Output: the value; empty when the kept folders cannot be joined.
-    fn search_path(&self) -> std::ffi::OsString {
-        let kept = self.kept(std::env::var_os("PATH").as_deref());
-        std::env::join_paths(kept).unwrap_or_default()
+    /// The PATH uv and winget get: the PATH value with only the folders setup keeps
+    /// ([`Self::kept`]). Input: the PATH value. Output: the value; empty when the kept folders
+    /// cannot be joined.
+    fn search_path(&self, path: Option<&std::ffi::OsStr>) -> std::ffi::OsString {
+        std::env::join_paths(self.kept(path)).unwrap_or_default()
     }
 
     fn graphify(&self) -> PathBuf {
@@ -259,7 +276,12 @@ impl Installer for WindowsInstaller {
         let wanted = match (dep, pin) {
             (Dependency::Tmux, _) => return Version::parse(CONPTY),
             (Dependency::Uv, Pin::Winget { id, version }) if id == UV_WINGET_ID => {
-                run_bounded(&mut uv_command(version), INSTALL_LIMIT, false)?;
+                let path = std::env::var_os("PATH");
+                run_bounded(
+                    &mut self.uv_command_on(path.as_deref(), version)?,
+                    INSTALL_LIMIT,
+                    false,
+                )?;
                 version
             }
             (
@@ -411,8 +433,11 @@ mod tests {
             Err(InstallError("setup_pin_invalid"))
         );
         let uv_version = Version::parse("0.9.5").unwrap();
-        let uv = uv_command(&uv_version);
-        assert_eq!(uv.get_program(), "winget");
+        let aliases = local.join("Microsoft").join("WindowsApps");
+        std::fs::create_dir_all(&aliases).unwrap();
+        std::fs::write(aliases.join("winget.exe"), b"").unwrap();
+        let uv = installer.uv_command_on(None, &uv_version).unwrap();
+        assert_eq!(uv.get_program(), aliases.join("winget.exe").as_os_str());
         assert!(uv.get_args().eq([
             "install",
             "--id",
