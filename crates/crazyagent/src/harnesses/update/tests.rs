@@ -2080,6 +2080,16 @@ fn a_harness_the_resolver_refuses_as_agent_writable_is_never_asked_its_version()
                 Some(refused.line())
             );
             assert!(!ran.exists(), "a refused harness file is never run");
+            let listed = crate::harnesses::with_needs(
+                vec![entry("codex", Some(case.entry.executable.clone().unwrap()))],
+                &case.machine.roots().places,
+            );
+            assert_eq!(
+                listed[0].status,
+                crate::harnesses::HarnessStatus::CantRun {
+                    reason: refused.line()
+                }
+            );
         } else {
             assert!(resolved.is_ok());
             assert_eq!(versions.needs, None);
@@ -2351,4 +2361,91 @@ fn a_versions_row_names_the_sign_in_minimum_of_a_harness_that_signs_in() {
     let claude = machine.program("brew/bin/claude", 0o755);
     let installed = Case::new(machine, entry("claude-code", Some(claude)), None).versions(false);
     assert_eq!(installed.sign_in_min.as_deref(), Some("2.1.268"));
+}
+
+/// RV-DS241-59: a check or update program is trusted only as the tool resolver trusts one:
+/// npm from a prefix inside a project, which agents write, or from a prefix under a folder
+/// every user can write, two levels up from npm, is refused before anything runs.
+#[test]
+fn a_check_program_agents_or_other_users_can_change_up_its_path_is_refused() {
+    for prefix in ["proj/node", "open/shared/node"] {
+        let machine = Machine::new();
+        std::fs::create_dir_all(machine.root.path().join("proj/.crazyagent")).unwrap();
+        machine.npm(prefix);
+        let open = machine.root.path().join("open");
+        std::fs::create_dir_all(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let real = machine.program(
+            &format!("{prefix}/lib/node_modules/@openai/codex/bin/codex.js"),
+            0o755,
+        );
+        assert_eq!(
+            check_command("codex", &real, &machine.roots()).map(|fixed| fixed.map(|_| ())),
+            Err(TOOL_UNSAFE),
+            "{prefix}"
+        );
+    }
+}
+
+/// security-audit run-1 (npm prefix, test A): a Check of an npm harness outside the engine's
+/// own prefix never starts a `node` the resolver would not run: npm's `env node` first line
+/// finds the prefix's node, which leads into a folder every user can write, so the check is
+/// refused or runs a vetted node, and that node never runs.
+#[test]
+fn a_check_never_runs_an_npm_prefix_node_others_can_change() {
+    let machine = Machine::new();
+    let home = machine.roots().home;
+    std::fs::create_dir_all(&home).unwrap();
+    let real = machine.program("node/lib/node_modules/@openai/codex/bin/codex.js", 0o755);
+    let cli = machine
+        .root
+        .path()
+        .join("node/lib/node_modules/npm/bin/npm-cli.js");
+    executable(&cli, "#!/usr/bin/env node\n");
+    let bin = machine.root.path().join("node/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(&cli, bin.join("npm")).unwrap();
+    let open = machine.root.path().join("open");
+    std::fs::create_dir_all(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    executable(&open.join("node"), "#!/bin/sh\n: > \"$HOME/marker\"\n");
+    std::os::unix::fs::symlink(open.join("node"), bin.join("node")).unwrap();
+    let resolved = crate::tools::resolve_entry(&bin.join("npm"), &machine.roots().places);
+    let missing = resolved.unwrap_err();
+    assert_eq!(missing.reason, crate::tools::Reason::NeedsInterpreter);
+    assert_eq!(missing.needs.as_deref(), Some("node"));
+    match check_command("codex", &real, &machine.roots()) {
+        Ok(Some(fixed)) => {
+            let _ = run(&fixed, &home, CHECK_TIME);
+        }
+        Ok(None) => {}
+        Err(code) => assert_eq!(code, TOOL_UNSAFE),
+    }
+    assert!(
+        !home.join("marker").exists(),
+        "a node others can change never runs"
+    );
+}
+
+/// RV-DS241-62: the Homebrew prefixes the engine trusts for install, check and update are
+/// this platform's own, as the tool resolver's are: Linuxbrew's prefix only on Linux, so a
+/// Mac never stats or runs a brew from the home automount.
+#[test]
+fn the_engine_trusts_only_this_platforms_homebrew_prefixes() {
+    let machine = Machine::new();
+    let roots = Roots::engine(machine.root.path());
+    let linuxbrew = PathBuf::from("/home/linuxbrew/.linuxbrew");
+    assert_eq!(
+        roots.brew_prefixes.contains(&linuxbrew),
+        cfg!(target_os = "linux")
+    );
+    if cfg!(target_os = "macos") {
+        for prefix in ["/opt/homebrew", "/usr/local"] {
+            assert!(
+                roots.brew_prefixes.contains(&PathBuf::from(prefix)),
+                "{prefix}"
+            );
+        }
+    }
 }
