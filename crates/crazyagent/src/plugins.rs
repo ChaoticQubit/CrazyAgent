@@ -389,11 +389,14 @@ pub struct LaunchServer {
 }
 
 /// The effective set with each server's secret values already read, ready for a harness
-/// launch. Skills are the same folders as in `EffectivePlugins`.
+/// launch. Skills are the same folders as in `EffectivePlugins`. `context_mode_needs_node`
+/// says the default pack's context-mode server was left out because the Node.js beside npx
+/// is older than context-mode needs.
 #[derive(Debug, Default)]
 pub struct LaunchPlugins {
     pub skills: Vec<EffectiveSkill>,
     pub servers: Vec<LaunchServer>,
+    pub context_mode_needs_node: bool,
 }
 
 const PROBLEMS: &[(&str, &str)] = &[
@@ -556,6 +559,10 @@ const PROBLEMS: &[(&str, &str)] = &[
     (
         "server_installs_busy",
         "Too many installs are running. Check again in a minute.",
+    ),
+    (
+        "server_node_too_old",
+        "context-mode needs Node.js 22.5 or newer. Update Node.js, then check again.",
     ),
     (
         "server_output_too_large",

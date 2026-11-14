@@ -1131,6 +1131,7 @@ impl AgentContext {
                 developer.push_str(&tool_use_section(
                     false,
                     servers,
+                    self.plugins.context_mode_needs_node,
                     &self.off_tools,
                     first_skill,
                 ));
@@ -1202,6 +1203,7 @@ impl AgentContext {
                 text.push_str(&tool_use_section(
                     true,
                     servers,
+                    self.plugins.context_mode_needs_node,
                     &self.off_tools,
                     first_skill,
                 ));
@@ -1651,12 +1653,15 @@ fn short_description(text: &str, bytes: usize) -> String {
 /// Tells a tools-on launch the rules for the tools it has (18.15.1), as firm rules for every
 /// task (DEC-116): the context-mode tools left on, by the names its harness gives them, for
 /// all output that is not short and fixed, a graphify query before any source read and a
-/// check of the approved skills by the names the skills index uses. Inputs: whether the
-/// harness is Claude Code, the launch's servers, the tools switched off and the first
-/// approved skill's name, none without skills. Output: at most `TOOL_USE_BYTES_MAX` bytes.
+/// check of the approved skills by the names the skills index uses. A launch that left the
+/// context-mode server out on an old Node.js is told why. Inputs: whether the harness is
+/// Claude Code, the launch's servers, whether context-mode was left out for its Node.js, the
+/// tools switched off and the first approved skill's name, none without skills. Output: at
+/// most `TOOL_USE_BYTES_MAX` bytes.
 fn tool_use_section(
     claude: bool,
     servers: &[LaunchServer],
+    context_mode_needs_node: bool,
     off_tools: &[(String, Vec<String>)],
     skill: Option<&str>,
 ) -> String {
@@ -1682,6 +1687,9 @@ fn tool_use_section(
                 " of the `{CONTEXT_MODE_DECLARED}` MCP server. Use the shell only for short fixed output, state changes and edits.\n"
             ),
         });
+    }
+    if context_mode_needs_node && !context_mode {
+        section.push_str("- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n");
     }
     section.push_str("- graphify: query the project graph before you read or search source. Run `graphify query \"<question>\"` in the shell first, `graphify path \"<A>\" \"<B>\"` for how two parts connect and `graphify explain \"<name>\"` for one part. If your worktree has no `graphify-out/graph.json`, say so in your report.\n");
     if let Some(name) = skill {

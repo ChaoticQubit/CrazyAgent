@@ -1546,6 +1546,9 @@ fn boundary_check(
         ForCheck::Refused("context_mode_installs_busy") => {
             return Err("server_installs_busy".into());
         }
+        ForCheck::Refused("context_mode_node_too_old") => {
+            return Err("server_node_too_old".into());
+        }
         ForCheck::Refused(code) => {
             eprintln!("plugin_check_install_refused cause={code}");
             return Err("server_cant_start".into());

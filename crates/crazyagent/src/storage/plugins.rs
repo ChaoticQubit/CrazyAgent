@@ -1452,7 +1452,16 @@ pub(crate) fn launch_set(
 
 fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, EngineError> {
     let mut servers = Vec::with_capacity(plugins.servers.len());
+    let mut context_mode_needs_node = false;
     for server in plugins.servers {
+        #[cfg(unix)]
+        let spec = crate::context_mode::for_launch(root, server.spec);
+        #[cfg(not(unix))]
+        let spec = Some(server.spec);
+        let Some(spec) = spec else {
+            context_mode_needs_node = true;
+            continue;
+        };
         let mut secrets = Vec::with_capacity(server.secrets.len());
         for secret in server.secrets {
             secrets.push(LaunchSecret {
@@ -1460,10 +1469,6 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
                 value: SecretValue::new(read_secret(root, &secret.reference)?),
             });
         }
-        #[cfg(unix)]
-        let spec = crate::context_mode::for_launch(root, server.spec);
-        #[cfg(not(unix))]
-        let spec = server.spec;
         servers.push(LaunchServer {
             name: server.name,
             spec,
@@ -1474,6 +1479,7 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
     Ok(LaunchPlugins {
         skills: plugins.skills,
         servers,
+        context_mode_needs_node,
     })
 }
 

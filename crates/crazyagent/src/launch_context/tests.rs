@@ -2029,6 +2029,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
                     ),
                 }],
             }],
+            context_mode_needs_node: false,
         },
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
@@ -2154,6 +2155,7 @@ impl LeftPane {
                         value: crate::plugins::SecretValue::new(secret.as_bytes().to_vec()),
                     }],
                 }],
+                context_mode_needs_node: false,
             },
             instructions: "# Project context from CrazyAgent\n".into(),
             process: None,
@@ -2545,6 +2547,7 @@ fn the_context_mode_server_is_declared_under_its_plugin_name_for_claude_and_code
     let plugins = || LaunchPlugins {
         skills: Vec::new(),
         servers: vec![command_server("context-mode"), command_server("graph")],
+        context_mode_needs_node: false,
     };
 
     let claude = private_home(&root, "claude");
@@ -2578,6 +2581,7 @@ fn switched_off_tools_reach_claude_as_denied_names_and_codex_as_disabled_tools()
     let plugins = || LaunchPlugins {
         skills: Vec::new(),
         servers: vec![command_server("context-mode"), command_server("graph")],
+        context_mode_needs_node: false,
     };
     let off = || {
         vec![
@@ -2934,6 +2938,7 @@ fn every_tools_on_launch_delivers_the_tool_rules_as_firm_rules() {
                     folder: folder.clone(),
                 }],
                 servers: vec![command_server("context-mode")],
+                context_mode_needs_node: false,
             },
             Vec::new(),
         )
@@ -3012,6 +3017,7 @@ fn the_task_start_reminder_names_the_select_string_and_skills_per_harness_and_no
             true => vec![command_server("context-mode"), command_server("graph")],
             false => vec![command_server("graph")],
         },
+        context_mode_needs_node: false,
     };
     let off = |tools: &[&str]| {
         vec![(
@@ -3135,6 +3141,7 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
             false => Vec::new(),
         },
         servers: vec![command_server("context-mode"), command_server("graph")],
+        context_mode_needs_node: false,
     };
     let off = || {
         vec![(
@@ -3252,6 +3259,7 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
         LaunchPlugins {
             skills: Vec::new(),
             servers: vec![command_server("graph")],
+            context_mode_needs_node: false,
         },
         Vec::new(),
     )

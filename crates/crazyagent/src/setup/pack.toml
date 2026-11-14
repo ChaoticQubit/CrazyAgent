@@ -161,6 +161,7 @@ license = "Elastic-2.0"
 on_by_default = true
 install = "run npx -y context-mode@1.0.169 as a stdio MCP server, matching the pinned v1.0.169 commit"
 integrity = "sha512-94JIaFuLjF9SO2BsGTrbGtyT44K95+9OC8BdbaL/UT76xOkanJLfUR5CzmNw+GELXZQqH4nBrKg9wjBnSFkVnQ=="
+program_integrity = "sha512-JtyjW26+UfYxCH3Dvw55p7ZQCVoFaM/p6yt8fw4crItrGS6OTnJOmw3vP5r1OEup9SR5cbJtJI262EHdMm5HUA=="
 source = { kind = "git", repo = "https://github.com/mksglu/context-mode", commit = "589d8214d56740a28b5f7bf63167743d586b0b40" }
 
 [[entries]]

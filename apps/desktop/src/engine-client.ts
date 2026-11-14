@@ -289,6 +289,7 @@ export function errorMessage(error: unknown): string {
     server_npm_missing: "context-mode needs npm and node in the same folder as npx. Install Node.js, then check again.",
     server_version_unpinned: "This context-mode version is not the one the default pack pins, so CrazyAgent does not install it. Use the default pack's version.",
     server_installs_busy: "Too many installs are running. Check again in a minute.",
+    server_node_too_old: "context-mode needs Node.js 22.5 or newer. Update Node.js, then check again.",
     server_output_too_large: "The server sent too much output.",
     server_refused: "The server refused the request.",
     server_reply_invalid: "The server's answer was not valid MCP.",
