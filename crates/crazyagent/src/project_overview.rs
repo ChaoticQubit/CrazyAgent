@@ -900,16 +900,18 @@ pub fn reject(db: &Connection, project: &ProjectId, tab: Tab) -> Result<(), Engi
 }
 
 /// Marks the project's Overview stale after a landed change set, due once the quiet period
-/// has passed, only while its tabs refresh after landings (the default with no row). A
-/// run that already waits to start at once (the first read, a Refresh) keeps its time.
-/// Inputs: the landing's connection, the project and the time. Output: unit, or
-/// `overview_unavailable`.
+/// has passed, only while its tabs refresh after landings (the default with no row) and the
+/// project is still set up, checked in the same statement, so a landing that ends after the
+/// project's removal makes no row (RV-DS241-81 r1 F1). A run that already waits to start at
+/// once (the first read, a Refresh) keeps its time. Inputs: the landing's connection, the
+/// project and the time. Output: unit, or `overview_unavailable`.
 pub fn mark_stale(db: &Connection, project: &ProjectId, now_ms: i64) -> Result<(), EngineError> {
     assert!(now_ms >= 0);
     let due_ms = now_ms.saturating_add(QUIET_MS);
     assert!(due_ms >= now_ms);
     db.execute(
-        "INSERT INTO project_overview(project,stale,due_ms) VALUES(?1,1,?2)
+        "INSERT INTO project_overview(project,stale,due_ms)
+           SELECT ?1,1,?2 WHERE EXISTS (SELECT 1 FROM project_setups WHERE project=?1)
          ON CONFLICT(project) DO UPDATE SET stale=1,
            due_ms=CASE WHEN stale=1 AND due_ms=0 THEN 0 ELSE excluded.due_ms END
          WHERE refresh='after_landing'",
