@@ -325,8 +325,6 @@ impl NativeAuthDispatchHost {
             .map_err(io_error)
     }
 
-    /// Keeps the failure code the custodian named before it exited, for the release that
-    /// settles its attempt. Input: the code. Output: Ok once kept in this dispatch's slot.
     /// Whether the harness this sign-in would run reads older than its sign-in minimum
     /// (DEC-166), from the version Settings, Harnesses shows for it. An unknown version, a
     /// harness with no minimum or a failed read is not too old, so the sign-in runs as before.
@@ -356,6 +354,8 @@ impl NativeAuthDispatchHost {
         crate::harnesses::sign_in_too_old(id, installed.as_deref())
     }
 
+    /// Keeps the failure code the custodian named before it exited, for the release that
+    /// settles its attempt. Input: the code. Output: Ok once kept in this dispatch's slot.
     pub(crate) fn record_custodian_failure(&self, code: &str) -> Result<(), EngineError> {
         let authority = self
             .authority
