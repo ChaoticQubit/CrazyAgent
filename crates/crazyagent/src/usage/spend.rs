@@ -45,17 +45,17 @@ const SETTLING_REFUSALS: [&str; 4] = [
 const _: () = assert!(TRIES_MAX >= 1 && ATTEMPTS_KEPT >= 1);
 const _: () = assert!(AUTO_SPENDS_PER_HOUR >= 1);
 
-/// Adds the Claude free resets source to a spend table made before it, with the default and
-/// the same check as `SCHEMA`.
+/// Adds the Claude free resets source to a spend table made before it, as Don't read since no
+/// source was stored, with the same check as `SCHEMA`.
 pub(super) const ADD_SOURCE: &str = "ALTER TABLE usage_spend ADD COLUMN resets_source TEXT
-    NOT NULL DEFAULT 'through_claude_code'
+    NOT NULL DEFAULT 'off'
     CHECK(resets_source IN ('through_claude_code','as_claude_code','off'));";
 
 pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_spend (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     confirm TEXT NOT NULL CHECK(confirm IN ('confirm_each','one_click','off')),
     all_limited TEXT NOT NULL CHECK(all_limited IN ('notice','no_hint','auto_spend')),
-    resets_source TEXT NOT NULL DEFAULT 'through_claude_code'
+    resets_source TEXT NOT NULL DEFAULT 'off'
         CHECK(resets_source IN ('through_claude_code','as_claude_code','off'))
 );
 CREATE TABLE IF NOT EXISTS usage_spend_attempts (
@@ -108,16 +108,17 @@ pub enum AllLimited {
     AutoSpend,
 }
 
-/// Where the engine reads Claude free resets from (DEC-154 addendum 2026-11-13, owner):
-/// through Claude Code (the default: its own report when its version has one, else the detail
-/// call identifying as Claude Code), always as Claude Code, or not at all.
+/// Where the engine reads Claude free resets from (DEC-154 addendum, owner): not at all (the
+/// default since 2026-11-14, as asking as Claude Code may break Anthropic's terms), through
+/// Claude Code (its own report when its version has one, else the detail call identifying as
+/// Claude Code), or always as Claude Code.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResetsSource {
     #[default]
+    Off,
     ThroughClaudeCode,
     AsClaudeCode,
-    Off,
 }
 
 /// The owner's Pools settings: the two spend settings and where Claude free resets are read
@@ -260,9 +261,9 @@ pub fn read(db: &Connection) -> Result<SpendSettings, EngineError> {
             _ => AllLimited::Notice,
         },
         resets_source: match source.as_str() {
+            "through_claude_code" => ResetsSource::ThroughClaudeCode,
             "as_claude_code" => ResetsSource::AsClaudeCode,
-            "off" => ResetsSource::Off,
-            _ => ResetsSource::ThroughClaudeCode,
+            _ => ResetsSource::Off,
         },
     })
 }
