@@ -3246,6 +3246,67 @@ async fn owner_removal_takes_the_live_master_done_quiet_and_notifications_with_i
     engine.stop().await;
 }
 
+/// A project added again under a removed project's id starts with no Overview row, tab
+/// seal or pending proposal and no master turn or kept conversation of the old one: the
+/// removal takes them with it, so no Overview run of the old project is claimed again and
+/// no text written from its evidence is offered for Accept (RV-DS241-81, ds-engine r1).
+#[tokio::test]
+async fn owner_removal_takes_the_overview_and_master_conversation_rows_with_it() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    crate::project_overview::initialize(&db).unwrap();
+    for row in [
+        "INSERT INTO project_overview(project,stale,due_ms) VALUES ('setup-pooled',1,0)",
+        "INSERT INTO project_overview_tabs(project,tab,seal,proposal) VALUES ('setup-pooled','features','s1','- Old feature')",
+        "INSERT INTO team_master_turns(agent,turn,project,started_ms,finished_ms,outcome) VALUES (7,1,'setup-pooled',1,2,'done')",
+        "INSERT INTO team_master_conversations(session,project,agent,harness,connection,conversation,record) VALUES ('s-old','setup-pooled',7,'claude','c1','conv-old','/tmp/old.jsonl')",
+    ] {
+        db.execute(row, []).unwrap();
+    }
+    drop(db);
+    let tables = [
+        "project_overview",
+        "project_overview_tabs",
+        "team_master_turns",
+        "team_master_conversations",
+    ];
+    for table in tables {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            1,
+            "{table} holds the project's row before removal"
+        );
+    }
+
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    for table in tables {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            0,
+            "{table} goes with the project"
+        );
+    }
+    drop(owner);
+    engine.stop().await;
+}
+
 /// A live agent keeps its row when its project is removed, and the status it writes after
 /// that logs nothing: the removal already took the project's history (HB-S5-I).
 #[tokio::test]
