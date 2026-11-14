@@ -1631,7 +1631,8 @@ impl ResearchRunner {
     /// Runs one agent with tools off that can read `run.folder`, its secret files
     /// closed but the ones the owner shared back (DEC-147.9), but write only
     /// its own engine-owned work, home and temp folders, reaching nothing but
-    /// its model endpoint. A managed account is held under the engine custody
+    /// its model endpoint and none of the engine root's secrets, which no
+    /// granted folder may hold. A managed account is held under the engine custody
     /// lease for the whole run. Takes the run and `stop`, polled while the
     /// agent runs. Returns how it ended; the agent's process group is stopped
     /// on every path, including a panic or an early error.
@@ -1737,6 +1738,7 @@ impl ResearchRunner {
             &tmp,
             SandboxNetwork::Only(vec![model_remote(account)?]),
         )?
+        .guard_engine(self.engine_folder()?)?
         .allow_read(&folder)?;
         let program =
             crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())?;
@@ -4626,9 +4628,7 @@ mod tests {
     /// never named, and no check waits on a remote host.
     #[test]
     fn a_loopback_provider_that_refuses_connections_is_named_at_once_and_a_listening_one_is_not() {
-        let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-        let port = closed.local_addr().unwrap().port();
-        drop(closed);
+        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
         let open = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let listening = open.local_addr().unwrap().port();
         let codex = |base_url: String| ResearchAccount::Endpoint {
@@ -4680,9 +4680,7 @@ mod tests {
     /// keeps its place.
     #[test]
     fn the_reach_check_here_names_a_refusing_provider_only_where_confined_runs_exist() {
-        let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-        let port = closed.local_addr().unwrap().port();
-        drop(closed);
+        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
         let account = ResearchAccount::Endpoint {
             base_url: format!("http://127.0.0.1:{port}/v1"),
             model: "local-model".into(),
@@ -4711,6 +4709,25 @@ mod tests {
         assert!(!refused(Err(Error::from_raw_os_error(libc::EMFILE))));
         assert!(!refused(Err(Error::from(ErrorKind::AddrNotAvailable))));
         assert!(!refused(Err(Error::from(ErrorKind::PermissionDenied))));
+    }
+
+    /// REACH-FLAKE: the port a reach row names for a down provider stays in use while the row
+    /// runs, so the system gives it to no port-0 bind and refuses a bind that names it without
+    /// `SO_REUSEADDR`, and every connect to it is refused at once: the row never finds a
+    /// provider it did not start on that port.
+    #[test]
+    fn a_port_kept_for_a_down_provider_refuses_connects_and_no_plain_bind_takes_it() {
+        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+        let taken = crate::spawn_gate::bind_tcp_std_exclusive(address);
+        assert_eq!(
+            taken.as_ref().map(drop).map_err(std::io::Error::kind),
+            Err(std::io::ErrorKind::AddrInUse),
+            "a plain bind took the port the row named for a down provider"
+        );
+        assert!(refused(
+            crate::spawn_gate::connect_tcp_std_timeout(&address, PROVIDER_REACH_TIME).map(drop)
+        ));
     }
 
     #[test]
@@ -4979,6 +4996,154 @@ mod tests {
             )),
             "{profile}"
         );
+    }
+
+    const PROFILE_CREDENTIAL: &str = "sec-ro-guard-dummy-profile-credential";
+
+    /// Writes a dummy sign-in credential where a native profile keeps its own, under
+    /// `<engine>/native-profiles/<key>/home`. Input: the engine root. Output: the path of
+    /// the dummy `.credentials.json`, which holds [`PROFILE_CREDENTIAL`].
+    fn native_profile_credential(engine: &Path) -> PathBuf {
+        let home = engine
+            .join(crate::engine::bootstrap::NATIVE_PROFILES_FOLDER)
+            .join("5".repeat(64))
+            .join("home");
+        fs::create_dir_all(&home).unwrap();
+        let credential = home.join(".credentials.json");
+        fs::write(&credential, PROFILE_CREDENTIAL).unwrap();
+        assert!(credential.starts_with(engine));
+        credential
+    }
+
+    /// A runner whose Codex is a stand-in at `codex` that prints the file at `target` and
+    /// exits. Inputs: the engine root fixture, the stand-in path and the file it reads.
+    /// Output: the runner.
+    fn reading_runner(root: &EngineRoot, codex: &Path, target: &Path) -> ResearchRunner {
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(
+            codex,
+            format!("#!/bin/sh\ncat '{}'\nexit 0\n", target.display()),
+        )
+        .unwrap();
+        fs::set_permissions(codex, fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = codex.to_path_buf();
+        ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+            .unwrap()
+            .with_harness_lookup(Arc::new(move |harness: &str| {
+                (harness == "codex").then(|| pinned.clone())
+            }))
+    }
+
+    /// Tells whether any regular file under `folder`, not following links, holds `text`.
+    /// Input: the folder and the text. Output: true when one does.
+    fn holds_text(folder: &Path, text: &str) -> bool {
+        fs::read_dir(folder)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| match entry.file_type() {
+                Ok(kind) if kind.is_dir() => holds_text(&entry.path(), text),
+                Ok(kind) if kind.is_file() => fs::read(entry.path()).is_ok_and(|bytes| {
+                    bytes
+                        .windows(text.len())
+                        .any(|part| part == text.as_bytes())
+                }),
+                _ => false,
+            })
+    }
+
+    /// SEC-RO-GUARD: a read-only run gets the engine-secret wall every other sandbox gets.
+    /// Its Seatbelt profile names the native sign-in profiles folder, the run still starts
+    /// with its own home, work and temp folders inside the engine root, and a stand-in agent
+    /// that tries to read a profile's credentials gets nothing.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_run_cannot_read_a_native_profile_credential() {
+        let root = engine_root();
+        let engine = root.database.parent().unwrap().to_path_buf();
+        let credential = native_profile_credential(&engine);
+        let runner = reading_runner(&root, &root.base.join("bin").join("codex"), &credential);
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let run = ReadOnlyRun {
+            name: "overview-alpha-3",
+            agent: "overview",
+            project: None,
+            folder: &folder,
+            prompt: "Describe this project.",
+            account: &account,
+            wall_time: Duration::from_secs(5),
+            output_tokens: None,
+        };
+        let _ = runner.run_read_only(&run, &|| false);
+        let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-3.sb"))
+            .expect("the guarded run still installs its profile");
+        let profiles = engine.join(crate::engine::bootstrap::NATIVE_PROFILES_FOLDER);
+        assert!(
+            profile.contains(&format!("(subpath \"{}\")", profiles.display())),
+            "{profile}"
+        );
+        let agent = root.state.join("agents").join("overview-alpha-3");
+        assert!(agent.join("events.jsonl").is_file());
+        assert!(!holds_text(&agent, PROFILE_CREDENTIAL));
+    }
+
+    /// SEC-RO-GUARD: no read-only grant may hold the engine root. A run folder holding it
+    /// and a harness installed in it are each refused before the agent starts, so the
+    /// stand-in never reads a native profile's credentials.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_grant_that_holds_the_engine_root_is_refused() {
+        let root = engine_root();
+        let engine = root.database.parent().unwrap().to_path_buf();
+        let credential = native_profile_credential(&engine);
+        let repo = root.base.join("repo");
+        fs::create_dir(&repo).unwrap();
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let cases = [
+            (
+                "overview-alpha-4",
+                root.base.clone(),
+                root.base.join("bin").join("codex"),
+            ),
+            ("overview-alpha-5", repo, engine.join("codex")),
+        ];
+        for (name, folder, codex) in cases {
+            assert!(engine.starts_with(&folder) || engine.starts_with(codex.parent().unwrap()));
+            let runner = reading_runner(&root, &codex, &credential);
+            let run = ReadOnlyRun {
+                name,
+                agent: "overview",
+                project: None,
+                folder: &folder,
+                prompt: "Describe this project.",
+                account: &account,
+                wall_time: Duration::from_secs(5),
+                output_tokens: None,
+            };
+            let ending = runner.run_read_only(&run, &|| false);
+            assert!(
+                matches!(
+                    &ending,
+                    Err(RunError::Sandbox(SandboxError::Invalid(reason)))
+                        if reason == crate::sandbox::SECRET_ROOT_REFUSED
+                ),
+                "{name}: {ending:?}"
+            );
+            assert!(!holds_text(
+                &root.state.join("agents").join(name),
+                PROFILE_CREDENTIAL
+            ));
+        }
     }
 
     fn host() -> HostStamp {
