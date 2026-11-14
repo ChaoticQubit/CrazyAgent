@@ -1288,6 +1288,46 @@ fn a_git_moved_into_the_server_temp_folder_stops_a_confined_start() {
     assert!(kept, "the planted .git was removed instead of refusing the start");
 }
 
+/// A `.git` a Full access session left in its temp folder, as a temporary clone or a git
+/// build leaves one, never refuses a later confined start of the project: that start gets a
+/// temp folder of its own, which is still walked and refused while it holds a `.git`
+/// (rv-sec3 r2+r3 F1).
+#[test]
+fn a_git_a_full_access_session_left_in_its_temp_folder_leaves_a_confined_start_alone() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("full-then-confined");
+    set_level(data.path(), &id, AgentAccess::Full);
+    let folder = servers.prepare(&id).unwrap();
+    let temp = |built: &Command| {
+        PathBuf::from(
+            built
+                .get_envs()
+                .find(|(key, _)| key.to_str() == Some("TMPDIR"))
+                .and_then(|(_, value)| value)
+                .unwrap(),
+        )
+    };
+    let full = temp(&server_command(&servers, &id, &root, &folder).unwrap());
+    fs::create_dir_all(full.join("clone").join(".git").join("hooks")).unwrap();
+    set_level(data.path(), &id, AgentAccess::Sandboxed);
+    let confined = server_command(&servers, &id, &root, &folder).map(|built| temp(&built));
+    let walked = confined.as_ref().ok().map(|confined| {
+        fs::create_dir_all(confined.join("clone").join(".git")).unwrap();
+        server_command(&servers, &id, &root, &folder)
+            .map(|_| ())
+            .map_err(|refused| refused.0)
+    });
+    for made in [Some(&full), confined.as_ref().ok()].into_iter().flatten() {
+        let _ = fs::remove_dir_all(made);
+    }
+    let confined =
+        confined.expect("a .git in the Full access temp folder refused a confined start");
+    assert_ne!(confined, full);
+    assert_eq!(walked, Some(Err("ide_server_data_git".to_owned())));
+}
+
 /// Runs git as a built IDE server starts it: the engine's shim under the server's installed
 /// profile and environment, with the owner's home as `HOME`, as the app has it. Inputs: the
 /// built command, the IDE folder, the owner's home, the working folder and git's arguments.
