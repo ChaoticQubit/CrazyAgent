@@ -193,6 +193,17 @@ impl WindowsInstaller {
             .find(|path| path.is_file())
     }
 
+    /// The winget command that installs exactly uv `version` for the owner. Inputs: the PATH
+    /// value and the version. Output: the command.
+    fn uv_command_on(
+        &self,
+        path: Option<&std::ffi::OsStr>,
+        version: &Version,
+    ) -> Result<Command, InstallError> {
+        let _ = path;
+        Ok(uv_command(version))
+    }
+
     /// The PATH folders the programs setup finds and starts may use: absolute ones the
     /// installer's places keep ([`crate::tools::Places::kept_for_children`]), so a relative or
     /// empty entry, or a folder agents can write, never gives uv, its Python or what uv runs.
@@ -313,6 +324,72 @@ mod tests {
         assert_eq!(
             installer.uv_on(Some(path.as_os_str())),
             Some(owner.join("uv.exe"))
+        );
+    }
+
+    /// RV-DS241-95 r2 (rv-sec4 F1): setup starts winget only from the owner's App Execution
+    /// Alias or an absolute PATH folder the tool resolver's places keep, by its full path and
+    /// with only the kept folders on its PATH, so a winget.exe planted in a relative entry or
+    /// a project folder agents can write never runs as the owner when setup installs uv. With
+    /// no winget in a kept place setup refuses instead of starting one by name.
+    #[test]
+    fn windows_setup_starts_winget_only_from_the_owner_alias_or_a_kept_path_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = temp.path().join("local");
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
+        let planted = project.join("bin");
+        let owner = temp.path().join("owner");
+        for folder in [&planted, &owner] {
+            std::fs::create_dir_all(folder).unwrap();
+            std::fs::write(folder.join("winget.exe"), b"winget").unwrap();
+        }
+        let installer =
+            WindowsInstaller::new(&temp.path().join("app"), Some(&local), places()).unwrap();
+        let version = Version::parse("0.9.5").unwrap();
+        let handed_path = |command: &Command| -> Vec<Option<std::ffi::OsString>> {
+            command
+                .get_envs()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+                .map(|(_, value)| value.map(OsStr::to_os_string))
+                .collect()
+        };
+
+        let only_planted =
+            std::env::join_paths([PathBuf::from("relative-bin"), planted.clone()]).unwrap();
+        assert_eq!(
+            installer
+                .uv_command_on(Some(only_planted.as_os_str()), &version)
+                .err(),
+            Some(InstallError("setup_winget_missing")),
+            "a winget only an agent could have placed is never started"
+        );
+
+        let path = std::env::join_paths([
+            PathBuf::from("relative-bin"),
+            planted.clone(),
+            owner.clone(),
+        ])
+        .unwrap();
+        let command = installer
+            .uv_command_on(Some(path.as_os_str()), &version)
+            .unwrap();
+        assert_eq!(command.get_program(), owner.join("winget.exe").as_os_str());
+        assert_eq!(
+            handed_path(&command),
+            [Some(std::env::join_paths([&owner]).unwrap())]
+        );
+
+        let alias = local.join("Microsoft").join("WindowsApps");
+        std::fs::create_dir_all(&alias).unwrap();
+        std::fs::write(alias.join("winget.exe"), b"").unwrap();
+        let command = installer
+            .uv_command_on(Some(path.as_os_str()), &version)
+            .unwrap();
+        assert_eq!(command.get_program(), alias.join("winget.exe").as_os_str());
+        assert_eq!(
+            handed_path(&command),
+            [Some(std::env::join_paths([&owner]).unwrap())]
         );
     }
 
