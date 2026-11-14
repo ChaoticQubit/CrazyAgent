@@ -47,14 +47,20 @@ pub fn uv_command(version: &Version) -> Command {
 pub struct WindowsInstaller {
     app_data: PathBuf,
     local_app_data: PathBuf,
+    places: crate::tools::Places,
 }
 
 impl WindowsInstaller {
-    /// Input: the app's private data folder, which holds Graphify and its Python, and the
-    /// owner's `%LOCALAPPDATA%`, where winget links uv, if Windows set it. Output: the
-    /// installer, `setup_local_app_data_missing` when `%LOCALAPPDATA%` is unset or
-    /// relative, or `setup_store_unavailable` when the app data folder is relative.
-    pub fn new(app_data: &Path, local_app_data: Option<&Path>) -> Result<Self, InstallError> {
+    /// Input: the app's private data folder, which holds Graphify and its Python, the
+    /// owner's `%LOCALAPPDATA%`, where winget links uv, if Windows set it, and the tool
+    /// resolver's places, whose refusals decide the PATH folders setup finds uv in and hands
+    /// uv. Output: the installer, `setup_local_app_data_missing` when `%LOCALAPPDATA%` is
+    /// unset or relative, or `setup_store_unavailable` when the app data folder is relative.
+    pub fn new(
+        app_data: &Path,
+        local_app_data: Option<&Path>,
+        places: crate::tools::Places,
+    ) -> Result<Self, InstallError> {
         let Some(local_app_data) = local_app_data.filter(|path| path.is_absolute()) else {
             return Err(InstallError("setup_local_app_data_missing"));
         };
@@ -64,6 +70,7 @@ impl WindowsInstaller {
         Ok(Self {
             app_data: app_data.to_path_buf(),
             local_app_data: local_app_data.to_path_buf(),
+            places,
         })
     }
 
@@ -113,6 +120,7 @@ impl WindowsInstaller {
             }
             command
                 .args(args)
+                .env("PATH", self.search_path())
                 .env("UV_CACHE_DIR", data.join("cache"))
                 .env("UV_PYTHON_INSTALL_DIR", data.join("python"))
                 .env("UV_NO_PROGRESS", "1");
@@ -167,6 +175,13 @@ impl WindowsInstaller {
     }
 
     fn uv(&self) -> Option<PathBuf> {
+        self.uv_on(std::env::var_os("PATH").as_deref())
+    }
+
+    /// The uv setup runs: the owner's WinGet Links copy, else the first `uv.exe` in a PATH
+    /// folder the installer's places keep ([`Self::kept`]). Input: the PATH value. Output:
+    /// the file, or none.
+    fn uv_on(&self, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
         let linked = self
             .local_app_data
             .join("Microsoft")
@@ -174,13 +189,29 @@ impl WindowsInstaller {
             .join("Links")
             .join("uv.exe");
         std::iter::once(linked)
-            .chain(
-                std::env::var_os("PATH")
-                    .iter()
-                    .flat_map(std::env::split_paths)
-                    .map(|dir| dir.join("uv.exe")),
-            )
+            .chain(self.kept(path).into_iter().map(|dir| dir.join("uv.exe")))
             .find(|path| path.is_file())
+    }
+
+    /// The PATH folders the programs setup finds and starts may use: absolute ones the
+    /// installer's places keep ([`crate::tools::Places::kept_for_children`]), so a relative or
+    /// empty entry, or a folder agents can write, never gives uv, its Python or what uv runs.
+    /// Input: the PATH value. Output: the folders in PATH order.
+    fn kept(&self, path: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+        let kept: Vec<PathBuf> = path
+            .into_iter()
+            .flat_map(std::env::split_paths)
+            .filter(|dir| dir.is_absolute() && self.places.kept_for_children(dir))
+            .collect();
+        assert!(kept.iter().all(|dir| dir.is_absolute()));
+        kept
+    }
+
+    /// The PATH uv gets: the engine's PATH with only the folders setup keeps ([`Self::kept`]).
+    /// Output: the value; empty when the kept folders cannot be joined.
+    fn search_path(&self) -> std::ffi::OsString {
+        let kept = self.kept(std::env::var_os("PATH").as_deref());
+        std::env::join_paths(kept).unwrap_or_default()
     }
 
     fn graphify(&self) -> PathBuf {
@@ -249,12 +280,48 @@ mod tests {
     use super::*;
     use std::ffi::OsStr;
 
+    /// Places with no folders and no HOME, whose refusals are the ones every place has, so a
+    /// row's temp folders are kept and its project folders are not. Output: the places.
+    fn places() -> crate::tools::Places {
+        crate::tools::Places::new(Vec::new(), None)
+    }
+
+    /// RV-DS241-95: setup on Windows finds uv only in an absolute PATH folder the tool
+    /// resolver's places keep, never in a relative entry or a project folder agents can
+    /// write, so the background status check never runs a planted uv.exe.
+    #[test]
+    fn windows_setup_never_finds_uv_in_a_relative_or_agent_writable_path_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = temp.path().join("local");
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
+        let planted = project.join("bin");
+        let owner = temp.path().join("owner");
+        for folder in [&planted, &owner] {
+            std::fs::create_dir_all(folder).unwrap();
+            std::fs::write(folder.join("uv.exe"), b"uv").unwrap();
+        }
+        let installer =
+            WindowsInstaller::new(&temp.path().join("app"), Some(&local), places()).unwrap();
+        let path = std::env::join_paths([
+            PathBuf::from("relative-bin"),
+            planted.clone(),
+            owner.clone(),
+        ])
+        .unwrap();
+        assert_eq!(installer.kept(Some(path.as_os_str())), vec![owner.clone()]);
+        assert_eq!(
+            installer.uv_on(Some(path.as_os_str())),
+            Some(owner.join("uv.exe"))
+        );
+    }
+
     #[test]
     fn windows_needs_no_tmux_and_pins_uv_and_graphify_exactly() {
         let temp = tempfile::tempdir().unwrap();
         let app = temp.path().join("app");
         let local = temp.path().join("local");
-        let installer = WindowsInstaller::new(&app, Some(&local)).unwrap();
+        let installer = WindowsInstaller::new(&app, Some(&local), places()).unwrap();
         let conpty = Version::parse(CONPTY).unwrap();
         assert_eq!(installer.find(Dependency::Tmux), Ok(Some(conpty.clone())));
         let brew = Pin::Homebrew {
@@ -333,7 +400,7 @@ mod tests {
             );
         }
         assert_eq!(
-            WindowsInstaller::new(Path::new("relative"), Some(temp.path())).err(),
+            WindowsInstaller::new(Path::new("relative"), Some(temp.path()), places()).err(),
             Some(InstallError("setup_store_unavailable"))
         );
     }
@@ -343,19 +410,19 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         for local in [None, Some(Path::new("relative"))] {
             assert_eq!(
-                WindowsInstaller::new(temp.path(), local).err(),
+                WindowsInstaller::new(temp.path(), local, places()).err(),
                 Some(InstallError("setup_local_app_data_missing"))
             );
         }
         let sentence = crate::setup::plain_reason("setup_local_app_data_missing");
         assert!(sentence.contains("local app data"), "{sentence}");
-        assert!(WindowsInstaller::new(temp.path(), Some(temp.path())).is_ok());
+        assert!(WindowsInstaller::new(temp.path(), Some(temp.path()), places()).is_ok());
     }
 
     #[test]
     fn uv_installs_only_from_its_own_winget_package() {
         let temp = tempfile::tempdir().unwrap();
-        let installer = WindowsInstaller::new(temp.path(), Some(temp.path())).unwrap();
+        let installer = WindowsInstaller::new(temp.path(), Some(temp.path()), places()).unwrap();
         let version = Version::parse("0.13.5").unwrap();
         for (dep, id) in [
             (Dependency::Uv, "someone.uv"),
