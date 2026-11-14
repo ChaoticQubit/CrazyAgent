@@ -33,6 +33,11 @@ test("a view that never opens stops after its tries, and one that stayed open a 
   assert.equal(io.followTry(io.FOLLOW_TRIES, 0, 60_000), 1, "an agent that ran a while and restarted in a new pane is followed again");
 });
 
+test("a clock that steps back between a view opening and its end counts a try instead of freezing the view (master r1 F1)", () => {
+  assert.equal(io.followTry(3, 10_000, 5_000), 4, "an end that reads earlier than the open is not a steady view, so it spends one try");
+  assert.equal(io.followTry(io.FOLLOW_TRIES, 10_000, 5_000), null, "a view out of tries still stops with Open again");
+});
+
 test("a view trying again says which try it is and why the last one ended", () => {
   assert.equal(io.connectingLine(null, 0), "Connecting to the terminal...");
   const reason = io.endCopy("terminal_outcome_unknown");
