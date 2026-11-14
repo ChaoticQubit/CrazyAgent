@@ -87,12 +87,12 @@ fn run_head(name: &str) -> bool {
 #[cfg(unix)]
 const SWEPT_MAX: usize = 4096;
 
-/// Removes every status run folder, with its profile, that an engine before 2.4.1 left in
-/// the research state: named [`RUN_NAME_HEAD`], the project id and the start time, with no
-/// run-id hash, a shape no run of this engine makes and Delete everything no longer
-/// matches (RV-DS241-45 r2). It runs at engine start, before any status run, and reads at
-/// most [`SWEPT_MAX`] entries. Input: the absolute research state folder. Output: how many
-/// runs it removed.
+/// Removes every status run or Overview writing run folder, with its profile, that an engine
+/// before 2.4.1 left in the research state: a [`run_head`] name, the project id and the start
+/// time, with no run-id hash, a shape no run of this engine makes and Delete everything no
+/// longer matches (RV-DS241-45 r2, RV-DS241-80 r1 F1). It runs at engine start, before any
+/// run, and reads at most [`SWEPT_MAX`] entries. Input: the absolute research state folder.
+/// Output: how many runs it removed.
 #[cfg(unix)]
 pub(crate) fn sweep_unhashed(state: &Path) -> usize {
     assert!(state.is_absolute());
@@ -105,7 +105,7 @@ pub(crate) fn sweep_unhashed(state: &Path) -> usize {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !name.starts_with(RUN_NAME_HEAD) || hashed(name) {
+        if !run_head(name) || hashed(name) {
             continue;
         }
         let profile = state.join("profiles").join(format!("{name}.sb"));
@@ -116,7 +116,7 @@ pub(crate) fn sweep_unhashed(state: &Path) -> usize {
     swept
 }
 
-/// Whether a status run name ends as this engine writes it: `-`, the run-id hash in
+/// Whether a status or Overview run name ends as this engine writes it: `-`, the run-id hash in
 /// lowercase hex, `-` and the start time in plain digits. Input: the name. Output: the
 /// answer.
 #[cfg(unix)]

@@ -2152,7 +2152,11 @@ fn a_finished_overview_run_is_removed_like_a_status_run() {
 fn the_name_of_an_overview_run_is_read_back_as_its_own_projects_only() {
     let demo = ProjectId::new("demo").unwrap();
     let name = run_name(&demo, 1_794_000_000_000);
-    assert_eq!(name, "overview-demo-1794000000000");
+    let hash = crate::roadmap_status::run_stem(&demo)
+        .strip_prefix("roadmap-status-demo-")
+        .unwrap()
+        .to_owned();
+    assert_eq!(name, format!("overview-demo-{hash}-1794000000000"));
     assert!(names_run(&demo, &name));
     for other in ["demo-2", "dem", "demonstration"] {
         let other = ProjectId::new(other).unwrap();

@@ -1003,6 +1003,41 @@ fn a_run_closed_after_its_time_or_whose_project_was_removed_no_longer_holds_its_
     );
 }
 
+/// The start sweep removes the status and Overview run folders and profiles an engine before
+/// 2.4.1 left, named with no run-id hash, and keeps the hashed runs of this engine and every
+/// other folder, so no old run outlives the names Delete everything reads (RV-DS241-80 r1 F1).
+#[cfg(unix)]
+#[test]
+fn the_start_sweep_removes_unhashed_status_and_overview_runs_only() {
+    let scratch = tempfile::tempdir().unwrap();
+    let state = std::fs::canonicalize(scratch.path()).unwrap();
+    let (agents, profiles) = (state.join("agents"), state.join("profiles"));
+    let demo = ProjectId::new("demo").unwrap();
+    let old = [
+        "overview-web_app-1794000000000",
+        "roadmap-status-web_app-1794000000000",
+    ];
+    let kept = [
+        crate::project_overview::run_name(&demo, 1_794_000_000_000),
+        run::run_name(&demo, NOW),
+        "job-1-1".to_owned(),
+    ];
+    for name in old.iter().map(|name| name.to_string()).chain(kept.clone()) {
+        std::fs::create_dir_all(agents.join(&name)).unwrap();
+        std::fs::create_dir_all(&profiles).unwrap();
+        std::fs::write(profiles.join(format!("{name}.sb")), "").unwrap();
+    }
+    assert_eq!(run::sweep_unhashed(&state), old.len());
+    for name in old {
+        assert!(!agents.join(name).exists(), "{name}");
+        assert!(!profiles.join(format!("{name}.sb")).exists(), "{name}");
+    }
+    for name in kept {
+        assert!(agents.join(&name).is_dir(), "{name}");
+        assert!(profiles.join(format!("{name}.sb")).is_file(), "{name}");
+    }
+}
+
 /// A status run's state name is read back as its own project's only, for ids that differ
 /// only in `.`, `:` or `_` and ids that differ only past the cut, so Delete everything of one
 /// project takes no other project's run (RV-DS241-80 r1 F1).

@@ -4,7 +4,6 @@ use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1079,56 +1078,18 @@ const RUN_NAME_BYTES_MAX: usize = 96;
 const RUN_TIME_DIGITS_MAX: usize = 19;
 const RUN_ID_HASH_BYTES: usize = 8;
 
-/// How many bytes [`run_project_part`] gives an id whose written form passes its room:
-/// `_h` and 32 hex digits.
-const RUN_DIGEST_PART_BYTES: usize = 34;
-
-/// The bytes of a run's state name that stand for its project, one to one with the id so
-/// no two projects share a run name (RV-DS241-80 r1 F1): ASCII letters, digits and `-` as
-/// they are, `_` as `__`, any other byte as `_` and two lowercase hex digits, and an id whose
-/// form passes `room` as `_h` and the first 16 bytes of its SHA-256 in hex, which no written
-/// form holds. Inputs: the project and the room. Output: at most `room` name-safe bytes.
+/// The bytes of a run's state name that stand for its project: the project id with every
+/// byte outside ASCII letters, digits, `-` and `_` written as `_` and cut to fit `room`, then
+/// `-` and the first `RUN_ID_HASH_BYTES` of the SHA-256 of the whole id in lowercase hex, so
+/// two ids that read the same once written or cut still get parts of their own (RV-DS241-45,
+/// RV-DS241-80 r1 F1). Inputs: the project and the room. Output: at most `room` bytes.
 pub(crate) fn run_project_part(project: &ProjectId, room: usize) -> String {
-    assert!(room >= RUN_DIGEST_PART_BYTES);
-    let id = project.as_str();
-    let mut part = String::with_capacity(3 * id.len());
-    for byte in id.bytes() {
-        match byte {
-            b'_' => part.push_str("__"),
-            b'-' => part.push('-'),
-            _ if byte.is_ascii_alphanumeric() => part.push(char::from(byte)),
-            _ => write!(part, "_{byte:02x}").expect("writing to a String cannot fail"),
-        }
-    }
-    if part.len() > room {
-        part = String::from("_h");
-        for byte in &Sha256::digest(id.as_bytes())[..16] {
-            write!(part, "{byte:02x}").expect("writing to a String cannot fail");
-        }
-        assert_eq!(part.len(), RUN_DIGEST_PART_BYTES);
-    }
-    assert!(part.len() <= room);
-    assert!(
-        part.bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    );
-    part
-}
-
-/// The part of a status run's state name that names its project: the head, the project id
-/// with every byte outside ASCII letters, digits, `-` and `_` written as `_` and cut so the
-/// name with its time fits `RUN_NAME_BYTES_MAX`, then `-` and the first
-/// `RUN_ID_HASH_BYTES` of the SHA-256 of the whole id in lowercase hex, so two ids that read
-/// the same once written or cut still get stems of their own (RV-DS241-45). Input: the
-/// project. Output: the stem.
-pub(crate) fn run_stem(project: &ProjectId) -> String {
-    use sha2::{Digest, Sha256};
     let hash: String = Sha256::digest(project.as_str().as_bytes())[..RUN_ID_HASH_BYTES]
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
     assert_eq!(hash.len(), 2 * RUN_ID_HASH_BYTES);
-    let room = RUN_NAME_BYTES_MAX - RUN_NAME_HEAD.len() - 1 - hash.len() - 1 - RUN_TIME_DIGITS_MAX;
+    assert!(room > hash.len() + 1);
     let named: String = project
         .as_str()
         .chars()
@@ -1139,9 +1100,19 @@ pub(crate) fn run_stem(project: &ProjectId) -> String {
                 '_'
             }
         })
-        .take(room)
+        .take(room - 1 - hash.len())
         .collect();
-    let stem = format!("{RUN_NAME_HEAD}{named}-{hash}");
+    let part = format!("{named}-{hash}");
+    assert!(part.is_ascii() && part.len() <= room);
+    part
+}
+
+/// The part of a status run's state name that names its project: the head and the
+/// project's [`run_project_part`], sized so the name with its time fits
+/// `RUN_NAME_BYTES_MAX`. Input: the project. Output: the stem.
+pub(crate) fn run_stem(project: &ProjectId) -> String {
+    let room = RUN_NAME_BYTES_MAX - RUN_NAME_HEAD.len() - 1 - RUN_TIME_DIGITS_MAX;
+    let stem = format!("{RUN_NAME_HEAD}{}", run_project_part(project, room));
     assert!(stem.is_ascii());
     assert!(stem.len() + 1 + RUN_TIME_DIGITS_MAX <= RUN_NAME_BYTES_MAX);
     stem
