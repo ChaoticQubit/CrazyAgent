@@ -420,27 +420,45 @@ mod tests {
     }
 
     /// RV-DS241-134: a name stored before hidden characters were refused and made only of
-    /// them (or of them and spaces) is left blank by the load-time cleaning; the profile then
-    /// reads as none, so the owner gets the first-run page instead of a refusal on every
-    /// read, and a new profile saves and loads over it.
+    /// them (or of them and spaces) is left blank by the load-time cleaning; the master path
+    /// loads no profile, while the owner's read gets the cleaned rest with an empty name, so
+    /// the first-run page shows the stored role, bio, stack and style (r2), and a new
+    /// profile saves and loads over it.
     #[cfg(unix)]
     #[test]
-    fn a_stored_name_of_only_hidden_characters_reads_as_no_profile_and_a_new_one_saves() {
+    fn a_stored_name_of_only_hidden_characters_loads_as_none_and_reads_as_a_prefill() {
+        let kept = OwnerProfile {
+            name: String::new(),
+            role: "Founder".into(),
+            bio: "Builds tools.".into(),
+            preferred_stack: vec!["Rust".into()],
+            working_style: WorkingStyle {
+                detail: AnswerDetail::Detailed,
+                initiative: Initiative::ActFirst,
+            },
+        };
         for name in ["\u{200b}", "\u{2060}", "\u{3164}", " \u{200b}\u{2060} "] {
             let mut connection = rusqlite::Connection::open_in_memory().unwrap();
             let tx = connection.transaction().unwrap();
             initialize(&tx).unwrap();
-            let body = serde_json::json!({"name": name, "role": "Founder"}).to_string();
+            let body = serde_json::json!({
+                "name": name,
+                "role": "Founder",
+                "bio": "Builds tools.\u{200b}",
+                "preferred_stack": ["Rust", "\u{2060}"],
+                "working_style": {"detail": "detailed", "initiative": "act_first"},
+            })
+            .to_string();
             tx.execute(
                 "INSERT INTO user_profile(singleton, body) VALUES(1, ?1)",
                 [&body],
             )
             .unwrap();
             assert_eq!(load(&tx).unwrap(), None, "{name:?}");
-            assert!(matches!(
-                read(&tx).unwrap(),
-                OwnerData::OwnerProfile { profile: None }
-            ));
+            let OwnerData::OwnerProfile { profile: read_back } = read(&tx).unwrap() else {
+                panic!("the profile read answers with a profile");
+            };
+            assert_eq!(read_back, Some(kept.clone()), "{name:?}");
             assert!(matches!(save(&tx, &profile()).unwrap(), Outcome::Applied));
             assert_eq!(load(&tx).unwrap(), Some(profile()));
         }

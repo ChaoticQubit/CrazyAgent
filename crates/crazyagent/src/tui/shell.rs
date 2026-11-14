@@ -1711,6 +1711,23 @@ mod tests {
         assert!(requests.contains(&"Pools".to_owned()), "{requests:?}");
     }
 
+    /// RV-DS241-134 r2: a stored profile the engine read back with its name left blank by
+    /// the hidden-character cleaning opens Welcome, not Home, so the owner names it again.
+    #[test]
+    fn a_stored_profile_read_back_with_a_blank_name_opens_welcome() {
+        let mut shell = Shell::new(ctx());
+        shell.arrive(Arrival::Connected(None));
+        let kept = OwnerProfile {
+            name: String::new(),
+            role: "Founder".into(),
+            bio: "Builds tools.".into(),
+            preferred_stack: vec!["Rust".into()],
+            working_style: Default::default(),
+        };
+        shell.arrive(Arrival::Profile(Ok(Some(kept))));
+        assert_eq!(shell.place(), Some(Place::Welcome));
+    }
+
     #[test]
     fn startup_opens_welcome_on_first_run_and_home_afterwards() {
         let mut shell = Shell::new(Ctx::new(

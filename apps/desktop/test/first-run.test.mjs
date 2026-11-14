@@ -58,6 +58,13 @@ test("hidden, direction and tag characters are refused in every profile field, a
   assert.ok("profile" in validateProfile(draft({ bio: "\u{1f469}\u200d\u{1f4bb} builds tools." })));
 });
 
+test("a first-run draft prefilled from a blank-named stored profile saves its role, bio, stack and style once a name is typed (RV-DS241-134 r2)", () => {
+  const kept = { name: "", role: "Founder", bio: "Builds tools.", preferred_stack: ["Rust"], working_style: { detail: "detailed", initiative: "act_first" } };
+  const draft = draftFromProfile(kept);
+  assert.ok("errors" in validateProfile(draft), "a blank name still asks for one");
+  assert.deepEqual(validateProfile({ ...draft, name: "Ada" }), { profile: { ...kept, name: "Ada" } });
+});
+
 test("a stack chip the profile save would refuse is refused as it is added, naming it, and a plain one is added (RV-DS241-136)", () => {
   for (const typed of ["Re\u00adact", "Ru\u200bst"]) {
     const added = addChip(["Go"], typed, 12, 40);

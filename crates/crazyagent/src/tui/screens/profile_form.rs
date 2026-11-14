@@ -730,4 +730,58 @@ mod tests {
             )
         );
     }
+
+    /// RV-DS241-134 r2: a form opened on a stored profile whose name the read left blank
+    /// shows its role, bio and stack, asks for a name, and saves them once one is typed.
+    #[test]
+    fn a_blank_named_stored_profile_prefills_the_form_and_saves_its_fields() {
+        let kept = OwnerProfile {
+            name: String::new(),
+            role: "Founder".into(),
+            bio: "Builds tools.".into(),
+            preferred_stack: vec!["Rust".into(), "Go".into()],
+            working_style: WorkingStyle {
+                detail: AnswerDetail::Detailed,
+                initiative: Initiative::ActFirst,
+            },
+        };
+        let mut form = ProfileForm::new(Some(&kept), None);
+        assert_eq!(form.profile(), Err(Slot::Name));
+        typed(&mut form, "Ada");
+        assert_eq!(
+            form.profile(),
+            Ok(OwnerProfile {
+                name: "Ada".into(),
+                ..kept
+            })
+        );
+    }
+
+    /// RV-DS241-136 r2 (DEC-141): a stack entry the save would refuse is named under the
+    /// field in the desktop chip input's words, its hidden character shown as an escape,
+    /// instead of the general stack sentence; plain entries beside it are kept.
+    #[test]
+    fn a_refused_stack_entry_is_named_under_the_field_in_the_desktop_words() {
+        for (stack, sentence) in [
+            (
+                "Go, Ru\u{200b}st",
+                "Ru\\u200bst has a hidden or special character. Type it again without it.",
+            ),
+            (
+                "Go, 数据库管理系统数据库管理系统",
+                "数据库管理系统数据库管理系统 is over 40 bytes (about 40 English letters or 13 Chinese, Hindi or Thai ones). Shorten it.",
+            ),
+        ] {
+            let mut form = ProfileForm::new(None, None);
+            typed(&mut form, "Mira");
+            form.stack.set(stack);
+            assert_eq!(form.profile(), Err(Slot::Stack), "{stack}");
+            assert_eq!(form.stack.error.as_deref(), Some(sentence));
+            assert_eq!(form.focus(), Some(Slot::Stack));
+        }
+        let mut form = ProfileForm::new(None, None);
+        typed(&mut form, "Mira");
+        form.stack.set("Go, 数据库");
+        assert_eq!(form.profile().unwrap().preferred_stack, ["Go", "数据库"]);
+    }
 }
