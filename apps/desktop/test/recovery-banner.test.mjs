@@ -97,6 +97,7 @@ test("a delete an engine stop cut short says so and offers Keep the project and 
   const only = { runs: [], notices: [cut], more: 0 };
   const text = words(renderToStaticMarkup(createElement(banner.RecoveryBannerView, view({ banner: only, onDeleteAgain: never("onDeleteAgain") }))));
   assert.match(text, /A delete was cut short\. Some folders may already be in the Trash\./);
+  assert.match(text, /If you keep the project, its agents stay stopped until you start them again with Start all again in the project menu\./);
   const chosen = [];
   const buttons = elements(rendered({
     banner: only,

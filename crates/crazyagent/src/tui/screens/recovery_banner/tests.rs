@@ -378,3 +378,25 @@ fn a_waiting_run_is_read_again_and_a_failed_read_says_so_plainly() {
         "the shell already says the engine is away"
     );
 }
+
+/// Beside Keep the project the banner says the project's agents stay stopped and how to
+/// start them again, as the desktop does (DEC-141), whole at eighty columns.
+#[test]
+fn a_delete_cut_short_says_its_agents_stay_stopped_and_how_to_start_them() {
+    let recovery = shown(RecoveryBanner {
+        runs: Vec::new(),
+        notices: vec![notice(ActionKind::ProjectDelete, 9, NoticeShown::Unknown)],
+        more: 0,
+    });
+    let lines = text(&recovery, 80);
+    let joined = lines.join(" ");
+    let words = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+    for wanted in [
+        "A delete was cut short. Some folders may already be in the Trash.",
+        "If you keep the project, its agents stay stopped until you start them again with S Start all on its Team screen.",
+        "Ctrl-D Keep the project",
+        "Ctrl-X Delete again",
+    ] {
+        assert!(words.contains(wanted), "{wanted:?} is shown whole:\n{}", lines.join("\n"));
+    }
+}

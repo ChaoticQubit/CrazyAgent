@@ -810,6 +810,77 @@ async fn removing_a_project_whose_delete_was_cut_short_ends_its_mark() {
     engine.stop().await;
 }
 
+/// A Delete everything of a project another Delete everything still runs for is refused
+/// before it writes anything, so the running delete keeps its mark and the second one never
+/// pauses, moves or forgets anything. Runs on macOS only, the one platform that offers Delete
+/// everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_second_delete_of_a_project_another_delete_still_runs_for_is_refused() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    std::fs::remove_dir_all(&folder).unwrap();
+    drop(crate::ledger::open(engine.root.path()).unwrap());
+    write_db(
+        &engine,
+        "INSERT INTO ledger_actions(kind,action_key,payload,started_ms)
+         VALUES ('project_delete','setup-pooled',
+                 '{\"project\":\"setup-pooled\",\"exchange\":4242}',1);",
+    );
+    let response = owner
+        .delete_project(project.clone(), NAME.into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), rejected("delete_in_progress"));
+    assert_eq!(kept(&engine), 2, "the records stay");
+    assert_eq!(paused(&engine), 0, "nothing is paused");
+    assert_eq!(
+        engine.rows(
+            "SELECT count(*) FROM ledger_actions
+             WHERE kind='project_delete' AND outcome IS NULL AND payload LIKE '%4242%'"
+        ),
+        1,
+        "the running delete keeps its own mark"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// A Delete everything whose mark the ledger cannot record is refused with its own code and
+/// nothing changed, so no delete ever runs that an engine stop could cut short unseen.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_delete_whose_mark_cannot_be_recorded_is_refused_with_nothing_changed() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    std::fs::remove_dir_all(&folder).unwrap();
+    drop(crate::ledger::open(engine.root.path()).unwrap());
+    write_db(
+        &engine,
+        "CREATE TRIGGER mark_fails BEFORE INSERT ON ledger_actions
+         WHEN NEW.kind='project_delete'
+         BEGIN
+           SELECT RAISE(FAIL, 'ledger full');
+         END;",
+    );
+    let response = owner
+        .delete_project(project.clone(), NAME.into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), rejected("delete_not_recorded"));
+    assert_eq!(kept(&engine), 2, "the records stay");
+    assert_eq!(paused(&engine), 0, "nothing is paused");
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects_delete_pending"),
+        0
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
 /// While a projects home move is pending, the owner can neither pick another home nor move it
 /// without its projects, so the move's own pick is never overwritten. Both go once the move
 /// is forgotten.

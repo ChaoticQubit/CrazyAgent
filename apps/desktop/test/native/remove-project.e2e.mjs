@@ -341,10 +341,10 @@ test("a delete an engine stop cut short shows on the project with Keep the proje
   assert.equal(sql("SELECT count(*) FROM projects_delete_pending"), "0", "the start still forgets the plan, so a home move may go");
   await onPage("cut-short", async (page, me) => {
     await page.send("Page.navigate", { url: `http://127.0.0.1:${run.site.port}/#/projects/${encodeURIComponent(id)}/overview` });
-    await me.waitFor("the delete cut short on the project", (text) => text.includes(CUT_SHORT));
+    await me.waitFor("the delete cut short on the project", (text) => text.includes(CUT_SHORT) && text.includes("its agents stay stopped until you start them again"));
     await me.capture("cut-short-banner");
     await me.click("Delete again", "button");
-    await me.waitFor("the remove dialog on Delete everything", (text) => text.includes(KEEP) && text.includes("Type"));
+    await me.waitFor("the remove dialog on Delete everything", (text) => text.includes(KEEP) && text.includes(folder) && text.includes("Type"));
     const shown = await dialog(page);
     assert.equal(shown.checked, "everything", `Delete again opens on Delete everything: ${JSON.stringify(shown)}`);
     assert.equal(shown.deleteEnabled, false, "the delete still waits for the typed name");

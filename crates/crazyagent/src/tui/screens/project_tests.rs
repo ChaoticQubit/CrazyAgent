@@ -4755,3 +4755,44 @@ fn p_on_the_context_tab_opens_project_memory_and_both_layouts_say_so() {
     }
     assert_eq!(screen.key(key(KeyCode::Char('p'))), ProjectReply::Memory);
 }
+
+/// Every Delete everything refusal reads as its own sentence in the TUI, as on the desktop
+/// (DEC-141): another delete still running, a mark that could not be recorded, and the older
+/// refusals the project page showed as a code.
+#[test]
+fn every_delete_refusal_reads_its_own_sentence() {
+    for code in [
+        "delete_in_progress",
+        "delete_not_recorded",
+        "delete_name_mismatch",
+        "delete_agents_running",
+        "delete_trash_partial",
+        "delete_shared_folder",
+    ] {
+        let sentence = plain_problem(code);
+        assert!(!sentence.contains("(code: "), "{code} reads as a sentence: {sentence}");
+    }
+    let unrecorded = plain_problem("delete_not_recorded");
+    assert!(
+        unrecorded.contains("Nothing was deleted") && unrecorded.contains("restart CrazyAgent"),
+        "{unrecorded}"
+    );
+}
+
+/// Delete again from the banner never opens the remove ask over another open box, whose keys
+/// it would take; with no box open it opens the ask.
+#[test]
+fn delete_again_never_opens_the_remove_ask_over_another_box() {
+    let project = ProjectId::new("gone").unwrap();
+    let mut screen = ProjectScreen::new(project, "Gone app".into(), None);
+    screen.hidden = Some(super::project::AddFile {
+        input: super::new_project_input::TextInput::single(64),
+        busy: false,
+        error: None,
+    });
+    screen.ask_delete_again();
+    assert!(!screen.confirm_remove, "the open box keeps the keys");
+    screen.hidden = None;
+    screen.ask_delete_again();
+    assert!(screen.confirm_remove);
+}
