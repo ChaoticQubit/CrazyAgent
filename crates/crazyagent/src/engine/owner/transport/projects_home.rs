@@ -279,6 +279,14 @@ pub(super) fn regranted(
     }
 }
 
+/// Whether the disk changed before the first grant check of an answer: a Delete whose
+/// folders reached the Trash. Inputs: whether the Trash move ran, whether the request moves
+/// the projects home or one project, and whether its disk work ran. Output: the answer,
+/// which [`regranted`] reads.
+pub(super) fn disk_changed(trashed: bool, moving: bool, moving_project: bool, ran: bool) -> bool {
+    trashed
+}
+
 /// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, SetupProject, CreateDemo
 /// and FolderSize for one owner. A client's change claims its request id first: a resend of
 /// one this engine still runs answers `InProgress` and plans nothing (DEC-159); the intake
@@ -433,7 +441,8 @@ pub(super) async fn serve(
     let trashed = deleted.is_some();
     let answer = async {
         let mut barrier = Some(engine.owner_egress.write().await);
-        let mut result = match regranted(authority.authenticate(packet), a, trashed) {
+        let changed = disk_changed(trashed, moving, moving_project, ran);
+        let mut result = match regranted(authority.authenticate(packet), a, changed) {
             Ok(()) => finish(engine, a, request, step).await,
             Err(e) => Err(e),
         };

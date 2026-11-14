@@ -587,3 +587,57 @@ fn a_grant_found_stale_after_the_disk_changed_is_an_outcome_to_reconcile() {
     );
     assert!(projects_home::regranted(Ok(admission(1)), &admission(1), true).is_ok());
 }
+
+/// RV-CODE combo-five r1 move F1 r1 (rv-code3 F1): the first grant check of an answer counts
+/// the disk as changed once a Delete reached the Trash or a move's disk work ran, for the
+/// projects home and for one project, so a grant found stale there is an outcome to
+/// reconcile, not Rejected, while the same request records the move. One case per path.
+#[test]
+fn the_first_grant_check_after_any_disk_work_counts_the_disk_as_changed() {
+    use projects_home::disk_changed;
+    let (trashed, moved, moved_project, ran) = (true, true, true, true);
+    assert!(
+        disk_changed(trashed, false, false, ran),
+        "Delete in the Trash"
+    );
+    assert!(
+        !disk_changed(!trashed, false, false, ran),
+        "Delete left out of the Trash"
+    );
+    assert!(
+        disk_changed(false, moved, false, ran),
+        "projects home moved"
+    );
+    assert!(
+        !disk_changed(false, moved, false, !ran),
+        "projects home move not run"
+    );
+    assert!(
+        disk_changed(false, false, moved_project, ran),
+        "project moved"
+    );
+    assert!(
+        !disk_changed(false, false, moved_project, !ran),
+        "project move not run"
+    );
+    assert!(
+        !disk_changed(false, false, false, ran),
+        "no Delete and no move"
+    );
+    let id = RequestId::new("move-1").unwrap();
+    let admission = |owner_epoch| crate::engine::owner::Admission {
+        db_instance: "db".into(),
+        engine_epoch: "engine".into(),
+        owner_id: "owner".into(),
+        owner_epoch,
+    };
+    let changed = disk_changed(false, false, moved_project, ran);
+    let refused = projects_home::regranted(Ok(admission(2)), &admission(1), changed).unwrap_err();
+    let frame = owner_reply_frame(Err(refused), id.clone(), true).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<OwnerReply>(&frame[4..])
+            .unwrap()
+            .response,
+        OwnerResponse::OutcomeUnknown { operation_id: id }
+    );
+}
