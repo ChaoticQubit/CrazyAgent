@@ -485,7 +485,8 @@ fn project_notice(
 ) -> Result<Option<BannerNotice>, EngineError> {
     let accept = notice.action_kind == ActionKind::LandingAccept;
     assert!(accept || notice.action_kind == ActionKind::ProjectDelete);
-    assert!(notice.agent.is_none() && notice.change_set.is_none());
+    assert!(notice.agent.is_none());
+    assert!(notice.change_set.is_none());
     let invalid = || failure("recovery_record_invalid");
     let owner = payload.get("project").and_then(serde_json::Value::as_str);
     let set = payload
