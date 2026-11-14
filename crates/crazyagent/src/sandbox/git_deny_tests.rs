@@ -1,3 +1,4 @@
+use super::policy::AccessGrant;
 use super::{ProjectSandbox, SandboxNetwork, any_case, sbpl_overlong, seatbelt_pattern};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -378,4 +379,102 @@ fn a_confined_agent_moves_no_admin_head_or_store_folder_in_any_letter_case() {
         &profile,
         &format!("printf w > {}", quoted(&worktree.join("work.txt"))),
     );
+}
+
+/// A confined agent with the owner's temp folder granted and `data` as a shared writable
+/// folder (DEC-147.9). Input: the case. Output: the sandbox, its worktree and the folder.
+fn widened(case: &Case) -> (ProjectSandbox, PathBuf, PathBuf) {
+    let worktree = worktree(case);
+    let data = case.project.join("data");
+    fs::create_dir_all(&data).unwrap();
+    let sandbox = sandbox(case)
+        .confine_to_worktree(&worktree)
+        .unwrap()
+        .grant_access(&[AccessGrant::TempFolder], Some(&case.owner_tmp))
+        .unwrap()
+        .keep_project_secrets(&case.project, &[])
+        .unwrap()
+        .allow_shared_write(&data)
+        .unwrap();
+    (sandbox, worktree, data)
+}
+
+/// RV-DS241-16: every root the agent may write is listed in the nested-repository rule, its
+/// working tree with a `.git` denied below its top, every other root, the owner's temp folder
+/// and a shared writable folder included, with a `.git` denied at any depth.
+#[test]
+fn every_writable_root_is_under_the_nested_git_rule() {
+    let case = case();
+    let (sandbox, worktree, data) = widened(&case);
+    let text = sandbox.profile();
+    let dot_git = any_case(".git");
+    let roots: Vec<&PathBuf> = sandbox.writable_roots().collect();
+    assert!(roots.contains(&&case.owner_tmp) && roots.contains(&&data));
+    for root in roots {
+        let pattern = seatbelt_pattern(root);
+        let rule = if *root == worktree {
+            format!("(regex #\"^{pattern}/.+/{dot_git}(/.*)?$\")")
+        } else {
+            format!("(regex #\"^{pattern}/(.+/)?{dot_git}(/.*)?$\")")
+        };
+        assert!(text.contains(&rule), "{}\n{text}", root.display());
+    }
+}
+
+/// RV-DS241-16: under the real profile a confined agent makes no repository, by git or by
+/// hand, in its shared writable folder or in the owner's temp folder, so none is left for the
+/// owner's git to enter there and none can be renamed whole into its worktree (SM1-R); plain
+/// files still land in both.
+#[test]
+fn a_confined_agent_makes_no_repository_in_a_shared_folder_or_the_owner_temp_folder() {
+    let case = case();
+    let (sandbox, worktree, data) = widened(&case);
+    let profile = case.profiles.join("widened.sb");
+    let tmp = &case.owner_tmp;
+    for (script, target) in [
+        (
+            format!("mkdir {}", quoted(&data.join(".git"))),
+            data.join(".git"),
+        ),
+        (
+            format!("cd {} && git init -q", quoted(&data)),
+            data.join(".git"),
+        ),
+        (
+            format!("mkdir -p {}", quoted(&data.join("sub").join(".git"))),
+            data.join("sub").join(".git"),
+        ),
+        (
+            format!(": > {}", quoted(&data.join(".GIT"))),
+            data.join(".GIT"),
+        ),
+        (
+            "mkdir -p \"$TMPDIR/box/.git\"".to_owned(),
+            tmp.join("box").join(".git"),
+        ),
+        (
+            "cd \"$TMPDIR\" && git init -q made".to_owned(),
+            tmp.join("made").join(".git"),
+        ),
+    ] {
+        refused(&sandbox, &profile, &script, &target);
+    }
+    let output = run(
+        &sandbox,
+        &profile,
+        &format!(
+            "mkdir -p \"$TMPDIR/moved\"; mkdir \"$TMPDIR/moved/.git\"; mv \"$TMPDIR/moved\" {}",
+            quoted(&worktree.join("moved"))
+        ),
+    );
+    assert!(
+        fs::symlink_metadata(worktree.join("moved").join(".git")).is_err(),
+        "a repository was renamed into the worktree: {output:?}"
+    );
+    for script in [
+        format!("printf hi > {}", quoted(&data.join("new.txt"))),
+        "printf hi > \"$TMPDIR/note.txt\"".to_owned(),
+    ] {
+        allowed(&sandbox, &profile, &script);
+    }
 }
