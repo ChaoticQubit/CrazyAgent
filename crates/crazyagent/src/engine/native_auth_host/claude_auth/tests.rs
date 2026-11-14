@@ -150,6 +150,54 @@ fn imp1035_claude_missing_status_identity_and_oversized_output_fail_closed() {
     assert!(verified_claude_account(&vec![b' '; 65_537], home).is_err());
 }
 
+/// DEC-166: Claude Code before 2.1.268 answers `auth status` without `configDirectory`, so
+/// that status reads as a harness too old to sign in, while a status missing anything else,
+/// or not a status at all, stays an invalid answer.
+#[test]
+fn a_claude_status_without_its_config_directory_reads_as_too_old_to_sign_in() {
+    let home = Path::new("/private/tmp/held-claude-profile");
+    let without = |field: &str| {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&status(true, "claude.ai", home.to_str().unwrap())).unwrap();
+        value.as_object_mut().unwrap().remove(field);
+        serde_json::to_vec(&value).unwrap()
+    };
+    assert_eq!(
+        verified_claude_account(&without("configDirectory"), home)
+            .unwrap_err()
+            .0,
+        "native_auth_harness_too_old"
+    );
+    let mut logged_out: serde_json::Value =
+        serde_json::from_slice(&status(false, "none", home.to_str().unwrap())).unwrap();
+    logged_out.as_object_mut().unwrap().remove("configDirectory");
+    assert_eq!(
+        verified_claude_account(&serde_json::to_vec(&logged_out).unwrap(), home)
+            .unwrap_err()
+            .0,
+        "native_auth_harness_too_old"
+    );
+    for field in ["loggedIn", "authMethod", "apiProvider"] {
+        assert_eq!(
+            verified_claude_account(&without(field), home).unwrap_err().0,
+            "native_auth_claude_status_invalid",
+            "{field}"
+        );
+    }
+    for other in [&b""[..], b"[]", b"{}", b"not json"] {
+        assert_eq!(
+            verified_claude_account(other, home).unwrap_err().0,
+            "native_auth_claude_status_invalid"
+        );
+    }
+    assert_eq!(
+        ClaudeAuthFailure::HarnessTooOld.code(),
+        "native_auth_harness_too_old"
+    );
+    assert!(verified_claude_account(b"", home).is_err());
+    assert!(verified_claude_account(&vec![b' '; 65_537], home).is_err());
+}
+
 /// v2.4.0 owner update: an account check's `claude auth status` ended
 /// `native_auth_claude_deadline` while the machine was under build load, at a 2 s bound inside
 /// the check's own 9 s. A status may now use the whole check bound; logout keeps its short one.
