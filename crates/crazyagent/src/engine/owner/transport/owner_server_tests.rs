@@ -524,3 +524,29 @@ async fn the_import_move_is_listed_committed_and_refused_again_through_the_owner
     );
     fixture.stop().await;
 }
+
+/// RV-DS241-66: a project move that is recorded but whose old folder could not be cleared
+/// reaches the client as its own code, which the TUI and the desktop show as moved with the
+/// old folder left, never as an outcome to reconcile; any other failed change stays unknown.
+#[test]
+fn a_move_whose_old_folder_was_left_reaches_the_client_as_its_code() {
+    let id = RequestId::new("move-1").unwrap();
+    let reply = |code: &str| {
+        let frame = owner_reply_frame(Err(failure(code)), id.clone(), true).unwrap();
+        serde_json::from_slice::<OwnerReply>(&frame[4..])
+            .unwrap()
+            .response
+    };
+    assert_eq!(
+        reply("move_project_old_folder_left"),
+        OwnerResponse::Rejected {
+            code: "move_project_old_folder_left".into()
+        }
+    );
+    assert_eq!(
+        reply("home_move_failed"),
+        OwnerResponse::OutcomeUnknown {
+            operation_id: id.clone()
+        }
+    );
+}

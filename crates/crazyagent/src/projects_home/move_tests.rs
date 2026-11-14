@@ -845,6 +845,95 @@ fn a_shared_folder_is_refused_and_outside_worktrees_need_the_owners_choice() {
     }
 }
 
+/// RV-DS241-44: a set-up project whose folder is gone still owns its name in the home. A
+/// Move or Copy of another project onto that name is refused before anything is written,
+/// and the missing project's onboarding and saved rows stay whole.
+#[test]
+fn a_move_onto_the_folder_of_a_project_whose_folder_is_gone_is_refused_and_its_rows_stay() {
+    let case = Case::new();
+    let gone = case.target();
+    assert!(std::fs::symlink_metadata(&gone).is_err());
+    case.db
+        .execute(
+            "INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,created_ms,updated_ms)
+             VALUES ('missing',?1,'pool','done','done','{}',1,1)",
+            [text(&gone)],
+        )
+        .unwrap();
+    for table in ["onboarding_saved_drafts", "onboarding_saved_overviews"] {
+        case.db
+            .execute(
+                &format!("INSERT INTO {table}(repo,seal) VALUES (?1,?2)"),
+                params![text(&gone), SEAL],
+            )
+            .unwrap();
+    }
+    let missing = Registered {
+        project_id: ProjectId::new("missing").unwrap(),
+        name: PROJECT.into(),
+        folder: gone.clone(),
+        repositories: vec![gone.clone()],
+        onboarding: false,
+    };
+    let mut registered = case.registered();
+    registered.push(missing);
+    let project = ProjectId::new(PROJECT).unwrap();
+    for mode in [AddMode::Move, AddMode::Copy] {
+        let tx = case.db.unchecked_transaction().unwrap();
+        let refused = plan(
+            &tx,
+            &case.database,
+            &case.engine,
+            &registered,
+            &Asked {
+                project: &project,
+                mode,
+                overrides: &[],
+                request: "request-7",
+                exchange: EXCHANGE,
+            },
+        )
+        .unwrap_err();
+        tx.commit().unwrap();
+        assert_eq!(refused.0, "home_destination_exists");
+        assert_eq!(pending(&case.db).unwrap(), None);
+    }
+    assert!(case.repo.join("README").is_file());
+    for table in [
+        "onboarding",
+        "onboarding_saved_drafts",
+        "onboarding_saved_overviews",
+    ] {
+        assert_eq!(case.rows_under(table, "repo", &gone), 1, "{table}");
+    }
+}
+
+/// RV-DS241-43: a main graph refresh in flight in the folder keeps the move from placing
+/// it: past the wait the move is refused as busy with nothing moved and nothing pending,
+/// and a move planned while the refresh runs waits for it to end, then runs.
+#[test]
+fn a_main_graph_refresh_in_the_folder_keeps_the_move_waiting_until_it_ends() {
+    let case = Case::new();
+    let refresh = crate::onboarding::service::Refreshing::start(&case.repo);
+    assert_eq!(
+        case.move_project(AddMode::Move, &[]).unwrap_err().0,
+        "move_project_busy"
+    );
+    assert!(case.repo.join("README").is_file());
+    assert_eq!(pending(&case.db).unwrap(), None);
+
+    let planned = case.plan(AddMode::Move, &[]).unwrap();
+    let ends = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        drop(refresh);
+    });
+    let moved = planned.run_with(Duration::from_secs(30));
+    ends.join().unwrap();
+    assert!(moved.is_ok(), "{moved:?}");
+    assert!(matches!(case.finish(true), Some(Finished::Moved { .. })));
+    assert_eq!(case.stored_folder(), case.target());
+}
+
 /// A move that goes by copy records the project at the checked copy before anything is
 /// deleted. An entry the check never saw (a `.DS_Store` Finder wrote meanwhile) then stays
 /// in the old folder, which is reported, and the project and its agent copy are whole in

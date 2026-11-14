@@ -37,10 +37,13 @@ pub(crate) fn begin(
 }
 
 /// Ends the mark of one Delete everything once its exchange settled: done when the project's
-/// records went, failed when they stayed. A mark the owner is shown is left alone, since an
-/// exchange number is unique only within one engine process. Inputs: the settle's
-/// transaction and the exchange. Output: how many marks ended.
-pub(crate) fn settle(tx: &Connection, exchange: i64) -> Result<usize, EngineError> {
+/// records went, failed when they stayed with nothing moved. When they stayed after its
+/// folders reached the Trash (a record refused, cut off or failed), the mark is kept as "A
+/// delete was cut short" on the project's banner instead, its exchange dropped, as an engine
+/// start shows it. A mark the owner is shown is left alone, since an exchange number is
+/// unique only within one engine process. Inputs: the settle's transaction, the exchange and
+/// whether its folders reached the Trash. Output: how many marks ended or were shown.
+pub(crate) fn settle(tx: &Connection, exchange: i64, trashed: bool) -> Result<usize, EngineError> {
     assert!(exchange > 0);
     ledger::initialize(tx)?;
     let marks = ledger::pending(tx, ActionKind::ProjectDelete)?;
@@ -50,13 +53,15 @@ pub(crate) fn settle(tx: &Connection, exchange: i64) -> Result<usize, EngineErro
         if ledger::notice(&action).is_some() || exchange_of(&action) != Some(exchange) {
             continue;
         }
-        let outcome = if exists(tx, &action.key)? {
-            Outcome::Failed
-        } else {
-            Outcome::Done
-        };
-        ledger::finish(tx, action.id, outcome)?;
         ended += 1;
+        if !exists(tx, &action.key)? {
+            ledger::finish(tx, action.id, Outcome::Done)?;
+        } else if trashed {
+            let payload = serde_json::json!({ "project": action.key, "unknown": true });
+            ledger::note(tx, action.id, &payload.to_string())?;
+        } else {
+            ledger::finish(tx, action.id, Outcome::Failed)?;
+        }
     }
     Ok(ended)
 }
