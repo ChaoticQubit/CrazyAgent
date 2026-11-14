@@ -138,6 +138,16 @@ const SIGN_IN_REJECTED: &str = "master_sign_in_rejected";
 const SIGN_IN_CHECKING: &str = "master_sign_in_checking";
 const AGENT_RESTART_CHECKING: &str = "The agent did not restart yet: account sign-ins are still being checked after the restart. Restart it again in a moment.";
 const LEFT_RUNNING_NOTE: &str = "Kept running while CrazyAgent was closed";
+
+/// What became of a kept pane whose model proxy ends with the engine at quit (DEC-158):
+/// frozen with its record stored, ended with every process confirmed gone, or ended with
+/// its sandbox not confirmed empty, as when its agent killed its own warden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtQuit {
+    Frozen,
+    Ended,
+    Unconfirmed,
+}
 const FROZEN_NOTE: &str = "Frozen while CrazyAgent was closed; it continues when CrazyAgent opens";
 const TURN_LIMIT: &str = "team_turn_limit";
 const TIME_LIMIT_NOTE: &str = "stopped by a time limit";
@@ -1636,9 +1646,14 @@ impl TeamRuntime {
             && !(host.pane_pid(&agent).ok().flatten() == Some(record.pid)
                 && hold_keeper(record.pid, &agent_pane_state(&self.state, id), Hold::Thaw))
         {
-            let _ = end_left_pane(host.as_ref(), &agent, "team");
+            let ended = end_left_pane(host.as_ref(), &agent, "team");
             drop(proxy);
-            return Ok(Err("it could not be continued after its freeze".into()));
+            let reason = "it could not be continued after its freeze";
+            return Ok(Err(match ended {
+                Ok(true) => reason.into(),
+                Err(problem) if problem.0 == "terminal_agent_unknown" => reason.into(),
+                _ => format!("{reason}. {}", crate::sandbox::warden::CLEANUP_UNCERTAIN),
+            }));
         }
         let record = &match (record.frozen_ms, u64::try_from(now_ms())) {
             (Some(at), Ok(now)) => PaneRecord {
@@ -3037,18 +3052,26 @@ impl TeamRuntime {
                     .is_some_and(|worker| worker.proxy.is_some())
             })
             .collect();
+        let mut unconfirmed = BTreeSet::new();
         let mut failed = None;
         for id in proxied {
-            let (held, problem) = self.freeze_or_end(id);
-            if held {
+            let (left, problem) = self.freeze_or_end(id);
+            if left == AtQuit::Frozen {
                 frozen.insert(id);
             } else {
                 kept.remove(&id);
+            }
+            if left == AtQuit::Unconfirmed {
+                unconfirmed.insert(id);
             }
             if failed.is_none() {
                 failed = problem;
             }
         }
+        let uncertain = with_code(
+            crate::sandbox::warden::CLEANUP_UNCERTAIN,
+            Some(crate::harnesses::leftovers::UNCERTAIN),
+        );
         let now = now_ms();
         let ids: Vec<i64> = self.workers.keys().copied().collect();
         self.workers.clear();
@@ -3065,11 +3088,15 @@ impl TeamRuntime {
             )
             .map_err(error)?;
             note_left_tasks(&tx, &left, now);
-            let note = kept.contains(&id).then_some(if frozen.contains(&id) {
-                FROZEN_NOTE
+            let note = if unconfirmed.contains(&id) {
+                Some(uncertain.as_str())
             } else {
-                LEFT_RUNNING_NOTE
-            });
+                kept.contains(&id).then_some(if frozen.contains(&id) {
+                    FROZEN_NOTE
+                } else {
+                    LEFT_RUNNING_NOTE
+                })
+            };
             tx.execute(
                 "UPDATE team_agents SET status='stopped', task=NULL, error=?3, stopped_ms=?2 WHERE id=?1 AND status IN ('starting','idle','working')",
                 params![id, now, note],
@@ -3099,17 +3126,19 @@ impl TeamRuntime {
     /// that says so (DEC-158). A pane that cannot be frozen, whose record cannot be read or
     /// stored, or whose frozen record no longer fits is ended instead, so none runs on with
     /// its port free or stays frozen with nothing to thaw it by. Takes the agent. Returns
-    /// whether it stays frozen, and the store problem a pane was ended over.
-    fn freeze_or_end(&self, id: i64) -> (bool, Option<EngineError>) {
+    /// whether it stays frozen or its end was confirmed, and the store problem it ended over.
+    fn freeze_or_end(&self, id: i64) -> (AtQuit, Option<EngineError>) {
         let host = self.terminal.clone();
         let (record, mut problem) = match self.kept_record(id) {
             Ok(record) => (record, None),
             Err(failed) => (None, Some(failed)),
         };
-        let held = match (&host, &record) {
+        let frozen = match (&host, &record) {
             (Some(host), Some(record)) => self.freeze_kept(host, id, record),
-            _ => None,
+            _ => Err(true),
         };
+        let mut confirmed = frozen.as_ref().err().copied().unwrap_or(true);
+        let held = frozen.ok();
         let stored = held.as_ref().and_then(PaneRecord::encode).map(|text| {
             self.connection
                 .execute(
@@ -3119,17 +3148,25 @@ impl TeamRuntime {
                 .map_err(error)
         });
         match stored {
-            Some(Ok(_)) => return (true, problem),
+            Some(Ok(_)) => return (AtQuit::Frozen, problem),
             Some(Err(failed)) => problem = Some(failed),
             None => {}
         }
         if let Some(pins) = held.as_ref().and_then(|record| record.keepers.as_deref()) {
-            end_keepers(pins);
+            confirmed &= end_keepers(pins);
         }
         if let (Some(host), Ok(agent)) = (&host, AgentId::team(id)) {
-            let _ = end_left_pane(host.as_ref(), &agent, "team");
+            confirmed &= match end_left_pane(host.as_ref(), &agent, "team") {
+                Ok(swept) => swept,
+                Err(problem) => problem.0 == "terminal_agent_unknown",
+            };
         }
-        (false, problem)
+        let left = if confirmed {
+            AtQuit::Ended
+        } else {
+            AtQuit::Unconfirmed
+        };
+        (left, problem)
     }
 
     /// Reads the pane record the engine keeps for a team agent. Takes the id. Returns the
@@ -3154,17 +3191,18 @@ impl TeamRuntime {
     /// engine's freeze record is asked. A native lead whose servers did not all freeze has
     /// them ended through their keepers, so no frozen server is left for the caller's end.
     /// Takes the host, the agent and its record. Returns the record to keep, with the
-    /// freeze time and a native lead's keepers, or none when the pane could not be frozen.
+    /// freeze time and a native lead's keepers, or, when the pane could not be frozen,
+    /// whether every keeper it ended exited in time, true when it ended none.
     fn freeze_kept(
         &self,
         host: &Arc<dyn Host>,
         id: i64,
         record: &PaneRecord,
-    ) -> Option<PaneRecord> {
+    ) -> Result<PaneRecord, bool> {
         if record.freeze != Some(true) {
-            return None;
+            return Err(true);
         }
-        let agent = AgentId::team(id).ok()?;
+        let agent = AgentId::team(id).map_err(|_| true)?;
         let held = host.server_keepers(&agent);
         let pins: Vec<KeeperPin> = if held.is_empty() {
             record
@@ -3202,12 +3240,11 @@ impl TeamRuntime {
                 && hold_keeper(record.pid, &agent_pane_state(&self.state, id), Hold::Freeze)
         };
         if !held {
-            end_keepers(&pins);
-            return None;
+            return Err(end_keepers(&pins));
         }
-        let at = u64::try_from(now_ms()).ok()?;
+        let at = u64::try_from(now_ms()).map_err(|_| true)?;
         assert!(!lead || pins.len() == KEEPERS_MAX);
-        Some(PaneRecord {
+        Ok(PaneRecord {
             frozen_ms: Some(at),
             keepers: lead.then_some(pins),
             ..record.clone()

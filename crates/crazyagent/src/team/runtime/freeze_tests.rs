@@ -1069,10 +1069,11 @@ fn a_native_lead_whose_frozen_record_cannot_be_stored_is_ended() {
         ))
         .unwrap();
 
-    let (held, problem) = lead.runtime.freeze_or_end(lead.id);
-    assert!(
-        !held,
-        "the lead whose record could not be stored stayed frozen"
+    let (left, problem) = lead.runtime.freeze_or_end(lead.id);
+    assert_eq!(
+        left,
+        AtQuit::Ended,
+        "the lead whose record could not be stored stayed frozen or its end was not confirmed"
     );
     assert!(problem.is_some(), "the failed store was not reported");
     let deadline = Instant::now() + WAIT;
