@@ -111,7 +111,8 @@ fn fenced(fence: &str, text: &str) -> String {
 /// Writes the prompt of one cleanup. Inputs: which file is rewritten, the app text and the
 /// project text; for the app file the project text is empty, and a blank app text leaves the
 /// app file out of a project prompt. Output: the prompt, with both texts fenced as data by a
-/// tilde fence longer than any tilde run in them.
+/// tilde fence longer than any tilde run in them; the fence shows four times, six with the
+/// app text compared, so a long tilde run grows the prompt past twice the text cap.
 pub fn prompt(scope: Scope, app: &str, project: &str) -> String {
     assert!(app.len() <= TEXT_BYTES_MAX && project.len() <= TEXT_BYTES_MAX);
     assert!(scope == Scope::Project || project.is_empty());
@@ -144,7 +145,9 @@ pub fn prompt(scope: Scope, app: &str, project: &str) -> String {
     }
     prompt.push_str(&format!("The {name} instructions file to rewrite:\n"));
     prompt.push_str(&fenced(&fence, text));
-    assert!(prompt.len() <= 2 * TEXT_BYTES_MAX + 4096);
+    let fences = if compared { 6 } else { 4 };
+    assert!(fence.len() <= TEXT_BYTES_MAX + 1);
+    assert!(prompt.len() <= app.len() + project.len() + fences * fence.len() + 4096);
     prompt
 }
 

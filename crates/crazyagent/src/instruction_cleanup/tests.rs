@@ -90,7 +90,10 @@ fn texts_with_long_tilde_runs_within_the_size_cap_still_get_a_prompt() {
     ] {
         let text = prompt(scope, app, project);
         let fence = "~".repeat(longest + 1);
-        let fenced_app = format!("{fence}\n{app}{}{fence}\n", if app.ends_with('\n') { "" } else { "\n" });
+        let fenced_app = format!(
+            "{fence}\n{app}{}{fence}\n",
+            if app.ends_with('\n') { "" } else { "\n" }
+        );
         assert!(text.contains(&fenced_app));
         if scope == Scope::Project {
             let fenced_project = format!(
