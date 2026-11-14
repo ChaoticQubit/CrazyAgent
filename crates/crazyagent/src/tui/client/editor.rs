@@ -122,7 +122,8 @@ fn command(editor: &str, file: &Path) -> Command {
 
 /// Hands the terminal to the editor and takes it back: leaves raw mode, if on, and the
 /// alternate screen the way the TUI exits, runs the editor through the spawn gate with
-/// the terminal's own stdio and waits for it, then enters both again as at start.
+/// the terminal's own stdio and waits for it, then enters both again as at start, with
+/// the keyboard protocol pushed again when the handoff popped it.
 /// Takes the terminal writer, the command and the keyboard pushed flag. Returns the
 /// editor's outcome as a plain problem, inside the error of a terminal that could not be
 /// handed over or taken back.
@@ -135,6 +136,7 @@ fn run(
     if raw {
         disable_raw_mode()?;
     }
+    let was_pushed = pushed.load(Ordering::SeqCst);
     crate::tui::run::restore_with(out, pushed)?;
     let ran = crate::spawn_gate::status(command);
     if raw {
@@ -147,6 +149,7 @@ fn run(
         EnableBracketedPaste,
         EnableFocusChange
     )?;
+    crate::tui::run::push_back(out, was_pushed, pushed)?;
     Ok(match ran {
         Ok(status) if status.success() => Ok(()),
         Ok(status) if status.code() == Some(SHELL_NOT_FOUND) => Err(EDITOR_MISSING),
