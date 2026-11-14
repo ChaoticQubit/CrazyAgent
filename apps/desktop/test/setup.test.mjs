@@ -119,6 +119,12 @@ test("the permission fix and the unused tools setting go through their own deskt
     assert.ok(source.includes(`"${kind}"`), `the pending change kind ${kind} is known`);
   }
   assert.match(setup, /pub async fn fix_tool_permissions\([^)]*\)[^{]*\{[^}]*self\.setup_change\(OwnerMutation::FixToolPermissions \{ name, tree, recursive \}, generation\)/);
+  const intake = readFileSync(new URL("../src/api-intake.ts", import.meta.url), "utf8");
+  assert.match(intake, /export function fixToolPermissions\(name: DependencyName, tree: string, recursive: boolean\)[^{]*\{\s*return wrap\(\(\) => startFix\(name, tree, recursive, nextGeneration\(\)\)\)/);
+  for (const screen of ["settings/pack.tsx", "intake/setup-step.tsx"]) {
+    const text = readFileSync(new URL(`../src/screens/${screen}`, import.meta.url), "utf8");
+    assert.match(text, /fixToolPermissions\([^)]*\.fix\.tree, [^)]*\.fix\.recursive\)/, `${screen} sends the scope its confirm named`);
+  }
   assert.match(setup, /pub async fn set_refused_tool\([^)]*\)[^{]*\{[^}]*self\.setup_change\(OwnerMutation::SetRefusedTool \{ choice \}, generation\)/);
   const setupCodes = setup.match(/const SETUP_CODES: \[&str; \d+\] = \[([^\]]*)\]/);
   for (const code of ["tool_fix_off", "tool_fix_not_needed", "tool_fix_unavailable", "tool_fix_changed", "tool_fix_refused", "tool_fix_too_large", "tool_fix_failed"]) {
