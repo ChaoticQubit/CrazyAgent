@@ -3534,31 +3534,36 @@ mod tests {
     use std::future::Future;
     use std::os::unix::fs::PermissionsExt;
 
+    /// The terminal host follows the tmux program the resolver finds: a new host once setup
+    /// installs its copy, the same host while it stays, a new one once it is removed. The
+    /// places hold only `<root>/setup/bin`, so the row reads the same on a Mac whose own tmux
+    /// the engine's places would find first.
     #[tokio::test]
     async fn the_terminal_host_follows_the_tmux_program_setup_installs_or_removes() {
         let root = tempfile::tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
         let engine = Engine::open(&root.path().join("db"), config).await.unwrap();
-        let first = engine.terminal(root.path()).unwrap();
-        assert!(Arc::ptr_eq(&first, &engine.terminal(root.path()).unwrap()));
         let bin = root.path().join("setup/bin");
+        let found = || {
+            crate::terminal::tmux::installed_at(&crate::tools::Places::new(vec![bin.clone()], None))
+        };
+        let host = || engine.terminal_on(root.path(), found()).unwrap();
+        assert_eq!(found(), None);
+        let first = host();
+        assert!(Arc::ptr_eq(&first, &host()));
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("tmux"), "#!/bin/sh\nexit 1\n").unwrap();
         std::fs::set_permissions(bin.join("tmux"), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let installed = engine.terminal(root.path()).unwrap();
+        assert_eq!(found(), Some(bin.join("tmux").canonicalize().unwrap()));
+        let installed = host();
         assert!(!Arc::ptr_eq(&first, &installed));
-        assert!(Arc::ptr_eq(
-            &installed,
-            &engine.terminal(root.path()).unwrap()
-        ));
+        assert!(Arc::ptr_eq(&installed, &host()));
         std::fs::remove_file(bin.join("tmux")).unwrap();
-        let removed = engine.terminal(root.path()).unwrap();
+        assert_eq!(found(), None);
+        let removed = host();
         assert!(!Arc::ptr_eq(&installed, &removed));
-        assert!(Arc::ptr_eq(
-            &removed,
-            &engine.terminal(root.path()).unwrap()
-        ));
+        assert!(Arc::ptr_eq(&removed, &host()));
         engine.close().await.unwrap();
     }
 
