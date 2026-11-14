@@ -334,3 +334,58 @@ test("a stale skill or server change reads the list again, so the owner sees the
   assert.match(source, /else \{ setFailure\(result\.kind === "not_ready" \? NOT_READY : result\.message\); if \(readsAgain\(result\)\) reload\(\); \}/, "the list reads again");
   assert.match(source, /if \(readsAgain\(result\)\) \{ reload\(\); onChanged\(\); \}/, "the skill detail and the list behind it read again");
 });
+
+const hook = (plugin, event, matcher, patch = {}) => ({ id: `hook-${plugin}-${event}-${matcher ?? "all"}`, name: `${plugin}/${event}/1`, plugin, event, matcher,
+  command: `node hooks/${event.toLowerCase()}.mjs`, scope: { kind: "global" }, scope_label: "For every project", enabled: true, on_here: null,
+  follows: plugin, source: `/Users/owner/Library/CrazyAgent/engine/setup/pack/${plugin}`, version: 0, ...patch });
+const packHooks = () => [
+  hook("caveman", "SessionStart", null), hook("caveman", "UserPromptSubmit", null), hook("caveman", "SubagentStart", null), hook("caveman", "SessionEnd", null),
+  hook("context-mode", "PreToolUse", "Bash"), hook("context-mode", "PreToolUse", "Read", { enabled: false }), hook("context-mode", "SessionStart", null),
+];
+const hooksProps = (hooks, patch = {}) => ({ hooks, failure: "", onAdd: forbidden, onToggle: forbidden, onToggleGroup: forbidden, onRetry: forbidden, ...patch });
+
+test("hooks group per plugin and scope in engine order, counting each event once", () => {
+  const hooks = [...packHooks(), hook("caveman", "SessionStart", null, { scope: { kind: "project", project_id: "app" }, scope_label: "This project only" })];
+  const groups = plugins.hookGroups(hooks);
+  assert.deepEqual(groups.map((group) => [group.plugin, group.events, group.hooks.length]), [["caveman", 4, 4], ["context-mode", 2, 3], ["caveman", 1, 1]]);
+  assert.equal(plugins.hookGroupName(groups[0]), "caveman - 4 events");
+  assert.equal(plugins.hookGroupName(groups[2]), "caveman - 1 event");
+  assert.deepEqual(groups[0].follows, ["caveman"]);
+  assert.deepEqual(plugins.hookGroupSwitch(groups[0]), { checked: true, label: "On for every project", project: false });
+  assert.deepEqual(plugins.hookGroupSwitch(groups[1]), { checked: false, label: "Partly on", project: false });
+  assert.deepEqual(plugins.hookGroupSwitch(groups[1], "app"), { checked: false, label: "Partly on", project: true });
+  const off = plugins.hookGroups(packHooks().map((one) => ({ ...one, enabled: false })));
+  assert.deepEqual(plugins.hookGroupSwitch(off[0]), { checked: false, label: "On for every project", project: false });
+});
+
+test("the hooks list shows one row per plugin with its switch, and its events stay folded", () => {
+  const markup = renderToStaticMarkup(createElement(plugins.HooksView, hooksProps({ kind: "ok", value: packHooks() })));
+  assert.match(markup, /caveman - 4 events/);
+  assert.match(markup, /context-mode - 2 events/);
+  assert.equal(markup.match(/Runs while caveman is on\./g)?.length, 1, "the follow note shows once, on the plugin row");
+  assert.match(markup, /Partly on/);
+  assert.match(markup, /id="hook-on-0"/);
+  assert.match(markup, /id="hook-on-1"/);
+  assert.match(markup, /aria-expanded="false"/);
+  assert.match(markup, /Show events/);
+  assert.doesNotMatch(markup, /SubagentStart/, "events show only once the row is opened");
+  assert.doesNotMatch(markup, /hook-on-0-0/);
+});
+
+test("an opened plugin row lists each event with its matcher, command and own switch", () => {
+  const groups = plugins.hookGroups(packHooks());
+  const markup = renderToStaticMarkup(createElement(plugins.HookEvents, { group: groups[1], index: 1, onToggle: forbidden }));
+  assert.match(markup, /PreToolUse, matching Bash/);
+  assert.match(markup, /PreToolUse, matching Read/);
+  assert.match(markup, /node hooks\/pretooluse\.mjs/);
+  assert.match(markup, /id="hook-on-1-0"/);
+  assert.match(markup, /id="hook-on-1-2"/);
+  assert.match(markup, /id="hook-on-1-1"[^>]*aria-checked="false"|aria-checked="false"[^>]*id="hook-on-1-1"/, "the off hook shows off");
+});
+
+test("turning a plugin row on or off changes only the hooks that differ, and a project skips hooks off in Settings", () => {
+  const groups = plugins.hookGroups(packHooks());
+  assert.deepEqual(plugins.hooksToSet(groups[0], false).map((one) => one.id), groups[0].hooks.map((one) => one.id));
+  assert.deepEqual(plugins.hooksToSet(groups[1], true).map((one) => one.id), ["hook-context-mode-PreToolUse-Read"]);
+  assert.deepEqual(plugins.hooksToSet(groups[1], true, "app").map((one) => one.id), [], "a hook off in Settings stays off for the project");
+});
