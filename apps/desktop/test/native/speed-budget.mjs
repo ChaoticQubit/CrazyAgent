@@ -233,14 +233,17 @@ function valuesOf(samples, metric) {
 
 /** Self-noise per metric: one build's two runs of samples against each other. Inputs: the two
  * sample lists. Output: `{ metric: share }` for each metric both measured at least
- * `KEPT_MIN` times. */
+ * `KEPT_MIN` times with a median above zero; a zero median has no share, so judge leaves
+ * only that metric unmeasured. */
 export function noiseShares(first, second) {
   assert.ok(first.length >= 1 && second.length >= 1, "two sample lists");
   const shares = {};
   for (const metric of new Set([...first, ...second].flatMap((sample) => Object.keys(sample)))) {
     const left = valuesOf(first, metric);
     const right = valuesOf(second, metric);
-    if (Math.min(left.length, right.length) >= KEPT_MIN) shares[metric] = noise(summary(left), summary(right));
+    if (Math.min(left.length, right.length) < KEPT_MIN) continue;
+    const sides = [summary(left), summary(right)];
+    if (Math.min(sides[0].median, sides[1].median) > 0) shares[metric] = noise(sides[0], sides[1]);
   }
   assert.ok(Object.values(shares).every((share) => share >= 0));
   return shares;
@@ -248,8 +251,8 @@ export function noiseShares(first, second) {
 
 /** Judges every metric of the candidate against the base (DEC-169 section 3). Inputs: both
  * sides' samples and the self-noise shares. Output: one row per metric, sorted: status pass,
- * fail, report (report-only) or unmeasured (fewer than `KEPT_MIN` valid samples a side), with
- * both summaries and the reasons. */
+ * fail, report (report-only) or unmeasured (fewer than `KEPT_MIN` valid samples a side, or no
+ * noise share), with both summaries and the reasons. */
 export function judge(base, candidate, shares) {
   assert.ok(Array.isArray(base) && Array.isArray(candidate), "two sample lists");
   const metrics = [...new Set([...base, ...candidate].flatMap((sample) => Object.keys(sample)))].sort();
@@ -258,10 +261,7 @@ export function judge(base, candidate, shares) {
     if (kept < KEPT_MIN) return { metric, status: "unmeasured", kept };
     const sides = { base: summary(valuesOf(base, metric).slice(0, kept)), candidate: summary(valuesOf(candidate, metric).slice(0, kept)) };
     if (REPORT_ONLY.has(metric)) return { metric, status: "report", ...sides };
-    if (OPTIONAL.has(metric) && !Object.hasOwn(shares, metric)) {
-      return { metric, status: "unmeasured", kept, reasons: ["the noise run never measured it"] };
-    }
-    assert.ok(Object.hasOwn(shares, metric), `a noise for ${metric}; run the noise mode first`);
+    if (!Object.hasOwn(shares, metric)) return { metric, status: "unmeasured", kept, reasons: ["the noise run never measured it"] };
     const share = margin(shares[metric]);
     const floor = floorFor(metric);
     const result = verdict({ ...sides, margin: share, floor });

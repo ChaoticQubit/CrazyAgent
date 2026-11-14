@@ -162,9 +162,19 @@ test("judge passes, fails, reports and leaves unmeasured each metric by its rule
   assert.deepEqual(by, { launch_ms: "fail", memory_app_mb: "pass", memory_webkit_mb: "report", round_trip_x_ms: "unmeasured", switch_cold_home_ms: "pass" });
 });
 
-test("judge refuses a timed metric with no noise reading", () => {
-  const side = Array.from({ length: KEPT_MIN }, () => ({ reload_home_ms: 1000 }));
-  assert.throws(() => judge(side, side, {}), /noise for reload_home_ms/);
+test("judge leaves a metric with no noise reading unmeasured, and the verdict names it as not judged", () => {
+  const side = Array.from({ length: KEPT_MIN }, () => ({ reload_home_ms: 1000, switch_cold_home_ms: 40 }));
+  const rows = judge(side, side, { switch_cold_home_ms: 0 });
+  assert.deepEqual(rows.map((item) => [item.metric, item.status]), [["reload_home_ms", "unmeasured"], ["switch_cold_home_ms", "pass"]]);
+  assert.match(rows[0].reasons.join(" "), /noise run never measured it/);
+  assert.ok(incomplete(rows).includes("reload_home_ms"));
+});
+
+test("noise shares leave out a metric whose median is zero on either run, so only that metric goes unjudged", () => {
+  const first = Array.from({ length: KEPT_MIN }, () => ({ round_trip_x_ms: 0, launch_webview_ms: 100 }));
+  const second = Array.from({ length: KEPT_MIN }, () => ({ round_trip_x_ms: 0.4, launch_webview_ms: 104 }));
+  assert.deepEqual(noiseShares(first, second), { launch_webview_ms: 0.04 });
+  assert.deepEqual(noiseShares(second, first), { launch_webview_ms: 0.04 });
 });
 
 test("judge rows carry their floor: launches and engine start 100 ms, TUI keys and pages 20 ms, memory 10 MB", () => {
