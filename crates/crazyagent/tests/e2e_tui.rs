@@ -2560,18 +2560,20 @@ fn stand_in_engine(prefix: &str, home: &Path, path: String) -> Engine {
     engine
 }
 
-/// DEC-166: whether a row of the screen is the picked one of a list and names the label: the
-/// list marker, at most a provider mark, then the label. Inputs: the screen and the label.
-/// Output: the answer.
+/// DEC-166: whether a row of the screen is the picked one of a list or menu and names the
+/// label: the list's `> ` marker or a menu item's focus bar, at most a provider mark, then
+/// the label. Inputs: the screen and the label. Output: the answer.
 fn picked_row(screen: &str, label: &str) -> bool {
     screen.lines().any(|line| {
         line.find(label).is_some_and(|at| {
             let before = &line[..at];
-            before.contains("> ")
-                && before
-                    .rsplit("> ")
-                    .next()
-                    .is_some_and(|between| between.trim().chars().count() <= 2)
+            ["> ", "\u{258c} ", "| "].iter().any(|marker| {
+                before.contains(marker)
+                    && before
+                        .rsplit(marker)
+                        .next()
+                        .is_some_and(|between| between.trim().chars().count() <= 2)
+            })
         })
     })
 }
