@@ -1686,7 +1686,7 @@ async fn a_folder_that_arrives_with_project_instructions_starts_onboarding_with_
             continue;
         }
         let labelled =
-            format!("## Imported from .crazyagent/instructions.md\n\nDUMMY-ARRIVED-{name}\n");
+            format!("### Imported from .crazyagent/instructions.md\n\nDUMMY-ARRIVED-{name}\n");
         if !started || text != labelled {
             problems.push(format!(
                 "{name}: started {started}, text {text:?}, sent {sent:?}"
