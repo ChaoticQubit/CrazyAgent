@@ -4519,6 +4519,7 @@ mod overview_read {
                     text: None,
                     version: String::new(),
                     edited: false,
+                    foreign: false,
                     proposal: None,
                     proposal_version: String::new(),
                     blocked: None,
@@ -4825,4 +4826,18 @@ fn delete_again_never_opens_the_remove_ask_over_another_box() {
     screen.hidden = None;
     screen.ask_delete_again();
     assert!(screen.confirm_remove);
+}
+
+/// Delete again from the banner on any tab moves to Settings, where the remove ask lives,
+/// before it opens the ask, as the desktop's Delete again opens Settings (DEC-141).
+#[test]
+fn delete_again_from_another_tab_opens_the_remove_ask_on_settings() {
+    for tab in [Tab::Overview, Tab::Agents, Tab::Context, Tab::Settings] {
+        let project = ProjectId::new("gone").unwrap();
+        let mut screen = ProjectScreen::new(project, "Gone app".into(), None);
+        screen.open(tab);
+        screen.ask_delete_again();
+        assert!(screen.confirm_remove, "{tab:?}");
+        assert_eq!(screen.tab, Tab::Settings, "from {tab:?}");
+    }
 }

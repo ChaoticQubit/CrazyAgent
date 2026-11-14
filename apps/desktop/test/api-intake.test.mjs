@@ -44,7 +44,7 @@ test("the intake job has a client call for each command and its own sentences", 
   assert.equal(api.intakeCopy("home_add_cancelled"), "Adding the folder stopped. Nothing was moved or copied.");
   assert.equal(api.intakeCopy("intake_failed"), "Adding the folder failed. Check your projects folder before trying again.");
   assert.deepEqual(await api.loadIntakeJob(), failed("engine_unreachable", "CrazyAgent's engine isn't running."));
-  assert.equal((await api.startIntake("relative/site", "move", [])).code, "home_source_invalid");
+  assert.deepEqual(await api.startIntake("relative/site", "move", []), failed("engine_unreachable", "CrazyAgent's engine isn't running."), "the native bridge checks the path, not the window");
 });
 
 test("without the native bridge an intake read reports the engine as unreachable, never sample data", async () => {

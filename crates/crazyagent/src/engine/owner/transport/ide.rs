@@ -33,6 +33,7 @@ pub const IDE_CODES: &[&str] = &[
     "ide_run_control_character",
     "ide_run_desktop_only",
     "ide_run_empty",
+    "ide_run_foreign_tab",
     "ide_run_not_one_line",
     "ide_run_off",
     "ide_run_too_long",
@@ -122,8 +123,8 @@ impl OwnerClient {
     /// Types one command the owner confirmed into a new terminal of the project's open
     /// desktop IDE and waits until the IDE says it typed it. Only the desktop client, where
     /// the owner confirms the command, may ask. Inputs: the project and the command.
-    /// Output: the run's id, or a refusal such as `ide_run_off`, `ide_run_chained`,
-    /// `ide_not_running` or `ide_run_desktop_only`.
+    /// Output: the run's id, or a refusal such as `ide_run_off`, `ide_run_foreign_tab`,
+    /// `ide_run_chained`, `ide_not_running` or `ide_run_desktop_only`.
     pub async fn ide_run(
         &self,
         project: ProjectId,

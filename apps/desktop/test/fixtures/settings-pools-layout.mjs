@@ -11,6 +11,7 @@ const SAVED_LINE_MS = 6000;
 let timers = [];
 let usageSince;
 let extrasAsks = [];
+let spendSent = [];
 let current = {};
 let schedule = null;
 let saves = [];
@@ -177,6 +178,10 @@ function answer(scene, command, args) {
     const limits = failing(scene.limits ?? "ok", LIMITS);
     return limits instanceof Promise ? limits : { limits };
   }
+  if (command === "desktop_usage_set_spend") {
+    spendSent.push(args.settings);
+    return null;
+  }
   if (scene.edits === "ok" && command === "desktop_inspect_model_access") return { ticket: "ticket", record: { kind: "pool", pool: { id: "pool-spare", name: "Spare", members: ["acct-3"] } } };
   if (scene.edits === "ok" && command === "desktop_edit_model_access") return APPLIED;
   if (command === "desktop_inspect_model_access" || command === "desktop_model_access_page") throw FAILURE;
@@ -191,6 +196,7 @@ export async function mount(scene = {}, theme = "light") {
   timers = [];
   saves = [];
   extrasAsks = [];
+  spendSent = [];
   gated = null;
   gatedAnswers = [];
   savedLineTimers = [];
@@ -372,6 +378,11 @@ export async function fireTimer(ms) {
 /** Reads what each extras read asked for. Output: its detail flag, one per read, in order. */
 export function extrasDetail() {
   return extrasAsks;
+}
+
+/** Lists the free resets settings the page asked the engine to keep. Output: each, in order. */
+export function spendSettingsSent() {
+  return spendSent;
 }
 
 export function lastUsageSince() {

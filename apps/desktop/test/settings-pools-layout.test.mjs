@@ -18,6 +18,8 @@ const RANKING = "desktop_account_ranking";
 const USAGE = "desktop_usage_report";
 const POOLS_READ = "desktop_pool_summaries";
 const ACCOUNTS_READ = "desktop_list_accounts";
+const EXTRAS_READ = "desktop_usage_extras";
+const SOURCE = '[role="radiogroup"][aria-label="Claude free resets"] [role="radio"]';
 
 test("the screen shows the title and purpose, Your pools with New pool on the left, the first pool selected on the right, and Free resets below", async () => {
   const seen = await onPools({}, async (page) => ({ top: await page.evaluate("Fixture.top()"), sections: await read(page), items: await items(page), cap: await page.evaluate("Fixture.wordsOf('.pool-cap')") }));
@@ -100,6 +102,19 @@ test("Pools asks for the detail rows on every read while it is open", async () =
   assert.ok(asked.first.length >= 1, JSON.stringify(asked));
   assert.ok(asked.later.length > asked.first.length, JSON.stringify(asked));
   assert.ok(asked.later.every((detail) => detail === true), JSON.stringify(asked));
+});
+
+test("each Claude free resets source picked reads every row's free resets again once the engine kept it, so a Claude row never waits the minute reread to follow it (DEC-154 addendum)", async () => {
+  const seen = await onPools({}, async (page) => {
+    const reads = [await commandCount(page, EXTRAS_READ)];
+    for (const option of ["Through Claude Code", "As Claude Code", "Don't read"]) {
+      await press(page, SOURCE, option);
+      reads.push(await commandCount(page, EXTRAS_READ));
+    }
+    return { reads, kept: await page.evaluate("Fixture.spendSettingsSent()") };
+  });
+  assert.deepEqual(seen.kept.map((settings) => settings.resets_source), ["through_claude_code", "as_claude_code", "off"]);
+  assert.deepEqual(seen.reads.slice(1).map((reads, at) => reads - seen.reads[at]), [1, 1, 1], JSON.stringify(seen));
 });
 
 test("a failed extras read keeps each row's usage and shows no made-up line", async () => {

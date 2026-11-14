@@ -605,7 +605,8 @@ function usePoolEdits(apply: ApplyChange, accounts: Loaded<AccountView[]>, refus
 
 /** Settings, Pools: the one screen, adding, removing, renaming, a new pool and Delete pool; the
  * pools, the accounts and the limits are read again once a minute, and the order too unless a
- * change waits, since the queue reads it when it drains. Input: whether the page was opened to
+ * change waits, since the queue reads it when it drains; a free resets setting the engine kept
+ * reads the usage and each row's free resets at once. Input: whether the page was opened to
  * start a new pool. */
 export function Pools({ creating }: { creating: boolean }) {
   const session = useAppSession();
@@ -659,6 +660,7 @@ export function Pools({ creating }: { creating: boolean }) {
   const known = accounts.kind === "ok" ? accounts.value : [];
   const extras = extrasRead.kind === "ok" ? new Map(extrasRead.value.map((row) => [row.account, row.extras])) : NO_EXTRAS;
   const reread = () => { reload(); rerank(); };
+  const rereadSpend = () => { rereadUsage(); rereadExtras(); };
 
   const prepareAll = async (pool: PoolSummary) => {
     setRefusal(undefined);
@@ -712,7 +714,7 @@ export function Pools({ creating }: { creating: boolean }) {
         onSelect={(id) => { edits.drop(); setAdding(false); setRefusal(undefined); setSelected(id); }} onNew={() => { edits.open(read.map((item) => item.name)); setRefusal(undefined); setAdding(true); }}
         onToggleAdd={() => setAdding(!adding)} onDoneAdd={closeAdd} onAdd={(pool, account) => (draft ? edits.addToDraft(account) : edits.add(pool, account))} onRemove={edits.remove} onRename={edits.rename} onDraftName={edits.setName}
         onDelete={(pool) => void askDelete(pool)} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} preparing={preparing} />
-      <div className="pool-spend"><SpendSettingsSection usage={usage} onDone={rereadUsage} onRetry={rereadUsage} /></div>
+      <div className="pool-spend"><SpendSettingsSection usage={usage} onDone={rereadSpend} onRetry={rereadUsage} /></div>
     </div>
     <ConfirmDialog open={Boolean(deleting)} title={`Delete ${deleting?.name ?? "pool"}?`} confirmLabel={copy?.confirmLabel ?? "Delete pool"} pending={removing}
       onCancel={() => setDeleting(undefined)} onConfirm={() => void remove()}>
