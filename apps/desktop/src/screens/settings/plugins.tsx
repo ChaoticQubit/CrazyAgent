@@ -820,9 +820,9 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
   const toggleHookGroup = (group: HookGroup, on: boolean) => {
     const changing = hooksToSet(group, on, projectId);
     void act<unknown>(group.key, async () => {
-      for (const hook of changing) {
+      for (const [at, hook] of changing.entries()) {
         const result = await setHook(hook, on);
-        if (result.kind !== "ok") return result;
+        if (result.kind !== "ok") { if (at > 0) reloadHooks(); return result; }
       }
       return { kind: "ok", value: null };
     }, () => `${group.plugin} hooks turned ${on ? "on" : "off"}.`, reloadHooks);

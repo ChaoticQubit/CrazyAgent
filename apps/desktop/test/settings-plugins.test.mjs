@@ -387,9 +387,12 @@ test("an opened plugin row lists each event with its matcher, command and own sw
   assert.match(markup, /id="hook-on-1-1"[^>]*aria-checked="false"|aria-checked="false"[^>]*id="hook-on-1-1"/, "the off hook shows off");
 });
 
-test("turning a plugin row on or off changes only the hooks that differ, and a project skips hooks off in Settings", () => {
+test("turning a plugin row on or off changes only the hooks that differ, and a project skips hooks off in Settings", async () => {
   const groups = plugins.hookGroups(packHooks());
   assert.deepEqual(plugins.hooksToSet(groups[0], false).map((one) => one.id), groups[0].hooks.map((one) => one.id));
   assert.deepEqual(plugins.hooksToSet(groups[1], true).map((one) => one.id), ["hook-context-mode-PreToolUse-Read"]);
   assert.deepEqual(plugins.hooksToSet(groups[1], true, "app").map((one) => one.id), [], "a hook off in Settings stays off for the project");
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../src/screens/settings/plugins.tsx", import.meta.url), "utf8");
+  assert.match(source, /if \(result\.kind !== "ok"\) \{ if \(at > 0\) reloadHooks\(\); return result; \}/, "a plugin switch refused after some hooks changed reads the list again");
 });
