@@ -42,7 +42,7 @@ impl RegistryCase {
         .unwrap();
         Self {
             root,
-            tools: tempfile::tempdir().unwrap(),
+            tools: owner_folder(),
             service,
             _stop: stop,
         }
@@ -55,6 +55,28 @@ impl RegistryCase {
             authority: Arc::clone(&retained.authority),
         }
     }
+}
+
+/// A folder for the rows' harness files outside the engine's own temp folder, which agents
+/// with the owner's temp folder grant write: this user's cache folder on macOS, the temp
+/// folder elsewhere, where agents get no temp grant. Output: the folder, removed when dropped.
+fn owner_folder() -> tempfile::TempDir {
+    if !cfg!(target_os = "macos") {
+        return tempfile::tempdir().unwrap();
+    }
+    let cache = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/getconf")
+            .arg("DARWIN_USER_CACHE_DIR")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let cache = std::fs::canonicalize(String::from_utf8(cache.stdout).unwrap().trim()).unwrap();
+    tempfile::Builder::new()
+        .prefix("rreg-tools-")
+        .tempdir_in(cache)
+        .unwrap()
 }
 
 /// Runs one row against a real engine. The row's harness files go in their own folder,
@@ -956,6 +978,32 @@ async fn a_re_pin_into_a_folder_agents_can_write_is_refused_as_at_engine_start()
                 .unwrap_err()
                 .0,
             crate::harnesses::finding::PATH_AGENT_SPACE
+        );
+    })
+    .await;
+}
+
+/// RV-DS241-58 with DEC-166: a harness pinned through a link that an update points at a new
+/// install in an owner folder is captured again and used, so an update needs no restart.
+#[tokio::test]
+async fn a_re_pin_to_a_new_install_in_an_owner_folder_is_used() {
+    registry_case(|host, root| async move {
+        let owner = root.join("owner");
+        std::fs::create_dir_all(&owner).unwrap();
+        let old = physical_file(&owner, "codex-0.50.0", b"old-codex");
+        let new = physical_file(&owner, "codex-0.56.0", b"new-codex");
+        let link = owner.join("codex");
+        std::os::unix::fs::symlink(&old, &link).unwrap();
+        host.register_codex_executable(RegisteredNativeAuthHost::capture_entry(&link).unwrap())
+            .unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&new, &link).unwrap();
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            new
         );
     })
     .await;

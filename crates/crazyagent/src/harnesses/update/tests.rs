@@ -2449,3 +2449,40 @@ fn the_engine_trusts_only_this_platforms_homebrew_prefixes() {
         }
     }
 }
+
+/// RV-DS241-59 (Update): an Update of a harness the tool resolver refuses, an npm Codex in a
+/// prefix inside a project, which agents write, never runs that file for its version before
+/// or after the update, nor the prefix's npm.
+#[test]
+fn an_update_of_a_resolver_refused_harness_never_runs_it() {
+    let machine = Machine::new();
+    std::fs::create_dir_all(machine.roots().home).unwrap();
+    std::fs::create_dir_all(machine.root.path().join("proj/.crazyagent")).unwrap();
+    let ran = machine.root.path().join("ran");
+    machine.npm("proj/node");
+    let real = machine
+        .root
+        .path()
+        .join("proj/node/lib/node_modules/@openai/codex/bin/codex.js");
+    executable(
+        &real,
+        &format!(
+            "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+            ran.display()
+        ),
+    );
+    let case = Case::new(machine, entry("codex", Some(real)), None);
+    let (ended, told) = std::sync::mpsc::channel();
+    let started = case
+        .updates
+        .start(&case.db, &case.entry, &case.machine.roots(), move |ok| {
+            let _ = ended.send(ok);
+        });
+    match started {
+        Ok(()) => {
+            let _ = told.recv_timeout(Duration::from_secs(30));
+        }
+        Err(code) => assert_eq!(code, TOOL_UNSAFE),
+    }
+    assert!(!ran.exists(), "a refused harness file is never run");
+}

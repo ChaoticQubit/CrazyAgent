@@ -309,6 +309,33 @@ fn the_programs_setup_starts_never_get_a_project_folder_on_their_path() {
     assert_eq!(folders, [root.path().join("setup/bin"), owner]);
 }
 
+/// security-audit run-1 (installer PATH, temp): on the engine's places, which set temp
+/// folders aside, the programs setup starts never get a temp folder on their PATH either, so
+/// an interpreter an agent with the owner's temp folder grant planted there never runs;
+/// setup's own `bin` stays first and a system folder stays.
+#[test]
+fn on_the_engines_places_the_programs_setup_starts_never_get_a_temp_folder_on_their_path() {
+    let root = private_root();
+    let planted = root.path().join("tmp/bin");
+    std::fs::create_dir_all(&planted).unwrap();
+    let places = crate::tools::Places::engine(Some(root.path()), None, None, None);
+    let installer = PinnedInstaller::with_places(
+        root.path(),
+        vec![planted, PathBuf::from("/usr/bin")],
+        places,
+    );
+    let (_, path) = installer
+        .env()
+        .into_iter()
+        .find(|(name, _)| *name == "PATH")
+        .unwrap();
+    let folders: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    assert_eq!(
+        folders,
+        [root.path().join("setup/bin"), PathBuf::from("/usr/bin")]
+    );
+}
+
 #[test]
 fn a_locked_tool_installs_only_files_whose_sha256_its_lock_lists() {
     let uv = found("uv");

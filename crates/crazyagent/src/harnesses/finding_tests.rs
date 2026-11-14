@@ -693,3 +693,24 @@ fn a_chosen_file_in_the_engines_own_temp_folder_is_refused_as_agent_space() {
         Err(PATH_AGENT_SPACE.to_owned())
     );
 }
+
+/// RV-DS241-61 premise: a chosen harness file under the shared temp folder, outside the
+/// agents' own `ca-` folders, is refused as one in a folder other users can change, so the
+/// engine's own temp folder is the one temp folder the check has to add.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_chosen_file_in_the_shared_temp_folder_is_refused_as_changeable() {
+    let case = Case::new();
+    let shared = tempfile::Builder::new()
+        .prefix("harness-shared-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    let file = shared.path().join("codex");
+    std::fs::write(&file, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let space = finding::AgentSpace::open(&case.engine).unwrap();
+    assert_eq!(
+        finding::check("codex", &file, &space, Some(&case.home)).map_err(|error| error.0),
+        Err(finding::PATH_CHANGEABLE.to_owned())
+    );
+}
