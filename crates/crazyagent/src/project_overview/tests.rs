@@ -2105,7 +2105,8 @@ fn a_writing_run_whose_provider_refuses_connections_fails_at_once_with_the_reach
 /// RV-DS241-80: Delete everything records the project's Overview writing runs as engine
 /// files and removes each run's folder, which holds the evidence prompt and the session
 /// transcript, and its Seatbelt profile; the runs of a project whose id only starts the
-/// same, a name in no run's shape and a research job's run all stay.
+/// same or adds a `_`, a name in no run's shape and a research job's run all stay. Every run
+/// name is built as the engine builds it, with its run-id hash.
 #[test]
 fn delete_everything_removes_the_projects_overview_runs_and_no_other_projects() {
     let root = tempfile::tempdir().unwrap();
@@ -2113,12 +2114,15 @@ fn delete_everything_removes_the_projects_overview_runs_and_no_other_projects() 
     let agents = base.join("research").join("agents");
     let profiles = base.join("research").join("profiles");
     std::fs::create_dir_all(&profiles).unwrap();
-    let own = "overview-demo-1794000000000";
+    let time = "1794000000000";
+    let named = |id: &str| run_name_at(&ProjectId::new(id).unwrap(), time);
+    let own = named("demo");
     let others = [
-        "overview-demo-2-1794000000000",
-        "overview-demonstration-1794000000000",
-        "overview-demo-later",
-        "job-7-1",
+        named("demo-2"),
+        named("demonstration"),
+        named("demo_"),
+        "overview-demo-later".to_owned(),
+        "job-7-1".to_owned(),
     ];
     for name in others.iter().chain([&own]) {
         std::fs::create_dir_all(agents.join(name).join("home")).unwrap();
@@ -2134,15 +2138,15 @@ fn delete_everything_removes_the_projects_overview_runs_and_no_other_projects() 
     };
     let files = plan.engine_files(&[]);
     let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, [own]);
+    assert_eq!(names, [own.as_str()]);
     assert_eq!(
         crate::projects_home::remove_engine_files(&plan.database, &files),
-        [own.to_owned()]
+        [own.clone()]
     );
-    assert!(std::fs::symlink_metadata(agents.join(own)).is_err());
+    assert!(std::fs::symlink_metadata(agents.join(&own)).is_err());
     assert!(std::fs::symlink_metadata(profiles.join(format!("{own}.sb"))).is_err());
     for name in others {
-        assert!(agents.join(name).join("prompt.md").is_file(), "{name}");
+        assert!(agents.join(&name).join("prompt.md").is_file(), "{name}");
         assert!(profiles.join(format!("{name}.sb")).is_file(), "{name}");
     }
 }
