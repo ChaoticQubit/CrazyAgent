@@ -25292,7 +25292,12 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
         team.shutdown().unwrap().is_empty(),
         "a kept proxied pane whose record never asked to be frozen ends with the engine"
     );
-    assert!(!host.alive().unwrap().contains(&AgentId::team(kept).unwrap()));
+    assert!(
+        !host
+            .alive()
+            .unwrap()
+            .contains(&AgentId::team(kept).unwrap())
+    );
     let deadline = Instant::now() + WAIT;
     while crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).is_ok() {
         assert!(
