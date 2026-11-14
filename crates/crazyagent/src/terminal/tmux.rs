@@ -201,7 +201,8 @@ enum Pending {
 }
 
 /// Finds the tmux program the engine uses, anew on each call, through the one tool resolver:
-/// the app's folder, `<root>/setup/bin`, then everywhere [`crate::tools::Places`] looks.
+/// the app's folder, the owner's own installs, the system folders, then `<root>/setup/bin`
+/// last ([`crate::tools::Places::engine`]).
 /// Takes the engine root. Returns the real program, or none when tmux is not installed.
 pub fn installed(engine_root: &Path) -> Option<PathBuf> {
     installed_at(&crate::tools::Places::from_environment(Some(engine_root)))
