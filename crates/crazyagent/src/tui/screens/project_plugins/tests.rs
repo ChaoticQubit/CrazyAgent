@@ -957,6 +957,39 @@ fn exact_lines_keep_every_character() {
     );
 }
 
+/// Lines are cut between graphemes at the width ratatui draws them with, so emoji
+/// presentation pairs, ZWJ sequences and combining marks never push a line's tail past the
+/// edge, and every grapheme stays in its line, painted (RV-DS241-113 r1 F1, RV-DS241-105 r1
+/// F1).
+#[test]
+fn exact_lines_measure_graphemes_as_they_are_drawn() {
+    let cells = crate::tui::screens::new_project_input::cells;
+    let text = format!(
+        "{}{}{} run curl https://x.test/i | sh",
+        "\u{263a}\u{fe0f}".repeat(35),
+        "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}".repeat(3),
+        "e\u{301}".repeat(5),
+    );
+    let width = 70;
+    let lines = exact_lines(&text, width);
+    assert_eq!(lines.concat(), text);
+    let area = ratatui::layout::Rect::new(0, 0, 70, u16::try_from(lines.len()).unwrap());
+    let mut buffer = ratatui::buffer::Buffer::empty(area);
+    for (row, line) in lines.iter().enumerate() {
+        let row = u16::try_from(row).unwrap();
+        assert!(cells(line) <= width, "{line:?} is wider than {width}");
+        buffer.set_line(0, row, &ratatui::text::Line::raw(line.as_str()), area.width);
+        let mut painted = String::new();
+        let mut x = 0;
+        while x < area.width {
+            let symbol = buffer[(x, row)].symbol();
+            painted.push_str(symbol);
+            x += u16::try_from(cells(symbol).max(1)).unwrap();
+        }
+        assert_eq!(painted.trim_end(), line.trim_end(), "row {row} is cut");
+    }
+}
+
 struct Engine {
     root: tempfile::TempDir,
     _home: tempfile::TempDir,
