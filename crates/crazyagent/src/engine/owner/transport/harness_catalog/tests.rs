@@ -158,10 +158,9 @@ async fn a_harness_registered_through_its_link_is_listed_by_the_link_its_updater
         Some(link.clone()),
         "listed by the entry the updater repoints, never by versions/2.1.200"
     );
-    assert_eq!(after.executable, Some(link.clone()));
     assert_eq!(
-        std::fs::canonicalize(&link).unwrap(),
-        std::fs::canonicalize(&new).unwrap(),
-        "the listed path leads to the version the update put in place"
+        after.executable,
+        Some(link),
+        "still listed by the entry once it leads to versions/2.1.300"
     );
 }

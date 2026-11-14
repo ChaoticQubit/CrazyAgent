@@ -150,7 +150,7 @@ async fn an_owner_attaching_after_a_claude_update_sees_the_new_install() {
         .unwrap();
     assert_eq!(
         claude(before.harness_catalog(false).await.unwrap()),
-        Some(old.clone())
+        Some(link.clone())
     );
     std::fs::remove_dir_all(old.parent().unwrap()).unwrap();
     std::fs::remove_file(&link).unwrap();
@@ -164,5 +164,5 @@ async fn an_owner_attaching_after_a_claude_update_sees_the_new_install() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(claude(entries.unwrap()), Some(new));
+    assert_eq!(claude(entries.unwrap()), Some(link));
 }
