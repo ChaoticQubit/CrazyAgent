@@ -2069,7 +2069,7 @@ fn first_run_fixes_a_refused_graphify_only_after_the_confirm_names_its_tree() {
         |screen| {
             screen.contains("Found, not used")
                 && screen.contains("graphify can't start")
-                && screen.contains("p Fix permissions")
+                && screen.contains("p Fix")
         },
     );
     pty.type_bytes(b"p");
@@ -2090,7 +2090,7 @@ fn first_run_fixes_a_refused_graphify_only_after_the_confirm_names_its_tree() {
         |screen| {
             screen.contains("Found 0.9.9")
                 && !screen.contains("Found, not used")
-                && !screen.contains("p Fix permissions")
+                && !screen.contains("p Fix")
         },
     );
     for folder in [&prefix, &prefix.join("bin")] {
@@ -2146,7 +2146,7 @@ fn first_run_shows_only_the_command_for_a_refused_graphify_when_unused_tools_is_
         |screen| {
             screen.contains("Found, not used")
                 && screen.contains("To fix it, run in Terminal: chmod -R go-w")
-                && !screen.contains("p Fix permissions")
+                && !screen.contains("p Fix")
         },
     );
     pty.type_bytes(b"p");

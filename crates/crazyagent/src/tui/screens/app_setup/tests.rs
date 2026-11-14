@@ -1883,6 +1883,38 @@ fn every_app_settings_hint_stays_on_the_bar_from_80_by_24_to_240_columns() {
     }
 }
 
+/// DEC-162: with a tool found and not used, the fix and unused tools hints join the app
+/// settings bar and every hint, `Esc Back` included, still stays on it from 80x24 to 240
+/// columns.
+#[test]
+fn a_refused_tool_keeps_every_app_settings_hint_on_the_bar_from_80_by_24_to_240_columns() {
+    let mut shell = settings(240, 80);
+    shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+        crate::setup::RefusedTool::FixButton,
+    )))));
+    let rows = render(&mut shell, 240, 80);
+    let wide = crate::tui::screens::settings_accounts::tests::bar_rows(&rows);
+    assert_eq!(wide.len(), 1, "{wide:?}");
+    let hints = crate::tui::screens::settings_accounts::tests::wide_hints(&wide[0]);
+    for needed in [
+        "p Fix",
+        "u Unused",
+        "Esc Back",
+        "g Sign out of GitHub",
+        "? Help",
+    ] {
+        assert!(hints.iter().any(|hint| hint == needed), "{hints:?}");
+    }
+    for (width, height) in [(200, 80), (209, 80), (80, 24)] {
+        let rows = render(&mut shell, width, height);
+        crate::tui::screens::settings_accounts::tests::every_hint_once(
+            &rows,
+            &hints,
+            &format!("{width}x{height}"),
+        );
+    }
+}
+
 fn refused_status(choice: crate::setup::RefusedTool) -> SetupStatus {
     let mut status = installed_status();
     assert_eq!(status.dependencies[2].name, Dependency::Graphify);
@@ -1930,7 +1962,7 @@ fn a_refused_tool_reads_found_not_used_and_p_fixes_only_the_tree_the_confirm_nam
         &rows,
         "Press p to remove write access for others from /h/py.",
     );
-    assert!(bar(&rows).contains("p Fix permissions"), "{}", bar(&rows));
+    assert!(bar(&rows).contains("p Fix"), "{}", bar(&rows));
 
     shell.key(Key::Char('p'));
     assert!(jobs(&mut shell).is_empty());
@@ -1998,7 +2030,7 @@ fn command_only_shows_the_command_and_p_sends_nothing() {
     )))));
     let rows = render(&mut shell, 120, 60);
     find(&rows, "To fix it, run in Terminal: chmod -R go-w '/h/py'");
-    assert!(!bar(&rows).contains("Fix permissions"), "{}", bar(&rows));
+    assert!(!bar(&rows).contains("p Fix"), "{}", bar(&rows));
     shell.key(Key::Char('p'));
     assert!(jobs(&mut shell).is_empty());
     assert_eq!(
@@ -2012,7 +2044,7 @@ fn the_unused_tools_setting_saves_the_command_only_choice() {
     let mut shell = settings(120, 60);
     let rows = render(&mut shell, 120, 60);
     assert!(find(&rows, "Unused tools").contains("Show a fix button"));
-    assert!(bar(&rows).contains("u Unused tools"), "{}", bar(&rows));
+    assert!(bar(&rows).contains("u Unused"), "{}", bar(&rows));
     shell.key(Key::Char('u'));
     find(&render(&mut shell, 120, 60), "> Show a fix button");
     shell.key(Key::Down);
