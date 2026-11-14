@@ -51,7 +51,8 @@ test("a hidden folders save sends the version it read, and a stale one reads the
   assert.match(hidden, /useState<HiddenPaths \| null>\(null\)/);
   assert.match(hidden, /saveHiddenPaths\(data\.id, paths, saved\.version, nextGeneration\(\)\)/, "the save sends the version the screen read");
   assert.match(hidden, /if \(savedStale\(result\)\) \{\n      const shown = await reread\(\);/, "a stale save reads the folders and their version again");
-  assert.ok(hidden.indexOf("savedStale(result)") < hidden.indexOf("failureCopy(result)"), "before the plain refusal copy");
+  const save = hidden.slice(hidden.indexOf("  async function save() {"));
+  assert.ok(save.indexOf("savedStale(result)") < save.indexOf("failureCopy(result)"), "before the plain refusal copy");
   assert.match(hidden, /setSaved\(fresh\.value\);\n    setPaths\(fresh\.value\.paths\);/);
   assert.ok(!hidden.includes("setSaved(paths)"), "an applied save reads the folders and their new version again");
   const api = readFileSync(new URL("../src/api-projects.ts", import.meta.url), "utf8");
