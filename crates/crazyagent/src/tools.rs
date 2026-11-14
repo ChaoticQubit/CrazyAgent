@@ -17,6 +17,8 @@ const INTERPRETER_DEPTH_MAX: usize = 2;
 const VERSION_ENTRIES_MAX: usize = 64;
 const VERSIONS_PER_MANAGER_MAX: usize = 4;
 const ANCESTORS_MAX: usize = 128;
+const PROJECT_ROOTS_MAX: usize = 1024;
+const PROJECTS_READ_TIME: std::time::Duration = std::time::Duration::from_secs(2);
 const TEMP_FOLDERS: [&str; 7] = [
     "/tmp",
     "/private/tmp",
@@ -83,7 +85,7 @@ pub const TMUX_MISSING: &str =
 /// The folders the resolver looks in, in order, built once from what the engine knows: no
 /// program is run, no shell file is read and every folder is absolute and bounded. No
 /// folder agents can write is kept ([`Places::agent_writable`]), the engine's data folder
-/// included; one in the engine's `setup` folder is set aside so [`resolve`] names a tool
+/// and every project the engine set up ([`registered_projects`]) included; one in the engine's `setup` folder is set aside so [`resolve`] names a tool
 /// there, and the engine's own places set aside a PATH or probed temp folder the same way
 /// ([`Places::set_aside_temp`]). The app's folder is kept on its own for the tools the app
 /// ships ([`Places::bundled`]).
@@ -97,6 +99,7 @@ pub struct Places {
     refused_setup: Vec<PathBuf>,
     refused_temp: Vec<PathBuf>,
     app_folder: Option<PathBuf>,
+    projects: Option<Vec<PathBuf>>,
 }
 
 impl Places {
@@ -105,18 +108,20 @@ impl Places {
     /// inside a project or a `.crazyagent` folder. Inputs: the folders in order and HOME.
     /// Output: the bounded places.
     pub fn new(folders: Vec<PathBuf>, home: Option<PathBuf>) -> Self {
-        Self::kept(folders, home, Vec::new(), false)
+        Self::kept(folders, home, Vec::new(), false, Some(Vec::new()))
     }
 
     /// Keeps the folders in order, dropping relative, oversized and repeated ones and every
     /// one agents can write, at most [`PLACES_MAX`], and sets aside one of those in an engine
     /// `setup` folder ([`Places::in_engine_setup`]). Inputs: the folders, HOME, the engine
-    /// data folders and whether probed temp folders are refused. Output: the bounded places.
+    /// data folders, whether probed temp folders are refused and the set-up projects' folders,
+    /// none when they could not be read. Output: the bounded places.
     fn kept(
         folders: Vec<PathBuf>,
         home: Option<PathBuf>,
         engine_roots: Vec<PathBuf>,
         temp_refused: bool,
+        projects: Option<Vec<PathBuf>>,
     ) -> Self {
         let mut places = Self {
             folders: Vec::new(),
@@ -134,6 +139,7 @@ impl Places {
             refused_setup: Vec::new(),
             refused_temp: Vec::new(),
             app_folder: None,
+            projects,
         };
         for folder in folders {
             if places.folders.len() == PLACES_MAX {
@@ -243,7 +249,14 @@ impl Places {
             app_folder: app_folder
                 .filter(|folder| usable(folder))
                 .map(Path::to_path_buf),
-            ..Self::kept(folders, home, engine_roots(engine_root), true).set_aside_temp(temp)
+            ..Self::kept(
+                folders,
+                home,
+                engine_roots(engine_root),
+                true,
+                Some(Vec::new()),
+            )
+            .set_aside_temp(temp)
         }
     }
 
@@ -257,8 +270,11 @@ impl Places {
     }
 
     /// Builds the engine's places as [`Places::from_environment`] does, with the engine
-    /// root this process recorded given explicitly so rows never record the global. Inputs:
-    /// the engine root given, if any, and the recorded one. Output: the places.
+    /// root this process recorded given explicitly so rows never record the global. With an
+    /// engine root given or recorded, the set-up projects are read from its `engine.db` on
+    /// every build, so a project set up after the engine started counts
+    /// ([`registered_projects`]); with neither, only the `.crazyagent` folder marks a project.
+    /// Inputs: the engine root given, if any, and the recorded one. Output: the places.
     fn at_roots(engine_root: Option<&Path>, recorded: Option<&Path>) -> Self {
         let engine_root = engine_root.or(recorded);
         let app = std::env::current_exe()
@@ -272,6 +288,7 @@ impl Places {
         });
         Self {
             engine_roots: engine_roots(data_root.as_deref()),
+            projects: engine_root.map_or_else(|| Some(Vec::new()), registered_projects),
             ..Self::engine(
                 engine_root,
                 app.as_deref(),
@@ -312,7 +329,13 @@ impl Places {
         let set_aside = self.refused_setup;
         let carried = self.refused_temp;
         let app_folder = self.app_folder;
-        let mut places = Self::kept(folders, self.home, self.engine_roots, temp_refused);
+        let mut places = Self::kept(
+            folders,
+            self.home,
+            self.engine_roots,
+            temp_refused,
+            self.projects,
+        );
         for folder in set_aside {
             if !places.refused_setup.contains(&folder) && places.refused_setup.len() < PLACES_MAX {
                 places.refused_setup.push(folder);
@@ -370,18 +393,121 @@ impl Places {
     }
 
     /// Whether agents can write a folder or file, read as written and with its links
-    /// resolved: inside a `.crazyagent` folder, inside a project ([`in_project`]), inside
-    /// the engine's data folder outside its `setup` folder, or inside an agent's short temp
-    /// folder ([`crate::sandbox::toolchains::in_agent_tmp`]). Input: the path. Output: the answer.
+    /// resolved: inside a `.crazyagent` folder, inside a project ([`in_project`]), inside a
+    /// project the engine set up ([`Places::in_set_up_project`]), inside the engine's data
+    /// folder outside its `setup` folder, or inside an agent's short temp folder
+    /// ([`crate::sandbox::toolchains::in_agent_tmp`]). Input: the path. Output: the answer.
     pub(crate) fn agent_writable(&self, path: &Path) -> bool {
         let real = path.canonicalize().ok();
         std::iter::once(path).chain(real.as_deref()).any(|path| {
             crate::harnesses::in_crazyagent_folder(path)
                 || in_project(self.home(), path)
+                || self.in_set_up_project(path)
                 || in_engine_data(&self.engine_roots, path)
                 || crate::sandbox::toolchains::in_agent_tmp(path)
         })
     }
+
+    /// Whether a path lies in the folder of a project the engine set up, which that project's
+    /// agents can write whole. When the projects could not be read it fails closed: every
+    /// path under HOME outside the engine's data folder counts. Input: the path. Output: the
+    /// answer.
+    fn in_set_up_project(&self, path: &Path) -> bool {
+        match &self.projects {
+            Some(roots) => roots.iter().any(|root| path.starts_with(root)),
+            None => {
+                let home = self.home.as_deref();
+                let real_home = home.and_then(|home| home.canonicalize().ok());
+                home.into_iter()
+                    .chain(real_home.as_deref())
+                    .any(|home| path.starts_with(home))
+                    && !self.engine_roots.iter().any(|root| path.starts_with(root))
+            }
+        }
+    }
+}
+
+/// The folders of every project the engine set up, as recorded and with links resolved, read
+/// read-only from the data folder's `engine.db`: an agent can write its project's whole folder,
+/// with or without a `.crazyagent` folder in it. No database yet, or one with no setups table,
+/// is no project. A database that cannot be read or more than [`PROJECT_ROOTS_MAX`] setups
+/// give none, never a partial list. Each setup is read for its folder alone
+/// ([`setup_folder`]), so one another version wrote still counts, and a row that names no
+/// folder is skipped alone and counted in the engine log. Input: the data folder. Output:
+/// the folders, or none.
+fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
+    let database = data_root.join("engine.db");
+    match std::fs::symlink_metadata(&database) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+        Ok(_) => {}
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        &database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .ok()?;
+    connection.busy_timeout(PROJECTS_READ_TIME).ok()?;
+    let tx = connection.unchecked_transaction().ok()?;
+    let tables: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='project_setups'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    if tables == 0 {
+        return Some(Vec::new());
+    }
+    let limit = i64::try_from(PROJECT_ROOTS_MAX + 1).ok()?;
+    let bodies: Vec<Option<String>> = tx
+        .prepare("SELECT body FROM project_setups LIMIT ?1")
+        .ok()?
+        .query_map([limit], |row| {
+            Ok(row.get_ref(0)?.as_str().ok().map(str::to_owned))
+        })
+        .ok()?
+        .collect::<Result<_, _>>()
+        .ok()?;
+    if bodies.len() > PROJECT_ROOTS_MAX {
+        return None;
+    }
+    let mut roots = Vec::with_capacity(2 * bodies.len());
+    let mut skipped = 0usize;
+    for body in bodies {
+        let Some(folder) = body.as_deref().and_then(setup_folder) else {
+            skipped += 1;
+            continue;
+        };
+        if !folder.is_absolute() {
+            continue;
+        }
+        let real = folder.canonicalize().ok();
+        for root in std::iter::once(folder).chain(real) {
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+    }
+    if skipped > 0 {
+        eprintln!("engine_places_setup_rows_skipped count={skipped}");
+    }
+    assert!(skipped <= PROJECT_ROOTS_MAX);
+    assert!(roots.len() <= 2 * PROJECT_ROOTS_MAX);
+    assert!(roots.iter().all(|root| root.is_absolute()));
+    Some(roots)
+}
+
+/// The project folder one stored setup names, read from its `folder` field alone so any
+/// other field another version added or dropped changes nothing
+/// ([`crate::project_setup::project_folder_of`]). Input: the stored body. Output: the
+/// folder, or none for a body that is not JSON or names no folder.
+fn setup_folder(body: &str) -> Option<PathBuf> {
+    let body: serde_json::Value = serde_json::from_str(body).ok()?;
+    let folder = body.get("folder")?.as_str()?;
+    Some(crate::project_setup::project_folder_of(Path::new(folder)))
 }
 
 /// Whether a path lies in the engine's data folder outside its `setup` folder, where the
