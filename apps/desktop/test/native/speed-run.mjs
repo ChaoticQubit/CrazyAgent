@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { endTerminals, start, stop } from "./e2e-harness.mjs";
 import {
-  KEPT_MIN, REFUSED_EXIT, incomplete, joinSample, judge, noiseShares, quiet, readQuiet, sampleMetrics, schedule,
+  KEPT_MIN, REFUSED_EXIT, incomplete, joinSample, judge, noiseShares, privateFolder, quiet, readQuiet, sampleMetrics, schedule,
   stayedQuiet,
 } from "./speed-budget.mjs";
 import { PROJECT } from "./speed-seed.mjs";
@@ -21,7 +21,7 @@ const QUIET_LOOK_MS = 15000;
 const TAINTED_MAX = 3;
 const RUN_MS_MAX = 20 * 60000;
 const OUTPUT_BYTES_MAX = 1 << 20;
-const STATE = /^\/tmp\/cas-(noise|compare)-(base|candidate)-[0-9a-f]{8}$/;
+const STATE = /^\/private\/tmp\/cas-(noise|compare)-(base|candidate)-[0-9a-f]{8}-[A-Za-z0-9]{6}$/;
 
 /** One side's artifacts as build-speed-base.sh lays them out, and the digest of its manifest
  * that names the build. Input: the folder. Output: the side. */
@@ -36,13 +36,14 @@ function artifacts(folder) {
   return { folder, digest };
 }
 
-/** Makes a side's kept engine state folder anew, removing only a folder this driver names.
- * Inputs: the mode, the side's label and its artifacts. Output: the state folder. */
+/** Makes a side's kept engine state folder, new and private: mkdtemp creates it 0700 with a
+ * name no one else can take first, short enough for the engine's socket address. Inputs: the
+ * mode, the side's label and its artifacts. Output: the state folder. */
 function freshState(mode, label, side) {
-  const state = `/tmp/cas-${mode}-${label}-${side.digest.slice(0, 8)}`;
+  const state = realpathSync(mkdtempSync(`/tmp/cas-${mode}-${label}-${side.digest.slice(0, 8)}-`));
   assert.match(state, STATE, "a speed state folder");
-  rmSync(state, { recursive: true, force: true });
-  mkdirSync(join(state, "home"), { recursive: true, mode: 0o700 });
+  privateFolder(state);
+  mkdirSync(join(state, "home"), { mode: 0o700 });
   return state;
 }
 
@@ -158,7 +159,7 @@ async function collect(mode, sides, kept, out) {
         const run = await runOnce(sides[side], states[side]);
         const tui = await tuiOnce(sides[side], states[side], run.evidence);
         const after = stayedQuiet(readQuiet());
-        runs.push({ side, warm, evidence: run.evidence, quiet_after: after.quiet, reasons: after.reasons });
+        runs.push({ side, warm, state: states[side], evidence: run.evidence, quiet_after: after.quiet, reasons: after.reasons });
         if (!after.quiet) continue;
         if (!warm) samples[side].push(joinSample(sampleMetrics(run.engine, run.app), tui));
         break;

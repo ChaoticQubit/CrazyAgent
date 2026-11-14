@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { KEPT_MIN, REFUSED_EXIT, REQUIRED, countFindings, incomplete, joinSample, judge, margin, noise, noiseShares, quiet, sampleMetrics, schedule, stayedQuiet, summary, verdict } from "./speed-budget.mjs";
+import { KEPT_MIN, REFUSED_EXIT, REQUIRED, countFindings, incomplete, joinSample, judge, margin, noise, noiseShares, privateFolder, quiet, sampleMetrics, schedule, stayedQuiet, summary, verdict } from "./speed-budget.mjs";
 
 const QUIET = { load1: 0.8, compilers: [], memoryLevel: 80, onAC: true, screenLocked: false, busy: false };
 
@@ -206,4 +209,28 @@ test("judge leaves the optional launch unmeasured when the noise run never measu
   const side = Array.from({ length: KEPT_MIN }, () => ({ launch_ms: 1000, reload_home_ms: 500 }));
   const rows = judge(side, side, { reload_home_ms: 0 });
   assert.deepEqual(rows.map((item) => [item.metric, item.status]), [["launch_ms", "unmeasured"], ["reload_home_ms", "pass"]]);
+});
+
+test("a speed state folder must be a real folder this user owns that no group or other user can write", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "ca-speed-owner-")));
+  try {
+    const state = join(root, "state");
+    mkdirSync(state, { mode: 0o700 });
+    assert.equal(privateFolder(state), state);
+    chmodSync(state, 0o755);
+    assert.equal(privateFolder(state), state, "read and search for others is fine");
+    for (const mode of [0o775, 0o757, 0o777]) {
+      chmodSync(state, mode);
+      assert.throws(() => privateFolder(state), /no group or other user can write/, mode.toString(8));
+    }
+    chmodSync(state, 0o700);
+    symlinkSync(state, join(root, "link"));
+    assert.throws(() => privateFolder(join(root, "link")), /a real folder, not a link/);
+    writeFileSync(join(root, "file"), "");
+    assert.throws(() => privateFolder(join(root, "file")), /a real folder, not a link/);
+    assert.throws(() => privateFolder(join(root, "missing")), /ENOENT/);
+    assert.throws(() => privateFolder("relative/state"), /an absolute folder/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

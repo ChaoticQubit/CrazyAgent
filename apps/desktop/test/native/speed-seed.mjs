@@ -4,6 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { POLL_MS, STEP_MS, bridgeCall, closedPort, start, stop, value } from "./e2e-harness.mjs";
 import { poolForMaster, readyForAgents } from "./master-lease.mjs";
+import { privateFolder } from "./speed-budget.mjs";
 
 const SOCKET_PATH_MAX = 100;
 
@@ -117,19 +118,24 @@ export function speedReads(seeded, ticket) {
 /** The speed suite's side, from the speed driver's environment: `SPEED_SIDE`, a folder
  * build-speed-base.sh made, and `SPEED_STATE`, the side's kept engine state, made here with
  * its settings on first use. A state with an engine but no seeded.json is a broken seeding
- * and is refused. Input: the app run.mjs was given. Output: the side's paths. */
+ * and is refused, as is a state, engine or projects folder that is not this user's private
+ * folder ([`privateFolder`]). Input: the app run.mjs was given. Output: the side's paths. */
 export async function speedSide(app) {
   const folder = process.env.SPEED_SIDE;
   const state = process.env.SPEED_STATE;
   assert.ok(folder && isAbsolute(folder) && existsSync(join(folder, "bin")), "SPEED_SIDE names a speed artifact folder");
   assert.ok(state && isAbsolute(state), "SPEED_STATE names the side's kept state folder");
+  privateFolder(state);
   assert.equal(app, join(folder, "bin", "crazyagent-desktop"), "the app is the side's own build");
   const side = { folder, state, engine: join(folder, "bin", "crazyagent"), bridge: join(folder, "bin", "desktop-e2e-bridge"),
     runtime: join(state, "engine"), projects: join(state, "projects"), seeded: join(state, "seeded.json") };
   assert.ok(join(side.runtime, "engine.sock").length < SOCKET_PATH_MAX, `the engine socket path fits a socket address: ${side.runtime}`);
   const fresh = !existsSync(side.runtime) || readdirSync(side.runtime).length === 0;
   assert.ok(fresh || existsSync(side.seeded), `${state} holds an engine that was never seeded; remove it and run again`);
-  for (const folderMade of [side.runtime, side.projects]) mkdirSync(folderMade, { recursive: true, mode: 0o700 });
+  for (const folderMade of [side.runtime, side.projects]) {
+    mkdirSync(folderMade, { recursive: true, mode: 0o700 });
+    privateFolder(folderMade);
+  }
   if (fresh) writeFileSync(join(side.runtime, "global.toml"), speedSettings(await closedPort()), { flag: "wx", mode: 0o600 });
   return side;
 }

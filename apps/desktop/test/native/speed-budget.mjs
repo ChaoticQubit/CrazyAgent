@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { lstatSync } from "node:fs";
+import { isAbsolute } from "node:path";
 
 /** Exit code of a speed run the Mac was too busy to judge: EX_TEMPFAIL, so a gate reads it as
  * not run, never as a pass or a failure. */
@@ -305,4 +307,16 @@ function floorFor(metric) {
   if (LAUNCHES.includes(metric)) return FLOOR.launch_ms;
   if (metric.startsWith("round_trip_")) return FLOOR.round_trip_ms;
   return FLOOR.page_ms;
+}
+
+/** Checks that a speed state folder is this user's own: a real folder, not a link, owned by
+ * this user, that no group or other user can write, so no other local account can plant an
+ * engine's settings or a seeded record in it. Input: the absolute folder. Output: the folder. */
+export function privateFolder(folder) {
+  assert.ok(typeof folder === "string" && isAbsolute(folder), `an absolute folder: ${folder}`);
+  const info = lstatSync(folder);
+  assert.ok(info.isDirectory() && !info.isSymbolicLink(), `${folder} is a real folder, not a link`);
+  assert.equal(info.uid, process.getuid(), `${folder} is this user's own`);
+  assert.equal(info.mode & 0o022, 0, `${folder}: no group or other user can write it`);
+  return folder;
 }
