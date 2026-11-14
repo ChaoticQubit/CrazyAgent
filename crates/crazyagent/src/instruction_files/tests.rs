@@ -1639,6 +1639,50 @@ mod import {
             "process_import_unsafe"
         );
     }
+
+    /// SA vid 7 (DEC-106 A): a project instructions file the folder's repository committed
+    /// is whoever committed it's text, so the import keeps it under its own Imported heading,
+    /// ahead of the files it imports, once however often it runs, while a file the
+    /// repository does not track, the engine's or the owner's, stays as it is.
+    #[test]
+    fn a_committed_project_instructions_file_is_kept_under_its_imported_heading_once() {
+        let carried = Checkout::new();
+        write(
+            &carried.folder.join(".crazyagent/instructions.md"),
+            "DUMMY-CARRIED-MARKER-7\n",
+        );
+        carried.git(&["add", "-f", ".crazyagent/instructions.md"]);
+        carried.git(&["commit", "-q", "-m", "carried"]);
+        import(&carried.folder).unwrap();
+        let text = crate::agent_home::read_project(&carried.folder).unwrap();
+        assert!(
+            text.starts_with(
+                "## Imported from .crazyagent/instructions.md\n\nDUMMY-CARRIED-MARKER-7\n\n## Imported from "
+            ),
+            "{text}"
+        );
+        import(&carried.folder).unwrap();
+        assert_eq!(
+            crate::agent_home::read_project(&carried.folder).unwrap(),
+            text
+        );
+        assert_eq!(
+            carried.git(&["ls-files", ".crazyagent/instructions.md"]),
+            ".crazyagent/instructions.md\n"
+        );
+
+        let own = Checkout::new();
+        write(
+            &own.folder.join(".crazyagent/instructions.md"),
+            "OWNER-RULE\n",
+        );
+        import(&own.folder).unwrap();
+        let text = crate::agent_home::read_project(&own.folder).unwrap();
+        assert!(
+            text.starts_with("OWNER-RULE\n\n## Imported from "),
+            "{text}"
+        );
+    }
 }
 
 #[test]
