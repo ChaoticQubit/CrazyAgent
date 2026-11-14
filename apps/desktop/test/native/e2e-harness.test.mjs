@@ -12,6 +12,21 @@ function holders(port, state) {
   return [...new Set(result.stdout.split("\n").filter(Boolean).map(Number))];
 }
 
+test("a low free port skips a port another listener of this user holds on a wildcard address or ::1", async () => {
+  for (const host of ["0.0.0.0", "::", "::1"]) {
+    const before = await freeLowPort();
+    const taken = before === 28999 ? 20000 : before + 1;
+    const holder = createServer();
+    await new Promise((done, fail) => {
+      holder.once("error", fail);
+      holder.listen(taken, host, done);
+    });
+    const after = await freeLowPort();
+    await new Promise((done) => holder.close(done));
+    assert.notEqual(after, taken, `${host} port ${taken} is held`);
+  }
+});
+
 test("a closed port refuses a connect, nothing listens there, and this process keeps holding it", async () => {
   const port = await closedPort();
   const refused = await new Promise((done) => {
