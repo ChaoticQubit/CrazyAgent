@@ -1728,6 +1728,12 @@ fn hooks_kept_while_an_entry_is_off_survive_a_second_new_pin() {
         "a hook switched off stays off across two pins"
     );
     assert!(
+        views
+            .iter()
+            .any(|view| view.event == "UserPromptSubmit" && view.enabled),
+        "a hook switched off in one project only stays on everywhere else"
+    );
+    assert!(
         effective_events(&mut connection, root, "project-1").is_empty(),
         "a hook switched off in one project stays off there across two pins"
     );
