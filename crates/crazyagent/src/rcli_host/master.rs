@@ -117,14 +117,14 @@ impl RcliMasterHost {
 
     /// How long the host waits for its harness to say it is ready when it has no run
     /// clock. Input: the host. Output: the start bound.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn start_time(&self) -> Duration {
         self.start_time
     }
 
     /// Shortens the start bound, so a test sees a start end without waiting the whole
     /// bound. Input: the shorter bound. Output: none.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn shorten_start_time(&mut self, time: Duration) {
         assert!(time <= self.start_time);
         self.start_time = time;

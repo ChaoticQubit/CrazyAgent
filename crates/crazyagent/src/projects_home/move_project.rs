@@ -160,7 +160,7 @@ impl ProjectMove {
     /// Runs the plan as a move across disks or out of iCloud Drive does, by a checked
     /// copy, on any disk. Input: the wait. Output: the old folder to clear, or the
     /// refusal code.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn run_by_copy(self, wait: Duration) -> Result<Moved, EngineError> {
         let landing = self.ready(wait)?;
         let placed = self.add.place_by_copy(&Tally::default())?;

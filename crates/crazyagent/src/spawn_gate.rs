@@ -207,7 +207,7 @@ pub async fn bind_tcp(
 /// Binds a Tokio TCP socket to `address` without listening on it, so the port stays held
 /// and every connection to it is refused while the socket lives; the socket is created
 /// inside the gate. Input: the address. Output: the bound socket or the bind error.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn bind_tcp_unlistened(
     address: std::net::SocketAddr,

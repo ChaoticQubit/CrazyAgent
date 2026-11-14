@@ -500,10 +500,10 @@ thread_local! {
 
 /// The step a walk on this thread runs before each read of a listed .git entry, set for
 /// one test and cleared when dropped.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) struct BeforeRead;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl BeforeRead {
     /// Sets the step. Input: what to do with the entry and whether the coming read lists
     /// it as a folder. Output: the guard that clears it.
@@ -513,7 +513,7 @@ impl BeforeRead {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Drop for BeforeRead {
     fn drop(&mut self) {
         BEFORE_READ.with(|slot| *slot.borrow_mut() = None);
