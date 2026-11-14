@@ -2750,8 +2750,8 @@ fn cancel_closes_the_icloud_question_and_starts_nothing() {
 }
 
 /// A start whose reply is lost or refused is decided from a fresh read of the job: a job for
-/// this folder that runs, or that ended done and was not the one shown before the start, is
-/// the started one and the page goes Home; anything else shows the start's refusal.
+/// this folder that runs is the started one and the page goes Home; an ended job for it that
+/// the store missed (a stale store shows none) is an older add, so the start's refusal shows.
 #[test]
 fn a_failed_start_reads_the_job_and_goes_home_only_when_this_folder_is_being_added() {
     let user = tempfile::tempdir().unwrap();
@@ -2761,7 +2761,7 @@ fn a_failed_start_reads_the_job_and_goes_home_only_when_this_folder_is_being_add
     };
     let reads = [
         (None, Some(copying), true),
-        (None, Some(JobState::Done), true),
+        (None, Some(JobState::Done), false),
         (Some("add-2"), Some(JobState::Done), false),
         (None, None, false),
     ];
