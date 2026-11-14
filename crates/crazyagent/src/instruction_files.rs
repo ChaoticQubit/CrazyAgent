@@ -1003,6 +1003,12 @@ const CARRIED_PATH: &str = ".crazyagent/instructions.md";
 /// sections so it sits inside the project instructions ([`imported`], SA vid 7 r2b, leader
 /// 10:50).
 const IMPORTED_LABEL: &str = "### Imported from ";
+/// Every character that ends a line of imported text for [`demoted`]: LF and CR as the
+/// file has them, and VT, FF, NEL, LS and PS, which an agent or a multiline pattern may also
+/// read as a line break (SA vid 7 r2d). A CR right before an LF ends one line with it.
+const LINE_ENDS: [char; 7] = [
+    '\n', '\r', '\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}',
+];
 /// The heading project instructions a folder arrived with are kept under: the app did not
 /// write them, so they are whoever wrote them, not the owner (SA vid 7, leader 09:27 A). It
 /// is the [`IMPORTED_LABEL`] naming the file, and nothing carried under it reads as a
@@ -1032,7 +1038,7 @@ fn carried(existing: &str) -> (String, bool) {
     if demoted(kept) != kept {
         assert!(end < part.len());
         kept = kept
-            .rfind(['\n', '\r'])
+            .rfind(LINE_ENDS)
             .map_or("", |line| kept[..line].trim_end());
         if demoted(kept) != kept {
             kept = "";
@@ -1066,11 +1072,11 @@ fn demoted(text: &str) -> String {
     let (mut above, mut above_ending) = ("", "\n");
     let mut rest = text;
     while !rest.is_empty() {
-        let end = rest.find(['\n', '\r']).unwrap_or(rest.len());
+        let end = rest.find(LINE_ENDS).unwrap_or(rest.len());
         let line = &rest[..end];
         let ending = match &rest[end..] {
             after if after.starts_with("\r\n") => &after[..2],
-            after => &after[..after.len().min(1)],
+            after => &after[..after.chars().next().map_or(0, char::len_utf8)],
         };
         let body = line.trim_start_matches(lead);
         let shown: String = body
