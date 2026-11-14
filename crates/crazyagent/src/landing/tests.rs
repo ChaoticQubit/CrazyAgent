@@ -15293,13 +15293,17 @@ fn a_confined_step_on_linux_meets_a_held_index_lock_as_git_does() {
     assert!(!lock.exists());
 }
 
+/// One plant of [`index_plants`]: its name and how to make it at a path.
+#[cfg(target_os = "linux")]
+type Plant = (&'static str, Box<dyn Fn(&Path)>);
+
 /// What an agent could leave where a confined Linux step keeps its copy of the index, or
 /// where the engine reads the index: a link to a file outside, a link to an endless device, a
 /// FIFO, a second hard link of a file outside and a folder with a file in it. Input: the file
 /// outside. Output: each plant's name and how to make it at a path.
 #[cfg(target_os = "linux")]
-fn index_plants(outside: &Path) -> Vec<(&'static str, Box<dyn Fn(&Path)>)> {
-    let mut plants: Vec<(&'static str, Box<dyn Fn(&Path)>)> = Vec::new();
+fn index_plants(outside: &Path) -> Vec<Plant> {
+    let mut plants: Vec<Plant> = Vec::new();
     let linked = outside.to_path_buf();
     plants.push((
         "a link to a file outside",
