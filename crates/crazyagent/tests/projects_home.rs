@@ -823,6 +823,12 @@ struct Volume {
 #[cfg(target_os = "macos")]
 impl Volume {
     fn attach() -> Self {
+        Self::attach_as("APFS")
+    }
+
+    /// Attaches a fresh 16 MB disk image of the given file system at its own mount point,
+    /// detached when dropped. Input: the `hdiutil create -fs` name. Output: the volume.
+    fn attach_as(format: &str) -> Self {
         use std::os::unix::fs::MetadataExt;
         let image = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
         let disk = image.path().join("second.dmg");
@@ -835,7 +841,7 @@ impl Volume {
                 "-size",
                 "16m",
                 "-fs",
-                "APFS",
+                format,
                 "-volname",
                 "ca-home-move",
                 text(&disk),
@@ -883,6 +889,64 @@ fn tool(program: &str, args: &[&str], path: &Path) {
     let status =
         crazyagent::spawn_gate::status(Command::new(program).args(args).arg(path)).unwrap();
     assert!(status.success(), "{program} {args:?}");
+}
+
+/// A Copy add of a folder on a case-sensitive disk that holds a link and a file whose names
+/// differ only in case, the link listed first, never writes the file through the link it
+/// copied into a projects home that folds case (RV-DS241-40): the add is refused, the
+/// link's target keeps its bytes and mode, and no partial folder shows.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_case_sensitive_copy_never_writes_through_a_link_it_made() {
+    let case = case();
+    fs::write(case.home.join("Fold"), "").unwrap();
+    assert!(
+        fs::symlink_metadata(case.home.join("fold")).is_ok(),
+        "the projects home folds case"
+    );
+    fs::remove_file(case.home.join("Fold")).unwrap();
+    let victim = case.root.join("victim");
+    fs::write(&victim, "owner file\n").unwrap();
+    fs::set_permissions(&victim, fs::Permissions::from_mode(0o600)).unwrap();
+    let volume = Volume::attach_as("Case-sensitive APFS");
+    let source = (0..64)
+        .find_map(|index| {
+            let source = volume.mount.join(format!("source-{index}"));
+            fs::create_dir(&source).unwrap();
+            symlink(&victim, source.join(format!("L{index}"))).unwrap();
+            let file = source.join(format!("l{index}"));
+            fs::write(&file, "copied bytes\n").unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+            let listed: Vec<String> = fs::read_dir(&source)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            assert_eq!(listed.len(), 2, "the source disk keeps both names");
+            (listed[0] == format!("L{index}")).then_some(source)
+        })
+        .expect("one source lists its link before its file");
+
+    let added = plan_add(
+        &case.home,
+        &case.engine,
+        text(&source),
+        AddMode::Copy,
+        &[],
+        &[],
+    )
+    .and_then(|plan| plan.run());
+    assert_eq!(
+        fs::read_to_string(&victim).unwrap(),
+        "owner file\n",
+        "the link's target keeps its bytes"
+    );
+    assert_eq!(mode(&victim), 0o600, "and its mode");
+    assert_eq!(added.unwrap_err().0, "home_copy_failed");
+    assert_eq!(
+        names(&case.home),
+        Vec::<String>::new(),
+        "no partial folder or staging shows"
+    );
 }
 
 #[cfg(target_os = "macos")]
