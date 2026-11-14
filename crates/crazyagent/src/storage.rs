@@ -216,7 +216,7 @@ pub(crate) enum Job {
         u64,
         oneshot::Sender<Result<projects_home::DeletePlanned, EngineError>>,
     ),
-    DeleteSettle(u64, oneshot::Sender<Result<(), EngineError>>),
+    DeleteSettle(u64, bool, oneshot::Sender<Result<(), EngineError>>),
     DeleteFilesClear(Vec<String>, oneshot::Sender<Result<(), EngineError>>),
     DeleteRecord(
         Admission,
@@ -372,7 +372,7 @@ impl Storage {
                     if let Err(e) = projects_home::project_move_settle(&mut connection, None, true) {
                         eprintln!("project_move_not_settled cause={}", e.0);
                     }
-                    if let Err(e) = projects_home::delete_settle(&connection, None) {
+                    if let Err(e) = projects_home::delete_settle(&connection, None, false) {
                         eprintln!("project_delete_not_settled cause={}", e.0);
                     }
                     if let Err(e) = projects_home::sweep_home(&connection) {
@@ -738,11 +738,11 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
-                        Job::DeleteSettle(exchange, reply) => {
+                        Job::DeleteSettle(exchange, trashed, reply) => {
                             let result = if readonly {
                                 Err(error("project_setup_readonly"))
                             } else {
-                                projects_home::delete_settle(&connection, Some(exchange))
+                                projects_home::delete_settle(&connection, Some(exchange), trashed)
                             };
                             let _ = reply.send(result);
                         }
