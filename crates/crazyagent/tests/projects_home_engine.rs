@@ -1491,6 +1491,28 @@ async fn an_intake_job_refuses_what_the_plan_sees_before_it_downloads() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_intake_job_past_the_copy_bounds_lands_once_the_owner_goes_past_too_large() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    fs::create_dir(&home).unwrap();
+    let deep = too_deep(&place, "deep");
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    let past = vec![AddOverride::TooLarge];
+    client
+        .intake_start(id("intake-deep"), text(&deep), AddMode::Copy, past)
+        .await
+        .unwrap();
+    job_until(&owner.controller, |job| job.state == JobState::Done).await;
+    let landed = (0..=COPY_BOUNDS.depth).fold(home.join("deep"), |folder, _| folder.join("d"));
+    assert!(landed.is_dir(), "the deepest folder is copied");
+    assert!(deep.join("d").is_dir(), "a copy leaves the source");
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_engine_stop_ends_a_running_intake_job_with_no_copy_left() {
     let disk = tempfile::tempdir().unwrap();
     let place = disk.path().canonicalize().unwrap();
