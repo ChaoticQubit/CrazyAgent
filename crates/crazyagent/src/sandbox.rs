@@ -2446,7 +2446,8 @@ impl ProjectSandbox {
     /// confined agent its worktree, that worktree's git admin folder and the git object
     /// store, or for a clone-confined agent its clone alone, then its own home and temp
     /// dirs, its short temp folder, then its extra worktrees, then for a native lead's
-    /// teammates the team folders they share in the lead's home.
+    /// teammates the team folders they share in the lead's home, then its tool cache, the
+    /// owner's temp folder when granted and each shared writable folder.
     pub fn writable_roots(&self) -> impl Iterator<Item = &PathBuf> {
         assert!(self.confinements() <= 1);
         let project: Vec<&PathBuf> = match (&self.checkout, &self.clone, &self.setup) {
@@ -2948,9 +2949,9 @@ impl ProjectSandbox {
     /// at a tree's root, not below it, so the `.+/` guard never matches them. A whole folder
     /// already holding a `.git` could once be renamed in as a path-blind move Seatbelt
     /// cannot inspect; that source is removed by also denying `.git` at any depth, top level
-    /// included, in every non-working-tree writable root (the admin folder, object store,
-    /// home, temp and scratch), so no agent can create a repository anywhere to rename from
-    /// (SM1-R). The only `.git` entries in agent roots are engine-made links to exactly
+    /// included, in every writable root that is not a working tree ([`Self::git_deny_roots`],
+    /// the owner's temp folder and shared writable folders included), so no agent can create
+    /// a repository anywhere to rename from (SM1-R, RV-DS241-16). The only `.git` entries in agent roots are engine-made links to exactly
     /// `/dev/null`: the uv markers in a tool cache's buckets (T8 C1), which an agent cannot
     /// make, remove or point elsewhere, and which, moved with their bucket into a tree, git
     /// never enters or stages. Input: the policy. Output: the rule text.
@@ -3057,41 +3058,36 @@ impl ProjectSandbox {
 
     /// Splits the agent's writable roots into the working-tree roots, where the root's own
     /// top-level `.git` is a legitimate repository link the engine adds, and every other
-    /// writable root, where no `.git` may ever appear. A `.git` anywhere below a working
-    /// tree, and a `.git` at any depth (top level included) in an admin folder, object
-    /// store, home, temp or scratch root, or a team folder a native lead shares with its
-    /// teammates, is denied so no agent can create a repository to rename whole into a
-    /// worktree (OP-9 r2). The tool cache is such a root (T8): its only `.git` entries are the
-    /// engine's `/dev/null` links.
+    /// writable root, where no `.git` may ever appear. The working trees are the project
+    /// folder, worktree, clone or setup folder the agent works in and its extra worktrees;
+    /// every other root comes from [`Self::writable_roots`] itself, so a root granted there
+    /// is under the rule at once: an admin folder, object store or setup records, home, temp
+    /// or scratch, a team folder a native lead shares with its teammates, the tool cache (T8,
+    /// whose only `.git` entries are the engine's `/dev/null` links), the owner's temp folder
+    /// and every shared writable folder (RV-DS241-16). A `.git` anywhere below a working
+    /// tree, and a `.git` at any depth (top level included) in every other root, is denied so
+    /// no agent can create a repository the owner's git enters there or rename one whole
+    /// into a worktree (OP-9 r2, SM1-R). Output: the working roots and the other roots.
     fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
-        let mut working: Vec<&Path> = Vec::new();
-        let mut other: Vec<&Path> = Vec::new();
         assert!(self.confinements() <= 1);
-        match (&self.checkout, &self.clone, &self.setup) {
-            (Some(checkout), _, _) => {
-                working.push(checkout.worktree.as_path());
-                other.push(checkout.admin.as_path());
-                other.push(checkout.objects.as_path());
-            }
-            (None, Some(clone), _) => working.push(clone.as_path()),
-            (None, None, Some(setup)) => {
-                working.push(setup.folder.as_path());
-                other.push(setup.records.as_path());
-            }
-            (None, None, None) => working.push(self.project_root.as_path()),
-        }
-        other.push(self.agent_home.as_path());
-        other.push(self.agent_tmp.as_path());
-        if let Some(scratch) = &self.scratch {
-            other.push(scratch.as_path());
-        }
-        other.extend(self.shared.iter().map(PathBuf::as_path));
-        if let Some((cache, _)) = &self.tool_cache {
-            other.push(cache.as_path());
-        }
-        for worktree in &self.worktrees {
-            working.push(worktree.as_path());
-        }
+        let mut working: Vec<&Path> = vec![match (&self.checkout, &self.clone, &self.setup) {
+            (Some(checkout), _, _) => checkout.worktree.as_path(),
+            (None, Some(clone), _) => clone.as_path(),
+            (None, None, Some(setup)) => setup.folder.as_path(),
+            (None, None, None) => self.project_root.as_path(),
+        }];
+        working.extend(self.worktrees.iter().map(PathBuf::as_path));
+        let other: Vec<&Path> = self
+            .writable_roots()
+            .map(PathBuf::as_path)
+            .filter(|root| !working.contains(root))
+            .collect();
+        assert!(
+            working
+                .iter()
+                .all(|root| self.writable_roots().any(|writable| writable == root))
+        );
+        assert!(other.len() >= 2);
         (working, other)
     }
 
