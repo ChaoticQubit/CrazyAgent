@@ -1738,3 +1738,62 @@ async fn an_intake_job_downloads_a_real_icloud_folder_with_moving_counts_and_cop
     assert!(files > 0);
     engine.stop().await;
 }
+
+/// Turns off macOS's fetch of iCloud placeholders for this whole test process, as a launchd
+/// agent runs: a lookup inside a placeholder folder then fails with EDEADLK instead of
+/// downloading it. It holds for the life of the process, so the row that calls it runs alone.
+#[cfg(target_os = "macos")]
+fn no_icloud_fetch() {
+    use libc::c_int;
+    const IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES: c_int = 3;
+    const IOPOL_SCOPE_PROCESS: c_int = 0;
+    const IOPOL_MATERIALIZE_DATALESS_FILES_OFF: c_int = 1;
+    unsafe extern "C" {
+        fn setiopolicy_np(kind: c_int, scope: c_int, policy: c_int) -> c_int;
+    }
+    let off = IOPOL_MATERIALIZE_DATALESS_FILES_OFF;
+    let kind = IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES;
+    let set = unsafe { setiopolicy_np(kind, IOPOL_SCOPE_PROCESS, off) };
+    assert_eq!(set, 0, "{}", std::io::Error::last_os_error());
+}
+
+/// Copies a real evicted iCloud Drive folder that is itself a placeholder while the engine may
+/// not fetch from iCloud, as the launchd agent may not: the check before the download does not
+/// look up `.git` inside it, so a plain folder is not asked about as a linked checkout, and the
+/// job lands the copy. The folder is named in `CRAZYAGENT_ICLOUD_SCRATCH`, holds no `.git` file
+/// and is evicted first with `brctl evict`; run by hand and alone.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an evicted folder of iCloud Drive named in CRAZYAGENT_ICLOUD_SCRATCH"]
+async fn an_evicted_icloud_folder_is_not_asked_about_a_linked_checkout_before_its_download() {
+    use crazyagent::projects_home::{icloud::dataless, linked_checkout};
+    let source = PathBuf::from(std::env::var_os("CRAZYAGENT_ICLOUD_SCRATCH").unwrap());
+    let top = fs::symlink_metadata(&source).unwrap();
+    assert!(dataless(&top), "evict {} first", source.display());
+    no_icloud_fetch();
+    let disk = tempfile::tempdir().unwrap();
+    let home = disk.path().canonicalize().unwrap().join("projects");
+    fs::create_dir(&home).unwrap();
+    let engine = Engine::start().await;
+    let owner = homed(&engine, &home).await;
+    let client = owner.controller.owner_client().unwrap();
+    let copy = AddMode::Copy;
+    client
+        .intake_start(id("intake-evicted"), text(&source), copy, Vec::new())
+        .await
+        .unwrap();
+    let start = Instant::now();
+    let ended = loop {
+        let job = client.intake_status().await.unwrap().expect("a job");
+        match &job.state {
+            JobState::Downloading { .. } | JobState::Copying { .. } | JobState::Clearing => {}
+            _ => break job,
+        }
+        assert!(start.elapsed() < Duration::from_secs(1800), "{job:?}");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+    assert_eq!(ended.state, JobState::Done, "a plain folder only in iCloud");
+    assert!(!linked_checkout(&source), "the downloaded folder is plain");
+    assert!(same_files(&source, &home.join(source.file_name().unwrap())) > 0);
+    engine.stop().await;
+}
