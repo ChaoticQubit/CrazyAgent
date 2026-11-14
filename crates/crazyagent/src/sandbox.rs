@@ -2815,7 +2815,8 @@ impl ProjectSandbox {
     /// rebase, sequencer, remotes and branches state, each with everything below it, and the
     /// entries `.git`, `.crazyagent`, the project instructions file `.crazyagent/instructions.md`
     /// (SA vid 11), the git config and its lock, the index and its lock, `commondir`,
-    /// `config.worktree`, `objects` and `objects/info`. Each name below the
+    /// `config.worktree`, `objects` and `objects/info`, none of which an agent may write or
+    /// hard link under another name it could write through (SA vid 11 r2). Each name below the
     /// project folder matches in any letter case, so the rule does not depend on how Seatbelt
     /// folds case on the case-insensitive volume, where git finds a name however it is typed
     /// (RV-DS241-15). `.git/info`, `.git/shallow`, the alternates files and `.git/modules`
@@ -2857,7 +2858,7 @@ impl ProjectSandbox {
             ]
             .map(|name| format!("{git}/{}", any_case(name))),
         );
-        let mut text = String::from("(deny file-write*");
+        let mut text = String::from("(deny file-write* file-link");
         for path in &below {
             text.push_str(&format!("\n  (regex #\"^{project}/{path}(/.*)?$\")"));
         }
