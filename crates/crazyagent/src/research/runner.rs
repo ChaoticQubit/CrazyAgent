@@ -54,6 +54,15 @@ pub(crate) const GIT_SAFE: [&str; 10] = [
     "-c",
     "protocol.allow=never",
 ];
+/// The variables every engine git sets whatever else it needs: no lazy fetch of an object a
+/// partial clone lacks, so a repository's own promisor remote never runs a command on a read
+/// (RV-DS241-71), no system config or attributes and no prompt.
+pub(crate) const GIT_SAFE_ENV: [(&str, &str); 4] = [
+    ("GIT_NO_LAZY_FETCH", "1"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_ATTR_NOSYSTEM", "1"),
+    ("GIT_TERMINAL_PROMPT", "0"),
+];
 #[cfg(unix)]
 const GIT_CONFIG_LISTING_BYTES_MAX: usize = 64 * 1024;
 #[cfg(unix)]
@@ -2690,7 +2699,7 @@ pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<
         .env("HOME", tmp)
         .env("TMPDIR", tmp)
         .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .envs(GIT_SAFE_ENV)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -3012,7 +3021,7 @@ fn real_git() -> Option<PathBuf> {
 fn worktree_git(sandbox: &ProjectSandbox, profile: &Path) -> Command {
     let mut git = sandbox.command(profile, sandboxed_git());
     git.env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_NO_LAZY_FETCH", "1")
+        .envs(GIT_SAFE_ENV)
         .args(GIT_SAFE)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -3048,7 +3057,6 @@ pub(crate) fn agent_git(
 ) -> Result<AgentGit, RunError> {
     let mut command = worktree_git(sandbox, profile);
     command
-        .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
         .envs(variables.iter().copied())
         .arg("-C")

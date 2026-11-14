@@ -3110,10 +3110,8 @@ async fn observe_dispatch(
             std::process::Command::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .env("GIT_NO_LAZY_FETCH", "1")
+                .envs(crate::research::runner::GIT_SAFE_ENV)
                 .env("GIT_OPTIONAL_LOCKS", "0")
                 .args([
                     "--no-replace-objects",

@@ -507,17 +507,19 @@ fn ignored(repo: &Path, paths: &[&str]) -> Option<Vec<bool>> {
 }
 
 /// The project's own git run in `repo` with `args`: the real git with no system or global
-/// config, hooks, fsmonitor or pager, no prompt and the C locale, its input and output piped
-/// and its errors dropped. Takes the folder and the arguments. Returns the command.
+/// config, hooks, fsmonitor or pager, no lazy fetch and no transport at all whatever the
+/// repository's own config allows (RV-DS241-71), no prompt and the C locale, its input and
+/// output piped and its errors dropped. Takes the folder and the arguments. Returns the
+/// command.
 fn git(repo: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(crate::research::runner::setup_git());
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .envs(crate::research::runner::GIT_SAFE_ENV)
         .arg("--no-optional-locks")
         .args(crate::research::runner::GIT_SAFE)
         .args(args)

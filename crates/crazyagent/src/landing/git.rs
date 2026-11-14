@@ -170,8 +170,7 @@ pub(super) fn owner_excludes(home: &Path, xdg: Option<&Path>) -> Option<PathBuf>
         .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
         .env("HOME", home)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
+        .envs(crate::research::runner::GIT_SAFE_ENV)
         .args([
             "config",
             "--global",
@@ -508,11 +507,8 @@ impl Repo {
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("LC_ALL", "C")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .envs(crate::research::runner::GIT_SAFE_ENV)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_ATTR_NOSYSTEM", "1")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_NO_REPLACE_OBJECTS", "1")
             .env("GIT_GRAFT_FILE", "/dev/null")
             .envs(env.iter().copied())
