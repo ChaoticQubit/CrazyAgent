@@ -3340,6 +3340,84 @@ fn waiting_results_make_room_at_the_task_cap_after_delivered_history() {
     );
 }
 
+/// DEC-170 addendum 4 with a live master session (RV-DS241-14): results bound to the live
+/// session stay at the task cap and a window full of them refuses, while a result bound to
+/// a parked session makes room for the new task.
+#[test]
+fn live_session_results_stay_at_the_task_cap_and_a_parked_sessions_make_room() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-tasks",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 2,
+            tools: false,
+        }],
+    );
+    let pool = access("team-tasks", &["local-a"]);
+    connection
+        .execute_batch(
+            "CREATE TABLE master_sessions(id TEXT PRIMARY KEY, project TEXT NOT NULL, phase TEXT NOT NULL);
+             INSERT INTO master_sessions VALUES
+               ('live-session','team-tasks','configured'),
+               ('parked-session','team-tasks','parked');",
+        )
+        .unwrap();
+    let tx = connection.transaction().unwrap();
+    let insert = |session: &str| {
+        tx.execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,session,created_ms) VALUES ('team-tasks','master','codex',0,'step','done',0,?1,0)",
+            [session],
+        )
+        .unwrap();
+        tx.last_insert_rowid()
+    };
+    let parked = insert("parked-session");
+    for _ in 1..TASKS_PER_PROJECT_MAX {
+        insert("live-session");
+    }
+    let live = project_rows(&tx, "team_tasks", "team-tasks");
+    let first = admit(
+        &tx,
+        &pool,
+        &setup,
+        None,
+        "first",
+        TaskSource::Owner,
+        None,
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    let rows = project_rows(&tx, "team_tasks", "team-tasks");
+    assert_eq!(rows.len() as i64, TASKS_PER_PROJECT_MAX);
+    assert!(
+        !rows.contains(&parked),
+        "the parked session's result made room"
+    );
+    assert_eq!(
+        rows[..rows.len() - 1],
+        live[1..],
+        "every live session result stays"
+    );
+    assert_eq!(rows.last(), Some(&first));
+    assert_eq!(
+        admit(
+            &tx,
+            &pool,
+            &setup,
+            None,
+            "refused",
+            TaskSource::Owner,
+            None,
+            2
+        )
+        .unwrap(),
+        Err("team_task_limit")
+    );
+    assert_eq!(project_rows(&tx, "team_tasks", "team-tasks"), rows);
+}
+
 /// The owner's Update at the task cap gets the plain limit refusal and changes nothing,
 /// where it used to trip the retention assert (RV-DS241-14).
 #[test]
