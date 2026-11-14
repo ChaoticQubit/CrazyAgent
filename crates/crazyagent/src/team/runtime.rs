@@ -13941,8 +13941,17 @@ fn keeper_started(_pid: u32) -> Option<String> {
 /// Takes the keepers. Returns whether they all exited in time.
 #[cfg(target_os = "macos")]
 fn end_keepers(pins: &[KeeperPin]) -> bool {
+    end_seen_keepers(pins, keeper_seen)
+}
+
+/// Ends the keepers as [`end_keepers`] does, each keeper's state read by `seen`: running
+/// as its pin names, gone, or none when it cannot be read. A keeper that is not gone is
+/// signalled and waited for. Takes the keepers and the reader. Returns whether they all
+/// exited in time.
+#[cfg(target_os = "macos")]
+fn end_seen_keepers(pins: &[KeeperPin], seen: impl Fn(&KeeperPin) -> Option<bool>) -> bool {
     use crate::harnesses::terminal_session::{KEEPER_POLL, KEEPER_WAIT};
-    for pin in pins.iter().filter(|pin| keeper_runs(pin)) {
+    for pin in pins.iter().filter(|pin| seen(pin) != Some(false)) {
         if let Some(process) = i32::try_from(pin.pid)
             .ok()
             .filter(|pid| *pid > 1)
@@ -13952,7 +13961,7 @@ fn end_keepers(pins: &[KeeperPin]) -> bool {
         }
     }
     let deadline = Instant::now() + KEEPER_WAIT;
-    while pins.iter().any(keeper_runs) {
+    while pins.iter().any(|pin| seen(pin) != Some(false)) {
         if Instant::now() >= deadline {
             return false;
         }
@@ -13968,11 +13977,12 @@ fn end_keepers(_pins: &[KeeperPin]) -> bool {
 }
 
 /// Whether a server keeper still runs as its pin names: a process with the pin's start
-/// that is no zombie, as a keeper this engine started stays until it is reaped. A keeper
-/// whose state cannot be read counts as running. Takes the pin. Returns the answer.
+/// that is no zombie, as a keeper this engine started stays until it is reaped. Takes the
+/// pin. Returns true when it runs, false when it is gone or its id names another process,
+/// none when `ps` cannot be run or its answer cannot be read.
 #[cfg(target_os = "macos")]
-fn keeper_runs(pin: &KeeperPin) -> bool {
-    let Ok(shown) = crate::spawn_gate::output(
+fn keeper_seen(pin: &KeeperPin) -> Option<bool> {
+    let shown = crate::spawn_gate::output(
         std::process::Command::new("/bin/ps")
             .env_clear()
             .env("LC_ALL", "C")
@@ -13981,15 +13991,16 @@ fn keeper_runs(pin: &KeeperPin) -> bool {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null()),
-    ) else {
-        return true;
-    };
+    )
+    .ok()?;
     let text = String::from_utf8_lossy(&shown.stdout);
     let text = text.trim();
     match (shown.status.success(), text.split_once(char::is_whitespace)) {
-        (false, None) if text.is_empty() => false,
-        (true, Some((state, started))) => !state.starts_with('Z') && started.trim() == pin.started,
-        _ => true,
+        (false, None) if text.is_empty() => Some(false),
+        (true, Some((state, started))) => {
+            Some(!state.starts_with('Z') && started.trim() == pin.started)
+        }
+        _ => None,
     }
 }
 

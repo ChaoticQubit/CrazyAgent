@@ -1008,3 +1008,30 @@ fn a_proxied_agent_s_pane_record_says_its_keeper_can_freeze_it() {
     let _ = end_left_pane(host.as_ref(), &agent, "team");
     host.close(&[]).unwrap();
 }
+
+/// DEC-158 (rv-secreview S4B r2 residual 1): a server keeper whose state `ps` cannot read
+/// is not signalled, since its id may by then name another process of the owner's, and
+/// the keepers do not count as ended, so the lead's proxy stays bound.
+#[test]
+fn a_keeper_whose_state_cannot_be_read_is_not_signalled() {
+    let mut child =
+        crate::spawn_gate::spawn(Command::new("/bin/sleep").arg("30").stdin(Stdio::null()))
+            .unwrap();
+    let pin = KeeperPin {
+        pid: child.id(),
+        started: keeper_started(child.id()).expect("the stand-in keeper's start reads"),
+        mates: false,
+    };
+    assert_eq!(keeper_seen(&pin), Some(true), "the stand-in keeper runs");
+    assert!(
+        !end_seen_keepers(std::slice::from_ref(&pin), |_| None),
+        "keepers whose state could not be read counted as ended"
+    );
+    assert_eq!(
+        child.try_wait().unwrap(),
+        None,
+        "a keeper whose state could not be read was signalled"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
