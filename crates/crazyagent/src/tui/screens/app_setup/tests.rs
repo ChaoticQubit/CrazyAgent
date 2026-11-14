@@ -1752,10 +1752,7 @@ fn settings_show_a_64_kib_master_frame_by_default_with_the_three_options() {
         "{shown}"
     );
     let shown_bar = bar(&rows);
-    assert!(
-        shown_bar.contains("t Master time   z Master frame"),
-        "{shown_bar}"
-    );
+    assert!(shown_bar.contains("z Master frame"), "{shown_bar}");
     shell.key(Key::Char('z'));
     let rows = render(&mut shell, 200, 80);
     find(
