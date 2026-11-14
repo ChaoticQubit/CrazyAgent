@@ -198,21 +198,29 @@ function captured(entry) {
 }
 
 /** The engine's environment for one suite: the run's own, or for the Node suite a clean Mac's:
- * a Codex the app's npm put in the engine prefix `<engine root>/setup/harnesses`, the one folder
- * the resolver accepts here (it refuses PATH folders in a project or a temp folder), no Node on
- * PATH and an empty clean-Mac gate root; the suite's home is never written. The refused-tool suite
- * gets the system PATH and an empty gate root, so the only graphify is the one in its home.
- * Input: the run environment. Output: the engine environment. */
+ * no Node on PATH and an empty clean-Mac gate root; its Codex is planted once the engine is
+ * ready ([`plantNodeCodex`]) and the suite's home is never written. The refused-tool suite gets
+ * the system PATH and an empty gate root, so the only graphify is the one in its home. Nothing
+ * is written under the engine root, which the fixture needs empty. Input: the run environment.
+ * Output: the engine environment. */
 function engineEnvironment(env) {
   if (suite === "refused-tool") {
     return { ...env, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", CRAZYAGENT_GATE_SYSTEM_ROOT: mkdtempSync(join(evidence, "gate-")) };
   }
   if (suite !== "first-run-harnesses-node") return env;
-  const bin = join(engineRoot, "setup", "harnesses", "bin");
-  mkdirSync(bin, { recursive: true, mode: 0o700 });
-  writeFileSync(join(bin, "codex"), "#!/usr/bin/env node\n", { mode: 0o755 });
   const gate = mkdtempSync(join(evidence, "gate-"));
   return { ...env, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", CRAZYAGENT_GATE_SYSTEM_ROOT: gate };
+}
+
+/** Puts the Node suite's npm Codex, a file that asks for node, where the app's npm puts one,
+ * `<engine root>/setup/harnesses/bin`. It runs once the fixture engine is ready, since the
+ * fixture refuses a root that is not empty, and before the app starts, so the first catalog
+ * read can see it. Input: none. Output: nothing; every other suite writes nothing. */
+function plantNodeCodex() {
+  if (suite !== "first-run-harnesses-node") return;
+  const bin = join(engineRoot, "setup", "harnesses", "bin");
+  mkdirSync(bin, { recursive: true, mode: 0o700 });
+  writeFileSync(join(bin, "codex"), "#!/usr/bin/env node\n", { mode: 0o755, flag: "wx" });
 }
 
 /** Starts the speed suite's real engine binary on the side's kept state, as the owner's
@@ -261,6 +269,7 @@ async function execute() {
       env.SPEED_ENGINE_PID = String(engine.child.pid);
     } else {
       await ready(engine);
+      plantNodeCodex();
     }
     env.CRAZYAGENT_DESKTOP_TEST_PORT = String(port);
     const test = launch("webdriver", process.execPath,
