@@ -2967,10 +2967,7 @@ impl ProjectSandbox {
             ));
         }
         for root in &other {
-            nested.push_str(&format!(
-                "\n      (regex #\"^{}/(.+/)?{dot_git}(/.*)?$\")",
-                seatbelt_pattern(root)
-            ));
+            nested.push_str(&format!("\n      {}", any_depth_git(root)));
         }
         let pattern = seatbelt_pattern(&self.project_root);
         let checkouts = format!("{pattern}(/\\.crazyagent)?/worktrees/[^/]+");
@@ -4035,11 +4032,38 @@ fn root_pin(root: &Path) -> String {
     format!("(deny {FIXED_WRITES} (literal \"{}\"))\n", root.display())
 }
 
+/// The Seatbelt filter for a `.git` at any depth below `root`, top level included, in any
+/// letter case: the part of [`ProjectSandbox::nested_git_denies`] for a root that is not a
+/// working tree (SM1-R). Input: the root. Output: the regex filter.
+fn any_depth_git(root: &Path) -> String {
+    format!(
+        "(regex #\"^{}/(.+/)?\\.[gG][iI][tT](/.*)?$\")",
+        seatbelt_pattern(root)
+    )
+}
+
+/// The base write denies a profile gives again after it grants writes once more to the agent
+/// home and other folders, as the IDE profile does for its server's data folders: each one
+/// pinned ([`root_pin`]), no `.git` at any depth in any of them ([`any_depth_git`]), and the
+/// home's launch files ([`launch_denies`]). They must follow that grant, since the last
+/// match wins. Inputs: the home and the other folders. Output: the rule text.
+#[cfg(unix)]
+pub(crate) fn regranted_denies(home: &Path, folders: &[&Path]) -> String {
+    let mut text = launch_denies(home);
+    let mut nested = String::new();
+    for root in std::iter::once(home).chain(folders.iter().copied()) {
+        text.push_str(&root_pin(root));
+        nested.push_str(&format!("\n  {}", any_depth_git(root)));
+    }
+    text.push_str(&format!("(deny file-write*{nested})\n"));
+    text
+}
+
 /// Whether every deny rule comes after the profile's last write allow, since Seatbelt applies
 /// the last matching rule and a deny a later allow overrides no longer holds (CTX-M1 F1).
 /// Inputs: the profile text and the deny rules as written in it. Output: false when any
 /// deny is missing or comes before a write allow.
-fn denies_follow_write_allows(text: &str, denies: &[String]) -> bool {
+pub(crate) fn denies_follow_write_allows(text: &str, denies: &[String]) -> bool {
     let last_write_allow = text
         .rfind("(allow file-write*")
         .max(text.rfind("(allow file-read* file-write*"));
