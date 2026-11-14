@@ -614,16 +614,19 @@ WantedBy=default.target\n",
     /// installed definition runs that still exists and the `bundled` engine may not replace
     /// ([`Self::may_replace`], judged on the app's own engine and not on an AppImage's private
     /// copy) is kept on a forced reinstall and started as it is otherwise (RV-DS241-129, DS-118
-    /// r2 F1). Else this definition is installed when asked, when none is installed, when the
-    /// installed one names a broken program ([`Self::broken_program`]) or another program, or
-    /// when it is [`Self::stale`]; otherwise the installed one starts as it is. An engine that
-    /// is itself [`transient`] is never installed: it starts a usable installed definition and
-    /// is refused otherwise. Inputs: the bundled engine, whether a definition is installed and
-    /// whether the owner asked for a reinstall. Output: the repair.
+    /// r2 F1). So is any usable definition while this service runs such a private copy, one
+    /// path every AppImage shares, which keeps a newer engine's bytes while one is known
+    /// ([`persistable`], DS-118 r3 F1). Else this definition is installed when asked, when none
+    /// is installed, when the installed one names a broken program ([`Self::broken_program`])
+    /// or another program, or when it is [`Self::stale`]; otherwise the installed one starts
+    /// as it is. An engine that is itself [`transient`] is never installed: it starts a usable
+    /// installed definition and is refused otherwise. Inputs: the bundled engine, whether a
+    /// definition is installed and whether the owner asked for a reinstall. Output: the repair.
     pub fn repair(&self, bundled: &Path, installed: bool, reinstall: bool) -> Repair {
         let broken = installed && self.broken_program().is_some();
         let another = installed && !broken && self.runs_another_program();
-        if another {
+        let copied = installed && !broken && self.executable != bundled;
+        if another || copied {
             let judged = Service {
                 executable: bundled.to_path_buf(),
                 ..self.clone()
@@ -715,9 +718,7 @@ WantedBy=default.target\n",
         ]
         .into_iter()
         .flatten()
-        .all(|known| {
-            crate::update::is_newer(&known, crate::version::VERSION).is_ok_and(|newer| !newer)
-        })
+        .all(|known| !newer_than_this(&known))
     }
 
     /// The version of the app bundle the installed plist runs, from that bundle's Info.plist
@@ -1100,10 +1101,12 @@ fn persisted(executable: &Path) -> Result<(), ServiceError> {
 /// (leader 20:15), one stable path across versions, each file refreshed by an atomic rename
 /// whenever it differs. The copy an older version kept in `<data root>/bin` stays, since a
 /// login service may still name it; `service start` retires it after the service names this
-/// one ([`retire_old_copies`]). Nothing is ever copied from another folder, so an engine other
-/// users can change is returned as it is and refused where it would be kept. Inputs: the
-/// bundled engine, the layout and the AppImage mount folder when there is one. Output: the
-/// executable to keep.
+/// one ([`retire_old_copies`]). While the data root reports a newer engine, this user's
+/// private copy is kept as it is, so an older AppImage never puts its bytes over the engine
+/// every AppImage runs there (DS-118 r3 F1). Nothing is ever copied from another folder, so an
+/// engine other users can change is returned as it is and refused where it would be kept.
+/// Inputs: the bundled engine, the layout and the AppImage mount folder when there is one.
+/// Output: the executable to keep.
 pub fn persistable(
     executable: &Path,
     layout: &Layout,
@@ -1132,6 +1135,12 @@ pub fn persistable(
     layout.prepare()?;
     let copies = layout.root().join("setup").join("bin");
     crate::paths::private_folder(&copies)?;
+    let installed = copies.join(main);
+    let newer = crate::engine::bootstrap::reported_engine_version(layout.root())
+        .is_some_and(|known| newer_than_this(&known));
+    if newer && private_file(&installed) {
+        return Ok(installed);
+    }
     for name in &names {
         let copy = copies.join(name);
         if kept(&source.join(name), &copy) {
@@ -1145,9 +1154,14 @@ pub fn persistable(
         copy_private(&source.join(name), &staged).map_err(fail)?;
         std::fs::rename(&staged, &copy).map_err(fail)?;
     }
-    let installed = copies.join(main);
     assert!(installed.starts_with(&copies) && installed.is_file());
     Ok(installed)
+}
+
+/// Whether a known engine version is newer than this engine, or cannot be read as a version,
+/// so this engine never takes its place. Input: the known version. Output: the answer.
+fn newer_than_this(known: &str) -> bool {
+    !crate::update::is_newer(known, crate::version::VERSION).is_ok_and(|newer| !newer)
 }
 
 /// Retires the copy an older version kept in `<data root>/bin` once the login service names
@@ -1192,10 +1206,10 @@ fn retire_old_copies_with(layout: &Layout, installed: &Path, cli: Option<&Path>)
     let _ = std::fs::remove_dir(old);
 }
 
-/// Whether `copy` is a regular file with exactly the bytes of `source`, private to this
-/// user where Unix modes exist. Inputs: the bundled file and its copy. Output: the answer.
-fn kept(source: &Path, copy: &Path) -> bool {
-    let private = std::fs::symlink_metadata(copy).is_ok_and(|metadata| {
+/// Whether `copy` is a regular file private to this user where Unix modes exist, so no other
+/// user has put or changed its bytes. Input: the copy. Output: the answer.
+fn private_file(copy: &Path) -> bool {
+    std::fs::symlink_metadata(copy).is_ok_and(|metadata| {
         #[cfg(unix)]
         let private = {
             use std::os::unix::fs::MetadataExt;
@@ -1204,8 +1218,13 @@ fn kept(source: &Path, copy: &Path) -> bool {
         #[cfg(not(unix))]
         let private = true;
         metadata.is_file() && private
-    });
-    private
+    })
+}
+
+/// Whether `copy` is a regular file with exactly the bytes of `source`, private to this
+/// user where Unix modes exist. Inputs: the bundled file and its copy. Output: the answer.
+fn kept(source: &Path, copy: &Path) -> bool {
+    private_file(copy)
         && std::fs::metadata(source)
             .map(|metadata| metadata.len())
             .ok()
