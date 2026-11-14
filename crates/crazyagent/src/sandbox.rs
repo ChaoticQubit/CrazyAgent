@@ -2930,9 +2930,10 @@ impl ProjectSandbox {
     fn submodule_denies(&self) -> String {
         let pattern = seatbelt_pattern(&self.project_root);
         let dot_git = any_case(".git");
+        let worktrees = any_case("worktrees");
         let modules = any_case("modules");
         let text = format!(
-            "(deny file-write*\n  (regex #\"^{pattern}/{dot_git}(/worktrees/[^/]+)?/{modules}(/.*)?$\"))\n"
+            "(deny file-write*\n  (regex #\"^{pattern}/{dot_git}(/{worktrees}/[^/]+)?/{modules}(/.*)?$\"))\n"
         );
         assert_eq!(text.matches("(regex #\"^/").count(), 1);
         text

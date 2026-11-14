@@ -203,7 +203,12 @@ fn every_protected_git_path_is_denied_by_an_any_case_regex() {
         let rule = format!("(regex #\"^{pattern}/{path}{tail}$\")");
         assert!(text.contains(&rule), "{rule}\n{text}");
     }
-    assert!(text.contains(&format!("/{}(/.*)?$\")", any_case("modules"))));
+    let submodules = format!(
+        "(regex #\"^{pattern}/{git}(/{}/[^/]+)?/{}(/.*)?$\")",
+        any_case("worktrees"),
+        any_case("modules")
+    );
+    assert!(text.contains(&submodules), "{submodules}\n{text}");
     assert!(text.contains(&format!(
         "(regex #\"^{}/{git}$\")",
         seatbelt_pattern(&extra)
