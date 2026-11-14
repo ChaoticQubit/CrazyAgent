@@ -6106,6 +6106,39 @@ mod tests {
         assert!(none.is_empty());
     }
 
+    /// The research prompt lists the owner's documents only from a real documents folder
+    /// below the project: a documents folder that is a link to a folder outside, as a
+    /// repository tracking `context/documents` as a link would make, lists none of that
+    /// folder's names (RV-DS241-29); a real one still lists its plain files.
+    #[test]
+    fn the_research_prompt_lists_no_documents_through_a_link() {
+        let folder = tempfile::tempdir().unwrap();
+        let base = folder.path().canonicalize().unwrap();
+        let root = base.join("project");
+        let outside = base.join("outside");
+        fs::create_dir_all(root.join("context")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("id_ed25519"), "key\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("context/documents")).unwrap();
+        let prompt = research_prompt(&root, "market_research", &[]).unwrap();
+        assert!(!prompt.contains("id_ed25519"), "{prompt}");
+        assert!(!prompt.contains("The owner attached these documents"));
+
+        fs::remove_file(root.join("context/documents")).unwrap();
+        fs::create_dir(root.join("context/documents")).unwrap();
+        fs::write(root.join("context/documents/pricing.pdf"), "pdf\n").unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("id_ed25519"),
+            root.join("context/documents/linked-key"),
+        )
+        .unwrap();
+        let prompt = research_prompt(&root, "market_research", &[]).unwrap();
+        assert!(
+            prompt.contains(": pricing.pdf. Read them if they help."),
+            "{prompt}"
+        );
+    }
+
     #[test]
     fn the_research_prompt_asks_for_owner_questions_in_the_shared_shape() {
         let folder = tempfile::tempdir().unwrap();
