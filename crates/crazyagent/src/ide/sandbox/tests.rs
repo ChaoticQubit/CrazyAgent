@@ -206,6 +206,13 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
 
+/// Moves `from` to `to` under the profile, the way a server would rename one of its data
+/// folders into the project it can write. Inputs: the profile, the folder and its new path.
+/// Output: whether the move succeeded.
+fn renamed(profile: &Path, from: &Path, to: &Path) -> bool {
+    run(profile, "/bin/mv", &[from.as_os_str(), to.as_os_str()]).0
+}
+
 /// Runs one `/bin/sh` script under the profile with `path` as `$1`. Output: whether it
 /// exited 0.
 fn sh(profile: &Path, script: &str, path: &Path) -> bool {
@@ -478,7 +485,8 @@ fn the_ide_server_data_folder_takes_no_git_in_any_form_and_keeps_its_root() {
         !holds_git(&root),
         "a .git reached the project (moved: {moved})"
     );
-    assert!(!sh(&profile, r#"/bin/mv "$1" "$1-aside""#, &home));
+    assert!(!renamed(&profile, &home, &root.join("home-moved")));
+    assert!(!root.join("home-moved").exists());
     assert!(!sh(&profile, r#"/bin/chmod 777 "$1""#, &home));
     assert!(home.is_dir() && !home.is_symlink());
     assert_eq!(
@@ -503,8 +511,8 @@ fn the_ide_server_data_folder_takes_no_git_in_any_form_and_keeps_its_root() {
     )
     .unwrap();
     assert!(!sh(&profile, r#"/bin/rmdir "$1""#, &spare));
-    assert!(!sh(&profile, r#"/bin/mv "$1" "$1-aside""#, &spare));
-    assert!(spare.is_dir());
+    assert!(!renamed(&profile, &spare, &root.join("spare-moved")));
+    assert!(spare.is_dir() && !root.join("spare-moved").exists());
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
 
