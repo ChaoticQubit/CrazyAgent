@@ -2008,6 +2008,7 @@ fn a_harness_that_still_needs_a_program_is_never_asked_its_version_until_the_res
         method("codex", &real, &machine.roots()),
         Method::Npm { .. }
     ));
+    std::fs::create_dir_all(machine.roots().home).unwrap();
     let case = Case::new(machine, entry("codex", Some(codex)), None);
     for _ in 0..3 {
         let versions = case.versions(false);
