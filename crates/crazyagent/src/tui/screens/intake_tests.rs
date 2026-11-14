@@ -1566,6 +1566,35 @@ fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
 }
 
 #[test]
+fn a_repository_that_came_with_its_own_project_instructions_says_so_in_the_desktop_words() {
+    let notice = "The repository came with its own .crazyagent/instructions.md. CrazyAgent gives it to your agents under the heading Imported from .crazyagent/instructions.md. Check it in Process before you start the team.";
+    let wrapped = crate::tui::text::wrap(notice, 76);
+    assert!(wrapped.len() > 1);
+    let (mut plain, _) = review_with(|_| {});
+    let rows = render(&mut plain, 200, 40);
+    assert!(!shows(&rows, &wrapped[0]), "{rows:#?}");
+    let (mut shell, _) = review_with(|view| {
+        let mut value = serde_json::to_value(&*view).unwrap();
+        value["carried"] = serde_json::Value::Bool(true);
+        *view = serde_json::from_value(value)
+            .expect("the onboarding view says whether its instructions came with the repository");
+    });
+    let rows = render(&mut shell, 200, 40);
+    for line in &wrapped {
+        assert!(shows(&rows, line), "{line:?} in {rows:#?}");
+    }
+    let desktop = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/desktop/src/screens/intake/onboarding.tsx"),
+    )
+    .unwrap();
+    assert!(
+        desktop.contains(notice),
+        "the desktop onboarding review shows the same notice"
+    );
+}
+
+#[test]
 fn a_graph_step_turned_off_in_setup_says_so_while_mapping_runs() {
     let (mut shell, _) = review_with(|view| {
         view.graph = Step::Off;
