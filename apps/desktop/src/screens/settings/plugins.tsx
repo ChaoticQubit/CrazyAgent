@@ -12,8 +12,6 @@ import {
   TextField,
 } from "../../ui";
 import { navigate } from "../../ui/router";
-import { MarkdownView } from "../project/markdown";
-import { useLinkOpener } from "../project/links";
 import { SkillTag } from "../skill-tag";
 import { displayText } from "../conversation";
 import { homePath } from "./harnesses";
@@ -221,14 +219,13 @@ export function fileSize(bytes: number): string {
 }
 
 /** One skill's detail as a pure view of the engine read: description, where it applies and
- * comes from, its switch, the rendered SKILL.md and its files. Inputs: the read, the project id
- * when shown in a project, the last failure and the actions. */
-export function SkillDetailView({ detail, projectId, failure, onToggle, onOpenLink, onRetry }: {
+ * comes from, its switch, its SKILL.md body as agents read it and its files. Inputs: the
+ * read, the project id when shown in a project, the last failure and the actions. */
+export function SkillDetailView({ detail, projectId, failure, onToggle, onRetry }: {
   detail: Loaded<SkillDetail>;
   projectId?: string;
   failure: string;
   onToggle: (skill: SkillView, on: boolean) => void;
-  onOpenLink: (href: string) => void;
   onRetry: () => void;
 }) {
   if (detail.kind === "loading") return <Skeleton shape="row" count={6} />;
@@ -248,7 +245,7 @@ export function SkillDetailView({ detail, projectId, failure, onToggle, onOpenLi
         disabledReason={on.project && !skill.enabled ? "Turned off for every project in Settings." : undefined} />
     </div>
     {failure && <Notice tone="danger" alert>{failure}</Notice>}
-    <Panel title="SKILL.md"><MarkdownView source={skillBody(text)} onOpenLink={onOpenLink} /></Panel>
+    <Panel title="SKILL.md"><pre className="mono small" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{displayText(skillBody(text))}</pre></Panel>
     <Panel title={`Files (${files.length + files_more})`} padded={false}><div className="rows">
       {files.map((file) => <div className="item-row" key={file.path}><span className="mono small">{file.path}</span><span className="muted small">{fileSize(file.bytes)}</span></div>)}
       {files_more > 0 && <div className="item-row"><span className="secondary">And {files_more} more</span></div>}
@@ -265,7 +262,6 @@ export function SkillDetailDialog({ id, projectId, onClose, onChanged }: {
   onChanged: () => void;
 }) {
   const session = useAppSession();
-  const openLink = useLinkOpener(session.showToast);
   const [detail, reload] = useLoad(() => skillDetail(id, projectId), [id, projectId], "skill-detail");
   const [failure, setFailure] = useState("");
   const toggle = async (skill: SkillView, on: boolean) => {
@@ -280,7 +276,7 @@ export function SkillDetailDialog({ id, projectId, onClose, onChanged }: {
   };
   const title = detail.kind === "ok" ? detail.value.skill.name : "Skill";
   return <Dialog open title={title} onClose={onClose} wide footer={<Button onClick={onClose}>Close</Button>}>
-    <SkillDetailView detail={detail} projectId={projectId} failure={failure} onRetry={reload} onOpenLink={openLink}
+    <SkillDetailView detail={detail} projectId={projectId} failure={failure} onRetry={reload}
       onToggle={(skill, on) => void toggle(skill, on)} />
   </Dialog>;
 }
