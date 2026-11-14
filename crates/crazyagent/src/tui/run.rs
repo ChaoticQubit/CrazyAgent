@@ -221,13 +221,14 @@ pub fn run(
 }
 
 /// How long the loop waits for a key before it looks again: a frame while an agent terminal
-/// streams, a tick while an engine reply is awaited, a request waits to go or the shell
-/// animates, otherwise the idle wake. Inputs: whether a terminal streams, whether a reply or
-/// a request waits, and whether the shell animates. Output: the wait.
+/// streams or an engine reply or request waits, since a reply never wakes the key poll and
+/// each one would otherwise sit out a tick; a tick while only the shell animates; otherwise
+/// the idle wake. Inputs: whether a terminal streams, whether a reply or a request waits, and
+/// whether the shell animates. Output: the wait.
 fn wake(streaming: bool, awaiting: bool, animating: bool) -> Duration {
-    if streaming {
+    if streaming || awaiting {
         STREAM_WAKE
-    } else if awaiting || animating {
+    } else if animating {
         TICK
     } else {
         IDLE_WAKE
