@@ -2447,8 +2447,10 @@ impl ProjectSandbox {
     }
 
     /// Paths no agent may write although they sit in a writable root: both `context/`
-    /// folders, the git hooks, config and its lock, `.git/modules` and, for an agent confined
-    /// to a worktree, its admin folder's `modules`, where git keeps submodule repositories.
+    /// folders, the project instructions file every later agent and the master get as the
+    /// owner's text (SA vid 11), the git hooks, config and its lock, `.git/modules` and, for
+    /// an agent confined to a worktree, its admin folder's `modules`, where git keeps
+    /// submodule repositories.
     /// Every platform boundary keeps these read-only, except that Windows guards the config
     /// but not its lock (`windows::GIT_CONFIG_LOCK`).
     pub fn protected_paths(&self) -> Vec<PathBuf> {
@@ -2456,6 +2458,9 @@ impl ProjectSandbox {
         let mut paths = vec![
             self.project_root.join("context"),
             self.project_root.join(".crazyagent").join("context"),
+            self.project_root
+                .join(".crazyagent")
+                .join(crate::agent_home::PROJECT_FILE),
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),
@@ -2842,8 +2847,10 @@ impl ProjectSandbox {
     /// The Seatbelt rule that keeps the files the engine and the owner's git read in the
     /// project folder out of agent hands: both `context/` folders, the git hooks and the
     /// rebase, sequencer, remotes and branches state, each with everything below it, and the
-    /// entries `.git`, `.crazyagent`, the git config and its lock, the index and its lock,
-    /// `commondir`, `config.worktree`, `objects` and `objects/info`. Each name below the
+    /// entries `.git`, `.crazyagent`, the project instructions file `.crazyagent/instructions.md`
+    /// (SA vid 11), the git config and its lock, the index and its lock, `commondir`,
+    /// `config.worktree`, `objects` and `objects/info`, none of which an agent may write or
+    /// hard link under another name it could write through (SA vid 11 r2). Each name below the
     /// project folder matches in any letter case, so the rule does not depend on how Seatbelt
     /// folds case on the case-insensitive volume, where git finds a name however it is typed
     /// (RV-DS241-15). `.git/info`, `.git/shallow`, the alternates files and `.git/modules`
@@ -2859,12 +2866,13 @@ impl ProjectSandbox {
         below.extend(GIT_STATE_TREES.map(|name| format!("{git}/{}", any_case(name))));
         let mut entries = vec![
             git.clone(),
+            format!("{state}/{}", any_case(crate::agent_home::PROJECT_FILE)),
             state,
             format!("{objects}/{}", any_case("info")),
             objects,
         ];
         entries.extend(GIT_STATE_FILES.map(|name| format!("{git}/{}", any_case(name))));
-        let mut text = String::from("(deny file-write*");
+        let mut text = String::from("(deny file-write* file-link");
         for path in &below {
             text.push_str(&format!("\n  (regex #\"^{project}/{path}(/.*)?$\")"));
         }
@@ -2872,8 +2880,8 @@ impl ProjectSandbox {
             text.push_str(&format!("\n  (regex #\"^{project}/{path}$\")"));
         }
         text.push_str(")\n");
-        assert_eq!(below.len() + entries.len(), 18);
-        assert_eq!(text.matches("(regex #\"^/").count(), 18);
+        assert_eq!(below.len() + entries.len(), 19);
+        assert_eq!(text.matches("(regex #\"^/").count(), 19);
         text
     }
 

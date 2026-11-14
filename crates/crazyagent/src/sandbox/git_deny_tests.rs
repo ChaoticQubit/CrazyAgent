@@ -175,6 +175,7 @@ fn every_protected_git_path_is_denied_by_an_any_case_regex() {
         (format!("{state}/{context}"), true),
         (git.clone(), false),
         (state.clone(), false),
+        (format!("{state}/{}", any_case("instructions.md")), false),
         (objects.clone(), false),
         (format!("{objects}/{}", any_case("info")), false),
     ];
@@ -312,6 +313,17 @@ fn a_project_agent_writes_no_protected_path_in_any_letter_case() {
             &profile,
             &format!("mkdir {}", quoted(&folder)),
             &folder,
+        );
+    }
+    for file in [
+        case.project.join(".crazyagent").join("instructions.md"),
+        case.project.join(".crazyagent").join("INSTRUCTIONS.md"),
+    ] {
+        refused(
+            &sandbox,
+            &profile,
+            &format!("printf x > {}", quoted(&file)),
+            &file,
         );
     }
     assert_eq!(fs::read_dir(&git).unwrap().count(), 1);
@@ -482,4 +494,80 @@ fn a_confined_agent_makes_no_repository_in_a_shared_folder_or_the_owner_temp_fol
     ] {
         allowed(&sandbox, &profile, &script);
     }
+}
+
+/// SA vid 11 r2 (rv-sec3 F1): the file an owner's project instructions save writes before
+/// its rename publishes it sits under a path every platform boundary protects, so a project
+/// agent can neither make it, plant it in advance nor rewrite it in the window before the
+/// rename, while the agent still writes a new file beside the instructions in `.crazyagent`.
+#[test]
+fn a_project_agent_cannot_reach_the_file_an_instructions_save_stages() {
+    let case = case();
+    let state = case.project.join(".crazyagent");
+    fs::create_dir_all(state.join("context")).unwrap();
+    let sandbox = sandbox(&case);
+    let profile = case.profiles.join("staged.sb");
+    let staging = crate::agent_home::project_staging(&state);
+    assert!(
+        sandbox
+            .protected_paths()
+            .iter()
+            .any(|path| staging.starts_with(path)),
+        "{}",
+        staging.display()
+    );
+    let staged = crate::agent_home::staged(&staging, crate::agent_home::PROJECT_FILE, 0);
+    refused(
+        &sandbox,
+        &profile,
+        &format!("printf x > {}", quoted(&staged)),
+        &staged,
+    );
+    refused(
+        &sandbox,
+        &profile,
+        &format!(
+            "printf x > .crazyagent/planted && /bin/mv .crazyagent/planted {}",
+            quoted(&staged)
+        ),
+        &staged,
+    );
+    fs::write(&staged, "Owner rule.\n").unwrap();
+    let rewrite = run(&sandbox, &profile, &format!("printf x > {}", quoted(&staged)));
+    assert!(!rewrite.status.success());
+    assert_eq!(fs::read_to_string(&staged).unwrap(), "Owner rule.\n");
+    allowed(&sandbox, &profile, "printf x > .crazyagent/note.txt");
+}
+
+/// SA vid 11 r2 (rv-sec3 addendum): a project agent makes no hard link of a protected file
+/// under a writable name, through which it would rewrite the owner's file in place: the
+/// project instructions, a context file, the git config and a git hook all stay unlinked
+/// and unchanged, while a link of a plain project file still lands.
+#[test]
+fn a_project_agent_links_no_protected_file_under_another_name() {
+    let case = case();
+    let state = case.project.join(".crazyagent");
+    let hooks = case.project.join(".git").join("hooks");
+    fs::create_dir_all(state.join("context")).unwrap();
+    fs::create_dir_all(&hooks).unwrap();
+    let sandbox = sandbox(&case);
+    let profile = case.profiles.join("linked.sb");
+    let alias = case.project.join("alias");
+    for file in [
+        state.join("instructions.md"),
+        state.join("context").join("brief.md"),
+        case.project.join(".git").join("config"),
+        hooks.join("pre-commit"),
+    ] {
+        fs::write(&file, "owner\n").unwrap();
+        refused(
+            &sandbox,
+            &profile,
+            &format!("/bin/ln {} alias", quoted(&file)),
+            &alias,
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), "owner\n");
+    }
+    fs::write(case.project.join("notes.txt"), "plain\n").unwrap();
+    allowed(&sandbox, &profile, "/bin/ln notes.txt notes-link.txt");
 }

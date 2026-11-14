@@ -243,15 +243,32 @@ pub fn read_project(folder: &Path) -> Result<String, AgentHomeError> {
 }
 
 /// Saves the project instructions into `<folder>/.crazyagent/instructions.md`, a folder git
-/// ignores. A project made before `.crazyagent/` existed keeps its state in the project
-/// folder itself, so it is refused rather than given a new state folder.
-/// Input: the project folder and the text. Output: unit, `process_project_folder_missing`
-/// without a real `.crazyagent/` folder, or another plain code.
+/// ignores, through a temporary file in [`project_staging`], made when missing. A project
+/// made before `.crazyagent/` existed keeps its state in the project folder and is refused.
+/// Input: the project folder and the text. Output: unit, `process_project_folder_missing`,
+/// `process_text_unwritable` when the staging folder is a link, or another plain code.
 pub fn save_project(folder: &Path, text: &str) -> Result<(), AgentHomeError> {
     validate(text)?;
     let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
     real_folder(&state).map_err(|_| failure("process_project_folder_missing"))?;
-    write_whole(&state, PROJECT_FILE, text.as_bytes())
+    let staging = project_staging(&state);
+    match fs::create_dir(&staging) {
+        Err(problem) if problem.kind() != std::io::ErrorKind::AlreadyExists => {
+            return Err(failure("process_text_unwritable"));
+        }
+        _ => {}
+    }
+    real_folder(&staging).map_err(|_| failure("process_text_unwritable"))?;
+    write_staged(&staging, &state, PROJECT_FILE, text.as_bytes())
+}
+
+/// The folder a project instructions save writes its temporary file in before renaming it
+/// into the state folder `state`: its `context/`, on the same volume and kept read-only to
+/// agents and the IDE server by every platform boundary, so none can make, plant or rewrite
+/// the file before the rename publishes it as the owner's text (SA vid 11, rv-sec3 F1).
+/// Input: the state folder. Output: the staging folder.
+pub(crate) fn project_staging(state: &Path) -> PathBuf {
+    state.join(crate::project_setup::CONTEXT_DIRECTORY)
 }
 
 /// Builds what every agent of the project receives from the owner's two instruction texts
@@ -1088,12 +1105,21 @@ fn read_text(file: File) -> Result<String, AgentHomeError> {
 }
 
 pub(crate) fn write_whole(folder: &Path, name: &str, bytes: &[u8]) -> Result<(), AgentHomeError> {
+    write_staged(folder, folder, name, bytes)
+}
+
+/// Writes `bytes` as `folder/name` whole: into a new temporary file in `staging`, a folder on
+/// the same volume, synced, then renamed over the name, so a reader finds the old text or the
+/// new one, never a part. Inputs: the staging folder, the folder, the name and the bytes.
+/// Output: unit, or `process_text_unwritable` with the temporary file removed.
+fn write_staged(
+    staging: &Path,
+    folder: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), AgentHomeError> {
     assert!(!name.contains('/') && !name.starts_with('.'));
-    let temporary = folder.join(format!(
-        ".{name}.{}.{}",
-        std::process::id(),
-        TEMPORARY.fetch_add(1, Ordering::Relaxed)
-    ));
+    let temporary = staged(staging, name, TEMPORARY.fetch_add(1, Ordering::Relaxed));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1108,6 +1134,13 @@ pub(crate) fn write_whole(folder: &Path, name: &str, bytes: &[u8]) -> Result<(),
         return Err(failure("process_text_unwritable"));
     }
     Ok(())
+}
+
+/// The `count`-th temporary file a save of `name` writes in `staging`, named after the
+/// engine's process so two engines never share one. Inputs: the staging folder, the name and
+/// the count. Output: the path.
+pub(crate) fn staged(staging: &Path, name: &str, count: u64) -> PathBuf {
+    staging.join(format!(".{name}.{}.{count}", std::process::id()))
 }
 
 mod transcript;
