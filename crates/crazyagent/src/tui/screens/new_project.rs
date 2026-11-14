@@ -313,7 +313,8 @@ type CatalogKey = (Option<CredentialRef>, Vec<ResearchKind>);
 
 /// The New project wizard: every field, the focused control and the creation phase.
 /// Takes keys and engine results; produces a validated project request on Create.
-/// The draft lives here until the project exists, so Esc keeps it.
+/// The draft lives here until the project exists, so Esc keeps it. `linux` is whether
+/// Review shows what the Linux sandbox cannot hold.
 pub(in crate::tui) struct Wizard {
     pub step: Step,
     pub done: [bool; 7],
@@ -352,6 +353,7 @@ pub(in crate::tui) struct Wizard {
     pub note: Option<Note>,
     pub phase: Phase,
     pub access: AgentAccess,
+    pub linux: bool,
 }
 
 impl Wizard {
@@ -400,6 +402,7 @@ impl Wizard {
             access: Some(AgentAccess::NEW_PROJECT)
                 .filter(|level| level.unavailable().is_none())
                 .unwrap_or_default(),
+            linux: cfg!(target_os = "linux"),
         };
         wizard.assert_consistent();
         wizard

@@ -179,6 +179,7 @@ fn bubblewrap_holds_the_same_project_boundary() {
         policy(&case, SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
         },
     )
     .unwrap();
@@ -216,6 +217,7 @@ fn neither_backend_lets_an_agent_truncate_a_file_it_may_only_read() {
         policy(&case, SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
         },
     )
     .unwrap();
@@ -386,6 +388,7 @@ fn no_agent_signals_an_outside_process_where_the_kernel_can_scope_signals() {
         policy(&case, SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
         },
     )
     .unwrap();
@@ -463,6 +466,7 @@ fn no_agent_opens_a_terminal_the_owner_holds_outside_its_boundary() {
         policy(&case, SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
         },
     )
     .unwrap();
@@ -530,6 +534,7 @@ fn every_agent_leads_a_session_of_its_own_without_the_engine_terminal() {
         policy(&case, SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
         },
     )
     .unwrap();
@@ -572,6 +577,7 @@ fn an_agent_adds_top_level_entries_to_its_own_worktree_but_not_to_the_project_fo
         leased(SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
         },
     )
     .unwrap();
@@ -640,6 +646,7 @@ fn landlock_limits_a_tools_off_agent_to_its_model_endpoint_port() {
         policy(&case, network),
         LinuxBackend::Bubblewrap {
             bwrap: PathBuf::from("/bin/sh"),
+            helper: PathBuf::from(HELPER),
         },
     );
     assert!(matches!(bubblewrap, Err(SandboxError::Unavailable(_))));
@@ -894,6 +901,7 @@ fn a_linux_agent_reaches_ip_endpoints_but_no_unix_socket_in_the_engine_runtime()
         guarded(SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
         },
     )
     .unwrap();
@@ -901,6 +909,125 @@ fn a_linux_agent_reaches_ip_endpoints_but_no_unix_socket_in_the_engine_runtime()
         reach(Some(&bubblewrap), &case, &socket, port, &runtime),
         "pair=ok\nunix=refused\ntcp=refused\nruntime=absent\n",
         "bubblewrap starts an agent only without a network"
+    );
+}
+
+/// A closed bubblewrap agent reaches no Unix socket even in a folder bound for it, such as an
+/// owner's socket in the project folder: the helper's socket filter refuses every Unix-domain
+/// socket there as it does under Landlock (RV-DS241-84).
+#[test]
+fn a_bubblewrap_agent_reaches_no_unix_socket_in_a_folder_bound_for_it() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let runtime = case.outside.parent().unwrap().join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    let socket = case.project.join("owner.sock");
+    let _listener = crazyagent::spawn_gate::bind_unix_std(&socket).unwrap();
+    let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = endpoint.local_addr().unwrap().port();
+    assert_eq!(
+        reach(None, &case, &socket, port, &runtime),
+        "pair=ok\nunix=ok\ntcp=ok\nruntime=present\n",
+        "the unsandboxed control must reach the socket"
+    );
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Only(Vec::new())),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        reach(Some(&bubblewrap), &case, &socket, port, &runtime),
+        "pair=ok\nunix=refused\ntcp=refused\nruntime=absent\n"
+    );
+}
+
+const FAMILIES: &str = "import errno, socket
+for name, family, kind, protocol in (('unix', socket.AF_UNIX, socket.SOCK_STREAM, 0),
+                                     ('vsock', 40, socket.SOCK_STREAM, 0),
+                                     ('bluetooth', 31, socket.SOCK_STREAM, 0),
+                                     ('packet', 17, socket.SOCK_DGRAM, 0),
+                                     ('alg', 38, socket.SOCK_SEQPACKET, 0),
+                                     ('udp', socket.AF_INET, socket.SOCK_DGRAM, 0),
+                                     ('audit', 16, socket.SOCK_RAW, 9),
+                                     ('tcp', socket.AF_INET, socket.SOCK_STREAM, 0),
+                                     ('route', 16, socket.SOCK_RAW, 0)):
+    try:
+        socket.socket(family, kind, protocol).close()
+        print(name + '=ok')
+    except OSError as error:
+        print(name + ('=refused' if error.errno == errno.EACCES else '=other'))
+";
+
+/// Runs the socket family probe through `command`, which starts `/usr/bin/python3` with
+/// the arguments it is given. Input: the command. Output: one line per socket kind, `ok`,
+/// `refused` for the socket filter's `EACCES`, or `other` for any other failure.
+fn families(mut command: Command) -> String {
+    let output = crazyagent::spawn_gate::output(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// A closed bubblewrap agent opens no socket its network namespace does not hold: the
+/// helper's socket filter keeps only TCP over IPv4 and routing netlink, as for a Landlock
+/// agent with a network limit, so an AF_VSOCK socket, which `--unshare-net` does not
+/// isolate and which reaches a VM host, is refused as a Unix-domain one is, and so is every
+/// other family, datagram and netlink kind (RV-DS241-84 r2, rv-sec3 F1).
+#[test]
+fn a_closed_bubblewrap_agent_opens_no_socket_its_network_namespace_does_not_hold() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let expected = "unix=refused\nvsock=refused\nbluetooth=refused\npacket=refused\n\
+                    alg=refused\nudp=refused\naudit=refused\ntcp=ok\nroute=ok\n";
+    let mut filtered = Command::new(HELPER);
+    filtered
+        .args(["--filter-sockets", "--", "/usr/bin/python3", "-I", "-c", FAMILIES])
+        .current_dir(&case.project);
+    assert_eq!(families(filtered), expected, "the helper's socket filter alone");
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Only(Vec::new())),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
+        },
+    )
+    .unwrap();
+    let mut harness = Command::new("/usr/bin/python3");
+    harness
+        .args(["-I", "-c", FAMILIES])
+        .current_dir(case.project.join("worktrees"));
+    assert_eq!(
+        families(bubblewrap.wrap(&harness).unwrap()),
+        expected,
+        "a closed bubblewrap agent"
     );
 }
 
@@ -1013,6 +1140,7 @@ fn an_open_network_agent_listens_on_no_owner_model_or_proxy_port() {
         open(),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
         },
     ) {
         Err(SandboxError::Unavailable(reason)) => assert_eq!(
@@ -1168,6 +1296,7 @@ fn a_kept_port_linux_could_pick_refuses_every_landlock_launch_but_no_closed_bubb
         kept(SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
         },
     )
     .unwrap();
@@ -1220,6 +1349,7 @@ fn a_limited_network_agent_with_kept_ports_outside_the_picked_ones_keeps_its_lis
         limited(LinuxSockets::TcpOnly),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
         },
     )
     .unwrap();
@@ -1358,6 +1488,7 @@ fn an_agent_confined_to_its_worktree_is_refused_on_both_backends() {
         },
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
         },
     ] {
         assert!(matches!(
@@ -1422,6 +1553,7 @@ fn no_agent_plants_the_git_metadata_git_follows_on_either_backend() {
         policy(&case, SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
         },
     )
     .unwrap();
@@ -1759,6 +1891,7 @@ fn no_agent_reads_the_environment_of_a_process_outside_its_boundary() {
         policy(&case, SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
         },
     )
     .unwrap();
