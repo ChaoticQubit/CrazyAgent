@@ -103,8 +103,11 @@ impl ProjectPlugins {
         }
     }
 
-    /// Says whether the next drawings of this section are painted on screen. Input: true
-    /// around the drawing that reaches the screen, false after it. Output: none.
+    /// Says whether the next drawings of this section are painted on screen. Only a painted
+    /// drawing records that an approval's command showed to its end and keeps its scroll, so
+    /// a taller layout that never reaches the screen can neither unlock y nor hold the scroll
+    /// back (RV-DS241-104). Input: true around the drawing that reaches the screen, false
+    /// after it. Output: none.
     pub(in crate::tui) fn painting(&self, painted: bool) {
         self.painting.set(painted);
     }
@@ -995,10 +998,10 @@ impl ProjectPlugins {
         self.notice.iter().map(|notice| notice.row(look)).collect()
     }
 
-    /// Draws the approval question: the server, the question and as many lines
-    /// of exactly what it runs as fit from the first line Up and Down chose, with
-    /// a line marker when some do not fit. Records the server and command once
-    /// its last line has shown, which `y` needs before it approves.
+    /// Draws the approval question: the server, the question and as many lines of exactly
+    /// what it runs, each hidden character as its escape, as fit from the first line Up and
+    /// Down chose, with a line marker when some do not fit. A painted drawing records the
+    /// server and command once its last line has shown, which `y` needs before it approves.
     /// Takes the server asked about, the content width, the rows and the look.
     /// Returns at most `room` rows.
     fn approval(&self, server: &ServerView, content: usize, room: usize, look: &Look) -> Vec<Row> {
@@ -1018,7 +1021,10 @@ impl ProjectPlugins {
                 look.muted,
             ),
         ];
-        let command = exact_lines(&server.runs, content.saturating_sub(2));
+        let command = exact_lines(
+            &crate::memory::visible_text(&server.runs),
+            content.saturating_sub(2),
+        );
         let fits = rows.len() + command.len() <= room;
         let shown = if fits {
             command.len()
@@ -1027,14 +1033,17 @@ impl ProjectPlugins {
         };
         assert!(shown <= command.len());
         let top = self.command_top.get().min(command.len() - shown);
-        self.command_top.set(top);
+        let painted = self.painting.get();
+        if painted {
+            self.command_top.set(top);
+        }
         let end = top + shown;
         rows.extend(
             command[top..end]
                 .iter()
                 .map(|line| Row::of("  ", Style::new()).push(line.clone(), look.fg)),
         );
-        if shown > 0 && end == command.len() {
+        if painted && shown > 0 && end == command.len() {
             *self.read_through.borrow_mut() = Some((server.id.clone(), server.runs.clone()));
         }
         if !fits {

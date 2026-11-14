@@ -115,7 +115,9 @@ fn frame(view: &ProjectPlugins, width: u16, height: u16) -> Vec<String> {
     let items = crate::tui::screens::project_view::tab_items(0, columns, &look);
     let mut rows: Vec<Row> = tab_strip(columns, &items, Tab::Settings as usize, &look).into();
     let room = usize::from(height) - 4 - 2;
+    view.painting(true);
     let (lines, help) = view.rows(columns - 4, room, &look);
+    view.painting(false);
     for line in lines.into_iter().take(room) {
         rows.push(Row::of("  ", Style::new()).cat(line).pad(columns));
     }
@@ -345,6 +347,7 @@ fn at_80x24_the_project_settings_tab_scrolls_a_long_command_and_y_waits_for_its_
     };
     let mut screen = ProjectScreen::new(project(), "Tidepool".into(), None);
     screen.open(Tab::Settings);
+    screen.plugins.painting(true);
     screen.plugins.next_job().unwrap();
     screen.plugins.apply(&read(&long));
     for _ in 0..5 {
@@ -570,6 +573,7 @@ fn hidden_characters_in_a_command_wrap_as_drawn_and_no_line_is_cut() {
 fn a_window_too_short_for_any_command_line_never_approves() {
     let look = Look::plain();
     let mut view = loaded();
+    view.painting(true);
     for _ in 0..5 {
         view.key(press(KeyCode::Down));
     }
