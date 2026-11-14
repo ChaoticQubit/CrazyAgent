@@ -12,7 +12,7 @@ use crate::projects_home::{FoundProject, FoundState, ProjectsHome};
 use crate::setup::{Dependency, DependencyState, SetupStatus};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::app_setup::AppSetupJob;
-use crate::tui::client::intake::{IntakeQuery, IntakeView};
+use crate::tui::client::intake::{IntakeQuery, IntakeView, start_id};
 use crate::tui::client::learning::LearningQuery;
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::clock;
@@ -488,10 +488,17 @@ impl Home {
         assert!(intake_job::actions(job).contains(&action));
         let query = match action {
             JobAction::Stop => IntakeQuery::JobStop { id: job.id.clone() },
-            JobAction::Retry => IntakeQuery::JobStart {
-                source: job.source.clone(),
-                mode: job.mode,
-                overrides: job.overrides.clone(),
+            JobAction::Retry => match start_id() {
+                Ok(id) => IntakeQuery::JobStart {
+                    id,
+                    source: job.source.clone(),
+                    mode: job.mode,
+                    overrides: job.overrides.clone(),
+                },
+                Err(code) => {
+                    ctx.say(Message::error(RETRY_FAILED, &copy(&code)));
+                    return Flow::Handled;
+                }
             },
             JobAction::Dismiss => IntakeQuery::JobDismiss { id: job.id.clone() },
             JobAction::Answer => {
@@ -1532,12 +1539,15 @@ impl Screen for Home {
     }
 }
 
+/// The lead said when Home could not start the intake job again.
+const RETRY_FAILED: &str = "Adding the folder did not start again.";
+
 /// The lead said when a request Home sent for the intake job failed. Input: the request, a
 /// stop, a start again or a dismiss. Output: the lead.
 fn job_failed(query: &IntakeQuery) -> &'static str {
     match query {
         IntakeQuery::JobStop { .. } => "The folder did not stop.",
-        IntakeQuery::JobStart { .. } => "Adding the folder did not start again.",
+        IntakeQuery::JobStart { .. } => RETRY_FAILED,
         IntakeQuery::JobDismiss { .. } => "The ended add was not dismissed.",
         other => panic!("Home sends no {other:?} for the intake job"),
     }

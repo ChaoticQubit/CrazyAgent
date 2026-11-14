@@ -43,6 +43,7 @@ pub(in crate::tui) enum IntakeQuery {
         full_name: String,
     },
     JobStart {
+        id: RequestId,
         source: String,
         mode: AddMode,
         overrides: Vec<AddOverride>,
@@ -54,6 +55,15 @@ pub(in crate::tui) enum IntakeQuery {
     JobDismiss {
         id: RequestId,
     },
+}
+
+/// A fresh id for one start of the engine's intake job, which the job that start makes
+/// carries, so a screen can tell that job from an older add of the same folder.
+/// Output: the id, or the problem when none was made.
+pub(in crate::tui) fn start_id() -> Result<RequestId, String> {
+    let id = crate::engine::owner::random_id().map_err(|error| bounded_problem(&error.0))?;
+    assert!(!id.is_empty());
+    RequestId::new(id).map_err(|_| "intake_failed".to_owned())
 }
 
 /// One intake job for the owner worker: a plain query or a pasted GitHub token.
@@ -223,12 +233,13 @@ impl NativeOwner {
                 IntakeView::Cloned(controller.clone_repo(full_name).await.map_err(problem)?)
             }
             IntakeQuery::JobStart {
+                id,
                 source,
                 mode,
                 overrides,
             } => IntakeView::Job(Some(
                 controller
-                    .intake_start(source, mode, overrides)
+                    .intake_start(id, source, mode, overrides)
                     .await
                     .map_err(problem)?,
             )),

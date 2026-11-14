@@ -142,7 +142,9 @@ async fn the_tui_starts_an_intake_job_reads_it_to_done_and_dismisses_it() {
     assert_eq!(event.result, Ok(IntakeView::Changed(OwnerResult::Applied)));
 
     let source = outside.to_str().unwrap().to_owned();
+    let id = start_id().unwrap();
     let start = IntakeQuery::JobStart {
+        id: id.clone(),
         source: source.clone(),
         mode: AddMode::Copy,
         overrides: Vec::new(),
@@ -153,6 +155,7 @@ async fn the_tui_starts_an_intake_job_reads_it_to_done_and_dismisses_it() {
         panic!("a started job required: {:?}", event.result);
     };
     assert_eq!(started.source, source);
+    assert_eq!(started.id, id, "the job carries the start's id");
     let mut done = None;
     for _ in 0..200 {
         let event = native

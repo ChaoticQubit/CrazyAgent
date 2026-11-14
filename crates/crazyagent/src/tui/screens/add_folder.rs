@@ -7,7 +7,7 @@ use crate::projects_home::{
     ADD_OVERRIDES_MAX, AddMode, AddOverride, GitLink, Measured, PATH_BYTES_MAX,
 };
 use crate::protocol::RequestId;
-use crate::tui::client::intake::{IntakeQuery, IntakeView};
+use crate::tui::client::intake::{IntakeQuery, IntakeView, start_id};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
@@ -141,7 +141,7 @@ pub struct AddFolder {
     answering: Option<RequestId>,
     pending: Option<String>,
     sent: Option<String>,
-    before: Option<RequestId>,
+    sent_id: Option<RequestId>,
     refused: Option<String>,
     problem: Option<String>,
 }
@@ -166,7 +166,7 @@ impl AddFolder {
             answering: None,
             pending: None,
             sent: None,
-            before: None,
+            sent_id: None,
             refused: None,
             problem: None,
         }
@@ -462,9 +462,10 @@ impl AddFolder {
         Flow::Handled
     }
 
-    /// Starts the engine's intake job with the overrides the owner agreed to, keeping the job
-    /// the store showed before so a failed start can tell a new job from it. Takes the folder,
-    /// the way, the overrides and the context. Returns Handled; the reply arrives later.
+    /// Starts the engine's intake job with the overrides the owner agreed to, keeping the
+    /// start's id, which the job it makes carries, so a failed start can tell that job from an
+    /// older add of the same folder. Takes the folder, the way, the overrides and the context.
+    /// Returns Handled; the reply arrives later, or the problem shows when no id was made.
     fn send(
         &mut self,
         source: String,
@@ -475,11 +476,19 @@ impl AddFolder {
         assert!(overrides.len() <= ADD_OVERRIDES_MAX);
         self.confirming = false;
         self.question = None;
+        let id = match start_id() {
+            Ok(id) => id,
+            Err(code) => {
+                self.problem = Some(copy(&code));
+                return Flow::Handled;
+            }
+        };
         self.sent = Some(source.clone());
-        self.before = ctx.store.intake.as_ref().map(|job| job.id.clone());
+        self.sent_id = Some(id.clone());
         ask(
             ctx,
             IntakeQuery::JobStart {
+                id,
                 source,
                 mode,
                 overrides,
@@ -500,7 +509,7 @@ impl AddFolder {
         ));
         self.sent = None;
         self.refused = None;
-        self.before = None;
+        self.sent_id = None;
         Flow::Go(Place::Home)
     }
 
@@ -516,18 +525,19 @@ impl AddFolder {
     }
 
     /// Decides a failed start from the read after it: a job for the same folder that runs,
-    /// or ended done and is not the job the store showed before the start, is the started one
-    /// whose reply was lost; anything else shows the start's refusal. Takes the read and the
-    /// context. Returns the flow.
+    /// or ended done carrying this start's id, is the started one whose reply was lost; an
+    /// older ended add of that folder and anything else show the start's refusal. Takes the
+    /// read and the context. Returns the flow.
     fn checked(&mut self, result: &Result<IntakeView, String>, ctx: &mut Ctx) -> Flow {
         let (Some(source), Some(code)) = (self.sent.take(), self.refused.take()) else {
             return Flow::Handled;
         };
-        let before = self.before.take();
+        let sent_id = self.sent_id.take();
+        assert!(sent_id.is_some());
         let attached = match result {
             Ok(IntakeView::Job(Some(job))) if job.source == source => {
                 intake_job::running(job)
-                    || (job.state == JobState::Done && before.as_ref() != Some(&job.id))
+                    || (job.state == JobState::Done && sent_id.as_ref() == Some(&job.id))
             }
             _ => false,
         };

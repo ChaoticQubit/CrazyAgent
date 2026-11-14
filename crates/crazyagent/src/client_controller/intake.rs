@@ -165,17 +165,16 @@ impl OwnerController {
 
     /// Starts the engine's intake job for a folder, which downloads what is only in iCloud and
     /// then moves or copies it into the projects home apart from this client, or attaches to
-    /// the job adding that folder already. Each start has a fresh id. Takes the absolute
-    /// folder, Move or Copy and the overrides. Returns the job, or `intake_busy` while another
-    /// folder is being added.
+    /// the job adding that folder already. Takes the start's fresh id, which a job it makes
+    /// carries, the absolute folder, Move or Copy and the overrides. Returns the job, or
+    /// `intake_busy` while another folder is being added.
     pub async fn intake_start(
         &mut self,
+        id: RequestId,
         source: String,
         mode: AddMode,
         overrides: Vec<AddOverride>,
     ) -> Result<JobView, EngineError> {
-        let id = RequestId::new(crate::engine::owner::random_id()?)
-            .map_err(|_| EngineError("intake_failed".into()))?;
         let view = self
             .owner_client()?
             .intake_start(id, source, mode, overrides)

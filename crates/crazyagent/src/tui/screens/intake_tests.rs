@@ -975,10 +975,11 @@ fn answering_a_job_s_soft_refusal_asks_that_question_and_starts_it_with_each_ove
     shell.key(Key::Right);
     shell.key(Key::Enter);
     let overrides = vec![AddOverride::Worktrees, AddOverride::TooLarge];
-    assert_eq!(
-        job_asks(&mut shell),
-        [start(&typed, AddMode::Move, overrides.clone())]
-    );
+    let asks: Vec<_> = job_asks(&mut shell)
+        .into_iter()
+        .map(with_start_id)
+        .collect();
+    assert_eq!(asks, [start(&typed, AddMode::Move, overrides.clone())]);
     let again = job_for(&typed, AddMode::Move, JobState::Clearing);
     shell.arrive(intake(
         start(&typed, AddMode::Move, overrides),
@@ -2625,6 +2626,7 @@ fn started(shell: &mut Shell, folder: &str) -> Vec<(AddMode, Vec<AddOverride>)> 
                 source,
                 mode,
                 overrides,
+                ..
             } if source == folder => Some((mode, overrides)),
             _ => None,
         })
@@ -2633,9 +2635,28 @@ fn started(shell: &mut Shell, folder: &str) -> Vec<(AddMode, Vec<AddOverride>)> 
 
 fn start(folder: &str, mode: AddMode, overrides: Vec<AddOverride>) -> IntakeQuery {
     IntakeQuery::JobStart {
+        id: RequestId::new("start-1").unwrap(),
         source: folder.to_owned(),
         mode,
         overrides,
+    }
+}
+
+/// An ask with a start's fresh id set to the one [`start`] uses, so a test compares what was
+/// started; a start's id is checked to be fresh hex first. Takes the ask. Returns it.
+fn with_start_id(query: IntakeQuery) -> IntakeQuery {
+    match query {
+        IntakeQuery::JobStart {
+            id,
+            source,
+            mode,
+            overrides,
+        } => {
+            assert_eq!(id.as_str().len(), 64, "{id:?}");
+            assert!(id.as_str().bytes().all(|b| b.is_ascii_hexdigit()), "{id:?}");
+            start(&source, mode, overrides)
+        }
+        other => other,
     }
 }
 
@@ -2750,8 +2771,9 @@ fn cancel_closes_the_icloud_question_and_starts_nothing() {
 }
 
 /// A start whose reply is lost or refused is decided from a fresh read of the job: a job for
-/// this folder that runs is the started one and the page goes Home; an ended job for it that
-/// the store missed (a stale store shows none) is an older add, so the start's refusal shows.
+/// this folder that runs, or ended done carrying this start's id, is the started one and the
+/// page goes Home; an ended job for it from an older add shows the start's refusal, whether
+/// the store showed that job or, stale, showed none.
 #[test]
 fn a_failed_start_reads_the_job_and_goes_home_only_when_this_folder_is_being_added() {
     let user = tempfile::tempdir().unwrap();
@@ -2760,24 +2782,33 @@ fn a_failed_start_reads_the_job_and_goes_home_only_when_this_folder_is_being_add
         checked: 0,
     };
     let reads = [
-        (None, Some(copying), true),
-        (None, Some(JobState::Done), false),
-        (Some("add-2"), Some(JobState::Done), false),
+        (None, Some((copying, false)), true),
+        (None, Some((JobState::Done, true)), true),
+        (None, Some((JobState::Done, false)), false),
+        (Some("add-2"), Some((JobState::Done, false)), false),
         (None, None, false),
     ];
     for (before, read, home) in reads {
         let shown = before.map(|_| JobState::Done);
         let (mut shell, typed) = measured(user.path(), AddMode::Copy, 0, shown);
-        assert_eq!(started(&mut shell, &typed), [(AddMode::Copy, Vec::new())]);
+        let asks: Vec<_> = intake_jobs(&mut shell)
+            .iter()
+            .map(IntakeJob::query)
+            .collect();
+        let [IntakeQuery::JobStart { id: sent, .. }] = asks.as_slice() else {
+            panic!("one start: {asks:?}");
+        };
+        let sent = sent.clone();
+        let compared: Vec<_> = asks.iter().cloned().map(with_start_id).collect();
+        assert_eq!(compared, [start(&typed, AddMode::Copy, Vec::new())]);
         let code = if home { "owner_timeout" } else { "intake_busy" };
-        shell.arrive(intake(
-            start(&typed, AddMode::Copy, Vec::new()),
-            Err(code.into()),
-        ));
+        shell.arrive(intake(asks[0].clone(), Err(code.into())));
         assert_eq!(job_asks(&mut shell), [IntakeQuery::JobStatus], "{read:?}");
-        let read_job = read
-            .clone()
-            .map(|state| job_for(&typed, AddMode::Copy, state));
+        let read_job = read.clone().map(|(state, ours)| {
+            let older = job_for(&typed, AddMode::Copy, state);
+            let id = if ours { sent.clone() } else { older.id.clone() };
+            JobView { id, ..older }
+        });
         shell.arrive(intake(
             IntakeQuery::JobStatus,
             Ok(IntakeView::Job(read_job)),
@@ -2867,13 +2898,12 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
     assert!(shows(&rows, "Enter Try again"), "{rows:#?}");
     assert!(shows(&rows, "d Dismiss"), "{rows:#?}");
     shell.key(Key::Enter);
-    let start = IntakeQuery::JobStart {
-        source: failed.source.clone(),
-        mode: AddMode::Move,
-        overrides: vec![AddOverride::TooLarge],
-    };
-    assert_eq!(job_asks(&mut shell), std::slice::from_ref(&start));
-    shell.arrive(intake(start, Err("intake_busy".into())));
+    let asks = job_asks(&mut shell);
+    let again = start(&failed.source, AddMode::Move, vec![AddOverride::TooLarge]);
+    let compared: Vec<_> = asks.iter().cloned().map(with_start_id).collect();
+    assert_eq!(compared, [again]);
+    let [asked] = <[IntakeQuery; 1]>::try_from(asks).unwrap();
+    shell.arrive(intake(asked, Err("intake_busy".into())));
     let said = shell.ctx.message().expect("a refused start is said");
     assert_eq!(
         (said.tone, said.lead.as_str(), said.rest.as_str()),
