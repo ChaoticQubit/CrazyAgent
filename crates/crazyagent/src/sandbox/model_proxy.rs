@@ -27,6 +27,16 @@ pub const PROXY_PORTS: std::ops::RangeInclusive<u16> = 41_300..=41_427;
 /// below them (LPF1-M1), and below the 30000 to 32767 that Kubernetes node ports use.
 #[cfg(target_os = "linux")]
 pub const PROXY_PORTS: std::ops::RangeInclusive<u16> = 29_300..=29_427;
+/// The loopback ports a model key relay listens on, the block right after [`PROXY_PORTS`]
+/// (SA241 vid 9). Every Open-network sandbox denies binding all of it, as it does the proxy
+/// block, so no sandboxed agent can take a relay's port, not even after the relay ended
+/// while a kept pane still sends its requests there.
+#[cfg(not(target_os = "linux"))]
+pub const RELAY_PORTS: std::ops::RangeInclusive<u16> = 41_428..=41_555;
+/// The same block on Linux, right after its proxy block, below the ports Linux hands out by
+/// itself and the 30000 up that Kubernetes node ports use.
+#[cfg(target_os = "linux")]
+pub const RELAY_PORTS: std::ops::RangeInclusive<u16> = 29_428..=29_555;
 /// Where the ports the system hands out by itself start unless an administrator moved
 /// them: 49152 on macOS and Windows, 32768 on Linux.
 #[cfg(not(target_os = "linux"))]
@@ -35,11 +45,15 @@ pub const PICKED_PORTS_START: u16 = 49_152;
 #[cfg(target_os = "linux")]
 pub const PICKED_PORTS_START: u16 = 32_768;
 const _: () = assert!(*PROXY_PORTS.start() > 1024 && *PROXY_PORTS.end() < PICKED_PORTS_START);
+const _: () = assert!(
+    *RELAY_PORTS.start() == *PROXY_PORTS.end() + 1 && *RELAY_PORTS.end() < PICKED_PORTS_START
+);
 const _: () = {
     let mut index = 0;
     while index < super::OWNER_PORTS.len() {
         let port = super::OWNER_PORTS[index];
         assert!(port < *PROXY_PORTS.start() || port > *PROXY_PORTS.end());
+        assert!(port < *RELAY_PORTS.start() || port > *RELAY_PORTS.end());
         index += 1;
     }
 };

@@ -815,3 +815,18 @@ fn a_port_grant_never_reaches_the_java_python_or_go_debugger_ports() {
         "a database port stays the owner's informed choice"
     );
 }
+
+/// SA241 vid 9: a port grant never opens a model relay port to an agent, at either end of
+/// the relay block.
+#[test]
+fn a_port_grant_refuses_the_model_relay_ports() {
+    let data = Path::new("/nonexistent-engine-data");
+    let block = crate::sandbox::model_proxy::RELAY_PORTS;
+    for port in [*block.start(), *block.end()] {
+        assert_eq!(
+            checked(&AccessGrant::Port { port }, data),
+            Err("grant_port_reserved"),
+            "port {port}"
+        );
+    }
+}

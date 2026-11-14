@@ -1127,8 +1127,9 @@ mod tests {
         assert!(!policy.limit_network);
         let mut expected = vec![1234, 1455, 8080, 11434];
         expected.extend(PROXY_PORTS);
+        expected.extend(crate::sandbox::model_proxy::RELAY_PORTS);
         assert_eq!(policy.keep_free, expected);
-        assert_eq!(policy.keep_free.len(), 4 + 128);
+        assert_eq!(policy.keep_free.len(), 4 + 256);
         assert_eq!(
             HelperRequest::parse(
                 policy
@@ -1234,6 +1235,7 @@ mod tests {
         assert!(policy.limit_network);
         let mut expected = vec![1455, 8080, 11434];
         expected.extend(PROXY_PORTS);
+        expected.extend(crate::sandbox::model_proxy::RELAY_PORTS);
         assert_eq!(policy.keep_free, expected);
         assert_eq!(
             HelperRequest::parse(

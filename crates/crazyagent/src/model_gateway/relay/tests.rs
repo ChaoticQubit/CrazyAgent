@@ -651,3 +651,46 @@ fn dropping_the_relay_aborts_a_provider_request_still_in_flight() {
     assert!(!String::from_utf8_lossy(&rest).contains("200"));
     drop(provider);
 }
+
+/// SA241 vid 9: a relay listens on a port of the reserved relay block, so the port it
+/// leaves when it ends is one no sandboxed agent can bind; relays running at once each hold
+/// a port of their own there.
+#[test]
+fn a_relay_listens_only_on_a_reserved_relay_port() {
+    let provider = Provider::json();
+    let relays: Vec<Relay> = (0..3)
+        .map(|_| Relay::start(&provider.origin(), key()).unwrap())
+        .collect();
+    let mut ports: Vec<u16> = relays.iter().map(Relay::port).collect();
+    for port in &ports {
+        assert!(
+            crate::sandbox::model_proxy::RELAY_PORTS.contains(port),
+            "{port}"
+        );
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    assert_eq!(ports.len(), relays.len());
+}
+
+/// SA241 vid 9: no Open-network agent listens on a port of the relay block, at either end
+/// of it, on IPv4 or IPv6 loopback or any address, so none can take a relay's port after
+/// the relay ended and answer a kept pane's next model request.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_open_agent_never_listens_on_a_model_relay_port() {
+    let agent = crate::sandbox::test_agent::TestAgent::open();
+    let block = crate::sandbox::model_proxy::RELAY_PORTS;
+    for port in [*block.start(), *block.end()] {
+        for host in ["127.0.0.1", "::1", "0.0.0.0", "::"] {
+            let output = agent.run(&format!(
+                "/usr/bin/nc -l {host} {port} 2>&1 & pid=$!; /bin/sleep 1; kill $pid 2>/dev/null; wait $pid; exit 0"
+            ));
+            let said = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                said.contains("Operation not permitted"),
+                "an agent cannot take {host}:{port} from a model relay: {said}"
+            );
+        }
+    }
+}
