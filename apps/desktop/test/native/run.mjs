@@ -29,6 +29,7 @@ assert(["model-access", "model-access-read-only", "native-auth", "pools-screen",
   "first-run-harnesses", "first-run-harnesses-node", "learning-replay-guide", "learning-replay-first-run", "refused-tool", "speed"].includes(suite),
   "closed native suite required");
 const WEBDRIVER_SECONDS = ["pools-screen", "pools-spend", "first-run-harnesses-node", "refused-tool", "speed"].includes(suite) ? 900 : 300;
+const ENGINE_SECONDS = WEBDRIVER_SECONDS + 30;
 let interrupted = false;
 
 function interrupt() {
@@ -222,7 +223,7 @@ function speedEngine(env, side) {
   env.CRAZYAGENT_DESKTOP_SOCKET = join(side.runtime, "engine.sock");
   const entry = launch("engine", side.engine,
     ["engine", side.runtime, join(side.runtime, "global.toml"), join(side.runtime, "project.toml"),
-      "engine.sock", "--writable-settings"], env, WEBDRIVER_SECONDS + 30);
+      "engine.sock", "--writable-settings"], env, ENGINE_SECONDS);
   entry.spawnedMs = performance.now();
   return entry;
 }
@@ -249,7 +250,7 @@ async function execute() {
   const side = suite === "speed" ? await speedSide(app) : null;
   const engine = side ? speedEngine(env, side) : launch("engine", fixture,
     [suite === "model-access-read-only" ? "serve" : "serve-model-access",
-      engineRoot, projects], engineEnvironment(env), WEBDRIVER_SECONDS + 30);
+      engineRoot, projects], { ...engineEnvironment(env), CRAZYAGENT_DESKTOP_TEST_FIXTURE_SECONDS: String(ENGINE_SECONDS) }, ENGINE_SECONDS);
   let failure = null;
   let code = 1;
   try {
