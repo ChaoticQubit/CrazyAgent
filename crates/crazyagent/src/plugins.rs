@@ -542,7 +542,7 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     (
         "server_install_failed",
-        "Setting up context-mode failed. The engine tries again within 10 minutes.",
+        "Setting up context-mode failed. Check again in 10 minutes.",
     ),
     (
         "server_npm_missing",
@@ -652,7 +652,7 @@ pub fn check_refused(reason: &str) -> String {
 }
 
 /// The start of a recorded check problem for a failed context-mode shared install, followed
-/// by the minutes from the check until the engine tries the install again.
+/// by the minutes from the check until a check or an agent launch may try the install again.
 const INSTALL_RETRY: &str = "server_install_failed:";
 
 /// The most minutes a failed context-mode shared install holds the next one back; the
@@ -660,7 +660,7 @@ const INSTALL_RETRY: &str = "server_install_failed:";
 pub const INSTALL_RETRY_MINUTES_MAX: u64 = 10;
 
 /// Records a check that found the context-mode shared install held back after a failure.
-/// Input: the minutes until the engine tries again, 1 to [`INSTALL_RETRY_MINUTES_MAX`].
+/// Input: the minutes until it may be tried again, 1 to [`INSTALL_RETRY_MINUTES_MAX`].
 /// Output: the problem to record, which [`check_problem`] shows with those minutes.
 pub fn install_failed(minutes: u64) -> String {
     assert!((1..=INSTALL_RETRY_MINUTES_MAX).contains(&minutes));
@@ -682,7 +682,7 @@ pub fn check_problem(problem: &str) -> String {
             .filter(|minutes| (1..=INSTALL_RETRY_MINUTES_MAX).contains(minutes));
         return match minutes {
             Some(minutes) => format!(
-                "Setting up context-mode failed. The engine tries again {minutes} {} after this check.",
+                "Setting up context-mode failed. Check again in {minutes} {}.",
                 if minutes == 1 { "minute" } else { "minutes" }
             ),
             None => plain_problem("server_install_failed")
@@ -849,11 +849,11 @@ mod tests {
     fn a_check_that_found_no_shared_install_says_why_in_its_own_words() {
         assert_eq!(
             check_problem(&install_failed(7)),
-            "Setting up context-mode failed. The engine tries again 7 minutes after this check."
+            "Setting up context-mode failed. Check again in 7 minutes."
         );
         assert_eq!(
             check_problem(&install_failed(1)),
-            "Setting up context-mode failed. The engine tries again 1 minute after this check."
+            "Setting up context-mode failed. Check again in 1 minute."
         );
         for unreadable in [
             "server_install_failed:",
@@ -863,14 +863,14 @@ mod tests {
         ] {
             assert_eq!(
                 check_problem(unreadable),
-                "Setting up context-mode failed. The engine tries again within 10 minutes.",
+                "Setting up context-mode failed. Check again in 10 minutes.",
                 "{unreadable:?}"
             );
         }
         for (code, words) in [
             (
                 "server_install_failed",
-                "Setting up context-mode failed. The engine tries again within 10 minutes.",
+                "Setting up context-mode failed. Check again in 10 minutes.",
             ),
             (
                 "server_npm_missing",

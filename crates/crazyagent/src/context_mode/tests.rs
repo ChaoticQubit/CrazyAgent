@@ -488,6 +488,27 @@ fn a_check_runs_the_shared_install_once_complete_even_while_an_install_is_regist
 }
 
 #[test]
+fn an_install_that_finished_after_it_was_started_or_found_running_runs_at_once() {
+    let case = case("/usr/bin/false");
+    let node = case.bin.join("node");
+    for begin in [Begin::Started, Begin::Running] {
+        assert_eq!(
+            after_begin(begin, &case.folder(), &node, VERSION),
+            ForCheck::SettingUp
+        );
+    }
+    finished(&case.folder(), PINNED);
+    let ready = shared(&case.folder(), &node, VERSION).unwrap();
+    for begin in [Begin::Started, Begin::Running] {
+        assert_eq!(
+            after_begin(begin, &case.folder(), &node, VERSION),
+            ForCheck::Run(ready.clone()),
+            "the shared install is read again after the start, so one that just finished runs"
+        );
+    }
+}
+
+#[test]
 fn a_check_while_the_install_runs_says_it_is_being_set_up() {
     let case = case("/usr/bin/false");
     INSTALLING

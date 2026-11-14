@@ -285,7 +285,7 @@ export function errorMessage(error: unknown): string {
     server_exited: "The server stopped before answering.",
     server_check_timeout: "The server did not answer within 10 seconds.",
     server_setting_up: "context-mode is still being set up. Check again in a minute.",
-    server_install_failed: "Setting up context-mode failed. The engine tries again within 10 minutes.",
+    server_install_failed: "Setting up context-mode failed. Check again in 10 minutes.",
     server_npm_missing: "context-mode needs npm and node in the same folder as npx. Install Node.js, then check again.",
     server_version_unpinned: "This context-mode version is not the one the default pack pins, so CrazyAgent does not install it. Use the default pack's version.",
     server_installs_busy: "Too many installs are running. Check again in a minute.",

@@ -33,7 +33,7 @@ test("plugin refusals from the engine read as the plugin sentences, not the gene
   assert.equal(api.plainError("hooks_plugin_manifest_missing"), "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.");
   assert.equal(api.plainError("hook_plugin_name_invalid"), "The plugin name must be 1 to 32 letters, digits, ., - or _.");
   assert.equal(api.plainError("server_setting_up"), "context-mode is still being set up. Check again in a minute.");
-  assert.equal(api.plainError("server_install_failed"), "Setting up context-mode failed. The engine tries again within 10 minutes.");
+  assert.equal(api.plainError("server_install_failed"), "Setting up context-mode failed. Check again in 10 minutes.");
   assert.equal(api.plainError("server_npm_missing"), "context-mode needs npm and node in the same folder as npx. Install Node.js, then check again.");
   assert.equal(api.plainError("server_version_unpinned"), "This context-mode version is not the one the default pack pins, so CrazyAgent does not install it. Use the default pack's version.");
   assert.equal(api.plainError("server_installs_busy"), "Too many installs are running. Check again in a minute.");

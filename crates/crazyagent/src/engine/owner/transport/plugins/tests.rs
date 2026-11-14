@@ -129,7 +129,7 @@ fn the_context_mode_check_names_why_no_shared_install_can_run_and_never_starts_n
     assert_eq!(held, crate::plugins::install_failed(10));
     assert_eq!(
         crate::plugins::check_problem(&held),
-        "Setting up context-mode failed. The engine tries again 10 minutes after this check."
+        "Setting up context-mode failed. Check again in 10 minutes."
     );
     assert_eq!(check("9.9.9"), "server_version_unpinned");
     std::fs::remove_file(&failed).unwrap();

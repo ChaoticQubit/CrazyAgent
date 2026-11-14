@@ -89,9 +89,17 @@ pub fn for_check(root: &Path, spec: ServerSpec) -> ForCheck {
     if let Some(shared) = shared(&folder, &node, version) {
         return ForCheck::Run(shared);
     }
-    match begin_install(root, bin, version) {
+    after_begin(begin_install(root, bin, version), &folder, &node, version)
+}
+
+/// Reads what a check runs once its install request went one way: the shared install when
+/// it is complete by now, even if the install was only just started or found running,
+/// otherwise being set up, the time left after a failure, or the refusal. Inputs: how the
+/// request went, the install folder, the `node` beside npx and the version. Output: the run.
+fn after_begin(begin: Begin, folder: &Path, node: &Path, version: &str) -> ForCheck {
+    match begin {
         Begin::Started | Begin::Running => {
-            shared(&folder, &node, version).map_or(ForCheck::SettingUp, ForCheck::Run)
+            shared(folder, node, version).map_or(ForCheck::SettingUp, ForCheck::Run)
         }
         Begin::Failed(left) => {
             assert!(left <= INSTALL_BACKOFF);
