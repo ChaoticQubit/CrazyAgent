@@ -999,21 +999,26 @@ pub fn pending(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
 
 /// Where the project instructions file sits in a project folder.
 const CARRIED_PATH: &str = ".crazyagent/instructions.md";
+/// The start of the label every imported text is kept under, one level below the app's own
+/// sections so it sits inside the project instructions ([`imported`], SA vid 7 r2b, leader
+/// 10:50).
+const IMPORTED_LABEL: &str = "### Imported from ";
 /// The heading project instructions a folder arrived with are kept under: the app did not
 /// write them, so they are whoever wrote them, not the owner (SA vid 7, leader 09:27 A). It
-/// sits one level below the app's own sections, inside the project instructions, and
-/// nothing carried under it reads as a heading at its level or above (SA vid 7 r2).
+/// is the [`IMPORTED_LABEL`] naming the file, and nothing carried under it reads as a
+/// heading at its level or above (SA vid 7 r2).
 pub const CARRIED_HEADING: &str = "### Imported from .crazyagent/instructions.md";
 /// What the setup review tells the owner when the project instructions came with the
 /// folder, word for word in the desktop and the TUI (DEC-141).
 pub const CARRIED_NOTICE: &str = "The folder came with its own .crazyagent/instructions.md. CrazyAgent gives it to your agents under the heading Imported from .crazyagent/instructions.md. Check it in Process before you start the team.";
 
-/// The project text a folder arrived with, under [`CARRIED_HEADING`] once, a label it
-/// already starts with taken off first, and with its headings moved below the label
-/// ([`demoted`]); empty text stays as it is. Text the heading leaves no room for is cut at
-/// the limit, back to a whole line when the cut line would read as a heading. Input: the
-/// project text. Output: the text to keep and whether it was cut.
+/// The project text a folder arrived with as one [`imported`] section under
+/// [`CARRIED_HEADING`], a label it already starts with taken off first; empty text stays as
+/// it is. Text the heading leaves no room for is cut at the limit, back to a whole line when
+/// the cut line would read as a heading. Input: the project text. Output: the text to keep
+/// and whether it was cut.
 fn carried(existing: &str) -> (String, bool) {
+    assert_eq!(CARRIED_HEADING, format!("{IMPORTED_LABEL}{CARRIED_PATH}"));
     let body = existing.strip_prefix(CARRIED_HEADING).unwrap_or(existing);
     let part = demoted(body.trim());
     if part.is_empty() {
@@ -1028,21 +1033,33 @@ fn carried(existing: &str) -> (String, bool) {
     if demoted(kept) != kept {
         assert!(end < part.len());
         let line = kept
-            .rfind(|c: char| c == '\n' || c == '\r')
+            .rfind(['\n', '\r'])
             .expect("only the line a cut ends in can read as a heading");
         kept = kept[..line].trim_end();
     }
     assert_eq!(demoted(kept), kept);
-    let text = format!("{CARRIED_HEADING}\n\n{kept}\n");
-    assert!(text.len() <= crate::agent_home::TEXT_BYTES_MAX);
+    let text = imported(CARRIED_PATH, kept);
+    assert!(text.starts_with(CARRIED_HEADING) && text.len() <= crate::agent_home::TEXT_BYTES_MAX);
     (text, end < part.len())
 }
 
-/// Carried text with no line an agent reads as a heading at the Imported label's level or
-/// above: a line whose first visible characters are one to three `#` then a space or its
-/// end gets three more, and a line of only `=` or only `-` under a non-blank line gets a
-/// blank line of the same ending above it, so it heads nothing (SA vid 7 r2). A second pass
-/// changes nothing. Input: the text. Output: the text, the same when it has no such line.
+/// One imported text as the project instructions keep it: under [`IMPORTED_LABEL`] naming
+/// the files that held it, with its headings moved below that label ([`demoted`]). The same
+/// for a folder's own project instructions and for every instruction file an import copies
+/// (SA vid 7 r2b, leader 10:50). Input: the names and the trimmed text. Output: the section.
+fn imported(names: &str, text: &str) -> String {
+    let body = demoted(text);
+    assert!(body.len() >= text.len());
+    format!("{IMPORTED_LABEL}{names}\n\n{body}\n")
+}
+
+/// Imported text with no line an agent reads as a heading at the [`IMPORTED_LABEL`] level or
+/// above but the labels themselves: a line whose first visible characters are one to three
+/// `#` then a space or its end gets three more unless it starts with the label, and a line
+/// of only `=` or only `-` under a non-blank line gets a blank line of the same ending above
+/// it, so it heads nothing (SA vid 7 r2, r2b). A second pass changes nothing, so labelling
+/// again after an import keeps the text. Input: the text. Output: the text, the same when it
+/// has no such line.
 fn demoted(text: &str) -> String {
     let lead = |c: char| {
         c.is_whitespace() || matches!(c, '\u{200B}'..='\u{200F}' | '\u{2060}' | '\u{FEFF}')
@@ -1051,9 +1068,7 @@ fn demoted(text: &str) -> String {
     let (mut above, mut above_ending) = ("", "\n");
     let mut rest = text;
     while !rest.is_empty() {
-        let end = rest
-            .find(|c: char| c == '\n' || c == '\r')
-            .unwrap_or(rest.len());
+        let end = rest.find(['\n', '\r']).unwrap_or(rest.len());
         let line = &rest[..end];
         let ending = match &rest[end..] {
             after if after.starts_with("\r\n") => &after[..2],
@@ -1068,7 +1083,8 @@ fn demoted(text: &str) -> String {
             out.push_str(above_ending);
         }
         out.push_str(&line[..line.len() - body.len()]);
-        if (1..=3).contains(&hashes)
+        if !line.starts_with(IMPORTED_LABEL)
+            && (1..=3).contains(&hashes)
             && body[hashes..]
                 .chars()
                 .next()
@@ -1172,17 +1188,13 @@ pub fn import(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
     }
     let mut text = existing.clone();
     for (names, _, part) in &sections {
-        if existing.contains(part) {
+        if existing.contains(part) || existing.contains(&demoted(part)) {
             continue;
         }
         if !text.is_empty() {
             text.push_str(if text.ends_with('\n') { "\n" } else { "\n\n" });
         }
-        text.push_str("## Imported from ");
-        text.push_str(&names.join(", "));
-        text.push_str("\n\n");
-        text.push_str(part);
-        text.push('\n');
+        text.push_str(&imported(&names.join(", "), part));
     }
     if text.len() > crate::agent_home::TEXT_BYTES_MAX {
         return Err(failure("process_text_too_large"));
