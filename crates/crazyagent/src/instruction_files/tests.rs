@@ -1962,6 +1962,39 @@ mod import {
             "{given:?}"
         );
     }
+
+    /// SA vid 7 r2c: carried text built so the cut lands on a bare label never stops the
+    /// start. A label line followed by spaces past the limit, and a file of bare label lines
+    /// past it, are each labelled within the limit and kept whole in `.crazyagent/imported/`,
+    /// and labelling again changes nothing.
+    #[test]
+    fn carried_text_whose_cut_ends_on_a_bare_label_is_labelled_without_failing() {
+        let max = crate::agent_home::TEXT_BYTES_MAX;
+        let label = "### Imported from .crazyagent/instructions.md";
+        for arrived in [
+            format!("### Imported from {}x", " ".repeat(65_500)),
+            "### Imported from \n".repeat(3_449),
+        ] {
+            assert!(arrived.len() <= max);
+            let plain = tempfile::tempdir().unwrap();
+            let folder = fs::canonicalize(plain.path()).unwrap();
+            write(&folder.join(".crazyagent/instructions.md"), &arrived);
+            label_arrived(&folder).unwrap();
+            let text = crate::agent_home::read_project(&folder).unwrap();
+            assert!(
+                text.starts_with(label) && text.len() <= max,
+                "{}",
+                &text[..80.min(text.len())]
+            );
+            label_arrived(&folder).unwrap();
+            assert_eq!(crate::agent_home::read_project(&folder).unwrap(), text);
+            assert_eq!(
+                fs::read_to_string(folder.join(".crazyagent/imported/.crazyagent/instructions.md"))
+                    .unwrap(),
+                arrived
+            );
+        }
+    }
 }
 
 #[test]
