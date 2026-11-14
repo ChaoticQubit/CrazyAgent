@@ -78,6 +78,7 @@ pub(crate) fn secret_like(name: &str) -> bool {
 
 /// File extensions of programming source. A source file is not kept out of the code graph
 /// by a secret word in its name alone (DEC-132 Q12), as graphify's own detection rule does.
+#[cfg(unix)]
 const SOURCE_EXTENSIONS: &[&str] = &[
     "c", "cc", "cjs", "cpp", "cs", "css", "go", "h", "hpp", "java", "js", "jsx", "kt", "kts",
     "less", "mjs", "php", "py", "rb", "rs", "sass", "scala", "scss", "svelte", "swift", "ts",
@@ -87,6 +88,7 @@ const SOURCE_EXTENSIONS: &[&str] = &[
 /// Whether `name`, one file name, ends in a programming-source extension, matched exactly.
 /// Takes the name. Returns true for `tokens.ts`, false for `tokens.json`, `.env` and a name
 /// with no extension.
+#[cfg(unix)]
 pub(super) fn source_file(name: &str) -> bool {
     assert!(!name.contains('/'), "a file name, not a path");
     assert!(SOURCE_EXTENSIONS.windows(2).all(|pair| pair[0] < pair[1]));

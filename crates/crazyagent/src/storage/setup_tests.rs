@@ -499,6 +499,23 @@ fn a_setup_run_already_going_refuses_another() {
 }
 
 #[test]
+fn the_owner_installs_one_dependency_alone_and_not_while_setup_runs() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let install = || SetupAction::Install {
+        name: crate::setup::Dependency::Node,
+    };
+    assert_eq!(owner(&mut connection, root, install()), Outcome::Applied);
+    assert!(!progress::snapshot(root).graph_tool);
+    progress::with(root, |state| state.running = true);
+    assert_eq!(
+        rejected_with(owner(&mut connection, root, install())),
+        "setup_busy"
+    );
+    progress::with(root, |state| state.running = false);
+}
+
+#[test]
 fn an_entry_whose_skill_name_is_taken_installs_nothing() {
     let (dir, mut connection) = database();
     let root = dir.path();
@@ -1334,4 +1351,91 @@ fn hooks_seeded_for_an_adopted_owner_skill_follow_that_skill() {
     )
     .unwrap();
     assert!(effective_events(&mut connection, root, "project-1").is_empty());
+}
+
+/// DEC-162 Q1: the owner's choice for a tool found but not used reads Fix button before
+/// any save, then what was saved, with the setup status both clients read.
+#[test]
+fn the_refused_tool_setting_reads_fix_button_until_command_only_is_saved() {
+    let (root, mut connection) = database();
+    assert_eq!(
+        status_of(&mut connection, root.path()).refused_tool,
+        crate::setup::RefusedTool::FixButton
+    );
+    assert_eq!(
+        owner(
+            &mut connection,
+            root.path(),
+            SetupAction::SetRefusedTool {
+                choice: crate::setup::RefusedTool::CommandOnly,
+            },
+        ),
+        Outcome::Applied
+    );
+    assert_eq!(
+        status_of(&mut connection, root.path()).refused_tool,
+        crate::setup::RefusedTool::CommandOnly
+    );
+    assert_eq!(
+        owner(
+            &mut connection,
+            root.path(),
+            SetupAction::SetRefusedTool {
+                choice: crate::setup::RefusedTool::FixButton,
+            },
+        ),
+        Outcome::Applied
+    );
+    assert_eq!(
+        status_of(&mut connection, root.path()).refused_tool,
+        crate::setup::RefusedTool::FixButton
+    );
+}
+
+/// DEC-162 Q1: Show command only is enforced in the engine, inside the owner transaction
+/// so a replay answers the same: a fix request answers `tool_fix_off` while it is chosen,
+/// `setup_busy` while a setup run or another fix goes on, `tool_fix_changed` for a target
+/// that is no absolute bounded path, and is admitted otherwise.
+#[test]
+fn command_only_refuses_the_permission_fix_in_the_engine() {
+    let (root, mut connection) = database();
+    let fix = |tree: &str| SetupAction::FixPermissions {
+        name: crate::setup::Dependency::Graphify,
+        tree: tree.into(),
+        recursive: true,
+    };
+    let tree = "/Users/me/.local/share/uv/python/cpython-3.13.1";
+    assert_eq!(
+        owner(&mut connection, root.path(), fix(tree)),
+        Outcome::Applied
+    );
+    for bad in [
+        "",
+        "relative/tree",
+        "/with\0nul",
+        &format!("/{}", "a".repeat(4096)),
+    ] {
+        assert_eq!(
+            rejected_with(owner(&mut connection, root.path(), fix(bad))),
+            "tool_fix_changed",
+            "{bad:?}"
+        );
+    }
+    progress::with(root.path(), |state| state.running = true);
+    assert_eq!(
+        rejected_with(owner(&mut connection, root.path(), fix(tree))),
+        "setup_busy"
+    );
+    progress::with(root.path(), |state| state.running = false);
+    owner(
+        &mut connection,
+        root.path(),
+        SetupAction::SetRefusedTool {
+            choice: crate::setup::RefusedTool::CommandOnly,
+        },
+    );
+    assert_eq!(
+        rejected_with(owner(&mut connection, root.path(), fix(tree))),
+        "tool_fix_off"
+    );
 }

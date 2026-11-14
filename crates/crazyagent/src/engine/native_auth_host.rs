@@ -9,13 +9,18 @@ use std::sync::Arc;
 
 const EXECUTABLE_BYTES_MAX: u64 = 1024 * 1024 * 1024;
 /// The PATH every sign-in or token renewal child runs with, no folder added: a script
-/// harness starts through its resolved interpreter instead ([`sign_in_command`]).
+/// harness starts through its resolved interpreter instead ([`launch::handed_command`],
+/// [`sign_in_command`]).
 pub(crate) const SIGN_IN_PATH: &str = "/usr/bin:/bin";
 
-/// Starts a sign-in or token renewal child with no search path: the harness file itself, or
-/// for a script that asks `env` for its interpreter, such as an npm-built Codex asking for
-/// `node`, that interpreter's absolute file and then the script
-/// ([`crate::harnesses::interactive::launch_words`]). Input: the harness's real file.
+pub use launch::{HandedWord, handed_words};
+pub(crate) use launch::{LaunchWord, handed_command};
+
+/// Starts a token renewal child in the engine with no search path: the harness file itself,
+/// or for a script that asks `env` for its interpreter, such as an npm-built Codex asking
+/// for `node`, that interpreter's absolute file and then the script
+/// ([`crate::harnesses::interactive::launch_words`]). A sign-in custodian never resolves:
+/// it runs the words the engine handed it ([`launch`]). Input: the harness's real file.
 /// Output: the command with those words, or the tool resolver's owner line.
 pub(crate) fn sign_in_command(executable: &Path) -> Result<std::process::Command, EngineError> {
     let words = crate::harnesses::interactive::launch_words(executable)
@@ -72,8 +77,9 @@ pub async fn run_native_auth_custodian_with_codex(
     input: OwnedFd,
     executable: &Path,
     expected_sha256: &str,
+    launch: &[HandedWord<'_>],
 ) -> Result<(), EngineError> {
-    entry::run_with_codex(runtime_dir, input, executable, expected_sha256)
+    entry::run_with_codex(runtime_dir, input, executable, expected_sha256, launch)
         .await
         .map(|_| ())
 }
@@ -83,8 +89,9 @@ pub async fn run_native_auth_custodian_with_claude(
     input: OwnedFd,
     executable: &Path,
     expected_sha256: &str,
+    launch: &[HandedWord<'_>],
 ) -> Result<(), EngineError> {
-    entry::run_with_claude(runtime_dir, input, executable, expected_sha256)
+    entry::run_with_claude(runtime_dir, input, executable, expected_sha256, launch)
         .await
         .map(|_| ())
 }
@@ -134,12 +141,24 @@ pub(crate) fn pinnable(metadata: &Metadata) -> Result<(), EngineError> {
     ExecutableIdentity::of(metadata).map(|_| ())
 }
 
+/// The identity a host's checks compare against: the captured one, or the one a re-hash
+/// proved after only the change time moved ([`RegisteredNativeAuthHost::retime`]), with when
+/// the checks first saw it off macOS.
+#[derive(Clone, Copy)]
+struct Pin {
+    identity: ExecutableIdentity,
+    #[cfg(not(target_os = "macos"))]
+    seen: std::time::Instant,
+}
+
 pub(crate) struct RegisteredNativeAuthHost {
     path: PathBuf,
     file: File,
     identity: ExecutableIdentity,
     digest: [u8; 32],
     entry: Option<PathBuf>,
+    retimed: std::sync::Mutex<Option<Pin>>,
+    launch: Vec<LaunchWord>,
     #[cfg(not(target_os = "macos"))]
     seen: std::time::Instant,
     #[cfg(not(target_os = "macos"))]
@@ -202,6 +221,8 @@ impl RegisteredNativeAuthHost {
             identity,
             digest,
             entry: None,
+            retimed: std::sync::Mutex::new(None),
+            launch: Vec::new(),
             #[cfg(not(target_os = "macos"))]
             seen,
             #[cfg(not(target_os = "macos"))]
@@ -224,12 +245,11 @@ impl RegisteredNativeAuthHost {
         Ok(host)
     }
 
-    /// The host while its entry still leads to the pinned file and that file verifies;
-    /// a fresh capture when the entry leads to another path or a new inode, as after a
-    /// harness update, or when only the pinned inode's metadata changed and its bytes still
-    /// hash to the pin. A rewrite in place of the pinned inode stays refused. Input: the
-    /// shared host. Output: the host to use, `native_auth_host_executable_changed`, the
-    /// verify error for a host with no entry, or `native_auth_host_unavailable`.
+    /// The host while its entry, if any, still leads to the pinned file and that file
+    /// verifies, a change of its ctime alone included; with an entry, a fresh capture when it
+    /// leads to another path or inode, or when other metadata of the pinned inode changed and
+    /// its bytes still hash to the pin. A rewrite in place stays refused. Input: the shared
+    /// host. Output: the host to use, the verify error, or `native_auth_host_unavailable`.
     pub(crate) fn current(self: &Arc<Self>) -> Result<Arc<Self>, EngineError> {
         let Some(entry) = self.entry.as_deref() else {
             self.verified_path()?;
@@ -267,21 +287,18 @@ impl RegisteredNativeAuthHost {
         self.entry.as_deref()
     }
 
-    /// Returns the captured path while the retained file and the file at that path still
-    /// have the identity hashed at capture. On macOS every content write moves ctime by the
-    /// fine clock, so equal identity means the hashed bytes without re-reading a harness of
-    /// hundreds of MB. Linux moves file times by the coarse clock tick, so a same-size write
-    /// in that tick keeps the identity: there the retained file is hashed again, off the
-    /// tokio worker, until a matching hash [`settles`] it. Input: none. Output: the path, or
-    /// `native_auth_host_executable_changed`.
+    /// Returns the captured path while the retained file, the file at that path and the path
+    /// show the pinned identity; a change of the change time alone is hashed once and adopted
+    /// ([`Self::retime`]). macOS moves ctime on every write by the fine clock, so equal identity
+    /// means the hashed bytes; off macOS the coarse tick can hide a same-size write, so there
+    /// the file is hashed again until a match [`settles`] it. Output: the path, or the refusal.
     pub(crate) fn verified_path(&self) -> Result<&Path, EngineError> {
+        let pin = self.pin();
         let named = Self::open(&self.path)?;
-        if ExecutableIdentity::of(&self.file.metadata().map_err(io_error)?)? != self.identity
-            || ExecutableIdentity::of(&named.metadata().map_err(io_error)?)? != self.identity
-            || ExecutableIdentity::of(&std::fs::symlink_metadata(&self.path).map_err(io_error)?)?
-                != self.identity
-        {
-            return Err(EngineError("native_auth_host_executable_changed".into()));
+        let seen = self.identities(&named)?;
+        if seen != [pin.identity; 3] {
+            self.retime(pin.identity, &named, seen)?;
+            return Ok(&self.path);
         }
         #[cfg(not(target_os = "macos"))]
         if !self.settled.load(std::sync::atomic::Ordering::Acquire) {
@@ -290,17 +307,92 @@ impl RegisteredNativeAuthHost {
             #[cfg(test)]
             self.rehashes
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if crate::engine::off_worker(|| Self::hash(&self.file, self.identity.length))?
+            if crate::engine::off_worker(|| Self::hash(&self.file, pin.identity.length))?
                 != self.digest
             {
                 return Err(EngineError("native_auth_host_executable_changed".into()));
             }
-            if settles(self.seen, started, wall, self.identity.changed) {
-                self.settled
-                    .store(true, std::sync::atomic::Ordering::Release);
+            if settles(pin.seen, started, wall, pin.identity.changed) {
+                let held = self
+                    .retimed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if held.map_or(self.identity, |kept| kept.identity) == pin.identity {
+                    self.settled
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
             }
         }
         Ok(&self.path)
+    }
+
+    /// The identity the checks compare against now: the latest one [`Self::retime`] proved,
+    /// else the captured one, with when the checks first saw it off macOS. Input: none.
+    /// Output: the pin.
+    fn pin(&self) -> Pin {
+        let retimed = *self
+            .retimed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        retimed.unwrap_or(Pin {
+            identity: self.identity,
+            #[cfg(not(target_os = "macos"))]
+            seen: self.seen,
+        })
+    }
+
+    /// The identities of the retained file, the file opened at the path and the path itself,
+    /// in that order. Input: the file opened at the path. Output: the three, or
+    /// `native_auth_host_executable_unsafe` or the read error for the first that fails.
+    fn identities(&self, named: &File) -> Result<[ExecutableIdentity; 3], EngineError> {
+        Ok([
+            ExecutableIdentity::of(&self.file.metadata().map_err(io_error)?)?,
+            ExecutableIdentity::of(&named.metadata().map_err(io_error)?)?,
+            ExecutableIdentity::of(&std::fs::symlink_metadata(&self.path).map_err(io_error)?)?,
+        ])
+    }
+
+    /// Adopts what the pinned inode shows now when all three looks agree and differ from the
+    /// pin in ctime alone, as a hard link, an xattr or a backup tool leaves it, and its bytes
+    /// still hash to the pin with the same three looks after the hash. Anything else, a write
+    /// during the hash included, is refused. Inputs: the pin, the file at the path and the
+    /// three looks. Output: Ok once adopted, or `native_auth_host_executable_changed`.
+    fn retime(
+        &self,
+        pin: ExecutableIdentity,
+        named: &File,
+        seen: [ExecutableIdentity; 3],
+    ) -> Result<(), EngineError> {
+        let changed = || EngineError("native_auth_host_executable_changed".into());
+        let now = seen[0];
+        let others = ExecutableIdentity {
+            changed: pin.changed,
+            ..now
+        };
+        if seen != [now; 3] || others != pin {
+            return Err(changed());
+        }
+        assert_ne!(now.changed, pin.changed);
+        assert_eq!(now.length, self.identity.length);
+        if crate::engine::off_worker(|| Self::hash(&self.file, now.length))? != self.digest
+            || self.identities(named)? != [now; 3]
+        {
+            return Err(changed());
+        }
+        let mut held = self
+            .retimed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *held = Some(Pin {
+            identity: now,
+            #[cfg(not(target_os = "macos"))]
+            seen: std::time::Instant::now(),
+        });
+        #[cfg(not(target_os = "macos"))]
+        self.settled
+            .store(false, std::sync::atomic::Ordering::Release);
+        drop(held);
+        Ok(())
     }
 
     pub(crate) fn verified_sha256(&self) -> Result<String, EngineError> {
@@ -313,21 +405,22 @@ impl RegisteredNativeAuthHost {
     }
 }
 
+/// Builds the sign-in custodian's command with a cleared environment: this engine's own
+/// file, the runtime folder and, for a Codex or Claude Code sign-in, the pinned harness and
+/// the launch the engine resolved for it ([`launch::hand_over`]). Inputs: the engine file,
+/// the runtime folder and the harness kind, file and words. Output: the command, or the pin
+/// error of a file that changed.
 fn custodian_command(
     executable: &Path,
     runtime_dir: &Path,
-    codex: Option<&RegisteredNativeAuthHost>,
+    harness: Option<(&str, &RegisteredNativeAuthHost, &[LaunchWord])>,
 ) -> Result<std::process::Command, EngineError> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let mut command = Command::new(executable);
     command.arg("native-auth-custodian").arg(runtime_dir);
-    if let Some(codex) = codex {
-        command
-            .arg("--codex-executable")
-            .arg(codex.verified_path()?)
-            .arg("--codex-sha256")
-            .arg(codex.verified_sha256()?);
+    if let Some((kind, harness, launch)) = harness {
+        launch::hand_over(&mut command, kind, harness, launch)?;
     }
     command
         .env_clear()
@@ -398,33 +491,53 @@ impl CustodianCause {
     }
 }
 
+/// The harness a custodian gets with the launch the engine resolved for it, a sign-in
+/// waiting for the first probe run when that is still going ([`launch::resolved_after_probe`]),
+/// or none when it cannot start, so the custodian ends the action without effect and it
+/// settles unavailable. Inputs: the pinned harness, its kind and the action. Output: both,
+/// or none.
+async fn handed(
+    harness: Arc<RegisteredNativeAuthHost>,
+    kind: &str,
+    action: &crate::engine::owner::NativeAuthAction,
+) -> Option<(Arc<RegisteredNativeAuthHost>, Vec<LaunchWord>)> {
+    let may_wait = matches!(
+        action,
+        crate::engine::owner::NativeAuthAction::SignIn { .. }
+    );
+    match launch::resolved_after_probe(&harness, kind, may_wait).await {
+        Some(words) => Some((harness, words)),
+        None => {
+            eprintln!("native_auth_harness_unresolved harness={kind}");
+            None
+        }
+    }
+}
+
 pub(in crate::engine) async fn dispatch(
     work: crate::storage::NativeAuthWork,
     host: crate::engine::owner::transport::NativeAuthDispatchHost,
 ) -> Result<(), EngineError> {
     let executable = host.registered_executable()?;
-    let harness = work.fact().binding.connection.harness.as_str();
-    let codex = if harness == "codex" {
-        host.registered_codex_executable()?
-    } else {
-        None
+    let kind = work.fact().binding.connection.harness.as_str().to_owned();
+    let registered = match kind.as_str() {
+        "codex" => host.registered_codex_executable()?,
+        "claude" => host.registered_claude_executable()?,
+        _ => None,
     };
-    let claude = if harness == "claude" {
-        host.registered_claude_executable()?
-    } else {
-        None
+    let harness = match registered {
+        Some(harness) => handed(harness, &kind, &work.fact().action).await,
+        None => None,
     };
     let runtime_dir = host.owner_runtime_dir()?;
     let launch = host.prepare_native_auth_custody(work).await?;
-    let mut command =
-        custodian_command(executable.verified_path()?, &runtime_dir, codex.as_deref())?;
-    if let Some(claude) = claude.as_ref() {
-        command
-            .arg("--claude-executable")
-            .arg(claude.verified_path()?)
-            .arg("--claude-sha256")
-            .arg(claude.verified_sha256()?);
-    }
+    let mut command = custodian_command(
+        executable.verified_path()?,
+        &runtime_dir,
+        harness
+            .as_ref()
+            .map(|(harness, words)| (kind.as_str(), harness.as_ref(), words.as_slice())),
+    )?;
     let mut child = crate::spawn_gate::spawn(&mut command).map_err(io_error)?;
     let cause = child.stderr.take().map(CustodianCause::new).transpose();
     let streams = match (child.stdin.take(), cause) {
@@ -499,3 +612,4 @@ mod entry_tests;
 mod executable_tests;
 #[cfg(test)]
 mod hash_backend_tests;
+mod launch;

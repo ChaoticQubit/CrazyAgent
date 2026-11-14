@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
@@ -15,6 +15,7 @@ const ADDED = "- Sells juice";
 const RIVAL = "- Berry Barn: cheaper, no delivery.";
 const INSTALL = "cargo install fruit-stand";
 const OWNER_LINE = "- Written by the owner";
+const OUTSIDE = "Ships pears by post";
 const TABS = ["quick_info", "features", "competitors", "install_and_use"];
 
 /** The reply of one writing run: the four tabs in the fenced form the engine reads, with one
@@ -45,13 +46,14 @@ function codex() {
 const CODEX = codex();
 
 /** The stand-in for the landed change set case: as CODEX, but a team sub-agent's turn, run
- * in its own worktree (<state>/worktrees/agent-<id>), also writes fruit.md as the handed-off
- * task asks, so its turn end opens a change set. The master, the owner's folder and the
- * writing runs write nothing. Output: the script. */
+ * in its own worktree (<project>/.crazyagent/worktrees/agent-<id>), also writes fruit.md as
+ * the handed-off task asks and commits it on its branch, as an agent in its own clone must,
+ * since only its commits land; the commit's outcome goes to $CODEX_HOME/wrote. The master,
+ * the owner's folder and the writing runs write nothing. Output: the script. */
 function landingCodex() {
   const started = String.raw`  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"` + "\n";
   assert.equal(CODEX.split(started).length, 2, "the stand-in marks each turn started once");
-  const write = String.raw`  case "$(/bin/pwd -P)" in */worktrees/agent-[0-9]*) printf '%s\n' 'Apples are crisp.' > fruit.md || exit 1 ;; esac` + "\n";
+  const write = String.raw`  case "$(/bin/pwd -P)" in */worktrees/agent-[0-9]*) printf '%s\n' 'Apples are crisp.' > fruit.md || exit 1; git add fruit.md && GIT_AUTHOR_NAME=Agent GIT_AUTHOR_EMAIL=agent@example.invalid GIT_COMMITTER_NAME=Agent GIT_COMMITTER_EMAIL=agent@example.invalid git commit -q -m 'Write fruit.md' > "$CODEX_HOME/wrote" 2>&1; printf 'exit %s\n' "$?" >> "$CODEX_HOME/wrote" ;; esac` + "\n";
   return CODEX.replace(started, write + started);
 }
 
@@ -114,6 +116,12 @@ async function openTab(page, site, me, project, label) {
   await me.click(label, "[role=tab]");
 }
 
+/** The Overview tabs' own status line as the page shows it, apart from the roadmap's "Checked"
+ * line on the same route. Input: the page. Output: its trimmed text, or "" when none shows. */
+function tabsStatus(page) {
+  return page.evaluate(`(() => (document.querySelector(".ov-bar [role=status]")?.innerText ?? "").trim())()`);
+}
+
 /** Says whether a button with this exact label is on the page and whether it is disabled.
  * Inputs: the page and the label. Output: null when it is not there, else its disabled state. */
 function button(page, label) {
@@ -170,6 +178,9 @@ test("Overview tabs, After each landed change set: a landed change set brings a 
     appendFileSync(join(await repoOf(bridge, project), "README.md"), `\nNow with ${MARKER}.\n`);
     await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
     assert.equal(await handOff(me, page, project, runtime), "done", "the sub-agent finished its task");
+    const agents = join(runtime, "team", "agents");
+    const wrote = readdirSync(agents).map((agent) => join(agents, agent, "home", "wrote")).filter((trace) => existsSync(trace)).map((trace) => readFileSync(trace, "utf8"));
+    assert.deepEqual(wrote.map((trace) => trace.trim().split("\n").at(-1)), ["exit 0"], `the sub-agent committed fruit.md on its branch: ${JSON.stringify(wrote)}`);
     await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/changes` });
     await me.waitFor("the agent's change set", (seen) => /Ready to review/.test(seen));
     await me.click("Accept");
@@ -299,5 +310,22 @@ test("A tab file CrazyAgent can't show says why, names the file and has no Edit"
     assert.equal(await button(page, "Edit"), null, "a blocked tab has no Edit");
     assert.equal(await refusal(bridge, "desktop_overview_save", { projectId: project, tab: "features", text: "- x\n", version: "" }), "overview_tab_blocked");
     await me.capture("blocked");
+  }, 1, CODEX);
+});
+
+test("A tab file changed outside CrazyAgent shows its new text when its tab is picked again, with no new visit", { timeout: 900000 }, async (t) => {
+  await onEngine(t, "ca-overview-outside-", async ({ project, me, page, site, bridge }) => {
+    await openTab(page, site, me, project, "Features");
+    await written(bridge, project);
+    await me.waitFor("the written Features tab", (seen) => seen.includes("Sells fruit"));
+    for (const deadline = Date.now() + RUN_MS; !(await tabsStatus(page)).startsWith("Checked "); await pause(POLL_MS)) {
+      assert.ok(Date.now() < deadline, "the tabs never showed a read after the run, so the page may still poll");
+    }
+    writeFileSync(join(await repoOf(bridge, project), ".crazyagent", "overview", "features.md"), `- ${OUTSIDE}\n`);
+    await until(bridge, project, "the engine never read the outside edit", (read) => (tabOf(read, "features").text ?? "").includes(OUTSIDE), STEP_MS);
+    await me.click("Quick info", "[role=tab]");
+    await me.click("Features", "[role=tab]");
+    await me.waitFor("the outside edit on the Features tab", (text) => text.includes(OUTSIDE));
+    await me.capture("outside-edit");
   }, 1, CODEX);
 });

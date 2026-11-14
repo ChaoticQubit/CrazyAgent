@@ -55,6 +55,14 @@ test("the section names the three options in order, each with what it does and t
   assert.ok(!/—/u.test(shown));
 });
 
+test("Stop at once promises no retry only where the harness allows it, as a ChatGPT sign-in Codex takes no retry count; the TUI's words", () => {
+  assert.deepEqual(settings.PROVIDER_RETRY_CHOICES.map((option) => option.summary), [
+    "Runs fail with the provider's error instead of retrying, where the harness allows it.",
+    "Harnesses keep their own retries, but none waits for the network without end.",
+    "CrazyAgent sets nothing, so each harness does what it does on its own.",
+  ]);
+});
+
 test("the lines are the engine's words, not the app's", () => {
   const changed = { ...LINES, stop_at_once: ["Claude Code: engine words one.", "Codex: engine words two.", "RCLI: engine words three."] };
   const shown = text(view(ok("stop_at_once", changed)));

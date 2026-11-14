@@ -187,6 +187,7 @@ pub struct AgentContext {
     native_threads: Option<u8>,
     relay: Option<(PathBuf, PathBuf)>,
     model_proxy: Option<u16>,
+    freeze_record: Option<PathBuf>,
     terminal_display: TerminalDisplay,
     catch_up_main: bool,
 }
@@ -217,6 +218,7 @@ pub struct Installed {
     native: Option<NativeTeam>,
     native_threads: bool,
     model_proxy: Option<u16>,
+    freeze_record: Option<PathBuf>,
     terminal_display: TerminalDisplay,
     _lock: File,
 }
@@ -285,6 +287,7 @@ pub fn for_project(
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main,
     })
@@ -765,6 +768,15 @@ impl AgentContext {
         self
     }
 
+    /// Lets a quitting engine freeze this launch's pane while its model proxy is down
+    /// (DEC-158): the pane's keeper gets the engine's freeze record, and the pane record
+    /// says so. Input: the record's absolute path. Output: the context.
+    pub fn with_freeze_record(mut self, record: PathBuf) -> Self {
+        assert!(record.is_absolute());
+        self.freeze_record = Some(record);
+        self
+    }
+
     /// Gives this launch's terminal the project's display (N-D9, DEC-141): Classic draws on
     /// the normal screen, Fullscreen keeps the harness's own view. Each harness kind's launch
     /// maps it to its own switches; headless runs ignore it. Input: the display. Output: the
@@ -1065,6 +1077,7 @@ impl AgentContext {
             native: None,
             native_threads: false,
             model_proxy: self.model_proxy,
+            freeze_record: self.freeze_record.clone(),
             terminal_display: self.terminal_display,
             _lock: lock,
         };
@@ -1337,6 +1350,12 @@ impl Installed {
         self.model_proxy
     }
 
+    /// Names the engine's freeze record this launch's keeper writes the warden's answers to
+    /// (DEC-158), none for a pane no engine freezes.
+    pub fn freeze_record(&self) -> Option<&Path> {
+        self.freeze_record.as_deref()
+    }
+
     /// Names the display this launch's terminal draws with (N-D9, DEC-141).
     pub fn terminal_display(&self) -> TerminalDisplay {
         self.terminal_display
@@ -1365,6 +1384,7 @@ impl Installed {
             native: None,
             native_threads: false,
             model_proxy: None,
+            freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             _lock: lock,
         })
@@ -2229,6 +2249,7 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         native: None,
         native_threads: false,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         _lock: lock,
     })

@@ -1,12 +1,14 @@
 use super::*;
 use crate::platform::unix_socket::{OwnedReadHalf, OwnedWriteHalf};
 use crate::protocol::encode_frame;
+#[cfg(unix)]
+use crate::terminal::buffer::Chunk;
 use crate::terminal::{
     AgentId, Host, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, TerminalFrame, TerminalRequest,
     TerminalStream,
 };
 #[cfg(unix)]
-use crate::terminal::{CHUNK_BYTES_MAX, HostError, type_prompt};
+use crate::terminal::{CHUNK_BYTES_MAX, HostError, attach_again, type_prompt};
 use tokio::io::AsyncWrite;
 
 pub(super) const MAGIC: &[u8; 4] = b"CAT1";
@@ -242,11 +244,26 @@ impl Engine {
     /// Takes the engine root. Returns the host, or `terminal_unavailable`.
     #[cfg(unix)]
     pub(crate) fn terminal(&self, root: &Path) -> Result<Arc<dyn Host>, EngineError> {
+        self.terminal_on(root, || crate::terminal::tmux::installed(root))
+    }
+
+    /// Gives the terminal host on the tmux program `find` gives, as [`Engine::terminal`] does
+    /// with the program found now: the kept host while that program is its program, else a
+    /// new host on it, kept in its place. `find` runs while the host's lock is held, so a
+    /// caller that found an older program never replaces a host opened on a newer one. Takes
+    /// the engine root and the finder, none when tmux is not installed. Returns the host, or
+    /// `terminal_unavailable`.
+    #[cfg(unix)]
+    pub(super) fn terminal_on(
+        &self,
+        root: &Path,
+        find: impl FnOnce() -> Option<std::path::PathBuf>,
+    ) -> Result<Arc<dyn Host>, EngineError> {
         let mut slot = self
             .terminal
             .lock()
             .map_err(|_| failure("terminal_unavailable"))?;
-        let found = crate::terminal::tmux::installed(root);
+        let found = find();
         if let Some((program, host)) = slot.as_ref()
             && *program == found
         {
@@ -350,6 +367,26 @@ async fn write(
         .await
         .map_err(|_| failure("terminal_viewer_slow"))?
         .map_err(io_error)
+}
+
+/// Writes a fresh viewer's redrawn screen to a view that fell behind, in output frames of
+/// at most `CHUNK_BYTES_MAX` bytes, each bounded by `WRITE_TIME`. Takes the writer and the
+/// fresh stream. Returns the first failed write's error, after which the stream may hold
+/// part of a frame.
+#[cfg(unix)]
+async fn redraw(
+    writer: &mut (impl AsyncWrite + Unpin),
+    viewer: &TerminalStream,
+) -> Result<(), EngineError> {
+    let bytes = viewer.redraw();
+    assert!(!bytes.is_empty());
+    for chunk in bytes.chunks(CHUNK_BYTES_MAX) {
+        let output = TerminalFrame::Output {
+            bytes: chunk.to_vec(),
+        };
+        write(writer, &output).await?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -605,11 +642,21 @@ async fn watch(
         Ok(()) => loop {
             tokio::select! {
                 chunk = viewer.next() => match chunk {
-                    Some(bytes) => {
+                    Some(Chunk::Output(bytes)) => {
                         if write(&mut writer, &TerminalFrame::Output { bytes }).await.is_err() {
                             break VIEWER_GONE;
                         }
                     }
+                    Some(Chunk::Behind) => match attach_again(host.clone(), agent.clone()).await {
+                        Ok(fresh) => {
+                            viewer = fresh;
+                            if redraw(&mut writer, &viewer).await.is_err() {
+                                break VIEWER_GONE;
+                            }
+                        }
+                        Err(error) if error.0 == "terminal_agent_unknown" => break "terminal_ended",
+                        Err(_) => break "terminal_unavailable",
+                    },
                     None => break "terminal_ended",
                 },
                 request = asked.recv() => match request {

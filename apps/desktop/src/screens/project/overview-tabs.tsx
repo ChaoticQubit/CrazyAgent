@@ -198,6 +198,14 @@ export function pollEvery(overview: ProjectOverview | null): number | null {
   return overview.running || due ? OVERVIEW_POLL_MS : null;
 }
 
+/** The read the tabs show after a new one: a failed read keeps the last good one, as the TUI
+ * does, so a re-read on a tab pick never blanks tabs already shown; with no good read yet the
+ * failure shows. Inputs: the last read of the same project, if any, and the new read.
+ * Output: the read to show. */
+export function keptRead(last: Result<ProjectOverview> | undefined, next: Result<ProjectOverview>): Result<ProjectOverview> {
+  return next.kind !== "ok" && last?.kind === "ok" ? last : next;
+}
+
 /** Where "Move into CrazyAgent folder" lives: the Remove section of Project settings.
  * Input: the project. Output: the route. */
 export function moveRoute(projectId: string): string {
@@ -259,12 +267,13 @@ function queued(overview: ProjectOverview): boolean {
   return overview.stale && !overview.running && overview.refresh !== "off" && !overview.needs_home;
 }
 
-/** The stored failure line: an alert only for a run that ended. While a run is queued or
- * writing, as one waiting for an account is, the same reason shows under a status, since
- * that refresh has not failed. Input: the overview. Output: the line, or null with none. */
+/** The stored failure line: an alert, also while a new run is queued or writing, except the
+ * engine's wait for an account, whose reason shows under a status while its run is queued or
+ * writing, since that refresh has not failed (IW-L1). Input: the overview. Output: the line,
+ * or null with none. */
 function failureLine(overview: ProjectOverview): ReactNode {
   if (!overview.failure) return null;
-  if (overview.running || queued(overview)) return <p className="pj-muted" role="status">{displayText(overview.failure)}</p>;
+  if (overview.waiting_for_account && (overview.running || queued(overview))) return <p className="pj-muted" role="status">{displayText(overview.failure)}</p>;
   return <p className="pj-error" role="alert">Couldn't refresh the tabs. {displayText(overview.failure)}</p>;
 }
 
@@ -779,9 +788,9 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
   </section>;
 }
 
-/** The Overview tabs of one project, read from the engine: reads once per visit and after
- * each action, and again every `OVERVIEW_POLL_MS` only while a run is writing or a landed
- * change set waits for one; keeps the picked tab for the session.
+/** The Overview tabs of one project, read from the engine once per visit, on each tab pick (a
+ * tab file can change outside CrazyAgent), after each action, and every `OVERVIEW_POLL_MS` only
+ * while a run writes or a landed change set waits for one; keeps the picked tab for the session.
  * Inputs: the project data, how Quick info renders a text, the Activity panel and the read.
  * Output: the strip and its panel. */
 export function ProjectOverviewTabs({ data, quickInfo, activity, load = loadOverview }: {
@@ -791,12 +800,14 @@ export function ProjectOverviewTabs({ data, quickInfo, activity, load = loadOver
   load?: typeof loadOverview;
 }) {
   const [selected, setSelected] = useState<StripId>(() => storedTab(data.id));
-  const [read, setRead] = useState<Result<ProjectOverview> | undefined>(undefined);
+  const [read, setRead] = useState<{ project: string; result: Result<ProjectOverview> } | undefined>(undefined);
   const [round, setRound] = useState(0);
   const [runMode, setRunMode] = useState<RunMode>("off");
   useEffect(() => {
     let live = true;
-    void load(data.id).then((result) => { if (live) setRead(result); });
+    void load(data.id).then((result) => {
+      if (live) setRead((last) => ({ project: data.id, result: keptRead(last?.project === data.id ? last.result : undefined, result) }));
+    });
     return () => { live = false; };
   }, [data.id, round, load]);
   useEffect(() => {
@@ -804,17 +815,18 @@ export function ProjectOverviewTabs({ data, quickInfo, activity, load = loadOver
     void loadRunMode(data.id).then((result) => { if (live) setRunMode(result.kind === "ok" ? result.value : "off"); });
     return () => { live = false; };
   }, [data.id]);
-  const overview = read?.kind === "ok" ? read.value : null;
+  const shown = read?.project === data.id ? read.result : undefined;
+  const overview = shown?.kind === "ok" ? shown.value : null;
   const every = pollEvery(overview);
   useEffect(() => {
     if (every === null) return;
     const timer = window.setInterval(() => setRound((count) => count + 1), every);
     return () => window.clearInterval(timer);
   }, [every]);
-  const problem = read?.kind === "not_ready" ? "Not ready yet: the Overview tabs aren't in this build."
-    : read?.kind === "error" ? `Couldn't load the Overview tabs. ${overviewCopy(read)}` : undefined;
+  const problem = shown?.kind === "not_ready" ? "Not ready yet: the Overview tabs aren't in this build."
+    : shown?.kind === "error" ? `Couldn't load the Overview tabs. ${overviewCopy(shown)}` : undefined;
   return <OverviewTabs key={data.id} data={data} overview={overview} problem={problem} now={data.now} selected={selected}
-    onSelect={(tab) => { storeTab(data.id, tab); setSelected(tab); }}
+    onSelect={(tab) => { storeTab(data.id, tab); setSelected(tab); setRound((count) => count + 1); }}
     actions={{ refresh: () => refreshOverview(data.id), save: saveOverviewTab, accept: acceptOverviewTab, reject: rejectOverviewTab, reload: () => setRound((count) => count + 1) }}
     runMode={runMode} quickInfo={quickInfo} activity={activity} />;
 }

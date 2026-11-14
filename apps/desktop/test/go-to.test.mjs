@@ -62,7 +62,7 @@ test("the Go to and shortcuts dialogs stay closed until asked for and the shell 
   assert.equal(renderToStaticMarkup(createElement(goTo.GoToDialog, { open: false, projects, onGo() {}, onClose() {} })), "");
   const session = {
     engine: "running", unconfirmed: false, profile: { kind: "ok", value: { name: "Mira", role: "", bio: "", preferred_stack: [], working_style: { detail: "terse", initiative: "ask_first" } } },
-    projects: { kind: "ok", value: [] }, toast: "", revision: 1, retry() {}, checkUnconfirmed() {}, refreshProfile() {}, refreshProjects() {}, showToast() {}, noteResult: (r) => r,
+    projects: { kind: "ok", value: [] }, toast: "", revision: 1, intake: null, found: { kind: "loading" }, retry() {}, checkUnconfirmed() {}, refreshProfile() {}, refreshProjects() {}, showToast() {}, noteResult: (r) => r,
   };
   assert.doesNotMatch(renderToStaticMarkup(createElement(AppView, { session, route: { name: "settings", tab: "profile" } })), /Go to|Keyboard shortcuts/);
   assert.ok(goTo.SHORTCUTS.some(([keys, what]) => keys === "Cmd+K" && what === "Go to anything"));
@@ -86,7 +86,7 @@ test("support details name the problem, window and time, and nothing private", (
 });
 
 test("the engine-down screen offers Copy details for support next to Try again", () => {
-  const session = { engine: "down", unconfirmed: false, profile: { kind: "loading" }, projects: { kind: "loading" }, toast: "", revision: 0,
+  const session = { engine: "down", unconfirmed: false, profile: { kind: "loading" }, projects: { kind: "loading" }, toast: "", revision: 0, intake: null, found: { kind: "loading" },
     retry() {}, checkUnconfirmed() {}, refreshProfile() {}, refreshProjects() {}, showToast() {}, noteResult: (r) => r };
   const html = renderToStaticMarkup(createElement(AppView, { session, route: { name: "home" } }));
   assert.match(html, /Try again<\/button>/);

@@ -177,8 +177,9 @@ pub(in crate::tui) fn pool_choices_from(pools: &[PoolSummary]) -> Vec<PoolChoice
 
 /// Builds the Team step's harness choices from the engine's harness catalog.
 /// Takes the catalog entries in owner priority order. Returns one choice per entry with its
-/// state, CantStart when it cannot run team agents, MasterOnly when it runs only as the
-/// project master, and the limited-control sentence, if any.
+/// state, CantRun when the tool resolver can't start it, CantStart when it cannot run team
+/// agents, MasterOnly when it runs only as the project master, and the limited-control
+/// sentence, if any.
 pub(in crate::tui) fn harness_choices_from(entries: &[HarnessEntry]) -> Vec<HarnessChoice> {
     entries
         .iter()
@@ -187,6 +188,7 @@ pub(in crate::tui) fn harness_choices_from(entries: &[HarnessEntry]) -> Vec<Harn
             name: entry.name.clone(),
             state: match (&entry.status, &entry.team) {
                 (HarnessStatus::NotInstalled, _) => HarnessState::NotInstalled,
+                (HarnessStatus::CantRun { .. }, _) => HarnessState::CantRun,
                 (_, TeamUse::Unavailable { .. }) => HarnessState::CantStart,
                 (_, TeamUse::MasterOnly { .. }) => HarnessState::MasterOnly,
                 (_, TeamUse::Available) => HarnessState::Ready,
@@ -225,6 +227,65 @@ impl Creation {
         self.delivery = delivery;
         self.again = false;
         send_creation(&self.submission, delivery, ctx);
+    }
+
+    /// Reads one reply to this creation: sends the follow-up a kept creation needs, or checks
+    /// one the engine still runs again on the next tick, or gives the outcome. Takes the reply
+    /// and the context. Returns none while a follow-up is out or due, else Ok for a made
+    /// project or the code it ended with.
+    fn outcome(&mut self, event: &CreationEvent, ctx: &mut Ctx) -> Option<Result<(), String>> {
+        assert!(
+            self.submission == event.submission,
+            "a page reads only its own reply"
+        );
+        let recover = event.retained && !self.recovered;
+        let outcome = match &event.result {
+            Ok(response) => match response.as_ref() {
+                OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+                    match &operation.result {
+                        OwnerResult::Applied => Ok(()),
+                        OwnerResult::Rejected { code } => Err(code.clone()),
+                        _ => Err("creation_outcome_unknown".to_owned()),
+                    }
+                }
+                OwnerResponse::NotRecordedAtBarrier { .. }
+                    if event.retained && !matches!(self.delivery, MutationDelivery::Retry) =>
+                {
+                    self.recovered = true;
+                    self.send(MutationDelivery::Retry, ctx);
+                    return None;
+                }
+                OwnerResponse::OutcomeUnknown { .. } | OwnerResponse::InProgress { .. }
+                    if recover =>
+                {
+                    self.recovered = true;
+                    self.send(MutationDelivery::Reconcile, ctx);
+                    return None;
+                }
+                OwnerResponse::InProgress { .. } if event.retained => {
+                    self.delivery = MutationDelivery::Reconcile;
+                    self.again = true;
+                    ctx.say(Message::warning(
+                        "Still creating the project.",
+                        "CrazyAgent is still setting it up. It checks again in a moment.",
+                    ));
+                    return None;
+                }
+                OwnerResponse::Rejected { code } => Err(code.clone()),
+                _ => Err("creation_outcome_unknown".to_owned()),
+            },
+            Err(_) if recover => {
+                self.recovered = true;
+                self.send(MutationDelivery::Reconcile, ctx);
+                return None;
+            }
+            Err(problem) if event.retained && problem != OWNER_BUSY => {
+                Err("creation_outcome_unknown".to_owned())
+            }
+            Err(problem) => Err(problem.clone()),
+        };
+        assert!(outcome.as_ref().err().is_none_or(|code| !code.is_empty()));
+        Some(outcome)
     }
 }
 
@@ -374,40 +435,8 @@ impl NewProjectPage {
         else {
             return Flow::Handled;
         };
-        let recover = event.retained && !creation.recovered;
-        let outcome = match &event.result {
-            Ok(response) => match response.as_ref() {
-                OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
-                    match &operation.result {
-                        OwnerResult::Applied => Ok(()),
-                        OwnerResult::Rejected { code } => Err(code.clone()),
-                        _ => Err("creation_outcome_unknown".to_owned()),
-                    }
-                }
-                OwnerResponse::NotRecordedAtBarrier { .. }
-                    if event.retained && !matches!(creation.delivery, MutationDelivery::Retry) =>
-                {
-                    creation.recovered = true;
-                    creation.send(MutationDelivery::Retry, ctx);
-                    return Flow::Handled;
-                }
-                OwnerResponse::OutcomeUnknown { .. } if recover => {
-                    creation.recovered = true;
-                    creation.send(MutationDelivery::Reconcile, ctx);
-                    return Flow::Handled;
-                }
-                OwnerResponse::Rejected { code } => Err(code.clone()),
-                _ => Err("creation_outcome_unknown".to_owned()),
-            },
-            Err(_) if recover => {
-                creation.recovered = true;
-                creation.send(MutationDelivery::Reconcile, ctx);
-                return Flow::Handled;
-            }
-            Err(problem) if event.retained && problem != OWNER_BUSY => {
-                Err("creation_outcome_unknown".to_owned())
-            }
-            Err(problem) => Err(problem.clone()),
+        let Some(outcome) = creation.outcome(event, ctx) else {
+            return Flow::Handled;
         };
         if let Err(code) = outcome {
             if creation.recovered && event.retained && code == OWNER_BUSY {

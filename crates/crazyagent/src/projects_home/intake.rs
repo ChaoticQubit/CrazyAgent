@@ -6,6 +6,7 @@ use std::fs;
 use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 /// How many entries and folder levels a copy, its check or a size read goes through
@@ -36,6 +37,60 @@ const CHUNK_BYTES: usize = 64 * 1024;
 const STAMP_SETTLE: Duration = Duration::from_secs(4);
 const DEADLINE_EVERY: u64 = 1024;
 const GITDIR_FILE_BYTES_MAX: u64 = 4096;
+
+/// What one add reports while it copies and the stop it obeys: the entries copied and
+/// checked so far, whether the checked copy is in place and the old folder being cleared,
+/// and a stop asked between entries, which ends the copy before clearing starts.
+#[derive(Debug, Default)]
+pub struct Tally {
+    copied: AtomicU64,
+    checked: AtomicU64,
+    clearing: AtomicBool,
+    stop: AtomicBool,
+}
+
+impl Tally {
+    /// Entries copied so far.
+    pub fn copied(&self) -> u64 {
+        self.copied.load(Ordering::SeqCst)
+    }
+
+    /// Entries checked against the source so far.
+    pub fn checked(&self) -> u64 {
+        self.checked.load(Ordering::SeqCst)
+    }
+
+    /// Whether the copy is in place and checked and the old folder is being cleared.
+    pub fn clearing(&self) -> bool {
+        self.clearing.load(Ordering::SeqCst)
+    }
+
+    /// Whether a stop was asked.
+    pub fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
+    /// Marks the checked copy in place and the old folder being cleared.
+    pub(super) fn mark_clearing(&self) {
+        let before = self.clearing.swap(true, Ordering::SeqCst);
+        assert!(!before, "clearing starts once");
+    }
+
+    /// Asks the copy to stop at its next entry. Clearing the old folder never stops, since
+    /// the copy it follows is complete and checked.
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Ok while no stop was asked, else `home_add_cancelled`, logged without a path.
+    fn go_on(&self) -> Result<(), EngineError> {
+        if !self.stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        eprintln!("home_add_cancelled");
+        Err(refused("home_add_cancelled"))
+    }
+}
 
 /// A checked plan to bring one folder into the projects home.
 /// Built only by `plan_add`, which refuses unsafe sources and taken names.
@@ -85,9 +140,19 @@ impl AddPlan {
     /// no partial folder shows; `home_move_source_left` means the folder landed but
     /// part of the source could not be deleted.
     pub fn run(self) -> Result<(), EngineError> {
-        match self.place()? {
+        self.run_tallied(&Tally::default())
+    }
+
+    /// `run` that reports into a tally and stops when it asks, before clearing.
+    /// Input: the tally. Output: as `run`, or `home_add_cancelled` after a stop, with the
+    /// source as it was and no partial folder showing.
+    pub fn run_tallied(self, tally: &Tally) -> Result<(), EngineError> {
+        match self.place(tally)? {
             Placed::Whole => Ok(()),
-            Placed::Copied(old) => old.clear(),
+            Placed::Copied(old) => {
+                tally.mark_clearing();
+                old.clear()
+            }
         }
     }
 
@@ -95,17 +160,20 @@ impl AddPlan {
     /// one disk, else a checked copy that leaves the whole source in place for the
     /// caller to clear. Output: whether a source is left to clear, or the refusal code
     /// with the source as it was and no partial folder showing.
-    pub(super) fn place(self) -> Result<Placed, EngineError> {
+    pub(super) fn place(self, tally: &Tally) -> Result<Placed, EngineError> {
+        tally.go_on()?;
         if fs::symlink_metadata(&self.destination).is_ok() {
             return Err(refused("home_destination_exists"));
         }
         match self.mode {
             AddMode::Move => match fs::rename(&self.source, &self.destination) {
                 Ok(()) => Ok(Placed::Whole),
-                Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => self.place_by_copy(),
+                Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+                    self.place_by_copy(tally)
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::Deadlock => {
                     eprintln!("home_move_by_copy cause=edeadlk");
-                    self.place_by_copy()
+                    self.place_by_copy(tally)
                 }
                 Err(e) => Err(failed_step("rename", &e, "home_move_failed")),
             },
@@ -114,6 +182,7 @@ impl AddPlan {
                 &self.destination,
                 Copying::Standalone,
                 self.bounds,
+                tally,
             )
             .map(|_| Placed::Whole),
         }
@@ -122,12 +191,18 @@ impl AddPlan {
     /// The copy a move falls back to across disks and out of iCloud Drive: copies every
     /// entry and checks the copy against the source, which stays whole. Output: the
     /// source to clear, with what the check matched, or the refusal code.
-    pub(super) fn place_by_copy(self) -> Result<Placed, EngineError> {
+    pub(super) fn place_by_copy(self, tally: &Tally) -> Result<Placed, EngineError> {
         assert_eq!(self.mode, AddMode::Move);
         if fs::symlink_metadata(&self.destination).is_ok() {
             return Err(refused("home_destination_exists"));
         }
-        let verified = copy_into(&self.source, &self.destination, Copying::Exact, self.bounds)?;
+        let verified = copy_into(
+            &self.source,
+            &self.destination,
+            Copying::Exact,
+            self.bounds,
+            tally,
+        )?;
         Ok(Placed::Copied(OldSource {
             source: self.source,
             landed: self.destination,
@@ -254,7 +329,13 @@ pub fn move_by_copy(source: &Path, destination: &Path) -> Result<(), EngineError
 /// matched, and still as it saw them, are removed. Inputs: the source, the destination and
 /// the bounds. Output: as `move_by_copy`.
 fn move_within(source: &Path, destination: &Path, bounds: CopyBounds) -> Result<(), EngineError> {
-    let verified = copy_into(source, destination, Copying::Exact, bounds)?;
+    let verified = copy_into(
+        source,
+        destination,
+        Copying::Exact,
+        bounds,
+        &Tally::default(),
+    )?;
     make_writable(source).map_err(|_| source_left(1))?;
     remove_verified(source, destination, &verified, bounds)
 }
@@ -468,6 +549,7 @@ fn copy_into(
     destination: &Path,
     how: Copying,
     bounds: CopyBounds,
+    tally: &Tally,
 ) -> Result<Verified, EngineError> {
     let parent = destination
         .parent()
@@ -479,13 +561,14 @@ fn copy_into(
         token.iter().map(|b| format!("{b:02x}")).collect::<String>()
     ));
     let result = match how {
-        Copying::Exact => copy_entries(source, &staging, &|_, _| false, bounds)
-            .and_then(|()| verify_within(source, &staging, bounds)),
+        Copying::Exact => copy_entries(source, &staging, &|_, _| false, bounds, tally)
+            .and_then(|()| verify_within(source, &staging, bounds, tally)),
         Copying::Standalone => copy_entries(
             source,
             &staging,
             &|path, kind| left_out(source, path, kind),
             bounds,
+            tally,
         )
         .map(|()| Verified::default()),
     }
@@ -530,6 +613,61 @@ fn still_in_icloud(step: &str) -> EngineError {
     refused("home_icloud_not_downloaded")
 }
 
+/// The most entries of one folder the staging sweep reads.
+const STAGING_SCAN_MAX: usize = 65_536;
+
+/// Removes the staging folders that adds cut short by an engine stop left in a folder,
+/// links never followed. Run at engine start, before any add plans, so none is live.
+/// Input: the folder, the projects home an add copied into. Output: how many were removed.
+pub fn sweep_staging(folder: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(folder) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.take(STAGING_SCAN_MAX).flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".crazyagent-adding-")
+        {
+            continue;
+        }
+        let path = entry.path();
+        let real = fs::symlink_metadata(&path)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+        if !real {
+            continue;
+        }
+        let _ = make_writable(&path);
+        match fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => eprintln!(
+                "home_staging_not_removed errno={}",
+                e.raw_os_error().unwrap_or(0)
+            ),
+        }
+    }
+    assert!(removed <= STAGING_SCAN_MAX);
+    removed
+}
+
+/// Where an add an engine stop cut short stands on disk, read without changing anything:
+/// `done` once the folder is a real folder at its destination (and, for a move, gone from
+/// its old place), `home_move_source_left` for a move that landed while part of the old
+/// folder is still there, else `home_add_interrupted`, nothing moved. Inputs: the source,
+/// the destination and whether it was a move. Output: the code.
+pub fn add_left(source: &Path, destination: &Path, moving: bool) -> &'static str {
+    assert!(source.is_absolute() && destination.is_absolute());
+    let landed = fs::symlink_metadata(destination)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    let left = fs::symlink_metadata(source).is_ok();
+    match (landed, moving && left) {
+        (false, _) => "home_add_interrupted",
+        (true, true) => "home_move_source_left",
+        (true, false) => "done",
+    }
+}
+
 fn make_writable(root: &Path) -> std::io::Result<()> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(folder) = stack.pop() {
@@ -551,7 +689,13 @@ fn make_writable(root: &Path) -> std::io::Result<()> {
 /// `home_copy_special_file` for devices, pipes or sockets, and
 /// `home_copy_too_large` past the entry or depth bound.
 pub fn copy_tree(source: &Path, target: &Path) -> Result<(), EngineError> {
-    copy_entries(source, target, &|_, _| false, COPY_BOUNDS)
+    copy_entries(
+        source,
+        target,
+        &|_, _| false,
+        COPY_BOUNDS,
+        &Tally::default(),
+    )
 }
 
 /// The skip rule of a standalone copy, asked for each entry below the source root.
@@ -637,6 +781,7 @@ fn copy_entries(
     target: &Path,
     skip: &dyn Fn(&Path, fs::FileType) -> bool,
     bounds: CopyBounds,
+    tally: &Tally,
 ) -> Result<(), EngineError> {
     let failed = |e: std::io::Error| failed_step("copy", &e, "home_copy_failed");
     let root = fs::symlink_metadata(source).map_err(failed)?;
@@ -646,6 +791,8 @@ fn copy_entries(
     if super::icloud::dataless(&root) {
         return Err(still_in_icloud("copy"));
     }
+    tally.go_on()?;
+    let mut copied = 0u64;
     fs::create_dir(target).map_err(failed)?;
     private_folder(target).map_err(failed)?;
     let mut folders = vec![(target.to_path_buf(), root.permissions())];
@@ -657,6 +804,7 @@ fn copy_entries(
             if entries > bounds.entries {
                 return Err(refused("home_copy_too_large"));
             }
+            tally.go_on()?;
             let entry = entry.map_err(failed)?;
             let path = entry.path();
             let copy = to.join(entry.file_name());
@@ -685,12 +833,15 @@ fn copy_entries(
             } else {
                 return Err(refused("home_copy_special_file"));
             }
+            copied += 1;
+            tally.copied.fetch_add(1, Ordering::SeqCst);
         }
     }
     for (folder, permissions) in folders.into_iter().rev() {
         fs::set_permissions(&folder, permissions).map_err(failed)?;
     }
     assert!(entries <= bounds.entries);
+    assert!(copied <= entries);
     Ok(())
 }
 
@@ -699,18 +850,27 @@ fn copy_entries(
 /// kinds, permission bits, symlink targets and file bytes; otherwise
 /// `home_copy_unverified`.
 pub fn verify_tree(source: &Path, copy: &Path) -> Result<(), EngineError> {
-    verify_within(source, copy, COPY_BOUNDS).map(drop)
+    verify_within(source, copy, COPY_BOUNDS, &Tally::default()).map(drop)
 }
 
 /// `verify_tree` within the given bounds. Inputs: the source, the copy and the bounds.
 /// Output: the source files and links found equal, or the code of `verify_tree`, or
 /// `home_icloud_not_downloaded` for a source entry whose data lives only in iCloud.
-fn verify_within(source: &Path, copy: &Path, bounds: CopyBounds) -> Result<Verified, EngineError> {
+fn verify_within(
+    source: &Path,
+    copy: &Path,
+    bounds: CopyBounds,
+    tally: &Tally,
+) -> Result<Verified, EngineError> {
     let differs = || refused("home_copy_unverified");
     let mut verified = Verified::default();
     let mut stack = vec![(source.to_path_buf(), copy.to_path_buf(), 0usize)];
     let mut entries = 0u64;
+    let mut checked = 0u64;
     while let Some((left, right, depth)) = stack.pop() {
+        tally.go_on()?;
+        checked += 1;
+        tally.checked.fetch_add(1, Ordering::SeqCst);
         let a = fs::symlink_metadata(&left).map_err(|_| differs())?;
         let b = fs::symlink_metadata(&right).map_err(|_| differs())?;
         if super::icloud::dataless(&a) {
@@ -763,6 +923,7 @@ fn verify_within(source: &Path, copy: &Path, bounds: CopyBounds) -> Result<Verif
         }
     }
     assert!(verified.0.len() as u64 <= entries + 1);
+    assert_eq!(checked, entries + 1);
     Ok(verified)
 }
 

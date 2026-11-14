@@ -590,13 +590,33 @@ fallback_allowed = false
         }
     }
 
-    /// Writes the generated SDK home of a keyed account with the fixture's config and no key
-    /// file, as a keyed account saved before DEC-150 addendum 9a has it once the master start
-    /// repaired it. Inputs: the fixture and the account's connection. Output: the home.
+    /// The config the engine generates for a keyed RCLI connection's SDK home, byte for byte
+    /// as the account setup writes it: the hashed provider id, the "Configured provider"
+    /// name and API key auth. Input: the connection. Output: the bytes.
+    fn engine_config(connection: &crate::config::ModelConnection) -> Vec<u8> {
+        let selection = crate::rcli_host::configured_sdk_connection(connection).unwrap();
+        let crate::config::ModelEndpoint::Http { url } = &connection.endpoint else {
+            panic!("a keyed RCLI connection has an HTTP endpoint");
+        };
+        serde_json::to_vec(&serde_json::json!({
+            "model": { "provider": selection.provider.as_str(), "model": connection.model.id },
+            "providers": [{
+                "id": selection.provider.as_str(), "name": "Configured provider",
+                "protocol": selection.protocol.as_str(), "baseUrl": url,
+                "auth": { "type": "apiKey" }
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// Writes the generated SDK home of a keyed account in the engine root, the fixture's
+    /// state folder, holding the engine's own config and no key file, as a keyed account
+    /// saved before DEC-150 addendum 9a has it. Inputs: the fixture and the account's
+    /// connection. Output: the home.
     fn generated_home(case: &Fixture, connection: &crate::config::ModelConnection) -> PathBuf {
         use sha2::{Digest, Sha256};
         let profile = crate::config::configured_profile_ref(connection).unwrap();
-        let homes = case.host.authority.root.path.join("configured-sdk-homes");
+        let homes = case.root.path().join("state/configured-sdk-homes");
         if !homes.exists() {
             private_directory(&homes);
         }
@@ -605,16 +625,18 @@ fallback_allowed = false
         private_directory(&home.join(".backboard"));
         private_file(
             &home.join(".backboard/config.json"),
-            &std::fs::read(case.home.join(".backboard/config.json")).unwrap(),
+            &engine_config(connection),
         );
         home
     }
 
-    /// Counts the account setups the engine reserved or started and never settled. Input:
-    /// the fixture. Output: the count, zero before any setup made the table.
+    /// Counts the account setups the engine reserved or started and never settled, read
+    /// from the engine's own database in the fixture's state folder. Input: the fixture.
+    /// Output: the count, zero before any setup made the table.
     fn unsettled_setups(case: &Fixture) -> i64 {
-        let db =
-            rusqlite::Connection::open(case.host.authority.root.path.join("engine.db")).unwrap();
+        let database = case.root.path().join("state/engine.db");
+        assert!(database.is_file());
+        let db = rusqlite::Connection::open(&database).unwrap();
         let table: i64 = db
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='account_profile_operations'",
@@ -664,6 +686,70 @@ fallback_allowed = false
         let generated = generated_home(&case, &keyed_connection());
         private_file(&generated.join(".backboard/keys.json"), b"{}");
         case.host.set_up_master_key(&case.prepared).await.unwrap();
+        assert_eq!(unsettled_setups(&case), 0);
+        case.close().await;
+    }
+
+    /// The synthetic API key Fixture::keyed's account has saved, as save_key stores it.
+    const SAVED_KEY: &[u8] = b"sk-synthetic-ky-m1-saved-key";
+
+    /// A stand-in for the RCLI host's private key writer: it saves the key it reads after
+    /// the length prefix as the home's keys.json and answers with the configured_only ack
+    /// the engine's writer protocol expects, echoing the request's id, generation and
+    /// provider.
+    const KEY_WRITER: &str = r#"#!/bin/sh
+[ "$1" = --private-key-write ] || exit 2
+umask 077
+dd bs=1 skip=4 2>/dev/null >"$HOME/.backboard/keys.json" || exit 3
+id=$(printf '%s' "$2" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+generation=$(printf '%s' "$2" | sed 's/.*"generation":\([0-9][0-9]*\).*/\1/')
+provider=$(printf '%s' "$2" | sed 's/.*"provider":"\([^"]*\)".*/\1/')
+ack="{\"protocol_version\":1,\"request_id\":\"$id\",\"generation\":$generation,\"provider\":\"$provider\",\"status\":\"configured_only\"}"
+size=${#ack}
+printf "\\000\\000\\$(printf %03o $((size / 256)))\\$(printf %03o $((size % 256)))"
+printf '%s' "$ack"
+"#;
+
+    /// Saves the keyed account's synthetic key the way the add-account screen does: an
+    /// owner-only `account-keys` folder in the engine root holding an owner-only file named
+    /// by the key reference. Input: the fixture. Output: none.
+    fn save_key(case: &Fixture) {
+        let folder = case
+            .root
+            .path()
+            .join("state")
+            .join(crate::storage::accounts::ACCOUNT_KEYS);
+        if !folder.exists() {
+            private_directory(&folder);
+        }
+        private_file(&folder.join("synthetic-key-ref-legacy"), SAVED_KEY);
+    }
+
+    /// Writes KEY_WRITER as an owner-only executable in the fixture's private folder.
+    /// Input: the fixture. Output: its path, for EngineService::register_rcli_executable.
+    fn key_writer(case: &Fixture) -> PathBuf {
+        let path = case.root.path().join("rcli-key-writer");
+        private_file(&path, KEY_WRITER.as_bytes());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+
+    /// KY-M1: a pooled pre-fix keyed account whose key is saved in the engine's key store
+    /// gets that key written into its generated home in the engine root before the master
+    /// launch, through the Configure flow and the registered key writer (a stand-in here),
+    /// and leaves no setup unsettled.
+    #[tokio::test]
+    async fn a_keyed_master_whose_generated_home_lacks_its_key_gets_its_saved_key_written() {
+        let mut case = Fixture::keyed().await;
+        let generated = generated_home(&case, &keyed_connection());
+        save_key(&case);
+        let writer = key_writer(&case);
+        case.service.register_rcli_executable(&writer).unwrap();
+        case.host.set_up_master_key(&case.prepared).await.unwrap();
+        assert_eq!(
+            std::fs::read(generated.join(".backboard/keys.json")).unwrap(),
+            SAVED_KEY
+        );
         assert_eq!(unsettled_setups(&case), 0);
         case.close().await;
     }

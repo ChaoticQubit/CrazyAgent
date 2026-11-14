@@ -1,4 +1,4 @@
-use super::buffer::{Feed, buffer, skipped_marker};
+use super::buffer::{Feed, buffer};
 pub use super::harness_socket;
 use super::{
     AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneInfo,
@@ -23,8 +23,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const SESSION: &str = "crazyagent";
 pub const SOCKET: &str = "tmux.sock";
 const HOLDER: &str = "_crazyagent";
-/// How many 2 second holder loops pass between two reads of the server's deadline: the
-/// modification time of its socket, which the running engine keeps ahead (FBTMUX-P1).
+/// How long a tmux may take to report its version, as setup allows.
+const VERSION_READ_TIME: Duration = Duration::from_secs(10);
+/// How many seconds one holder loop sleeps.
+const HOLDER_LOOP_SECONDS: u32 = 2;
+/// How many holder loops pass between two reads of the server's deadline: the modification
+/// time of its socket, which the running engine keeps ahead (FBTMUX-P1). A server's keeper
+/// reads the engine's deadline record as often (FBTMUX-P1-R1-L1).
 const DEADLINE_CHECK_LOOPS: u32 = 30;
 /// How many deadline reads in a row must find the deadline passed before the holder ends
 /// its server, about five awake minutes, so an engine waking with the machine renews first.
@@ -42,7 +47,7 @@ const MODIFIED: &str = "stat -L -c %Y";
 fn holder_command(loops: u32, late: u32) -> String {
     assert!(loops >= 1 && late >= 1);
     format!(
-        "s=${{TMUX%,*,*}}; i=0; a=0; l=0; while [ -S \"$s\" ]; do i=$((i+1)); if [ $i -ge {loops} ]; then i=0; d=$({MODIFIED} \"$s\" 2>/dev/null) && n=$(date +%s) && if [ \"$n\" -lt \"$d\" ]; then a=1; l=0; elif [ $a = 1 ]; then l=$((l+1)); fi; [ $l -ge {late} ] && break; fi; sleep 2; done; p=${{TMUX%,*}}; kill \"${{p##*,}}\""
+        "s=${{TMUX%,*,*}}; i=0; a=0; l=0; while [ -S \"$s\" ]; do i=$((i+1)); if [ $i -ge {loops} ]; then i=0; d=$({MODIFIED} \"$s\" 2>/dev/null) && n=$(date +%s) && if [ \"$n\" -lt \"$d\" ]; then a=1; l=0; elif [ $a = 1 ]; then l=$((l+1)); fi; [ $l -ge {late} ] && break; fi; sleep {HOLDER_LOOP_SECONDS}; done; p=${{TMUX%,*}}; kill \"${{p##*,}}\""
     )
 }
 
@@ -196,13 +201,94 @@ enum Pending {
 }
 
 /// Finds the tmux program the engine uses, anew on each call, through the one tool resolver:
-/// the app's folder, `<root>/setup/bin`, then everywhere [`crate::tools::Places`] looks.
+/// the app's folder, the owner's own installs, the system folders, then `<root>/setup/bin`
+/// last ([`crate::tools::Places::engine`]).
 /// Takes the engine root. Returns the real program, or none when tmux is not installed.
 pub fn installed(engine_root: &Path) -> Option<PathBuf> {
-    let places = crate::tools::Places::from_environment(Some(engine_root));
-    crate::tools::resolve("tmux", &places)
+    installed_at(&crate::tools::Places::from_environment(Some(engine_root)))
+}
+
+/// Finds the tmux program the engine uses in the given places, the answer setup shows: the
+/// bundled copy when it runs, else the usual order ([`crate::tools::resolve_tmux`]).
+/// Takes the places. Returns the real program, or none when tmux is not installed.
+pub fn installed_at(places: &crate::tools::Places) -> Option<PathBuf> {
+    crate::tools::resolve_tmux(places, crate::tools::SHIPS_BUNDLED_TMUX, runs)
         .ok()
-        .map(|tmux| tmux.program)
+        .map(|(tmux, _)| tmux.program)
+}
+
+/// A tmux file as (path, device, inode, size, change seconds and nanoseconds), so a file
+/// replaced in place is read again.
+type RanFile = (PathBuf, u64, u64, u64, i64, i64);
+
+/// How many tmux files [`RAN`] keeps, one per path: the bundled one, with room for tests
+/// that each read their own at the same time.
+const RAN_MAX: usize = 4;
+
+/// The tmux files that answered as running, a pass or a read that ran out of time, so
+/// setup and every terminal start do not each wait on them again. A failed read is not
+/// kept: a fix outside the file, such as a library installed, counts on the next ask.
+static RAN: Mutex<Vec<RanFile>> = Mutex::new(Vec::new());
+
+/// Whether a tmux runs: `-V` reports a version within the bound and that version is one the
+/// terminal supports (3.2 or later). A read that runs out of time counts as running, since a
+/// new file can wait behind the system's first-run checks; the version read setup does next
+/// reports it. Takes the tmux. Returns the answer.
+pub fn runs(tmux: &crate::tools::Resolved) -> bool {
+    runs_within(tmux, VERSION_READ_TIME)
+}
+
+/// Answers [`runs`] with the version read bounded by the given time, so a test can let a
+/// read run out of time quickly. Takes the tmux and the bound. Returns the answer.
+fn runs_within(tmux: &crate::tools::Resolved, time: Duration) -> bool {
+    assert!(!time.is_zero() && time <= VERSION_READ_TIME);
+    let Ok(metadata) = std::fs::metadata(&tmux.program) else {
+        return false;
+    };
+    let file: RanFile = (
+        tmux.program.clone(),
+        metadata.dev(),
+        metadata.ino(),
+        metadata.size(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    );
+    let last = || {
+        RAN.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    if last().contains(&file) {
+        return true;
+    }
+    let words = tmux.argv();
+    let Some((program, rest)) = words.split_first() else {
+        return false;
+    };
+    let mut arguments = rest.to_vec();
+    arguments.push("-V".into());
+    let version = crate::setup::process::run(
+        Path::new(program),
+        &arguments,
+        &[],
+        &std::env::temp_dir(),
+        time,
+    );
+    let running = match version {
+        Err(crate::setup::InstallError(code)) => code == "setup_timeout",
+        Ok((false, _)) => false,
+        Ok((true, output)) => crate::setup::process::version_from(&output)
+            .is_ok_and(|found| supported(found.as_str()) == Some(true)),
+    };
+    if running {
+        let mut kept = last();
+        kept.retain(|(path, ..)| *path != file.0);
+        if kept.len() == RAN_MAX {
+            kept.remove(0);
+        }
+        kept.push(file);
+        assert!(kept.len() <= RAN_MAX);
+    }
+    running
 }
 
 impl Tmux {
@@ -253,13 +339,13 @@ impl Tmux {
     }
 
     /// Opens the host on a native lead's teammates' own tmux server (see
-    /// [`super::teammates_socket`], rv-audit S1 F1): the server starts inside the teammates'
-    /// profile, which cannot reach its socket, and each engine client connects inside the
-    /// lead's profile and never starts a server, so no server runs in the lead's profile with
-    /// teammate panes. Each client it connects checks the server's pid against `pin`.
-    /// Nothing starts until the first call. Takes the tmux program, the socket, the lead's
-    /// installed profile, the teammates' and the socket's pin. Returns the host, or
-    /// `terminal_folder_unsafe` for a socket path with no folder.
+    /// [`super::teammates_socket`], rv-audit S1 F1): the server runs inside the teammates'
+    /// profile, which cannot reach its socket, started under its keeper by `Servers`
+    /// (FBTMUX-P1-R1-L1), and each engine client connects inside the lead's profile and never
+    /// starts a server, so no server runs in the lead's profile with teammate panes. Each
+    /// client it connects checks the server's pid against `pin`. Takes the tmux program, the
+    /// socket, the lead's installed profile, the teammates' and the socket's pin. Returns the
+    /// host, or `terminal_folder_unsafe` for a socket path with no folder.
     fn teammates(
         executable: Option<PathBuf>,
         socket: &Path,
@@ -480,47 +566,12 @@ impl Tmux {
         Ok(socket)
     }
 
-    /// Starts a teammates' server with its holder session inside the teammates' profile when
-    /// no socket exists yet (rv-audit S1 F1); a raw connect probe, never a tmux client,
-    /// looks. A socket an ended server left is never removed or served again (see
-    /// [`Self::remove_socket`]). Takes the tmux program, the socket and the teammates'
-    /// profile. Returns Ok once a server was found or started, or `terminal_unavailable`.
-    fn start_in(&self, executable: &Path, socket: &Path, profile: &Path) -> Result<(), HostError> {
-        match crate::spawn_gate::connect_unix_std(socket) {
-            Ok(_) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(failure("terminal_unavailable")),
-        }
-        let started = crate::spawn_gate::status(
-            Command::new(crate::sandbox::SANDBOX_EXEC)
-                .arg("-f")
-                .arg(profile)
-                .arg(executable)
-                .args(["-u", "-f", "/dev/null", "-S"])
-                .arg(socket)
-                .args(["new-session", "-d", "-s", SESSION, "-n", HOLDER])
-                .args(HOLDER_SHELL)
-                .arg(self.holder())
-                .env_clear()
-                .env("PATH", SERVER_PATH)
-                .current_dir(&self.folder)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null()),
-        )
-        .map_err(|_| failure("terminal_unavailable"))?;
-        if !started.success() {
-            return Err(failure("terminal_unavailable"));
-        }
-        Ok(())
-    }
-
     /// Connects a control client to the server, starting the server with its holder
     /// session only when `may_start` is set; otherwise tmux -N refuses an ended server. A
     /// confined host always connects with -N, so its client, inside the lead's profile, never
-    /// starts a server: a teammates host starts its server through [`Self::start_in`], and a
-    /// lead's own server starts under its keeper (KEEPER (b), `Servers`). Takes whether it
-    /// may start one. Output: the control, or a plain code.
+    /// starts a server: a lead's own server and its teammates' server start under their
+    /// keepers (KEEPER (b), FBTMUX-P1-R1-L1, `Servers`). Takes whether it may start one.
+    /// Output: the control, or a plain code.
     fn connect(&self, may_start: bool) -> Result<Control, HostError> {
         let executable = self
             .executable
@@ -532,9 +583,6 @@ impl Tmux {
             && (!metadata.file_type().is_socket() || metadata.uid() != user())
         {
             return Err(failure("terminal_folder_unsafe"));
-        }
-        if may_start && let Some(server_profile) = &self.starts_in {
-            self.start_in(executable, &socket, server_profile)?;
         }
         let mut command = match &self.confined {
             Some(profile) => {
@@ -1777,8 +1825,12 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
         if dropped > 0 {
             if let Some(rest) = guard(&line, b"%output") {
                 let pane = rest.split(|byte| *byte == b' ').next().unwrap_or_default();
-                let lost = u64::try_from(line.len() + dropped).unwrap_or(u64::MAX);
-                deliver(&mut state, pane, &skipped_marker(lost));
+                state.viewers.retain(|viewer| {
+                    if viewer.pane != pane {
+                        return viewer.feed.open();
+                    }
+                    viewer.feed.lost()
+                });
             }
             continue;
         }

@@ -164,6 +164,17 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "home_move_source_left" => {
             "The folder was copied in, but the original could not be removed. Remove it yourself."
         }
+        "home_add_cancelled" => "Adding the folder stopped. Nothing was moved or copied.",
+        "home_add_interrupted" => {
+            "Adding the folder stopped part way. Check your projects folder before trying again."
+        }
+        "home_add_in_progress" => {
+            "A folder is being added to your projects folder. Try again when it finishes."
+        }
+        "intake_busy" => "Another folder is being added. Wait for it to finish on Home.",
+        "intake_failed" => {
+            "Adding the folder failed. Check your projects folder before trying again."
+        }
         "folder_size_unreadable" => "Some files in this folder can't be read.",
         "folder_size_timeout" | "folder_size_too_large" => "This folder is very large.",
         "owner_home_unknown" => "Your home folder could not be found.",

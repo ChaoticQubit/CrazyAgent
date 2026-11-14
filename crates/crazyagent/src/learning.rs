@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 pub const COUNT_MAX: u32 = 99;
 
+#[cfg_attr(not(unix), allow(dead_code))]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS learning_marks (
     step TEXT PRIMARY KEY,
     marked_ms INTEGER NOT NULL
@@ -128,94 +129,100 @@ impl LearningProgress {
     }
 }
 
-const STEPS: [(StepId, Topic, &str, &str, Option<Signal>); 10] = [
+const STEPS: [(StepId, Topic, &str, &str, &[Signal]); 10] = [
     (
         StepId::Project,
         Topic::Basics,
         "Create a project",
         "A project is a folder the agents work in. Start a new one, add a folder or clone from GitHub.",
-        Some(Signal {
+        &[Signal {
             table: "projects",
             filter: "1",
-        }),
+        }],
     ),
     (
         StepId::Master,
         Topic::CoreLoop,
         "Talk to the master",
         "Each project has a master you message in its conversation. It plans the work and hands parts to agents.",
-        Some(Signal {
-            table: "conversation_entries",
-            filter: "kind='message'",
-        }),
+        &[
+            Signal {
+                table: "conversation_entries",
+                filter: "kind='message'",
+            },
+            Signal {
+                table: "session_messages",
+                filter: "speaker='owner' AND mode='live'",
+            },
+        ],
     ),
     (
         StepId::Agents,
         Topic::CoreLoop,
         "Watch the team work",
         "The master starts agents, each in its own copy of the project. The project's Agents page shows who works on what.",
-        Some(Signal {
+        &[Signal {
             table: "team_agents",
             filter: "role='sub'",
-        }),
+        }],
     ),
     (
         StepId::Question,
         Topic::CoreLoop,
         "Answer a question",
         "Agents ask when they need your call. Your answer goes back to the agent that asked.",
-        Some(Signal {
+        &[Signal {
             table: "questions_log",
             filter: "status IN ('answered','answered_in_terminal')",
-        }),
+        }],
     ),
     (
         StepId::ChangeSet,
         Topic::CoreLoop,
         "Accept a change set",
         "Finished work waits as a change set you review. Accept it to land the work on the project's branch.",
-        Some(Signal {
+        &[Signal {
             table: "landing_change_sets",
             filter: "state='accepted'",
-        }),
+        }],
     ),
     (
         StepId::Ide,
         Topic::IdeAndTerminals,
         "Open the IDE",
         "The IDE opens the project in a code editor beside the agents. What you may change there follows the project's access.",
-        Some(Signal {
+        &[Signal {
             table: "ide_workspaces",
             filter: "1",
-        }),
+        }],
     ),
     (
         StepId::Terminal,
         Topic::IdeAndTerminals,
         "Open a terminal",
         "Each agent runs in a terminal you can open and watch live. Type in it when an agent waits for you.",
-        None,
+        &[],
     ),
     (
         StepId::Process,
         Topic::ProcessMetricsUsage,
         "Set your process",
         "Process holds the instructions every agent gets. Import a CLAUDE.md or start from the default process.",
-        None,
+        &[],
     ),
     (
         StepId::Metrics,
         Topic::ProcessMetricsUsage,
         "Read your metrics",
         "Metrics shows what the team did with its time and accounts. Use it to see what works.",
-        None,
+        &[],
     ),
     (
         StepId::Usage,
         Topic::ProcessMetricsUsage,
         "Check your usage",
         "Usage shows how much of each account's limits the agents used. It helps you pick accounts and pools.",
-        None,
+        &[],
     ),
 ];
 
@@ -229,6 +236,7 @@ struct Signal {
 
 /// Creates the marks table when it is missing. Input: the engine database. Output: Ok, or
 /// `learning_progress_unavailable`.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(unavailable)
 }
@@ -239,11 +247,8 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
 /// guide is skipped, or the storage failure.
 pub(crate) fn progress(tx: &Transaction<'_>) -> Result<LearningProgress, EngineError> {
     let mut steps = Vec::with_capacity(STEPS.len());
-    for (id, topic, title, body, signal) in STEPS {
-        let rows = match signal {
-            Some(signal) => count(tx, signal)?,
-            None => 0,
-        };
+    for (id, topic, title, body, signals) in STEPS {
+        let rows = count(tx, signals)?;
         let count = if rows > 0 {
             rows
         } else {
@@ -302,10 +307,8 @@ pub(crate) fn latch(tx: &Transaction<'_>) {
 }
 
 fn keep_ticked(tx: &Transaction<'_>) -> Result<(), EngineError> {
-    for (id, _, _, _, signal) in STEPS {
-        if let Some(signal) = signal
-            && count(tx, signal)? > 0
-        {
+    for (id, _, _, _, signals) in STEPS {
+        if count(tx, signals)? > 0 {
             set(tx, id.name(), true)?;
         }
     }
@@ -354,18 +357,27 @@ fn exists(tx: &Transaction<'_>, table: &'static str) -> Result<bool, EngineError
     Ok(found.is_some())
 }
 
-/// Counts up to `COUNT_MAX` rows of one signal. Inputs: the transaction and the signal.
-/// Output: the count, 0 when the table does not exist yet.
-fn count(tx: &Transaction<'_>, signal: Signal) -> Result<u32, EngineError> {
-    if !exists(tx, signal.table)? {
-        return Ok(0);
+/// Counts up to `COUNT_MAX` rows of a step's signals together, since one step can be shown
+/// by rows in more than one table. Inputs: the transaction and the signals. Output: the
+/// count, where a table that does not exist yet adds 0.
+fn count(tx: &Transaction<'_>, signals: &[Signal]) -> Result<u32, EngineError> {
+    let mut total: u32 = 0;
+    for signal in signals {
+        if !exists(tx, signal.table)? {
+            continue;
+        }
+        let sql = format!(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM {} WHERE {} LIMIT {COUNT_MAX})",
+            signal.table, signal.filter
+        );
+        let rows: u32 = tx
+            .query_row(&sql, [], |row| row.get(0))
+            .map_err(unavailable)?;
+        assert!(rows <= COUNT_MAX);
+        total = total.saturating_add(rows).min(COUNT_MAX);
     }
-    let sql = format!(
-        "SELECT COUNT(*) FROM (SELECT 1 FROM {} WHERE {} LIMIT {COUNT_MAX})",
-        signal.table, signal.filter
-    );
-    tx.query_row(&sql, [], |row| row.get(0))
-        .map_err(unavailable)
+    assert!(total <= COUNT_MAX);
+    Ok(total)
 }
 
 fn unavailable(_: rusqlite::Error) -> EngineError {

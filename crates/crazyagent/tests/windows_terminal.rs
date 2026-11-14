@@ -1,6 +1,7 @@
 #![cfg(target_os = "windows")]
 
 use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
+use crazyagent::terminal::buffer::Chunk;
 use crazyagent::terminal::windows::ConptyHost;
 use crazyagent::terminal::{AgentId, Host, INPUT_BYTES_MAX, SIZE_MAX, TerminalStream};
 use std::path::{Path, PathBuf};
@@ -27,7 +28,7 @@ fn command(args: &[&str], cwd: &Path) -> InteractiveCommand {
 fn forward(mut stream: TerminalStream) -> Receiver<Vec<u8>> {
     let (sender, receiver) = channel();
     std::thread::spawn(move || {
-        while let Some(chunk) = stream.next_blocking() {
+        while let Some(Chunk::Output(chunk)) = stream.next_blocking() {
             if sender.send(chunk).is_err() {
                 break;
             }

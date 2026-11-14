@@ -1,6 +1,9 @@
 use super::clone;
 use super::diff::{self, plain};
 use super::git::{Repo, Writes, failure, is_object_id, object_id};
+#[cfg(test)]
+pub(super) use super::hold::busy;
+pub(super) use super::hold::{Held, hold};
 use super::store::{self, Intent, Record};
 use super::{AgentKind, ChangeSetId, ChangeState, RESTORE_WINDOW_MS, TurnEnd, Workspace};
 use crate::agent_git::{self, Layout};
@@ -10,7 +13,6 @@ use crate::worktrees::TreeBounds;
 use rusqlite::Connection;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex, PoisonError};
 
 pub(super) const ENGINE: (&str, &str) = ("CrazyAgent", "engine@crazyagent.invalid");
 const TASK_SUFFIXES_MAX: usize = 64;
@@ -30,33 +32,6 @@ const LINK_BYTES_MAX: usize = 4096;
 const HEAD_BYTES_MAX: usize = 512;
 const CONFLICTS_SHOWN_MAX: usize = 50;
 const INDEX_BYTES_MAX: u64 = 256 * 1024 * 1024;
-static BUSY: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
-static FREED: Condvar = Condvar::new();
-
-/// The engine's hold on one owner repository: landing work on it runs one at a time in
-/// this engine. Dropping it lets the next one start.
-#[derive(Debug)]
-pub(super) struct Held(PathBuf);
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        let mut busy = BUSY.lock().unwrap_or_else(PoisonError::into_inner);
-        assert!(busy.remove(&self.0));
-        FREED.notify_all();
-    }
-}
-
-/// Waits for and takes the engine's hold on one owner repository.
-/// Input: the repository root. Output: the hold.
-pub(super) fn hold(repository: &Path) -> Held {
-    let mut busy = BUSY.lock().unwrap_or_else(PoisonError::into_inner);
-    while busy.contains(repository) {
-        busy = FREED.wait(busy).unwrap_or_else(PoisonError::into_inner);
-    }
-    assert!(busy.insert(repository.to_path_buf()));
-    Held(repository.to_path_buf())
-}
-
 /// Takes the engine's hold on one owner repository for an owner's action, refusing at
 /// once while a project move is pending for it: the move keeps this hold for as long as
 /// its folder moves, and an action that waited that long would answer after its client
@@ -69,35 +44,6 @@ pub(super) fn hold_unmoved(db: &Connection, repository: &Path) -> Result<Held, E
         return Err(failure("move_project_in_progress"));
     }
     Ok(hold(repository))
-}
-
-/// Takes the engine's hold on one owner repository, waiting no longer than `wait` for
-/// landing work that has it. Inputs: the repository root and the wait. Output: the hold,
-/// or none when the work did not end within the wait.
-pub(super) fn hold_within(repository: &Path, wait: std::time::Duration) -> Option<Held> {
-    let deadline = std::time::Instant::now() + wait;
-    let mut busy = BUSY.lock().unwrap_or_else(PoisonError::into_inner);
-    while busy.contains(repository) {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            return None;
-        }
-        busy = FREED
-            .wait_timeout(busy, left)
-            .unwrap_or_else(PoisonError::into_inner)
-            .0;
-    }
-    assert!(busy.insert(repository.to_path_buf()));
-    Some(Held(repository.to_path_buf()))
-}
-
-/// Tells whether someone holds the engine's hold on one owner repository right now.
-/// Input: the repository root. Output: the answer.
-#[cfg(test)]
-pub(super) fn busy(repository: &Path) -> bool {
-    BUSY.lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .contains(repository)
 }
 
 fn invalid() -> EngineError {

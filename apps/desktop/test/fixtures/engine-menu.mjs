@@ -59,6 +59,20 @@ export function centerOf(selector) {
   return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
 }
 
+/** Presses Esc once, the moment the footer's menu enters the page and before the browser can
+ * paint it, as the quickest key press after the menu shows does, and records "escape" among the
+ * events. Output: nothing. */
+export function escapeOnShow() {
+  const foot = document.querySelector(".sidebar-foot");
+  const watch = new MutationObserver(() => {
+    if (document.querySelector(".sidebar-foot [role=menu]") === null) return;
+    watch.disconnect();
+    events.push("escape");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  });
+  watch.observe(foot, { childList: true, subtree: true });
+}
+
 /** Reads the footer's menu, its confirm dialog and where focus is. Output: the reading. */
 export function shown() {
   const menu = document.querySelector(".sidebar-foot [role=menu]");

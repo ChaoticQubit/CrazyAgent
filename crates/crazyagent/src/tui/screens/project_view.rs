@@ -928,7 +928,7 @@ fn overview_tab_rows(
     }
     let mut rows = vec![Row::default(), strip];
     if let Some(failure) = &overview.failure {
-        let (line, style) = if overview_pending(overview) {
+        let (line, style) = if overview.waiting_for_account && overview_pending(overview) {
             (sanitize(failure), look.muted)
         } else {
             (

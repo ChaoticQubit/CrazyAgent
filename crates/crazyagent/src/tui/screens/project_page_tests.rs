@@ -4999,6 +4999,57 @@ async fn a_second_lost_reply_on_a_recovering_creation_says_the_project_is_unconf
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_creation_the_engine_still_runs_is_checked_again_on_each_tick_until_it_answers() {
+    use crate::tui::client::MutationDelivery;
+    let engine = Engine::start().await;
+    let (mut shell, _connection, submission) = submitted_creation(&engine).await;
+    let late = || Err("owner_outcome_unknown_reconcile_same_identity".to_owned());
+    let running = || {
+        Ok(Box::new(OwnerResponse::InProgress {
+            operation_id: crate::protocol::RequestId::new("late-creation").unwrap(),
+        }))
+    };
+
+    let sent = creation_reply(&mut shell, &submission, late(), true);
+    assert_eq!(sent.len(), 1, "a late answer is reconciled once");
+    assert!(matches!(sent[0].delivery, MutationDelivery::Reconcile));
+
+    for _ in 0..2 {
+        let sent = creation_reply(&mut shell, &submission, running(), true);
+        assert!(
+            sent.is_empty(),
+            "a running creation waits for the next tick"
+        );
+        let shown = render(&mut shell, 160, 24);
+        assert!(
+            !shown.contains("could not confirm"),
+            "the engine still runs the creation, so it is not unconfirmed: {shown}"
+        );
+        assert_eq!(
+            shell.ctx.message().map(|message| message.lead.clone()),
+            Some("Still creating the project.".to_owned())
+        );
+        shell.tick();
+        let checks = std::iter::from_fn(|| shell.ctx.next_request())
+            .filter_map(|request| match request {
+                Request::Creation(job) => Some(*job),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            checks.len(),
+            1,
+            "each tick checks the running creation once"
+        );
+        assert!(matches!(checks[0].delivery, MutationDelivery::Reconcile));
+        assert_eq!(
+            checks[0].submission, submission,
+            "the same submission and project id, never a second one"
+        );
+    }
+}
+
 /// While the uncommitted-move banner takes rows above the tabs, the Changes tab offers
 /// Accept on a moved diff only once its last line was painted in the frame the owner
 /// sees, never from the taller view drawn after each key (RVA-1 r1 F2).
@@ -5196,6 +5247,7 @@ mod overview_tabs {
             stale: false,
             checked_ms: None,
             failure: None,
+            waiting_for_account: false,
             refresh: Refresh::AfterLanding,
             apply: Apply::AlwaysAsk,
             needs_home: false,
@@ -5347,6 +5399,7 @@ mod overview_tabs {
         for (stale, running) in [(true, false), (false, true)] {
             let mut overview = empty();
             overview.failure = Some(reason.into());
+            overview.waiting_for_account = true;
             overview.stale = stale;
             overview.running = running;
             let shown = flat(&mut page_with_overview(overview));
@@ -5355,11 +5408,31 @@ mod overview_tabs {
         }
         let mut ended = empty();
         ended.failure = Some(reason.into());
+        ended.waiting_for_account = true;
         let shown = flat(&mut page_with_overview(ended));
         assert!(
             shown.contains(&format!("Couldn't refresh the tabs. {reason}")),
             "{shown}"
         );
+    }
+
+    /// An ended real failure stays a failed refresh while the next run waits to start and
+    /// while it writes (IW-L1, DEC-147 addendum): only the engine's wait for an account is
+    /// shown as a wait, in the same words as the desktop app.
+    #[test]
+    fn an_ended_failure_stays_a_failed_refresh_while_a_new_run_waits_or_writes() {
+        let reason = crate::project_overview::UNFINISHED;
+        for (stale, running) in [(true, false), (false, true), (true, true)] {
+            let mut overview = empty();
+            overview.failure = Some(reason.into());
+            overview.stale = stale;
+            overview.running = running;
+            let shown = flat(&mut page_with_overview(overview));
+            assert!(
+                shown.contains(&format!("Couldn't refresh the tabs. {reason}")),
+                "stale {stale} running {running}: {shown}"
+            );
+        }
     }
 
     #[test]

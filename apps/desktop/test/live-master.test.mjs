@@ -226,6 +226,16 @@ test("the wait for the master's terminal is bounded: overdue a minute after the 
   assert.equal(live.runningState(missing, node, 9, true), missing);
 });
 
+test("a master still starting says Starting and opens no terminal until its pane runs, then attaches, its minute counted from the first read with no terminal (DEC-161 3b, owner 11-12)", () => {
+  const node = { id: "m", kind: "master", parent: null, label: "m", harness: "claude-code", status: "starting", status_label: "Starting", account: null, terminal: null };
+  assert.deepEqual(live.runningState({ kind: "starting" }, node, 5, false), { kind: "starting", since: 5 });
+  assert.deepEqual(live.runningState({ kind: "running", node: null, since: 5 }, node, 9, false), { kind: "starting", since: 5 }, "a master taken over after an engine restart waits as starting and keeps the clock");
+  assert.equal(live.liveWord({ kind: "starting", since: 5 }).word, "Starting");
+  const ready = { ...node, status: "idle", status_label: "Idle", terminal: "team-1" };
+  assert.deepEqual(live.runningState({ kind: "starting", since: 5 }, ready, 12, false), { kind: "running", node: ready, since: 5 }, "the pane runs: the terminal opens and the same minute goes on");
+  assert.deepEqual(live.runningState({ kind: "starting", since: 5 }, ready, 12, true), { kind: "running", node: ready, since: null });
+});
+
 test("the wait for the master's terminal ends only when it opens: a listed terminal keeps the clock until its first frame and one that closes with the switch on starts it again, as the TUI (rv-code V240-MASTER-UI N1, DEC-141)", () => {
   const node = { id: "m", kind: "master", parent: null, label: "m", harness: "codex", status: null, status_label: null, account: null, terminal: "team-1" };
   assert.deepEqual(live.runningState({ kind: "running", node: null, since: 5 }, node, 9, false), { kind: "running", node, since: 5 }, "listed with no first frame: the clock runs on");

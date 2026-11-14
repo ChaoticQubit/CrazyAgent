@@ -455,7 +455,7 @@ export type ReceiptState ={ kind: "applied" } | { kind: "rejected"; code: string
 /** Classifies an intent receipt for the screens.
  * Input: the receipt. Output: applied, rejected with a code, or unconfirmed while pending. */
 export function receiptState(receipt: IntentReceipt): ReceiptState {
-  if (receipt.pending || receipt.outcome === "uncertain" || receipt.outcome === "unknown" || receipt.outcome === "not_recorded_at_barrier") {
+  if (receipt.pending || receipt.outcome === "uncertain" || receipt.outcome === "unknown" || receipt.outcome === "in_progress" || receipt.outcome === "not_recorded_at_barrier") {
     return { kind: "unconfirmed" };
   }
   if (receipt.rejection) return { kind: "rejected", code: receipt.rejection };
@@ -937,8 +937,8 @@ export interface RoadmapItemState {
 }
 
 /** A project's roadmap status: the items of the last check, when it ran, whether one runs now
- * or is due after a landing, the refresh setting, the roadmap file read and why the last check
- * failed, if it did. */
+ * or is due after a landing, the refresh setting, the roadmap file read, why the last check
+ * failed, if it did, and whether that line is the engine's wait for an account. */
 export interface RoadmapStatus {
   items: RoadmapItemState[];
   checked_ms: number | null;
@@ -947,14 +947,15 @@ export interface RoadmapStatus {
   refresh: RoadmapRefresh;
   source: string | null;
   problem: string | null;
+  waiting_for_account: boolean;
 }
 
 const ROADMAP_STATUSES: readonly string[] = ["pending", "in_progress", "done", "tested"];
 const ROADMAP_REFRESHES: readonly string[] = ["after_landing", "refresh_only", "off"];
 
 /** Whether a bridge reply is a roadmap status this window can show: every field of its type,
- * known status and refresh names, at most `ROADMAP_ITEMS_MAX` items. Input: the reply.
- * Output: the answer. */
+ * except a wait flag an older engine leaves out, known status and refresh names, at most
+ * `ROADMAP_ITEMS_MAX` items. Input: the reply. Output: the answer. */
 export function isRoadmapStatus(value: unknown): value is RoadmapStatus {
   if (typeof value !== "object" || value === null) return false;
   const status = value as Record<string, unknown>;
@@ -968,15 +969,20 @@ export function isRoadmapStatus(value: unknown): value is RoadmapStatus {
   return listed && (status.checked_ms === null || typeof status.checked_ms === "number")
     && typeof status.running === "boolean" && typeof status.stale === "boolean"
     && typeof status.refresh === "string" && ROADMAP_REFRESHES.includes(status.refresh)
-    && text(status.source) && text(status.problem);
+    && text(status.source) && text(status.problem)
+    && (status.waiting_for_account === undefined || typeof status.waiting_for_account === "boolean");
 }
 
-/** Reads a project's roadmap status. Input: the project id. Output: the status, or
- * `invalid_response` for a reply that is not one. */
+/** Reads a project's roadmap status, an older engine's reply with no wait flag as no wait
+ * for an account. Input: the project id. Output: the status, or `invalid_response` for a
+ * reply that is not one. */
 export async function roadmapStatus(id: string): Promise<Result<RoadmapStatus>> {
   const result = await call<RoadmapStatus>("desktop_roadmap_status", { id });
-  if (result.kind !== "ok" || isRoadmapStatus(result.value)) return result;
-  return { kind: "error", code: "invalid_response", message: plainError("invalid_response") };
+  if (result.kind !== "ok") return result;
+  if (!isRoadmapStatus(result.value)) {
+    return { kind: "error", code: "invalid_response", message: plainError("invalid_response") };
+  }
+  return { kind: "ok", value: { ...result.value, waiting_for_account: result.value.waiting_for_account ?? false } };
 }
 
 /** Asks the engine to check a project's roadmap status now, without the wait after a landing.

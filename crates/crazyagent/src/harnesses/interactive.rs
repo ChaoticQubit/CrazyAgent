@@ -531,23 +531,29 @@ fn moved(to: &Path, rest: &Path) -> Result<String, LaunchError> {
 pub(crate) fn launch_words(executable: &Path) -> Result<Vec<String>, LaunchError> {
     let places = crate::tools::Places::from_environment(None);
     let resolved = launch_tool(executable, &places)?;
-    let words = match resolved.kind {
-        crate::tools::Kind::Native => vec![resolved.entry.into_os_string()],
-        _ => {
-            let argv = resolved.argv();
-            if argv.len() > 1 {
-                argv
-            } else {
-                vec![resolved.entry.into_os_string()]
-            }
-        }
-    };
-    let words = words
+    let words = start_words(&resolved)
         .iter()
         .map(|word| text(Path::new(word)))
         .collect::<Result<Vec<String>, LaunchError>>()?;
     assert!(!words.is_empty());
     Ok(words)
+}
+
+/// The words that start a resolved harness with no search path: the entry itself for a
+/// program or a script the system runs, else its interpreter's words, the first line's words
+/// and the script's real file ([`crate::tools::Resolved::argv`]). Input: the tool. Output:
+/// the words, at least one.
+pub(crate) fn start_words(resolved: &crate::tools::Resolved) -> Vec<std::ffi::OsString> {
+    let entry = || vec![resolved.entry.clone().into_os_string()];
+    let words = match resolved.kind {
+        crate::tools::Kind::Native => entry(),
+        _ => {
+            let argv = resolved.argv();
+            if argv.len() > 1 { argv } else { entry() }
+        }
+    };
+    assert!(!words.is_empty());
+    words
 }
 
 /// The harness the engine starts for a pinned file, only after the tool resolver's entry

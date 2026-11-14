@@ -1262,6 +1262,10 @@ fn picker_box(
                 format!("{} Can't start", look.glyph("\u{2298}")),
                 look.warning,
             ),
+            HarnessState::CantRun => (
+                format!("{} Can't run", look.glyph("\u{2298}")),
+                look.warning,
+            ),
             HarnessState::MasterOnly => (
                 format!("{} Master only", look.glyph("\u{25e7}")),
                 look.warning,

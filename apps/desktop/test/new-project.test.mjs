@@ -177,6 +177,26 @@ test("harness choices list every harness and say why one can't be picked", () =>
   assert.equal(wizard.harnessChoices(catalog, "agent")[3].label, "Gemini CLI - Not installed");
 });
 
+test("a harness the engine lists as Can't run is never the team default, sits in its own group and can't be picked", () => {
+  const cantRun = { kind: "cant_run", reason: "codex needs node, which is missing. Install Node.js from nodejs.org, or run brew install node in Terminal. Then try again." };
+  const blocked = [harness("codex", "Codex", cantRun), harness("claude", "Claude Code", ready), harness("gemini", "Gemini CLI", missing, undefined, undefined, noReader)];
+  const moved = wizard.defaultTeam(engineTeam("codex", 2), blocked);
+  assert.equal(moved.master, "claude", "a blocked engine default moves to the first ready harness");
+  assert.deepEqual(moved.sub_harnesses, [{ harness: "claude", agents: 2, tools: true }]);
+  const onlyBlocked = [harness("codex", "Codex", cantRun), harness("gemini", "Gemini CLI", missing, undefined, undefined, noReader)];
+  assert.equal(wizard.defaultTeam(engineTeam("gemini", 1), onlyBlocked).master, "gemini", "the default never moves onto a harness that can't run");
+  assert.deepEqual(wizard.harnessChoices(blocked, "master").map((choice) => [choice.id, choice.label, choice.group, choice.disabled]), [
+    ["claude", "Claude Code", "Ready", false],
+    ["codex", "Codex - Can't run", "Can't run", true],
+    ["gemini", "Gemini CLI - Not installed", "Not installed", true],
+  ]);
+  assert.equal(wizard.teamErrors(engineTeam("codex", 1), blocked).master, "Codex can't run on this Mac. Pick another harness.");
+  assert.deepEqual(wizard.teamErrors(engineTeam("codex", 1), blocked).rows, ["Codex can't run on this Mac. Pick another harness."]);
+  assert.equal(wizard.teamValid(engineTeam("codex", 1), blocked), false);
+  const added = wizard.addHarnessRow({ ...engineTeam("claude", 0), sub_harnesses: [{ harness: "claude", agents: 1, tools: true }] }, blocked);
+  assert.equal(added.sub_harnesses[1].harness, "claude", "a new row never starts on a harness that can't run");
+});
+
 test("a master-only harness is offered and valid as the master but never for an agent row", () => {
   const masterOnly = { kind: "master_only", reason: "runs only as a CrazyAgent master" };
   const rcli = harness("rcli", "RCLI", { kind: "limited", reason: "runs only as a CrazyAgent master" }, { kind: "limited", reason: "runs without tools" },

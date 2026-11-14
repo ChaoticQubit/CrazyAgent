@@ -130,8 +130,9 @@ pub struct ItemState {
 }
 
 /// A project's roadmap status as its views show it: the items of the last check, when it
-/// ran, whether one runs now or is due, the refresh setting, the roadmap file it read and
-/// why the last check failed, if it did.
+/// ran, whether one runs now or is due, the refresh setting, the roadmap file it read, why
+/// the last check failed, if it did, and whether that line is the wait for an account
+/// (false in an older engine's reply).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoadmapStatus {
     pub items: Vec<ItemState>,
@@ -141,6 +142,8 @@ pub struct RoadmapStatus {
     pub refresh: Refresh,
     pub source: Option<String>,
     pub problem: Option<String>,
+    #[serde(default)]
+    pub waiting_for_account: bool,
 }
 
 /// The identity of one claimed status run: `tick` hands it to `Runs::start` and the run
@@ -485,10 +488,12 @@ fn read_at(
             refresh,
             source: None,
             problem: None,
+            waiting_for_account: false,
         });
     };
     let items = stored_items(&body.ok_or_else(|| unavailable(()))?)?;
     let note = |text: Option<String>| text.map(|text| cut(text, NOTE_BYTES_MAX));
+    let problem = note(problem);
     Ok(RoadmapStatus {
         items,
         checked_ms,
@@ -496,7 +501,8 @@ fn read_at(
         stale,
         refresh,
         source: note(source),
-        problem: note(problem),
+        waiting_for_account: problem.as_deref().is_some_and(waits_for_account),
+        problem,
     })
 }
 
@@ -1037,6 +1043,13 @@ pub fn account_found(
         .map_err(unavailable)?;
     assert!(cleared <= 1);
     Ok(cleared == 1)
+}
+
+/// Tells whether a stored problem is the wait for an account that [`wait_for_account`]
+/// writes and [`account_found`] drops, so the views show it as a wait and any other problem
+/// as a failure (IW-L1). Input: the stored problem. Output: the answer.
+fn waits_for_account(stored: &str) -> bool {
+    stored == line(NO_ACCOUNT, NOTE_BYTES_MAX)
 }
 
 /// Whether a run still holds its claim: no longer once `tick` closed it, the owner switched

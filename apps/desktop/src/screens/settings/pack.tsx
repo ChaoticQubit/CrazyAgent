@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import { listSkills } from "../../api";
-import { intakeCopy, loadSetupStatus, removePackEntry, runSetup, setPackEntry } from "../../api-intake";
+import { fixToolPermissions, installDependency, intakeCopy, loadSetupStatus, removePackEntry, runSetup, setPackEntry, setRefusedTool } from "../../api-intake";
 import type { SkillEntry } from "../../api-process";
-import type { PackEntry, SetupStatus } from "../../engine-client";
+import type { Dependency, PackEntry, RefusedTool, SetupStatus, ToolFix } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, SettingSection, Skeleton, StatusBadge, Switch } from "../../ui";
-import { SettingRow } from "../../ui/setting";
+import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, RadioCard, SettingSection, Skeleton, StatusBadge, Switch } from "../../ui";
+import { SettingLine, SettingRow } from "../../ui/setting";
 import { displayText } from "../conversation";
-import { SETUP_POLL_MS, dependencyView, entryIcon, entryName, installed, packGroups, packStateView, setupBusy, toolsChecking, toolsStep } from "../intake/intake";
+import { REFUSED_TOOL_CHOICES, SETUP_POLL_MS, dependencyView, entryIcon, entryName, fixCommand, fixFailed, installed, packGroups, packStateView, rowFix, rowInstall, setupBusy, toolsChecking, toolsOffer, toolsStep } from "../intake/intake";
+import { ToolFixDialog, type ToolFixAsk } from "../intake/setup-step";
 import { SkillTag, skillEntries } from "../skill-tag";
 import "../project/projects.css";
 
@@ -29,28 +30,60 @@ export function packConfirm(ask: PackAsk): { title: string; body: string; confir
       : `Agents in every project can use this skill. It comes from ${displayText(ask.entry.source)}.` };
 }
 
-/** The Tools section of Settings, Pack: tmux, uv and graphify with their state, any readiness
- * note such as agent git needing the Command Line Tools, and Install tools while one is
- * missing or failed and nothing is checking or installing.
- * Inputs: the setup status, the change in flight and the Install tools handler. */
-function ToolsSection({ status, busy, onInstallTools }: { status: SetupStatus; busy: string | null; onInstallTools: () => void }) {
+/** The Tools section of Settings, Pack: tmux, uv, graphify and Node with their state, any
+ * readiness note such as agent git needing the Command Line Tools, Install tools while one is
+ * missing, failed or not used and nothing is checking or installing, Install on a row that
+ * installs alone, and on a tool found and not used its fix or the command by the setting.
+ * Inputs: the setup status, the change in flight and the Install tools, row Install and Fix
+ * permissions handlers. */
+function ToolsSection({ status, busy, onInstallTools, onInstall, onFix }: {
+  status: SetupStatus;
+  busy: string | null;
+  onInstallTools: () => void;
+  onInstall?: (dependency: Dependency) => void;
+  onFix?: (dependency: Dependency, fix: ToolFix) => void;
+}) {
   const step = toolsStep({ kind: "ok", value: status });
-  const wanted = status.dependencies.some((item) => item.state.state === "missing" || item.state.state === "failed");
-  const offer = wanted && !setupBusy(status) && !toolsChecking(status);
+  const offer = toolsOffer(status);
   return <SettingSection title="Tools" about={step.body} actions={offer ? <Button variant="primary" size="small" icon="wrench" disabled={busy !== null && busy !== TOOLS_BUSY} pending={busy === TOOLS_BUSY}
     pendingLabel="Starting..." onClick={onInstallTools}>Install tools</Button> : undefined}>
     {status.dependencies.map((dependency) => {
       const row = dependencyView(dependency);
+      const fix = onFix ? rowFix(dependency, status) : null;
+      const command = fixCommand(dependency, status);
+      const failed = fixFailed(dependency);
       return <SettingRow key={dependency.name} label={row.title}>
         <span className="set-label">{row.title}</span>
         <span className="set-help">
           <span>{row.about}</span>
           {row.line && <span className={dependency.state.state === "failed" ? "pj-error" : undefined}>{row.line}</span>}
+          {failed && <span className="pj-error">{failed}</span>}
+          {command && <span>To fix it, run in Terminal: <code>{command}</code></span>}
         </span>
-        <div className="set-ctl set-line-ctl"><StatusBadge word={row.word} tone={row.tone} /></div>
+        <div className="set-ctl set-line-ctl"><StatusBadge word={row.word} tone={row.tone} />
+          {fix && onFix && <Button size="small" icon="wrench" disabled={busy !== null} onClick={() => onFix(dependency, fix)}>Fix permissions</Button>}
+          {onInstall && rowInstall(dependency, status) && <Button size="small" icon="wrench" disabled={busy !== null} pending={busy === TOOLS_BUSY + dependency.name}
+            pendingLabel="Starting..." onClick={() => onInstall(dependency)}>Install</Button>}</div>
       </SettingRow>;
     })}
     {status.notes && status.notes.length > 0 && <div className="set-body">{status.notes.map((note) => <p className="pj-error" key={note}>{displayText(note)}</p>)}</div>}
+  </SettingSection>;
+}
+
+/** The Unused tools setting of Settings, Pack (DEC-162): whether a tool found and not used
+ * because others can change its files offers a fix button or shows only the command, the
+ * fix button when the engine names neither. Inputs: the setup status, the change in flight
+ * and the handler. */
+function RefusedToolSection({ status, busy, onChoice }: { status: SetupStatus; busy: string | null; onChoice: (choice: RefusedTool) => void }) {
+  const choice = status.refused_tool ?? "fix_button";
+  return <SettingSection title="Unused tools">
+    <SettingLine wide label="When setup finds a tool it does not use" help="Others can change files the tool runs, so CrazyAgent passes it over.">
+      <fieldset className="field" disabled={busy !== null}>
+        <legend className="visually-hidden">When setup finds a tool it does not use</legend>
+        {REFUSED_TOOL_CHOICES.map((option) => <RadioCard key={option.value} name="unused-tools" value={option.value} checked={choice === option.value}
+          onChecked={() => onChoice(option.value)} title={option.title} details={[option.detail]} />)}
+      </fieldset>
+    </SettingLine>
   </SettingSection>;
 }
 
@@ -94,7 +127,7 @@ function PackRow({ entry, locked, busy, skills, onSwitch, onAsk }: {
  * line, the default pack grouped like setup and last tmux, uv and graphify. A group whose
  * installed entries differ from what ships is marked changed. Inputs: the setup read, the
  * change in flight, the last problem and the handlers. */
-export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAsk, onInstallTools, onRetry }: {
+export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAsk, onInstallTools, onInstall, onFix, onRefusedTool, onRetry }: {
   status: Loaded<SetupStatus>;
   busy: string | null;
   problem: string;
@@ -102,6 +135,9 @@ export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAs
   onSwitch: (entry: PackEntry, on: boolean) => void;
   onAsk: (ask: PackAsk) => void;
   onInstallTools: () => void;
+  onInstall?: (dependency: Dependency) => void;
+  onFix?: (dependency: Dependency, fix: ToolFix) => void;
+  onRefusedTool?: (choice: RefusedTool) => void;
   onRetry: () => void;
 }) {
   const running = status.kind === "ok" && setupBusy(status.value);
@@ -117,7 +153,8 @@ export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAs
           title={differsFromShipped(group.entries) ? <>{group.title}<span className="set-changed">changed</span></> : group.title}>
           {group.entries.map((entry) => <PackRow key={entry.id} entry={entry} locked={running || busy !== null} busy={busy} skills={skills} onSwitch={onSwitch} onAsk={onAsk} />)}
         </SettingSection>)}
-        {status.value.dependencies.length > 0 && <ToolsSection status={status.value} busy={busy} onInstallTools={onInstallTools} />}
+        {status.value.dependencies.length > 0 && <ToolsSection status={status.value} busy={busy} onInstallTools={onInstallTools} onInstall={onInstall} onFix={onFix} />}
+        {status.value.dependencies.length > 0 && onRefusedTool && <RefusedToolSection status={status.value} busy={busy} onChoice={onRefusedTool} />}
       </>}
   </div>;
 }
@@ -145,8 +182,10 @@ export function PackConfirmDialogs({ ask, pending, onCancel, onConfirm }: {
   </>;
 }
 
-/** Settings, Pack: reads the tools and the pack, installs missing tools, switches, removes and
- * installs entries, and reads again every few seconds while a tool is checked or setup installs. */
+/** Settings, Pack: reads the tools and the pack, installs missing tools, fixes a refused tool's
+ * permissions once the owner confirms the tree, saves what unused tools offer, switches, removes
+ * and installs entries, and reads again every few seconds while a tool is checked or setup
+ * installs. */
 export function PackSettings() {
   const session = useAppSession();
   const [loaded, reload] = useLoad(loadSetupStatus, [], "setup-status");
@@ -154,6 +193,7 @@ export function PackSettings() {
   const [fresh, setFresh] = useState<SetupStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [ask, setAsk] = useState<PackAsk | null>(null);
+  const [fixAsk, setFixAsk] = useState<ToolFixAsk | null>(null);
   const [problem, setProblem] = useState("");
   const status: Loaded<SetupStatus> = fresh ? { kind: "ok", value: fresh } : loaded;
   const moving = status.kind === "ok" && (setupBusy(status.value) || toolsChecking(status.value));
@@ -173,6 +213,7 @@ export function PackSettings() {
     const result = await change();
     setBusy(null);
     setAsk(null);
+    setFixAsk(null);
     if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Changing the pack isn't in this build." : intakeCopy(result)); reload(); return; }
     setFresh(result.value);
     session.showToast(done);
@@ -186,8 +227,13 @@ export function PackSettings() {
 
   return <>
     <PackSettingsView status={status} busy={busy} problem={problem} skills={listed.kind === "ok" ? skillEntries(listed.value) : []} onRetry={reload} onAsk={setAsk}
-      onInstallTools={() => void apply(TOOLS_BUSY, () => runSetup([]), "Installing tmux, uv and graphify.")}
+      onInstallTools={() => void apply(TOOLS_BUSY, () => runSetup([]), "Installing the missing tools.")}
+      onInstall={(dependency) => void apply(TOOLS_BUSY + dependency.name, () => installDependency(dependency.name), `Installing ${dependency.label}.`)}
+      onFix={(dependency, fix) => setFixAsk({ dependency, fix })}
+      onRefusedTool={(choice) => void apply(TOOLS_BUSY, () => setRefusedTool(choice), `Unused tools: ${REFUSED_TOOL_CHOICES.find((option) => option.value === choice)?.title ?? choice}.`)}
       onSwitch={(entry, on) => void apply(entry.id, () => setPackEntry(entry.id, on, version), `${entryName(entry)} is ${on ? "on" : "off"}.`)} />
+    <ToolFixDialog ask={fixAsk} pending={busy !== null} onCancel={() => { if (busy === null) setFixAsk(null); }}
+      onConfirm={(pending) => void apply(TOOLS_BUSY + pending.dependency.name, () => fixToolPermissions(pending.dependency.name, pending.fix.tree, pending.fix.recursive), `Fixing permissions on ${displayText(pending.fix.tree)}.`)} />
     <PackConfirmDialogs ask={ask} pending={busy !== null} onCancel={() => { if (busy === null) setAsk(null); }} onConfirm={confirm} />
   </>;
 }

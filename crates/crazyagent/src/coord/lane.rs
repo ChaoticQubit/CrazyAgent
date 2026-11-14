@@ -379,10 +379,12 @@ pub struct LaneView {
 
 struct Stored {
     agent: AgentId,
+    #[cfg_attr(not(unix), allow(dead_code))]
     ticket: String,
     uses: Vec<String>,
     label: String,
     created_ms: i64,
+    #[cfg_attr(not(unix), allow(dead_code))]
     seen_ms: i64,
     granted_ms: Option<i64>,
 }

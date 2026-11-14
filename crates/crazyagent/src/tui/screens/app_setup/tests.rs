@@ -129,6 +129,7 @@ fn first_run_status() -> SetupStatus {
         running: false,
         notes: Vec::new(),
         version: 4,
+        refused_tool: Default::default(),
     }
 }
 
@@ -252,6 +253,40 @@ fn lead(shell: &Shell) -> String {
 fn typed(shell: &mut Shell, text: &str) {
     for character in text.chars() {
         shell.key(Key::Char(character));
+    }
+}
+
+/// DEC-157, desktop parity with intake.ts: a tmux the app ships reads Bundled with
+/// CrazyAgent and its version, with the ready glyph.
+#[test]
+fn a_bundled_tmux_reads_bundled_with_crazyagent_and_its_version() {
+    let word = tool_word(&DependencyState::Bundled {
+        version: version("3.8"),
+    });
+    assert_eq!(word, "Bundled with CrazyAgent 3.8");
+    assert_eq!(Status::of(&word), Some(Status::Ok));
+}
+
+/// Leader 20:08, desktop parity with intake.ts: a system tmux used in place of the bundled
+/// one reads Found and its version, with the note under it, at every width.
+#[test]
+fn a_system_tmux_in_place_of_the_bundled_one_reads_found_with_its_note_under_it() {
+    for (width, height) in [(80, 24), (120, 36)] {
+        let mut status = first_run_status();
+        status.dependencies[0].state = DependencyState::System {
+            version: version("3.5a"),
+            note: crate::tools::BundleNote::CannotRun.line().to_owned(),
+        };
+        let mut shell = Shell::with(ctx(width, height), Box::new(AppSetup::new(true)));
+        assert!(matches!(jobs(&mut shell).as_slice(), [AppSetupJob::Status]));
+        shell.arrive(event(AppSetupEvent::Status(Ok(status))));
+        let rows = render(&mut shell, width, height);
+        assert!(find(&rows, "tmux").contains("Found 3.5a"));
+        find(&rows, "Using the system tmux,");
+        assert!(
+            rows.iter()
+                .all(|row| row.chars().count() <= usize::from(width))
+        );
     }
 }
 
@@ -413,7 +448,7 @@ fn continuing_installs_the_ticked_entries_then_opens_home() {
     done.pack[1].state = PackState::Available;
     done.pack[2].state = PackState::On;
     shell.arrive(event(AppSetupEvent::Status(Ok(done))));
-    assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+    assert_eq!(shell.place(), Some(Place::HarnessSetup));
 }
 
 #[test]
@@ -425,7 +460,7 @@ fn first_run_offers_to_continue_without_installing_and_runs_nothing() {
         assert!(help.contains("Enter Install and continue"), "{help}");
         assert!(help.contains("c Continue without installing"), "{help}");
         shell.key(Key::Char('c'));
-        assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+        assert_eq!(shell.place(), Some(Place::HarnessSetup));
         let runs = jobs(&mut shell)
             .iter()
             .filter(|job| matches!(job, AppSetupJob::Run { .. }))
@@ -461,7 +496,37 @@ fn a_failed_install_keeps_first_run_here_until_the_owner_continues() {
         "caveman: The source could not be downloaded.",
     );
     shell.key(Key::Char('c'));
-    assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+    assert_eq!(shell.place(), Some(Place::HarnessSetup));
+}
+
+#[test]
+fn a_failed_install_offers_try_again_which_runs_only_what_is_not_installed() {
+    let mut shell = first_run(120, 36);
+    shell.key(Key::Enter);
+    jobs(&mut shell);
+    shell.arrive(event(AppSetupEvent::Ran(Ok(()))));
+    jobs(&mut shell);
+    let mut finished = installed_status();
+    finished.dependencies[0].state = DependencyState::Failed {
+        reason: "setup_homebrew_missing".into(),
+    };
+    finished.pack[2].state = PackState::Failed {
+        reason: "pack_fetch_failed".into(),
+    };
+    shell.arrive(event(AppSetupEvent::Status(Ok(finished))));
+    let rows = render(&mut shell, 120, 36);
+    let help = bar(&rows);
+    assert!(help.contains("Enter Try again"), "{help}");
+    assert!(help.contains("c Continue without it"), "{help}");
+    shell.key(Key::Enter);
+    let runs: Vec<Vec<String>> = jobs(&mut shell)
+        .into_iter()
+        .filter_map(|job| match job {
+            AppSetupJob::Run { pack, .. } => Some(pack),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(runs, vec![vec!["caveman".to_owned()]]);
 }
 
 #[test]
@@ -580,7 +645,7 @@ fn without_engine_support_first_run_says_not_ready_and_continues() {
     find(&rows, "Not ready yet.");
     assert!(bar(&rows).contains("Enter Continue"));
     shell.key(Key::Enter);
-    assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+    assert_eq!(shell.place(), Some(Place::HarnessSetup));
 }
 
 #[test]
@@ -1854,8 +1919,8 @@ fn settings_show_retry_briefly_by_default_with_the_three_options_and_each_harnes
     ] {
         assert!(shown.contains(line), "{line} in {shown}");
     }
-    assert!(bar(&rows).contains("p Retries"));
-    shell.key(Key::Char('p'));
+    assert!(bar(&rows).contains("e Retry"));
+    shell.key(Key::Char('e'));
     let rows = render(&mut shell, 200, 80);
     find(
         &rows,
@@ -1866,7 +1931,7 @@ fn settings_show_retry_briefly_by_default_with_the_three_options_and_each_harnes
     find(&rows, "  Harness default");
     let shown = flat(&rows);
     for summary in [
-        "A run fails with the provider's error instead of retrying.",
+        "Runs fail with the provider's error instead of retrying, where the harness allows it.",
         "Harnesses keep their own retries, but none waits for the network without end.",
         "CrazyAgent sets nothing, so each harness does what it does on its own.",
         "New runs take the choice; runs already going keep theirs. Each harness line is proven on read-only runs.",
@@ -1902,7 +1967,7 @@ fn each_provider_retry_option_is_saved_when_picked_and_shown_once_stored() {
         (ProviderRetry::RetryBriefly, Key::Up, 1, "Retry briefly"),
     ];
     for (choice, key, presses, title) in picks {
-        shell.key(Key::Char('p'));
+        shell.key(Key::Char('e'));
         for _ in 0..presses {
             shell.key(key.clone());
         }
@@ -1932,11 +1997,11 @@ fn each_provider_retry_option_is_saved_when_picked_and_shown_once_stored() {
 #[test]
 fn esc_and_a_refused_save_leave_the_provider_retry_setting_as_it_was() {
     let mut shell = settings(200, 80);
-    shell.key(Key::Char('p'));
+    shell.key(Key::Char('e'));
     shell.key(Key::Up);
     shell.key(Key::Esc);
     assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
-    shell.key(Key::Char('p'));
+    shell.key(Key::Char('e'));
     shell.key(Key::Up);
     shell.key(Key::Enter);
     assert_eq!(retry_chosen(&mut shell), ProviderRetry::StopAtOnce);
@@ -1956,7 +2021,7 @@ fn a_stored_provider_retry_setting_this_version_does_not_know_is_not_offered() {
     let row = find(&rows, "Provider retry  ");
     assert!(row.contains("Failed to read it."), "{row}");
     assert!(row.contains("not one this version knows"), "{row}");
-    shell.key(Key::Char('p'));
+    shell.key(Key::Char('e'));
     assert!(jobs(&mut shell).is_empty());
     assert_eq!(lead(&shell), "The provider retry setting is not known yet.");
 }
@@ -1968,8 +2033,8 @@ fn the_provider_retry_row_and_its_ask_fit_a_120_by_40_terminal() {
     let mut shell = settings(120, 40);
     let rows = render(&mut shell, 120, 40);
     assert!(find(&rows, "Provider retry  ").contains("Retry briefly"));
-    assert!(bar(&rows).contains("p Retries"));
-    shell.key(Key::Char('p'));
+    assert!(bar(&rows).contains("e Retry"));
+    shell.key(Key::Char('e'));
     let rows = render(&mut shell, 120, 40);
     find(
         &rows,
@@ -1988,4 +2053,197 @@ fn the_provider_retry_row_and_its_ask_fit_a_120_by_40_terminal() {
         crate::provider_retry::view(ProviderRetry::HarnessDefault),
     ))));
     assert!(find(&render(&mut shell, 120, 40), "Provider retry  ").contains("Harness default"));
+}
+
+/// DEC-162: with a tool found and not used, the fix and unused tools hints join the app
+/// settings bar and every hint, `Esc Back` included, still stays on it from 80x24 to 240
+/// columns.
+#[test]
+fn a_refused_tool_keeps_every_app_settings_hint_on_the_bar_from_80_by_24_to_240_columns() {
+    let mut shell = settings(240, 80);
+    shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+        crate::setup::RefusedTool::FixButton,
+    )))));
+    let rows = render(&mut shell, 240, 80);
+    let wide = crate::tui::screens::settings_accounts::tests::bar_rows(&rows);
+    assert_eq!(wide.len(), 1, "{wide:?}");
+    let hints = crate::tui::screens::settings_accounts::tests::wide_hints(&wide[0]);
+    for needed in [
+        "p Fix",
+        "u Unused",
+        "Esc Back",
+        "g Sign out of GitHub",
+        "? Help",
+    ] {
+        assert!(hints.iter().any(|hint| hint == needed), "{hints:?}");
+    }
+    for (width, height) in [(200, 80), (209, 80), (80, 24)] {
+        let rows = render(&mut shell, width, height);
+        crate::tui::screens::settings_accounts::tests::every_hint_once(
+            &rows,
+            &hints,
+            &format!("{width}x{height}"),
+        );
+    }
+}
+
+fn refused_status(choice: crate::setup::RefusedTool) -> SetupStatus {
+    let mut status = installed_status();
+    assert_eq!(status.dependencies[2].name, Dependency::Graphify);
+    status.dependencies[2].state = DependencyState::Refused {
+        line: "graphify can't start: /h/g/bin/python3 is not used because another user or group can change /h/py/bin/python3.13.".into(),
+        file: "/h/g/bin/python3".into(),
+        part: Some("/h/py/bin/python3.13".into()),
+        fix: Some(crate::setup::ToolFix {
+            tree: "/h/py".into(),
+            recursive: true,
+            command: "chmod -R go-w '/h/py'".into(),
+        }),
+        fix_failed: None,
+    };
+    status.refused_tool = choice;
+    status
+}
+
+fn fix_sent(shell: &mut Shell) -> (Dependency, String, bool) {
+    let sent = jobs(shell);
+    let [
+        AppSetupJob::FixPermissions {
+            name,
+            tree,
+            recursive,
+            generation,
+        },
+    ] = sent.as_slice()
+    else {
+        panic!("one permission fix required, got {} jobs", sent.len())
+    };
+    assert!(*generation > 0);
+    (*name, tree.clone(), *recursive)
+}
+
+#[test]
+fn a_refused_tool_reads_found_not_used_and_p_fixes_only_the_tree_the_confirm_named() {
+    let mut shell = settings(120, 60);
+    shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+        crate::setup::RefusedTool::FixButton,
+    )))));
+    let rows = render(&mut shell, 120, 60);
+    assert!(find(&rows, "Graphify command").contains("Found, not used"));
+    find(&rows, "graphify can't start");
+    find(
+        &rows,
+        "Press p to remove write access for others from /h/py.",
+    );
+    assert!(bar(&rows).contains("p Fix"), "{}", bar(&rows));
+
+    shell.key(Key::Char('p'));
+    assert!(jobs(&mut shell).is_empty());
+    let rows = render(&mut shell, 120, 60);
+    find(&rows, "Fix permissions for Graphify command?");
+    find(&rows, "chmod -R go-w '/h/py'");
+    assert!(bar(&rows).contains("y Fix"), "{}", bar(&rows));
+    shell.key(Key::Char('n'));
+    assert!(jobs(&mut shell).is_empty());
+
+    shell.key(Key::Char('p'));
+    shell.key(Key::Char('y'));
+    assert_eq!(
+        fix_sent(&mut shell),
+        (Dependency::Graphify, "/h/py".into(), true),
+        "y sends the tree and the scope the confirm named"
+    );
+    shell.arrive(event(AppSetupEvent::FixSet(Ok(()))));
+    assert_eq!(lead(&shell), "Fixing permissions on /h/py.");
+    assert!(
+        jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, AppSetupJob::Status))
+    );
+    assert!(shell.busy());
+
+    let mut running = refused_status(crate::setup::RefusedTool::FixButton);
+    running.running = true;
+    shell.arrive(event(AppSetupEvent::Status(Ok(running))));
+    assert_eq!(lead(&shell), "Fixing permissions on /h/py.");
+    shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
+    assert_eq!(
+        lead(&shell),
+        "Permissions fixed. Graphify command can run now."
+    );
+    assert!(!shell.busy());
+}
+
+#[test]
+fn a_failed_permission_fix_shows_its_sentence_on_the_row_and_as_the_message() {
+    let mut shell = first_run(120, 36);
+    shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+        crate::setup::RefusedTool::FixButton,
+    )))));
+    shell.key(Key::Char('p'));
+    shell.key(Key::Char('y'));
+    fix_sent(&mut shell);
+    shell.arrive(event(AppSetupEvent::FixSet(Ok(()))));
+    jobs(&mut shell);
+    let failed = crate::setup::plain_reason(crate::tools::permission_fix::TOOL_FIX_FAILED);
+    let mut after = refused_status(crate::setup::RefusedTool::FixButton);
+    if let DependencyState::Refused { fix_failed, .. } = &mut after.dependencies[2].state {
+        *fix_failed = Some(failed.to_owned());
+    }
+    shell.arrive(event(AppSetupEvent::Status(Ok(after))));
+    assert_eq!(lead(&shell), failed);
+    find(
+        &render(&mut shell, 120, 36),
+        "The permissions could not be changed.",
+    );
+    assert_eq!(shell.place(), Some(Place::Setup { first_run: true }));
+}
+
+#[test]
+fn command_only_shows_the_command_and_p_sends_nothing() {
+    let mut shell = settings(120, 60);
+    shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+        crate::setup::RefusedTool::CommandOnly,
+    )))));
+    let rows = render(&mut shell, 120, 60);
+    find(&rows, "To fix it, run in Terminal: chmod -R go-w '/h/py'");
+    assert!(!bar(&rows).contains("p Fix"), "{}", bar(&rows));
+    shell.key(Key::Char('p'));
+    assert!(jobs(&mut shell).is_empty());
+    assert_eq!(
+        lead(&shell),
+        crate::setup::plain_reason(crate::tools::permission_fix::TOOL_FIX_OFF)
+    );
+}
+
+#[test]
+fn the_unused_tools_setting_saves_the_command_only_choice() {
+    let mut shell = settings(120, 60);
+    let rows = render(&mut shell, 120, 60);
+    assert!(find(&rows, "Unused tools").contains("Show a fix button"));
+    assert!(bar(&rows).contains("u Unused"), "{}", bar(&rows));
+    shell.key(Key::Char('u'));
+    find(&render(&mut shell, 120, 60), "> Show a fix button");
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let sent = jobs(&mut shell);
+    let [AppSetupJob::SetRefusedTool { choice, generation }] = sent.as_slice() else {
+        panic!("one unused tools change required, got {} jobs", sent.len())
+    };
+    assert_eq!(*choice, crate::setup::RefusedTool::CommandOnly);
+    assert!(*generation > 0);
+    shell.arrive(event(AppSetupEvent::RefusedToolSet(Ok(()))));
+    assert_eq!(lead(&shell), "Unused tools: Show the command only.");
+}
+
+/// DEC-158: keeping team agents tells the owner that an agent under network None is frozen
+/// until CrazyAgent opens again, in the same words as the desktop Settings.
+#[test]
+fn keeping_team_agents_says_an_agent_under_network_none_is_frozen_until_crazyagent_opens() {
+    let (title, detail) = on_quit_words(OnQuit::KeepRunning);
+    assert_eq!(title, "Keep team agents running");
+    assert_eq!(
+        detail,
+        "They go on with their work, and CrazyAgent takes them over when it opens again. An agent under network None is frozen instead, until CrazyAgent opens again."
+    );
 }
