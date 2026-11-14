@@ -1267,6 +1267,27 @@ fn names_near_git_and_links_out_of_the_server_data_folder_leave_a_start_alone() 
     assert!(server_command(&servers, &full, &root, &folder).is_ok());
 }
 
+/// A repository a server of an older profile moved from its data folder into its temp
+/// folder, which every start of that project reuses, stops a confined start with
+/// `ide_server_data_git` and stays where it was, so no later server renames it from there
+/// into the project (SA vid 101 residue one rename further, rv-sec2 r1 F1).
+#[test]
+fn a_git_moved_into_the_server_temp_folder_stops_a_confined_start() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("moved-to-tmp");
+    let folder = servers.prepare(&id).unwrap();
+    let tmp = crate::sandbox::toolchains::make_tmp(&folder.join(SERVER_DATA)).unwrap();
+    let planted = tmp.join("x").join(".git");
+    fs::create_dir_all(planted.join("hooks")).unwrap();
+    let started = server_command(&servers, &id, &root, &folder);
+    let kept = planted.is_dir();
+    fs::remove_dir_all(&tmp).unwrap();
+    assert_eq!(started.unwrap_err().0, "ide_server_data_git");
+    assert!(kept, "the planted .git was removed instead of refusing the start");
+}
+
 /// Runs git as a built IDE server starts it: the engine's shim under the server's installed
 /// profile and environment, with the owner's home as `HOME`, as the app has it. Inputs: the
 /// built command, the IDE folder, the owner's home, the working folder and git's arguments.
