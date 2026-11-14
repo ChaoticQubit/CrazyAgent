@@ -96,7 +96,8 @@ pub struct MappingTry {
 /// extra facts, the `missing` fields such as `about`, the `.crazyagent/overview.md` this
 /// engine wrote as `overview` or one it did not write as `folder_overview`, `finished`
 /// once the owner saved the setup, when name and draft are the saved ones, the project's own
-/// instruction files the start moved into `.crazyagent/imported/`, and as `proposed` the
+/// instruction files the start moved into `.crazyagent/imported/`, as `carried` whether its
+/// project instructions came with the folder's repository (SA vid 7), and as `proposed` the
 /// mapping's draft when the owner saved a setup with neither about nor tech stack before
 /// the mapping finished.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +116,8 @@ pub struct OnboardingView {
     pub folder_overview: Option<String>,
     pub finished: bool,
     pub imported: Vec<crate::instruction_files::ImportFile>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub carried: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed: Option<ProjectSetup>,
 }
@@ -457,7 +460,9 @@ fn real_dir(path: &Path) -> bool {
 /// same name that is gone, and is refused as `onboarding_project_mismatch`
 /// while that folder is still there. A new project's own instruction files
 /// (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md, CLAUDE.local.md) are copied into its
-/// project instructions and moved into `.crazyagent/imported/` last, and the moved
+/// project instructions and moved into `.crazyagent/imported/` last, after the project
+/// instructions the folder arrived with are labelled Imported (SA vid 7), a label that
+/// cannot be saved refusing the start as `onboarding_instructions_unwritable`, and the moved
 /// files are kept for the onboarding view; a file or import the engine refuses
 /// stays in place for the owner's later import. Takes the transaction,
 /// configuration, engine database path and action. Returns Applied or a plain
@@ -535,6 +540,9 @@ pub(crate) fn execute(
         || !real_dir(&layout.join(CONTEXT_DIRECTORY))
     {
         return Ok(rejected("onboarding_layout_incomplete"));
+    }
+    if crate::instruction_files::label_arrived(&repo).is_err() {
+        return Ok(rejected("onboarding_instructions_unwritable"));
     }
     let mut drafted = engine_draft(tx, repo_text, &layout)?
         .unwrap_or_else(|| draft::Drafted::new(draft::folder_name(&repo), pool));
@@ -815,6 +823,7 @@ pub(crate) fn status(
         folder_overview,
         finished,
         imported: crate::instruction_files::moved(tx, project_id, Path::new(&repo))?,
+        carried: crate::instruction_files::carried_in(Path::new(&repo)),
         proposed,
     }))
 }

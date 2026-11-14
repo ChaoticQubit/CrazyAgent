@@ -157,7 +157,7 @@ impl Screen for Startup {
                 ]),
                 Line::default(),
                 Line::raw("  Projects, accounts and agents live in the engine."),
-                Line::raw("  Start it, then press r to try again."),
+                Line::raw("  Start it with crazyagent service start, then press r to try again."),
                 Line::default(),
                 Line::from(vec![
                     Span::raw("  "),

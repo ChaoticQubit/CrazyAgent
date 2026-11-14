@@ -2499,7 +2499,7 @@ async fn starting_onboarding_moves_the_instruction_files_and_the_view_lists_them
     );
     assert_eq!(
         fs::read_to_string(bench.repo.join(".crazyagent").join("instructions.md")).unwrap(),
-        "## Imported from CLAUDE.md\n\n# Rules\n\nONBOARD-CLAUDE-RULE-83\n\n## Imported from AGENTS.md\n\nONBOARD-AGENTS-RULE-84\n"
+        "### Imported from CLAUDE.md\n\n#### Rules\n\nONBOARD-CLAUDE-RULE-83\n\n### Imported from AGENTS.md\n\nONBOARD-AGENTS-RULE-84\n"
     );
     assert_eq!(
         git(&bench.repo, &["status", "--porcelain"]),
@@ -2895,8 +2895,21 @@ async fn a_research_job_claimed_while_the_home_moves_goes_back_to_wait() {
         (job.status, job.attempts),
         (crazyagent::research::jobs::ResearchStatus::Queued, 0)
     );
+    assert_eq!(
+        job.error.as_deref(),
+        Some("Waiting for the projects home move to finish")
+    );
     db.execute("DELETE FROM projects_home_move WHERE singleton=1", [])
         .unwrap();
+    assert!(
+        runner.run_once(&project).unwrap().is_none(),
+        "the job waits out its backoff (DEC-170 addendum 6)"
+    );
+    db.execute(
+        "UPDATE research_jobs SET not_before_ms = 0 WHERE id = ?1",
+        [id],
+    )
+    .unwrap();
     let ran = runner
         .run_once(&project)
         .unwrap()

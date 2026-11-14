@@ -353,6 +353,40 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     library::initialize(connection)
 }
 
+/// The knowledge tables whose rows belong to one project by its id.
+const KNOWLEDGE_OF_PROJECT: [&str; 7] = [
+    "knowledge_heads",
+    "knowledge_entries",
+    "knowledge_nominations",
+    "knowledge_activity",
+    "knowledge_sources",
+    "knowledge_jobs",
+    "knowledge_watermarks",
+];
+
+/// Deletes every knowledge row of one project id, its kept research among them, and the
+/// app-wide candidates made from its entries, so a project removed and a different folder
+/// later added under the same id never shares them (SA research id reuse, owner decision
+/// 11-14). Inputs: the open transaction and the project. Output: done, or the database's
+/// refusal.
+pub(crate) fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
+    tx.execute(
+        "DELETE FROM knowledge_globals WHERE entry IN
+         (SELECT id FROM knowledge_entries WHERE project=?1)",
+        [project.as_str()],
+    )
+    .map_err(error)?;
+    for table in KNOWLEDGE_OF_PROJECT {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE project=?1"),
+            [project.as_str()],
+        )
+        .map_err(error)?;
+    }
+    assert!(!tx.is_autocommit());
+    Ok(())
+}
+
 pub(crate) fn capacity(
     tx: &Transaction<'_>,
     table: &str,
@@ -627,6 +661,22 @@ pub(crate) fn hidden_text(text: &str) -> bool {
     (0..chars.len()).any(|at| hidden_at(&chars, at))
 }
 
+/// Takes out every character [`hidden_text`] finds; line breaks, tabs and an emoji
+/// selector or joiner inside an emoji stay. Input: the text. Output: the text without them.
+pub(crate) fn without_hidden(text: &str) -> String {
+    if !hidden_text(text) {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let out: String = (0..chars.len())
+        .filter(|at| !hidden_at(&chars, *at))
+        .map(|at| chars[at])
+        .collect();
+    assert!(out.len() < text.len());
+    assert!(!hidden_text(&out));
+    out
+}
+
 /// Shows every character hidden_text finds as a visible escape, `\uXXXX` or `\u{XXXXX}`,
 /// the same form the desktop shows. Input: the text. Output: the text with those characters
 /// escaped; line breaks, tabs and an emoji selector or joiner inside an emoji stay as they are.
@@ -654,7 +704,7 @@ fn hidden_at(chars: &[char], at: usize) -> bool {
     hidden_char(chars[at]) && !emoji_part(chars, at)
 }
 
-fn hidden_char(c: char) -> bool {
+pub(crate) fn hidden_char(c: char) -> bool {
     (c.is_control() && c != '\n' && c != '\t')
         || matches!(
             c,

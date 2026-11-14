@@ -411,8 +411,9 @@ fn banner_run(db: &Connection, run: &Interrupted) -> Result<BannerRun, EngineErr
 
 /// Shapes one pending ledger action as a banner notice of one project. Inputs: the engine
 /// database, the project and the action. Output: the notice, none for an intent a check
-/// still settles or a notice of another project, or `recovery_record_invalid` for a notice
-/// that names neither a team agent nor a project.
+/// still settles, a notice of another project, or one whose agent is gone or holds no team
+/// role, so one such notice never fails every project's banner (RV-DS241-64), or
+/// `recovery_record_invalid` for a notice that names neither a team agent nor a project.
 fn banner_notice(
     db: &Connection,
     project: &ProjectId,
@@ -459,15 +460,13 @@ fn banner_notice(
         .optional()
         .map_err(|_| failure("recovery_unavailable"))?;
     let Some((owner, role)) = found else {
-        return Err(invalid());
+        return Ok(None);
     };
     if owner != project.as_str() {
         return Ok(None);
     }
-    let role = match role.as_str() {
-        "master" => AgentRole::Master,
-        "sub" => AgentRole::Sub,
-        _ => return Err(invalid()),
+    let Some(role) = AgentRole::parse(&role) else {
+        return Ok(None);
     };
     notice.agent = Some(agent);
     notice.label = Some(agent_label(db, agent, role)?);

@@ -23,6 +23,7 @@ pub(crate) fn subjects(checkout: &Path, max: usize) -> Result<Vec<String>, Engin
         let count = max.to_string();
         let arguments = [
             "log",
+            "--no-show-signature",
             "--first-parent",
             "-z",
             "--format=%s",

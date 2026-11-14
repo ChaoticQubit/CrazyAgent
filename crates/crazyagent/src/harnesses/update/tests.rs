@@ -2036,6 +2036,71 @@ fn a_harness_that_still_needs_a_program_is_never_asked_its_version_until_the_res
     );
 }
 
+/// security-audit run-1 (version read): a harness file the tool resolver refuses as one
+/// agents can write, such as a codex planted in a project's `node_modules/.bin`, is never run
+/// for its version: the read starts nothing and names the resolver's refusal, as a launch
+/// refuses the file. Without the project marker the same file is read once, so the resolver
+/// decides the outcome, not a failed start.
+#[test]
+fn a_harness_the_resolver_refuses_as_agent_writable_is_never_asked_its_version() {
+    for project in [true, false] {
+        let machine = Machine::new();
+        std::fs::create_dir_all(machine.roots().home).unwrap();
+        let work = machine.root.path().join("proj");
+        if project {
+            std::fs::create_dir_all(work.join(".crazyagent")).unwrap();
+        }
+        let ran = machine.root.path().join("ran");
+        let real = work.join("node_modules/@openai/codex/bin/codex.js");
+        executable(
+            &real,
+            &format!(
+                "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+                ran.display()
+            ),
+        );
+        let link = work.join("node_modules/.bin/codex");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(matches!(
+            method("codex", &real, &machine.roots()),
+            Method::Npm { .. }
+        ));
+        let resolved = crate::tools::resolve_entry(&link, &machine.roots().places);
+        let case = Case::new(machine, entry("codex", Some(link)), None);
+        let versions = case.versions(false);
+        if project {
+            let refused = resolved.unwrap_err();
+            assert_eq!(refused.reason, crate::tools::Reason::Refused);
+            assert_eq!(
+                refused.refused.as_ref().map(|refused| refused.why.clone()),
+                Some(crate::tools::Refusal::AgentsCanWrite)
+            );
+            assert_eq!(versions.installed, None);
+            assert_eq!(
+                versions.needs.as_ref().map(|needs| needs.line.clone()),
+                Some(refused.line())
+            );
+            assert!(!ran.exists(), "a refused harness file is never run");
+            let listed = crate::harnesses::with_needs(
+                vec![entry("codex", Some(case.entry.executable.clone().unwrap()))],
+                &case.machine.roots().places,
+            );
+            assert_eq!(
+                listed[0].status,
+                crate::harnesses::HarnessStatus::CantRun {
+                    reason: refused.line()
+                }
+            );
+        } else {
+            assert!(resolved.is_ok());
+            assert_eq!(versions.needs, None);
+            assert_eq!(versions.installed.as_deref(), Some("0.167.1"));
+            assert_eq!(std::fs::read_to_string(&ran).unwrap().lines().count(), 1);
+        }
+    }
+}
+
 fn listed(ids: &[&str]) -> Vec<String> {
     ids.iter().map(|id| (*id).to_owned()).collect()
 }
@@ -2298,4 +2363,156 @@ fn a_versions_row_names_the_sign_in_minimum_of_a_harness_that_signs_in() {
     let claude = machine.program("brew/bin/claude", 0o755);
     let installed = Case::new(machine, entry("claude-code", Some(claude)), None).versions(false);
     assert_eq!(installed.sign_in_min.as_deref(), Some("2.1.268"));
+}
+
+/// RV-DS241-59: a check or update program is trusted only as the tool resolver trusts one:
+/// npm from a prefix inside a project, which agents write, or from a prefix under a folder
+/// every user can write, two levels up from npm, is refused before anything runs.
+#[test]
+fn a_check_program_agents_or_other_users_can_change_up_its_path_is_refused() {
+    for prefix in ["proj/node", "open/shared/node"] {
+        let machine = Machine::new();
+        std::fs::create_dir_all(machine.root.path().join("proj/.crazyagent")).unwrap();
+        machine.npm(prefix);
+        let open = machine.root.path().join("open");
+        std::fs::create_dir_all(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let real = machine.program(
+            &format!("{prefix}/lib/node_modules/@openai/codex/bin/codex.js"),
+            0o755,
+        );
+        assert_eq!(
+            check_command("codex", &real, &machine.roots()).map(|fixed| fixed.map(|_| ())),
+            Err(TOOL_UNSAFE),
+            "{prefix}"
+        );
+    }
+}
+
+/// security-audit run-1 (npm prefix, test A): a Check of an npm harness outside the engine's
+/// own prefix never starts a `node` the resolver would not run: npm's `env node` first line
+/// finds the prefix's node first on the child's PATH, and that node leads into a folder every
+/// user can write, so the check is refused, even with a good node elsewhere in the places the
+/// resolver vets npm with, and the prefix's node never runs.
+#[test]
+fn a_check_never_runs_an_npm_prefix_node_others_can_change() {
+    let machine = Machine::new();
+    let home = machine.roots().home;
+    std::fs::create_dir_all(&home).unwrap();
+    let vetted = machine.program("brew/bin/node", 0o755);
+    let real = machine.program("node/lib/node_modules/@openai/codex/bin/codex.js", 0o755);
+    let cli = machine
+        .root
+        .path()
+        .join("node/lib/node_modules/npm/bin/npm-cli.js");
+    executable(&cli, "#!/usr/bin/env node\n");
+    let bin = machine.root.path().join("node/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(&cli, bin.join("npm")).unwrap();
+    let open = machine.root.path().join("open");
+    std::fs::create_dir_all(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    executable(&open.join("node"), "#!/bin/sh\n: > \"$HOME/marker\"\n");
+    std::os::unix::fs::symlink(open.join("node"), bin.join("node")).unwrap();
+    let resolved = crate::tools::resolve_entry(&bin.join("npm"), &machine.roots().places);
+    match resolved.unwrap().kind {
+        crate::tools::Kind::Script { interpreter, .. } => assert_eq!(interpreter.entry, vetted),
+        crate::tools::Kind::Native => panic!("npm is a script"),
+    }
+    match check_command("codex", &real, &machine.roots()) {
+        Ok(Some(fixed)) => {
+            let _ = run(&fixed, &home, CHECK_TIME);
+        }
+        Ok(None) => {}
+        Err(code) => assert_eq!(code, TOOL_UNSAFE),
+    }
+    assert!(
+        !home.join("marker").exists(),
+        "a node others can change never runs"
+    );
+}
+
+/// RV-DS241-62: the Homebrew prefixes the engine trusts for install, check and update are
+/// this platform's own, as the tool resolver's are: Linuxbrew's prefix only on Linux, so a
+/// Mac never stats or runs a brew from the home automount.
+#[test]
+fn the_engine_trusts_only_this_platforms_homebrew_prefixes() {
+    let machine = Machine::new();
+    let roots = Roots::engine(machine.root.path());
+    let linuxbrew = PathBuf::from("/home/linuxbrew/.linuxbrew");
+    assert_eq!(
+        roots.brew_prefixes.contains(&linuxbrew),
+        cfg!(target_os = "linux")
+    );
+    if cfg!(target_os = "macos") {
+        for prefix in ["/opt/homebrew", "/usr/local"] {
+            assert!(
+                roots.brew_prefixes.contains(&PathBuf::from(prefix)),
+                "{prefix}"
+            );
+        }
+    }
+}
+
+/// RV-DS241-59 (Update): an Update of a harness the tool resolver refuses, an npm Codex in a
+/// prefix inside a project, which agents write, never runs that file for its version before
+/// or after the update, nor the prefix's npm.
+#[test]
+fn an_update_of_a_resolver_refused_harness_never_runs_it() {
+    let machine = Machine::new();
+    std::fs::create_dir_all(machine.roots().home).unwrap();
+    std::fs::create_dir_all(machine.root.path().join("proj/.crazyagent")).unwrap();
+    let ran = machine.root.path().join("ran");
+    machine.npm("proj/node");
+    let real = machine
+        .root
+        .path()
+        .join("proj/node/lib/node_modules/@openai/codex/bin/codex.js");
+    executable(
+        &real,
+        &format!(
+            "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+            ran.display()
+        ),
+    );
+    let case = Case::new(machine, entry("codex", Some(real)), None);
+    let (ended, told) = std::sync::mpsc::channel();
+    let started = case
+        .updates
+        .start(&case.db, &case.entry, &case.machine.roots(), move |ok| {
+            let _ = ended.send(ok);
+        });
+    match started {
+        Ok(()) => {
+            let _ = told.recv_timeout(Duration::from_secs(30));
+        }
+        Err(code) => assert_eq!(code, TOOL_UNSAFE),
+    }
+    assert!(!ran.exists(), "a refused harness file is never run");
+}
+
+/// rv-sec4 r1 addendum F2 (RV-DS241-59 sibling): the usage User-Agent's version read runs a
+/// Claude entry's `--version` only where the tool resolver would run it. An npm entry whose
+/// `env node` first line finds, in the entry's own folder, a node that leads into a folder
+/// every user can write is never asked its version, and that node never runs.
+#[test]
+fn the_user_agent_version_read_never_runs_a_node_others_can_change() {
+    let machine = Machine::new();
+    let entry = machine.root.path().join("claude/bin/claude");
+    executable(&entry, "#!/usr/bin/env node\n");
+    let open = machine.root.path().join("open");
+    std::fs::create_dir_all(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let marker = machine.root.path().join("marker");
+    executable(
+        &open.join("node"),
+        &format!(
+            "#!/bin/sh\n: > '{}'\necho 2.1.300\n",
+            marker.to_str().unwrap()
+        ),
+    );
+    std::os::unix::fs::symlink(open.join("node"), entry.with_file_name("node")).unwrap();
+    assert_eq!(version_under_home(&entry), None);
+    assert!(!marker.exists(), "a node others can change never runs");
 }

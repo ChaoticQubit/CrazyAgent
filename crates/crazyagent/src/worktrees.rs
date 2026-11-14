@@ -287,36 +287,24 @@ fn git_until(
 }
 
 /// Builds the engine's Git process: the host Git with a cleared environment, no system
-/// or global config, hooks, fsmonitor, replace objects, grafts, commit-graph files,
-/// protocols or automatic maintenance. Inputs: the repository and the arguments. Output:
-/// the unspawned process.
+/// or global config, the engine's safe settings (no hooks, fsmonitor, pager, protocols or
+/// signature programs), no replace objects, grafts, commit-graph files or automatic
+/// maintenance. Inputs: the repository and the arguments. Output: the unspawned process.
 fn git_command(repository: &Path, args: &[&str]) -> Process {
     let mut command = Process::new("/usr/bin/git");
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .env("GIT_ATTR_NOSYSTEM", "1")
+        .envs(crate::research::runner::GIT_SAFE_ENV)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_GRAFT_FILE", "/dev/null")
         .arg("--no-replace-objects")
         .arg("--no-optional-locks")
+        .args(crate::research::runner::GIT_SAFE)
         .args([
             "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.pager=cat",
-            "-c",
             "core.attributesFile=/dev/null",
-            "-c",
-            "submodule.recurse=false",
-            "-c",
-            "protocol.allow=never",
             "-c",
             "gc.auto=0",
             "-c",
@@ -3702,5 +3690,21 @@ mod tests {
             inspect(repository.to_str().unwrap()).unwrap_err().0,
             "git_metadata_capacity"
         );
+    }
+
+    /// The engine's worktree git, asked outright for the signature of an owner commit in any
+    /// armor, runs none of the repository's signature programs (RV-DS241-39).
+    #[test]
+    fn engine_worktree_git_runs_no_repository_signature_program_in_any_armor() {
+        use crate::landing::signature_tests::{Armor, signed};
+        for armor in Armor::ALL {
+            let signed = signed(armor);
+            git(
+                &signed.root,
+                &["log", "--show-signature", "-1", "--format=%s"],
+            )
+            .unwrap();
+            assert_eq!(signed.ran(), Vec::<String>::new(), "{armor:?}");
+        }
     }
 }

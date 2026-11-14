@@ -1194,8 +1194,9 @@ fn keeper_answer(record: &Path) -> Option<u8> {
 }
 
 /// Frames a prompt as one bracketed paste the app takes as typed text, split into host
-/// inputs of at most `INPUT_BYTES_MAX` bytes on character boundaries. Control characters
-/// other than newline and tab are dropped, so the prompt cannot end the paste or press keys.
+/// inputs of at most `INPUT_BYTES_MAX` bytes on character boundaries and never inside the
+/// closing marker, which a harness may read per input. Control characters other than
+/// newline and tab are dropped, so the prompt cannot end the paste or press keys.
 pub fn paste(prompt: &str) -> Vec<String> {
     let clean: String = prompt
         .replace("\r\n", "\n")
@@ -1204,17 +1205,23 @@ pub fn paste(prompt: &str) -> Vec<String> {
         .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
         .collect();
     let framed = format!("{PASTE_START}{clean}{PASTE_END}");
+    let marker = framed.len() - PASTE_END.len();
     let mut parts = Vec::new();
     let mut start = 0;
     while start < framed.len() {
         let mut end = (start + INPUT_BYTES_MAX).min(framed.len());
+        if marker < end && end < framed.len() {
+            end = marker;
+        }
         while !framed.is_char_boundary(end) {
             end -= 1;
         }
+        assert!(end > start);
         parts.push(framed[start..end].to_owned());
         start = end;
     }
     assert!(parts.iter().all(|part| part.len() <= INPUT_BYTES_MAX));
+    assert!(parts.last().is_some_and(|part| part.ends_with(PASTE_END)));
     assert_eq!(parts.concat(), framed);
     parts
 }

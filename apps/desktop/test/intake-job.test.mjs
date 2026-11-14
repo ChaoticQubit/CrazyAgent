@@ -25,7 +25,7 @@ test("an intake job line says what it does now, with counts as files land", () =
   assert.equal(intake.jobLine(job({ state: "cancelled", phase: "copying" })), "Adding shop stopped. Nothing was moved or copied.");
   assert.equal(intake.jobLine(job(failed("home_copy_failed", "copying"))), "shop: Couldn't copy the folder. The original is untouched. Try again.");
   assert.equal(intake.jobLine(job(failed("home_move_source_left", "clearing"))),
-    "shop: The folder was added, but part of the original couldn't be removed. Check its old place.");
+    "shop: The folder was added, but part of the original couldn't be removed. What's left there may be newer than the copy, so check it before you delete anything.");
   assert.equal(intake.jobLine(job({ state: "needs_answer", code: "home_move_worktrees" })), "shop needs your answer before it is moved.");
   assert.equal(intake.jobLine(job({ state: "needs_answer", code: "home_copy_too_large" }, { mode: "copy" })), "shop needs your answer before it is copied.");
 });

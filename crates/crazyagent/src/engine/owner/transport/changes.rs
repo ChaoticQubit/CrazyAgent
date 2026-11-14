@@ -29,6 +29,7 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_embedded_repository",
     "changes_git_busy",
     "changes_git_failed",
+    "changes_git_hooks",
     "changes_git_unsupported",
     "changes_ignored_files",
     "changes_link_outside",

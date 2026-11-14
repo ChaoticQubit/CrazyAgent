@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, GrantLogRow, IdeAgentFiles, PolicyView, SharedAccess, SharedFolders, SharedScope, ToolCacheScope } from "../../api-projects";
+import { desktopPlatform } from "../../api-ide";
 import { Switch } from "../../ui";
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -46,6 +47,12 @@ export const NETWORK_CHOICES: { network: AgentNetwork; label: string; help: stri
   { network: "https", label: "Port 443 only", help: "Agents and the plugin check reach port 443 only; agents also still reach the model." },
   { network: "none", label: "None", help: "None limits agents to their model: a hosted model's own hosts, through the engine's proxy, or only the local model's port. The plugin check reaches nothing." },
 ];
+
+/** What a limited network can't hold on Linux, shown there only, the engine's LINUX_PORTS_ANY_HOST_LINE. */
+export const LINUX_PORTS_ANY_HOST = "On Linux, network limits hold ports, not hosts: a port agents may reach on this computer, such as the model's proxy port or a port you allow, is open to them on every host.";
+
+/** What a writable project folder can't hold on Linux, shown there only, the engine's LINUX_NESTED_GIT_LINE. */
+export const LINUX_NESTED_GIT = "On Linux, agents can make a git repository inside any project folder they may change, and your own git or IDE runs its settings when you open that folder. Check agent-made folders for a .git before you open them.";
 
 /** Why the network choice has no effect under Full access. */
 export const NETWORK_IGNORED_UNDER_FULL = "Full access runs agents without a sandbox, so this choice does not apply.";
@@ -257,11 +264,12 @@ function toolchainNote(row: PolicyView["toolchains"][number]): string {
   return "";
 }
 
-/** The access level choice as radio cards, with the reason a level can't run here and the Full
- * access warning when it is chosen. Inputs: the radio group name, the chosen level, the reason
- * each level is unavailable (null when it runs) and the change handler. Output: the fieldset. */
-export function AccessLevels({ name, value, unavailable, onChange }: {
-  name: string; value: AgentAccess; unavailable: (access: AgentAccess) => string | null; onChange: (access: AgentAccess) => void;
+/** The access level choice as radio cards, with the reason a level can't run here, the Full
+ * access warning when it is chosen and, on Linux below Full access, the nested git gap. Inputs:
+ * the radio group name, the chosen level, the reason each level is unavailable (null when it
+ * runs), the change handler and this desktop's platform. Output: the fieldset. */
+export function AccessLevels({ name, value, unavailable, onChange, platform = desktopPlatform() }: {
+  name: string; value: AgentAccess; unavailable: (access: AgentAccess) => string | null; onChange: (access: AgentAccess) => void; platform?: string;
 }) {
   return <fieldset className="pj-field">
     <legend>Agent access</legend>
@@ -279,14 +287,15 @@ export function AccessLevels({ name, value, unavailable, onChange }: {
       })}
     </div>
     {value === "full" && <p className="pj-note warn" role="alert">{FULL_ACCESS_WARNING} {FULL_ACCESS_IDE}</p>}
+    {value !== "full" && platform === "linux" && <p className="pj-note" role="note">{LINUX_NESTED_GIT}</p>}
   </fieldset>;
 }
 
-/** The network choice as radio cards, with a note when Full access makes it moot. Inputs: the
- * radio group name, the chosen network, the chosen access level and the change handler.
- * Output: the fieldset. */
-export function NetworkChoices({ name, value, access, onChange }: {
-  name: string; value: AgentNetwork; access: AgentAccess; onChange: (network: AgentNetwork) => void;
+/** The network choice as radio cards, with a note when Full access makes it moot or, on Linux,
+ * that limits hold ports, not hosts. Inputs: the radio group name, the chosen network, the
+ * chosen access level, the change handler and this desktop's platform. Output: the fieldset. */
+export function NetworkChoices({ name, value, access, onChange, platform = desktopPlatform() }: {
+  name: string; value: AgentNetwork; access: AgentAccess; onChange: (network: AgentNetwork) => void; platform?: string;
 }) {
   return <fieldset className="pj-field">
     <legend>Network for agents with tools on</legend>
@@ -300,6 +309,7 @@ export function NetworkChoices({ name, value, access, onChange }: {
       </label>)}
     </div>
     {access === "full" && <p className="pj-note" role="note">{NETWORK_IGNORED_UNDER_FULL}</p>}
+    {access !== "full" && platform === "linux" && <p className="pj-note" role="note">{LINUX_PORTS_ANY_HOST}</p>}
   </fieldset>;
 }
 
@@ -450,12 +460,12 @@ export function ApplyChoices({ name, value, onChange }: {
   </fieldset>;
 }
 
-/** The allowed extras: each saved or added one with what it means and Remove, and a form to
- * add one socket, one port or the owner's temp folder within their bounds (F08). Inputs: the id
- * prefix, the engine's view, the extras as edited, the chosen level and the change handler.
- * Output: the fieldset. */
-export function GrantsEditor({ prefix, view, grants, access, onChange }: {
-  prefix: string; view: PolicyView; grants: AccessGrant[]; access: AgentAccess; onChange: (grants: AccessGrant[]) => void;
+/** The allowed extras: each saved or added one with what it means and Remove, a form to add one
+ * socket, one port or the owner's temp folder within their bounds (F08) and, on Linux below Full
+ * access, that a port is open on every host. Inputs: the id prefix, the engine's view, the extras
+ * as edited, the chosen level, the change handler and this desktop's platform. Output: the fieldset. */
+export function GrantsEditor({ prefix, view, grants, access, onChange, platform = desktopPlatform() }: {
+  prefix: string; view: PolicyView; grants: AccessGrant[]; access: AgentAccess; onChange: (grants: AccessGrant[]) => void; platform?: string;
 }) {
   const [kind, setKind] = useState<"socket" | "port">("port");
   const [typed, setTyped] = useState("");
@@ -475,6 +485,7 @@ export function GrantsEditor({ prefix, view, grants, access, onChange }: {
   return <fieldset className="pj-field">
     <legend>Allowed extras</legend>
     <p className="pj-help">One socket, one port on this computer or your temp folder that agents may reach beyond their level. Agents can also ask for one; you answer in Questions.</p>
+    {access !== "full" && platform === "linux" && <p className="pj-note" role="note">{LINUX_PORTS_ANY_HOST}</p>}
     <ul className="pj-paths" aria-label="Allowed extras">
       {grants.length === 0 && <li className="pj-muted">No extras.</li>}
       {grants.map((grant) => <li key={grantLabel(grant)}>

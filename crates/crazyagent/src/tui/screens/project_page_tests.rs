@@ -2243,6 +2243,76 @@ async fn a_creation_run_in_the_background_finishes_after_its_page_is_gone() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_draft_refused_while_another_wizard_is_open_is_kept_ahead_of_that_wizards_draft() {
+    let engine = Engine::start().await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    pump(&mut shell, &mut connection).await;
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Tidepool is ready.")
+    );
+
+    go_to(&mut shell, "new project");
+    pump(&mut shell, &mut connection).await;
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1);
+    go_to(&mut shell, "new project");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    for character in "Harbor".chars() {
+        shell.key(Key::Char(character));
+    }
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"create"), "{sent:?}");
+    let refused = shell.ctx.message().expect("the refusal is shown");
+    assert!(
+        refused.lead.starts_with("Could not create"),
+        "{}",
+        refused.lead
+    );
+    assert!(
+        refused.rest.contains("Tidepool is kept as a draft"),
+        "{}",
+        refused.rest
+    );
+    assert_eq!(shell.place(), Some(Place::NewProject));
+
+    go_to(&mut shell, "home");
+    assert_eq!(
+        kept_draft().as_deref(),
+        Some("Tidepool"),
+        "leaving the open wizard keeps its draft behind the refused one, not over it"
+    );
+    go_to(&mut shell, "new project");
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Tidepool"), "{shown}");
+    assert_eq!(kept_draft().as_deref(), Some("Harbor"));
+    go_to(&mut shell, "home");
+    assert_eq!(kept_draft().as_deref(), Some("Harbor"));
+    go_to(&mut shell, "new project");
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Harbor"), "{shown}");
+    assert_eq!(kept_draft().as_deref(), Some("Tidepool"));
+}
+
 #[test]
 fn leaving_the_wizard_keeps_the_draft_for_next_time() {
     let mut ctx = ctx(80, 24);

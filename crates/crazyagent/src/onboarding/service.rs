@@ -18,7 +18,7 @@ use crate::research::runner::{
     confined_unavailable,
 };
 use crate::sandbox::SandboxError;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::cell::Cell;
 #[cfg(unix)]
 use std::collections::HashMap;
@@ -40,7 +40,6 @@ const ENGINE_TICK: Duration = Duration::from_secs(2);
 /// takes effect while the claim still lets newer projects go first.
 const PAUSE_RECHECK_MS: i64 = 10_000;
 const RUN_NAME_BYTES_MAX: usize = 96;
-#[cfg(unix)]
 const ONBOARDED_MAX: i64 = 256;
 #[cfg(unix)]
 const REFRESH_PREFIX: &str = "graph-main-";
@@ -325,51 +324,85 @@ const CLAIMABLE: &str = "claimer IS NULL AND (graph_state='waiting'
         AND NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=o.project
             AND json_extract(s.body,'$.revision')>?1)))";
 
+/// One onboarding row a worker may claim, as [`first_unheld`] reads it: the project, its
+/// folder, pool and draft as stored, its runs so far, whether its graph step waits, and
+/// when its onboarding began.
+struct Waiting {
+    project: String,
+    repo: String,
+    pool: String,
+    drafted: String,
+    runs: i64,
+    graph: bool,
+    created_ms: i64,
+}
+
+/// The oldest claimable row ([`CLAIMABLE`]) whose folder no pending project move holds,
+/// looking at no more than [`ONBOARDED_MAX`] rows in claim order, so one held project never
+/// stalls the others. Takes a connection, the time now and the pause recheck cut-off.
+/// Returns the row, None when none waits, or any SQLite failure.
+fn first_unheld(
+    connection: &Connection,
+    now: i64,
+    recheck: i64,
+) -> rusqlite::Result<Option<Waiting>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT project,repo,pool,drafted,runs,graph_state='waiting',created_ms
+         FROM onboarding o WHERE {CLAIMABLE} ORDER BY created_ms,project LIMIT ?4"
+    ))?;
+    let rows = statement.query_map(
+        params![
+            crate::project_setup::FIRST_REVISION as i64,
+            now,
+            recheck,
+            ONBOARDED_MAX
+        ],
+        |row| {
+            Ok(Waiting {
+                project: row.get(0)?,
+                repo: row.get(1)?,
+                pool: row.get(2)?,
+                drafted: row.get(3)?,
+                runs: row.get(4)?,
+                graph: row.get(5)?,
+                created_ms: row.get(6)?,
+            })
+        },
+    )?;
+    for row in rows {
+        let row = row?;
+        if !crate::projects_home::project_move_holds(connection, Path::new(&row.repo))? {
+            return Ok(Some(row));
+        }
+    }
+    Ok(None)
+}
+
 /// Claims the oldest waiting step ([`CLAIMABLE`]): a graph build, or a mapping once its
 /// graph step has finished either way, while the owner has not saved the
 /// setup and no account pause it waits on is still running, or that pause was
 /// last checked [`PAUSE_RECHECK_MS`] ago. Marks it running under `claimer`
 /// and counts the attempt; a row whose pool or draft cannot be read fails with
 /// [`ROW_UNREADABLE`] instead. A step of a project whose folder is being moved into the
-/// projects home is not claimed until the move is finished or forgotten. Returns `None`
-/// when nothing waits.
+/// projects home is not claimed until the move is finished or forgotten, and the next
+/// waiting step is claimed meanwhile ([`first_unheld`]). Returns `None` when nothing waits.
 fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String> {
     let tx = rusqlite::Transaction::new_unchecked(database, TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
     let now = now_ms();
-    let row = tx
-        .query_row(
-            &format!(
-                "SELECT project,repo,pool,drafted,runs,graph_state='waiting',created_ms
-                 FROM onboarding o WHERE {CLAIMABLE} ORDER BY created_ms,project LIMIT 1"
-            ),
-            params![
-                crate::project_setup::FIRST_REVISION as i64,
-                now,
-                now - PAUSE_RECHECK_MS
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, bool>(5)?,
-                    row.get::<_, i64>(6)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
-    let Some((project, repo, pool, drafted, runs, graph, created_ms)) = row else {
+    let row = first_unheld(&tx, now, now - PAUSE_RECHECK_MS).map_err(|error| error.to_string())?;
+    let Some(Waiting {
+        project,
+        repo,
+        pool,
+        drafted,
+        runs,
+        graph,
+        created_ms,
+    }) = row
+    else {
         return Ok(None);
     };
-    if crate::projects_home::project_move_holds(&tx, std::path::Path::new(&repo))
-        .map_err(|error| error.to_string())?
-    {
-        return Ok(None);
-    }
     let kind = if graph { Kind::Graph } else { Kind::Mapping };
     let read = CredentialRef::new(pool)
         .ok()
@@ -621,8 +654,10 @@ struct Refresh {
 /// project ([`refreshable`]) whose absolute folder holds a `.crazyagent` folder and whose
 /// published graph is missing or was built at another tip than its main branch holds now,
 /// which covers every landing and the owner's own commits, or while the project hid other
-/// folders than it hides now. The first pass runs at engine start. Takes the work, the
-/// worker's database, what earlier passes saw and `halted`. Returns whether a build ran.
+/// folders than it hides now, and never in a folder a project move holds, asked under the
+/// refresh's mark ([`Refreshing`]), which the move waits for. The first pass runs at engine
+/// start. Takes the work, the worker's database, what earlier passes saw and `halted`.
+/// Returns whether a build ran.
 #[cfg(unix)]
 fn refresh_step(
     work: &Work,
@@ -669,6 +704,10 @@ fn refresh_step(
         ) {
             continue;
         }
+        let _refreshing = Refreshing::start(repo);
+        if held(database, repo) {
+            continue;
+        }
         match refresh_build(work, database, project, repo, tip, &hidden, halted) {
             Refreshed::Published => {
                 refresh.failed.remove(project);
@@ -697,33 +736,30 @@ fn graphs_wanted(database: &Connection) -> bool {
     main_graph::wanted(switch, std::env::consts::OS)
 }
 
-/// Whether a new or ready onboarding step waits to be claimed ([`CLAIMABLE`]): a graph step,
-/// or a mapping with no account pause or one whose pause has ended. The pause recheck
+/// Whether a new or ready onboarding step waits to be claimed ([`first_unheld`]): a graph
+/// step, or a mapping with no account pause or one whose pause has ended, in a folder no
+/// project move holds, so a held step halts no refresh. The pause recheck
 /// cut-off is bound to the smallest time, so a mapping that only rechecks its pause every
 /// [`PAUSE_RECHECK_MS`] never halts a refresh and waits one build instead. Takes the
 /// worker's database. Returns the answer; a table that cannot be read counts as no step
 /// waiting, since the claim then fails too.
 #[cfg(unix)]
 fn step_waits(database: &Connection) -> bool {
-    database
-        .query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM onboarding o WHERE {CLAIMABLE})"),
-            params![
-                crate::project_setup::FIRST_REVISION as i64,
-                now_ms(),
-                i64::MIN
-            ],
-            |row| row.get::<_, bool>(0),
-        )
-        .unwrap_or(false)
+    first_unheld(database, now_ms(), i64::MIN).is_ok_and(|row| row.is_some())
 }
 
-/// The stop a main graph refresh build polls (DEC-123): yes once the engine halts, or once
+/// The stop a main graph refresh build polls (DEC-123): yes once the engine halts, once
 /// an onboarding step waits to be claimed ([`step_waits`]), so a new project's onboarding
-/// never waits behind a refresh. The table is read at most every [`STEP_POLL`], and a yes
-/// stays yes. Takes the worker's database and `halted`. Returns the stop.
+/// never waits behind a refresh, or once a project move holds the folder it builds in
+/// ([`held`]), so the move never waits long. The table is read at most every
+/// [`STEP_POLL`], and a yes stays yes. Takes the worker's database, the folder and `halted`.
+/// Returns the stop.
 #[cfg(unix)]
-fn gives_way<'a>(database: &'a Connection, halted: &'a dyn Fn() -> bool) -> impl Fn() -> bool + 'a {
+fn gives_way<'a>(
+    database: &'a Connection,
+    folder: &'a Path,
+    halted: &'a dyn Fn() -> bool,
+) -> impl Fn() -> bool + 'a {
     let read: Cell<Option<Instant>> = Cell::new(None);
     let waits = Cell::new(false);
     move || {
@@ -732,17 +768,81 @@ fn gives_way<'a>(database: &'a Connection, halted: &'a dyn Fn() -> bool) -> impl
         }
         if !waits.get() && read.get().is_none_or(|at| at.elapsed() >= STEP_POLL) {
             read.set(Some(Instant::now()));
-            waits.set(step_waits(database));
+            waits.set(step_waits(database) || held(database, folder));
         }
         waits.get()
     }
 }
 
+/// Whether a pending project move holds `folder`
+/// ([`crate::projects_home::project_move_holds`]). A hold that cannot be read counts as
+/// held, so no refresh writes into a folder that may be moving. Takes the worker's database
+/// and the folder. Returns the answer.
+#[cfg(unix)]
+fn held(database: &Connection, folder: &Path) -> bool {
+    crate::projects_home::project_move_holds(database, folder).unwrap_or(true)
+}
+
+/// The project folders a main graph refresh builds or publishes in now, each with how many
+/// refreshes hold it, so a project move waits for them ([`refreshing_in`]).
+static REFRESHING: std::sync::Mutex<std::collections::BTreeMap<PathBuf, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// One main graph refresh in flight in a project folder, at its real path when it resolves,
+/// seen by [`refreshing_in`] until it is dropped. A refresh takes it before it asks for a
+/// project move's hold, so a move planned meanwhile either sees the mark or holds the folder
+/// before the refresh asks. Built only by [`Refreshing::start`].
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct Refreshing(PathBuf);
+
+#[cfg(unix)]
+impl Refreshing {
+    /// Marks a refresh in flight in `repo`. Input: the project folder. Output: the mark.
+    pub(crate) fn start(repo: &Path) -> Self {
+        let folder = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+        let mut marks = REFRESHING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *marks.entry(folder.clone()).or_insert(0) += 1;
+        assert!(marks.len() <= ONBOARDED_MAX as usize);
+        Self(folder)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Refreshing {
+    fn drop(&mut self) {
+        let mut marks = REFRESHING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let left = {
+            let count = marks.get_mut(&self.0).expect("a refresh mark is counted");
+            assert!(*count > 0);
+            *count -= 1;
+            *count
+        };
+        if left == 0 {
+            marks.remove(&self.0);
+        }
+    }
+}
+
+/// Tells whether a main graph refresh builds or publishes in `folder` or inside it now.
+/// Input: the folder, at its real path. Output: the answer.
+pub(crate) fn refreshing_in(folder: &Path) -> bool {
+    REFRESHING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .keys()
+        .any(|marked| marked.starts_with(folder))
+}
+
 /// The projects whose main graph the refresh looks after, with their folders, at most
 /// `ONBOARDED_MAX` in project order: each onboarded project whose graph step is over, at its
 /// onboarding folder, and each project with no onboarding row that declares a repository,
-/// its first repository standing in for its folder as the trash guards read it. Takes the
-/// worker's database. Returns the list.
+/// its first repository standing in for its folder as the trash guards read it, leaving out
+/// a folder a project move holds ([`held`]). Takes the worker's database. Returns the list.
 #[cfg(unix)]
 fn refreshable(database: &Connection) -> rusqlite::Result<Vec<(String, PathBuf)>> {
     let mut statement = database.prepare(
@@ -758,7 +858,11 @@ fn refreshable(database: &Connection) -> rusqlite::Result<Vec<(String, PathBuf)>
             PathBuf::from(row.get::<_, String>(1)?),
         ))
     })?;
-    rows.collect()
+    let listed = rows.collect::<rusqlite::Result<Vec<(String, PathBuf)>>>()?;
+    Ok(listed
+        .into_iter()
+        .filter(|(_, repo)| !held(database, repo))
+        .collect())
 }
 
 /// The tip a project's main graph is built at ([`crate::landing::main_tip`]), only a commit
@@ -779,8 +883,8 @@ fn main_tip(database: &Connection, project: &str, repo: &Path) -> Option<String>
 enum Refreshed {
     /// Built and published.
     Published,
-    /// Stopped for a waiting onboarding step or the engine's stop; never a failure, so the
-    /// project is tried again at its next check.
+    /// Stopped for a waiting onboarding step, a project move of its folder or the engine's
+    /// stop; never a failure, so the project is tried again at its next check.
     GaveWay,
     /// Failed, timed out, did not start or was not published.
     Failed,
@@ -789,7 +893,8 @@ enum Refreshed {
 /// Rebuilds one project's main graph in place through the confined graph build and
 /// publishes it at `tip` with the folders it hid ([`publish_main`]), then removes the
 /// build's run folder and profile unless its processes may still run. The build stops as
-/// soon as an onboarding step waits ([`gives_way`]). Takes the work, the worker's database,
+/// soon as an onboarding step waits or a project move holds the folder ([`gives_way`]), and
+/// a build a move holds by its end is not published. Takes the work, the worker's database,
 /// the project, its folder, the tip read before the build, the project's hidden folders
 /// and `halted`. Returns how the refresh ended.
 #[cfg(unix)]
@@ -813,12 +918,13 @@ fn refresh_build(
         &name,
         hidden,
         work.limits.graph_time,
-        &gives_way(database, halted),
+        &gives_way(database, repo, halted),
     );
     if !matches!(ending, Err(RunError::Uncertain(_))) {
         forget_run(work.runner.state(), &name);
     }
     match ending {
+        Ok(GraphEnding::Built) if held(database, repo) => Refreshed::GaveWay,
         Ok(GraphEnding::Built) if publish_main(repo, tip, hidden) => Refreshed::Published,
         Ok(GraphEnding::Stopped) => Refreshed::GaveWay,
         _ => Refreshed::Failed,

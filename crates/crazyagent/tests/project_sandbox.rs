@@ -1413,7 +1413,7 @@ fn a_configured_local_model_port_stays_reachable_but_no_tools_on_agent_listens_o
     let open = sandbox(&case, SandboxNetwork::Open)
         .keep_ports(&ports)
         .unwrap();
-    let block: String = (41_300..=41_427)
+    let block: String = (41_300..=41_555)
         .map(|proxy| format!(" (local ip \"*:{proxy}\")"))
         .collect();
     for rule in ["network-bind", "network-inbound"] {

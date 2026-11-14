@@ -132,6 +132,22 @@ pub struct SpendSettings {
     pub resets_source: ResetsSource,
 }
 
+/// One of the owner's Pools settings with its new value. A save names only the setting the
+/// owner changed, so the other two stay as stored and a change another window made to them is
+/// kept. An unknown setting, value or extra key does not decode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "field",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum SpendChoice {
+    Confirm(SpendConfirm),
+    AllLimited(AllLimited),
+    ResetsSource(ResetsSource),
+}
+
 impl SpendSettings {
     /// Whether the app may spend at all. Spend confirmation Off means it never does, so
     /// this is the one place that reading lives. Output: the answer.
@@ -268,9 +284,9 @@ pub fn read(db: &Connection) -> Result<SpendSettings, EngineError> {
     })
 }
 
-/// Stores the owner's spend settings and Claude free resets source, all or none. Inputs:
-/// the store and the settings. Output: done, or `usage_unavailable`.
-pub fn write(db: &Connection, settings: SpendSettings) -> Result<(), EngineError> {
+/// The stored words of the three settings, in column order. Input: the settings. Output:
+/// confirm, all_limited and resets_source as the store keeps them.
+fn stored_words(settings: SpendSettings) -> [&'static str; 3] {
     let confirm = match settings.confirm {
         SpendConfirm::ConfirmEach => "confirm_each",
         SpendConfirm::OneClick => "one_click",
@@ -286,6 +302,44 @@ pub fn write(db: &Connection, settings: SpendSettings) -> Result<(), EngineError
         ResetsSource::AsClaudeCode => "as_claude_code",
         ResetsSource::Off => "off",
     };
+    [confirm, all_limited, source]
+}
+
+/// Stores one of the owner's Pools settings in one statement and leaves the other two as
+/// stored, the defaults when none was stored yet. Inputs: the store and the choice. Output:
+/// done, or `usage_unavailable`.
+pub fn write_one(db: &Connection, choice: SpendChoice) -> Result<(), EngineError> {
+    let mut fresh = SpendSettings::default();
+    let column = match choice {
+        SpendChoice::Confirm(value) => {
+            fresh.confirm = value;
+            "confirm"
+        }
+        SpendChoice::AllLimited(value) => {
+            fresh.all_limited = value;
+            "all_limited"
+        }
+        SpendChoice::ResetsSource(value) => {
+            fresh.resets_source = value;
+            "resets_source"
+        }
+    };
+    let [confirm, all_limited, source] = stored_words(fresh);
+    db.execute(
+        &format!(
+            "INSERT INTO usage_spend (singleton,confirm,all_limited,resets_source) VALUES (1,?1,?2,?3)
+             ON CONFLICT(singleton) DO UPDATE SET {column}=excluded.{column}"
+        ),
+        params![confirm, all_limited, source],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Stores the owner's spend settings and Claude free resets source, all or none. Inputs:
+/// the store and the settings. Output: done, or `usage_unavailable`.
+pub fn write(db: &Connection, settings: SpendSettings) -> Result<(), EngineError> {
+    let [confirm, all_limited, source] = stored_words(settings);
     db.execute(
         "INSERT INTO usage_spend (singleton,confirm,all_limited,resets_source) VALUES (1,?1,?2,?3)
          ON CONFLICT(singleton) DO UPDATE SET confirm=excluded.confirm,

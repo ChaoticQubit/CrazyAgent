@@ -943,3 +943,79 @@ fn owner_text_up_to_the_cap_is_given_inline_and_more_is_refused_by_its_larger_pa
         "agent_instructions_too_large_project"
     );
 }
+
+/// A launch leaves no code an agent planted in its own home for the shell its harness
+/// starts next (SA vid 12): the zsh, bash and sh startup files, the compiled zsh forms and
+/// the folders whose scripts Claude Code and Codex source ahead of each shell command are
+/// removed, a link among them without what it points to, while the agent's other files,
+/// its shell history and its harness state stay.
+#[cfg(unix)]
+#[test]
+fn a_launch_removes_shell_startup_files_and_shell_prelude_folders_from_the_agent_home() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let outside = root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("kept.sh"), "echo kept\n").unwrap();
+    let startup = [
+        ".zshenv",
+        ".zprofile",
+        ".zshrc",
+        ".zlogin",
+        ".zlogout",
+        ".zshenv.zwc",
+        ".zprofile.zwc",
+        ".zshrc.zwc",
+        ".zlogin.zwc",
+        ".zlogout.zwc",
+        ".bashrc",
+        ".bash_profile",
+        ".bash_login",
+        ".bash_logout",
+        ".profile",
+    ];
+    let kept = [".zsh_history", ".claude.json", "note", "projects/p/s.jsonl"];
+    for (name, harness) in [("claude", Harness::Claude), ("codex", Harness::Codex)] {
+        let home = home(&root, name);
+        for file in startup.iter().chain(kept.iter()) {
+            let path = home.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "echo planted\n").unwrap();
+        }
+        let session = home.join("session-env").join("0b6f1c2e-5d4a");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(session.join("sessionstart-hook-0.sh"), "echo planted\n").unwrap();
+        fs::create_dir(home.join("shell-snapshots")).unwrap();
+        fs::write(
+            home.join("shell-snapshots").join("snapshot-zsh-1.sh"),
+            "echo planted\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, home.join("shell_snapshots")).unwrap();
+
+        prepare(&home, harness, &project, &given).unwrap();
+
+        let left: Vec<&str> = startup
+            .iter()
+            .copied()
+            .chain(["session-env", "shell-snapshots", "shell_snapshots"])
+            .filter(|entry| fs::symlink_metadata(home.join(entry)).is_ok())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "a {name} launch kept planted shell code in the agent home: {left:?}"
+        );
+        for file in kept {
+            assert_eq!(
+                fs::read_to_string(home.join(file)).unwrap(),
+                "echo planted\n",
+                "{file}"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(outside.join("kept.sh")).unwrap(),
+            "echo kept\n"
+        );
+    }
+}

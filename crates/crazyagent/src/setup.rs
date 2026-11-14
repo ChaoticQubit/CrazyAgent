@@ -555,7 +555,7 @@ pub const PLATFORM_UNSUPPORTED: &str = "setup_platform_unsupported";
 /// profile reads: the Setup note, and a refused agent git step.
 pub const AGENT_GIT_NEEDS_TOOLS: &str = "agent_git_needs_tools";
 
-const REASONS: [(&str, &str); 34] = [
+const REASONS: [(&str, &str); 36] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
@@ -571,6 +571,10 @@ const REASONS: [(&str, &str); 34] = [
     (
         "setup_homebrew_missing",
         "Homebrew is not installed. Install tmux yourself, then run setup again.",
+    ),
+    (
+        "setup_homebrew_unsafe",
+        "Another account can change Homebrew's files, so setup did not run it. Install tmux yourself, then run setup again.",
     ),
     ("setup_install_failed", "The installer did not finish."),
     (
@@ -588,6 +592,10 @@ const REASONS: [(&str, &str); 34] = [
     (
         "setup_uv_missing",
         "uv is needed to install Graphify and it is not installed.",
+    ),
+    (
+        "setup_winget_missing",
+        "winget is needed to install uv and it is not installed. Install App Installer from the Microsoft Store, then run setup again.",
     ),
     (
         "setup_store_unavailable",
@@ -746,7 +754,11 @@ pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
 #[cfg(target_os = "windows")]
 pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
     let local_app_data = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
-    match windows::WindowsInstaller::new(&engine_root.join("setup"), local_app_data.as_deref()) {
+    match windows::WindowsInstaller::new(
+        &engine_root.join("setup"),
+        local_app_data.as_deref(),
+        crate::tools::Places::from_environment(Some(engine_root)),
+    ) {
         Ok(installer) => Box::new(installer),
         Err(code) => Box::new(RefusingInstaller(code)),
     }
@@ -1197,5 +1209,43 @@ mod tests {
                 }
             }
         ));
+    }
+
+    /// DEC-141, ds-setup r4: every code setup names a sentence for reaches the desktop by
+    /// name, in the bridge's setup codes and in the window's words, so a refusal such as
+    /// setup_homebrew_unsafe is never shown as a bare "setup failed". The codes no desktop
+    /// table lists yet are named here, and a code added to the tables must leave this list.
+    #[test]
+    fn every_setup_reason_is_named_by_the_desktop_bridge_and_window() {
+        let read = |path: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../apps/desktop/{path}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        let bridge = read("src-tauri/src/bridge/intake.rs");
+        let start = bridge.find("const SETUP_CODES: [&str; ").unwrap();
+        let codes = &bridge[start..];
+        let codes = &codes[..codes.find("];").unwrap()];
+        let window = read("src/api-intake.ts");
+        let start = window.find("const COPY: Record<string, string> = {").unwrap();
+        let words = &window[start..];
+        let words = &words[..words.find("\n};").unwrap()];
+        let unlisted = [
+            "setup_archive_unsafe",
+            "setup_pin_unlocked",
+            "setup_local_app_data_missing",
+            PLATFORM_UNSUPPORTED,
+            AGENT_GIT_NEEDS_TOOLS,
+        ];
+        for (code, _) in REASONS {
+            let in_bridge = codes.contains(&format!("\"{code}\","));
+            let in_window = words.contains(&format!("\n  {code}: \""));
+            let listed = !unlisted.contains(&code);
+            assert_eq!(in_bridge, listed, "{code} in the bridge's setup codes");
+            assert_eq!(in_window, listed, "{code} in the window's words");
+        }
+        assert!(codes.contains("\"setup_homebrew_unsafe\","));
     }
 }

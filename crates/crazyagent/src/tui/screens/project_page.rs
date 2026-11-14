@@ -1875,12 +1875,14 @@ impl Screen for ProjectPage {
         self.screen.width = area.width;
         self.screen.now_ms = now_ms();
         self.screen.changes.painting(true);
+        self.screen.plugins.painting(true);
         self.view = project_screen(
             &mut self.screen,
             area.width,
             area.height.saturating_add(4),
             &look(ctx),
         );
+        self.screen.plugins.painting(false);
         self.screen.changes.painting(false);
         paint(frame, area, &self.view)
     }

@@ -1,4 +1,4 @@
-use super::new_project_input::char_cells;
+use super::new_project_input::cells;
 use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project_team::{Help, Notice, TABS, window};
 use super::settings_plugins::{
@@ -74,6 +74,7 @@ pub(in crate::tui) struct ProjectPlugins {
     expanded: Option<(String, Scope)>,
     command_top: Cell<usize>,
     read_through: RefCell<Option<(String, String)>>,
+    painting: Cell<bool>,
 }
 
 impl ProjectPlugins {
@@ -98,7 +99,17 @@ impl ProjectPlugins {
             expanded: None,
             command_top: Cell::new(0),
             read_through: RefCell::new(None),
+            painting: Cell::new(false),
         }
+    }
+
+    /// Says whether the next drawings of this section are painted on screen. Only a painted
+    /// drawing records that an approval's command showed to its end and keeps its scroll, so
+    /// a taller layout that never reaches the screen can neither unlock y nor hold the scroll
+    /// back (RV-DS241-104). Input: true around the drawing that reaches the screen, false
+    /// after it. Output: none.
+    pub(in crate::tui) fn painting(&self, painted: bool) {
+        self.painting.set(painted);
     }
 
     /// Gives the next read: skills and servers at the start and after every
@@ -987,10 +998,10 @@ impl ProjectPlugins {
         self.notice.iter().map(|notice| notice.row(look)).collect()
     }
 
-    /// Draws the approval question: the server, the question and as many lines
-    /// of exactly what it runs as fit from the first line Up and Down chose, with
-    /// a line marker when some do not fit. Records the server and command once
-    /// its last line has shown, which `y` needs before it approves.
+    /// Draws the approval question: the server, the question and as many lines of exactly
+    /// what it runs, each hidden character as its escape, as fit from the first line Up and
+    /// Down chose, with a line marker when some do not fit. A painted drawing records the
+    /// server and command once its last line has shown, which `y` needs before it approves.
     /// Takes the server asked about, the content width, the rows and the look.
     /// Returns at most `room` rows.
     fn approval(&self, server: &ServerView, content: usize, room: usize, look: &Look) -> Vec<Row> {
@@ -1010,7 +1021,10 @@ impl ProjectPlugins {
                 look.muted,
             ),
         ];
-        let command = exact_lines(&server.runs, content.saturating_sub(2));
+        let command = exact_lines(
+            &crate::memory::visible_text(&server.runs),
+            content.saturating_sub(2),
+        );
         let fits = rows.len() + command.len() <= room;
         let shown = if fits {
             command.len()
@@ -1019,14 +1033,17 @@ impl ProjectPlugins {
         };
         assert!(shown <= command.len());
         let top = self.command_top.get().min(command.len() - shown);
-        self.command_top.set(top);
+        let painted = self.painting.get();
+        if painted {
+            self.command_top.set(top);
+        }
         let end = top + shown;
         rows.extend(
             command[top..end]
                 .iter()
                 .map(|line| Row::of("  ", Style::new()).push(line.clone(), look.fg)),
         );
-        if shown > 0 && end == command.len() {
+        if painted && shown > 0 && end == command.len() {
             *self.read_through.borrow_mut() = Some((server.id.clone(), server.runs.clone()));
         }
         if !fits {
@@ -1164,22 +1181,30 @@ fn state(enabled: bool, on_here: Option<bool>, status: Option<ServerStatus>, loo
     }
 }
 
-/// Splits text into lines of at most a width without dropping or merging any
-/// character, so a command shown for approval reads exactly as it will run.
-/// Takes the text and the width in cells. Returns at least one line.
+/// Splits text into lines of at most a width without dropping or merging any character, so
+/// a command shown for approval reads exactly as it will run. Lines are cut between the
+/// graphemes ratatui draws, each measured as ratatui measures it, so an emoji pair or a
+/// joined sequence never pushes a line's tail past the edge (RV-DS241-113 r1 F1). Takes
+/// the text and the width in cells. Returns at least one line.
 pub(in crate::tui) fn exact_lines(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut lines = vec![String::new()];
     let mut used = 0;
-    for character in text.chars() {
-        let size = char_cells(character);
-        if used + size > width && used > 0 {
-            lines.push(String::new());
-            used = 0;
+    for (at, piece) in text.split('\n').enumerate() {
+        let span = ratatui::text::Span::raw(piece);
+        let graphemes = span
+            .styled_graphemes(Style::default())
+            .map(|grapheme| grapheme.symbol);
+        for grapheme in (at > 0).then_some("\n").into_iter().chain(graphemes) {
+            let size = cells(grapheme);
+            if used + size > width && used > 0 {
+                lines.push(String::new());
+                used = 0;
+            }
+            let last = lines.len() - 1;
+            lines[last].push_str(grapheme);
+            used += size;
         }
-        let last = lines.len() - 1;
-        lines[last].push(character);
-        used += size;
     }
     assert_eq!(lines.concat(), text);
     lines

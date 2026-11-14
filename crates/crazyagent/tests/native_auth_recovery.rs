@@ -60,13 +60,9 @@ impl Case {
         Self::started("codex-by-name", "claude-by-name", Some(home))
     }
 
-    /// Starts the engine with a scratch HOME in this user's own temp folder, which no other
-    /// user can change, and a Codex stand-in whose first line asks `env` for
-    /// `crazyagent-test-login-shell`, an interpreter only the login shell's PATH names: the
-    /// scratch login files wait until the test opens [`Self::release_probe`], at most 9 s so
-    /// a failed test still lets the shell end inside the probe's 10 s limit, then leave
-    /// `login-probe-done` in that HOME and add its folder, so the first probe run is still
-    /// going when the first sign-in starts.
+    /// Starts the engine as [`Self::on_login_path`] does with a scratch HOME in this user's
+    /// own temp folder, which no other user can change, so the login probe keeps its folder
+    /// and the engine's places set it aside as a temp folder (2.4.1 R1). Output: the case.
     #[cfg(target_os = "macos")]
     fn with_interpreter_on_login_path() -> Self {
         let temp = crazyagent::spawn_gate::output(
@@ -82,6 +78,26 @@ impl Case {
             .prefix("ca-nar-login-")
             .tempdir_in(temp)
             .unwrap();
+        Self::on_login_path(home)
+    }
+
+    /// Starts the engine as [`Self::on_login_path`] does with a scratch HOME from
+    /// [`owner_cache_folder`], outside every temp folder and every project, so the engine's
+    /// places look in the login folder the probe finds and the harness starts. Output: the
+    /// case.
+    #[cfg(target_os = "macos")]
+    fn with_interpreter_on_login_path_outside_temp() -> Self {
+        Self::on_login_path(owner_cache_folder("ca-nar-login-"))
+    }
+
+    /// Starts the engine with the given scratch HOME and a Codex stand-in whose first line
+    /// asks `env` for `crazyagent-test-login-shell`, an interpreter only the login shell's
+    /// PATH names: the scratch login files wait until the test opens [`Self::release_probe`],
+    /// at most 9 s so a failed test still lets the shell end inside the probe's 10 s limit,
+    /// then leave `login-probe-done` in that HOME and add its folder, so the first probe run is
+    /// still going when the first sign-in starts. Input: the HOME. Output: the case.
+    #[cfg(target_os = "macos")]
+    fn on_login_path(home: tempfile::TempDir) -> Self {
         private(home.path(), 0o700);
         let bin = home.path().join("login-only").join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -382,6 +398,61 @@ fn scratch(prefix: &str) -> tempfile::TempDir {
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     private(folder.path(), 0o700);
+    folder
+}
+
+/// A private scratch folder in `Library/Caches/crazyagent-tests` of this user's home as the
+/// user database names it, so a gate's HOME changes nothing, removed when dropped. It must
+/// lie outside every temp folder 2.4.1 R1 sets aside and outside every project; the test
+/// fails when it does not, never skipping a row. Input: its name's prefix. Output: the
+/// folder.
+#[cfg(target_os = "macos")]
+fn owner_cache_folder(prefix: &str) -> tempfile::TempDir {
+    let entry = crazyagent::spawn_gate::output(
+        Command::new("/usr/bin/id")
+            .arg("-P")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(entry.status.success(), "id -P failed: {:?}", entry.status);
+    let entry = String::from_utf8(entry.stdout).unwrap();
+    let home = entry
+        .trim_end()
+        .split(':')
+        .nth(8)
+        .map(Path::new)
+        .filter(|home| home.is_absolute())
+        .unwrap_or_else(|| panic!("no home in the user database entry {entry:?}"));
+    let parent = home.join("Library").join("Caches").join("crazyagent-tests");
+    std::fs::create_dir_all(&parent).unwrap();
+    private(&parent, 0o700);
+    let folder = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(&parent)
+        .unwrap();
+    private(folder.path(), 0o700);
+    let real = std::fs::canonicalize(folder.path()).unwrap();
+    let temps = [
+        "/tmp",
+        "/private/tmp",
+        "/var/tmp",
+        "/private/var/tmp",
+        "/var/folders",
+        "/private/var/folders",
+        "/dev/shm",
+    ];
+    let own_temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    assert!(
+        !temps.iter().any(|temp| real.starts_with(temp)) && !real.starts_with(&own_temp),
+        "the scratch HOME {real:?} is in a temp folder, so these rows cannot run"
+    );
+    assert!(
+        real.ancestors()
+            .all(|folder| std::fs::symlink_metadata(folder.join(".crazyagent")).is_err()),
+        "the scratch HOME {real:?} is in a project, so these rows cannot run"
+    );
     folder
 }
 
@@ -909,13 +980,16 @@ async fn a_harness_whose_interpreter_is_found_only_under_home_signs_in() {
     }
 }
 
-/// The first sign-in right after the engine starts, as in onboarding, finds a harness whose
-/// interpreter only the login shell's PATH names: the engine's first probe run is still
-/// going, so the engine waits for it, resolves once more and starts the harness, never
-/// settling Unavailable while the answer is on its way.
+/// 2.4.1 R1: the first sign-in right after the engine starts, as in onboarding, with a
+/// harness whose interpreter only the login shell's PATH names waits for the engine's first
+/// probe run, staying Starting instead of settling Unavailable while the answer is on its
+/// way, then resolves once more with what the probe found; that PATH names the interpreter
+/// only in this user's temp folder, which agents with the owner's temp folder grant write,
+/// so the engine refuses it and the sign-in settles Unavailable only after the probe ended.
+/// The tools rows prove a probed folder outside every temp folder is looked in.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_first_sign_in_after_start_waits_for_the_login_path_to_find_its_interpreter() {
+async fn the_first_sign_in_after_start_waits_for_the_login_path_and_refuses_its_temp_folder() {
     let case = Case::with_interpreter_on_login_path();
     let (client, database) = owner(case.root()).await;
     let account = subscription(&client, Provider::Chatgpt, "Work ChatGPT").await;
@@ -925,24 +999,49 @@ async fn the_first_sign_in_after_start_waits_for_the_login_path_to_find_its_inte
         .unwrap();
     case.logged("native_auth_harness_waiting harness=codex")
         .await;
-    case.release_probe();
-    let challenge = settle(&client, &scope, &begun, shown).await;
     assert_eq!(
-        (challenge.phase, challenge.code.as_deref()),
-        (NativeAuthPhase::AwaitingOwner, None),
+        read(&client, &scope, &begun).await.phase,
+        NativeAuthPhase::Starting,
         "{}",
         case.log()
     );
-    cancel(&client, &scope, &challenge).await;
-    let finished = settle(&client, &scope, &challenge, ended).await;
-    assert_eq!(finished.phase, NativeAuthPhase::Cancelled, "{}", case.log());
+    assert!(
+        !case.home.path().join("login-probe-done").exists(),
+        "the probe ended before the wait was read: {}",
+        case.log()
+    );
+    case.release_probe();
+    let finished = settle(&client, &scope, &begun, ended).await;
+    assert_eq!(
+        (finished.phase, finished.code.as_deref()),
+        (
+            NativeAuthPhase::Unavailable,
+            Some("native_auth_host_unavailable")
+        ),
+        "{}",
+        case.log()
+    );
+    assert!(
+        case.home.path().join("login-probe-done").exists(),
+        "{}",
+        case.log()
+    );
+    let log = case.log();
+    let waited = log.find("native_auth_harness_waiting harness=codex");
+    let unresolved = log.find("native_auth_harness_unresolved harness=codex");
+    assert!(
+        matches!((waited, unresolved), (Some(waited), Some(unresolved)) if waited < unresolved),
+        "{log}"
+    );
     case.no_fence().await;
 }
 
 /// Cancelling the first sign-in while the engine waits for its first probe run settles
 /// Cancelled and frees the account: the engine has logged that it waits and the login
 /// shell's probe has not ended yet when the cancel is sent, so the cancel lands inside the
-/// wait, and the engine never goes on to call the harness unresolved.
+/// wait. The wait then ends with the probe and the engine resolves once more, refusing the
+/// login folder in the temp folder (2.4.1 R1); that late answer never turns the cancelled
+/// sign-in Unavailable.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelling_a_sign_in_while_the_engine_waits_for_its_first_probe_run_settles_cancelled() {
@@ -974,11 +1073,126 @@ async fn cancelling_a_sign_in_while_the_engine_waits_for_its_first_probe_run_set
         case.log()
     );
     case.no_fence().await;
+    case.logged("native_auth_harness_unresolved harness=codex")
+        .await;
+    let after = read(&client, &scope, &begun).await;
+    assert_eq!(
+        (after.phase, after.code.as_deref()),
+        (NativeAuthPhase::Cancelled, None),
+        "{}",
+        case.log()
+    );
+}
+
+/// The first sign-in right after the engine starts, as in onboarding, finds a harness whose
+/// interpreter only the login shell's PATH names, in a folder outside every temp folder: the
+/// engine's first probe run is still going, so the engine waits for it, staying Starting,
+/// then resolves once more with what the probe found and starts the harness, never settling
+/// Unavailable while the answer is on its way.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_first_sign_in_after_start_waits_for_the_login_path_to_find_its_interpreter() {
+    let case = Case::with_interpreter_on_login_path_outside_temp();
+    let (client, database) = owner(case.root()).await;
+    let account = subscription(&client, Provider::Chatgpt, "Work ChatGPT").await;
+    let (scope, _) = scope(&client, &database, &account).await;
+    let begun = start(&client, &scope, NativeAuthMethod::CodexBrowser)
+        .await
+        .unwrap();
+    case.logged("native_auth_harness_waiting harness=codex")
+        .await;
+    assert_eq!(
+        read(&client, &scope, &begun).await.phase,
+        NativeAuthPhase::Starting,
+        "{}",
+        case.log()
+    );
+    assert!(
+        !case.home.path().join("login-probe-done").exists(),
+        "the probe ended before the wait was read: {}",
+        case.log()
+    );
+    case.release_probe();
+    let challenge = settle(&client, &scope, &begun, shown).await;
+    assert_eq!(
+        (challenge.phase, challenge.code.as_deref()),
+        (NativeAuthPhase::AwaitingOwner, None),
+        "{}",
+        case.log()
+    );
+    assert!(
+        case.home.path().join("login-probe-done").exists(),
+        "{}",
+        case.log()
+    );
     assert!(
         !case.log().contains("native_auth_harness_unresolved"),
         "{}",
         case.log()
     );
+    cancel(&client, &scope, &challenge).await;
+    let finished = settle(&client, &scope, &challenge, ended).await;
+    assert_eq!(finished.phase, NativeAuthPhase::Cancelled, "{}", case.log());
+    case.no_fence().await;
+}
+
+/// Cancelling the first sign-in while the engine waits for its first probe run settles
+/// Cancelled and frees the account when the late answer finds the harness: the cancel lands
+/// inside the wait, then the probe finds the interpreter in a folder outside every temp
+/// folder and the engine resolves the harness for the cancelled sign-in. The next sign-in
+/// shows its challenge, and by then the engine never called the harness unresolved, since
+/// only the cancelled sign-in's custodian, started after the resolve, stores Cancelled, and
+/// left no custodian of the cancelled sign-in.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_a_sign_in_whose_late_probe_finds_its_interpreter_settles_cancelled() {
+    let case = Case::with_interpreter_on_login_path_outside_temp();
+    let (client, database) = owner(case.root()).await;
+    let account = subscription(&client, Provider::Chatgpt, "Work ChatGPT").await;
+    let (scope, _) = scope(&client, &database, &account).await;
+    let begun = start(&client, &scope, NativeAuthMethod::CodexBrowser)
+        .await
+        .unwrap();
+    case.logged("native_auth_harness_waiting harness=codex")
+        .await;
+    assert_eq!(
+        read(&client, &scope, &begun).await.phase,
+        NativeAuthPhase::Starting,
+        "{}",
+        case.log()
+    );
+    assert!(
+        !case.home.path().join("login-probe-done").exists(),
+        "the probe ended before the cancel: {}",
+        case.log()
+    );
+    cancel(&client, &scope, &begun).await;
+    case.release_probe();
+    let finished = settle(&client, &scope, &begun, ended).await;
+    assert_eq!(
+        (finished.phase, finished.code.as_deref()),
+        (NativeAuthPhase::Cancelled, None),
+        "{}",
+        case.log()
+    );
+    case.no_fence().await;
+    let next = waiting_with(&client, &scope, NativeAuthMethod::CodexBrowser).await;
+    assert!(
+        case.home.path().join("login-probe-done").exists(),
+        "{}",
+        case.log()
+    );
+    assert!(
+        !case.log().contains("native_auth_harness_unresolved"),
+        "{}",
+        case.log()
+    );
+    let custodian = case.custodian();
+    cancel(&client, &scope, &next).await;
+    let finished = settle(&client, &scope, &next, ended).await;
+    assert_eq!(finished.phase, NativeAuthPhase::Cancelled, "{}", case.log());
+    case.no_fence().await;
+    gone(custodian).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

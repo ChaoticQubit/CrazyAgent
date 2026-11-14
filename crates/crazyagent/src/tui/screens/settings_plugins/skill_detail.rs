@@ -7,7 +7,7 @@ use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, hint};
 use crate::tui::keys::Key;
 use crate::tui::screens::new_project_view::printable;
-use crate::tui::screens::project_markdown::{self, MdLine};
+use crate::tui::screens::project_plugins::exact_lines;
 use crate::tui::screens::settings_accounts::{send, settings_event};
 use crate::tui::screens::{Flow, Place, Screen};
 use crate::tui::seam::Arrival;
@@ -59,7 +59,7 @@ fn skill_header(text: &str) -> Vec<&str> {
 
 /// Wraps one header line to the width, keeping its leading spaces on every part so an
 /// indented continuation still reads as part of the field above it.
-/// Inputs: the printable line and the width. Output: the parts.
+/// Inputs: the visible line and the width. Output: the parts.
 fn indented(line: &str, limit: usize) -> Vec<String> {
     let body = line.trim_start_matches(' ');
     let indent = (line.len() - body.len()).min(limit / 2);
@@ -82,24 +82,48 @@ pub fn file_size(bytes: u64) -> String {
     }
 }
 
-fn md_line(line: &MdLine, theme: &Theme) -> Line<'static> {
-    join(line.iter().map(|(text, role)| match role {
-        project_markdown::Role::Heading | project_markdown::Role::Bold => {
-            styled(text.clone(), Role::Heading, theme)
-        }
-        project_markdown::Role::Code | project_markdown::Role::Muted => {
-            styled(text.clone(), Role::Muted, theme)
-        }
-        project_markdown::Role::Link => styled(text.clone(), Role::Accent, theme),
-        project_markdown::Role::Plain | project_markdown::Role::Italic => Line::raw(text.clone()),
-    }))
+/// Shows one SKILL.md line as agents read it, safe to draw: hidden and control characters,
+/// escape sequences included, become visible escapes and tabs four spaces. Input: the
+/// line. Output: the shown line, with every other character kept.
+fn visible_line(line: &str) -> String {
+    crate::memory::visible_text(&line.replace('\t', "    "))
+}
+
+/// Draws a SKILL.md body for review as agents read it: every line in full, broken only at
+/// the width, hidden and control characters shown as escapes and tabs as four spaces, with
+/// headings and fenced code only styled. Inputs: the body, the width and the theme.
+/// Output: the lines.
+fn review_lines(body: &str, limit: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let mut fenced = false;
+    let mut lines = Vec::new();
+    for line in body.lines() {
+        let start = line.trim_start();
+        let fence = start.starts_with("```") || start.starts_with("~~~");
+        let role = if fence || fenced {
+            Some(Role::Muted)
+        } else if start.starts_with('#') {
+            Some(Role::Heading)
+        } else {
+            None
+        };
+        fenced ^= fence;
+        lines.extend(
+            exact_lines(&visible_line(line), limit)
+                .into_iter()
+                .map(|part| match role {
+                    Some(role) => styled(part, role, theme),
+                    None => Line::raw(part),
+                }),
+        );
+    }
+    lines
 }
 
 /// One skill read in full, from Settings or from one project's Settings tab: its switch,
-/// description and folder, the rendered SKILL.md and the folder's files. Input: keys and
-/// the engine's skill detail. Output: the scrolled page; Space turns the skill on or off
-/// for every project, or for the project it was opened from, and Esc goes back. Only a read
-/// for the same place lands, so a project page never holds an every-project read.
+/// description and folder, its SKILL.md body as agents read it, and the folder's files.
+/// Input: keys and the engine's skill detail. Output: the scrolled page; Space turns the
+/// skill on or off for every project, or for the project it was opened from, and Esc goes
+/// back. Only a read for the same place lands, so a project page never holds another's.
 pub struct SkillDetailPage {
     id: String,
     name: String,
@@ -313,18 +337,14 @@ impl SkillDetailPage {
             lines.push(styled(HEADER_EXTRA, Role::Warning, theme));
             for line in extra {
                 lines.extend(
-                    indented(&printable(line.to_owned()), limit)
+                    indented(&visible_line(line), limit)
                         .into_iter()
                         .map(|part| styled(part, Role::Muted, theme)),
                 );
             }
         }
         lines.push(Line::default());
-        lines.extend(
-            project_markdown::render(skill_body(&detail.text), limit)
-                .iter()
-                .map(|line| md_line(line, theme)),
-        );
+        lines.extend(review_lines(skill_body(&detail.text), limit, theme));
         lines.push(Line::default());
         let total = detail.files.len() + detail.files_more as usize;
         lines.push(styled(format!("Files  {total}"), Role::Heading, theme));

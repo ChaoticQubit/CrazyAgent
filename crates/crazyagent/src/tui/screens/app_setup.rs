@@ -2014,6 +2014,14 @@ impl AppSetup {
                 );
             }
         }
+        lines
+    }
+
+    /// The note naming the ticked MCP servers that Enter installs and approves, after a blank
+    /// line; [`Self::body`] keeps it on screen whenever it fits. Takes the line width.
+    /// Returns its lines, none when no ticked MCP server is still to install.
+    fn approval_note(&self, limit: usize) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
         let servers: Vec<&str> = self
             .entries()
             .iter()
@@ -2329,12 +2337,17 @@ impl AppSetup {
             }
         };
         let mut rows = Vec::new();
+        let mut approval = 0;
         if let Some(setup) = &ready {
             top.extend(self.tools(setup, limit, ctx));
             top.push(Line::default());
             top.push(self.pack_heading(limit, ctx));
             bottom.extend(self.pack_notes(limit, ctx));
+            let note = self.approval_note(limit);
+            approval = note.len();
+            bottom.extend(note);
         }
+        let notes = bottom.len();
         let (asked, at) = self.ask_rows(limit, ctx);
         let asking = !asked.is_empty();
         let window_min = if ready.is_some() && !asking {
@@ -2364,11 +2377,19 @@ impl AppSetup {
             }
         }
         let ask_top = top.len() + rows.len() + asked_from;
+        let pack_end = top.len() + rows.len() + notes;
+        let keep_from = if approval > 0 {
+            pack_end - approval
+        } else {
+            top.len()
+        };
         let mut lines = top;
         lines.extend(rows);
         lines.extend(bottom);
         let skip = if asking {
             ask_skip(lines.len(), ask_top, height)
+        } else if ready.is_some() {
+            pack_skip(pack_end, keep_from, height)
         } else {
             0
         };
@@ -2376,6 +2397,17 @@ impl AppSetup {
         let cursor = at.map(|at| Position::new(at.x, at.y + (ask_top - skip) as u16));
         (lines, cursor)
     }
+}
+
+/// Counts the body lines left out above the pack list, so the list and the notes under it,
+/// the MCP approval note last, end on the body's last line when the top is too tall. Takes the
+/// line just past the notes, the first line never left out (the approval note's first, else
+/// the first pack row) and the body height. Returns the count, never past that line.
+fn pack_skip(end: usize, keep_from: usize, height: usize) -> usize {
+    assert!(keep_from <= end);
+    let skip = end.saturating_sub(height).min(keep_from);
+    assert!(end - skip <= height || skip == keep_from);
+    skip
 }
 
 /// Counts the body lines left out above an open ask, so the ask is drawn whole at the bottom

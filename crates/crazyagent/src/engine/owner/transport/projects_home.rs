@@ -8,6 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const SIZE_MARGIN: Duration = Duration::from_millis(250);
 pub(super) const UNKNOWN: &str = "owner_outcome_unknown_reconcile_same_identity";
+/// The code for a grant found stale or revoked after a change reached the disk: no client
+/// reads it as "nothing changed", so the reply is an outcome to reconcile from state.
+const STALE_AFTER_CHANGE: &str = "owner_grant_stale_after_change";
 const UNSETTLED: [&str; 2] = [UNKNOWN, "owner_actor_stopped_outcome_unknown"];
 const OLD_FOLDER_LEFT: &str = "move_project_old_folder_left";
 const SETTLE_TRIES: usize = 3;
@@ -259,6 +262,32 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
     )
 }
 
+/// Reads a grant check made while a change is answered. Inputs: the check, the admission
+/// the request came with and whether the disk already changed. Output: Ok while the grant
+/// is the same; else `STALE_AFTER_CHANGE` once the disk changed, which clients reconcile,
+/// or the check's own refusal before any change.
+pub(super) fn regranted(
+    checked: Result<Admission, EngineError>,
+    a: &Admission,
+    changed: bool,
+) -> Result<(), EngineError> {
+    match checked {
+        Ok(current) if &current == a => Ok(()),
+        _ if changed => Err(failure(STALE_AFTER_CHANGE)),
+        Ok(_) => Err(failure("owner_grant_stale_or_revoked")),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether the disk changed before the first grant check of an answer: a Delete whose
+/// folders reached the Trash, or a projects home or project move whose disk work ran, even
+/// one that failed, so a grant found stale there is an outcome to reconcile (rv-code3 r1 F1).
+/// Inputs: whether the Trash move ran, whether the request moves the projects home or one
+/// project, and whether its disk work ran. Output: the answer, which [`regranted`] reads.
+pub(super) fn disk_changed(trashed: bool, moving: bool, moving_project: bool, ran: bool) -> bool {
+    trashed || ((moving || moving_project) && ran)
+}
+
 /// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, SetupProject, CreateDemo
 /// and FolderSize for one owner. A client's change claims its request id first: a resend of
 /// one this engine still runs answers `InProgress` and plans nothing (DEC-159); the intake
@@ -410,11 +439,12 @@ pub(super) async fn serve(
         Ok(Step::Deleted(Ok(files))) => Some(files.clone()),
         _ => None,
     };
+    let trashed = deleted.is_some();
     let answer = async {
         let mut barrier = Some(engine.owner_egress.write().await);
-        let mut result = match authority.authenticate(packet) {
-            Ok(current) if &current == a => finish(engine, a, request, step).await,
-            Ok(_) => Err(failure("owner_grant_stale_or_revoked")),
+        let changed = disk_changed(trashed, moving, moving_project, ran);
+        let mut result = match regranted(authority.authenticate(packet), a, changed) {
+            Ok(()) => finish(engine, a, request, step).await,
             Err(e) => Err(e),
         };
         drop(after.landing.take());
@@ -428,12 +458,11 @@ pub(super) async fn serve(
             drop(barrier.take());
             let cleared = tokio::task::spawn_blocking(move || old.clear()).await;
             barrier = Some(engine.owner_egress.write().await);
-            result = match authority.authenticate(packet) {
-                Ok(current) if &current == a => match cleared {
+            result = match regranted(authority.authenticate(packet), a, true) {
+                Ok(()) => match cleared {
                     Ok(Ok(())) => result,
                     _ => Err(failure(OLD_FOLDER_LEFT)),
                 },
-                Ok(_) => Err(failure("owner_grant_stale_or_revoked")),
                 Err(e) => Err(e),
             };
         }
@@ -448,7 +477,7 @@ pub(super) async fn serve(
             Ok(OwnerReply { response: OwnerResponse::Applied { operation }, .. })
                 if operation.result == OwnerResult::Applied && !operation.historical_replay
         );
-        let forgotten = deleting && settle_delete(engine, exchange).await;
+        let forgotten = deleting && settle_delete(engine, exchange, trashed).await;
         let written = sink.reply(result, id, mutation).await;
         drop(barrier);
         (written, removed, forgotten)
@@ -482,7 +511,7 @@ pub(super) async fn serve(
         .await;
     }
     if deleting && !forgotten {
-        settle_delete(engine, exchange).await;
+        settle_delete(engine, exchange, trashed).await;
     }
     if let Some(added) = adding {
         settled(engine, "home_add_not_settled", |reply| {
@@ -493,11 +522,12 @@ pub(super) async fn serve(
     answered.map_err(|_| failure(UNKNOWN))?
 }
 
-/// Forgets a Delete everything's plan. Inputs: the engine and the exchange. Output: whether
-/// the plan is gone.
-async fn settle_delete(engine: &Arc<Engine>, exchange: u64) -> bool {
+/// Forgets a Delete everything's plan and ends or shows its mark. Inputs: the engine, the
+/// exchange and whether its folders reached the Trash, so a record that never came after the
+/// Trash move is shown as a delete cut short. Output: whether the plan is gone.
+async fn settle_delete(engine: &Arc<Engine>, exchange: u64, trashed: bool) -> bool {
     settled(engine, "project_delete_not_settled", |reply| {
-        Job::DeleteSettle(exchange, reply)
+        Job::DeleteSettle(exchange, trashed, reply)
     })
     .await
 }

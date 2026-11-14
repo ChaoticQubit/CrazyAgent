@@ -42,7 +42,7 @@ impl RegistryCase {
         .unwrap();
         Self {
             root,
-            tools: tempfile::tempdir().unwrap(),
+            tools: crate::harnesses::finding::owner_folder("rreg-tools-"),
             service,
             _stop: stop,
         }
@@ -919,6 +919,69 @@ async fn check_again_refuses_a_codex_in_an_agent_worktree_or_a_registered_projec
             host.find_harness("codex", None, &search(vec![worktree, declared, good]), None)
                 .unwrap(),
             Found::Registered { path: safe }
+        );
+    })
+    .await;
+}
+
+/// RV-DS241-58: a harness pinned through a link is captured again only where engine start
+/// would take it. When the link comes to lead into a folder agents can write, the fresh
+/// capture is refused with the start check's own code and never pinned, so a sign-in never
+/// runs an agent-planted file outside the sandbox.
+#[tokio::test]
+async fn a_re_pin_into_a_folder_agents_can_write_is_refused_as_at_engine_start() {
+    registry_case(|host, root| async move {
+        let owner = root.join("owner");
+        let planted = root.join("work/.crazyagent/agents/a1/bin");
+        std::fs::create_dir_all(&owner).unwrap();
+        std::fs::create_dir_all(&planted).unwrap();
+        let installed = physical_file(&owner, "codex-0.167.1", b"owner-codex");
+        let dropped = physical_file(&planted, "codex", b"agent-codex");
+        let link = owner.join("codex");
+        std::os::unix::fs::symlink(&installed, &link).unwrap();
+        host.register_codex_executable(RegisteredNativeAuthHost::capture_entry(&link).unwrap())
+            .unwrap();
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            installed
+        );
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&dropped, &link).unwrap();
+        assert_eq!(
+            host.registered_codex_executable()
+                .map(|host| host.verified_path().map(Path::to_path_buf))
+                .unwrap_err()
+                .0,
+            crate::harnesses::finding::PATH_AGENT_SPACE
+        );
+    })
+    .await;
+}
+
+/// RV-DS241-58 with DEC-166: a harness pinned through a link that an update points at a new
+/// install in an owner folder is captured again and used, so an update needs no restart.
+#[tokio::test]
+async fn a_re_pin_to_a_new_install_in_an_owner_folder_is_used() {
+    registry_case(|host, root| async move {
+        let owner = root.join("owner");
+        std::fs::create_dir_all(&owner).unwrap();
+        let old = physical_file(&owner, "codex-0.50.0", b"old-codex");
+        let new = physical_file(&owner, "codex-0.56.0", b"new-codex");
+        let link = owner.join("codex");
+        std::os::unix::fs::symlink(&old, &link).unwrap();
+        host.register_codex_executable(RegisteredNativeAuthHost::capture_entry(&link).unwrap())
+            .unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&new, &link).unwrap();
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            new
         );
     })
     .await;

@@ -120,10 +120,7 @@ async fn a_harness_registered_through_its_link_is_listed_by_the_link_its_updater
     )
     .await
     .unwrap();
-    let outside = tempfile::Builder::new()
-        .prefix("hc-claude-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
+    let outside = crate::harnesses::finding::owner_folder("hc-claude-");
     std::fs::set_permissions(outside.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let host = root.path().join("crazyagent-pin-only");
     let versions = outside.path().join(".local/share/claude/versions");

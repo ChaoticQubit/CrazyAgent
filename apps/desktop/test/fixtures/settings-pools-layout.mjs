@@ -176,11 +176,12 @@ function answer(scene, command, args) {
   if (command === "desktop_usage_report") {
     usageSince = args.sinceMs;
     const limits = failing(scene.limits ?? "ok", LIMITS);
-    const settings = spendSent.at(-1) ?? { confirm: "confirm_each", all_limited: "notice", resets_source: "off" };
+    const settings = { confirm: "confirm_each", all_limited: "notice", resets_source: "off" };
+    for (const choice of spendSent) settings[choice.field] = choice.value;
     return limits instanceof Promise ? limits : { limits, spend: { settings, attempts: [], limited_pools: [] } };
   }
   if (command === "desktop_usage_set_spend") {
-    spendSent.push(args.settings);
+    spendSent.push(args.choice);
     return null;
   }
   if (scene.edits === "ok" && command === "desktop_inspect_model_access") return { ticket: "ticket", record: { kind: "pool", pool: { id: "pool-spare", name: "Spare", members: ["acct-3"] } } };
@@ -381,7 +382,8 @@ export function extrasDetail() {
   return extrasAsks;
 }
 
-/** Lists the free resets settings the page asked the engine to keep. Output: each, in order. */
+/** Lists the free resets choices the page asked the engine to keep, one setting each. Output:
+ * each, in order. */
 export function spendSettingsSent() {
   return spendSent;
 }

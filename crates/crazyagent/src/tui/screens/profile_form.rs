@@ -675,7 +675,9 @@ mod tests {
         assert_eq!(form.profile(), Err(Slot::Stack));
         assert_eq!(
             form.stack.error.as_deref(),
-            Some("List up to 12 different technologies, each up to 40 characters.")
+            Some(
+                "List up to 12 different technologies, each on one line, up to 40 bytes, with no hidden characters."
+            )
         );
         assert_eq!(form.focus(), Some(Slot::Stack));
     }
@@ -695,5 +697,37 @@ mod tests {
         let mut form = ProfileForm::new(Some(&saved), Some(Colors::Light));
         assert_eq!(form.profile().unwrap(), saved);
         assert_eq!(form.colors(), Some(Colors::Light));
+    }
+
+    #[test]
+    fn a_hidden_character_is_refused_under_its_field_in_the_engine_words() {
+        let hidden = OwnerProfile {
+            name: "Ada\u{200b}".into(),
+            role: String::new(),
+            bio: String::new(),
+            preferred_stack: Vec::new(),
+            working_style: WorkingStyle::default(),
+        };
+        let mut form = ProfileForm::new(Some(&hidden), None);
+        assert_eq!(form.profile(), Err(Slot::Name));
+        assert_eq!(
+            form.name.error.as_deref(),
+            Some(
+                "Enter your name on one line, up to 100 bytes (about 100 English letters or 33 Chinese, Hindi or Thai ones), with no hidden characters."
+            )
+        );
+        let tagged = OwnerProfile {
+            name: "Ada".into(),
+            bio: "Builds tools.\u{e0041}".into(),
+            ..hidden
+        };
+        let mut form = ProfileForm::new(Some(&tagged), None);
+        assert_eq!(form.profile(), Err(Slot::Bio));
+        assert_eq!(
+            form.bio.error.as_deref(),
+            Some(
+                "Keep your bio to 1000 bytes (about 1000 English letters or 333 Chinese, Hindi or Thai ones), with no tabs, special or hidden characters."
+            )
+        );
     }
 }

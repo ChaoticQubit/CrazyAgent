@@ -475,7 +475,7 @@ fn a_delete_mark_shown_to_the_owner_outlives_a_settle_of_a_reused_exchange() {
         .unwrap();
     mark("kept", 7);
     mark("gone", 8);
-    projects_home::delete_settle(&connection, None).unwrap();
+    projects_home::delete_settle(&connection, None, false).unwrap();
     let shown = marks();
     assert_eq!(
         shown.len(),
@@ -491,7 +491,7 @@ fn a_delete_mark_shown_to_the_owner_outlives_a_settle_of_a_reused_exchange() {
         "a shown mark names no exchange",
     );
     mark("next", 7);
-    projects_home::delete_settle(&connection, Some(7)).unwrap();
+    projects_home::delete_settle(&connection, Some(7), false).unwrap();
     let left = marks();
     assert_eq!(
         left.len(),

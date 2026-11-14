@@ -997,12 +997,173 @@ pub fn pending(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
     Ok(found.into_iter().map(|found| found.file).collect())
 }
 
+/// Where the project instructions file sits in a project folder.
+const CARRIED_PATH: &str = ".crazyagent/instructions.md";
+/// The start of the label every imported text is kept under, one level below the app's own
+/// sections so it sits inside the project instructions ([`imported`], SA vid 7 r2b, leader
+/// 10:50).
+const IMPORTED_LABEL: &str = "### Imported from ";
+/// Every character that ends a line of imported text for [`demoted`]: LF and CR as the
+/// file has them, and VT, FF, NEL, LS and PS, which an agent or a multiline pattern may also
+/// read as a line break (SA vid 7 r2d). A CR right before an LF ends one line with it.
+const LINE_ENDS: [char; 7] = [
+    '\n', '\r', '\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}',
+];
+/// The heading project instructions a folder arrived with are kept under: the app did not
+/// write them, so they are whoever wrote them, not the owner (SA vid 7, leader 09:27 A). It
+/// is the [`IMPORTED_LABEL`] naming the file, and nothing carried under it reads as a
+/// heading at its level or above (SA vid 7 r2).
+pub const CARRIED_HEADING: &str = "### Imported from .crazyagent/instructions.md";
+/// What the setup review tells the owner when the project instructions came with the
+/// folder, word for word in the desktop and the TUI (DEC-141).
+pub const CARRIED_NOTICE: &str = "The folder came with its own .crazyagent/instructions.md. CrazyAgent gives it to your agents under the heading Imported from .crazyagent/instructions.md. Check it in Process before you start the team.";
+
+/// The project text a folder arrived with as one [`imported`] section under
+/// [`CARRIED_HEADING`], a label it starts with taken off first; empty text stays. Past the
+/// limit it is cut, back a line or to nothing when the cut end would read as a heading, the
+/// whole file kept aside. Input: the project text. Output: the text and whether it was cut.
+fn carried(existing: &str) -> (String, bool) {
+    assert_eq!(CARRIED_HEADING, format!("{IMPORTED_LABEL}{CARRIED_PATH}"));
+    let body = existing.strip_prefix(CARRIED_HEADING).unwrap_or(existing);
+    let part = demoted(body.trim());
+    if part.is_empty() {
+        return (existing.to_owned(), false);
+    }
+    let room = crate::agent_home::TEXT_BYTES_MAX - CARRIED_HEADING.len() - 3;
+    let mut end = part.len().min(room);
+    while !part.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut kept = part[..end].trim_end();
+    if demoted(kept) != kept {
+        assert!(end < part.len());
+        kept = kept
+            .rfind(LINE_ENDS)
+            .map_or("", |line| kept[..line].trim_end());
+        if demoted(kept) != kept {
+            kept = "";
+        }
+    }
+    assert_eq!(demoted(kept), kept);
+    let text = imported(CARRIED_PATH, kept);
+    assert!(text.starts_with(CARRIED_HEADING) && text.len() <= crate::agent_home::TEXT_BYTES_MAX);
+    (text, end < part.len())
+}
+
+/// One imported text as the project instructions keep it: under [`IMPORTED_LABEL`] naming
+/// the files that held it, with its headings moved below that label ([`demoted`]). The same
+/// for a folder's own project instructions and for every instruction file an import copies
+/// (SA vid 7 r2b, leader 10:50). Input: the names and the trimmed text. Output: the section.
+fn imported(names: &str, text: &str) -> String {
+    let body = demoted(text);
+    assert!(body.len() >= text.len());
+    format!("{IMPORTED_LABEL}{names}\n\n{body}\n")
+}
+
+/// Imported text where only labels (`### Imported from` then whitespace or the line end)
+/// read as a heading at their level or above, with every `memory::hidden_char` dropped:
+/// other ATX headings of level one to three get three more `#`, an underline under a line of
+/// more than spaces and tabs a blank line above (SA vid 7 r2, r2b, r2d). Input: the text.
+/// Output: the text, the same when it has no such line; a second pass or end trim keeps it.
+fn demoted(text: &str) -> String {
+    let lead = |c: char| c.is_whitespace() || crate::memory::hidden_char(c);
+    let blank = |text: &str| text.bytes().all(|byte| byte == b' ' || byte == b'\t');
+    let mut out = String::with_capacity(text.len());
+    let (mut above, mut above_ending) = ("", "\n");
+    let mut rest = text;
+    while !rest.is_empty() {
+        let end = rest.find(LINE_ENDS).unwrap_or(rest.len());
+        let line = &rest[..end];
+        let ending = match &rest[end..] {
+            after if after.starts_with("\r\n") => &after[..2],
+            after => &after[..after.chars().next().map_or(0, char::len_utf8)],
+        };
+        let body = line.trim_start_matches(lead);
+        let shown: String = body
+            .chars()
+            .filter(|c| !crate::memory::hidden_char(*c))
+            .collect();
+        let hashes = shown.len() - shown.trim_start_matches('#').len();
+        let rule = shown.trim();
+        let underline = !rule.is_empty()
+            && (rule.bytes().all(|byte| byte == b'=') || rule.bytes().all(|byte| byte == b'-'));
+        if underline && !blank(above) {
+            out.push_str(above_ending);
+        }
+        out.push_str(&line[..line.len() - body.len()]);
+        let label = line
+            .strip_prefix(IMPORTED_LABEL.trim_end())
+            .is_some_and(|after| after.chars().next().is_none_or(char::is_whitespace));
+        if !label
+            && (1..=3).contains(&hashes)
+            && shown[hashes..]
+                .chars()
+                .next()
+                .is_none_or(char::is_whitespace)
+        {
+            out.push_str("###");
+        }
+        out.push_str(body);
+        out.push_str(ending);
+        (above, above_ending) = (line, ending);
+        rest = &rest[end + ending.len()..];
+    }
+    assert!(out.len() >= text.len());
+    out
+}
+
+/// Whether a project's instructions came with its folder: they start with
+/// [`CARRIED_HEADING`], as the first import keeps them. Input: the project folder. Output: the
+/// answer, false when they cannot be read.
+pub fn carried_in(folder: &Path) -> bool {
+    crate::agent_home::read_project(folder).is_ok_and(|text| text.starts_with(CARRIED_HEADING))
+}
+
+/// Labels the project instructions a new project's folder arrived with, before the app has
+/// written any: a non-empty `.crazyagent/instructions.md`, git or not, is saved under
+/// [`CARRIED_HEADING`] ([`carried`]), the whole file moved aside into
+/// `.crazyagent/imported/` first when the heading leaves it no room. Text that cannot be
+/// read is left as it is, since no agent launch reads it either. Input: the project folder.
+/// Output: unit, or a plain code when the label cannot be saved, so the start is refused
+/// rather than giving agents the text unlabelled.
+pub fn label_arrived(folder: &Path) -> Result<(), EngineError> {
+    assert_eq!(
+        CARRIED_PATH,
+        format!(
+            "{}/{}",
+            crate::projects_home::CRAZYAGENT_DIRECTORY,
+            crate::agent_home::PROJECT_FILE
+        )
+    );
+    let _importing = IMPORTING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
+    let state = crate::projects_home::prepare_layout(&root)
+        .map_err(|_| failure("process_folder_unsafe"))?;
+    let Ok(existing) = crate::agent_home::read_project(&root) else {
+        return Ok(());
+    };
+    let (kept, cut) = carried(&existing);
+    if kept == existing {
+        return Ok(());
+    }
+    assert!(kept.starts_with(CARRIED_HEADING) && kept.len() <= crate::agent_home::TEXT_BYTES_MAX);
+    if cut {
+        move_aside(&root, &state, CARRIED_PATH)?;
+    }
+    crate::agent_home::save_project(&root, &kept)
+        .map_err(|problem: crate::agent_home::AgentHomeError| EngineError(problem.0))?;
+    Ok(())
+}
+
 /// Copies the project's own instruction files into its project instructions, each text
 /// once under a heading naming every file that held it, after the text already there and
 /// never twice, then moves each copied file into `.crazyagent/imported/` at its same path.
-/// A file that cannot be imported stays where it is. A project without `.crazyagent/`
-/// gets it first. Input: the project folder. Output: the moved files, or a plain code
-/// with nothing moved, such as `process_text_too_large` when the result would not fit.
+/// A file that cannot be imported stays where it is. The project instructions are taken as
+/// they are; only [`label_arrived`] labels them. A project without `.crazyagent/` gets it
+/// first. Input: the project folder. Output: the moved files, or a plain code with nothing
+/// moved, such as `process_text_too_large` when the result would not fit.
 pub fn import(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
     let _importing = IMPORTING
         .lock()
@@ -1038,17 +1199,13 @@ pub fn import(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
     }
     let mut text = existing.clone();
     for (names, _, part) in &sections {
-        if existing.contains(part) {
+        if existing.contains(part) || existing.contains(&demoted(part)) {
             continue;
         }
         if !text.is_empty() {
             text.push_str(if text.ends_with('\n') { "\n" } else { "\n\n" });
         }
-        text.push_str("## Imported from ");
-        text.push_str(&names.join(", "));
-        text.push_str("\n\n");
-        text.push_str(part);
-        text.push('\n');
+        text.push_str(&imported(&names.join(", "), part));
     }
     if text.len() > crate::agent_home::TEXT_BYTES_MAX {
         return Err(failure("process_text_too_large"));
@@ -1363,12 +1520,13 @@ fn owned(_metadata: &fs::Metadata) -> bool {
     true
 }
 
-/// Moves one project instruction file, or the link at its path, to the same path under
+/// Moves one project instruction file, or the link at its path, or arrived project
+/// instructions about to be cut to fit their heading, to the same path under
 /// `.crazyagent/imported/`, beside an earlier move as `<path>.2` and so on rather than over
 /// it. Inputs: the canonical project folder, its `.crazyagent/` folder and the file's path
 /// inside the project. Output: unit, or `process_import_unmovable`.
 fn move_aside(root: &Path, state: &Path, path: &str) -> Result<(), EngineError> {
-    assert!(PROJECT_FILES.contains(&path));
+    assert!(PROJECT_FILES.contains(&path) || path == CARRIED_PATH);
     let unmovable = || failure("process_import_unmovable");
     let mut folder = state.join(IMPORTED_DIRECTORY);
     real_folder(&folder).map_err(|_| unmovable())?;

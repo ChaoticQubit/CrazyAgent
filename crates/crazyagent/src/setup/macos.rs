@@ -86,11 +86,13 @@ impl MacInstaller {
         if !valid {
             return Err(InstallError("setup_pin_invalid"));
         }
-        let brew = self
-            .brew
-            .iter()
-            .find(|path| runnable(path))
-            .ok_or(InstallError("setup_homebrew_missing"))?;
+        let mut found = self.brew.iter().filter(|path| runnable(path)).peekable();
+        if found.peek().is_none() {
+            return Err(InstallError("setup_homebrew_missing"));
+        }
+        let brew = found
+            .find(|path| crate::service::changeable_past_sticky(path).is_none())
+            .ok_or(InstallError("setup_homebrew_unsafe"))?;
         let mut env = self.pinned.env();
         env.extend([
             ("HOMEBREW_NO_AUTO_UPDATE", OsString::from("1")),
@@ -100,7 +102,7 @@ impl MacInstaller {
         ]);
         let (ok, _) = run(
             brew,
-            &["install".into(), formula.into()],
+            &["install".into(), "--formula".into(), formula.into()],
             &env,
             &std::env::temp_dir(),
             BREW_TIME,

@@ -64,9 +64,9 @@ use crazyagent::team::cleanup::FinishedAgent;
 use crazyagent::team::{TeamGraph, TeamStatus, TerminalsPerWindow};
 use crazyagent::terminal::TerminalRequest;
 use crazyagent::usage::metrics::Metrics;
-use crazyagent::usage::money::MoneySettings;
+use crazyagent::usage::money::MoneyChoice;
 use crazyagent::usage::report::UsageReport;
-use crazyagent::usage::spend::SpendSettings;
+use crazyagent::usage::spend::SpendChoice;
 use std::sync::Arc;
 use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
@@ -163,13 +163,16 @@ fn default_engine() -> Result<(crazyagent::paths::Layout, crazyagent::service::S
     Ok((layout, service))
 }
 
-/// Installs the service when it is missing, when `reinstall` asks or when it is
-/// [`crazyagent::service::Service::stale`], else starts it as it is, then waits for the
-/// engine while the service still runs it ([`crazyagent::service::wait_started`]). The
-/// service runs the sidecar, or its private copy when the sidecar sits in the AppImage
-/// mount folder; a sidecar other users can change is refused. Inputs: the layout, the
-/// service and whether to replace the definition with this app's sidecar. Output: Ok once
-/// it answers.
+/// Installs the service or starts it as it is, as [`crazyagent::service::Service::repair`]
+/// says: a definition naming a gone, /Volumes or translocated program is never started as
+/// it is (RV-DS241-118), and a sidecar on a disk image or in a temporary folder is never
+/// installed (`engine_app_not_installed`); a refusal removes a definition naming a broken
+/// program first. Restart engine never replaces another program this engine may not
+/// (`engine_newer_than_app`, RV-DS241-129). Then it waits for the engine while the service
+/// still runs it ([`crazyagent::service::wait_started`]). The service runs the sidecar, or its
+/// private copy when the sidecar sits in the AppImage mount folder; a sidecar other users can
+/// change is refused. Inputs: the layout, the service and whether to replace the definition
+/// with this app's sidecar. Output: Ok once it answers.
 async fn start_engine(
     layout: &crazyagent::paths::Layout,
     service: &crazyagent::service::Service,
@@ -187,22 +190,30 @@ async fn start_engine(
             .map_err(|_| engine_failure("engine_service_failed"))?,
         ..service.clone()
     };
-    if reinstall || !installed || service.stale(bundled) {
-        if !service.executable.is_file() {
-            return Err(engine_failure("engine_sidecar_missing"));
+    match service.repair(bundled, installed, reinstall) {
+        crazyagent::service::Repair::Refuse => {
+            service.refuse();
+            return Err(engine_failure("engine_app_not_installed"));
         }
-        if installed {
+        crazyagent::service::Repair::Keep => {
+            return Err(engine_failure("engine_newer_than_app"));
+        }
+        crazyagent::service::Repair::Install => {
+            if !service.executable.is_file() {
+                return Err(engine_failure("engine_sidecar_missing"));
+            }
+            if installed {
+                service
+                    .stop()
+                    .map_err(|_| engine_failure("engine_service_failed"))?;
+            }
             service
-                .stop()
+                .install()
                 .map_err(|_| engine_failure("engine_service_failed"))?;
         }
-        service
-            .install()
-            .map_err(|_| engine_failure("engine_service_failed"))?;
-    } else {
-        service
+        crazyagent::service::Repair::Start => service
             .start()
-            .map_err(|_| engine_failure("engine_service_failed"))?;
+            .map_err(|_| engine_failure("engine_service_failed"))?,
     }
     crazyagent::service::wait_started(layout, &service, crazyagent::service::READY_TIMEOUT, since)
         .await
@@ -1827,15 +1838,27 @@ async fn desktop_terminal_attach(
     terminal_window(&webview)?;
     let agent = bridge::terminal::agent(&agent)?;
     let pane = pane.as_deref().map(bridge::terminal::pane).transpose()?;
-    if webview.label() != "main" {
-        let id = id.ok_or_else(|| engine_failure("window_denied"))?;
-        terminal_window_for(&webview, &id)?;
-        let graph = read(&state).await?.team_graph(&id).await?;
-        if !bridge::terminal::graph_shows(&graph, &agent) {
-            return Err(engine_failure("window_denied"));
+    let id = match webview.label() {
+        "main" => None,
+        _ => {
+            let id = id.ok_or_else(|| engine_failure("window_denied"))?;
+            terminal_window_for(&webview, &id)?;
+            Some(id)
         }
-    }
-    let room = terminals.0.room(webview.label(), &agent)?;
+    };
+    let shows = async {
+        if let Some(id) = id {
+            let graph = read(&state).await?.team_graph(&id).await?;
+            if !bridge::terminal::graph_shows(&graph, &agent) {
+                return Err(engine_failure("window_denied"));
+            }
+        }
+        Ok::<(), BridgeError>(())
+    };
+    let room = terminals
+        .0
+        .checked_room(webview.label(), &agent, shows)
+        .await?;
     let session = lock(&state).await?.open_terminal(agent, pane).await?;
     room.attach(session, output)
 }
@@ -3778,10 +3801,10 @@ fn desktop_usage_notices(webview: Webview) -> Result<&'static str, BridgeError> 
 async fn desktop_usage_set_money(
     webview: Webview,
     state: State<'_, NativeState>,
-    settings: MoneySettings,
+    choice: MoneyChoice,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.usage_set_money(settings)?;
+    let call = lock(&state).await?.usage_set_money_one(choice)?;
     call.await
 }
 
@@ -3801,10 +3824,10 @@ async fn desktop_usage_spend(
 async fn desktop_usage_set_spend(
     webview: Webview,
     state: State<'_, NativeState>,
-    settings: SpendSettings,
+    choice: SpendChoice,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.usage_set_spend(settings)?;
+    let call = lock(&state).await?.usage_set_spend_one(choice)?;
     call.await
 }
 
