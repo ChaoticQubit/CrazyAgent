@@ -41,6 +41,24 @@ export function refusedToolHome(env = process.env, parent = existsSync("/private
   return { home, prepared: false };
 }
 
+/** The HOME the first-run-harnesses-node suite gives its app and engine: a new real folder in
+ * the system temp folder, since the resolver never looks under the checkout, holding an owner's
+ * npm Codex in `.npm-global/bin`, a HOME folder the engine's harness search reads, that asks
+ * for node, with no Node anywhere. A prepared home is refused, so the stand-in never lands in
+ * one. Inputs: the environment and the parent folder. Output: { home, prepared: false }. */
+export function nodeSuiteHome(env = process.env, parent = existsSync("/private/tmp") ? "/private/tmp" : "/tmp") {
+  if (env.CRAZYAGENT_E2E_HOME) throw new Error("the first-run-harnesses-node suite plants a Codex in its home and needs a fresh one: unset CRAZYAGENT_E2E_HOME");
+  const home = realpathSync(mkdtempSync(join(parent, "can-")));
+  const bin = join(home, ".npm-global/bin");
+  mkdirSync(bin, { recursive: true, mode: 0o755 });
+  for (const folder of [join(home, ".npm-global"), bin]) chmodSync(folder, 0o755);
+  const codex = join(bin, "codex");
+  writeFileSync(codex, "#!/usr/bin/env node\n", { flag: "wx", mode: 0o755 });
+  chmodSync(codex, 0o755);
+  assert.equal(statSync(codex).mode & 0o7777, 0o755, "the stand-in Codex is an executable only this user can change");
+  return { home, prepared: false };
+}
+
 /** Where the refused-tool suite's graphify lives in its home: the Python installation whose
  * folders the group can change, and the 0777 file a link in it points out to.
  * Input: the home. Output: { prefix, outside }. */
