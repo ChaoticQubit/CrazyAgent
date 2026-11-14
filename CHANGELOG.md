@@ -116,7 +116,7 @@ Status of each version:
 
 - Version set to 2.4.0 on 2026-11-13 10:00 UTC (dd70a3af2).
 - PR [#3](https://github.com/ChaoticQubit/CrazyAgent/pull/3) merged 2026-11-13 16:57 UTC, commit 7ace0bbc9.
-- Dev build 2.4.0-dev.202611131658 published 2026-11-13 18:59 UTC, commit 7ace0bbc9. Its macOS notarizing failed first and passed on a rerun.
+- Dev build 2.4.0-dev.202611131658 published 2026-11-13 18:59 UTC, commit 7ace0bbc9. Its macOS notarizing failed first and passed on a rerun. Published as the rolling dev release (since replaced).
 - PR [#4](https://github.com/ChaoticQubit/CrazyAgent/pull/4) merged 2026-11-13 19:02 UTC, commit 1b791c409.
 - Dev build 2.4.0-dev.202611131902 published 2026-11-13 19:41 UTC, commit 1b791c409, as its own prerelease `build-2.4.0-dev.202611131902`.
 - No stable tag yet. Latest stable stays [2.3.2].
@@ -184,7 +184,7 @@ Status of each version:
 - Test install 2026-11-12 11:50 UTC, commit dfd32ccb7.
 - PR [#2](https://github.com/ChaoticQubit/CrazyAgent/pull/2) merged 2026-11-12 15:42 UTC, commit 13cb98a9e.
 - Stable tag v2.3.2 published 2026-11-12 16:18 UTC, commit 13cb98a9e.
-- Dev build 2.3.2-dev.202611121542 published 2026-11-12 16:20 UTC, commit 13cb98a9e.
+- Dev build 2.3.2-dev.202611121542 published 2026-11-12 16:20 UTC, commit 13cb98a9e, as the rolling dev release (since replaced).
 - Version set to 2.3.2 on 2026-11-12 15:24 UTC (c93cb04e2).
 - Carries the [2.3.0] and [2.3.1] lines below, which were never released on their own.
 
@@ -235,14 +235,14 @@ Status of each version:
 
 ## [2.3.1] - 2026-11-12 08:28 UTC - Internal build
 
-- Test build of commit cea59a451 made 2026-11-11 21:03 UTC.
+- Test build of commit cea59a451 started 2026-11-11 20:55 UTC.
 - Test install 2026-11-12 08:28 UTC, commit 40bfb82a2.
 - Work from 2026-11-11 to 2026-11-12, on top of the combined 2.2.0. Never released on its own. Shipped to users in [2.3.2].
 
 ### Added
 
-- Processes an agent left running after a stop are listed for you, with End and Keep, and a setting for what happens to them.
-- A live master resumes in place after an engine restart.
+- Processes an agent left running after a stop are listed for you, with End and Keep. A per-project setting picks End them (default), Keep running and release the account, or Ask me.
+- A live master whose terminal ends on its own starts again in its own conversation, instead of turning Live terminal off.
 - The Harnesses page lists where CrazyAgent looked for a missing Codex or Claude Code, lets you choose the file by path, and Check again picks up a late install.
 - Memory a master wants to save is approved on the project's own Memory screen (Context, Project memory), not only in Settings, in the app and the TUI.
 
@@ -272,10 +272,10 @@ Status of each version:
 - Leftover process checks read process identity from fixed fields and check again before each signal.
 - A plugin server check the sandbox refuses shows the sandbox's reason.
 
-## [2.3.0] - 2026-11-11 17:28 UTC - Internal build
+## [2.3.0] - 2026-11-11 17:25 UTC - Internal build
 
 - Version set to 2.3.0 on 2026-11-11 14:39 UTC (98008f483).
-- Test build of commit 6a3ca5084 made 2026-11-11 17:28 UTC and installed later that day (install time not recorded). It was replaced by the combined 2.2.0 build at 19:52 UTC.
+- Test build of commit 6a3ca5084 started 2026-11-11 17:25 UTC and was installed later that day (install time not recorded). It was replaced by the combined 2.2.0 build at 19:52 UTC.
 - Work from 2026-11-11. Never released on its own. Shipped to users in [2.3.2].
 
 ### Added
@@ -305,10 +305,10 @@ Status of each version:
 
 - Test install of commit fc9600c57 2026-11-11 19:52 UTC.
 - PR [#1](https://github.com/ChaoticQubit/CrazyAgent/pull/1) merged 2026-11-11 23:30 UTC, commit bb7691145.
-- Dev build 2.2.0-dev.202611112331 published 2026-11-12 00:20 UTC, commit bb7691145.
+- Dev build 2.2.0-dev.202611112331 published 2026-11-12 00:20 UTC, commit bb7691145, as the rolling dev release (since replaced).
 - Stable tag v2.2.0 published 2026-11-12 01:21 UTC, commit bb7691145.
 - Version set to 2.2.0 on 2026-11-11 04:31 UTC (b8d654849).
-- First release since V1. It carries the [V2], [V2.1] and [2.2.1] lines below, plus the V2.2 work listed here.
+- First stable release. It carries the [V2], [V2.1] and [2.2.1] lines below, plus the V2.2 work listed here.
 - Platforms: macOS (Apple silicon and Intel) and Linux x86_64. No Windows build in this release.
 - Known limit on Linux: a master with tools edits existing files but cannot create a new file or folder at the top of its worktree.
 
