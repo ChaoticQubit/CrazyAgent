@@ -832,10 +832,10 @@ impl DeletePlan {
     }
 
     /// Names the engine's own files of this deleted project for the record its row removal
-    /// writes: each agent, each research run of its jobs, each roadmap status run and, on
-    /// macOS, the tool caches of its folders (T8), with the identity of the folder that
-    /// holds it. A folder that is no real run, or that is not there, is left out. Input: the
-    /// project's research jobs. Output: the records.
+    /// writes: each agent, each research run of its jobs, each roadmap status run, each
+    /// Overview writing run (RV-DS241-80) and, on macOS, the tool caches of its folders (T8),
+    /// with the identity of the folder that holds it. A folder that is no real run, or that
+    /// is not there, is left out. Input: the project's research jobs. Output: the records.
     pub fn engine_files(&self, research: &[i64]) -> Vec<RecordedFile> {
         let Some(root) = self.database.parent() else {
             return Vec::new();
@@ -854,6 +854,7 @@ impl DeletePlan {
                     .iter()
                     .any(|job| name.starts_with(&format!("job-{job}-")))
                     || crate::roadmap_status::names_run(&self.project, &name)
+                    || crate::project_overview::names_run(&self.project, &name)
                 {
                     names.push(name);
                 }
@@ -944,10 +945,17 @@ impl EngineFile {
 
 /// Reads a recorded name as an engine file, exact shapes only: `agent-<id>`, or
 /// `job-<id>-<attempt>` with an optional `-<launch>`, each number in its one plain spelling,
-/// or `roadmap-status-<project>-<time>`, or `tool-cache-<digest>` with 32 lowercase hex
-/// digits (T8). Input: the name. Output: what it names, or None for anything else.
+/// or `roadmap-status-<project>-<time>` or `overview-<project>-<time>`, a run whose folder
+/// and profile both go, or `tool-cache-<digest>` with 32 lowercase hex digits (T8). Input:
+/// the name. Output: what it names, or None for anything else.
 fn engine_file(name: &str) -> Option<EngineFile> {
-    if let Some(run) = name.strip_prefix(crate::roadmap_status::RUN_NAME_HEAD) {
+    let status_run = [
+        crate::roadmap_status::RUN_NAME_HEAD,
+        crate::project_overview::RUN_NAME_HEAD,
+    ]
+    .into_iter()
+    .find_map(|head| name.strip_prefix(head));
+    if let Some(run) = status_run {
         let (project, time) = run.rsplit_once('-')?;
         let plain = !project.is_empty()
             && project
@@ -1326,9 +1334,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "home_copy_failed" | "home_move_failed" => {
             "The folder could not be added. Nothing was removed."
         }
-        "home_copy_unverified" => "The copy did not match the original, so the original was kept.",
+        "home_copy_unverified" => "The copy didn't match the original, so the original was kept.",
         "home_move_source_left" => {
-            "The folder was added, but some of the original could not be removed."
+            "The folder was added, but part of the original couldn't be removed. What's left there may be newer than the copy, so check it before you delete anything."
         }
         "home_icloud_not_downloaded" => {
             "Some files are still only in iCloud, so the folder was not added. Nothing was removed. Download them and try again."
@@ -1344,7 +1352,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "icloud_outcome_unknown" | "icloud_owner_unavailable" => {
             "CrazyAgent couldn't confirm the iCloud download. Nothing was moved or copied. Try again."
         }
-        "home_add_unverified" => "The folder did not arrive in your projects folder.",
+        "home_add_unverified" => {
+            "The folder didn't arrive in your projects folder. Check it and try again."
+        }
         "home_move_same" => "That is already your projects folder.",
         "home_move_nested" => "Pick a projects folder that is not inside the current one.",
         "home_move_too_many" => {
@@ -1385,7 +1395,7 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
             "A project is still being moved into your projects folder. Try again when it finishes."
         }
         "move_project_old_folder_left" => {
-            "The project moved, but part of its old folder couldn't be deleted. Check the old folder and delete it yourself."
+            "The project moved, but part of its old folder couldn't be deleted. What's left there may be newer than the copy, so check it before you delete anything."
         }
         "move_project_unavailable" => {
             "The engine could not check the project's agents. Nothing was moved."

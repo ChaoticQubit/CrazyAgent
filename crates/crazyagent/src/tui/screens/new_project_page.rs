@@ -24,10 +24,16 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 
+/// The most New project drafts kept at once. A creation refused in the background past it
+/// keeps no draft and its refusal says so; a wizard left open over it still keeps its own,
+/// so the list holds at most this many plus the wizards open at that moment.
+const DRAFTS_MAX: usize = 8;
+
 thread_local! {
-    static KEPT: RefCell<Option<Wizard>> = const { RefCell::new(None) };
+    static KEPT: RefCell<VecDeque<Wizard>> = const { RefCell::new(VecDeque::new()) };
     static RUNNING: RefCell<Vec<NewProjectPage>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -58,12 +64,12 @@ pub(in crate::tui) fn carry_background(arrival: &Arrival, ctx: &mut Ctx) {
     drop(settled);
 }
 
-/// Names the New project draft kept after the owner left the wizard.
-/// Takes nothing; the draft lives on the TUI thread until the wizard opens again.
+/// Names the kept New project draft the wizard opens next, the oldest one kept.
+/// Takes nothing; drafts live on the TUI thread until the wizard opens them again.
 /// Returns the typed name, "Untitled project" for a draft without one, or none.
 pub(in crate::tui) fn kept_draft() -> Option<String> {
     KEPT.with_borrow(|kept| {
-        kept.as_ref().map(|wizard| {
+        kept.front().map(|wizard| {
             let name = wizard.name.value().trim();
             if name.is_empty() {
                 "Untitled project".to_owned()
@@ -297,12 +303,12 @@ fn send_creation(submission: &CreationSubmission, delivery: MutationDelivery, ct
 }
 
 impl NewProjectPage {
-    /// Opens the kept draft, or an empty wizard with the pools the shell already has.
+    /// Opens the oldest kept draft, or an empty wizard with the pools the shell already has.
     /// Takes the shell context for pools, the home folder and the size.
     /// Returns the screen, drawn once so the header and help line are current.
     pub fn new(ctx: &Ctx) -> Self {
         let pools = ctx.store.pools.ready();
-        let wizard = match KEPT.take() {
+        let wizard = match KEPT.with_borrow_mut(VecDeque::pop_front) {
             Some(mut wizard) => {
                 wizard.resume();
                 if let Some(pools) = pools {
@@ -554,18 +560,16 @@ impl NewProjectPage {
             Phase::Failed { title, .. } => title.clone(),
             _ => "Could not create the project.".to_owned(),
         };
-        if KEPT.with_borrow(Option::is_none) {
-            ctx.say(Message::error(
-                &title,
-                &format!("{name} is kept as a draft. Open New project to fix it."),
-            ));
+        let kept = KEPT.with_borrow(VecDeque::len);
+        let rest = if kept == 0 {
+            format!("{name} is kept as a draft. Open New project to fix it.")
+        } else if kept < DRAFTS_MAX {
+            format!("{name} is kept as a draft. New project opens your earlier drafts first.")
         } else {
             self.wizard = Wizard::new(Vec::new(), None);
-            ctx.say(Message::error(
-                &title,
-                &format!("Your newer draft is kept. Create {name} again in New project."),
-            ));
-        }
+            format!("{DRAFTS_MAX} drafts are already kept. Create {name} again in New project.")
+        };
+        ctx.say(Message::error(&title, &rest));
     }
 
     fn set_pools(&mut self, pools: &[PoolSummary]) {
@@ -603,7 +607,7 @@ impl Drop for NewProjectPage {
         }
         if !matches!(self.wizard.phase, Phase::Creating { .. }) && self.draft() {
             let wizard = std::mem::replace(&mut self.wizard, Wizard::new(Vec::new(), None));
-            KEPT.set(Some(wizard));
+            KEPT.with_borrow_mut(|kept| kept.push_back(wizard));
         }
     }
 }
@@ -732,3 +736,6 @@ impl Screen for NewProjectPage {
         Some(Place::NewProject)
     }
 }
+
+#[cfg(test)]
+mod tests;

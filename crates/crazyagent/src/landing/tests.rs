@@ -477,6 +477,89 @@ fn accepting_two_change_sets_that_each_hold_half_a_bare_layout_refuses_the_secon
     }
 }
 
+/// A bare-repository layout whose `refs` or `objects` is spelled with a letter a
+/// case-insensitive volume folds onto ASCII, here U+017F LATIN SMALL LETTER LONG S, is
+/// refused like the plain one, since the owner's own git on that volume opens it
+/// (RV-DS241-70).
+#[test]
+fn a_bare_repository_layout_spelled_with_folded_letters_is_refused_when_its_turn_is_committed() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    for (objects, refs) in [("objects", "ref\u{17f}"), ("object\u{17f}", "refs")] {
+        let case = Case::new();
+        let layout = case.workspace.worktree.join("notes");
+        let packs = format!("{objects}/info/packs");
+        let main = format!("{refs}/heads/main");
+        plant_layout(
+            &layout,
+            &[
+                ("HEAD", "ref: refs/heads/main\n", false),
+                (packs.as_str(), "\n", false),
+                (main.as_str(), "\n", false),
+            ],
+        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                git_in(&case.home, &layout, &["rev-parse", "--git-dir"]).trim(),
+                ".",
+                "the owner's own git on a folding volume takes {objects} and {refs} as a repository"
+            );
+        }
+        assert_eq!(
+            refused(record_turn_end(&case.db, &case.workspace, &turn)),
+            "changes_bare_repository",
+            "{objects} {refs}"
+        );
+    }
+}
+
+/// Two change sets whose folders differ only in letter case, each holding half a bare
+/// repository layout, make the whole layout in one folder of an owner checkout on a
+/// case-insensitive volume, so accepting the second is refused and the branch stays
+/// (RV-DS241-70).
+#[test]
+fn accepting_halves_of_a_bare_layout_in_folders_that_differ_only_in_case_refuses_the_second() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    let store: Vec<(&str, &str, bool)> = vec![
+        ("objects/info/packs", "\n", false),
+        ("refs/heads/main", "\n", false),
+    ];
+    let head: Vec<(&str, &str, bool)> = vec![
+        ("HEAD", "ref: refs/heads/main\n", false),
+        ("config", "[core]\n\tbare = true\n", false),
+    ];
+    for (first, second) in [(&store, &head), (&head, &store)] {
+        let case = Case::new();
+        let sibling = second_agent(&case);
+        plant_layout(&case.workspace.worktree.join("evil"), first);
+        plant_layout(&sibling.worktree.join("Evil"), second);
+        let one = record_turn_end(&case.db, &case.workspace, &turn)
+            .unwrap()
+            .expect("half a layout lands as a change set");
+        let two = record_turn_end(&case.db, &sibling, &turn)
+            .unwrap()
+            .expect("the other half lands as a change set");
+        assert!(matches!(
+            case.accept(&one).unwrap(),
+            AcceptOutcome::Landed { .. }
+        ));
+        let tip = case.tip();
+        assert_eq!(
+            refused(case.accept(&two)),
+            "changes_bare_repository",
+            "evil/ and Evil/ are one folder of the owner's checkout"
+        );
+        assert_eq!(case.tip(), tip, "the branch did not move");
+    }
+}
+
 #[test]
 fn a_link_an_agent_leaves_pointing_outside_the_project_or_into_the_agents_folder_is_refused() {
     let turn = TurnEnd {
@@ -3509,6 +3592,25 @@ fn the_owners_ignore_file_is_the_global_setting_else_the_default_and_only_a_real
     );
     write(&home.join("relative/ignore"), "secret.env\n");
     assert_eq!(git::owner_excludes(&home, None), None);
+}
+
+#[test]
+fn the_onboarding_listing_keeps_out_what_the_owners_global_ignore_file_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let (home, repo) = (root.join("home"), root.join("repo"));
+    for folder in [&home, &repo] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    git::OWNER_HOME.with(|owner| *owner.borrow_mut() = Some(home.clone()));
+    git_in(&home, &repo, &["init", "-q", "--template="]);
+    write(&home.join(".config/git/ignore"), "scratch.txt\n");
+    write(&repo.join("scratch.txt"), "the owner's own notes\n");
+    write(&repo.join("notes.md"), "# Notes\n");
+
+    let kept = crate::onboarding::draft::kept_out(&repo);
+
+    assert_eq!(kept, Some(vec!["scratch.txt".to_owned()]));
 }
 
 #[test]

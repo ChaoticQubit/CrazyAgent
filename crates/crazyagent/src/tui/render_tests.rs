@@ -335,6 +335,22 @@ fn startup_frames_match_the_design() {
     check("too-small", &render(&mut shell, 50, 12), &[]);
 }
 
+/// RV-DS241-118: the engine-down screen names the command that starts the engine, which also
+/// repairs a login service left naming a gone or temporary app path, as the desktop's
+/// Restart engine does.
+#[test]
+fn the_engine_down_screen_names_the_command_that_starts_and_repairs_the_engine() {
+    for (width, height) in [(120, 36), (80, 24)] {
+        let mut shell = Shell::new(ctx(width, height));
+        shell.ctx.link = Link::Down("engine_unavailable".into());
+        let text = render(&mut shell, width, height).join("\n");
+        assert!(
+            text.contains("Start it with crazyagent service start, then press r to try again."),
+            "{text}"
+        );
+    }
+}
+
 #[test]
 fn welcome_frames_match_the_design() {
     for (width, height) in [(120, 36), (80, 24)] {

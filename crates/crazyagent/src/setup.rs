@@ -594,6 +594,10 @@ const REASONS: [(&str, &str); 35] = [
         "uv is needed to install Graphify and it is not installed.",
     ),
     (
+        "setup_winget_missing",
+        "winget is needed to install uv and it is not installed. Install App Installer from the Microsoft Store, then run setup again.",
+    ),
+    (
         "setup_store_unavailable",
         "The app's data folder can't be written.",
     ),
@@ -750,7 +754,11 @@ pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
 #[cfg(target_os = "windows")]
 pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
     let local_app_data = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
-    match windows::WindowsInstaller::new(&engine_root.join("setup"), local_app_data.as_deref()) {
+    match windows::WindowsInstaller::new(
+        &engine_root.join("setup"),
+        local_app_data.as_deref(),
+        crate::tools::Places::from_environment(Some(engine_root)),
+    ) {
         Ok(installer) => Box::new(installer),
         Err(code) => Box::new(RefusingInstaller(code)),
     }

@@ -651,3 +651,74 @@ fn dropping_the_relay_aborts_a_provider_request_still_in_flight() {
     assert!(!String::from_utf8_lossy(&rest).contains("200"));
     drop(provider);
 }
+
+/// SA241 vid 9: a relay listens on a port of the reserved relay block, so the port it
+/// leaves when it ends is one no sandboxed agent can bind; relays running at once each hold
+/// a port of their own there.
+#[test]
+fn a_relay_listens_only_on_a_reserved_relay_port() {
+    let provider = Provider::json();
+    let relays: Vec<Relay> = (0..3)
+        .map(|_| Relay::start(&provider.origin(), key()).unwrap())
+        .collect();
+    let mut ports: Vec<u16> = relays.iter().map(Relay::port).collect();
+    for port in &ports {
+        assert!(
+            crate::sandbox::model_proxy::RELAY_PORTS.contains(port),
+            "{port}"
+        );
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    assert_eq!(ports.len(), relays.len());
+}
+
+/// SA241 vid 9: no Open-network agent listens on a port of the relay block, at either end
+/// of it, on IPv4 or IPv6 loopback or any address, so none can take a relay's port after
+/// the relay ended and answer a kept pane's next model request.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_open_agent_never_listens_on_a_model_relay_port() {
+    let agent = crate::sandbox::test_agent::TestAgent::open();
+    let block = crate::sandbox::model_proxy::RELAY_PORTS;
+    for port in [*block.start(), *block.end()] {
+        for host in ["127.0.0.1", "::1", "0.0.0.0", "::"] {
+            let output = agent.run(&format!(
+                "/usr/bin/nc -l {host} {port} 2>&1 & pid=$!; /bin/sleep 1; kill $pid 2>/dev/null; wait $pid; exit 0"
+            ));
+            let said = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                said.contains("Operation not permitted"),
+                "an agent cannot take {host}:{port} from a model relay: {said}"
+            );
+        }
+    }
+}
+
+/// A relay port the system keeps from this user, as a Windows excluded port range answers
+/// a bind with `PermissionDenied`, or one it cannot give (`AddrNotAvailable`), is skipped
+/// as a taken one is, so the relay binds the next port of its block; any other bind error
+/// still ends the start, and a block with no port left says every port is taken (rv-code4
+/// relay-port r1 F1).
+#[test]
+fn a_relay_port_the_system_refuses_is_skipped_for_the_next_one() {
+    use std::io::{Error, ErrorKind};
+    let ports = [41_428, 41_429, 41_430, 41_431];
+    let asked = Mutex::new(Vec::new());
+    let refusing = |address: SocketAddr| -> std::io::Result<TcpListener> {
+        asked.lock().unwrap().push(address.port());
+        match address.port() {
+            41_428 => Err(Error::from(ErrorKind::PermissionDenied)),
+            41_429 => Err(Error::from(ErrorKind::AddrNotAvailable)),
+            41_430 => Err(Error::from(ErrorKind::AddrInUse)),
+            _ => crate::spawn_gate::bind_tcp_std("127.0.0.1:0"),
+        }
+    };
+    let bound = first_bound(&ports, 0, refusing).unwrap();
+    assert!(bound.local_addr().unwrap().ip().is_loopback());
+    assert_eq!(*asked.lock().unwrap(), ports.to_vec());
+    let excluded = first_bound(&ports, 1, |_| Err(Error::from(ErrorKind::PermissionDenied)));
+    assert_eq!(excluded.unwrap_err().kind(), ErrorKind::AddrInUse);
+    let broken = first_bound(&ports, 2, |_| Err(Error::other("no sockets")));
+    assert_eq!(broken.unwrap_err().kind(), ErrorKind::Other);
+}

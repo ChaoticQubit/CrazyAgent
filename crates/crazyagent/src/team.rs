@@ -1673,7 +1673,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 task INTEGER PRIMARY KEY,
                 project TEXT NOT NULL,
                 agent INTEGER NOT NULL,
-                held INTEGER NOT NULL DEFAULT 0
+                held INTEGER NOT NULL DEFAULT 0,
+                resolve INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS team_worktrees (
                 agent INTEGER PRIMARY KEY,
@@ -2024,8 +2025,10 @@ pub fn admit(
 /// Starts the work that resolves what an Ask agent to update merged into a team agent's
 /// worktree (DEC-095): a sub-agent gets a task pinned to it, so it runs in the same
 /// worktree and lands in the same change set; the team master gets an engine message. A
-/// sub-agent holds at most one queued resolve task, whose prompt the newest update
-/// replaces, so the global task cap never refuses a merge already made. The update is
+/// sub-agent holds at most one queued resolve task, marked so on its pin, whose prompt the
+/// newest update replaces, so the global task cap never refuses a merge already made; any
+/// other task queued for the agent keeps its prompt and the resolve waits behind it
+/// (RV-DS241-123). The update is
 /// the owner's, so it clears the owner stop of that sub-agent alone; the agents it leads
 /// stay stopped. Takes the transaction, project, agent, prompt and time. Returns Ok, or a
 /// plain refusal code, `team_task_limit` when the task window holds only work it keeps;
@@ -2070,7 +2073,7 @@ pub fn admit_resolve(
     let queued: Option<i64> = tx
         .query_row(
             "SELECT t.id FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
-             WHERE p.project=?1 AND p.agent=?2 AND t.status=?3",
+             WHERE p.project=?1 AND p.agent=?2 AND p.resolve=1 AND t.status=?3",
             params![project.as_str(), agent, TaskStatus::Queued.name()],
             |row| row.get(0),
         )
@@ -2108,7 +2111,7 @@ pub fn admit_resolve(
     )
     .map_err(error)?;
     tx.execute(
-        "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+        "INSERT INTO team_task_pins(task,project,agent,resolve) VALUES (?1,?2,?3,1)",
         params![task, project.as_str(), agent],
     )
     .map_err(error)?;
@@ -4007,7 +4010,9 @@ pub(crate) const ENDED_TEAMMATE: &str = "a.status IN ('stopped','failed')
 /// `team_tasks.wait` (why it waits to start, F11), `team_agents.hookless` (1 when the agent's launch fires no hooks,
 /// DEC-104 bare-hooks), `team_agents.pane_pid` (the pane process a native teammate was
 /// first named by, PLC (b)), `team_task_pins.held` (1 when a hold pinned the task, not
-/// its own purpose), `team_owner_stops.stopped_by` (who made the stop; one from before
+/// its own purpose), `team_task_pins.resolve` (1 for the task an Ask agent to update
+/// queued, the only queued task a later update may rewrite, RV-DS241-123),
+/// `team_owner_stops.stopped_by` (who made the stop; one from before
 /// the column was the owner's), `team_owner_stops.last_by` (who made the latest stop, whose
 /// time the row holds; none from before the column, HB-S5-B-L2) and
 /// `team_teammate_names.save_refused` (why the engine last gave up saving a teammate's
@@ -4032,6 +4037,7 @@ fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
         ("team_agents", "hookless", "INTEGER NOT NULL DEFAULT 0"),
         ("team_agents", "pane_pid", "INTEGER"),
         ("team_task_pins", "held", "INTEGER NOT NULL DEFAULT 0"),
+        ("team_task_pins", "resolve", "INTEGER NOT NULL DEFAULT 0"),
         (
             "team_owner_stops",
             "stopped_by",
@@ -5101,6 +5107,26 @@ pub(crate) fn owner_start_alone(
     connection
         .execute(
             "DELETE FROM team_owner_stops WHERE agent=?1 AND project=?2",
+            params![agent, project.as_str()],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// Clears the master's or a lead's stop of one agent that starts again, never the owner's:
+/// an owner-stopped agent starts only through the owner's own Wake, restart or task, which
+/// clear that stop themselves, so a stop the owner makes while a start is under way stays
+/// and is applied again (AW-1, RV-DS241-125). Takes a connection, the project and the
+/// agent. Returns any SQLite failure.
+pub(crate) fn clear_stop_unless_owner(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<(), EngineError> {
+    assert!(agent > 0, "clear_stop_unless_owner_needs_a_stored_agent");
+    connection
+        .execute(
+            "DELETE FROM team_owner_stops WHERE agent=?1 AND project=?2 AND stopped_by<>'owner'",
             params![agent, project.as_str()],
         )
         .map_err(error)?;

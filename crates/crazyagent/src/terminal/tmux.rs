@@ -124,6 +124,9 @@ const REPLY_TIME: Duration = Duration::from_secs(10);
 /// with the text so far as a success; only a line ending with this mark was expanded whole.
 const FORMAT_END: &str = " end";
 const REPLY_CUT: &str = "terminal_reply_cut";
+/// The most live views one tmux server feeds at once over all its panes: every view the
+/// engine serves, so one agent per tile never meets it first; `VIEWERS_MAX` bounds one pane.
+const SERVER_VIEWERS_MAX: usize = super::CONNECTIONS_MAX;
 const PLACED: &str = "#{pane_id} #{pane_pid}";
 const PANE_FIELDS: &str = "#{pane_id} #{pane_pid} #{pane_dead}";
 const CLOSE_TIME: Duration = Duration::from_secs(2);
@@ -1641,11 +1644,16 @@ fn viewer(
     let (feed, receiver) = buffer();
     if view {
         state.viewers.retain(|viewer| viewer.feed.open());
-        if state.viewers.len() >= VIEWERS_MAX {
+        let of_pane = state
+            .viewers
+            .iter()
+            .filter(|viewer| viewer.pane == pane)
+            .count();
+        if of_pane >= VIEWERS_MAX || state.viewers.len() >= SERVER_VIEWERS_MAX {
             return Err(failure("terminal_viewers_full"));
         }
         state.viewers.push(Viewer { pane, window, feed });
-        assert!(state.viewers.len() <= VIEWERS_MAX);
+        assert!(state.viewers.len() <= SERVER_VIEWERS_MAX);
     }
     Ok(TerminalStream {
         agent,
@@ -1722,21 +1730,56 @@ fn guard<'a>(line: &'a [u8], word: &[u8]) -> Option<&'a [u8]> {
     line.strip_prefix(word)?.strip_prefix(b" ")
 }
 
+/// How the reader finds the end of the reply block opening now: `Searched` looks for its
+/// closing guard, `Counted` takes that many rows of an attach's capture as data first, and
+/// `Unknown` is a capture whose located reply was cut, so its rows cannot be counted.
+enum Rows {
+    Searched,
+    Counted(usize),
+    Unknown,
+}
+
 /// How many rows the reply block opening now holds, when it is an attach's capture: the
-/// history rows the attach read just before, then the screen rows.
-/// capture-pane prints one line per pane row and the pane's own text can look like any
-/// control line, including the block's closing guard, so those rows are counted as data
-/// rather than searched for a guard. Takes the state. Returns the history and pane height
-/// the attach read just before, or none for every other reply.
-fn capture_rows(state: &State) -> Option<usize> {
-    match state.pending.front()? {
-        Pending::Attach {
+/// history rows the attach read just before, then the screen rows. capture-pane prints one
+/// line per pane row and the pane's own text can look like any control line, including the
+/// block's closing guard, so those rows are counted as data, never searched for a guard.
+/// Takes the state. Returns the count, `Searched` for other replies, or `Unknown`.
+fn capture_rows(state: &State) -> Rows {
+    match state.pending.front() {
+        Some(Pending::Attach {
             located: Some(lines),
             history,
             ..
-        } => located(lines).map(|found| found.history.min(*history) + usize::from(found.rows)),
-        _ => None,
+        }) => located(lines).map_or(Rows::Unknown, |found| {
+            Rows::Counted(found.history.min(*history) + usize::from(found.rows))
+        }),
+        _ => Rows::Searched,
     }
+}
+
+/// The pane ids a tmux window layout lists, as `%<id>`: each leaf cell is
+/// `<width>x<height>,<x>,<y>,<id>`, while a split cell holds child cells in braces or brackets
+/// after its own `<x>,<y>`. Takes the layout. Returns the ids, none for a layout not read.
+fn layout_panes(layout: &[u8]) -> Vec<Vec<u8>> {
+    let words: Vec<&[u8]> = layout
+        .split(|byte| matches!(byte, b',' | b'{' | b'}' | b'[' | b']'))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let mut panes = Vec::new();
+    for (at, word) in words.iter().enumerate() {
+        if !word.contains(&b'x') {
+            continue;
+        }
+        if let Some(id) = words.get(at + 3)
+            && id.iter().all(u8::is_ascii_digit)
+        {
+            let mut pane = b"%".to_vec();
+            pane.extend_from_slice(id);
+            panes.push(pane);
+        }
+    }
+    assert!(panes.len() <= layout.len());
+    panes
 }
 
 /// One reply block the reader is inside: its opening guard, the lines kept, how many lines
@@ -1835,12 +1878,17 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
             continue;
         }
         if let Some(opened) = guard(&line, b"%begin") {
+            let rows = match capture_rows(&state) {
+                Rows::Searched => None,
+                Rows::Counted(rows) => Some(rows),
+                Rows::Unknown => break,
+            };
             block = Some(Block {
                 opened: opened.to_vec(),
                 lines: Vec::new(),
                 seen: 0,
                 bytes: 0,
-                rows: capture_rows(&state),
+                rows,
                 oversized: false,
             });
         } else if let Some(rest) = guard(&line, b"%output") {
@@ -1856,6 +1904,15 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
         {
             let window = rest.split(|byte| *byte == b' ').next().unwrap_or_default();
             state.viewers.retain(|viewer| viewer.window != window);
+        } else if let Some(rest) = guard(&line, b"%layout-change") {
+            let mut fields = rest.split(|byte| *byte == b' ');
+            let window = fields.next().unwrap_or_default();
+            let panes = layout_panes(fields.next().unwrap_or_default());
+            if !panes.is_empty() {
+                state
+                    .viewers
+                    .retain(|viewer| viewer.window != window || panes.contains(&viewer.pane));
+            }
         } else if line == b"%exit" || guard(&line, b"%exit").is_some() {
             break;
         }

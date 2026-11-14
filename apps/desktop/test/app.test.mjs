@@ -50,6 +50,25 @@ test("an unreachable engine shows one full-window state with Try again and no sh
   assert.doesNotMatch(markup, /class="sidebar"/);
 });
 
+test("the engine-down state offers Restart engine, which repairs the login service, and names why the engine didn't start (RV-DS241-118)", async () => {
+  const moved = "Move CrazyAgent to your Applications folder, then open it again. Its engine can't run at login from a disk image, another disk or a temporary folder.";
+  const { plainError } = await import("../src/api.ts");
+  assert.equal(plainError("engine_app_not_installed"), moved);
+  const markup = render({ engine: "down", engineProblem: moved });
+  assert.match(markup, /<h1>CrazyAgent&#x27;s engine isn&#x27;t running<\/h1>/);
+  assert.match(markup, /role="alert"[^>]*>Move CrazyAgent to your Applications folder, then open it again\./);
+  assert.match(markup, /class="btn primary"[^>]*>[\s\S]*Try again<\/button>/);
+  assert.match(markup, /class="btn"[^>]*>(?:(?!<\/button>).)*Restart engine<\/button>/);
+  const plain = render({ engine: "down", engineProblem: null });
+  assert.match(plain, /Restart engine<\/button>/);
+  assert.doesNotMatch(plain, /role="alert"/);
+});
+
+test("Restart engine never replaces a newer engine, or one a test build may not, and says why (RV-DS241-129)", async () => {
+  const { plainError } = await import("../src/api.ts");
+  assert.equal(plainError("engine_newer_than_app"), "Your login service runs a newer CrazyAgent engine than this app, or this app is a test build, so Restart engine keeps that engine. Open the newer CrazyAgent or update this one, then restart the engine.");
+});
+
 test("an engine of another version asks for a restart with both versions, not the engine-down state", () => {
   const { engineState } = state;
   const ok = { kind: "ok", value: { connected: true, pending: false } };

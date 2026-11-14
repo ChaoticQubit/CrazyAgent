@@ -231,8 +231,10 @@ impl Ctx {
     /// Queues one engine request; duplicates of a queued read are dropped and
     /// keystrokes for the agent terminal already waiting at the back join it.
     /// Input: the request. Output: Ok when the engine will see it, or the request back
-    /// when the queue already holds 32 requests. A joined terminal input holds at most
-    /// the engine's terminal input limit.
+    /// when the queue already holds 32 requests. Keystrokes join only while the joined
+    /// input stays within the engine's terminal input limit; one key event's input, a whole
+    /// paste included, is one request the terminal client splits, so the queue takes or
+    /// refuses it whole.
     fn queue(&mut self, request: Request) -> Result<(), Box<Request>> {
         if matches!(request, Request::Reconnect) {
             self.reconnect = true;

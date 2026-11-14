@@ -759,7 +759,15 @@ pub(in crate::tui) fn job_status(job: &ResearchJob, now_ms: i64, offset: i64, lo
                 look.muted,
             )
         }
-        ResearchStatus::Queued => Row::of(format!("{} Queued", look.glyph("\u{25cc}")), look.muted),
+        ResearchStatus::Queued => {
+            let queued = Row::of(format!("{} Queued", look.glyph("\u{25cc}")), look.muted);
+            match job.error.as_deref().map(str::trim) {
+                Some(reason) if !reason.is_empty() => {
+                    queued.push(format!("  {reason}"), look.muted)
+                }
+                _ => queued,
+            }
+        }
         ResearchStatus::NeedsPool => match job.rate_limited() {
             Some((until, _)) => Row::of(
                 format!("! Rate limited until {}", clock(until, offset)),
@@ -1029,9 +1037,16 @@ fn work_rows(screen: &ProjectScreen, look: &Look, paths: bool, width: usize) -> 
                     Row::of(format!("{} Queued", look.glyph("\u{25cc}")), look.muted)
                 }
             };
+            let waits = screen.job_for(&path).is_some_and(|job| {
+                job.status == ResearchStatus::Queued
+                    && job
+                        .error
+                        .as_deref()
+                        .is_some_and(|reason| !reason.trim().is_empty())
+            });
             let mut row = Row::of(research_label(*kind, look), look.fg)
                 .pad(24)
-                .cat(status.pad(28));
+                .cat(if waits { status } else { status.pad(28) });
             if paths
                 && screen
                     .job_for(&path)

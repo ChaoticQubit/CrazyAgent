@@ -1,6 +1,6 @@
-import { useState } from "react";
-import { SPEND_DEFAULTS, setSpendSettings, usageRefusal, type AllLimited, type LimitedPool, type ResetsSource, type SpendConfirm, type SpendSettings, type SpendView, type UsageReport } from "../../api-usage";
-import { sameJson, useHeld, type Loaded } from "../../state";
+import { useRef, useState } from "react";
+import { SPEND_DEFAULTS, setSpendOne, usageRefusal, type AllLimited, type LimitedPool, type ResetsSource, type SpendChoice, type SpendConfirm, type SpendSettings, type SpendView, type UsageReport } from "../../api-usage";
+import { useHeld, type Loaded } from "../../state";
 import { LoadError, Notice, Segmented, SettingLine, SettingSection } from "../../ui";
 import { andList } from "./account-drawer";
 import { SpendReset } from "./spend-reset";
@@ -62,10 +62,10 @@ export function allLimitedHelp(settings: SpendSettings): string {
 }
 
 /** The three free resets settings as drawn, each option a radio with its help line and a
- * changed mark off the default. Inputs: the settings, the refusal to show and the change handler. Output:
- * the section. */
-export function SpendSettingsView({ settings, refused, onChange }: {
-  settings: SpendSettings; refused: string; onChange: (settings: SpendSettings) => void;
+ * changed mark off the default; a pick names only its own setting. Inputs: the settings, the
+ * refusal to show and the pick handler. Output: the section. */
+export function SpendSettingsView({ settings, refused, onChoice }: {
+  settings: SpendSettings; refused: string; onChoice: (choice: SpendChoice) => void;
 }) {
   const confirmChanged = settings.confirm !== SPEND_DEFAULTS.confirm;
   const limitedChanged = settings.all_limited !== SPEND_DEFAULTS.all_limited;
@@ -73,13 +73,13 @@ export function SpendSettingsView({ settings, refused, onChange }: {
   const sourceChanged = source !== SPEND_DEFAULTS.resets_source;
   return <SettingSection title="Free resets" about={SPEND_ABOUT}>
     <SettingLine label="Spend confirmation" help={confirmHelp(settings.confirm)} changed={confirmChanged}>
-      <Segmented label="Spend confirmation" value={settings.confirm} options={CONFIRM_OPTIONS} onValue={(confirm) => onChange({ ...settings, confirm })} />
+      <Segmented label="Spend confirmation" value={settings.confirm} options={CONFIRM_OPTIONS} onValue={(value) => onChoice({ field: "confirm", value })} />
     </SettingLine>
     <SettingLine label="When every pool account is limited" help={allLimitedHelp(settings)} changed={limitedChanged}>
-      <Segmented label="When every pool account is limited" value={settings.all_limited} options={ALL_LIMITED_OPTIONS} onValue={(all_limited) => onChange({ ...settings, all_limited })} />
+      <Segmented label="When every pool account is limited" value={settings.all_limited} options={ALL_LIMITED_OPTIONS} onValue={(value) => onChoice({ field: "all_limited", value })} />
     </SettingLine>
     <SettingLine label="Claude free resets" help={resetsSourceHelp(source)} changed={sourceChanged}>
-      <Segmented label="Claude free resets" value={source} options={RESETS_SOURCE_OPTIONS} onValue={(resets_source) => onChange({ ...settings, resets_source })} />
+      <Segmented label="Claude free resets" value={source} options={RESETS_SOURCE_OPTIONS} onValue={(value) => onChoice({ field: "resets_source", value })} />
     </SettingLine>
     {refused && <div className="set-body"><Notice tone="danger" alert>{refused}</Notice></div>}
   </SettingSection>;
@@ -88,58 +88,59 @@ export function SpendSettingsView({ settings, refused, onChange }: {
 const SPEND_ABOUT = "Some accounts hold free resets that start their limits over. These choose how CrazyAgent uses them.";
 
 /** Runs saves one at a time in the order asked: a save asked while another is on its way waits
- * for it, and of the saves waiting only the latest is sent, so the engine never keeps an older
- * pick that landed after a newer one. Input: the save. Output: the call that asks for a save and
- * answers with its result, or null once a later save took its place. */
-export function latestSaves<T, R>(save: (value: T) => Promise<R>): (value: T) => Promise<R | null> {
-  let asked = 0;
-  let last: Promise<void> | null = null;
+ * for it, so the engine keeps the picks of one setting in the order they were made. Input: the
+ * save. Output: the call that asks for a save and answers with its result. */
+export function inOrder<T, R>(save: (value: T) => Promise<R>): (value: T) => Promise<R> {
+  let last: Promise<unknown> = Promise.resolve();
   return (value) => {
-    asked += 1;
-    const mine = asked;
-    const start = () => mine === asked ? save(value) : null;
-    const sent = last === null ? new Promise<R | null>((resolve) => resolve(start())) : last.then(start);
-    const settled = sent.then(() => undefined, () => undefined);
-    last = settled;
-    void settled.then(() => { if (last === settled) last = null; });
-    return sent.then((result) => mine === asked ? result : null, (failure: unknown) => {
-      if (mine === asked) throw failure;
-      return null;
-    });
+    const sent = last.then(() => save(value));
+    last = sent.then(() => undefined, () => undefined);
+    return sent;
   };
 }
 
-const saveSpend = latestSaves(setSpendSettings);
+const saveSpend = inOrder(setSpendOne);
+
+type SpendField = SpendChoice["field"];
 
 /** The three free resets settings on Pools: until the usage read holds the stored settings, a
  * loading line, its failure with Try again or a not ready line and no control, so nothing shows
- * a default as stored or saves one; then shows a pick at once and stores it, one save at a time,
- * and only the latest pick's answer shows a refusal or rereads the usage; the pick shows until a
- * read started after that answer lands. Inputs: the usage read, the reread and the retry.
- * Output: the section. */
+ * a default as stored or saves one; then each control shows its pick at once and stores only its
+ * own setting, one save at a time in the order picked. Only a setting's latest pick shows its
+ * refusal, until that setting's next answer, and each pick shows until a read started after its
+ * answer lands. Inputs: the usage read, the reread and the retry. Output: the section. */
 export function SpendSettingsSection({ usage, onDone, onRetry }: { usage: Loaded<UsageReport>; onDone: () => void; onRetry: () => void }) {
-  const [refused, setRefused] = useState("");
+  const [refused, setRefused] = useState<Partial<Record<SpendField, string>>>({});
+  const latest = useRef<Partial<Record<SpendField, number>>>({});
+  const picks = useRef(0);
   const read = usage.kind === "ok" ? usage.value : undefined;
   const stored = read?.spend?.settings;
-  const [shown, hold] = useHeld<SpendSettings | undefined>(stored, sameJson, read);
-  const change = (next: SpendSettings) => {
-    const settle = hold(next);
-    void saveSpend(next).then((result) => {
-      if (result === null) return;
+  const [confirm, holdConfirm] = useHeld<SpendConfirm | undefined>(stored?.confirm, Object.is, read);
+  const [allLimited, holdAllLimited] = useHeld<AllLimited | undefined>(stored?.all_limited, Object.is, read);
+  const [source, holdSource] = useHeld<ResetsSource | undefined>(stored && (stored.resets_source ?? SPEND_DEFAULTS.resets_source), Object.is, read);
+  const choose = (choice: SpendChoice) => {
+    const settle = choice.field === "confirm" ? holdConfirm(choice.value)
+      : choice.field === "all_limited" ? holdAllLimited(choice.value) : holdSource(choice.value);
+    picks.current += 1;
+    const mine = picks.current;
+    latest.current[choice.field] = mine;
+    void saveSpend(choice).then((result) => {
+      if (latest.current[choice.field] !== mine) return;
       const note = result.kind === "ok" ? "" : usageRefusal(result.kind === "error" ? result : { code: "usage_unavailable" });
-      setRefused(note);
+      setRefused((now) => ({ ...now, [choice.field]: note }));
       settle(note);
       onDone();
     });
   };
-  if (stored === undefined || shown === undefined) {
+  if (confirm === undefined || allLimited === undefined || source === undefined) {
     return <SettingSection title="Free resets" about={SPEND_ABOUT}><div className="set-body">
       {usage.kind === "loading" && <p className="secondary" role="status">Loading your free resets settings...</p>}
       {usage.kind === "error" && <LoadError message={usage.message} onRetry={onRetry} />}
       {(usage.kind === "not_ready" || usage.kind === "ok") && <p className="secondary" role="status">The free resets settings aren't in this build yet.</p>}
     </div></SettingSection>;
   }
-  return <SpendSettingsView settings={shown} refused={refused} onChange={change} />;
+  const notes = [...new Set([refused.confirm, refused.all_limited, refused.resets_source].filter((note): note is string => Boolean(note)))];
+  return <SpendSettingsView settings={{ confirm, all_limited: allLimited, resets_source: source }} refused={notes.join(" ")} onChoice={choose} />;
 }
 
 /** The notice line for a pool whose every account is at its limit. Inputs: the pool and the

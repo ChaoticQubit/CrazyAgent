@@ -35,32 +35,45 @@ async fn a_real_codex_master_turn_is_signed_in_inside_the_master_sandbox() {
     let codex = crate::team::runtime::managed_agent::codex();
     let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
     let folder = MasterRuntimeFolder::new(&root, &runtime_ref);
-    let command = master_command(
+    let place = MasterTurnPlace {
+        root: &root,
+        runtime_ref: &runtime_ref,
+        repository: &repository,
+        worktree: &worktree,
+        policy: &AgentPolicy::default(),
+        hidden: &[],
+    };
+    let MasterTurnLaunch {
+        command,
+        sandbox,
+        home,
+        credential,
+        ..
+    } = codex_master_turn(
+        &place,
+        &profile,
         &codex,
-        &managed,
-        &worktree,
-        &connection.model.id,
+        &connection,
+        Some(Duration::from_millis(ResourceBudget::unit().wall_time_ms)),
         None,
+        &[],
         crate::provider_retry::ProviderRetry::RetryBriefly,
     )
     .unwrap();
-    let sandbox = master_sandbox(
-        &root,
-        &runtime_ref,
-        &repository,
-        &worktree,
-        &managed,
-        &codex,
-        &connection.endpoint,
-        &AgentPolicy::default(),
-        &[],
-    )
-    .unwrap();
+    assert_ne!(home, managed);
+    assert!(home.starts_with(&base));
+    let writable: Vec<std::path::PathBuf> = sandbox.sandbox().writable_roots().cloned().collect();
+    assert!(
+        writable
+            .iter()
+            .all(|root| !managed.starts_with(root) && !root.starts_with(&managed)),
+        "{writable:?}"
+    );
     let mut master = CodexHost::spawn(
         command,
         sandbox,
         profile,
-        managed.clone(),
+        home.clone(),
         NativeAction::Launch {
             session_id: SessionId::new("codex-live-master-session").unwrap(),
             harness: NativeHarness::Codex,
@@ -100,7 +113,9 @@ async fn a_real_codex_master_turn_is_signed_in_inside_the_master_sandbox() {
     assert_eq!(errors, Vec::<String>::new());
     assert_eq!(outcome, TurnOutcome::Success);
     assert!(text.contains("OK"), "{text}");
+    drop(credential);
     drop(folder);
+    assert!(!home.exists());
     assert!(
         !base
             .join(format!("master-runtime-{}", runtime_ref.as_str()))

@@ -541,7 +541,7 @@ pub(crate) fn gather(repo: &Path, hidden: &[std::path::PathBuf]) -> Evidence {
     #[cfg(unix)]
     {
         let readme = evidence.readme.as_ref().map(|(name, _)| name.as_str());
-        let hidden = documents::below_root(repo, hidden);
+        let hidden = names::below_root(repo, hidden);
         let reading = hidden
             .as_deref()
             .and_then(|hidden| documents::read(repo, readme, hidden));

@@ -159,10 +159,6 @@ const FIXED_WRITES: &str =
 /// home for its own skills, while no folder built elsewhere replaces the one holding the
 /// engine's copies and no flag keeps the engine from removing what is in it (CTX-M1 r1).
 const PINNED_WRITES: &str = "file-write-unlink file-write-mode file-write-acl file-write-flags";
-/// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
-/// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
-#[cfg(unix)]
-const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
 /// The folders of a Claude Code config home that its agent team shares, the members'
 /// mailboxes and task lists. Claude Code 2.1.309 keeps them under each member's config home,
 /// with no variable of their own, so a native lead's teammates write the lead's (TPH-2).
@@ -761,8 +757,8 @@ pub fn agent_command<'a>(
 
 /// Network reach of a sandboxed agent: open when the agent's tools are on, except that
 /// it never binds or listens on an [`OWNER_PORTS`] port, one [`ProjectSandbox::keep_ports`]
-/// keeps or one of [`model_proxy::PROXY_PORTS`], otherwise only the listed remotes, each one
-/// port on loopback or on any host.
+/// keeps or one of [`model_proxy::PROXY_PORTS`] or [`model_proxy::RELAY_PORTS`], otherwise
+/// only the listed remotes, each one port on loopback or on any host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxNetwork {
     Open,
@@ -837,6 +833,41 @@ pub const LINUX_RESOLVER_NEEDS_UDP: &str = "linux_resolver_needs_udp";
 /// whose interpreter cannot be checked ([`elf::Lookup::Unjudged`]), such as a script that
 /// runs another script: the check follows a `#!` line one level only and never guesses.
 pub const LINUX_HARNESS_UNCHECKED: &str = "linux_harness_unchecked";
+
+/// The `.git` folders whose contents the owner's git reads and runs: hook scripts, rebase
+/// and sequencer plans, and remote and branch definitions. No macOS or Linux agent writes
+/// in them: Seatbelt denies each with everything below it, and Linux never grants one
+/// (RV-DS241-85).
+pub const GIT_STATE_TREES: [&str; 6] = [
+    "hooks",
+    "rebase-merge",
+    "rebase-apply",
+    "remotes",
+    "branches",
+    "sequencer",
+];
+
+/// The single `.git` files no macOS or Linux agent writes: the config, the index, their
+/// locks, and the links git follows to a common dir or a worktree config. Seatbelt denies
+/// each by name and Linux never grants one (RV-DS241-85).
+pub const GIT_STATE_FILES: [&str; 6] = [
+    "config",
+    "config.lock",
+    "index",
+    "index.lock",
+    "commondir",
+    "config.worktree",
+];
+
+/// What a limited network cannot hold on Linux, shown there only, under the network choice
+/// in the desktop and the TUI (RV-DS241-83): Landlock limits outbound TCP by port, not by
+/// host, so a port an agent may reach on this computer is open to it on every host.
+pub const LINUX_PORTS_ANY_HOST_LINE: &str = "On Linux, network limits hold ports, not hosts: a port agents may reach on this computer, such as the model's proxy port or a port you allow, is open to them on every host.";
+
+/// What a writable project folder cannot hold on Linux, shown there only, under the access
+/// level in the desktop and the TUI (RV-DS241-85): no Landlock rule stops an agent from
+/// making a git repository inside a folder it may change.
+pub const LINUX_NESTED_GIT_LINE: &str = "On Linux, agents can make a git repository inside any project folder they may change, and your own git or IDE runs its settings when you open that folder. Check agent-made folders for a .git before you open them.";
 
 /// Refusal to build or install a project sandbox, with a plain reason.
 #[derive(Debug)]
@@ -2221,9 +2252,11 @@ impl ProjectSandbox {
             home.join(crate::launch_context::STATE),
             home.join(crate::coord::relay::PLUGIN_FOLDER),
         ];
-        teammates
-            .read_only
-            .extend(CLAUDE_BASH_PRELUDES.iter().map(|folder| home.join(folder)));
+        teammates.read_only.extend(
+            crate::agent_home::CLAUDE_BASH_PRELUDES
+                .iter()
+                .map(|folder| home.join(folder)),
+        );
         teammates.read_only.extend(
             self.scratch
                 .iter()
@@ -2761,6 +2794,7 @@ impl ProjectSandbox {
                     .chain(&self.kept_ports)
                     .copied()
                     .chain(model_proxy::PROXY_PORTS)
+                    .chain(model_proxy::RELAY_PORTS)
                     .map(|port| format!(" (local ip \"*:{port}\")"))
                     .collect::<String>();
                 text.push_str(&format!(
@@ -2822,34 +2856,14 @@ impl ProjectSandbox {
         let context = any_case("context");
         let objects = format!("{git}/{}", any_case("objects"));
         let mut below = vec![context.clone(), format!("{state}/{context}")];
-        below.extend(
-            [
-                "hooks",
-                "rebase-merge",
-                "rebase-apply",
-                "remotes",
-                "branches",
-                "sequencer",
-            ]
-            .map(|name| format!("{git}/{}", any_case(name))),
-        );
+        below.extend(GIT_STATE_TREES.map(|name| format!("{git}/{}", any_case(name))));
         let mut entries = vec![
             git.clone(),
             state,
             format!("{objects}/{}", any_case("info")),
             objects,
         ];
-        entries.extend(
-            [
-                "config",
-                "config.lock",
-                "index",
-                "index.lock",
-                "commondir",
-                "config.worktree",
-            ]
-            .map(|name| format!("{git}/{}", any_case(name))),
-        );
+        entries.extend(GIT_STATE_FILES.map(|name| format!("{git}/{}", any_case(name))));
         let mut text = String::from("(deny file-write*");
         for path in &below {
             text.push_str(&format!("\n  (regex #\"^{project}/{path}(/.*)?$\")"));
@@ -2967,10 +2981,7 @@ impl ProjectSandbox {
             ));
         }
         for root in &other {
-            nested.push_str(&format!(
-                "\n      (regex #\"^{}/(.+/)?{dot_git}(/.*)?$\")",
-                seatbelt_pattern(root)
-            ));
+            nested.push_str(&format!("\n      {}", any_depth_git(root)));
         }
         let pattern = seatbelt_pattern(&self.project_root);
         let checkouts = format!("{pattern}(/\\.crazyagent)?/worktrees/[^/]+");
@@ -3936,9 +3947,11 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
 /// output styles and rules folders Claude Code reads or the `.agents` folder whose skills
 /// Codex reads from its home, none to the global instruction files of Claude Code and Codex,
 /// the Codex override that would replace them, the Codex `config.toml` holding its developer
-/// instructions or Claude Code's `settings.json`, none under `skills` but Codex's own
-/// `.system` skills, which Codex installs at its start and the engine removes before each
-/// Codex launch, and no move or removal of the `skills` folder, so no folder built elsewhere
+/// instructions or Claude Code's `settings.json`, nor to a zsh, bash or sh startup file,
+/// which every shell its harness starts there runs first (SA vid 12), none under `skills`
+/// but Codex's own `.system` skills, which Codex installs at its start and the engine
+/// removes before each Codex launch, and no move or removal of the `skills` folder, so no
+/// folder built elsewhere
 /// is moved in, nor a flag on `skills` or anywhere in `.system` that would keep the engine
 /// from removing it (CTX-M1 r1), each name in any letter case. Its own run cannot change the
 /// text it runs with until the next launch rewrites it. They also keep the agent's own
@@ -3981,6 +3994,7 @@ fn launch_denies(home: &Path) -> String {
     for file in files {
         text.push_str(&format!("  (regex #\"^{home}/{}$\")\n", any_case(file)));
     }
+    text.push_str(&format!("  (regex #\"^{home}/{}$\")\n", shell_startup()));
     let system = any_case(crate::launch_context::CODEX_SYSTEM_SKILLS);
     text.push_str(&format!(
         "  (regex #\"^{skills}/{}\"))\n(deny {PINNED_WRITES} (regex #\"^{skills}$\"))\n(deny file-write-flags\n  (regex #\"^{skills}/{system}$\")\n  (regex #\"^{skills}/{system}/\"))\n",
@@ -3991,8 +4005,29 @@ fn launch_denies(home: &Path) -> String {
     text.push_str(&format!(
         "(deny {PINNED_WRITES}\n  (regex #\"^{library}$\")\n  (regex #\"^{preferences}$\"))\n(deny file-write-create\n  (require-all\n    (require-any\n      (regex #\"^{library}$\")\n      (regex #\"^{preferences}$\"))\n    (vnode-type SYMLINK)))\n"
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 22);
+    assert_eq!(text.matches("(regex #\"^/").count(), 23);
     text
+}
+
+/// Spells the Seatbelt pattern of the shell startup files directly in a home, each in any
+/// letter case: zsh's, alone or in the compiled form zsh runs in its place, and bash's and
+/// sh's (SA vid 12). Output: the pattern, a group without anchors.
+fn shell_startup() -> String {
+    let spelled = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| any_case(name))
+            .collect::<Vec<_>>()
+            .join("|")
+    };
+    let pattern = format!(
+        "(({})({})?|{})",
+        spelled(&crate::agent_home::ZSH_STARTUP[..]),
+        any_case(crate::agent_home::ZSH_COMPILED),
+        spelled(&crate::agent_home::SH_STARTUP[..]),
+    );
+    assert!(pattern.len() <= SBPL_STRING_MAX / 2);
+    pattern
 }
 
 /// Spells a Seatbelt regex for one path component other than `name` in any letter case,
@@ -4035,11 +4070,38 @@ fn root_pin(root: &Path) -> String {
     format!("(deny {FIXED_WRITES} (literal \"{}\"))\n", root.display())
 }
 
+/// The Seatbelt filter for a `.git` at any depth below `root`, top level included, in any
+/// letter case: the part of [`ProjectSandbox::nested_git_denies`] for a root that is not a
+/// working tree (SM1-R). Input: the root. Output: the regex filter.
+fn any_depth_git(root: &Path) -> String {
+    format!(
+        "(regex #\"^{}/(.+/)?\\.[gG][iI][tT](/.*)?$\")",
+        seatbelt_pattern(root)
+    )
+}
+
+/// The base write denies a profile gives again after it grants writes once more to the agent
+/// home and other folders, as the IDE profile does for its server's data folders: each one
+/// pinned ([`root_pin`]), no `.git` at any depth in any of them ([`any_depth_git`]), and the
+/// home's launch files ([`launch_denies`]). They must follow that grant, since the last
+/// match wins. Inputs: the home and the other folders. Output: the rule text.
+#[cfg(unix)]
+pub(crate) fn regranted_denies(home: &Path, folders: &[&Path]) -> String {
+    let mut text = launch_denies(home);
+    let mut nested = String::new();
+    for root in std::iter::once(home).chain(folders.iter().copied()) {
+        text.push_str(&root_pin(root));
+        nested.push_str(&format!("\n  {}", any_depth_git(root)));
+    }
+    text.push_str(&format!("(deny file-write*{nested})\n"));
+    text
+}
+
 /// Whether every deny rule comes after the profile's last write allow, since Seatbelt applies
 /// the last matching rule and a deny a later allow overrides no longer holds (CTX-M1 F1).
 /// Inputs: the profile text and the deny rules as written in it. Output: false when any
 /// deny is missing or comes before a write allow.
-fn denies_follow_write_allows(text: &str, denies: &[String]) -> bool {
+pub(crate) fn denies_follow_write_allows(text: &str, denies: &[String]) -> bool {
     let last_write_allow = text
         .rfind("(allow file-write*")
         .max(text.rfind("(allow file-read* file-write*"));

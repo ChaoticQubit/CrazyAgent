@@ -345,10 +345,11 @@ async fn main() -> std::process::ExitCode {
         }
         _ => Err("one closed fixture mode is required".into()),
     };
-    if result.is_ok() {
-        std::process::ExitCode::SUCCESS
-    } else {
-        eprintln!("native fixture failed");
-        std::process::ExitCode::FAILURE
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("native fixture failed: {error}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }

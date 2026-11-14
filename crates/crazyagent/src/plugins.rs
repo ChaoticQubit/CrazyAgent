@@ -54,11 +54,12 @@ fn error(code: &str) -> EngineError {
 }
 
 fn printable(text: &str) -> bool {
-    !text.chars().any(char::is_control)
+    !text.chars().any(char::is_control) && !crate::memory::hidden_text(text)
 }
 
 impl ServerSpec {
-    /// Checks the command or URL before it is saved.
+    /// Checks the command or URL before it is saved or approved, refusing control and hidden
+    /// characters (`crate::memory::hidden_text`) anywhere in it.
     /// Input: an untrusted spec. Output: Ok, or a code naming the first problem:
     /// a relative or oversized command, too many or bad arguments, a command and
     /// arguments over `COMMAND_LINE_BYTES_MAX` together, or a URL that is
@@ -828,6 +829,13 @@ mod tests {
                 "server_args_invalid",
             ),
             (stdio("/bin/x", &["a\u{0}b"]), "server_args_invalid"),
+            (stdio("/bin/x", &["a\u{200b}b"]), "server_args_invalid"),
+            (
+                stdio("/bin/x", &["--path=\u{202e}txt.exe"]),
+                "server_args_invalid",
+            ),
+            (stdio("/bin/x\u{feff}", &[]), "server_command_invalid"),
+            (http("https://e.com/\u{2060}mcp"), "server_url_invalid"),
             (
                 stdio("/bin/x", &[&"a".repeat(ARG_BYTES_MAX + 1)]),
                 "server_args_invalid",

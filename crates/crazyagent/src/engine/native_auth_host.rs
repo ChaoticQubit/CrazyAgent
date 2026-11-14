@@ -239,7 +239,14 @@ impl RegisteredNativeAuthHost {
     pub(crate) fn capture_entry(entry: &Path) -> Result<Self, EngineError> {
         let real = crate::paths::launch_executable(entry, std::env::var_os("PATH").as_deref())
             .map_err(|_| EngineError("native_auth_host_unavailable".into()))?;
-        let mut host = Self::capture(&real)?;
+        Self::captured_as(entry, &real)
+    }
+
+    /// Captures the real file an entry leads to, pinned as `capture` pins it, with the entry
+    /// kept for `current`. Inputs: the absolute entry and its real file. Output: the host, or
+    /// the capture refusal.
+    fn captured_as(entry: &Path, real: &Path) -> Result<Self, EngineError> {
+        let mut host = Self::capture(real)?;
         assert!(host.entry.is_none());
         host.entry = Some(entry.to_path_buf());
         Ok(host)
@@ -248,19 +255,27 @@ impl RegisteredNativeAuthHost {
     /// The host while its entry, if any, still leads to the pinned file and that file
     /// verifies, a change of its ctime alone included; with an entry, a fresh capture when it
     /// leads to another path or inode, or when other metadata of the pinned inode changed and
-    /// its bytes still hash to the pin. A rewrite in place stays refused. Input: the shared
-    /// host. Output: the host to use, the verify error, or `native_auth_host_unavailable`.
-    pub(crate) fn current(self: &Arc<Self>) -> Result<Arc<Self>, EngineError> {
+    /// its bytes still hash to the pin, once `trusted` passes the entry the launch now goes
+    /// through, so a re-pin runs the checks of engine start. A rewrite in place stays refused.
+    /// Inputs: the shared host and the engine-start check. Output: the host to use, the
+    /// verify error, the check's refusal, or `native_auth_host_unavailable`.
+    pub(crate) fn current(
+        self: &Arc<Self>,
+        trusted: impl FnOnce(&Path) -> Result<(), EngineError>,
+    ) -> Result<Arc<Self>, EngineError> {
         let Some(entry) = self.entry.as_deref() else {
             self.verified_path()?;
             return Ok(self.clone());
         };
-        let real = crate::paths::launch_executable(entry, std::env::var_os("PATH").as_deref())
-            .map_err(|_| EngineError("native_auth_host_unavailable".into()))?;
+        let unavailable = |_| EngineError("native_auth_host_unavailable".into());
+        let used = crate::paths::launch_entry(entry, std::env::var_os("PATH").as_deref())
+            .map_err(unavailable)?;
+        let real = std::fs::canonicalize(&used).map_err(unavailable)?;
         if real == self.path && self.verified_path().is_ok() {
             return Ok(self.clone());
         }
-        let fresh = Self::capture_entry(entry)?;
+        trusted(&used)?;
+        let fresh = Self::captured_as(entry, &real)?;
         assert_eq!(fresh.entry.as_deref(), Some(entry));
         if fresh.path == self.path
             && (fresh.identity.device, fresh.identity.inode)

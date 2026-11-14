@@ -13,7 +13,7 @@ const NAME_BYTES_MAX: usize = 64;
 const PATH_BYTES_MAX: usize = 1024;
 const SCRIPT_HEAD_BYTES_MAX: usize = 256;
 const SHEBANG_WORDS_MAX: usize = 8;
-const INTERPRETER_DEPTH_MAX: usize = 2;
+pub(crate) const INTERPRETER_DEPTH_MAX: usize = 2;
 const VERSION_ENTRIES_MAX: usize = 64;
 const VERSIONS_PER_MANAGER_MAX: usize = 4;
 const ANCESTORS_MAX: usize = 128;
@@ -390,6 +390,13 @@ impl Places {
     /// HOME, for the shim checks. Output: HOME, or none.
     pub fn home(&self) -> Option<&Path> {
         self.home.as_deref()
+    }
+
+    /// Whether a folder may be on the PATH of a program the engine starts, as a lookup here
+    /// would keep it: not one agents can write ([`Places::agent_writable`]) and, on the
+    /// engine's places, not in a temp folder. Input: the folder. Output: the answer.
+    pub(crate) fn kept_for_children(&self, folder: &Path) -> bool {
+        !self.agent_writable(folder) && !(self.temp_refused && in_temp_of(folder, &self.temps))
     }
 
     /// Whether agents can write a folder or file, read as written and with its links

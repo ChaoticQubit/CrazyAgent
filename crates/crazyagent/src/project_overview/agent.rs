@@ -1,6 +1,6 @@
 use super::{
     Competitors, Ended, RUN_TIME, Research, TREE_PATHS_MAX, brief, competitors, finish, needs_home,
-    report_text, requeue,
+    report_text, requeue, run_name,
 };
 use crate::project_setup::ResearchKind;
 use crate::project_setup::links;
@@ -9,6 +9,7 @@ use crate::research::runner::{
     ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchRunner, RunError,
 };
 use crate::roadmap_status::Claim;
+use crate::roadmap_status::run::{RunLeft, asked};
 use rusqlite::Connection;
 use std::path::Path;
 use std::time::Duration;
@@ -28,8 +29,6 @@ pub const RETRY_MS: i64 = 60 * 1000;
 
 const PREPARE_SECS: u64 = 90;
 const AGENT_TIME: Duration = Duration::from_secs(RUN_TIME.as_secs() - PREPARE_SECS);
-const RUN_NAME_BYTES_MAX: usize = 96;
-const RUN_NAME_HEAD: &str = "overview-";
 
 const _: () = assert!(RUN_TIME.as_secs() >= 4 * PREPARE_SECS && RETRY_MS > 0);
 const _: () = assert!(RETRY_MS < crate::roadmap_status::QUIET_MS);
@@ -47,23 +46,23 @@ pub(super) enum Unwritten {
 /// new try after `RETRY_MS` when the engine is stopping or the account is busy. A result
 /// that cannot be stored leaves the run open; `tick` closes it once its time is over.
 /// Inputs: the runner, the project, the claim the run holds, the project's folder and the
-/// account to run on.
+/// account to run on. Output: what the run left in the research state, its folder with the
+/// evidence prompt and transcript and its Seatbelt profile, for the research loop to remove
+/// once the usage upkeep has counted it (RV-DS241-80), if it left anything.
 pub(crate) fn write(
     runner: &ResearchRunner,
     project: &ProjectId,
     claim: Claim,
     root: &Path,
     account: &ResearchAccount,
-) {
+) -> Option<RunLeft> {
     assert!(root.is_absolute());
-    let Some(db) = runner
+    let db = runner
         .database()
         .parent()
-        .and_then(|engine| crate::questions::open(engine).ok())
-    else {
-        return;
-    };
-    let outcome = answer(runner, &db, project, root, account);
+        .and_then(|engine| crate::questions::open(engine).ok())?;
+    let mut left = None;
+    let outcome = answer(runner, &db, project, root, account, &mut left);
     let now = crate::team::now_ms();
     let _ = match &outcome {
         Ok((reply, with_competitors)) => {
@@ -79,6 +78,7 @@ pub(crate) fn write(
         Err(Unwritten::Skipped) => finish(&db, project, root, claim, Ended::Skipped, now),
         Err(Unwritten::Later) => requeue(&db, project, claim, now.saturating_add(RETRY_MS)),
     };
+    left
 }
 
 /// The competitor research a run is shown: the report of the newest finished competitor
@@ -112,15 +112,17 @@ pub(super) fn research(db: &Connection, project: &ProjectId, root: &Path) -> Opt
 
 /// Asks the writing agent about one project: checks the project can hold tab files and
 /// hides nothing tracked, gathers the research and the tracked paths, and runs the agent
-/// with tools off on the project's account. Inputs: the runner, the engine connection, the
-/// project, its folder and the account. Output: the reply and whether competitor research
-/// was in its evidence, or how the run ended without one.
+/// with tools off on the project's account ([`asked`]). Inputs: the runner, the engine
+/// connection, the project, its folder, the account and where to put what the run left.
+/// Output: the reply and whether competitor research was in its evidence, or how the run
+/// ended without one.
 pub(super) fn answer(
     runner: &ResearchRunner,
     db: &Connection,
     project: &ProjectId,
     root: &Path,
     account: &ResearchAccount,
+    left: &mut Option<RunLeft>,
 ) -> Result<(String, bool), Unwritten> {
     let failed = |words: &str| Unwritten::Failed(words.to_owned());
     if needs_home(root) {
@@ -154,35 +156,13 @@ pub(super) fn answer(
         wall_time: AGENT_TIME,
         output_tokens: Some(OUTPUT_TOKENS),
     };
-    match runner.run_read_only(&run, &|| runner.is_stopping()) {
+    let (ending, run_left) = asked(runner, &run, &|| runner.is_stopping());
+    *left = run_left;
+    match ending {
         Ok(ReadOnlyEnding::Answered(text)) => Ok((text, with_competitors)),
         Ok(ReadOnlyEnding::Failed(reason)) => Err(Unwritten::Failed(reason)),
         Ok(ReadOnlyEnding::TimedOut) => Err(failed(TIMED_OUT)),
         Ok(ReadOnlyEnding::Stopped) | Err(RunError::Busy) => Err(Unwritten::Later),
         Err(error) => Err(Unwritten::Failed(error.to_string())),
     }
-}
-
-/// The agent state name of one writing run: its project and when it started, so no run
-/// reuses the folder of an earlier one; the project part is cut to fit the bound. Inputs:
-/// the project and now. Output: the name, ASCII letters, digits, `-` and `_` only.
-fn run_name(project: &ProjectId, now_ms: i64) -> String {
-    let tail = format!("-{now_ms}");
-    let room = RUN_NAME_BYTES_MAX - RUN_NAME_HEAD.len() - tail.len();
-    let named: String = project
-        .as_str()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .take(room)
-        .collect();
-    let name = format!("{RUN_NAME_HEAD}{named}{tail}");
-    assert!(!name.is_empty() && name.len() <= RUN_NAME_BYTES_MAX);
-    assert!(name.is_ascii());
-    name
 }

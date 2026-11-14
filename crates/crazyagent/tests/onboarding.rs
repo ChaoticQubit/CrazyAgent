@@ -2895,8 +2895,21 @@ async fn a_research_job_claimed_while_the_home_moves_goes_back_to_wait() {
         (job.status, job.attempts),
         (crazyagent::research::jobs::ResearchStatus::Queued, 0)
     );
+    assert_eq!(
+        job.error.as_deref(),
+        Some("Waiting for the projects home move to finish")
+    );
     db.execute("DELETE FROM projects_home_move WHERE singleton=1", [])
         .unwrap();
+    assert!(
+        runner.run_once(&project).unwrap().is_none(),
+        "the job waits out its backoff (DEC-170 addendum 6)"
+    );
+    db.execute(
+        "UPDATE research_jobs SET not_before_ms = 0 WHERE id = ?1",
+        [id],
+    )
+    .unwrap();
     let ran = runner
         .run_once(&project)
         .unwrap()

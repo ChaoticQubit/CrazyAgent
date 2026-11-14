@@ -240,11 +240,14 @@ impl NativeBridge {
         &self,
         items: Vec<(u64, u64)>,
     ) -> Result<Unlocked<QuestionsDismissed>, BridgeError> {
-        let distinct = items
-            .iter()
-            .enumerate()
-            .all(|(index, (id, _))| !items[..index].iter().any(|(seen, _)| seen == id));
-        if items.is_empty() || items.len() > LISTED_MAX || !distinct {
+        let distinct = |items: &[(u64, u64)]| {
+            assert!(items.len() <= LISTED_MAX);
+            items
+                .iter()
+                .enumerate()
+                .all(|(index, (id, _))| !items[..index].iter().any(|(seen, _)| seen == id))
+        };
+        if items.is_empty() || items.len() > LISTED_MAX || !distinct(&items) {
             return Err(failure("questions_bulk_invalid"));
         }
         let client = self.questions_client()?;

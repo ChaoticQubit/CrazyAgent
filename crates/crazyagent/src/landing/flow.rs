@@ -21,6 +21,7 @@ const PATH_BYTES_MAX: usize = 1024;
 const FOLDER_CHARS_MAX: usize = 128;
 const LAYOUT_NAMES: [&str; 4] = ["head", "objects", "refs", "commondir"];
 const LAYOUT_FOLDERS_MAX: usize = 64;
+const LAYOUT_LISTINGS_MAX: usize = 1024;
 const LINK_HEADER_BYTES_MAX: usize = 128;
 const NAME_BYTES_MAX: usize = 128;
 /// The most closed change sets holding claims one claims sweep releases.
@@ -1323,12 +1324,12 @@ fn new_folder_limit(db: &Connection, project: &ProjectId) -> Result<u32, EngineE
 }
 
 /// Adds the folders above each component of a path named like a part of a git folder
-/// (`LAYOUT_NAMES`, any case): the folders `repository_layout` lists.
-/// Inputs: the set and one added or changed path.
+/// (`LAYOUT_NAMES`, as a case-insensitive volume folds names, [`ascii_fold`]): the folders
+/// `repository_layout` lists. Inputs: the set and one added or changed path.
 fn layout_folders(folders: &mut BTreeSet<String>, path: &str) {
     let names: Vec<&str> = path.split('/').collect();
     for (at, name) in names.iter().enumerate() {
-        if LAYOUT_NAMES.contains(&name.to_ascii_lowercase().as_str()) {
+        if ascii_fold(name).is_some_and(|folded| LAYOUT_NAMES.contains(&folded.as_str())) {
             folders.insert(names[..at].join("/"));
         }
     }
@@ -1393,12 +1394,15 @@ pub(super) fn check_merged(
 }
 
 /// Tells whether a tree holds a folder git would open as a bare repository (SM-R1): a
-/// `HEAD` file or link beside a `commondir`, or beside both `objects` and `refs`, each
-/// name in any case, `objects` and `refs` of any type since git takes an executable file
-/// for either folder. The owner's own git run in that folder would read its config.
-/// Inputs: the repository, the tree and the folders a change put such a name in.
-/// Output: the answer, `changes_too_large` past `LAYOUT_FOLDERS_MAX` folders, else
-/// `changes_git_failed` when git cannot list one.
+/// `HEAD` file or link beside a `commondir`, or beside both `objects` and `refs`,
+/// `objects` and `refs` of any type since git takes an executable file for either folder.
+/// Names compare as a case-insensitive volume compares them ([`same_name`]): a folder
+/// holds the entries of every tree folder whose path the volume makes the same folder,
+/// such as `Evil/` beside `evil/`, and an entry counts by the layout name it folds onto,
+/// such as `refſ` (RV-DS241-70). The owner's own git run in that folder would read its
+/// config. Inputs: the repository, the tree and the folders a change put such a name in.
+/// Output: the answer, `changes_too_large` past `LAYOUT_FOLDERS_MAX` folders or spellings
+/// of one, else `changes_git_failed` when git cannot list one.
 fn repository_layout(
     repo: &Repo,
     tree: &str,
@@ -1407,7 +1411,60 @@ fn repository_layout(
     if folders.len() > LAYOUT_FOLDERS_MAX {
         return Err(failure("changes_too_large"));
     }
+    let mut listed = BTreeMap::new();
     for folder in folders {
+        let mut spellings = vec![String::new()];
+        for part in folder.split('/').filter(|part| !part.is_empty()) {
+            let mut next = Vec::new();
+            for spelled in &spellings {
+                for (name, file) in tree_folder(repo, tree, spelled, &mut listed)? {
+                    if !file && same_name(name, part) {
+                        next.push(if spelled.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{spelled}/{name}")
+                        });
+                    }
+                }
+            }
+            if next.len() > LAYOUT_FOLDERS_MAX {
+                return Err(failure("changes_too_large"));
+            }
+            spellings = next;
+        }
+        let mut entries: BTreeSet<(String, bool)> = BTreeSet::new();
+        for spelled in &spellings {
+            for (name, file) in tree_folder(repo, tree, spelled, &mut listed)? {
+                if let Some(folded) = ascii_fold(name) {
+                    entries.insert((folded, *file));
+                }
+            }
+        }
+        let has = |name: &str| entries.iter().any(|(entry, _)| entry == name);
+        let head = entries.contains(&("head".to_owned(), true));
+        if head && (has("commondir") || (has("objects") && has("refs"))) {
+            return Ok(true);
+        }
+    }
+    assert!(listed.len() <= LAYOUT_LISTINGS_MAX);
+    Ok(false)
+}
+
+/// Lists one folder of a tree for [`repository_layout`] once, keeping the listing for the
+/// folders that share it: each entry's name and whether it is no folder. Inputs: the
+/// repository, the tree, the folder's path in it, empty for its root, and the listings so
+/// far. Output: the entries, else `changes_too_large` past `LAYOUT_LISTINGS_MAX` folders or
+/// `changes_git_failed` when git cannot list it within `LISTING_BYTES_MAX`.
+fn tree_folder<'a>(
+    repo: &Repo,
+    tree: &str,
+    folder: &str,
+    listed: &'a mut BTreeMap<String, Vec<(String, bool)>>,
+) -> Result<&'a [(String, bool)], EngineError> {
+    if !listed.contains_key(folder) {
+        if listed.len() >= LAYOUT_LISTINGS_MAX {
+            return Err(failure("changes_too_large"));
+        }
         let spec = if folder.is_empty() {
             tree.to_owned()
         } else {
@@ -1429,17 +1486,13 @@ fn repository_layout(
                 .ok_or_else(|| failure("changes_git_failed"))?;
             let file = !entry[..tab].starts_with(b"040000 ");
             entries.push((
-                String::from_utf8_lossy(&entry[tab + 1..]).to_ascii_lowercase(),
+                String::from_utf8_lossy(&entry[tab + 1..]).into_owned(),
                 file,
             ));
         }
-        let has = |name: &str| entries.iter().any(|(entry, _)| entry == name);
-        let head = entries.iter().any(|(entry, file)| entry == "head" && *file);
-        if head && (has("commondir") || (has("objects") && has("refs"))) {
-            return Ok(true);
-        }
+        listed.insert(folder.to_owned(), entries);
     }
-    Ok(false)
+    Ok(listed[folder].as_slice())
 }
 
 /// Refuses a tree whose links an owner could follow out of the project or into a folder an
@@ -1699,20 +1752,28 @@ fn ascii_fold(part: &str) -> Option<String> {
     Some(folded)
 }
 
-/// Tells whether a walk may name a link path on a volume that folds names: every part
-/// folds onto the same ASCII name under [`ascii_fold`], or both stay outside ASCII, since
-/// the volume may still fold one onto the other. A part that stays outside ASCII never
-/// matches one that folds onto ASCII. Inputs: the link path and the walk's parts.
-/// Output: true when it may.
+/// Tells whether a walk may name a link path on a volume that folds names: every part of
+/// the one may name the same entry as the matching part of the other ([`same_name`]).
+/// Inputs: the link path and the walk's parts. Output: true when it may.
 fn folds_onto(link: &str, walk: &[&str]) -> bool {
     link.split('/').count() == walk.len()
-        && link.split('/').zip(walk).all(|(part, step)| {
-            match (ascii_fold(part), ascii_fold(step)) {
-                (Some(part), Some(step)) => part == step,
-                (None, None) => true,
-                _ => false,
-            }
-        })
+        && link
+            .split('/')
+            .zip(walk)
+            .all(|(part, step)| same_name(part, step))
+}
+
+/// Tells whether two path parts may name one entry on a volume that folds names, the one
+/// name compare of the landing checks: both fold onto the same ASCII name under
+/// [`ascii_fold`], or both stay outside ASCII, since the volume may still fold one onto
+/// the other. A part that stays outside ASCII never names the entry of one that folds onto
+/// ASCII. Inputs: the two parts. Output: true when they may.
+fn same_name(one: &str, other: &str) -> bool {
+    match (ascii_fold(one), ascii_fold(other)) {
+        (Some(one), Some(other)) => one == other,
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 /// Tells whether a walk starts with the agents' folder. A compared part that is not ASCII

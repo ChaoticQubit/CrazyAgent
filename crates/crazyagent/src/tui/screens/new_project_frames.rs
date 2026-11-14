@@ -125,6 +125,7 @@ pub(super) fn check_frames(drawn: &[(String, String)]) {
 
 fn about() -> Wizard {
     let mut wizard = wizard();
+    wizard.linux = false;
     type_text(&mut wizard, "Tidepool");
     wizard.key(key(KeyCode::Tab));
     type_text(
@@ -138,7 +139,8 @@ fn about() -> Wizard {
 /// review frames show the access level the wizard preselects by itself, and the row checks
 /// that level first. Where the design's level cannot run yet, as on Linux, the wizard
 /// preselects the default level instead: the row checks that too and only then sets the
-/// design's level, so one reviewed frame serves every system.
+/// design's level, so one reviewed frame serves every system, drawn without the Linux-only
+/// note, which its own row checks.
 fn wizard_frames() -> Vec<(String, String)> {
     let look = Look::plain();
     let mut drawn = Vec::new();
@@ -281,6 +283,7 @@ fn state_frames(home: &std::path::Path) -> Vec<(String, String)> {
         pool_choices(&super::new_project_tests::config()),
         Some(home.to_path_buf()),
     );
+    wizard.linux = false;
     type_text(&mut wizard, "Tidepool");
     wizard.key(key(KeyCode::Tab));
     type_text(
@@ -485,4 +488,32 @@ fn an_empty_sub_agent_list_with_a_team_maximum_of_one_says_no_sub_agent_runs() {
         "{shown}"
     );
     assert!(!flat.contains(ANY_HARNESS_NOTE), "{shown}");
+}
+
+#[test]
+fn only_on_linux_below_full_access_does_review_say_nested_git_is_not_blocked() {
+    use crate::sandbox::LINUX_NESTED_GIT_LINE;
+    assert_eq!(
+        Wizard::new(Vec::new(), None).linux,
+        cfg!(target_os = "linux")
+    );
+    let look = Look::plain();
+    let shown = |wizard: &Wizard| {
+        compose(&wizard_screen(wizard, 80, 120, &look), 80, 120, "", &look)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut wizard = about();
+    wizard.go(Step::Review);
+    wizard.access = AgentAccess::Sandboxed;
+    let off = shown(&wizard);
+    assert!(off.contains("Agent access"), "{off}");
+    assert!(!off.contains(LINUX_NESTED_GIT_LINE), "{off}");
+    wizard.linux = true;
+    let on = shown(&wizard);
+    assert!(on.contains(LINUX_NESTED_GIT_LINE), "{on}");
+    wizard.access = AgentAccess::Full;
+    let full = shown(&wizard);
+    assert!(!full.contains(LINUX_NESTED_GIT_LINE), "{full}");
 }

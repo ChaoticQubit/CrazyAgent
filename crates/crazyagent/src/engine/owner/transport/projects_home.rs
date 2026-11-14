@@ -410,6 +410,7 @@ pub(super) async fn serve(
         Ok(Step::Deleted(Ok(files))) => Some(files.clone()),
         _ => None,
     };
+    let trashed = deleted.is_some();
     let answer = async {
         let mut barrier = Some(engine.owner_egress.write().await);
         let mut result = match authority.authenticate(packet) {
@@ -448,7 +449,7 @@ pub(super) async fn serve(
             Ok(OwnerReply { response: OwnerResponse::Applied { operation }, .. })
                 if operation.result == OwnerResult::Applied && !operation.historical_replay
         );
-        let forgotten = deleting && settle_delete(engine, exchange).await;
+        let forgotten = deleting && settle_delete(engine, exchange, trashed).await;
         let written = sink.reply(result, id, mutation).await;
         drop(barrier);
         (written, removed, forgotten)
@@ -482,7 +483,7 @@ pub(super) async fn serve(
         .await;
     }
     if deleting && !forgotten {
-        settle_delete(engine, exchange).await;
+        settle_delete(engine, exchange, trashed).await;
     }
     if let Some(added) = adding {
         settled(engine, "home_add_not_settled", |reply| {
@@ -493,11 +494,12 @@ pub(super) async fn serve(
     answered.map_err(|_| failure(UNKNOWN))?
 }
 
-/// Forgets a Delete everything's plan. Inputs: the engine and the exchange. Output: whether
-/// the plan is gone.
-async fn settle_delete(engine: &Arc<Engine>, exchange: u64) -> bool {
+/// Forgets a Delete everything's plan and ends or shows its mark. Inputs: the engine, the
+/// exchange and whether its folders reached the Trash, so a record that never came after the
+/// Trash move is shown as a delete cut short. Output: whether the plan is gone.
+async fn settle_delete(engine: &Arc<Engine>, exchange: u64, trashed: bool) -> bool {
     settled(engine, "project_delete_not_settled", |reply| {
-        Job::DeleteSettle(exchange, reply)
+        Job::DeleteSettle(exchange, trashed, reply)
     })
     .await
 }

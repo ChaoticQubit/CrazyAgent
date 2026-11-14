@@ -15,7 +15,7 @@ struct Case {
 
 impl Case {
     fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = finding::owner_folder("finding-");
         let root = std::fs::canonicalize(temp.path()).unwrap();
         let home = root.join("home");
         let engine = root.join("engine");
@@ -674,5 +674,50 @@ fn a_home_place_on_path_inside_a_temp_folder_keeps_its_path_position() {
         looked.first().map(String::as_str),
         Some("~/.local/bin"),
         "{looked:?}"
+    );
+}
+
+/// RV-DS241-61: a chosen harness file in the engine's own temp folder, which agents with the
+/// owner's temp folder grant can write, is refused as a file agents can write, by its path as
+/// given and through a link from an owner folder into it; the shared temp folders are already
+/// refused as folders other users can change.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_chosen_file_in_the_engines_own_temp_folder_is_refused_as_agent_space() {
+    let case = Case::new();
+    let planted = tempfile::tempdir().unwrap();
+    let owner_temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let real = std::fs::canonicalize(planted.path())
+        .unwrap()
+        .join("Applications/Codex/codex");
+    assert!(real.starts_with(&owner_temp), "{real:?}");
+    std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+    std::fs::write(&real, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let link = case.root.join("bin/codex");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert_eq!(case.check("codex", &real), Err(PATH_AGENT_SPACE.to_owned()));
+    assert_eq!(case.check("codex", &link), Err(PATH_AGENT_SPACE.to_owned()));
+}
+
+/// RV-DS241-61 premise: a chosen harness file under the shared temp folder, outside the
+/// agents' own `ca-` folders, is refused as one in a folder other users can change, so the
+/// engine's own temp folder is the one temp folder the check has to add.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_chosen_file_in_the_shared_temp_folder_is_refused_as_changeable() {
+    let case = Case::new();
+    let shared = tempfile::Builder::new()
+        .prefix("harness-shared-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    let file = shared.path().join("codex");
+    std::fs::write(&file, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let space = finding::AgentSpace::open(&case.engine).unwrap();
+    assert_eq!(
+        finding::check("codex", &file, &space, Some(&case.home)).map_err(|error| error.0),
+        Err(finding::PATH_CHANGEABLE.to_owned())
     );
 }
