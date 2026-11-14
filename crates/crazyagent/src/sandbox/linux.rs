@@ -1340,4 +1340,45 @@ mod tests {
             refused_sockets(true, false).unwrap().len()
         );
     }
+
+    #[test]
+    fn no_agent_is_granted_the_git_state_the_owners_git_reads_and_runs() {
+        let (_temp, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+        let git = sandbox.project_root().join(".git");
+        let trees = [
+            "rebase-merge",
+            "rebase-apply",
+            "remotes",
+            "branches",
+            "sequencer",
+            "refs",
+        ];
+        for name in trees {
+            fs::create_dir_all(git.join(name)).unwrap();
+        }
+        for name in ["index", "index.lock", "HEAD"] {
+            fs::write(git.join(name), "state\n").unwrap();
+        }
+        let grants = Grants::of(&sandbox).unwrap();
+        for name in [
+            "index",
+            "index.lock",
+            "rebase-merge",
+            "rebase-apply",
+            "remotes",
+            "branches",
+            "sequencer",
+        ] {
+            assert!(
+                !grants.write.contains(&git.join(name)),
+                "{name} is writable"
+            );
+        }
+        for name in ["HEAD", "refs"] {
+            assert!(
+                grants.write.contains(&git.join(name)),
+                "{name} is not writable"
+            );
+        }
+    }
 }
