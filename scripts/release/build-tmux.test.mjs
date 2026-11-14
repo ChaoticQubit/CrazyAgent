@@ -118,6 +118,7 @@ test("the tmux build refuses a work folder whose private socket path would not f
     const run = refused(["--target", "aarch64-apple-darwin", "--work", work, "--out", join(root, "crazyagent-tmux")]);
     assert.equal(run.status, 2);
     assert.match(run.stderr, /build_tmux_work_too_long/);
+    assert.equal(run.downloaded, false, "nothing was fetched");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -127,8 +128,9 @@ test("the tmux build refuses an unknown target, a used work folder or an existin
   const root = mkdtempSync(join(tmpdir(), "build-tmux-"));
   try {
     const out = join(root, "crazyagent-tmux");
-    assert.equal(refused([]).status, 2);
-    assert.match(refused([]).stderr, /usage: build-tmux\.sh --target/);
+    const bare = refused([]);
+    assert.equal(bare.status, 2);
+    assert.match(bare.stderr, /usage: build-tmux\.sh --target/);
     const target = refused(["--target", "sparc-sun-solaris", "--work", join(root, "work"), "--out", out]);
     assert.equal(target.status, 2);
     assert.match(target.stderr, /build_tmux_target_rejected/);
@@ -139,7 +141,24 @@ test("the tmux build refuses an unknown target, a used work folder or an existin
     const kept = refused(["--target", "aarch64-apple-darwin", "--work", join(root, "work"), "--out", out]);
     assert.equal(kept.status, 2);
     assert.match(kept.stderr, /build_tmux_out_exists/);
+    for (const run of [bare, target, work, kept]) assert.equal(run.downloaded, false, "nothing was fetched");
     assert.equal(readFileSync(out, "utf8"), "", "an existing output is never overwritten");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the refusal runs notice a fetch made before the checks, so a refusal test cannot pass after a download (RV-DS241-37)", () => {
+  const root = mkdtempSync(join(tmpdir(), "build-tmux-early-"));
+  try {
+    const early = join(root, "build-tmux.sh");
+    const text = readFileSync(SCRIPT, "utf8");
+    assert(text.includes("set -euo pipefail\n"));
+    writeFileSync(early, text.replace("set -euo pipefail\n", "set -euo pipefail\ncurl --version > /dev/null\n"), { mode: 0o755 });
+    const run = refused([], early);
+    assert.equal(run.status, 2, run.stderr);
+    assert.equal(run.downloaded, true, "the early fetch is seen");
+    assert.equal(refused([]).downloaded, false, "the real script fetches nothing before it refuses");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -946,3 +946,35 @@ test("the release job marks every engine it builds for a target that ships crazy
   const tools = readFileSync(fileURLToPath(new URL("../../crates/crazyagent/src/tools.rs", import.meta.url)), "utf8");
   assert.match(tools, /pub const SHIPS_BUNDLED_TMUX: bool = match option_env!\("CRAZYAGENT_BUNDLES_TMUX"\) \{\n {4}Some\(mark\) => matches!\(mark\.as_bytes\(\), \[b'1'\]\),\n {4}None => false,\n\};/);
 });
+
+test("the secret and runner guards read every job of every workflow file, matrix runner values included (RV-DS241-38)", async () => {
+  const names = (await readdir(WORKFLOWS)).filter((name) => /\.ya?ml$/.test(name)).sort();
+  assert(names.includes("ci.yml") && names.includes("release.yml"), names.join(" "));
+  const exposed = [];
+  for (const name of names) {
+    const text = await workflow(name);
+    exposed.push(...exposedJobs(text).map((job) => `${name}:${job}`));
+    assert.deepEqual(runnerProblems(text), [], name);
+  }
+  assert.deepEqual(exposed, ["release.yml:build"], "only the release build reads a secret or binds an environment");
+  const added = [
+    "jobs:",
+    "  lint:",
+    "    runs-on: ubuntu-22.04",
+    "    steps:",
+    "      - run: echo ${{ secrets.TOKEN }}",
+    "  deploy:",
+    "    runs-on: ubuntu-latest",
+    "    environment: production",
+    "  odd:",
+    "    runs-on: ${{ matrix.runner }}",
+    "    strategy:",
+    "      matrix:",
+    "        include:",
+    "          - runner: macos-15",
+    "          - runner: self-hosted",
+    "",
+  ].join("\n");
+  assert.deepEqual(exposedJobs(added), ["lint", "deploy"]);
+  assert.deepEqual(runnerProblems(added), ["deploy: ubuntu-latest", "odd: self-hosted"]);
+});

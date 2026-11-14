@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -22,6 +23,25 @@ async function keyPair(root) {
   const env = { ...process.env, TAURI_SIGNING_PRIVATE_KEY_PATH: path, TAURI_SIGNING_PRIVATE_KEY_PASSWORD: password };
   delete env.TAURI_SIGNING_PRIVATE_KEY;
   return { env, publicKey: (await readFile(`${path}.pub`, "utf8")).trim() };
+}
+
+/**
+ * Signs `data` the way minisign does, with a fresh Ed25519 key and the given trusted comment.
+ * Inputs: the bytes, the trusted comment and the algorithm, "ED" (prehashed, as Tauri signs) or
+ * the legacy unhashed "Ed". Output: the base64 Tauri public key and signature.
+ */
+function minisigned(data, trusted, algorithm = "ED") {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const id = Buffer.from("0123456789abcdef", "hex");
+  const raw = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url");
+  const message = algorithm === "ED" ? createHash("blake2b512").update(data).digest() : data;
+  const signed = sign(null, message, privateKey);
+  const global = sign(null, Buffer.concat([signed, Buffer.from(trusted, "utf8")]), privateKey);
+  const boxed = (lines) => Buffer.from(`${lines.join("\n")}\n`, "utf8").toString("base64");
+  return {
+    publicKey: boxed(["untrusted comment: minisign public key", Buffer.concat([Buffer.from("Ed", "latin1"), id, raw]).toString("base64")]),
+    signature: boxed(["untrusted comment: signature from minisign secret key", Buffer.concat([Buffer.from(algorithm, "latin1"), id, signed]).toString("base64"), `trusted comment: ${trusted}`, global.toString("base64")]),
+  };
 }
 
 async function executable(path, text) {
@@ -176,6 +196,23 @@ test("desktop bundles are collected under release names with a signature for eve
     await mkdir(join(unsigned, "nsis"), { recursive: true });
     await writeFile(join(unsigned, `nsis/CrazyAgent_${VERSION}_x64-setup.exe`), "unsigned\n");
     await assert.rejects(collectDesktop({ target: "x86_64-pc-windows-msvc", version: VERSION, bundleDir: unsigned, out: await scratch("release-unsigned-"), env }), /release_updater_signature_missing/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a trusted comment that names a field twice is refused, and so is the legacy unhashed Ed signature (RV-DS241-35)", async () => {
+  const root = await scratch("release-sig-fields-");
+  try {
+    const file = join(root, "asset.bin");
+    await writeFile(file, "release asset bytes\n");
+    const data = await readFile(file);
+    const once = `timestamp:1761400000\tfile:asset.bin\tversion:${VERSION}`;
+    assert.equal((await verifySignature({ file, ...minisigned(data, once), version: VERSION })).version, VERSION);
+    for (const trusted of [`${once}\tversion:9.9.9`, `timestamp:1761400000\tfile:asset.bin\tversion:9.9.9\tversion:${VERSION}`, `${once}\tfile:other.bin`]) {
+      await assert.rejects(verifySignature({ file, ...minisigned(data, trusted), version: VERSION }), /release_signature_ambiguous/, trusted);
+    }
+    await assert.rejects(verifySignature({ file, ...minisigned(data, once, "Ed"), version: VERSION }), /release_signature_rejected/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
