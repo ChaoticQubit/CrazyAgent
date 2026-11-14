@@ -605,8 +605,15 @@ impl Plugins {
                         styled(printable(skill.name.clone()), Role::Accent, theme),
                         Line::raw(if skill.enabled { "On" } else { "Off" }),
                         match &skill.refused {
-                            Some(code) => styled(unused(code), Role::Error, theme),
-                            None => Line::raw(printable(tilde(&skill.source, ctx))),
+                            Some(code) => join([
+                                Line::raw(printable(format!("{}  ", skill.origin))),
+                                styled(unused(code), Role::Error, theme),
+                            ]),
+                            None => Line::raw(printable(format!(
+                                "{}  {}",
+                                skill.origin,
+                                tilde(&skill.source, ctx)
+                            ))),
                         },
                     ];
                     list_row(

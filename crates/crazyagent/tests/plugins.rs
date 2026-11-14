@@ -8,6 +8,7 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::plugins::{Scope, ServerSpec, ServerStatus, ServerView, plain_problem};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
+use crazyagent::setup::pack::{PackSource, default_pack, repo_key};
 use rusqlite::OptionalExtension;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -384,6 +385,60 @@ async fn a_skill_description_with_hidden_characters_is_refused_and_never_reaches
             .all(|skill| skill.name != "fmt"),
         "the refused skill can still be removed"
     );
+    case.close().await;
+}
+
+#[tokio::test]
+async fn each_skill_says_where_it_came_from() {
+    let case = Case::new().await;
+    let controller = case.controller().await;
+    let root = case.root.path().to_path_buf();
+    let entry = default_pack()
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|entry| entry.id == "superpowers")
+        .unwrap();
+    let PackSource::Git { repo, path, .. } = &entry.source else {
+        panic!("superpowers is a pinned git entry");
+    };
+    let bumped = "0".repeat(40);
+    let checkout = root
+        .join("setup")
+        .join("pack")
+        .join(format!("{}-{bumped}", repo_key(repo)));
+    let folder = checkout
+        .join(path.as_deref().unwrap_or(""))
+        .join("origin-check");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(
+        folder.join("SKILL.md"),
+        "---\nname: origin-check\ndescription: Checks origins.\n---\n\nSteps.\n",
+    )
+    .unwrap();
+    let packed = controller
+        .add_skill(Scope::Global, folder.display().to_string())
+        .await
+        .unwrap();
+    assert_eq!(
+        packed.origin, "Default pack: superpowers",
+        "a skill in a pack checkout names its entry, even from a checkout of another commit"
+    );
+    let picked = controller
+        .add_skill(Scope::Global, skill_folder(&root, "notes", "notes"))
+        .await
+        .unwrap();
+    assert_eq!(picked.origin, "Added by you");
+    let listed = controller.plugin_skills(None).await.unwrap();
+    let origins: Vec<(&str, &str)> = listed
+        .iter()
+        .map(|skill| (skill.name.as_str(), skill.origin.as_str()))
+        .collect();
+    assert!(
+        origins.contains(&("origin-check", "Default pack: superpowers")),
+        "{origins:?}"
+    );
+    assert!(origins.contains(&("notes", "Added by you")), "{origins:?}");
     case.close().await;
 }
 

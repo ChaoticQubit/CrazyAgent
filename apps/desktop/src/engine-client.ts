@@ -2131,6 +2131,7 @@ export interface SkillView {
   on_here: boolean | null;
   version: number;
   source: string;
+  origin: string;
   folder: string;
   refused: string | null;
 }

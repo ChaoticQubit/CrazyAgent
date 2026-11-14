@@ -22,6 +22,7 @@ fn skill(name: &str, enabled: bool) -> SkillView {
         enabled,
         on_here: None,
         source: format!("/Users/mira/Skills/{name}"),
+        origin: "Added by you".into(),
         folder: format!("/private/tmp/engine/skills/{name}"),
         version: 2,
         refused: None,
@@ -56,11 +57,17 @@ fn stdio(command: &str, args: &[&str]) -> ServerSpec {
 }
 
 fn lists() -> (Vec<SkillView>, Vec<ServerView>) {
+    let mut imported = skill("linear-method", false);
+    imported.source = "/Users/mira/.claude/skills/linear-method".into();
+    imported.origin = "Imported from Claude Code".into();
+    let mut packed = skill("release-notes", true);
+    packed.source = "/Users/mira/Library/Application Support/CrazyAgent/engine/setup/bundled/skills/release-notes".into();
+    packed.origin = "Default pack: release-notes".into();
     let skills = vec![
         skill("frontend-design", true),
         skill("tiger-style", true),
-        skill("linear-method", false),
-        skill("release-notes", true),
+        imported,
+        packed,
     ];
     let mut postgres = server(
         "postgres-local",
@@ -112,6 +119,36 @@ fn plugin_frames_match_the_design() {
             &render(&mut shell, width, height),
             &[],
             None,
+        );
+    }
+}
+
+#[test]
+fn each_skill_row_says_where_the_skill_came_from_before_its_folder() {
+    for (width, height) in [(80, 24), (120, 36)] {
+        let (skills, servers) = lists();
+        let mut shell = Shell::with(
+            plugin_ctx(width, height),
+            Box::new(Plugins::with(skills, servers)),
+        );
+        let rows = render(&mut shell, width, height);
+        let row = |name: &str| {
+            rows.iter()
+                .find(|row| row.contains(&format!(" {name} ")))
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert!(
+            row("frontend-design").contains("Added by you  ~/Skills/frontend-design"),
+            "{width}: {rows:?}"
+        );
+        assert!(
+            row("linear-method").contains("Imported from Claude Code  ~/.claude/skill"),
+            "{width}: {rows:?}"
+        );
+        assert!(
+            row("release-notes").contains("Default pack: release-notes  ~/Library/"),
+            "the label comes first, so a cut keeps it: {width}: {rows:?}"
         );
     }
 }
@@ -872,6 +909,11 @@ fn the_skill_page_renders_skill_md_and_files_and_switches_the_skill() {
         lines.contains(&"From ~/Skills/frontend-design".to_owned()),
         "{lines:?}"
     );
+    let from = lines
+        .iter()
+        .position(|line| line == "From ~/Skills/frontend-design")
+        .unwrap();
+    assert_eq!(lines[from - 1], "Added by you", "{lines:?}");
     assert!(lines.iter().any(|line| line == "Steps"), "{lines:?}");
     assert!(lines.iter().any(|line| line.contains("Read the brief")));
     assert!(lines.iter().any(|line| line.contains("npm run build")));
@@ -1341,6 +1383,11 @@ fn a_skill_agents_no_longer_get_says_why_on_the_list_and_its_page() {
             .any(|row| row.contains("frontend-design")
                 && row.contains("Agents don't get this skill.")),
         "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Added by you  Agents don't get this skill.")),
+        "a refused skill still says where it came from: {rows:?}"
     );
     assert!(
         rows.iter()
