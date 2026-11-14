@@ -7,6 +7,9 @@ const FEATURES: &str = ".crazyagent/overview/features.md";
 
 fn case() -> (Connection, ProjectId, tempfile::TempDir) {
     let db = Connection::open_in_memory().unwrap();
+    crate::project_setup::initialize(&db).unwrap();
+    db.execute("INSERT INTO project_setups VALUES ('alpha', '{}')", [])
+        .unwrap();
     crate::roadmap_status::initialize(&db).unwrap();
     initialize(&db).unwrap();
     let folder = tempfile::tempdir().unwrap();
@@ -457,6 +460,32 @@ fn a_landed_set_marks_the_overview_stale_only_when_refresh_follows_landing() {
         )
         .unwrap();
     assert_eq!(due, 2_000 + crate::roadmap_status::QUIET_MS);
+}
+
+/// A landing that ends after its project was removed makes no Overview row, so no run of a
+/// removed project is listed due and retried every minute, and an id added again inherits
+/// no row; a project still set up is marked as before (RV-DS241-81 r1 F1, code track).
+#[test]
+fn a_landing_after_its_project_was_removed_makes_no_overview_row() {
+    let (db, project, _folder) = case();
+    let rows = |db: &Connection| -> i64 {
+        db.query_row("SELECT COUNT(*) FROM project_overview", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    };
+    db.execute(
+        "DELETE FROM project_setups WHERE project=?1",
+        [project.as_str()],
+    )
+    .unwrap();
+    mark_landed(&db, &project);
+    assert_eq!(rows(&db), 0, "a removed project got an Overview row");
+    db.execute("INSERT INTO project_setups VALUES ('alpha', '{}')", [])
+        .unwrap();
+    mark_landed(&db, &project);
+    assert_eq!(rows(&db), 1);
+    assert!(state(&db, &project).unwrap().stale);
 }
 
 #[test]
