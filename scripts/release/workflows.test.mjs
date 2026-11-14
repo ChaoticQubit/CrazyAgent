@@ -29,10 +29,11 @@ function block(text, indent, name) {
 }
 
 /**
- * Lists the jobs under `jobs:` of a workflow, failing closed: every line of the block that is
- * not blank or a comment belongs to a job whose key sits alone at 2-space indent, so a job the
- * guards cannot read throws instead of being skipped. Input: the workflow text. Output: each
- * job's name with its lines, at least one.
+ * Lists the jobs under `jobs:` of a workflow, failing closed: every non-blank line of the block
+ * deeper than 2-space indent belongs to a job whose key sits alone at 2-space indent, `#`-led
+ * run block lines included, since GitHub expands them; only a `#` line at indent 2 or less is a
+ * YAML comment passed over. A job the guards cannot read throws instead of being skipped.
+ * Input: the workflow text. Output: each job's name with its lines, at least one.
  */
 function jobsOf(text) {
   const lines = text.split("\n");
@@ -40,7 +41,8 @@ function jobsOf(text) {
   assert(start >= 0, "no jobs: block at indent 0, so no job can be read");
   const jobs = [];
   for (const line of lines.slice(start + 1)) {
-    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+    if (line.trim() === "") continue;
+    if (line.trimStart().startsWith("#") && line.length - line.trimStart().length <= 2) continue;
     if (/^\S/.test(line)) break;
     const name = line.match(/^ {2}([A-Za-z0-9_-]+):\s*$/)?.[1];
     if (name) {
