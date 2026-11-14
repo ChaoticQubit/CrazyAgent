@@ -134,13 +134,23 @@ impl PinnedInstaller {
         Ok(Ok((found.entry, version, note)))
     }
 
-    /// Returns the `PATH` value that puts `setup/bin` first, for programs the engine runs.
+    /// Returns the `PATH` value that puts `setup/bin` first, for programs the engine runs,
+    /// with every other folder a lookup on the installer's places would refuse left out
+    /// ([`crate::tools::Places::kept_for_children`]), so a program setup starts never finds an
+    /// interpreter agents or other users planted. Output: the value.
     pub fn search_path(&self) -> OsString {
-        std::env::join_paths(&self.search).unwrap_or_default()
+        let own = self.setup.join("bin");
+        assert_eq!(self.search.first(), Some(&own));
+        let kept = self
+            .search
+            .iter()
+            .filter(|folder| **folder == own || self.places.kept_for_children(folder));
+        std::env::join_paths(kept).unwrap_or_default()
     }
 
-    /// The only environment the programs setup starts get: `PATH` with `setup/bin` first,
-    /// and the engine's `HOME`, `TMPDIR` and `LANG` when set. Output: the pairs.
+    /// The only environment the programs setup starts get: `PATH` with `setup/bin` first and
+    /// no folder the installer's places refuse ([`Self::search_path`]), and the engine's
+    /// `HOME`, `TMPDIR` and `LANG` when set. Output: the pairs.
     pub(super) fn env(&self) -> Vec<(&'static str, OsString)> {
         let mut env = vec![("PATH", self.search_path())];
         for name in ["HOME", "TMPDIR", "LANG"] {

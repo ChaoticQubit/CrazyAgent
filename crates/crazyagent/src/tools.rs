@@ -369,6 +369,13 @@ impl Places {
         self.home.as_deref()
     }
 
+    /// Whether a folder may be on the PATH of a program the engine starts, as a lookup here
+    /// would keep it: not one agents can write ([`Places::agent_writable`]) and, on the
+    /// engine's places, not in a temp folder. Input: the folder. Output: the answer.
+    pub(crate) fn kept_for_children(&self, folder: &Path) -> bool {
+        !self.agent_writable(folder) && !(self.temp_refused && in_temp_of(folder, &self.temps))
+    }
+
     /// Whether agents can write a folder or file, read as written and with its links
     /// resolved: inside a `.crazyagent` folder, inside a project ([`in_project`]), inside
     /// the engine's data folder outside its `setup` folder, or inside an agent's short temp
