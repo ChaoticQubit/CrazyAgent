@@ -3673,6 +3673,72 @@ fn a_resolve_reaches_the_team_master_as_an_engine_message_and_a_sub_agent_as_one
     );
 }
 
+/// Ask agent to update while other work waits queued for the sub-agent, pinned to it: the
+/// master's wake task (agent 2), the owner's task a hold put back in the queue (agent 3) and a
+/// task the runtime pinned to wake the agent for its messages (agent 4). Each waiting prompt
+/// stays exactly as it was and the resolve becomes a task of its own behind it, while a
+/// later update still replaces only the queued resolve (RV-DS241-123).
+#[test]
+fn ask_agent_to_update_never_rewrites_other_work_queued_for_the_agent() {
+    let (_directory, mut connection) = database();
+    connection
+        .execute_batch(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES
+               ('team-resolve','master','codex',1,'stopped',1,1),
+               ('team-resolve','sub','codex',1,'stopped',1,1),
+               ('team-resolve','sub','codex',1,'stopped',1,1),
+               ('team-resolve','sub','codex',1,'stopped',1,1);
+             INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES
+               (2,'team-resolve','/r','/r/b','/r/.git/worktrees/b'),
+               (3,'team-resolve','/r','/r/c','/r/.git/worktrees/c'),
+               (4,'team-resolve','/r','/r/d','/r/.git/worktrees/d');
+             INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES
+               ('team-resolve','master','codex',1,'Pick up the review notes.','queued',1),
+               ('team-resolve','owner','codex',1,'Fix the login form.','queued',2),
+               ('team-resolve','master','codex',1,'Read your new messages.','queued',3);
+             INSERT INTO team_task_pins(task,project,agent) VALUES (1,'team-resolve',2);
+             INSERT INTO team_task_pins(task,project,agent,held) VALUES (2,'team-resolve',3,1);
+             INSERT OR REPLACE INTO team_task_pins(task,project,agent) VALUES (3,'team-resolve',4);",
+        )
+        .unwrap();
+    let project = ProjectId::new("team-resolve").unwrap();
+    let tx = connection.transaction().unwrap();
+    for (agent, prompt, now) in [
+        (2, "Resolve the first merge for 2.", 5),
+        (3, "Resolve the merge for 3.", 6),
+        (4, "Resolve the merge for 4.", 7),
+        (2, "Resolve the newest merge for 2.", 8),
+    ] {
+        admit_resolve(&tx, &project, agent, prompt, now)
+            .unwrap()
+            .unwrap();
+    }
+    tx.commit().unwrap();
+    let tasks: Vec<(i64, String, String, i64)> = connection
+        .prepare(
+            "SELECT t.id,t.prompt,t.status,p.agent FROM team_tasks t JOIN team_task_pins p ON p.task=t.id
+             WHERE t.project='team-resolve' ORDER BY t.id",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let queued =
+        |id: i64, prompt: &str, agent: i64| (id, prompt.to_owned(), "queued".to_owned(), agent);
+    assert_eq!(
+        tasks,
+        vec![
+            queued(1, "Pick up the review notes.", 2),
+            queued(2, "Fix the login form.", 3),
+            queued(3, "Read your new messages.", 4),
+            queued(4, "Resolve the newest merge for 2.", 2),
+            queued(5, "Resolve the merge for 3.", 3),
+            queued(6, "Resolve the merge for 4.", 4),
+        ]
+    );
+}
+
 /// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
 /// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
 #[cfg(target_os = "macos")]
