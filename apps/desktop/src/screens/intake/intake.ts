@@ -222,6 +222,13 @@ export function jobRunning(job: IntakeJob | null): boolean {
   return state === "downloading" || state === "copying" || state === "clearing";
 }
 
+/** Whether a start that came back with an error reached the engine all the same, read from the
+ * job after it: a job adding the same folder that runs or ended done. Inputs: the folder and the
+ * job read after the start, if any. Output: true when Add folder should go Home. */
+export function startReached(source: string, after: IntakeJob | null): boolean {
+  return after !== null && after.source === source && (jobRunning(after) || after.state.state === "done");
+}
+
 /** How long until the app reads the intake job again: every second while one runs, else at
  * the found-folder pace, so a job another client started shows up too. Input: the last read
  * job. Output: the wait in ms. */

@@ -8,8 +8,8 @@ import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
 import { SetUpDialog } from "./found";
 import {
-  addWay, anywayIssues, anywayOverrides, anywayWarnings, folderName, icloudCountLine, icloudMoveLine, jobRunning,
-  icloudPlaceholders, icloudProgressLine, joinPath, pickedFolderProblem, sizeLine, waysOffered, waysWithheld, worktreesLine, type AddWay, type AnywayIssue, type AnywayWarning,
+  addWay, anywayIssues, anywayOverrides, anywayWarnings, folderName, icloudCountLine, icloudMoveLine,
+  icloudPlaceholders, icloudProgressLine, joinPath, pickedFolderProblem, sizeLine, startReached, waysOffered, waysWithheld, worktreesLine, type AddWay, type AnywayIssue, type AnywayWarning,
 } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
@@ -238,7 +238,7 @@ export function AddFolder() {
     setAsking(false);
     if (result.kind === "not_ready") { setProblem("Adding a folder isn't in this build."); return; }
     const same = running?.kind === "ok" ? running.value : null;
-    const attached = same !== null && same.source === source && (jobRunning(same) || same.state.state === "done");
+    const attached = startReached(source, same);
     if (result.kind === "error" && !attached) { setProblem(result.message); return; }
     session.refreshIntake(result.kind === "ok" ? result.value : undefined);
     session.showToast(`Adding ${folderName(source)}. Follow it on Home; you can keep working.`, { name: "home" });
