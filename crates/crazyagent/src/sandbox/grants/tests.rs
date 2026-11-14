@@ -815,3 +815,96 @@ fn a_port_grant_never_reaches_the_java_python_or_go_debugger_ports() {
         "a database port stays the owner's informed choice"
     );
 }
+
+/// Asks for the owner's Allow on a socket an agent named in the project folder, with a
+/// second socket of the owner's beside it in a folder of its own. Input: the case. Output:
+/// the asked socket's path, the other socket's path, both listeners and the question.
+#[cfg(target_os = "macos")]
+fn asked_socket(
+    case: &Case,
+) -> (
+    PathBuf,
+    PathBuf,
+    std::os::unix::net::UnixListener,
+    std::os::unix::net::UnixListener,
+    u64,
+) {
+    let base = case._tmp.path().canonicalize().unwrap();
+    let asked = base.join("project").join("app.sock");
+    let owner = base.join("owner");
+    std::fs::create_dir(&owner).unwrap();
+    let other = owner.join("store.sock");
+    let asked_listener = crate::spawn_gate::bind_unix_std(&asked).unwrap();
+    let other_listener = crate::spawn_gate::bind_unix_std(&other).unwrap();
+    assert_eq!(
+        checked(
+            &AccessGrant::Socket {
+                path: other.clone()
+            },
+            &base.join("engine")
+        ),
+        Ok(AccessGrant::Socket {
+            path: other.clone()
+        }),
+        "the owner's other socket passes the check on its own"
+    );
+    let Requested::Asked(question) = request(
+        &case.db,
+        &case.project,
+        &Asker::Master(7),
+        &AccessGrant::Socket {
+            path: asked.clone(),
+        },
+        "the app's own socket",
+    )
+    .unwrap() else {
+        panic!("no question was raised");
+    };
+    (asked, other, asked_listener, other_listener, question)
+}
+
+/// Answers a question with the owner's Allow and checks that it grants nothing: the
+/// policy and its version stay and the request ends denied. Inputs: the case and the
+/// question.
+#[cfg(target_os = "macos")]
+fn allow_grants_nothing(case: &Case, question: u64) {
+    let before = case.version();
+    let allow = Answer {
+        picks: vec![0],
+        comment: None,
+    };
+    assert_eq!(
+        crate::questions::answer(&case.db, question, 0, &allow).unwrap(),
+        Settlement::Settled
+    );
+    assert_eq!(case.policy().grants, Vec::<AccessGrant>::new());
+    assert_eq!(case.version(), before, "nothing was written");
+    assert_eq!(case.status(), ["denied"]);
+}
+
+/// The owner's Allow binds to the socket the question showed: an agent that swaps the
+/// socket it asked for for a link to another of the owner's sockets after asking gets
+/// nothing, and the swapped path is never saved (RV-DS241-82).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_allow_after_the_asked_socket_became_a_link_to_another_socket_grants_nothing() {
+    let case = Case::new();
+    let (asked, other, _asked, _other, question) = asked_socket(&case);
+    std::fs::remove_file(&asked).unwrap();
+    std::os::unix::fs::symlink(&other, &asked).unwrap();
+    allow_grants_nothing(&case, question);
+}
+
+/// The owner's Allow binds to the very socket file the question showed, not only its
+/// path: a different socket made at the same path after asking gets nothing
+/// (RV-DS241-82).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_allow_after_another_socket_took_the_asked_path_grants_nothing() {
+    let case = Case::new();
+    let (asked, _, asked_listener, _other, question) = asked_socket(&case);
+    drop(asked_listener);
+    std::fs::remove_file(&asked).unwrap();
+    let _again = crate::spawn_gate::bind_unix_std(&asked).unwrap();
+    allow_grants_nothing(&case, question);
+}
