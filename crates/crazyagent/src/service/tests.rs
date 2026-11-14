@@ -114,6 +114,25 @@ WantedBy=default.target
     );
 }
 
+/// systemd.exec: Environment= expands no variables, so a `$` in a PATH folder is written as
+/// is, while `%` (a specifier), backslash and double quote are still escaped.
+#[test]
+fn systemd_environment_keeps_a_dollar_in_a_path_folder_as_written() {
+    let mut linux = service(Platform::Linux);
+    linux.path = OsString::from(
+        r#"/home/owner/odd$dir/bin:/home/owner/50%/bin:/home/owner/"q"\/bin:/usr/bin"#,
+    );
+    let text = linux.definition_text().unwrap();
+    assert!(
+        text.contains(
+            r#"
+Environment="PATH=/home/owner/odd$dir/bin:/home/owner/50%%/bin:/home/owner/\"q\"\\/bin:/usr/bin"
+"#
+        ),
+        "{text}"
+    );
+}
+
 #[test]
 fn windows_task_runs_at_logon_for_the_user_and_appends_output_to_the_log() {
     let mut windows = service(Platform::Windows);
@@ -349,7 +368,6 @@ fn windows_path_command_hands_the_folder_over_in_its_environment_only() {
         .map(|part| part.to_str().unwrap())
         .collect();
     assert_eq!(args[..3], ["-NoProfile", "-NonInteractive", "-Command"]);
-    assert!(args[3].contains("[Environment]::SetEnvironmentVariable('Path'"));
     assert!(args[3].contains(&format!("$f=$env:{WINDOWS_PATH_FOLDER_VARIABLE};")));
     assert!(!args[3].contains("$args"));
     assert!(!args[3].contains("Cra'zy"));
@@ -364,18 +382,52 @@ fn windows_path_command_hands_the_folder_over_in_its_environment_only() {
     );
 }
 
-/// Reads the user's stored PATH through PowerShell. Takes nothing. Returns the value, empty
-/// when it is unset.
+/// The user's PATH is read as written, with its %VAR% references unexpanded, and stored back
+/// with the registry kind it had (REG_EXPAND_SZ when there was none), never as an expanded
+/// REG_SZ; a changed PATH is announced to running programs.
+#[test]
+fn windows_path_command_keeps_the_user_path_kind_and_its_unexpanded_text() {
+    let command = windows_path_command(Path::new(r"C:\Users\owner\AppData\Local\CrazyAgent"));
+    let script = command.get_args().nth(3).unwrap().to_str().unwrap();
+    assert!(script.contains("DoNotExpandEnvironmentNames"), "{script}");
+    assert!(script.contains("GetValueKind('Path')"), "{script}");
+    assert!(
+        script.contains("[Microsoft.Win32.RegistryValueKind]::ExpandString"),
+        "{script}"
+    );
+    assert!(script.contains("-Type $t"), "{script}");
+    assert!(
+        !script.contains("GetEnvironmentVariable('Path'"),
+        "{script}"
+    );
+    assert!(
+        !script.contains("SetEnvironmentVariable('Path'"),
+        "{script}"
+    );
+    assert!(
+        script.contains(
+            "[Environment]::SetEnvironmentVariable('CRAZYAGENT_PATH_REFRESH', $null, 'User')"
+        ),
+        "{script}"
+    );
+}
+
+/// Serializes the tests that change the user's stored PATH, so one never restores over
+/// another's change.
 #[cfg(windows)]
-fn user_path() -> String {
+static USER_PATH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Runs one PowerShell script with the given environment. Takes the script and the
+/// variables. Returns its standard output; panics when PowerShell fails.
+#[cfg(windows)]
+fn powershell(script: &str, env: &[(&str, &str)]) -> String {
+    let mut command = std::process::Command::new("powershell.exe");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    for (name, value) in env {
+        command.env(name, value);
+    }
     let output = crate::spawn_gate::output(
-        std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "[Console]::Out.Write([Environment]::GetEnvironmentVariable('Path','User'))",
-            ])
+        command
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped()),
@@ -385,44 +437,84 @@ fn user_path() -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-/// Stores the user's PATH back as it was, handing the value over in the environment.
-/// Takes the value. Returns nothing; panics when PowerShell fails.
+/// Reads the user's stored PATH as written, %VAR% references unexpanded, with its registry
+/// kind. Takes nothing. Returns the kind name and the value, both empty when it is unset.
 #[cfg(windows)]
-fn restore_user_path(value: &str) {
-    let output = crate::spawn_gate::output(
-        std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "[Environment]::SetEnvironmentVariable('Path', $env:CRAZYAGENT_TEST_PATH, 'User')",
-            ])
-            .env("CRAZYAGENT_TEST_PATH", value)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .unwrap();
-    assert!(output.status.success(), "{output:?}");
+fn raw_user_path() -> (String, String) {
+    let shown = powershell(
+        "$k=Get-Item -LiteralPath 'HKCU:\\Environment'; \
+if ($k.GetValueNames() -contains 'Path') { [Console]::Out.Write($k.GetValueKind('Path').ToString() + \"`n\" + \
+$k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)) }",
+        &[],
+    );
+    match shown.split_once('\n') {
+        Some((kind, value)) => (kind.to_owned(), value.to_owned()),
+        None => (String::new(), String::new()),
+    }
+}
+
+/// Stores the user's PATH back as it was: the same text with the same registry kind, or no
+/// value when the kind is empty. Takes the kind name and the value. Returns nothing.
+#[cfg(windows)]
+fn restore_raw_user_path(kind: &str, value: &str) {
+    powershell(
+        "if ([string]::IsNullOrEmpty($env:CRAZYAGENT_TEST_KIND)) { \
+Remove-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -ErrorAction SilentlyContinue } else { \
+Set-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -Value $env:CRAZYAGENT_TEST_PATH -Type $env:CRAZYAGENT_TEST_KIND }",
+        &[
+            ("CRAZYAGENT_TEST_KIND", kind),
+            ("CRAZYAGENT_TEST_PATH", value),
+        ],
+    );
 }
 
 #[cfg(windows)]
 #[test]
 fn link_cli_adds_a_folder_named_like_powershell_code_to_the_user_path_once() {
-    let before = user_path();
+    let _held = USER_PATH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (kind, before) = raw_user_path();
     let root = tempfile::tempdir().unwrap();
     let folder = root.path().join("cra'zy;$(exit 7)");
     std::fs::create_dir(&folder).unwrap();
     let executable = folder.join("crazyagent.exe");
     let first = link_cli(&executable, root.path());
     let second = link_cli(&executable, root.path());
-    let after = user_path();
-    restore_user_path(&before);
+    let (_, after) = raw_user_path();
+    restore_raw_user_path(&kind, &before);
     assert_eq!(first.unwrap(), folder);
     assert_eq!(second.unwrap(), folder);
     let shown = folder.to_str().unwrap();
     assert_eq!(after.split(';').filter(|entry| *entry == shown).count(), 1);
-    assert_eq!(user_path(), before);
+    assert_eq!(raw_user_path(), (kind, before));
+}
+
+#[cfg(windows)]
+#[test]
+fn link_cli_keeps_the_user_path_kind_and_its_unexpanded_references() {
+    let _held = USER_PATH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (kind, before) = raw_user_path();
+    let reference = r"%USERPROFILE%\crazyagent-kind-check";
+    restore_raw_user_path("ExpandString", &format!("{reference};{before}"));
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("bin");
+    std::fs::create_dir(&folder).unwrap();
+    let linked = link_cli(&folder.join("crazyagent.exe"), root.path());
+    let after = raw_user_path();
+    restore_raw_user_path(&kind, &before);
+    assert_eq!(linked.unwrap(), folder);
+    assert_eq!(after.0, "ExpandString", "{after:?}");
+    assert!(after.1.starts_with(&format!("{reference};")), "{after:?}");
+    let shown = folder.to_str().unwrap();
+    assert_eq!(
+        after.1.split(';').filter(|entry| *entry == shown).count(),
+        1,
+        "{after:?}"
+    );
+    assert_eq!(raw_user_path(), (kind, before));
 }
 
 #[cfg(unix)]
@@ -1439,5 +1531,326 @@ fn the_accounts_with_a_primary_group_are_read_from_the_local_account_file() {
         primary_users("ana:x:1000:staff:::\n", 1000),
         None,
         "a group that is not a number"
+    );
+}
+
+/// RV-DS241-18: a part an access list lets someone other than this user or root change
+/// counts as changeable at its depth, for the engine service and for the tools the resolver
+/// runs alike, even inside a store.
+#[cfg(unix)]
+#[test]
+fn a_part_an_access_list_opens_to_others_is_changeable() {
+    const ME: u32 = 501;
+    let own = Part::Found {
+        owner: ME,
+        group: 20,
+        mode: 0o755,
+        folder: true,
+        link: false,
+    };
+    let system = Part::Found {
+        owner: 0,
+        group: 0,
+        mode: 0o755,
+        folder: true,
+        link: false,
+    };
+    let tool = Part::Found {
+        owner: ME,
+        group: 20,
+        mode: 0o755,
+        folder: false,
+        link: false,
+    };
+    for open_stores in [false, true] {
+        assert_eq!(
+            first_changeable_part(&[tool, Part::Shared, own, system], ME, open_stores),
+            Some(1)
+        );
+        assert_eq!(
+            first_changeable_part(&[Part::Shared, own, system], ME, open_stores),
+            Some(0)
+        );
+        assert_eq!(
+            first_changeable_part(&[tool, own, system], ME, open_stores),
+            None
+        );
+    }
+}
+
+/// RV-DS241-18: a macOS `ls -lde` listing names an entry changeable by others when an
+/// allow entry gives write, append, add or delete rights, or rights over the entry's own
+/// attributes, security or owner, to anyone but this user, root, wheel or admin; deny
+/// entries and read rights never do, and a listing it cannot read fails closed.
+#[cfg(unix)]
+#[test]
+fn an_access_listing_that_lets_others_change_an_entry_is_shared() {
+    let listing = |entries: &[&str]| {
+        let mut text = String::from("drwxr-xr-x+ 2 me  staff  64 Nov 14 03:33 /Users/me/bin\n");
+        for (index, entry) in entries.iter().enumerate() {
+            text.push_str(&format!(" {index}: {entry}\n"));
+        }
+        text
+    };
+    let me = Some("me");
+    assert_eq!(acl::listed_shared(&listing(&[]), me), Some(false));
+    for entry in [
+        "group:staff allow add_file,delete_child",
+        "group:everyone allow write",
+        "user:other allow append",
+        "user:other allow add_subdirectory",
+        "user:other allow delete",
+        "user:other allow writeattr",
+        "user:other allow writeextattr",
+        "user:other allow writesecurity",
+        "user:other allow chown",
+        "group:staff inherited allow add_file",
+        "ABCDEF01-2345-6789-ABCD-EF0123456789 allow write",
+    ] {
+        assert_eq!(
+            acl::listed_shared(&listing(&["group:everyone deny delete", entry]), me),
+            Some(true),
+            "{entry}"
+        );
+        assert_eq!(
+            acl::listed_shared(&listing(&[entry]), None),
+            Some(true),
+            "{entry}"
+        );
+    }
+    for entry in [
+        "group:everyone deny delete",
+        "user:me allow write,append,delete",
+        "user:root allow write",
+        "group:wheel allow add_file",
+        "group:admin allow add_file",
+        "user:other allow read,list,search,readattr,readextattr,readsecurity,execute",
+        "group:staff inherited deny add_file,delete_child",
+    ] {
+        assert_eq!(
+            acl::listed_shared(&listing(&[entry]), me),
+            Some(false),
+            "{entry}"
+        );
+    }
+    assert_eq!(
+        acl::listed_shared(&listing(&["user:me allow write"]), None),
+        Some(true),
+        "without this user's name every user entry counts as someone else"
+    );
+    for broken in [
+        format!("{}x: group:staff allow write\n", listing(&[])),
+        format!("{} 0: group:staff\n", listing(&[])),
+        format!("{} 0: group:staff allow\n", listing(&[])),
+        String::new(),
+    ] {
+        assert_eq!(acl::listed_shared(&broken, me), None, "{broken:?}");
+    }
+}
+
+/// RV-DS241-18 r2: one `ls -lde` listing of several entries is read block by block, each
+/// block going to the one entry its first line ends with, the longest when one name ends
+/// another. An entry with no block or two gets none, and so does one whose block does not
+/// read, alone; a listing with a block for no entry or an access-list line before any entry
+/// gives none for every entry.
+#[cfg(unix)]
+#[test]
+fn a_listing_of_several_entries_is_read_block_by_block() {
+    let me = Some("me");
+    let line = |name: &str| format!("drwxr-xr-x+ 2 me  staff  64 Nov 14 03:33 {name}\n");
+    let open = " 0: group:staff allow add_file,delete_child\n";
+    let closed = " 0: group:everyone deny delete\n";
+    let entries = ["/Volumes/My /c", "/c", "/Users/me/bin", "/Users/me"];
+    let text = format!(
+        "{}{}{open}{}{closed}{}",
+        line("/Users/me"),
+        line("/Users/me/bin"),
+        line("/Volumes/My /c"),
+        line("/c")
+    );
+    assert_eq!(
+        acl::listed_shared_all(&text, &entries, me),
+        vec![Some(false), Some(false), Some(true), Some(false)]
+    );
+    assert_eq!(
+        acl::listed_shared_all(&line("/Users/me"), &["/Users/me", "/gone"], me),
+        vec![Some(false), None],
+        "an entry the listing left out"
+    );
+    assert_eq!(
+        acl::listed_shared_all(&format!("{0}{0}", line("/a")), &["/a"], me),
+        vec![None],
+        "an entry listed twice"
+    );
+    assert_eq!(
+        acl::listed_shared_all(
+            &format!("{} 0: group:staff\n{}{open}", line("/a"), line("/b")),
+            &["/a", "/b"],
+            me
+        ),
+        vec![None, Some(true)],
+        "a block that does not read fails alone"
+    );
+    for whole in [
+        format!("{open}{}", line("/a")),
+        format!("{}{}{open}", line("/a"), line("/zzz")),
+        String::new(),
+    ] {
+        assert_eq!(
+            acl::listed_shared_all(&whole, &["/a", "/b"], me),
+            vec![None, None],
+            "{whole:?}"
+        );
+    }
+}
+
+/// RV-DS241-18: a Linux `system.posix_acl_access` value names an entry changeable by others
+/// when a named user other than this user or root, or a named group the trusted-group rule
+/// does not trust, has write; the owner, group and other entries stay with the mode bits,
+/// and a value it cannot read fails closed.
+#[cfg(unix)]
+#[test]
+fn a_posix_access_list_that_lets_others_write_is_shared() {
+    const ME: u32 = 1000;
+    const OTHER: u32 = 1001;
+    const OWN_GROUP: u32 = 1000;
+    const SHARED_GROUP: u32 = 100;
+    let trusted = |group: u32| group == 0 || group == OWN_GROUP;
+    let value = |entries: &[(u16, u16, u32)]| {
+        let mut bytes = 2u32.to_le_bytes().to_vec();
+        for (tag, perm, id) in entries {
+            bytes.extend(tag.to_le_bytes());
+            bytes.extend(perm.to_le_bytes());
+            bytes.extend(id.to_le_bytes());
+        }
+        bytes
+    };
+    let base = [
+        (0x01, 7, u32::MAX),
+        (0x04, 5, u32::MAX),
+        (0x10, 7, u32::MAX),
+        (0x20, 5, u32::MAX),
+    ];
+    let with = |extra: (u16, u16, u32)| {
+        let mut entries = base.to_vec();
+        entries.insert(1, extra);
+        value(&entries)
+    };
+    assert_eq!(acl::posix_shared(&value(&base), ME, trusted), Some(false));
+    for open in [(0x02, 7, OTHER), (0x02, 2, OTHER), (0x08, 6, SHARED_GROUP)] {
+        assert_eq!(
+            acl::posix_shared(&with(open), ME, trusted),
+            Some(true),
+            "{open:?}"
+        );
+    }
+    for closed in [
+        (0x02, 7, ME),
+        (0x02, 7, 0),
+        (0x02, 5, OTHER),
+        (0x08, 7, OWN_GROUP),
+        (0x08, 5, SHARED_GROUP),
+    ] {
+        assert_eq!(
+            acl::posix_shared(&with(closed), ME, trusted),
+            Some(false),
+            "{closed:?}"
+        );
+    }
+    let mut old = value(&base);
+    old[0] = 1;
+    assert_eq!(acl::posix_shared(&old, ME, trusted), None);
+    let mut cut = value(&base);
+    cut.pop();
+    assert_eq!(acl::posix_shared(&cut, ME, trusted), None);
+    assert_eq!(acl::posix_shared(&[], ME, trusted), None);
+}
+
+/// RV-DS241-18: on macOS a folder whose mode bits are private but whose access list lets
+/// staff add and delete files is changeable by others, for the engine service and for the
+/// resolver's tools, while a deny-only list leaves it private.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tool_folder_staff_may_change_through_its_access_list_is_changeable() {
+    let temp = durable_folder();
+    let folder = temp.path().join("bin");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    assert_eq!(changeable_by_others(&tool), None);
+    let chmod = |rule: &str| {
+        let status = crate::spawn_gate::status(
+            std::process::Command::new("/bin/chmod")
+                .arg("+a")
+                .arg(rule)
+                .arg(&folder),
+        )
+        .unwrap();
+        assert!(status.success(), "{rule}");
+    };
+    chmod("user:nobody deny add_file");
+    assert_eq!(
+        changeable_by_others(&tool),
+        None,
+        "a deny entry changes nothing"
+    );
+    assert_eq!(mode_of(&folder), 0o755);
+    chmod("group:staff allow add_file,delete_child");
+    assert_eq!(mode_of(&folder), 0o755, "the mode bits still read private");
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    assert_eq!(changeable_past_sticky(&tool), Some(folder.clone()));
+}
+
+/// RV-DS241-18 r2: one `ls -lde` lists every part of a path the first time, names with a
+/// space or an accent included; a repeat lists none of the parts it read, and an access-list
+/// change moves only the changed part's change time, so that part alone is listed again and
+/// the change counts.
+#[cfg(target_os = "macos")]
+#[test]
+fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts() {
+    let temp = durable_folder();
+    let kit = temp.path().join("tool kit \u{e9}");
+    let folder = kit.join("bin");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    let ours = |listings: &[Vec<PathBuf>]| -> Vec<PathBuf> {
+        listings
+            .iter()
+            .flatten()
+            .filter(|listed| listed.starts_with(temp.path()))
+            .cloned()
+            .collect()
+    };
+    acl::take_listings();
+    assert_eq!(changeable_by_others(&tool), None);
+    let first = acl::take_listings();
+    assert_eq!(first.len(), 1, "one listing for every part: {first:?}");
+    for part in [&tool, &folder, &kit] {
+        assert!(first[0].contains(part), "{part:?} in {first:?}");
+    }
+
+    assert_eq!(changeable_by_others(&tool), None);
+    let repeat = acl::take_listings();
+    assert!(repeat.len() <= 1, "{repeat:?}");
+    assert_eq!(
+        ours(&repeat),
+        Vec::<PathBuf>::new(),
+        "nothing read is listed again"
+    );
+
+    let status = crate::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .arg("+a")
+            .arg("group:staff allow add_file,delete_child")
+            .arg(&folder),
+    )
+    .unwrap();
+    assert!(status.success());
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    let changed = acl::take_listings();
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert_eq!(
+        ours(&changed),
+        vec![folder.clone()],
+        "the changed part alone"
     );
 }

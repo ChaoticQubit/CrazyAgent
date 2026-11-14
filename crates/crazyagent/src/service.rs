@@ -332,7 +332,7 @@ StandardError=append:{log}\n\
 WantedBy=default.target\n",
                 executable = self.written_executable(),
                 root = systemd_quoted(&root),
-                path = systemd_quoted(&format!("PATH={}", self.path.to_string_lossy())),
+                path = systemd_environment_quoted(&format!("PATH={}", self.path.to_string_lossy())),
                 log = systemd_specifiers(&log),
             ),
             Platform::Windows => {
@@ -745,11 +745,11 @@ WantedBy=default.target\n",
 }
 
 /// The first entry on a path that someone other than this user or root can change: an
-/// entry another user owns, a world-writable entry such as `/tmp`, or a file or folder an
-/// untrusted group can write ([`trusted_group`]), except a sticky store such as /nix/store
-/// above an entry's own folder ([`first_changeable_part`]). It reads the path as written and
-/// with its links resolved; an unreadable entry counts. Input: the absolute path. Output:
-/// the entry.
+/// entry another user owns, a world-writable entry such as `/tmp`, a file or folder an
+/// untrusted group can write ([`trusted_group`]), or one whose access list lets someone else
+/// change it, except a sticky store such as /nix/store above an entry's own folder
+/// ([`first_changeable_part`]). It reads the path as written and with its links resolved; an
+/// unreadable entry or access list counts. Input: the absolute path. Output: the entry.
 #[cfg(unix)]
 pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
     changeable(path, false)
@@ -771,21 +771,40 @@ pub(crate) fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
 fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
     let me = current_uid();
     let resolved = canonical(path);
-    [path, resolved.as_path()].into_iter().find_map(|path| {
-        let parts: Vec<Part> = path.ancestors().map(read_part).collect();
-        first_changeable_part(&parts, me, open_stores)
+    let paths = [path, resolved.as_path()];
+    let mut entries: Vec<&Path> = Vec::new();
+    for entry in paths.into_iter().flat_map(Path::ancestors) {
+        if !entries.contains(&entry) {
+            entries.push(entry);
+        }
+    }
+    let read = read_parts(&entries);
+    assert_eq!(read.len(), entries.len());
+    for path in paths {
+        let parts: Vec<Part> = path
+            .ancestors()
+            .filter_map(|entry| entries.iter().position(|seen| *seen == entry))
+            .map(|index| read[index])
+            .collect();
+        assert_eq!(parts.len(), path.ancestors().count());
+        if let Some(entry) = first_changeable_part(&parts, me, open_stores)
             .and_then(|depth| path.ancestors().nth(depth))
-            .map(Path::to_path_buf)
-    })
+        {
+            return Some(entry.to_path_buf());
+        }
+    }
+    None
 }
 
-/// One part of a path as the ownership rule reads it: missing, unreadable, or its owner,
-/// group, mode and whether it is a folder or a link.
+/// One part of a path as the ownership rule reads it: missing, unreadable, carrying an
+/// access list that lets someone other than this user or root change it ([`acl`]), or its
+/// owner, group, mode and whether it is a folder or a link.
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Part {
     Missing,
     Unreadable,
+    Shared,
     Found {
         owner: u32,
         group: u32,
@@ -795,18 +814,79 @@ pub(crate) enum Part {
     },
 }
 
-/// Reads one part of a path without following a link. Input: the part. Output: the read.
-#[cfg(unix)]
+/// Reads the parts of a path without following a link, every access list in one listing
+/// ([`acl::shared_all`]). A link's own access list is never read, as its mode is not. Input:
+/// the parts. Output: the reads, in order.
+#[cfg(target_os = "macos")]
+fn read_parts(entries: &[&Path]) -> Vec<Part> {
+    use std::os::unix::fs::MetadataExt;
+    let read: Vec<std::io::Result<std::fs::Metadata>> =
+        entries.iter().map(std::fs::symlink_metadata).collect();
+    let listed: Vec<(&Path, &std::fs::Metadata)> = entries
+        .iter()
+        .zip(&read)
+        .filter_map(|(entry, read)| match read {
+            Ok(metadata) if !metadata.file_type().is_symlink() => Some((*entry, metadata)),
+            _ => None,
+        })
+        .collect();
+    let mut shared = acl::shared_all(&listed).into_iter();
+    let parts: Vec<Part> = read
+        .iter()
+        .map(|read| match read {
+            Ok(metadata) => {
+                let link = metadata.file_type().is_symlink();
+                match (!link).then(|| shared.next().flatten()) {
+                    Some(None) => Part::Unreadable,
+                    Some(Some(true)) => Part::Shared,
+                    Some(Some(false)) | None => Part::Found {
+                        owner: metadata.uid(),
+                        group: metadata.gid(),
+                        mode: metadata.mode(),
+                        folder: metadata.is_dir(),
+                        link,
+                    },
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Part::Missing,
+            Err(_) => Part::Unreadable,
+        })
+        .collect();
+    assert!(shared.next().is_none());
+    assert_eq!(parts.len(), entries.len());
+    parts
+}
+
+/// Reads the parts of a path one by one ([`read_part`]). Input: the parts. Output: the
+/// reads, in order.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn read_parts(entries: &[&Path]) -> Vec<Part> {
+    entries.iter().map(|entry| read_part(entry)).collect()
+}
+
+/// Reads one part of a path without following a link. A link's own access list is never
+/// read, as its mode is not. Input: the part. Output: the read.
+#[cfg(all(unix, not(target_os = "macos")))]
 fn read_part(entry: &Path) -> Part {
     use std::os::unix::fs::MetadataExt;
     match std::fs::symlink_metadata(entry) {
-        Ok(metadata) => Part::Found {
-            owner: metadata.uid(),
-            group: metadata.gid(),
-            mode: metadata.mode(),
-            folder: metadata.is_dir(),
-            link: metadata.file_type().is_symlink(),
-        },
+        Ok(metadata) => {
+            let link = metadata.file_type().is_symlink();
+            #[cfg(not(target_os = "macos"))]
+            let shared = (!link).then(|| acl::shared(entry, current_uid(), trusted_group));
+            match shared {
+                Some(None) => return Part::Unreadable,
+                Some(Some(true)) => return Part::Shared,
+                Some(Some(false)) | None => {}
+            }
+            Part::Found {
+                owner: metadata.uid(),
+                group: metadata.gid(),
+                mode: metadata.mode(),
+                folder: metadata.is_dir(),
+                link,
+            }
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Part::Missing,
         Err(_) => Part::Unreadable,
     }
@@ -822,7 +902,7 @@ pub(crate) fn first_changeable_part(parts: &[Part], me: u32, open_stores: bool) 
     for (depth, part) in parts.iter().enumerate() {
         let changeable = match *part {
             Part::Missing => false,
-            Part::Unreadable => true,
+            Part::Unreadable | Part::Shared => true,
             Part::Found {
                 owner,
                 group,
@@ -1063,14 +1143,23 @@ fn plist_string(line: &str) -> Option<String> {
     )
 }
 
+/// Quotes one word of an ExecStart= line, where systemd also expands `$` variables, so a
+/// `$` is doubled on top of [`systemd_environment_quoted`]. Input: the word. Output: the
+/// quoted text.
 fn systemd_quoted(text: &str) -> String {
+    systemd_environment_quoted(&text.replace('$', "$$"))
+}
+
+/// Quotes a value for systemd: backslash and double quote are escaped and `%` (a specifier)
+/// is doubled. Environment= expands no variables, so `$` is written as is. Input: the value.
+/// Output: the quoted text.
+fn systemd_environment_quoted(text: &str) -> String {
     let mut quoted = String::from("\"");
     for character in text.chars() {
         match character {
             '\\' => quoted.push_str("\\\\"),
             '"' => quoted.push_str("\\\""),
             '%' => quoted.push_str("%%"),
-            '$' => quoted.push_str("$$"),
             other => quoted.push(other),
         }
     }
@@ -1657,16 +1746,26 @@ pub fn link_cli(executable: &Path, _bin: &Path) -> Result<PathBuf, ServiceError>
 /// on the command line.
 pub const WINDOWS_PATH_FOLDER_VARIABLE: &str = "CRAZYAGENT_PATH_FOLDER";
 
-/// The PowerShell command that appends a folder to the user's PATH once. Input: the
-/// folder, handed over in [`WINDOWS_PATH_FOLDER_VARIABLE`] so it is read as data, never
-/// as script. Output: the command; it fails when that variable arrives empty.
+/// The PowerShell command that appends a folder to the user's PATH once. It reads the
+/// stored value as written, %VAR% references unexpanded, and stores it back with the
+/// registry kind it had (REG_EXPAND_SZ for a new value), so references keep following their
+/// variables. Deleting a CrazyAgent-only user variable through .NET then announces the
+/// change to running programs the way a PATH set through .NET would. Input: the folder,
+/// handed over in [`WINDOWS_PATH_FOLDER_VARIABLE`] so it is read as data, never as script.
+/// Output: the command; it fails when that variable arrives empty.
 pub fn windows_path_command(folder: &Path) -> std::process::Command {
     let script = format!(
-        "$f=$env:{WINDOWS_PATH_FOLDER_VARIABLE}; if ([string]::IsNullOrEmpty($f)) {{ exit 2 }}; \
-$p=[Environment]::GetEnvironmentVariable('Path','User'); \
-if ($null -eq $p) {{ $p='' }}; \
-if (-not (($p -split ';') -contains $f)) {{ \
-[Environment]::SetEnvironmentVariable('Path', (($p.TrimEnd(';'), $f) -join ';').TrimStart(';'), 'User') }}"
+        "$ErrorActionPreference='Stop'; \
+$f=$env:{WINDOWS_PATH_FOLDER_VARIABLE}; if ([string]::IsNullOrEmpty($f)) {{ exit 2 }}; \
+$k=Get-Item -LiteralPath 'HKCU:\\Environment'; \
+$p=''; $t=[Microsoft.Win32.RegistryValueKind]::ExpandString; \
+if ($k.GetValueNames() -contains 'Path') {{ \
+$p=[string]$k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); \
+$t=$k.GetValueKind('Path') }}; \
+if (-not ((($p -split ';') | ForEach-Object {{ [Environment]::ExpandEnvironmentVariables($_) }}) -contains $f)) {{ \
+$v=(($p.TrimEnd(';'), $f) -join ';').TrimStart(';'); \
+Set-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -Value $v -Type $t; \
+[Environment]::SetEnvironmentVariable('CRAZYAGENT_PATH_REFRESH', $null, 'User') }}"
     );
     let mut command = std::process::Command::new("powershell.exe");
     command
@@ -1674,6 +1773,9 @@ if (-not (($p -split ';') -contains $f)) {{ \
         .env(WINDOWS_PATH_FOLDER_VARIABLE, folder);
     command
 }
+
+#[cfg(unix)]
+mod acl;
 
 #[cfg(test)]
 mod tests;

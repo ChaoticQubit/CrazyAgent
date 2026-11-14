@@ -128,6 +128,19 @@ async function settled(bridge, name, wanted, what, ms = AUTH_MS) {
   }
 }
 
+/** Waits until the page's own call of a command was answered the given number of times. The
+ * test reads the sign-in through the bridge the page uses, and a read between the page's own
+ * read and its start replaces the one selection the start needs, so a check waits for the
+ * page's start first. Inputs: the call log, the command, the count and the wait. Output: that
+ * answer. */
+async function pageAnswer(log, cmd, count, ms = AUTH_MS) {
+  for (const deadline = Date.now() + ms; ; await pause(POLL_MS)) {
+    const answers = log.trail.filter((entry) => entry.cmd === cmd);
+    if (answers.length >= count) return answers[count - 1].answer;
+    assert.ok(Date.now() < deadline, `the page called ${cmd} ${answers.length} times, not ${count}`);
+  }
+}
+
 /** Whether a sign-in view is one refused as too old. Input: the view. Output: the answer. */
 function tooOld(view) {
   return view.phase === "failed" && view.code === TOO_OLD;
@@ -241,7 +254,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
           await me.type("#account-name", name);
           await me.click(harness.start);
         };
-        await steps({ bridge, me, page, open, signIn, fakes });
+        await steps({ bridge, me, page, open, signIn, fakes, log });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
@@ -269,7 +282,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
  * updater check.
  * Output: the steps. */
 function belowThenUpdated(t, harness, old, account, updated) {
-  return async ({ bridge, me, open, signIn, fakes }) => {
+  return async ({ bridge, me, open, signIn, fakes, log }) => {
     await open("#/settings/harnesses", "the Harnesses page", (text) => text.includes(`Sign-in needs ${harness.minimum} or newer.`));
     await signIn(harness, account);
     const line = `${harness.name} ${old} is too old to sign in from CrazyAgent; it needs ${harness.minimum} or newer.`;
@@ -287,6 +300,8 @@ function belowThenUpdated(t, harness, old, account, updated) {
     updated(fakes);
     assert.equal((await value(bridge, "desktop_harness_versions", { id: harness.id, look: false })).installed, harness.minimum, "the engine reads the new version with no restart");
     await me.click("Check again");
+    const restarted = await pageAnswer(log, "desktop_start_native_auth", 2);
+    assert.ok("value" in restarted, `Check again starts a new sign-in: ${JSON.stringify(restarted)}`);
     const after = await settled(bridge, account, ran, `a sign-in that runs ${harness.name} at its minimum`);
     t.diagnostic(`${harness.name} at its minimum ended with ${after.code}`);
     await me.waitFor("the panel without the too-old line", (text) => !text.includes(line) && !text.includes(`${harness.name} is too old`));

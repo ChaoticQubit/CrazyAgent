@@ -202,27 +202,52 @@ test("Free resets shows no choice while the usage read loads, failed or has no s
   for (const label of ["Confirm each", "Notice", "Don&#x27;t read"]) assert.match(stored, new RegExp(`aria-checked="false"[^>]*>${label}<`), label);
 });
 
-test("free resets saves go one at a time in the order picked, the ones picked meanwhile collapse to the latest, and only that one answers", async () => {
+test("spend one: free resets saves go one at a time, every pick sent in the order picked, each answered on its own", async () => {
   const tick = () => new Promise((resolve) => setImmediate(resolve));
   const sent = [];
   const answers = [];
-  const push = section.latestSaves((value) => { sent.push(value); return new Promise((resolve) => answers.push(resolve)); });
+  const push = section.inOrder((value) => { sent.push(value); return new Promise((resolve) => answers.push(resolve)); });
   const done = { kind: "ok", value: undefined };
-  const asClaudeCode = push(settings("confirm_each", "notice", "as_claude_code"));
-  const throughClaudeCode = push(settings("confirm_each", "notice", "through_claude_code"));
-  const dontRead = push(settings("confirm_each", "notice", "off"));
+  const refused = { kind: "error", code: "usage_unavailable", message: "Usage couldn't be read. Try again." };
+  const confirm = push({ field: "confirm", value: "off" });
+  const asClaudeCode = push({ field: "resets_source", value: "as_claude_code" });
+  const dontRead = push({ field: "resets_source", value: "off" });
   await tick();
-  assert.deepEqual(sent.map((value) => value.resets_source), ["as_claude_code"]);
-  answers[0]({ kind: "error", code: "usage_unavailable", message: "Usage couldn't be read. Try again." });
-  assert.equal(await asClaudeCode, null);
-  assert.equal(await throughClaudeCode, null);
+  assert.deepEqual(sent.map((choice) => choice.value), ["off"]);
+  answers[0](refused);
+  assert.deepEqual(await confirm, refused);
   await tick();
-  assert.deepEqual(sent.map((value) => value.resets_source), ["as_claude_code", "off"]);
+  assert.deepEqual(sent.map((choice) => choice.value), ["off", "as_claude_code"]);
   answers[1](done);
-  assert.deepEqual(await dontRead, done);
-  const later = push(settings("one_click", "notice", "off"));
+  assert.deepEqual(await asClaudeCode, done);
   await tick();
-  assert.equal(sent.length, 3);
+  assert.deepEqual(sent.map((choice) => choice.value), ["off", "as_claude_code", "off"]);
   answers[2](done);
-  assert.deepEqual(await later, done);
+  assert.deepEqual(await dontRead, done);
+});
+
+test("spend one: each Free resets control sends only its own setting, and the bridge carries just that choice", async () => {
+  const { isValidElement } = await import("react");
+  const { Segmented } = await import("../src/ui/index.ts");
+  const walk = (node, found = []) => {
+    if (Array.isArray(node)) for (const child of node) walk(child, found);
+    else if (isValidElement(node)) { found.push(node); walk(node.props.children, found); }
+    return found;
+  };
+  const picked = [];
+  const tree = section.SpendSettingsView({ settings: settings("one_click", "no_hint", "as_claude_code"), refused: "", onChoice: (choice) => picked.push(choice), onChange: (all) => picked.push(all) });
+  const controls = new Map(walk(tree).filter((element) => element.type === Segmented).map((element) => [element.props.label, element.props]));
+  controls.get("Spend confirmation").onValue("off");
+  controls.get("When every pool account is limited").onValue("auto_spend");
+  controls.get("Claude free resets").onValue("off");
+  assert.deepEqual(picked, [{ field: "confirm", value: "off" }, { field: "all_limited", value: "auto_spend" }, { field: "resets_source", value: "off" }]);
+  const calls = [];
+  const before = globalThis.window;
+  globalThis.window = { __TAURI_INTERNALS__: { async invoke(command, args) { calls.push([command, args]); return null; } } };
+  try {
+    assert.deepEqual(await client.setSpendOne({ field: "resets_source", value: "off" }), { kind: "ok", value: null });
+  } finally {
+    globalThis.window = before;
+  }
+  assert.deepEqual(calls, [["desktop_usage_set_spend", { choice: { field: "resets_source", value: "off" } }]]);
 });

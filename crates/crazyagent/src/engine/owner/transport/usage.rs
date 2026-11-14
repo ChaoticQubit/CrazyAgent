@@ -2,9 +2,9 @@ use super::*;
 use crate::protocol::{CredentialRef, ProjectId, encode_frame};
 use crate::usage::extras::LimitExtras;
 use crate::usage::metrics::Metrics;
-use crate::usage::money::MoneySettings;
+use crate::usage::money::{MoneyChoice, MoneySettings};
 use crate::usage::report::UsageReport;
-use crate::usage::spend::SpendSettings;
+use crate::usage::spend::{SpendChoice, SpendSettings};
 use crate::usage::{self, WindowKind};
 use serde::{Deserialize, Serialize};
 use tokio::sync::OwnedRwLockWriteGuard;
@@ -66,6 +66,9 @@ enum Action {
     SetMoney {
         settings: MoneySettings,
     },
+    SetMoneyOne {
+        choice: MoneyChoice,
+    },
     DecideRecount {
         use_new: bool,
     },
@@ -75,6 +78,9 @@ enum Action {
     },
     SetSpend {
         settings: SpendSettings,
+    },
+    SetSpendOne {
+        choice: SpendChoice,
     },
 }
 
@@ -194,6 +200,16 @@ impl OwnerClient {
         }
     }
 
+    /// Stores one of the owner's dollars and Metrics page choices and keeps the other two as
+    /// stored. Input: the choice and its value. Output: done; an engine before this request
+    /// answers `usage_request_invalid`.
+    pub async fn usage_set_money_one(&self, choice: MoneyChoice) -> Result<(), EngineError> {
+        match self.usage_exchange(Action::SetMoneyOne { choice }).await? {
+            Reply::Done => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
     /// Applies the owner's choice of the recount, once. Input: whether to use the new
     /// numbers. Output: done, or `usage_recount_not_ready`.
     pub async fn usage_decide_recount(&self, use_new: bool) -> Result<(), EngineError> {
@@ -228,6 +244,16 @@ impl OwnerClient {
     /// limited and Claude free resets. Input: the settings. Output: done.
     pub async fn usage_set_spend(&self, settings: SpendSettings) -> Result<(), EngineError> {
         match self.usage_exchange(Action::SetSpend { settings }).await? {
+            Reply::Done => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Stores one of the owner's Pools settings and keeps the other two as stored. Input:
+    /// the setting and its value. Output: done; an engine before this request answers
+    /// `usage_request_invalid`.
+    pub async fn usage_set_spend_one(&self, choice: SpendChoice) -> Result<(), EngineError> {
+        match self.usage_exchange(Action::SetSpendOne { choice }).await? {
             Reply::Done => Ok(()),
             _ => Err(unknown()),
         }
@@ -303,9 +329,11 @@ enum Change {
     Refresh,
     SetReset(CredentialRef, WindowKind, Option<i64>),
     SetMoney(MoneySettings),
+    SetMoneyOne(MoneyChoice),
     DecideRecount(bool),
     Spend(CredentialRef, bool),
     SetSpend(SpendSettings),
+    SetSpendOne(SpendChoice),
 }
 
 /// Serves one usage request. The report is built first; then the owner barrier is waited
@@ -427,11 +455,13 @@ async fn prepare(
             at_ms,
         } => Prepared::Change(root, Change::SetReset(account, window, at_ms)),
         Action::SetMoney { settings } => Prepared::Change(root, Change::SetMoney(settings)),
+        Action::SetMoneyOne { choice } => Prepared::Change(root, Change::SetMoneyOne(choice)),
         Action::DecideRecount { use_new } => Prepared::Change(root, Change::DecideRecount(use_new)),
         Action::Spend { account, confirmed } => {
             Prepared::Change(root, Change::Spend(account, confirmed))
         }
         Action::SetSpend { settings } => Prepared::Change(root, Change::SetSpend(settings)),
+        Action::SetSpendOne { choice } => Prepared::Change(root, Change::SetSpendOne(choice)),
     })
 }
 
@@ -535,6 +565,7 @@ async fn finish(
                 usage::set_reset_override(db, &account, window, at_ms)
             }
             Change::SetMoney(settings) => usage::money::write(db, settings),
+            Change::SetMoneyOne(choice) => usage::money::write_one(db, choice),
             Change::DecideRecount(use_new) => {
                 usage::recount::decide(db, use_new, crate::team::now_ms())
             }
@@ -542,6 +573,7 @@ async fn finish(
                 usage::spend::request(db, &account, confirmed, crate::team::now_ms())
             }
             Change::SetSpend(settings) => usage::spend::write(db, settings),
+            Change::SetSpendOne(choice) => usage::spend::write_one(db, choice),
         };
         written.map(|_| Reply::Done)
     })
@@ -644,5 +676,215 @@ mod spend_request_tests {
             matches!(action, Action::Spend { ref account, confirmed: true } if account.as_str() == "codex-a")
         );
         assert!(USAGE_CODES.contains(&"usage_spend_unconfirmed"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod spend_one_tests {
+    use super::super::usage_tests::Usage;
+    use super::*;
+    use crate::usage::spend::{AllLimited, ResetsSource, SpendConfirm};
+    use serde_json::{Value, json};
+
+    fn decoded(usage: Value) -> Result<Action, serde_json::Error> {
+        serde_json::from_value::<Envelope>(json!({ "usage": usage })).map(|envelope| envelope.usage)
+    }
+
+    #[test]
+    fn spend_one_requests_name_one_known_field_and_its_value_and_nothing_else() {
+        for field in ["confirm", "all_limited", "resets_source"] {
+            let value = if field == "all_limited" {
+                "no_hint"
+            } else {
+                "off"
+            };
+            let sent =
+                json!({ "kind": "set_spend_one", "choice": { "field": field, "value": value } });
+            assert!(decoded(sent).is_ok(), "{field}");
+        }
+        for refused in [
+            json!({ "kind": "set_spend_one", "choice": { "field": "colour", "value": "off" } }),
+            json!({ "kind": "set_spend_one", "choice": { "field": "confirm", "value": "sometimes" } }),
+            json!({ "kind": "set_spend_one", "choice": { "field": "confirm" } }),
+            json!({ "kind": "set_spend_one", "choice": { "field": "confirm", "value": "off", "extra": 1 } }),
+            json!({ "kind": "set_spend_one", "choice": { "field": "confirm", "value": "off" }, "settings": {} }),
+        ] {
+            assert!(decoded(refused.clone()).is_err(), "{refused}");
+        }
+        assert!(USAGE_CODES.contains(&"usage_request_invalid"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spend_one_changes_its_own_setting_and_keeps_the_other_two() {
+        let usage = Usage::start().await;
+        let send = |field: &str, value: &str| {
+            decoded(
+                json!({ "kind": "set_spend_one", "choice": { "field": field, "value": value } }),
+            )
+            .expect("the engine reads a one-setting request")
+        };
+        let fresh = usage
+            .client
+            .usage_exchange(send("confirm", "off"))
+            .await
+            .unwrap();
+        assert!(matches!(fresh, Reply::Done));
+        let report = usage.client.usage_report(None, None, 0).await.unwrap();
+        assert_eq!(
+            report.spend.settings,
+            SpendSettings {
+                confirm: SpendConfirm::Off,
+                ..SpendSettings::default()
+            },
+            "a first one-setting save keeps the defaults of the other two"
+        );
+        let all = SpendSettings {
+            confirm: SpendConfirm::OneClick,
+            all_limited: AllLimited::NoHint,
+            resets_source: ResetsSource::AsClaudeCode,
+        };
+        usage.client.usage_set_spend(all).await.unwrap();
+        for (field, value, expected) in [
+            (
+                "resets_source",
+                "off",
+                SpendSettings {
+                    resets_source: ResetsSource::Off,
+                    ..all
+                },
+            ),
+            (
+                "all_limited",
+                "auto_spend",
+                SpendSettings {
+                    all_limited: AllLimited::AutoSpend,
+                    resets_source: ResetsSource::Off,
+                    ..all
+                },
+            ),
+            (
+                "confirm",
+                "confirm_each",
+                SpendSettings {
+                    confirm: SpendConfirm::ConfirmEach,
+                    all_limited: AllLimited::AutoSpend,
+                    resets_source: ResetsSource::Off,
+                },
+            ),
+        ] {
+            let reply = usage
+                .client
+                .usage_exchange(send(field, value))
+                .await
+                .unwrap();
+            assert!(matches!(reply, Reply::Done), "{field}");
+            let report = usage.client.usage_report(None, None, 0).await.unwrap();
+            assert_eq!(report.spend.settings, expected, "{field}");
+        }
+        usage.stop().await;
+    }
+}
+
+#[cfg(all(test, unix))]
+mod money_one_tests {
+    use super::super::usage_tests::Usage;
+    use super::*;
+    use crate::usage::money::{MainNumber, PriceSource, ProjectLimits};
+    use serde_json::{Value, json};
+
+    fn decoded(usage: Value) -> Result<Action, serde_json::Error> {
+        serde_json::from_value::<Envelope>(json!({ "usage": usage })).map(|envelope| envelope.usage)
+    }
+
+    #[test]
+    fn money_one_requests_name_one_known_field_and_its_value_and_nothing_else() {
+        for (field, value) in [
+            ("main_number", "tokens"),
+            ("prices", "off"),
+            ("project_limits", "shown"),
+        ] {
+            let sent =
+                json!({ "kind": "set_money_one", "choice": { "field": field, "value": value } });
+            assert!(decoded(sent).is_ok(), "{field}");
+        }
+        for refused in [
+            json!({ "kind": "set_money_one", "choice": { "field": "currency", "value": "off" } }),
+            json!({ "kind": "set_money_one", "choice": { "field": "main_number", "value": "euros" } }),
+            json!({ "kind": "set_money_one", "choice": { "field": "prices" } }),
+            json!({ "kind": "set_money_one", "choice": { "field": "prices", "value": "off", "extra": 1 } }),
+            json!({ "kind": "set_money_one", "choice": { "field": "prices", "value": "off" }, "settings": {} }),
+        ] {
+            assert!(decoded(refused.clone()).is_err(), "{refused}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn money_one_changes_its_own_choice_and_keeps_the_other_two() {
+        let usage = Usage::start().await;
+        let send = |field: &str, value: &str| {
+            decoded(
+                json!({ "kind": "set_money_one", "choice": { "field": field, "value": value } }),
+            )
+            .expect("the engine reads a one-choice request")
+        };
+        let fresh = usage
+            .client
+            .usage_exchange(send("prices", "off"))
+            .await
+            .unwrap();
+        assert!(matches!(fresh, Reply::Done));
+        let report = usage.client.usage_report(None, None, 0).await.unwrap();
+        assert_eq!(
+            report.money.settings,
+            MoneySettings {
+                prices: PriceSource::Off,
+                ..MoneySettings::default()
+            },
+            "a first one-choice save keeps the defaults of the other two"
+        );
+        let all = MoneySettings {
+            main_number: MainNumber::Tokens,
+            prices: PriceSource::Off,
+            project_limits: ProjectLimits::Shown,
+        };
+        usage.client.usage_set_money(all).await.unwrap();
+        for (field, value, expected) in [
+            (
+                "project_limits",
+                "hidden",
+                MoneySettings {
+                    project_limits: ProjectLimits::Hidden,
+                    ..all
+                },
+            ),
+            (
+                "main_number",
+                "dollars",
+                MoneySettings {
+                    main_number: MainNumber::Dollars,
+                    project_limits: ProjectLimits::Hidden,
+                    ..all
+                },
+            ),
+            (
+                "prices",
+                "bundled",
+                MoneySettings {
+                    main_number: MainNumber::Dollars,
+                    prices: PriceSource::Bundled,
+                    project_limits: ProjectLimits::Hidden,
+                },
+            ),
+        ] {
+            let reply = usage
+                .client
+                .usage_exchange(send(field, value))
+                .await
+                .unwrap();
+            assert!(matches!(reply, Reply::Done), "{field}");
+            let report = usage.client.usage_report(None, None, 0).await.unwrap();
+            assert_eq!(report.money.settings, expected, "{field}");
+        }
+        usage.stop().await;
     }
 }

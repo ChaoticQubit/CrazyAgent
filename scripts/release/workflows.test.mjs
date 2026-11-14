@@ -28,6 +28,86 @@ function block(text, indent, name) {
   return lines.slice(start, end < 0 ? lines.length : end);
 }
 
+/**
+ * Lists the jobs under `jobs:` of a workflow, failing closed: every non-blank line of the block
+ * deeper than 2-space indent belongs to a job whose key sits alone at 2-space indent, `#`-led
+ * run block lines included, since GitHub expands them; only a `#` line at indent 2 or less is a
+ * YAML comment passed over. A job the guards cannot read throws instead of being skipped.
+ * Input: the workflow text. Output: each job's name with its lines, at least one.
+ */
+function jobsOf(text) {
+  const lines = text.split("\n");
+  const start = lines.indexOf("jobs:");
+  assert(start >= 0, "no jobs: block at indent 0, so no job can be read");
+  const jobs = [];
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() === "") continue;
+    if (line.trimStart().startsWith("#") && line.length - line.trimStart().length <= 2) continue;
+    if (/^\S/.test(line)) break;
+    const name = line.match(/^ {2}([A-Za-z0-9_-]+):\s*$/)?.[1];
+    if (name) {
+      jobs.push({ name, lines: [line] });
+      continue;
+    }
+    assert(jobs.length > 0 && line.length - line.trimStart().length > 2, `every job key sits alone at 2-space indent under jobs:, not ${JSON.stringify(line)}`);
+    jobs.at(-1).lines.push(line);
+  }
+  assert(jobs.length > 0, "no job key at 2-space indent under jobs:");
+  return jobs;
+}
+
+/**
+ * The lines of a workflow outside its `jobs:` block, such as a workflow-level `env:` every job
+ * inherits; the block ends where jobsOf stops reading. Input: the workflow text. Output: the lines.
+ */
+function sharedLines(text) {
+  const lines = text.split("\n");
+  const start = lines.indexOf("jobs:");
+  const end = lines.findIndex((line, index) => index > start && /^[^\s#]/.test(line));
+  return [...lines.slice(0, start), ...(end < 0 ? [] : lines.slice(end))];
+}
+
+/**
+ * Names the jobs of a workflow that read a secret, hand secrets to a called workflow or bind an
+ * environment, whatever the file or job; a secret outside `jobs:` reaches every job. Input: the
+ * workflow text. Output: the job names in file order.
+ */
+function exposedJobs(text) {
+  const jobs = jobsOf(text);
+  const shared = sharedLines(text).some((line) => line.includes("secrets."));
+  return jobs.filter(({ lines }) => shared || lines.some((line) => line.includes("secrets.") || /^ {4}(environment|secrets):/.test(line))).map(({ name }) => name);
+}
+
+/**
+ * Lists every runner of a workflow outside the allowed GitHub-hosted images, reading each
+ * matrix runner value when a job takes `${{ matrix.runner }}`; a `runner:` key, in block or
+ * flow form, whose value is not one plain name is a problem. A job that calls a reusable workflow has no runner of its own.
+ * Input: the workflow text. Output: "job: runner" entries.
+ */
+function runnerProblems(text) {
+  const allowed = new Set(Object.values(RUNNERS));
+  const problems = [];
+  for (const { name, lines } of jobsOf(text)) {
+    const runsOn = lines.find((line) => /^ {4}runs-on:/.test(line))?.replace(/^ {4}runs-on:\s*/, "");
+    if (runsOn === undefined) {
+      if (!lines.some((line) => /^ {4}uses: \.\/\.github\/workflows\//.test(line))) problems.push(`${name}: no runner`);
+      continue;
+    }
+    if (runsOn !== "${{ matrix.runner }}") {
+      if (!allowed.has(runsOn)) problems.push(`${name}: ${runsOn}`);
+      continue;
+    }
+    const named = lines.filter((line) => /(?:^\s+(?:- )?|[{,]\s*)runner:/.test(line));
+    if (named.length === 0) problems.push(`${name}: no matrix runner`);
+    for (const line of named) {
+      const runner = line.match(/^\s+(?:- )?runner: ([A-Za-z0-9._-]+)$/)?.[1];
+      if (runner === undefined) problems.push(`${name}: runner line ${line.trim()}`);
+      else if (!allowed.has(runner)) problems.push(`${name}: ${runner}`);
+    }
+  }
+  return problems;
+}
+
 test("CI runs for pull requests and as a reusable workflow; a pull request cancels its own older run, and a release's CI never shares a group with another ref or gets cancelled", async () => {
   const ci = await workflow("ci.yml");
   const on = block(ci, 0, "on");
@@ -58,11 +138,7 @@ test("signing secrets reach only the build job, which is bound to the release en
   const jobs = block(release, 0, "jobs").join("\n");
   const build = block(jobs, 2, "build");
   assert(build.includes("    environment: release"), "build runs in the release environment");
-  for (const job of ["prepare", "ci", "publish"]) {
-    const lines = block(jobs, 2, job);
-    assert(!lines.some((line) => line.includes("secrets.")), `${job} reads no secret`);
-    assert(!lines.some((line) => /^ {4}environment:/.test(line)), `${job} needs no environment`);
-  }
+  assert.deepEqual(exposedJobs(release), ["build"], "every other job reads no secret and needs no environment");
   assert(release.split("\n").filter((line) => line.includes("secrets.")).length > 0);
 });
 
@@ -100,12 +176,10 @@ test("every CI job runs on a GitHub-hosted runner, macOS on macos-15, and no wor
   const ci = await workflow("ci.yml");
   const jobs = block(ci, 0, "jobs").join("\n");
   for (const [job, runner] of Object.entries(RUNNERS)) assert(block(jobs, 2, job).includes(`    runs-on: ${runner}`), job);
-  for (const name of ["ci.yml", "release.yml"]) {
+  for (const name of (await readdir(WORKFLOWS)).filter((name) => /\.ya?ml$/.test(name))) {
     const text = await workflow(name);
     assert.doesNotMatch(text, /pull_request_target|head\.repo/, name);
-    for (const line of text.split("\n").filter((line) => /^\s+runs-on:/.test(line))) {
-      assert.match(line.trim(), /^runs-on: (?:ubuntu-22\.04|macos-15|windows-2022|\$\{\{ matrix\.runner \}\})$/, `${name}: ${line.trim()}`);
-    }
+    assert.deepEqual(runnerProblems(text), [], name);
   }
 });
 
@@ -267,7 +341,7 @@ test("a self-hosted release builds in a clean Rust folder and Cargo home, never 
 test("tools kept in the runner tool cache are checked against their pinned SHA-256 on every use, not once per version", async () => {
   for (const [name, job, title] of [["ci.yml", "macos", "Install pinned Node on the owner's runner"], ["ci.yml", "macos", "Install pinned arm64 bun on the owner's runner"],
     ["release.yml", "build", "Install x86_64 bun for the Intel rcli host"], ["release.yml", "build", "Install pinned Node on the owner's runner"],
-    ["release.yml", "build", "Install pinned arm64 bun for macOS"]]) {
+    ["release.yml", "build", "Install pinned arm64 bun for macOS"], ["release.yml", "build", "Install pinned x64 bun for Linux"]]) {
     const step = steps(await workflow(name), job).find((text) => text.includes(`name: ${title}`));
     assert(step, `${job}: ${title}`);
     assert.doesNotMatch(step, /\.complete/, `${job}: ${title} keeps no install marker`);
@@ -302,9 +376,9 @@ test("the committed context-mode lock CI installs from holds the default pack's 
   }
 });
 
-test("a release signs with pinned, checksum-checked Node and Rust on the owner's runner and embeds a checksum-checked bun on every macOS runner, never the tool cache, rustup or Cargo settings CI left on the runner", async () => {
+test("a release signs with pinned, checksum-checked Node and Rust on the owner's runner and embeds a checksum-checked bun on every runner, never the tool cache, rustup or Cargo settings CI left on the runner", async () => {
   const release = await workflow("release.yml");
-  for (const pin of ["BUN_DARWIN_ARM64_SHA256", "NODE_DARWIN_ARM64_SHA256", "RUSTC_DARWIN_ARM64_SHA256", "CARGO_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_X64_SHA256"]) {
+  for (const pin of ["BUN_DARWIN_ARM64_SHA256", "BUN_LINUX_X64_SHA256", "NODE_DARWIN_ARM64_SHA256", "RUSTC_DARWIN_ARM64_SHA256", "CARGO_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_X64_SHA256"]) {
     assert.match(release, new RegExp(`^ {2}${pin}: [0-9a-f]{64}$`, "m"), pin);
   }
   const all = steps(release, "build");
@@ -314,7 +388,12 @@ test("a release signs with pinned, checksum-checked Node and Rust on the owner's
     assert(step, String(shared));
     assert.match(step, /^ {6}- (?:id: \S+\n {8})?(?:name: [^\n]+\n {8})?if: runner\.environment == 'github-hosted'\n/, `${shared} runs only on GitHub's fresh runners`);
   }
-  assert.match(all[at(/uses: oven-sh\/setup-bun@/)], /^ {6}- id: bun\n {8}if: runner\.environment == 'github-hosted' && matrix\.os != 'macos'\n/, "setup-bun's unchecked bun runs only on a GitHub-hosted Linux runner");
+  assert.doesNotMatch(release, /uses: oven-sh\/setup-bun@/, "no release runner builds with setup-bun's unchecked bun");
+  const linux = all[at(/id: bun\n/)];
+  assert.match(linux, /^ {6}- id: bun\n {8}name: Install pinned x64 bun for Linux\n {8}if: matrix\.os == 'linux'\n/, "every Linux runner, GitHub-hosted included, runs the pinned x64 bun");
+  assert.match(linux, /\/bun-v\$BUN_VERSION\/bun-linux-x64\.zip"/);
+  assert.match(linux, /\n\s+echo "\$BUN_LINUX_X64_SHA256  \$work\/bun\.zip" \| sha256sum -c -\n/, "a downloaded Linux bun that does not match its pin fails the job");
+  assert.match(linux, /\n\s+install -m 0755 "\$work\/bun-linux-x64\/bun" "\$work\/bin\/bun"\n/);
   const rust = all[at(/name: Install pinned Rust on the owner's runner/)];
   assert(rust, "the release on the owner's runner installs its own Rust");
   assertPinnedRust(rust, "release");
@@ -329,7 +408,13 @@ test("a release signs with pinned, checksum-checked Node and Rust on the owner's
   for (const name of ["Install rcli source dependencies", "Build rcli host"]) {
     const index = at(new RegExp(`name: ${name}\n`));
     assert.equal(all[index].match(/\n\s+BUN_PATH: (.+)\n/)[1], "${{ steps.bun-x64.outputs.bun-path || steps.bun-arm64.outputs.bun-path || steps.bun.outputs.bun-path }}", name);
-    assert(bun < index && at(/id: bun-x64\n/) < index, `${name}: a macOS rcli gets the checksum-checked x86_64 or arm64 bun, never setup-bun's`);
+    assert(bun < index && at(/id: bun-x64\n/) < index && at(/id: bun\n/) < index, `${name}: an rcli gets the checksum-checked bun of its runner`);
+    for (const id of all[index].match(/\bsteps\.([a-z0-9-]+)\.outputs\.bun-path\b/g).map((ref) => ref.split(".")[1])) {
+      const source = all[at(new RegExp(`^ {6}- id: ${id}\\n`))];
+      assert(source, `${name}: ${id} is a step of this job`);
+      assert.doesNotMatch(source, /\n {8}uses: /, `${name}: ${id} is a step this workflow writes, not an action`);
+      assert.match(source, /\n\s+echo "\$BUN_[A-Z0-9_]+_SHA256  \$work\/bun\.zip" \| (?:sha256sum|shasum -a 256) -c -\n/, `${name}: ${id} checks its bun against a pinned SHA-256`);
+    }
   }
   assert(node < at(/\bnode scripts\//) && node < at(/\bnpm ci\b/), "no node or npm run comes before the pinned Node");
   assert(at(/name: Install pinned Rust/) < at(/\bcargo build\b/), "no cargo run comes before the pinned Rust");
@@ -934,4 +1019,106 @@ test("the release job marks every engine it builds for a target that ships crazy
   assert.equal(text.split("CRAZYAGENT_BUNDLES_TMUX").length - 1, 1, "no step sets the mark again");
   const tools = readFileSync(fileURLToPath(new URL("../../crates/crazyagent/src/tools.rs", import.meta.url)), "utf8");
   assert.match(tools, /pub const SHIPS_BUNDLED_TMUX: bool = match option_env!\("CRAZYAGENT_BUNDLES_TMUX"\) \{\n {4}Some\(mark\) => matches!\(mark\.as_bytes\(\), \[b'1'\]\),\n {4}None => false,\n\};/);
+});
+
+test("the secret and runner guards read every job of every workflow file, matrix runner values included (RV-DS241-38)", async () => {
+  const names = (await readdir(WORKFLOWS)).filter((name) => /\.ya?ml$/.test(name)).sort();
+  assert(names.includes("ci.yml") && names.includes("release.yml"), names.join(" "));
+  const exposed = [];
+  for (const name of names) {
+    const text = await workflow(name);
+    exposed.push(...exposedJobs(text).map((job) => `${name}:${job}`));
+    assert.deepEqual(runnerProblems(text), [], name);
+  }
+  assert.deepEqual(exposed, ["release.yml:build"], "only the release build reads a secret or binds an environment");
+  const added = [
+    "jobs:",
+    "  lint:",
+    "    runs-on: ubuntu-22.04",
+    "    steps:",
+    "      - run: echo ${{ secrets.TOKEN }}",
+    "  deploy:",
+    "    runs-on: ubuntu-latest",
+    "    environment: production",
+    "  odd:",
+    "    runs-on: ${{ matrix.runner }}",
+    "    strategy:",
+    "      matrix:",
+    "        include:",
+    "          - runner: macos-15",
+    "          - runner: self-hosted",
+    "",
+  ].join("\n");
+  assert.deepEqual(exposedJobs(added), ["lint", "deploy"]);
+  assert.deepEqual(runnerProblems(added), ["deploy: ubuntu-latest", "odd: self-hosted"]);
+});
+
+test("the secret guard also catches a called workflow's secrets key and a workflow-level secret every job inherits, both guards refuse a workflow whose jobs do not parse, and a matrix runner that is not one plain value is a problem (RV-DS241-38 r2)", () => {
+  const call = [
+    "jobs:",
+    "  ci:",
+    "    uses: ./.github/workflows/ci.yml",
+    "    secrets: inherit",
+    "  plain:",
+    "    runs-on: ubuntu-22.04",
+    "",
+  ].join("\n");
+  assert.deepEqual(exposedJobs(call), ["ci"]);
+  const inherited = [
+    "env:",
+    "  TOKEN: ${{ secrets.TOKEN }}",
+    "jobs:",
+    "  lint:",
+    "    runs-on: ubuntu-22.04",
+    "  test:",
+    "    runs-on: ubuntu-22.04",
+    "",
+  ].join("\n");
+  assert.deepEqual(exposedJobs(inherited), ["lint", "test"]);
+  for (const jobs of [
+    ["jobs:", "    build:", "      runs-on: self-hosted"],
+    ["jobs:", '  "build":', "    runs-on: self-hosted"],
+    ["jobs:", "  lint:", "    runs-on: ubuntu-22.04", "  deploy: {runs-on: self-hosted}"],
+    ["jobs:", "  lint:", "    runs-on: ubuntu-22.04", "  deploy: # prod", "    runs-on: self-hosted"],
+    ["jobs:", "      runs-on: self-hosted", "  lint:", "    runs-on: ubuntu-22.04"],
+  ]) {
+    const text = [...jobs, ""].join("\n");
+    assert.throws(() => exposedJobs(text), /job/, text);
+    assert.throws(() => runnerProblems(text), /job/, text);
+  }
+  const runners = [
+    "jobs:",
+    "  odd:",
+    "    runs-on: ${{ matrix.runner }}",
+    "    strategy:",
+    "      matrix:",
+    "        include:",
+    "          - runner: macos-15",
+    "          - runner: [ubuntu-22.04, self-hosted]",
+    "  tail:",
+    "    runs-on: ${{ matrix.runner }}",
+    "    strategy:",
+    "      matrix:",
+    "        runner: self-hosted # pinned",
+    "",
+  ].join("\n");
+  assert.deepEqual(runnerProblems(runners), ["odd: runner line - runner: [ubuntu-22.04, self-hosted]", "tail: runner line runner: self-hosted # pinned"]);
+});
+
+test("a run block line that starts with # is script text GitHub still expands, so a secret there exposes its job; only a comment at job-key indent is passed over (RV-DS241-38 r2b)", () => {
+  const scripted = [
+    "jobs:",
+    "  # the jobs",
+    "  build:",
+    "    runs-on: ubuntu-22.04",
+    "  publish:",
+    "    runs-on: ubuntu-22.04",
+    "    steps:",
+    "      - run: |",
+    "          # token ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}",
+    "          echo done",
+    "",
+  ].join("\n");
+  assert.deepEqual(exposedJobs(scripted), ["publish"]);
+  assert.deepEqual(runnerProblems(scripted), []);
 });
