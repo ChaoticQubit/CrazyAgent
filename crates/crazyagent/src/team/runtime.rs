@@ -3840,8 +3840,10 @@ impl TeamRuntime {
     }
 
     /// Stores why the queued tasks dispatch does not look at this tick wait (F11): tasks
-    /// whose stopped run waits in Recovery, and tasks behind the `DISPATCH_TASKS_MAX` it
-    /// reads. Takes the project and the tasks it read. Returns any SQLite failure.
+    /// whose stopped run waits in Recovery, unpinned tasks whose lead the owner stopped
+    /// (kept out of the window, so they never hold back the tasks after them), and tasks
+    /// behind the `DISPATCH_TASKS_MAX` it reads. Takes the project and the tasks it read.
+    /// Returns any SQLite failure.
     fn wait_beyond_dispatch(
         &self,
         project: &ProjectId,
@@ -3856,6 +3858,18 @@ impl TeamRuntime {
                 params![project.as_str(), WAIT_RECOVERY],
             )
             .map_err(error)?;
+        self.connection
+            .execute(
+                "UPDATE team_tasks SET wait=?2 WHERE project=?1 AND status='queued' AND wait IS NOT ?2
+                 AND id NOT IN (SELECT task FROM recovery_runs WHERE task IS NOT NULL
+                     AND state IN ('stopped','interrupted','resuming','failed'))
+                 AND NOT EXISTS (SELECT 1 FROM team_task_pins p
+                     WHERE p.task=team_tasks.id AND p.project=team_tasks.project)
+                 AND EXISTS (SELECT 1 FROM team_owner_stops s
+                     WHERE s.agent=team_tasks.parent AND s.stopped_by='owner')",
+                params![project.as_str(), WAIT_LEAD_OWNER_STOPPED],
+            )
+            .map_err(error)?;
         if read.len() < DISPATCH_TASKS_MAX as usize {
             return Ok(());
         }
@@ -3865,7 +3879,11 @@ impl TeamRuntime {
             .execute(
                 "UPDATE team_tasks SET wait=?2 WHERE project=?1 AND status='queued' AND id>?3
                  AND wait IS NOT ?2 AND id NOT IN (SELECT task FROM recovery_runs
-                     WHERE task IS NOT NULL AND state IN ('stopped','interrupted','resuming','failed'))",
+                     WHERE task IS NOT NULL AND state IN ('stopped','interrupted','resuming','failed'))
+                 AND NOT (NOT EXISTS (SELECT 1 FROM team_task_pins p
+                         WHERE p.task=team_tasks.id AND p.project=team_tasks.project)
+                     AND EXISTS (SELECT 1 FROM team_owner_stops s
+                         WHERE s.agent=team_tasks.parent AND s.stopped_by='owner'))",
                 params![project.as_str(), behind, last],
             )
             .map_err(error)?;
@@ -6607,6 +6625,8 @@ impl TeamRuntime {
                      WHERE t.project=?1 AND t.status='queued' AND t.id NOT IN (
                          SELECT task FROM recovery_runs WHERE task IS NOT NULL
                          AND state IN ('stopped','interrupted','resuming','failed'))
+                     AND NOT (p.agent IS NULL AND EXISTS (SELECT 1 FROM team_owner_stops s
+                         WHERE s.agent=t.parent AND s.stopped_by='owner'))
                      ORDER BY t.id LIMIT ?2",
                 )
                 .map_err(error)?;
