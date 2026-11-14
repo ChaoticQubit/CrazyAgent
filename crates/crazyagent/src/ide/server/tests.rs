@@ -1291,16 +1291,20 @@ fn a_git_moved_into_the_old_server_temp_folder_is_outside_the_next_confined_star
     let started = started.expect("a .git in the old temp folder refused a confined start");
     assert_ne!(started, tmp);
     assert!(
+        profile.contains(started.to_str().unwrap()),
+        "the confined start's profile names its own temp folder"
+    );
+    assert!(
         !profile.contains(tmp.to_str().unwrap()),
         "the confined start's profile names the old temp folder"
     );
     assert!(kept, "the planted .git was removed");
 }
 
-/// A confined session that leaves its temp folder unusable for the walk, with a `.git`, a
-/// folder it shut with mode 000 or more entries than any check reads, never stops the next
-/// confined start of the project: each confined start gets a temp folder no earlier start
-/// used, and the old one is outside its profile (rv-sec3 r4 addendum).
+/// A confined session that leaves a `.git` or a folder it shut with mode 000 in its temp
+/// folder never stops the next confined start of the project: each confined start gets a
+/// temp folder no earlier start used, and the old one is outside its profile, so no count
+/// of entries left there matters either (rv-sec3 r4 addendum).
 #[test]
 fn a_confined_start_never_reuses_an_earlier_start_s_temp_folder() {
     let (checkout, data) = (scratch(), scratch());
@@ -1321,6 +1325,10 @@ fn a_confined_start_never_reuses_an_earlier_start_s_temp_folder() {
     }
     let next = next.expect("an earlier start's temp folder refused the next confined start");
     assert_ne!(next, first);
+    assert!(
+        profile.contains(next.to_str().unwrap()),
+        "the next start's profile names its own temp folder"
+    );
     assert!(
         !profile.contains(first.to_str().unwrap()),
         "the next start's profile names the earlier start's temp folder"

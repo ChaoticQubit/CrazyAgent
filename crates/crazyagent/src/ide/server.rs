@@ -1163,8 +1163,8 @@ fn refuse_planted_git(home: &Path, limit: usize) -> Result<(), EngineError> {
 }
 
 /// Makes a confined start's own short temp folder, one no earlier start used: the folder
-/// [`crate::sandbox::toolchains::make_tmp`] keys by a fresh random name beside the server
-/// data folder. What an earlier session left in its temp folder, a `.git`, a shut folder or
+/// [`crate::sandbox::toolchains::make_tmp`] keys by a fresh random name under the server
+/// data folder's path, where nothing is made. What an earlier session left in its temp folder, a `.git`, a shut folder or
 /// any number of entries, is then outside this start's profile, and nothing is deleted.
 /// Input: the server data folder. Output: the new folder, `ide_entropy_unavailable`, or
 /// `ide_state_unavailable`.
