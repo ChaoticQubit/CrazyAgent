@@ -843,6 +843,9 @@ pub struct TeamRuntime {
     settled: bool,
     naming: Option<i64>,
     fresh_start: Option<i64>,
+    /// The live switch `keep_live` read for the master it starts now, carried into that
+    /// start's launch so the launch never reads the switch a second time (RV-DS241-121).
+    master_switch: Option<bool>,
     deliveries: crate::coord::delivery::Deliveries,
     adoption_failed: Option<String>,
     claims_next: BTreeMap<ProjectId, Instant>,
@@ -1186,6 +1189,7 @@ impl TeamRuntime {
             settled: false,
             naming: None,
             fresh_start: None,
+            master_switch: None,
             deliveries: crate::coord::delivery::Deliveries::default(),
             #[cfg(unix)]
             callers: BTreeMap::new(),
@@ -1527,7 +1531,7 @@ impl TeamRuntime {
                 "the project already runs {PANES_PER_PROJECT_MAX} agents"
             )));
         }
-        let live = self.live_master(&project, role, launch);
+        let live = self.live_master(&project, role, launch)?;
         let native = !live && matches!(self.native_lead(&project, id, role, launch), Ok(true));
         let account_reach = match eligible_accounts(access, &project, launch) {
             Accounts::Usable(accounts) => accounts
@@ -1663,7 +1667,10 @@ impl TeamRuntime {
             AgentRole::Sub | AgentRole::Master => self
                 .agent_layout(&project, id)
                 .ok()
-                .and_then(|layout| self.context(&project, id, role, tools, layout).ok())
+                .and_then(|layout| {
+                    self.launch_context(&project, id, role, tools, layout, live)
+                        .ok()
+                })
                 .and_then(|context| context.task_start(launch, tools)),
             AgentRole::Teammate => None,
         };
@@ -4279,12 +4286,13 @@ impl TeamRuntime {
         let layout = self
             .agent_layout(project, id)
             .map_err(|_| with_code("the agent worktree record could not be read", None))?;
-        let context = self.context(
+        let context = self.launch_context(
             project,
             id,
             self.workers[&id].role,
             self.workers[&id].tools,
             layout,
+            self.workers[&id].live,
         )?;
         let access = crate::sandbox::policy::load(&self.connection, project.as_str())
             .map_err(|_| with_code("the project's agent access could not be read", None))?
@@ -4674,7 +4682,7 @@ impl TeamRuntime {
             }
         }
         let live_capable = launch_harness(&harness)
-            .is_some_and(|launch| self.live_master(project, AgentRole::Master, launch));
+            .is_some_and(|launch| self.can_run_live(AgentRole::Master, launch));
         if !on || !live_capable || self.panes(project) >= PANES_PER_PROJECT_MAX {
             return Ok(());
         }
@@ -4713,7 +4721,11 @@ impl TeamRuntime {
                 .or_default()
                 .push(Instant::now());
         }
-        match self.start_master(stored, access, &harness, &account, session.as_deref())? {
+        assert!(on && self.master_switch.is_none());
+        self.master_switch = Some(on);
+        let started = self.start_master(stored, access, &harness, &account, session.as_deref());
+        self.master_switch = None;
+        match started? {
             Start::Started((id, note)) => {
                 super::master::problem(&self.connection, project, None)?;
                 if let Some(note) = note {
@@ -4770,7 +4782,10 @@ impl TeamRuntime {
         {
             return Ok(());
         }
-        let saved = saved.filter(|saved| self.live_master(project, AgentRole::Master, saved));
+        let saved = match saved {
+            Some(saved) if self.live_master(project, AgentRole::Master, saved)? => Some(saved),
+            _ => None,
+        };
         let quiet = super::master::quiet(
             &self.connection,
             self.agents.as_deref().map(Agents::typing),
@@ -4992,8 +5007,7 @@ impl TeamRuntime {
                     settle_takeover(db, project, session, launch, mode, changed, true)?;
                 }
                 let note = carried.map(|(note, _, _)| note);
-                let seated = self.seat_session(id, Some(session), seed, note);
-                return Ok(Start::Started(seated));
+                return Ok(self.seat_session(id, Some(session), seed, note));
             }
             plan = match carried.take() {
                 Some((_, anew, from)) => ResumePlan::Fresh {
@@ -5059,8 +5073,12 @@ impl TeamRuntime {
             settle_takeover(db, project, session, launch, mode, changed, false)?;
         }
         let (seed, note) = seeded.unzip();
-        let (id, note) = self.seat_session(started, session.as_ref(), seed, note);
-        Ok(Start::Started((id, note.or(switch_note))))
+        Ok(
+            match self.seat_session(started, session.as_ref(), seed, note) {
+                Start::Started((id, note)) => Start::Started((id, note.or(switch_note))),
+                refused => refused,
+            },
+        )
     }
 
     /// Plans a live start of a session no other master ran since: it continues the
@@ -5090,23 +5108,31 @@ impl TeamRuntime {
 
     /// Binds a live master that just started to the session it runs, with the seed its
     /// briefing carries: the earlier turns for a fresh conversation, or the turns a kept
-    /// conversation does not hold for one that continues. Takes the agent, the session, the
-    /// seed and the note of the start. Returns the agent and the note.
+    /// conversation does not hold for one that continues. A master that did not start live
+    /// and unbriefed is stopped and its start refused, so a start that read the switch off
+    /// never ends the team thread (RV-DS241-121). Takes the agent, the session, the seed and
+    /// the note of the start. Returns the agent and the note, or the refusal.
     fn seat_session(
         &mut self,
         id: i64,
         session: Option<&SessionId>,
         seed: Option<String>,
         note: Option<String>,
-    ) -> (i64, Option<String>) {
-        let worker = self
+    ) -> Start<(i64, Option<String>)> {
+        let Some(worker) = self
             .workers
             .get_mut(&id)
-            .expect("a started master has a worker");
-        assert!(worker.live && !worker.briefed);
+            .filter(|worker| worker.live && !worker.briefed)
+        else {
+            if let Some(worker) = self.workers.get_mut(&id) {
+                worker.stop_for("engine_stop:not_live");
+                let _ = worker.orders.send(Order::Stop);
+            }
+            return Start::Refused(MASTER_NOT_LIVE.to_owned());
+        };
         worker.session = session.map(|session| session.as_str().to_owned());
         worker.seed = seed;
-        (id, note)
+        Start::Started((id, note))
     }
 
     /// Turns a project's live master off after it could not keep running, so the runtime
@@ -5323,6 +5349,12 @@ impl TeamRuntime {
             })
             .map(|(id, _)| *id)
             .collect();
+        let stopping: BTreeSet<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| &worker.project == project && (worker.stopping || worker.held))
+            .map(|(id, _)| *id)
+            .collect();
         let host = self.terminal.as_deref();
         let mut done = Vec::new();
         for id in subs {
@@ -5357,6 +5389,22 @@ impl TeamRuntime {
                     )
                 },
                 &mut |connection, caller, call| {
+                    if changes_work(&call) {
+                        let refusal = match (
+                            stopping.contains(&id) || stopping.contains(&caller),
+                            super::stopped(connection, id),
+                            super::stopped(connection, caller),
+                        ) {
+                            (true, _, _) | (_, Ok(true), _) | (_, _, Ok(true)) => {
+                                Some(super::master::STOPPED_CALLS_REFUSED)
+                            }
+                            (false, Ok(false), Ok(false)) => None,
+                            (false, _, _) => Some(LEAD_UNREAD),
+                        };
+                        if let Some(line) = refusal {
+                            return Some((line.to_owned(), true));
+                        }
+                    }
                     let finished = caller == id
                         && matches!(
                             &call,
@@ -6493,6 +6541,10 @@ impl TeamRuntime {
             .collect();
         for id in ended {
             self.instruction_restarts.remove(&id);
+            if super::stopped(&self.connection, id)? {
+                self.note(project, INSTRUCTIONS_RESTART_DROPPED)?;
+                continue;
+            }
             let row: Option<(String, bool)> = self
                 .connection
                 .query_row(
@@ -6584,6 +6636,13 @@ impl TeamRuntime {
             || super::keep_warm(&self.connection, project)?;
         self.wait_beyond_dispatch(project, &queued)?;
         for (task, harness, prompt, pin, by_master, parent, mode) in queued {
+            if pin.is_none()
+                && let Some(lead) = parent
+                && super::owner_stopped(&self.connection, lead)?
+            {
+                self.wait(task, WAIT_LEAD_OWNER_STOPPED)?;
+                continue;
+            }
             let slot = if stored.team.sub_harnesses.is_empty() {
                 super::slot(&stored.team, &harness)
             } else {
@@ -7010,7 +7069,8 @@ impl TeamRuntime {
         else {
             return Ok(());
         };
-        let Some(deadline) = super::master_limits::run_deadline(&self.connection, project)? else {
+        let Some((deadline, secs)) = super::master_limits::run_end(&self.connection, project)?
+        else {
             return Ok(());
         };
         if now_ms() < deadline {
@@ -7020,9 +7080,6 @@ impl TeamRuntime {
         if !turn_open && !self.work_in_flight(project)? {
             return Ok(());
         }
-        let secs = super::master_limits::read(&self.connection, project)?
-            .run_secs
-            .expect("a deadline comes from a run time");
         let worker = self.workers.get_mut(&id).expect("worker exists");
         assert!(worker.live && worker.role == AgentRole::Master);
         worker.stopping = true;
@@ -7555,7 +7612,7 @@ impl TeamRuntime {
         if changed != 1 {
             return Ok(Err("the agent is not stopped".into()));
         }
-        super::owner_start_alone(&self.connection, &stored.project_id, id)?;
+        super::clear_stop_unless_owner(&self.connection, &stored.project_id, id)?;
         if role == AgentRole::Sub {
             names::reclaim(&self.connection, &stored.project_id, id)?;
         }
@@ -7620,6 +7677,11 @@ impl TeamRuntime {
             Some([_, worktree, git_dir]) => recorded_layout(worktree, git_dir),
             None => self.git_layout(&stored.project_id),
         };
+        let switch = match (role, self.master_switch) {
+            (AgentRole::Master, Some(on)) => on,
+            (AgentRole::Master, None) => super::master::live(&self.connection, &stored.project_id)?,
+            (AgentRole::Sub | AgentRole::Teammate, _) => false,
+        };
         let prepared = self.prepare(
             stored,
             id,
@@ -7629,6 +7691,7 @@ impl TeamRuntime {
             account,
             kept.is_some(),
             layout,
+            switch,
         );
         #[cfg(unix)]
         let prepared = prepared.and_then(|(root, plan, mode)| {
@@ -9050,6 +9113,7 @@ impl TeamRuntime {
         account: &TeamAccount,
         adopt: bool,
         layout: Layout,
+        switch: bool,
     ) -> Result<(PathBuf, Plan, Mode), String> {
         let launch = launch_harness(harness).ok_or("harness has no launch adapter")?;
         let executable = &self.harness(launch).ok_or("harness is not installed")?;
@@ -9166,7 +9230,7 @@ impl TeamRuntime {
                 Some("native_team_needs_hooks"),
             ));
         }
-        let live = self.live_master(&stored.project_id, role, launch);
+        let live = switch && self.can_run_live(role, launch);
         let agent_tools = role == AgentRole::Sub && tools && self.delegation_tool.is_some();
         if (role == AgentRole::Master && tools) || agent_tools || native {
             private_directory(&tmp.join(tool::MAILBOX_FOLDER)).map_err(|e| {
@@ -9174,7 +9238,7 @@ impl TeamRuntime {
             })?;
         }
         let _ = private_directory(&tmp.join(crate::coord::lane::FOLDER));
-        let context = self.context(&stored.project_id, id, role, tools, layout)?;
+        let context = self.launch_context(&stored.project_id, id, role, tools, layout, live)?;
         let task_start = match role {
             AgentRole::Sub | AgentRole::Master => context.task_start(launch, tools),
             AgentRole::Teammate => None,
@@ -9572,24 +9636,34 @@ impl TeamRuntime {
         self.agent_folder(id).join("tmp").join(tool::MAILBOX_FOLDER)
     }
 
-    /// Tells whether a project's master runs live: its own app kept running in a pane the
-    /// owner types into. Takes the project, the role and the launch harness. Returns true
-    /// for a master while the project's live switch is on, the harness has an interactive
-    /// app and the engine has a terminal host; a state read failure counts as off.
-    fn live_master(&self, project: &ProjectId, role: AgentRole, harness: &str) -> bool {
+    /// Tells whether an agent can run as a live master, its own app kept running in a pane
+    /// the owner types into, reading no state. Takes the role and the launch harness.
+    /// Returns true for a master whose harness has an interactive app while the engine has
+    /// a terminal host.
+    fn can_run_live(&self, role: AgentRole, harness: &str) -> bool {
         role == AgentRole::Master
             && self.terminal.is_some()
             && crate::harnesses::interactive::support(harness)
                 == crate::harnesses::interactive::Support::Terminal
-            && super::master::live(&self.connection, project).unwrap_or(false)
     }
 
-    /// Reads what one team agent launch receives: the project context and approved
-    /// memories, the approved skills and MCP servers with tools on, the engine's `delegate`
-    /// tool for a master with tools on, served by the captured engine while the file at its
-    /// path is still that one, and the team's skill and server names for a master with tools
-    /// off. Takes the project, the agent id, its role, tools switch and git layout, which
-    /// picks how its work lands.
+    /// Tells whether a project's master runs live: it can run live and the project's live
+    /// switch is on. Takes the project, the role and the launch harness. Returns the answer,
+    /// or the SQLite failure of the switch read, never counted as off.
+    fn live_master(
+        &self,
+        project: &ProjectId,
+        role: AgentRole,
+        harness: &str,
+    ) -> Result<bool, EngineError> {
+        Ok(self.can_run_live(role, harness) && super::master::live(&self.connection, project)?)
+    }
+
+    /// Reads what one agent's launch would receive as [`TeamRuntime::launch_context`] does,
+    /// reading its live switch here, for the tests that look at a launch's context. Takes the
+    /// project, the agent id, its role, tools switch and git layout. Returns the context, or
+    /// the plain reason it could not be read.
+    #[cfg(test)]
     fn context(
         &self,
         project: &ProjectId,
@@ -9597,6 +9671,36 @@ impl TeamRuntime {
         role: AgentRole,
         tools: bool,
         layout: Layout,
+    ) -> Result<AgentContext, String> {
+        let harness = self
+            .connection
+            .query_row("SELECT harness FROM team_agents WHERE id=?1", [id], |row| {
+                row.get::<_, String>(0)
+            })
+            .ok();
+        let live = match harness.as_deref().and_then(launch_harness) {
+            Some(launch) => self
+                .live_master(project, role, launch)
+                .map_err(|e| with_code("the live switch could not be read", Some(&e.0)))?,
+            None => false,
+        };
+        self.launch_context(project, id, role, tools, layout, live)
+    }
+
+    /// Reads what one team agent launch receives: the project context and approved
+    /// memories, the approved skills and MCP servers with tools on, the engine's `delegate`
+    /// tool for a master with tools on, served by the captured engine while the file at its
+    /// path is still that one, and the team's skill and server names for a master with tools
+    /// off. Takes the project, the agent id, its role, tools switch, git layout, which picks
+    /// how its work lands, and whether the launch runs it live, as its caller read once.
+    fn launch_context(
+        &self,
+        project: &ProjectId,
+        id: i64,
+        role: AgentRole,
+        tools: bool,
+        layout: Layout,
+        live: bool,
     ) -> Result<AgentContext, String> {
         let unread =
             |e: LaunchError| with_code("the project context could not be read", Some(&e.0));
@@ -9608,15 +9712,7 @@ impl TeamRuntime {
             .and_then(|context| context.for_agent(&self.connection, project, id))
             .map_err(unread)?;
         let master = role == AgentRole::Master;
-        let live = master
-            && self
-                .connection
-                .query_row("SELECT harness FROM team_agents WHERE id=?1", [id], |row| {
-                    row.get::<_, String>(0)
-                })
-                .ok()
-                .and_then(|harness| launch_harness(&harness))
-                .is_some_and(|harness| self.live_master(project, role, harness));
+        assert!(master || !live);
         let context = match &self.delegation_tool {
             Some(engine) if master && tools && live => {
                 let engine = engine
@@ -12316,14 +12412,21 @@ const OWN_TURN_TASK: &str =
 const OWN_TURN_FAILED: &str = "The lead's own turn did not finish";
 const OWNER_STOPPED_TASK: &str =
     "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
+/// Why a live master start is refused when its launch did not open it live and unbriefed.
+const MASTER_NOT_LIVE: &str = "it did not open in a live terminal";
+/// The team note when a sub-agent stopping for changed instructions was stopped meanwhile,
+/// by the owner, the master or its lead, so its restart is dropped (RV-DS241-125).
+const INSTRUCTIONS_RESTART_DROPPED: &str = "An agent that stopped to load your changed instructions was stopped meanwhile, so it was not started again.";
 /// The most queued tasks of a project dispatch reads in one tick; later ones wait behind.
 const DISPATCH_TASKS_MAX: i64 = 64;
 /// Why a queued task waits (F11), each on the task while it waits: for its own agent, busy
 /// or stopping now; for the owner to start its stopped agent again; for a signed-in
 /// account's profile another turn holds; for the sign-in check after a restart; while the
-/// project folder moves; for its stopped run in Recovery; for a stopped team.
+/// project folder moves; for its stopped run in Recovery; for a stopped team; for the owner
+/// to start the stopped lead that queued it.
 const WAIT_OWN_AGENT: &str = "Waits for its own agent, which is busy or stopping now";
 const WAIT_OWNER_STOPPED: &str = "Waits for you to start its agent again";
+const WAIT_LEAD_OWNER_STOPPED: &str = "Waits for you to start its lead again";
 const WAIT_PROFILE_HELD: &str = "Waits for its account's sign-in, which another turn holds now";
 const WAIT_SIGN_IN_CHECK: &str = "Waits for the pool's sign-in check after the restart";
 const WAIT_FOLDER_MOVE: &str = "Waits while the project folder moves";
@@ -13565,6 +13668,19 @@ fn leads_native_team(connection: &Connection, project: &ProjectId, agent: i64) -
         mode.as_deref() == Some(SubagentMode::Native.as_str())
             && HarnessKind::from_harness(&harness).map(native_sub_agents)
                 == Some(NativeSubAgents::Teams),
+    )
+}
+
+/// Tells whether a team call starts or changes work: `spawn`, `merge`, `start_work` and
+/// `update_work`, which a stopping, held or stopped agent is refused while its mailbox is
+/// still drained (RV-DS241-122). Takes the call. Returns the answer.
+fn changes_work(call: &tool::Call) -> bool {
+    matches!(
+        call,
+        tool::Call::Spawn { .. }
+            | tool::Call::Merge { .. }
+            | tool::Call::StartWork { .. }
+            | tool::Call::UpdateWork { .. }
     )
 }
 
