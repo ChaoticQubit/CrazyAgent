@@ -138,6 +138,14 @@ test("a skill's page shows every SKILL.md body line agents read in full", () => 
   }
 });
 
+test("a CRLF SKILL.md body shows no \\u000d at its line ends, and a lone carriage return stays escaped", () => {
+  const text = "---\r\nname: frontend-design\r\ndescription: Builds polished front ends.\r\n---\r\n\r\n# Steps\r\n\r\n- Read the brief\r\nOverwrite\rme\r\n";
+  assert.equal(skillBody(text), "# Steps\n\n- Read the brief\nOverwrite\rme\n");
+  const markup = renderToStaticMarkup(createElement(SkillDetailView, detailProps({ kind: "ok", value: detail({ text }) })));
+  assert.ok(!markup.includes("\\u000d\n"), markup);
+  assert.ok(markup.includes("# Steps\n\n- Read the brief\nOverwrite\\u000dme\n"), markup);
+});
+
 test("a skill's detail shows plain loading, not ready and error states", () => {
   assert.match(renderToStaticMarkup(createElement(SkillDetailView, detailProps({ kind: "loading" }))), /skeleton/);
   assert.match(renderToStaticMarkup(createElement(SkillDetailView, detailProps({ kind: "not_ready" }))), /Not ready yet/);
