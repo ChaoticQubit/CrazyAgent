@@ -626,6 +626,32 @@ pub(super) fn hooks_follow(tx: &Transaction<'_>, item: &str) -> Result<bool, Eng
         .any(|hook| hook.follows.as_deref() == Some(item)))
 }
 
+/// The hooks that follow one skill or MCP server as a new pin keeps them: each hook's
+/// name, whether it is on and the projects it is switched off in. Inputs: the transaction
+/// and the item id. Output: the hooks.
+#[cfg(unix)]
+pub(super) fn following_hooks(
+    tx: &Transaction<'_>,
+    item: &str,
+) -> Result<Vec<(String, bool, Vec<String>)>, EngineError> {
+    let mut hooks = Vec::new();
+    for hook in all::<HookRecord>(tx, "hook")?
+        .into_iter()
+        .filter(|hook| hook.follows.as_deref() == Some(item))
+    {
+        let mut statement = tx
+            .prepare("SELECT project FROM plugin_switches WHERE item=?1")
+            .map_err(error)?;
+        let projects = statement
+            .query_map([&hook.id], |row| row.get::<_, String>(0))
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        hooks.push((hook.name, hook.enabled, projects));
+    }
+    Ok(hooks)
+}
+
 /// Deletes every hook that follows one skill or MCP server, with the item, and notes each
 /// hook folder copy for the trash to delete once nothing refers to it. Inputs: the
 /// transaction and the item id. Output: any SQLite failure.
@@ -1515,7 +1541,11 @@ pub(crate) fn execute(
     | Command::SetServer { id, .. }
     | Command::RemoveServer { id, .. } = &command
     {
-        super::setup::plugin_changed(&tx, id)?;
+        let removed = matches!(
+            command,
+            Command::RemoveSkill { .. } | Command::RemoveServer { .. }
+        );
+        super::setup::plugin_changed(&tx, id, removed)?;
     }
     let value = run(&tx, root, command)?;
     let committed = tx.commit().map_err(error);
