@@ -828,6 +828,13 @@ mod tests {
                 "server_args_invalid",
             ),
             (stdio("/bin/x", &["a\u{0}b"]), "server_args_invalid"),
+            (stdio("/bin/x", &["a\u{200b}b"]), "server_args_invalid"),
+            (
+                stdio("/bin/x", &["--path=\u{202e}txt.exe"]),
+                "server_args_invalid",
+            ),
+            (stdio("/bin/x\u{feff}", &[]), "server_command_invalid"),
+            (http("https://e.com/\u{2060}mcp"), "server_url_invalid"),
             (
                 stdio("/bin/x", &[&"a".repeat(ARG_BYTES_MAX + 1)]),
                 "server_args_invalid",

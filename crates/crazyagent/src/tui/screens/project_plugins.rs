@@ -74,6 +74,7 @@ pub(in crate::tui) struct ProjectPlugins {
     expanded: Option<(String, Scope)>,
     command_top: Cell<usize>,
     read_through: RefCell<Option<(String, String)>>,
+    painting: Cell<bool>,
 }
 
 impl ProjectPlugins {
@@ -98,7 +99,14 @@ impl ProjectPlugins {
             expanded: None,
             command_top: Cell::new(0),
             read_through: RefCell::new(None),
+            painting: Cell::new(false),
         }
+    }
+
+    /// Says whether the next drawings of this section are painted on screen. Input: true
+    /// around the drawing that reaches the screen, false after it. Output: none.
+    pub(in crate::tui) fn painting(&self, painted: bool) {
+        self.painting.set(painted);
     }
 
     /// Gives the next read: skills and servers at the start and after every

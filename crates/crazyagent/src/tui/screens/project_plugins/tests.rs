@@ -467,6 +467,105 @@ fn at_80x24_the_project_settings_tab_scrolls_a_long_command_and_y_waits_for_its_
     );
 }
 
+/// RV-DS241-104: only the painted frame records that a command showed to its end; a layout
+/// that never reaches the screen, such as one at the full terminal height while the move
+/// banner takes rows, lets no y approve.
+#[test]
+fn only_the_painted_frame_lets_y_approve_a_command_it_showed_to_the_end() {
+    let look = Look::plain();
+    let mut view = loaded();
+    for _ in 0..5 {
+        view.key(press(KeyCode::Down));
+    }
+    view.key(press(KeyCode::Enter));
+    assert_eq!(view.confirm.as_deref(), Some("pl0xpostgres"));
+    view.rows(76, 40, &look);
+    assert!(
+        matches!(view.key(press(KeyCode::Char('y'))), PluginsReply::Handled),
+        "a layout never painted showed nothing"
+    );
+    assert_eq!(view.confirm.as_deref(), Some("pl0xpostgres"));
+    view.painting(true);
+    view.rows(76, 40, &look);
+    view.painting(false);
+    let PluginChange::Approve { id, .. } = sent(view.key(press(KeyCode::Char('y')))) else {
+        panic!("an approval expected");
+    };
+    assert_eq!(id, "pl0xpostgres");
+}
+
+/// RV-DS241-104: a taller layout that never reaches the screen does not hold the scroll back,
+/// so Down still brings the painted frame to the command's last line.
+#[test]
+fn a_taller_unpainted_layout_never_holds_the_scroll_short_of_the_end() {
+    let look = Look::plain();
+    let long = format!("{LONG_RUNS}{}", " --table notes_archive_2026".repeat(14));
+    let (skills, mut servers) = lists();
+    servers[1].runs = long.clone();
+    let mut view = ProjectPlugins::new(project());
+    view.next_job().unwrap();
+    view.apply(&SettingsEvent::ProjectPlugins(
+        project(),
+        Ok((skills, servers)),
+    ));
+    for _ in 0..5 {
+        view.key(press(KeyCode::Down));
+    }
+    view.key(press(KeyCode::Enter));
+    assert_eq!(view.confirm.as_deref(), Some("pl0xpostgres"));
+    let lines = exact_lines(&long, 74).len();
+    assert!(lines > 4, "the command needs more rows than either layout");
+    for _ in 0..lines + 2 {
+        view.key(press(KeyCode::Down));
+        view.rows(76, 8, &look);
+        view.painting(true);
+        view.rows(76, 6, &look);
+        view.painting(false);
+    }
+    view.painting(true);
+    let (rows, _) = view.rows(76, 6, &look);
+    view.painting(false);
+    let rows: Vec<String> = rows.iter().map(Row::text).collect();
+    let marker = rows
+        .iter()
+        .find(|row| row.trim_start().starts_with("Lines "))
+        .unwrap_or_else(|| panic!("a line marker shows: {rows:?}"));
+    assert!(marker.contains("the end"), "{rows:?}");
+}
+
+/// RV-DS241-105: a command carrying zero-width characters wraps as it is drawn, each hidden
+/// character as its escape, so no line's end is cut off.
+#[test]
+fn hidden_characters_in_a_command_wrap_as_drawn_and_no_line_is_cut() {
+    let hidden = format!("/opt/homebrew/bin/uvx {}", "ab\u{200b}".repeat(30));
+    let (skills, mut servers) = lists();
+    servers[1].runs = hidden.clone();
+    let mut view = ProjectPlugins::new(project());
+    view.next_job().unwrap();
+    view.apply(&SettingsEvent::ProjectPlugins(
+        project(),
+        Ok((skills, servers)),
+    ));
+    for _ in 0..5 {
+        view.key(press(KeyCode::Down));
+    }
+    view.key(press(KeyCode::Enter));
+    assert_eq!(view.confirm.as_deref(), Some("pl0xpostgres"));
+    let narrow = frame(&view, 80, 24);
+    let shown: String = narrow
+        .iter()
+        .skip_while(|row| !row.contains("It runs:"))
+        .skip(1)
+        .take_while(|row| row.starts_with("    ") && !row.trim().is_empty())
+        .map(|row| row.trim_start_matches(' ').trim_end_matches(' '))
+        .collect();
+    assert_eq!(
+        shown,
+        crate::memory::visible_text(&hidden),
+        "every drawn character shows: {narrow:?}"
+    );
+}
+
 #[test]
 fn a_window_too_short_for_any_command_line_never_approves() {
     let look = Look::plain();
