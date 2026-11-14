@@ -57,6 +57,9 @@ const PROJECTS_MAX: usize = 256;
 /// timed-out open can hold one for as long as its lookup hangs.
 const STOP_LEFTOVER_WAIT: Duration = Duration::from_secs(10);
 const GROUP_BYTES_MAX: u64 = 256;
+/// How many entries a confined start reads in its server data folder before it refuses:
+/// far above what a VSCodium server keeps there, so only a padded folder reaches it.
+const SERVER_DATA_ENTRIES_MAX: usize = 200_000;
 const READY_POLL: Duration = Duration::from_millis(100);
 const CONNECT_TIME: Duration = Duration::from_millis(500);
 const WATCH_POLL: Duration = Duration::from_secs(1);
@@ -1038,7 +1041,8 @@ async fn holding_start<T: Send + 'static>(
 /// the project's hooks run in `root` only when the policy's switch is on, and every git it starts
 /// is held by [`confined_git`]. A Full access server's git is the owner's own, hooks and
 /// config included, so its shim holds no hooks path, whose count line needs the forced keys.
-/// Inputs: the launch, the server's info and the output pipe.
+/// A confined start is refused while its server data folder holds a `.git`
+/// ([`refuse_planted_git`]). Inputs: the launch, the server's info and the output pipe.
 fn command(
     launch: Launch<'_>,
     info: &ServerInfo,
@@ -1054,6 +1058,9 @@ fn command(
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
     let confined = policy.access != AgentAccess::Full;
+    if confined {
+        refuse_planted_git(&home, SERVER_DATA_ENTRIES_MAX)?;
+    }
     let hooks = (confined && policy.hooks).then_some(launch.root);
     let index_project = confined.then_some(launch.root);
     let written = settings::write(folder, &home, data, hooks, policy.access, index_project)?;
@@ -1132,6 +1139,32 @@ fn confined_git(data: &Path, launch: &Launch<'_>) -> Result<OsString, EngineErro
 /// access. The profile keeps the Remote settings folder locked, the extensions folder read
 /// only and agent folders as the owner chose ([`super::workspace::agent_files_rule`]). Inputs: the launch, the server's info and its places. Output: the command, or the
 /// profile's refusal.
+/// Refuses a start while the server data folder holds an entry named `.git` in any ASCII
+/// letter case at any depth, folder, file or link alike, which a server of an older profile
+/// could leave to rename into the project later (SA vid 101 residue). Links are never
+/// followed. Inputs: the folder and the most entries to read. Output: Ok, or
+/// `ide_server_data_git` for a `.git`, a folder it cannot read or more than `limit` entries.
+fn refuse_planted_git(home: &Path, limit: usize) -> Result<(), EngineError> {
+    let refused = |_| failure("ide_server_data_git");
+    let mut folders = vec![home.to_path_buf()];
+    let mut read = 0usize;
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder).map_err(refused)? {
+            let entry = entry.map_err(refused)?;
+            read += 1;
+            if read > limit || entry.file_name().eq_ignore_ascii_case(".git") {
+                return Err(failure("ide_server_data_git"));
+            }
+            if entry.file_type().map_err(refused)?.is_dir() {
+                folders.push(entry.path());
+            }
+        }
+        assert!(folders.len() <= read, "only folders read are queued");
+    }
+    assert!(read <= limit);
+    Ok(())
+}
+
 fn launcher_command(
     launch: &Launch<'_>,
     info: &ServerInfo,

@@ -1207,6 +1207,23 @@ fn a_git_left_in_the_server_data_folder_stops_a_confined_start() {
     }
 }
 
+/// The check reads at most its limit of entries and refuses past it, so a padded server data
+/// folder cannot hold a start on a walk without end.
+#[test]
+fn a_server_data_folder_past_the_entry_limit_stops_a_start() {
+    let home = scratch();
+    fs::create_dir(home.path().join("a")).unwrap();
+    for name in ["1", "a/2", "a/3"] {
+        fs::write(home.path().join(name), "").unwrap();
+    }
+    assert!(refuse_planted_git(home.path(), 4).is_ok());
+    fs::write(home.path().join("a").join("4"), "").unwrap();
+    assert_eq!(
+        refuse_planted_git(home.path(), 4).unwrap_err().0,
+        "ide_server_data_git"
+    );
+}
+
 /// A folder in the server data folder the check cannot read stops a confined start, since a
 /// `.git` can sit in it and the server can open it again once it runs.
 #[test]
