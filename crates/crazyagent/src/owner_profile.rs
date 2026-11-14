@@ -410,4 +410,31 @@ mod tests {
         assert_eq!(loaded.preferred_stack, ["Rust"]);
         assert!(!crate::memory::hidden_text(&loaded.preface()));
     }
+
+    /// RV-DS241-134: a name stored before hidden characters were refused and made only of
+    /// them (or of them and spaces) is left blank by the load-time cleaning; the profile then
+    /// reads as none, so the owner gets the first-run page instead of a refusal on every
+    /// read, and a new profile saves and loads over it.
+    #[cfg(unix)]
+    #[test]
+    fn a_stored_name_of_only_hidden_characters_reads_as_no_profile_and_a_new_one_saves() {
+        for name in ["\u{200b}", "\u{2060}", "\u{3164}", " \u{200b}\u{2060} "] {
+            let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+            let tx = connection.transaction().unwrap();
+            initialize(&tx).unwrap();
+            let body = serde_json::json!({"name": name, "role": "Founder"}).to_string();
+            tx.execute(
+                "INSERT INTO user_profile(singleton, body) VALUES(1, ?1)",
+                [&body],
+            )
+            .unwrap();
+            assert_eq!(load(&tx).unwrap(), None, "{name:?}");
+            assert!(matches!(
+                read(&tx).unwrap(),
+                OwnerData::OwnerProfile { profile: None }
+            ));
+            assert!(matches!(save(&tx, &profile()).unwrap(), Outcome::Applied));
+            assert_eq!(load(&tx).unwrap(), Some(profile()));
+        }
+    }
 }
