@@ -354,25 +354,27 @@ const _: () = {
     use crate::sandbox::model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
     assert!(*LOW_PORTS.start() > 1024 && *LOW_PORTS.end() < 30_000);
     assert!(*LOW_PORTS.end() < PICKED_PORTS_START);
-    assert!(*LOW_PORTS.end() < *PROXY_PORTS.start() || *LOW_PORTS.start() > *PROXY_PORTS.end());
+    assert!(*LOW_PORTS.end() < *PROXY_PORTS.start());
     let mut index = 0;
     while index < OWNER_PORTS.len() {
-        assert!(OWNER_PORTS[index] < *LOW_PORTS.start() || OWNER_PORTS[index] > *LOW_PORTS.end());
+        let port = OWNER_PORTS[index];
+        assert!(port < *LOW_PORTS.start() || port > *LOW_PORTS.end());
         index += 1;
     }
 };
 
-/// Picks a loopback TCP port nothing holds now from [`LOW_PORTS`], so no port-0 bind or
-/// outbound connect takes it before the caller's own listener, such as a sandboxed child's,
-/// binds it. Each call in this process starts past the port the last call gave. Input: none.
-/// Output: the port, which nothing holds when this returns.
+/// Picks a loopback TCP port nothing holds now from the low block, 20000 to 28999, so no
+/// port-0 bind or outbound connect takes it before the caller's own listener, such as a
+/// sandboxed child's, binds it. Each call in this process starts past the port the last call
+/// gave. Input: none. Output: the port, which nothing holds when this returns.
 pub fn free_low_tcp_port() -> io::Result<u16> {
     static NEXT: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(None);
     let span = u32::from(LOW_PORTS.end() - LOW_PORTS.start()) + 1;
     let mut next = NEXT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let first = next.unwrap_or_else(|| std::process::id().wrapping_mul(2_654_435_761) % span);
+    let seed = std::process::id().wrapping_mul(2_654_435_761) % span;
+    let first = next.unwrap_or(seed);
     for step in 0..span {
         let offset = (first + step) % span;
         let port = LOW_PORTS.start() + u16::try_from(offset).map_err(io::Error::other)?;
