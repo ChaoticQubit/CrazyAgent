@@ -7,7 +7,7 @@ import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, 
 import type { IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
 import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
 import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
-import { Button, ConfirmDialog, Dialog, Segmented, Select } from "../../ui";
+import { Button, ConfirmDialog, Dialog, Segmented, Select, navigate } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
@@ -214,14 +214,24 @@ export function removeLine(folder: string | null): string {
   return `Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk ${where}, with every file in it.`;
 }
 
+/** Takes the ask a route to Remove project carries, once: the choice the Remove dialog opens on,
+ * Remove from dashboard for `remove` and Delete everything for `delete`, and drops any ask from
+ * the address in place, so a later mount of the section never opens the dialog again. Input:
+ * the project id. Output: the choice, or null when the route asked for neither. */
+export function takeRemoveAsk(projectId: string): RemoveChoice | null {
+  const asked = hashParam("ask");
+  if (asked === null) return null;
+  navigate({ name: "project", id: projectId, tab: "settings", section: "remove" }, true);
+  return asked === "delete" ? "everything" : asked === "remove" ? "dashboard" : null;
+}
+
 /** Settings' Remove project: the section, and its dialog, opened by the button or by a route
  * asking for it; a route asking for a delete again, after one an engine stop cut short, opens it
  * on Delete everything once the preview offers it. Inputs: the project and its stored setup. */
 function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup | null }) {
   const session = useContext(SessionContext);
-  const asked = hashParam("ask");
-  const wanted = useRef<RemoveChoice>(asked === "delete" ? "everything" : "dashboard");
-  const [confirming, setConfirming] = useState(() => asked === "remove" || asked === "delete");
+  const wanted = useRef<RemoveChoice>("dashboard");
+  const [confirming, setConfirming] = useState(false);
   const [preview, setPreview] = useState<Result<RemovalPreview>>();
   const [choice, setChoice] = useState<RemoveChoice>("dashboard");
   const [typed, setTyped] = useState("");
@@ -229,6 +239,12 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
   const [note, setNote] = useState("");
   const line = removeLine(setup ? projectFolder(setup.folder) : null);
   const read = preview?.kind === "ok" ? preview.value : null;
+  useEffect(() => {
+    const asked = takeRemoveAsk(data.id);
+    if (asked === null) return;
+    wanted.current = asked;
+    setConfirming(true);
+  }, [data.id]);
   useEffect(() => {
     if (!confirming) return;
     let live = true;
