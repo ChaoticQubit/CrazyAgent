@@ -2174,6 +2174,108 @@ mod tests {
         assert!(!text.contains("(allow network*)"));
     }
 
+    /// CONFIGURED-HOMES-GUARD: an rcli master whose home is one configured SDK home in the
+    /// engine root reads, writes and resolves that home and keeps its launch denies there,
+    /// while the folder of homes stays denied, so a real child can neither list it nor read
+    /// another keyed account's config. The profile denies the folder and allows the own home
+    /// right after that deny, naming no other home. Runs on macOS only: it checks Seatbelt.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_rcli_master_reaches_its_own_configured_home_and_no_other() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let engine = root.engine_root().unwrap().to_path_buf();
+        let homes = engine.join("configured-sdk-homes");
+        let own = homes.join("a".repeat(64));
+        let other = homes.join("b".repeat(64));
+        let own_text = "configured-homes-guard-dummy-own-config";
+        let other_text = "configured-homes-guard-dummy-other-config";
+        for (home, text) in [(&own, own_text), (&other, other_text)] {
+            private_directory(&home.join(".backboard"));
+            std::fs::write(home.join(".backboard").join("config.json"), text).unwrap();
+        }
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let install = base.join("install").join("bin");
+        for directory in [&homes, &repository, &worktree, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("rcli");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _capture_ref, _capture) = allocate_master_capture(&root).unwrap();
+        let sandbox = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &own,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+            &[],
+        )
+        .unwrap();
+        let text = sandbox.sandbox().profile();
+        let deny = text
+            .find(&format!("\n  (subpath \"{}\")", homes.display()))
+            .expect("the profile denies the configured homes");
+        let allow = text
+            .find(&format!(
+                "(allow file-read* file-write*\n  (subpath \"{}\"))",
+                own.display()
+            ))
+            .expect("the profile allows the master's own home");
+        assert!(deny < allow, "{text}");
+        assert!(!text.contains(&other.display().to_string()), "{text}");
+        let run = |script: &str| {
+            let mut harness = Command::new("/bin/sh");
+            harness.arg("-c").arg(script).current_dir(&worktree);
+            let mut child = sandbox.wrap(&harness).unwrap();
+            child
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            crate::spawn_gate::output(&mut child).unwrap()
+        };
+        let quoted = |path: &Path| format!("'{}'", path.display());
+        let own_config = own.join(".backboard").join("config.json");
+        let read = run(&format!("cat {}", quoted(&own_config)));
+        assert!(read.status.success(), "{read:?}");
+        assert_eq!(String::from_utf8_lossy(&read.stdout), own_text);
+        let resolved = run(&format!(
+            "/bin/realpath {} && cd {} && pwd -P",
+            quoted(&own_config),
+            quoted(&own)
+        ));
+        assert!(resolved.status.success(), "{resolved:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&resolved.stdout),
+            format!("{}\n{}\n", own_config.display(), own.display())
+        );
+        let write = run(&format!("echo turn > {}", quoted(&own.join("turn.txt"))));
+        assert!(write.status.success(), "{write:?}");
+        assert_eq!(
+            std::fs::read_to_string(own.join("turn.txt")).unwrap(),
+            "turn\n"
+        );
+        let launch = run(&format!("echo x > {}", quoted(&own.join("settings.json"))));
+        assert!(!launch.status.success());
+        assert!(!own.join("settings.json").exists());
+        let other_config = other.join(".backboard").join("config.json");
+        let stolen = run(&format!("cat {}", quoted(&other_config)));
+        assert!(!stolen.status.success());
+        assert!(!String::from_utf8_lossy(&stolen.stdout).contains(other_text));
+        let planted = run(&format!("echo x > {}", quoted(&other.join("planted"))));
+        assert!(!planted.status.success());
+        assert!(!other.join("planted").exists());
+        let listed = run(&format!("ls {}", quoted(&homes)));
+        assert!(!listed.status.success());
+        assert!(!String::from_utf8_lossy(&listed.stdout).contains(&"b".repeat(64)));
+    }
+
     /// A hidden folder inside the project reaches the master's own boundary: the installed
     /// master profile denies it and a real sandboxed read of a file inside it is refused,
     /// while a plain file elsewhere in the repository stays readable. Runs on macOS only:

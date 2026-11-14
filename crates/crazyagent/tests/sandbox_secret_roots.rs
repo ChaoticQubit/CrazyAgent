@@ -183,6 +183,40 @@ fn the_native_profiles_folder_is_an_engine_secret_no_root_may_cover() {
     assert!(guarded(&case).secret_paths().contains(&profiles));
 }
 
+/// CONFIGURED-HOMES-GUARD: the folder of configured SDK homes, where each keyed account's
+/// home keeps its key, is an engine secret. No read root or worktree may be it, one home in
+/// it or the engine root around it, in either order; the plain guard refuses an agent home
+/// inside it; and the guarded sandbox names it among its secret paths.
+#[test]
+fn the_configured_sdk_homes_folder_is_an_engine_secret_no_root_may_cover() {
+    let case = case();
+    let homes = case.runtime.join("configured-sdk-homes");
+    let home = homes.join("b".repeat(64));
+    fs::create_dir_all(home.join(".backboard")).unwrap();
+    for root in [&homes, &home] {
+        walled(guarded(&case).allow_read(root));
+        walled(guarded(&case).allow_worktree(root));
+        walled(
+            sandbox(&case)
+                .allow_read(root)
+                .unwrap()
+                .guard_engine(&case.runtime),
+        );
+    }
+    walled(guarded(&case).allow_read(&case.runtime));
+    walled(
+        ProjectSandbox::new(
+            &case.project,
+            &home,
+            &case.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .guard_engine(&case.runtime),
+    );
+    assert!(guarded(&case).secret_paths().contains(&homes));
+}
+
 #[test]
 fn unrelated_roots_and_look_alike_names_still_pass() {
     let case = case();
