@@ -249,6 +249,7 @@ pub fn checked(grant: &AccessGrant, data_root: &Path) -> Result<AccessGrant, &'s
                 || OWNER_PORTS.contains(port)
                 || CONTROL_PORTS.contains(port)
                 || super::model_proxy::PROXY_PORTS.contains(port)
+                || super::model_proxy::RELAY_PORTS.contains(port)
                 || ide_ports(data_root).contains(port);
             if reserved {
                 return Err("grant_port_reserved");

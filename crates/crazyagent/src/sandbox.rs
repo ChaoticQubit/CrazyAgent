@@ -761,8 +761,8 @@ pub fn agent_command<'a>(
 
 /// Network reach of a sandboxed agent: open when the agent's tools are on, except that
 /// it never binds or listens on an [`OWNER_PORTS`] port, one [`ProjectSandbox::keep_ports`]
-/// keeps or one of [`model_proxy::PROXY_PORTS`], otherwise only the listed remotes, each one
-/// port on loopback or on any host.
+/// keeps or one of [`model_proxy::PROXY_PORTS`] or [`model_proxy::RELAY_PORTS`], otherwise
+/// only the listed remotes, each one port on loopback or on any host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxNetwork {
     Open,
@@ -2761,6 +2761,7 @@ impl ProjectSandbox {
                     .chain(&self.kept_ports)
                     .copied()
                     .chain(model_proxy::PROXY_PORTS)
+                    .chain(model_proxy::RELAY_PORTS)
                     .map(|port| format!(" (local ip \"*:{port}\")"))
                     .collect::<String>();
                 text.push_str(&format!(
