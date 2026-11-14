@@ -169,14 +169,11 @@ async function addProject(bridge, repo, generation) {
   return project;
 }
 
-/** Starts the real engine with the stand-in Codex and the bridge on new projects made from
- * the owner's repositories, serves the built app to a browser page on the first project's
- * Agents tab, runs the steps and stops everything. Inputs: the test context, the temporary
- * folder prefix, the steps (given the first project, every project, the engine root, the
- * owner on the page, the page, the served app, the bridge, the listening model provider, the evidence folder and the
- * stopped member's port), how many projects, one to four, the stand-in Codex script, whether the engine gets its own
- * private temp folder beside its root, as the owner's engine does, instead of the one holding it, and whether the pool
- * lists a member whose provider is stopped ahead of the listening one. Output: none. */
+/** Starts the real engine with the stand-in Codex and the bridge on new projects made from the owner's repositories,
+ * serves the built app to a browser page on the first project's Agents tab, runs the steps and stops everything. Inputs:
+ * the test context, the temp folder prefix, the steps (given the projects, engine root, owner, page, served app, bridge,
+ * listening provider, evidence folder and stopped member's port), one to four projects, the stand-in Codex script, a
+ * private temp folder beside the root, and a stopped-provider member listed first in the pool. Output: none. */
 export async function onEngine(t, prefix, steps, count = 1, codex = COUNTING_CODEX, { ownTemp = false, stoppedFirst = false } = {}) {
   assert.ok(Number.isInteger(count) && count >= 1 && count <= 4, `one to four projects, not ${count}`);
   assert.equal(typeof ownTemp, "boolean", "ownTemp is true or false");
