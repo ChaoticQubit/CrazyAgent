@@ -4,7 +4,7 @@ use crate::usage::extras::LimitExtras;
 use crate::usage::metrics::Metrics;
 use crate::usage::money::MoneySettings;
 use crate::usage::report::UsageReport;
-use crate::usage::spend::SpendSettings;
+use crate::usage::spend::{SpendChoice, SpendSettings};
 use crate::usage::{self, WindowKind};
 use serde::{Deserialize, Serialize};
 
@@ -74,6 +74,9 @@ enum Action {
     },
     SetSpend {
         settings: SpendSettings,
+    },
+    SetSpendOne {
+        choice: SpendChoice,
     },
 }
 
@@ -232,6 +235,16 @@ impl OwnerClient {
         }
     }
 
+    /// Stores one of the owner's Pools settings and keeps the other two as stored. Input:
+    /// the setting and its value. Output: done; an engine before this request answers
+    /// `usage_request_invalid`.
+    pub async fn usage_set_spend_one(&self, choice: SpendChoice) -> Result<(), EngineError> {
+        match self.usage_exchange(Action::SetSpendOne { choice }).await? {
+            Reply::Done => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
     async fn usage_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         tokio::time::timeout(self.timeout.max(USAGE_TIMEOUT), async {
             let read = read_kind(&action);
@@ -305,6 +318,7 @@ enum Change {
     DecideRecount(bool),
     Spend(CredentialRef, bool),
     SetSpend(SpendSettings),
+    SetSpendOne(SpendChoice),
 }
 
 /// Serves one usage request. The report is built first; then, under the owner barrier, the
@@ -429,6 +443,7 @@ async fn prepare(
             Prepared::Change(root, Change::Spend(account, confirmed))
         }
         Action::SetSpend { settings } => Prepared::Change(root, Change::SetSpend(settings)),
+        Action::SetSpendOne { choice } => Prepared::Change(root, Change::SetSpendOne(choice)),
     })
 }
 
@@ -529,6 +544,7 @@ async fn finish(
                 usage::spend::request(&db, &account, confirmed, crate::team::now_ms())
             }
             Change::SetSpend(settings) => usage::spend::write(&db, settings),
+            Change::SetSpendOne(choice) => usage::spend::write_one(&db, choice),
         }
     })
     .await
@@ -628,8 +644,13 @@ mod spend_one_tests {
     #[test]
     fn spend_one_requests_name_one_known_field_and_its_value_and_nothing_else() {
         for field in ["confirm", "all_limited", "resets_source"] {
-            let value = if field == "all_limited" { "no_hint" } else { "off" };
-            let sent = json!({ "kind": "set_spend_one", "choice": { "field": field, "value": value } });
+            let value = if field == "all_limited" {
+                "no_hint"
+            } else {
+                "off"
+            };
+            let sent =
+                json!({ "kind": "set_spend_one", "choice": { "field": field, "value": value } });
             assert!(decoded(sent).is_ok(), "{field}");
         }
         for refused in [
@@ -648,8 +669,10 @@ mod spend_one_tests {
     async fn spend_one_changes_its_own_setting_and_keeps_the_other_two() {
         let usage = Usage::start().await;
         let send = |field: &str, value: &str| {
-            decoded(json!({ "kind": "set_spend_one", "choice": { "field": field, "value": value } }))
-                .expect("the engine reads a one-setting request")
+            decoded(
+                json!({ "kind": "set_spend_one", "choice": { "field": field, "value": value } }),
+            )
+            .expect("the engine reads a one-setting request")
         };
         let fresh = usage
             .client
@@ -700,7 +723,11 @@ mod spend_one_tests {
                 },
             ),
         ] {
-            let reply = usage.client.usage_exchange(send(field, value)).await.unwrap();
+            let reply = usage
+                .client
+                .usage_exchange(send(field, value))
+                .await
+                .unwrap();
             assert!(matches!(reply, Reply::Done), "{field}");
             let report = usage.client.usage_report(None, None, 0).await.unwrap();
             assert_eq!(report.spend.settings, expected, "{field}");

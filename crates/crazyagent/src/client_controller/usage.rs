@@ -2,7 +2,7 @@ use super::*;
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::usage::money::MoneySettings;
 use crate::usage::report::UsageReport;
-use crate::usage::spend::SpendSettings;
+use crate::usage::spend::SpendChoice;
 
 impl OwnerController {
     fn usage_client(&self) -> Result<&OwnerClient, EngineError> {
@@ -56,9 +56,10 @@ impl OwnerController {
         self.usage_client()?.usage_spend(account, confirmed).await
     }
 
-    /// Stores the owner's spend settings. Input: the settings. Output: done.
-    pub async fn usage_set_spend(&self, settings: SpendSettings) -> Result<(), EngineError> {
-        self.usage_client()?.usage_set_spend(settings).await
+    /// Stores one of the owner's Pools settings and keeps the other two. Input: the setting
+    /// and its value. Output: done.
+    pub async fn usage_set_spend_one(&self, choice: SpendChoice) -> Result<(), EngineError> {
+        self.usage_client()?.usage_set_spend_one(choice).await
     }
 
     /// Applies the owner's choice of the recount, once. Input: whether to use the new numbers.

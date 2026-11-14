@@ -176,7 +176,7 @@ fn c_steps_spend_confirmation_and_stores_it() {
         let (mut spend, mut ctx) = ready(view(settings(from, AllLimited::NoHint), Vec::new()));
         spend.key(&Key::Char('c'), &mut ctx);
         assert!(
-            matches!(job(&mut ctx), Some(SettingsJob::SetSpend(sent)) if sent == settings(to, AllLimited::NoHint))
+            matches!(job(&mut ctx), Some(SettingsJob::SetSpendOne(sent)) if sent == SpendChoice::Confirm(to))
         );
     }
 }
@@ -245,7 +245,7 @@ fn f_steps_the_claude_free_resets_source_and_keeps_the_spend_settings() {
         let (mut spend, mut ctx) = ready(view(with_source(from), Vec::new()));
         spend.key(&Key::Char('f'), &mut ctx);
         assert!(
-            matches!(job(&mut ctx), Some(SettingsJob::SetSpend(sent)) if sent == with_source(to)),
+            matches!(job(&mut ctx), Some(SettingsJob::SetSpendOne(sent)) if sent == SpendChoice::ResetsSource(to)),
             "{from:?}"
         );
     }
@@ -307,7 +307,7 @@ fn l_steps_the_all_limited_setting_and_stores_it() {
         let (mut spend, mut ctx) = ready(view(settings(SpendConfirm::OneClick, from), Vec::new()));
         spend.key(&Key::Char('l'), &mut ctx);
         assert!(
-            matches!(job(&mut ctx), Some(SettingsJob::SetSpend(sent)) if sent == settings(SpendConfirm::OneClick, to))
+            matches!(job(&mut ctx), Some(SettingsJob::SetSpendOne(sent)) if sent == SpendChoice::AllLimited(to))
         );
     }
 }
@@ -482,7 +482,10 @@ fn the_spend_view_is_read_once_a_minute_or_every_5_s_while_a_spend_is_out() {
 #[test]
 fn spend_one_each_key_sends_only_its_own_setting() {
     for key in ['c', 'l', 'f'] {
-        let (mut spend, mut ctx) = ready(view(settings(SpendConfirm::OneClick, AllLimited::NoHint), Vec::new()));
+        let (mut spend, mut ctx) = ready(view(
+            settings(SpendConfirm::OneClick, AllLimited::NoHint),
+            Vec::new(),
+        ));
         spend.key(&Key::Char(key), &mut ctx);
         let sent = job(&mut ctx).expect("the key asks the engine");
         assert_eq!(format!("{sent:?}"), "SetSpendOne", "{key}");

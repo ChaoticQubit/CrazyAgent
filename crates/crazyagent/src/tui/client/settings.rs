@@ -21,7 +21,7 @@ use crate::plugins::{HookView, Scope, ServerSpec, ServerView, SkillView, ToolVie
 use crate::protocol::CredentialRef;
 use crate::usage::money::MoneySettings;
 use crate::usage::report::UsageReport;
-use crate::usage::spend::SpendSettings;
+use crate::usage::spend::SpendChoice;
 
 const POOL_JOINS_MAX: usize = 64;
 const SUGGESTION_PROJECTS_MAX: usize = 50;
@@ -72,7 +72,7 @@ pub(in crate::tui) enum SettingsJob {
         detail: bool,
     },
     SetMoney(MoneySettings),
-    SetSpend(SpendSettings),
+    SetSpendOne(SpendChoice),
     Spend {
         account: CredentialRef,
         confirmed: bool,
@@ -262,7 +262,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::RefreshUsage => "RefreshUsage",
             Self::Extras { .. } => "Extras",
             Self::SetMoney(_) => "SetMoney",
-            Self::SetSpend(_) => "SetSpend",
+            Self::SetSpendOne(_) => "SetSpendOne",
             Self::Spend { .. } => "Spend",
             Self::DecideRecount(_) => "DecideRecount",
             Self::SignIn(_) => "SignIn",
@@ -463,7 +463,7 @@ impl SettingsEvent {
             SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
             SettingsJob::Extras { .. } => Self::Extras(Err(problem)),
             SettingsJob::SetMoney(_) => Self::MoneySet(Err(problem)),
-            SettingsJob::SetSpend(_) => Self::SpendSet(Err(problem)),
+            SettingsJob::SetSpendOne(_) => Self::SpendSet(Err(problem)),
             SettingsJob::Spend { .. } => Self::Spent(Err(problem)),
             SettingsJob::DecideRecount(_) => Self::RecountDecided(Err(problem)),
             SettingsJob::SignIn(_) => Self::SignIn(Err(problem)),
@@ -745,10 +745,10 @@ impl NativeOwner {
                     Err(error) => Err(error),
                 })
             }
-            SettingsJob::SetSpend(settings) => {
+            SettingsJob::SetSpendOne(choice) => {
                 SettingsEvent::SpendSet(match self.settings_controller() {
                     Ok(controller) => controller
-                        .usage_set_spend(settings)
+                        .usage_set_spend_one(choice)
                         .await
                         .map_err(|error| problem(&error, lost)),
                     Err(error) => Err(error),
