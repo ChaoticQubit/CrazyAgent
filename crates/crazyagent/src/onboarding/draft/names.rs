@@ -133,3 +133,43 @@ pub(crate) fn without_secret_paths(text: &str) -> String {
         .filter(|line| !names_secret(line))
         .collect()
 }
+
+/// The project's `hidden` folders as paths below `repo`, with `/` between names, for the
+/// mapping to leave out. Takes the folder and the hidden folders. Returns the paths, or
+/// `None` when one is not below the folder or not UTF-8, so nothing is cleared.
+pub(crate) fn below_root(
+    repo: &std::path::Path,
+    hidden: &[std::path::PathBuf],
+) -> Option<Vec<String>> {
+    let root = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    hidden
+        .iter()
+        .map(|folder| {
+            let below = folder
+                .strip_prefix(&root)
+                .or_else(|_| folder.strip_prefix(repo))
+                .ok()?;
+            let text = below.to_str()?;
+            (!text.is_empty()).then(|| text.to_owned())
+        })
+        .collect()
+}
+
+/// Whether `path`, below the project folder and with an optional closing `/`, is one of the
+/// `hidden` folders or lies inside one. Takes the path and the folders. Returns the answer.
+pub(super) fn under(path: &str, hidden: &[String]) -> bool {
+    let path = path.trim_end_matches('/');
+    hidden.iter().any(|folder| {
+        path.strip_prefix(folder.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
+}
+
+/// Whether the evidence sent to a model provider may name `path`, below the project folder,
+/// by the onboarding documents' own skip rules: not when it names a path that looks like it
+/// holds a secret ([`names_secret`]) nor when it is or lies in one of the `hidden` folders,
+/// given below the project folder ([`below_root`]). Takes the path and the folders. Returns
+/// the answer.
+pub(crate) fn offered(path: &str, hidden: &[String]) -> bool {
+    !names_secret(path) && !under(path, hidden)
+}

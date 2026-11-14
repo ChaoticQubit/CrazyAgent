@@ -770,6 +770,7 @@ fn evidence_holds_the_readme_a_manifest_the_tree_and_research_within_its_bound()
     }];
     let pack = evidence(
         folder.path(),
+        &[],
         &research,
         &["src/main.rs".to_owned(), "src/search.rs".to_owned()],
     );
@@ -806,7 +807,7 @@ fn evidence_keeps_its_bounds_when_the_tree_and_the_research_are_larger_than_the_
             text: "^".repeat(20_000),
         },
     ];
-    let pack = evidence(folder.path(), &research, &tree);
+    let pack = evidence(folder.path(), &[], &research, &tree);
     assert!(pack.len() <= EVIDENCE_BYTES_MAX);
     assert!(pack.contains("# Alpha"));
     assert!(pack.contains("src/kept.rs"));
@@ -1138,7 +1139,7 @@ fn no_backtick_run_in_research_closes_its_fence_in_the_evidence() {
             path: "docs/research.md".into(),
             text: format!("Before.\n{}\nAfter.\n", "`".repeat(run)),
         }];
-        let pack = evidence(folder.path(), &research, &[]);
+        let pack = evidence(folder.path(), &[], &research, &[]);
         assert!(pack.len() <= EVIDENCE_BYTES_MAX);
         let part = &pack[pack.find("# Competitor research").unwrap()..];
         assert!(part.contains("Before."), "run of {run}");
