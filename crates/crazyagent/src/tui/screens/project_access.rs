@@ -66,7 +66,8 @@ const SECRETS_SHOWN_BYTES_MAX: usize = 256;
 /// choice and the shared project folders. Row 0 is the level, each next row one toolchain,
 /// then the network, hooks, agent folders and shared folders rows, one row per top-level
 /// folder while Chosen folders is picked, and last the Read-only or Read-write row. Busy
-/// while the engine saves; a refusal keeps the choices with the reason.
+/// while the engine saves; a refusal keeps the choices with the reason. `linux` is whether
+/// the box shows what the Linux sandbox cannot hold.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct AccessEdit {
     pub view: PolicyView,
@@ -81,6 +82,7 @@ pub(in crate::tui) struct AccessEdit {
     pub confirm_full: bool,
     pub busy: bool,
     pub error: Option<String>,
+    pub linux: bool,
 }
 
 /// What one key in the Agent access box asks the screen to do.
@@ -108,6 +110,7 @@ impl AccessEdit {
             confirm_full: false,
             busy: false,
             error: None,
+            linux: cfg!(target_os = "linux"),
         }
     }
 

@@ -863,6 +863,16 @@ pub const GIT_STATE_FILES: [&str; 6] = [
     "config.worktree",
 ];
 
+/// What a limited network cannot hold on Linux, shown there only, under the network choice
+/// in the desktop and the TUI (RV-DS241-83): Landlock limits outbound TCP by port, not by
+/// host, so a port an agent may reach on this computer is open to it on every host.
+pub const LINUX_PORTS_ANY_HOST_LINE: &str = "On Linux, network limits hold ports, not hosts: a port agents may reach on this computer, such as the model's proxy port or a port you allow, is open to them on every host.";
+
+/// What a writable project folder cannot hold on Linux, shown there only, under the access
+/// level in the desktop and the TUI (RV-DS241-85): no Landlock rule stops an agent from
+/// making a git repository inside a folder it may change.
+pub const LINUX_NESTED_GIT_LINE: &str = "On Linux, agents can make a git repository inside any project folder they may change, and your own git or IDE runs its settings when you open that folder. Check agent-made folders for a .git before you open them.";
+
 /// Refusal to build or install a project sandbox, with a plain reason.
 #[derive(Debug)]
 pub enum SandboxError {

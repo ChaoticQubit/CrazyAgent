@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import "./load-source.mjs";
 
 const access = await import("../src/screens/project/access.tsx");
@@ -414,5 +416,22 @@ test("every shared folders refusal has its own sentence in both UIs", () => {
     assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
     assert.ok(tui.includes(`"${code}" =>`), `the TUI names ${code} plainly`);
     assert.match(api.plainError(code), /Agent access/, code);
+  }
+});
+
+test("only on Linux do the network and access choices say ports hold no host and nested git is not blocked (RV-DS241-83, -85)", () => {
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
+  assert.ok(engine.includes(`pub const LINUX_PORTS_ANY_HOST_LINE: &str = "${access.LINUX_PORTS_ANY_HOST}";`), "the port gap reads as the engine states it");
+  assert.ok(engine.includes(`pub const LINUX_NESTED_GIT_LINE: &str = "${access.LINUX_NESTED_GIT}";`), "the nested git gap reads as the engine states it");
+  const none = () => {};
+  const shown = (platform, chosen) => renderToStaticMarkup(createElement(access.NetworkChoices, { name: "n", value: "none", access: chosen, onChange: none, platform }))
+    + renderToStaticMarkup(createElement(access.AccessLevels, { name: "a", value: chosen, unavailable: () => null, onChange: none, platform }));
+  const escaped = (text) => text.replaceAll("'", "&#x27;");
+  const linux = shown("linux", "sandboxed");
+  assert.ok(linux.includes(escaped(access.LINUX_PORTS_ANY_HOST)), linux);
+  assert.ok(linux.includes(escaped(access.LINUX_NESTED_GIT)), linux);
+  for (const page of [shown("macos", "sandboxed"), shown("windows", "sandboxed"), shown("linux", "full")]) {
+    assert.ok(!page.includes(escaped(access.LINUX_PORTS_ANY_HOST)), page);
+    assert.ok(!page.includes(escaped(access.LINUX_NESTED_GIT)), page);
   }
 });
