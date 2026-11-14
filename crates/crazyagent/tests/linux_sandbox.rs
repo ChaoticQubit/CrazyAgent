@@ -952,6 +952,85 @@ fn a_bubblewrap_agent_reaches_no_unix_socket_in_a_folder_bound_for_it() {
     );
 }
 
+const FAMILIES: &str = "import errno, socket
+for name, family, kind, protocol in (('unix', socket.AF_UNIX, socket.SOCK_STREAM, 0),
+                                     ('vsock', 40, socket.SOCK_STREAM, 0),
+                                     ('bluetooth', 31, socket.SOCK_STREAM, 0),
+                                     ('packet', 17, socket.SOCK_DGRAM, 0),
+                                     ('alg', 38, socket.SOCK_SEQPACKET, 0),
+                                     ('udp', socket.AF_INET, socket.SOCK_DGRAM, 0),
+                                     ('audit', 16, socket.SOCK_RAW, 9),
+                                     ('tcp', socket.AF_INET, socket.SOCK_STREAM, 0),
+                                     ('route', 16, socket.SOCK_RAW, 0)):
+    try:
+        socket.socket(family, kind, protocol).close()
+        print(name + '=ok')
+    except OSError as error:
+        print(name + ('=refused' if error.errno == errno.EACCES else '=other'))
+";
+
+/// Runs the socket family probe through `command`, which starts `/usr/bin/python3` with
+/// the arguments it is given. Input: the command. Output: one line per socket kind, `ok`,
+/// `refused` for the socket filter's `EACCES`, or `other` for any other failure.
+fn families(mut command: Command) -> String {
+    let output = crazyagent::spawn_gate::output(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// A closed bubblewrap agent opens no socket its network namespace does not hold: the
+/// helper's socket filter keeps only TCP over IPv4 and routing netlink, as for a Landlock
+/// agent with a network limit, so an AF_VSOCK socket, which `--unshare-net` does not
+/// isolate and which reaches a VM host, is refused as a Unix-domain one is, and so is every
+/// other family, datagram and netlink kind (RV-DS241-84 r2, rv-sec3 F1).
+#[test]
+fn a_closed_bubblewrap_agent_opens_no_socket_its_network_namespace_does_not_hold() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let expected = "unix=refused\nvsock=refused\nbluetooth=refused\npacket=refused\n\
+                    alg=refused\nudp=refused\naudit=refused\ntcp=ok\nroute=ok\n";
+    let mut filtered = Command::new(HELPER);
+    filtered
+        .args(["--filter-sockets", "--", "/usr/bin/python3", "-I", "-c", FAMILIES])
+        .current_dir(&case.project);
+    assert_eq!(families(filtered), expected, "the helper's socket filter alone");
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Only(Vec::new())),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+            helper: PathBuf::from(HELPER),
+        },
+    )
+    .unwrap();
+    let mut harness = Command::new("/usr/bin/python3");
+    harness
+        .args(["-I", "-c", FAMILIES])
+        .current_dir(case.project.join("worktrees"));
+    assert_eq!(
+        families(bubblewrap.wrap(&harness).unwrap()),
+        expected,
+        "a closed bubblewrap agent"
+    );
+}
+
 const LISTEN: &str = "import socket, sys
 for port in sys.argv[1:]:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
