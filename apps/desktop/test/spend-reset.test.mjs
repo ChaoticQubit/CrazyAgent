@@ -182,3 +182,19 @@ test("each Pools row holds its own Spend for an account with a free reset, whate
   assert.doesNotMatch(draw(view({ settings: settings("one_click", "no_hint") }), new Map()), /spend-reset/, "extras not read");
   assert.doesNotMatch(draw(undefined, two), /spend-reset/, "spend view not read");
 });
+
+test("Free resets shows no choice while the usage read loads, failed or has no spend part, never the defaults as stored", () => {
+  const draw = (usage) => renderToStaticMarkup(createElement(section.SpendSettingsSection, { usage, onDone: noop, onRetry: noop }));
+  const loading = draw({ kind: "loading" });
+  assert.doesNotMatch(loading, /role="radiogroup"/);
+  assert.match(loading, /role="status"[^>]*>Loading your free resets settings\.\.\.</);
+  const failed = draw({ kind: "error", code: "usage_unavailable", message: "Usage couldn't be read. Try again." });
+  assert.doesNotMatch(failed, /role="radiogroup"/);
+  assert.match(failed, /Usage couldn&#x27;t be read\. Try again\./);
+  assert.match(failed, />Try again</);
+  assert.doesNotMatch(draw({ kind: "not_ready" }), /role="radiogroup"/);
+  assert.doesNotMatch(draw({ kind: "ok", value: {} }), /role="radiogroup"/);
+  const stored = draw({ kind: "ok", value: { spend: view({ settings: settings("off", "no_hint", "as_claude_code") }) } });
+  for (const label of ["Off", "No hint", "As Claude Code"]) assert.match(stored, new RegExp(`aria-checked="true"[^>]*>${label}<`), label);
+  for (const label of ["Confirm each", "Notice", "Don&#x27;t read"]) assert.match(stored, new RegExp(`aria-checked="false"[^>]*>${label}<`), label);
+});
