@@ -2735,8 +2735,10 @@ async fn write_reply(stream: &mut UnixStream, frame: &[u8]) -> Result<(), Engine
 }
 
 /// Encodes one owner reply. An error becomes Rejected with its code when the engine
-/// knows the request changed nothing, and OutcomeUnknown for any other failed mutation.
-/// Inputs: the result, the request id and whether it was a mutation. Output: the frame.
+/// knows the request changed nothing, or for `move_project_old_folder_left`, a project move
+/// recorded in the home whose old folder was left, which clients show as moved; any other
+/// failed mutation becomes OutcomeUnknown. Inputs: the result, the request id and whether it
+/// was a mutation. Output: the frame.
 fn owner_reply_frame(
     result: Result<OwnerReply, EngineError>,
     id: RequestId,
@@ -2753,6 +2755,7 @@ fn owner_reply_frame(
                 | "master_transaction_rolled_back"
                 | "master_dispatch_stopped"
                 | "master_dispatch_capacity"
+                | "move_project_old_folder_left"
         );
         let response = if mutation && !known {
             OwnerResponse::OutcomeUnknown {
