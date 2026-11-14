@@ -22,7 +22,33 @@ const INSTALL_TIME: Duration = Duration::from_secs(900);
 const INSTALL_BACKOFF: Duration = Duration::from_secs(600);
 const INSTALLS_MAX: usize = 16;
 
+const _: () = assert!(
+    INSTALL_BACKOFF.as_secs().div_ceil(60) == crate::plugins::INSTALL_RETRY_MINUTES_MAX
+);
+
 static INSTALLING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// What a server check runs for one approved spec. The check never runs the default pack's
+/// pinned context-mode npx launch: that spec runs from the engine's shared install once it is
+/// complete, waits while its install runs in this engine, and otherwise says why no install
+/// can run, with the time left after a recent failure. Every other spec runs as approved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForCheck {
+    Run(ServerSpec),
+    SettingUp,
+    Failed(Duration),
+    Refused(&'static str),
+}
+
+/// How a request to install the shared copy went: started now, already running in this
+/// engine, held back after a recent failure for the time left, or refused with its code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Begin {
+    Started,
+    Running,
+    Failed(Duration),
+    Refused(&'static str),
+}
 
 /// The folder holding the engine's one shared install of a context-mode version,
 /// `<engine root>/setup/npm/context-mode@<version>`. Inputs: the engine root and the
@@ -46,22 +72,33 @@ pub fn for_launch(root: &Path, spec: ServerSpec) -> ServerSpec {
     if let Some(shared) = shared(&install_folder(root, version), &bin.join("node"), version) {
         return shared;
     }
-    begin_install(root, bin, version);
+    let _ = begin_install(root, bin, version);
     spec
 }
 
-/// Whether the engine is installing the shared copy a pinned context-mode spec runs from,
-/// so [`for_launch`] still hands that spec back unchanged. Inputs: the engine root and the
-/// approved spec. Output: true only while that version's install runs in this engine.
-pub fn installing(root: &Path, spec: &ServerSpec) -> bool {
-    let Some((_, version)) = pinned(spec) else {
-        return false;
+/// What a Settings check of one approved server runs ([`ForCheck`]). Like [`for_launch`] it
+/// starts the shared install when one can run, but it never hands back the pinned npx spec.
+/// A shared install found complete after the start wins, so an install that finished between
+/// the two reads still runs. Inputs: the engine root and the approved spec. Output: the run.
+pub fn for_check(root: &Path, spec: ServerSpec) -> ForCheck {
+    let Some((bin, version)) = pinned(&spec) else {
+        return ForCheck::Run(spec);
     };
     let folder = install_folder(root, version);
-    INSTALLING
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .contains(&folder)
+    let node = bin.join("node");
+    if let Some(shared) = shared(&folder, &node, version) {
+        return ForCheck::Run(shared);
+    }
+    match begin_install(root, bin, version) {
+        Begin::Started | Begin::Running => {
+            shared(&folder, &node, version).map_or(ForCheck::SettingUp, ForCheck::Run)
+        }
+        Begin::Failed(left) => {
+            assert!(left <= INSTALL_BACKOFF);
+            ForCheck::Failed(left)
+        }
+        Begin::Refused(code) => ForCheck::Refused(code),
+    }
 }
 
 /// The shared install folder a launch spec from [`for_launch`] runs from, which an agent's
@@ -120,8 +157,8 @@ pub fn install(root: &Path, bin: &Path, version: &str) -> Result<PathBuf, Instal
     if complete(&folder, version) {
         return Ok(folder);
     }
-    let failed = parent.join(format!("{prefix}.failed"));
-    if backing_off(&failed) {
+    let failed = failed_marker(root, version);
+    if backoff_left(&failed).is_some() {
         return Err(InstallError("context_mode_install_backoff"));
     }
     let result = replace(root, &folder, bin, version);
@@ -259,16 +296,22 @@ fn unix_now() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
-fn backing_off(marker: &Path) -> bool {
+fn failed_marker(root: &Path, version: &str) -> PathBuf {
+    root.join("setup")
+        .join("npm")
+        .join(format!("{PACKAGE}@{version}.failed"))
+}
+
+fn backoff_left(marker: &Path) -> Option<Duration> {
     let mut text = String::new();
     let read =
         File::open(marker).and_then(|file| file.take(MARKER_BYTES_MAX).read_to_string(&mut text));
-    let Some(failed) = read.ok().and_then(|_| text.trim().parse::<u64>().ok()) else {
-        return false;
-    };
+    let failed = read.ok().and_then(|_| text.trim().parse::<u64>().ok())?;
     let now = unix_now();
     let backoff = INSTALL_BACKOFF.as_secs();
-    failed <= now.saturating_add(backoff) && now.saturating_sub(failed) < backoff
+    let since = now.saturating_sub(failed);
+    (failed <= now.saturating_add(backoff) && since < backoff)
+        .then(|| Duration::from_secs(backoff - since))
 }
 
 fn clear(folder: &Path) -> Result<(), InstallError> {
@@ -302,12 +345,46 @@ fn runnable(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
-fn begin_install(root: &Path, bin: &Path, version: &str) {
+fn running(folder: &Path) -> bool {
+    INSTALLING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|held| held == folder)
+}
+
+/// Says whether an install of one version can start now, before it is registered, with the
+/// same refusals [`install`] would return at once. Inputs: the engine root, npx's folder and
+/// the version. Output: none, or the refusal.
+fn can_install(root: &Path, bin: &Path, version: &str) -> Option<Begin> {
+    if pin(version).is_none() {
+        return Some(Begin::Refused("context_mode_integrity_unpinned"));
+    }
+    if !runnable(&bin.join("npm")) || !runnable(&bin.join("node")) {
+        return Some(Begin::Refused("context_mode_npm_missing"));
+    }
+    backoff_left(&failed_marker(root, version)).map(Begin::Failed)
+}
+
+/// Starts the shared install of one version in the background unless it runs already or
+/// cannot run now. Only an install that can start is registered, so [`for_check`] reads
+/// "being set up" only while one really runs. Inputs: the engine root, npx's folder and the
+/// version. Output: how it went.
+fn begin_install(root: &Path, bin: &Path, version: &str) -> Begin {
     let folder = install_folder(root, version);
+    if running(&folder) {
+        return Begin::Running;
+    }
+    if let Some(refused) = can_install(root, bin, version) {
+        return refused;
+    }
     {
         let mut installing = INSTALLING.lock().unwrap_or_else(PoisonError::into_inner);
-        if installing.contains(&folder) || installing.len() >= INSTALLS_MAX {
-            return;
+        if installing.contains(&folder) {
+            return Begin::Running;
+        }
+        if installing.len() >= INSTALLS_MAX {
+            return Begin::Refused("context_mode_installs_busy");
         }
         installing.push(folder.clone());
         assert!(installing.len() <= INSTALLS_MAX);
@@ -322,7 +399,9 @@ fn begin_install(root: &Path, bin: &Path, version: &str) {
         });
     if started.is_err() {
         finish(&folder);
+        return Begin::Refused("context_mode_installs_busy");
     }
+    Begin::Started
 }
 
 fn finish(folder: &Path) {

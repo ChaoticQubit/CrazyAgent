@@ -1504,8 +1504,10 @@ async fn start_check(
 }
 
 /// Checks an approved command server inside the boundary agents run it in, running what an
-/// agent launch runs ([`crate::context_mode::for_launch`]: the default pack's context-mode
-/// from the engine's shared install): its own project, home and temp folders under
+/// agent launch runs once the default pack's context-mode has its shared install
+/// ([`crate::context_mode::for_check`]). That spec never runs as npx here: while its install
+/// runs, after a recent failure, without npm beside npx or for a version the pack does not
+/// pin, the check is not run and says why. Its own project, home and temp folders under
 /// `mcp-checks/<id>` in the engine folder, reads of system paths, the command's folder and
 /// that shared install only, open network without binding the owner's ports, and only its
 /// own secrets. Inputs: the engine folder, server id, approved command, arguments, secret
@@ -1526,18 +1528,35 @@ fn boundary_check(
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     assert!(valid_id(id));
+    use crate::context_mode::ForCheck;
     let approved = ServerSpec::Stdio {
         command: command.to_owned(),
         args: args.to_vec(),
     };
-    let launched = crate::context_mode::for_launch(root, approved.clone());
+    let launched = match crate::context_mode::for_check(root, approved) {
+        ForCheck::Run(spec) => spec,
+        ForCheck::SettingUp => return Err("server_setting_up".into()),
+        ForCheck::Failed(left) => {
+            let most = crate::plugins::INSTALL_RETRY_MINUTES_MAX;
+            let minutes = left.as_secs().div_ceil(60).clamp(1, most);
+            return Err(crate::plugins::install_failed(minutes));
+        }
+        ForCheck::Refused("context_mode_npm_missing") => return Err("server_npm_missing".into()),
+        ForCheck::Refused("context_mode_integrity_unpinned") => {
+            return Err("server_version_unpinned".into());
+        }
+        ForCheck::Refused("context_mode_installs_busy") => {
+            return Err("server_installs_busy".into());
+        }
+        ForCheck::Refused(code) => {
+            eprintln!("plugin_check_install_refused cause={code}");
+            return Err("server_cant_start".into());
+        }
+    };
     let ServerSpec::Stdio { command, args } = &launched else {
         return Err("server_check_command_only".into());
     };
     let install = crate::context_mode::shared_install(&launched);
-    if install.is_none() && crate::context_mode::installing(root, &approved) {
-        return Err("server_setting_up".into());
-    }
     let program = Path::new(command);
     match std::fs::metadata(program) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

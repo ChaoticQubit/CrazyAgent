@@ -541,6 +541,22 @@ const PROBLEMS: &[(&str, &str)] = &[
         "context-mode is still being set up. Check again in a minute.",
     ),
     (
+        "server_install_failed",
+        "Setting up context-mode failed. The engine tries again within 10 minutes.",
+    ),
+    (
+        "server_npm_missing",
+        "context-mode needs npm and node in the same folder as npx. Install Node.js, then check again.",
+    ),
+    (
+        "server_version_unpinned",
+        "This context-mode version is not the one the default pack pins, so CrazyAgent does not install it. Use the default pack's version.",
+    ),
+    (
+        "server_installs_busy",
+        "Too many installs are running. Check again in a minute.",
+    ),
+    (
         "server_output_too_large",
         "The server sent too much output.",
     ),
@@ -635,11 +651,45 @@ pub fn check_refused(reason: &str) -> String {
     problem
 }
 
+/// The start of a recorded check problem for a failed context-mode shared install, followed
+/// by the minutes from the check until the engine tries the install again.
+const INSTALL_RETRY: &str = "server_install_failed:";
+
+/// The most minutes a failed context-mode shared install holds the next one back; the
+/// install's own backoff, rounded up, is held to this at compile time.
+pub const INSTALL_RETRY_MINUTES_MAX: u64 = 10;
+
+/// Records a check that found the context-mode shared install held back after a failure.
+/// Input: the minutes until the engine tries again, 1 to [`INSTALL_RETRY_MINUTES_MAX`].
+/// Output: the problem to record, which [`check_problem`] shows with those minutes.
+pub fn install_failed(minutes: u64) -> String {
+    assert!((1..=INSTALL_RETRY_MINUTES_MAX).contains(&minutes));
+    let problem = format!("{INSTALL_RETRY}{minutes}");
+    assert!(check_problem(&problem).contains(&format!(" {minutes} minute")));
+    problem
+}
+
 /// Turns a recorded server check problem into the sentence shown to the owner: a boundary
-/// refusal ([`check_refused`]) shows the boundary's own reason, a plugins code its plain
-/// sentence, and anything else reads as a server that can't start. Input: the recorded
-/// problem. Output: the sentence.
+/// refusal ([`check_refused`]) shows the boundary's own reason, a failed shared install
+/// ([`install_failed`]) the minutes until the retry, a plugins code its plain sentence, and
+/// anything else reads as a server that can't start. Input: the recorded problem. Output:
+/// the sentence.
 pub fn check_problem(problem: &str) -> String {
+    if let Some(left) = problem.strip_prefix(INSTALL_RETRY) {
+        let minutes = left
+            .parse::<u64>()
+            .ok()
+            .filter(|minutes| (1..=INSTALL_RETRY_MINUTES_MAX).contains(minutes));
+        return match minutes {
+            Some(minutes) => format!(
+                "Setting up context-mode failed. The engine tries again {minutes} {} after this check.",
+                if minutes == 1 { "minute" } else { "minutes" }
+            ),
+            None => plain_problem("server_install_failed")
+                .unwrap_or("The server can't start.")
+                .to_owned(),
+        };
+    }
     match problem.strip_prefix(CHECK_REFUSED) {
         Some(reason) if !reason.is_empty() => format!(
             "CrazyAgent did not run the check: {}.",
