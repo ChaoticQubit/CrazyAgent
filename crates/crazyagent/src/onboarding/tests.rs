@@ -2521,12 +2521,13 @@ fn a_graph_step_whose_graphify_is_refused_fails_with_the_refused_line() {
         needs: None,
         looked: Vec::new(),
         refused: Some(Box::new(crate::tools::Refused {
-            file: std::path::PathBuf::from("/h/.local/share/uv/tools/graphifyy/bin/python3"),
+            file: std::path::PathBuf::from("/h/tool/bin/python3"),
             why: crate::tools::Refusal::OthersCanChange(std::path::PathBuf::from(
-                "/h/.local/share/uv/python/cpython-3.13/bin/python3.13",
+                "/h/py/bin/python3.13",
             )),
         })),
     };
+    assert!(refused.line().len() <= 256, "{}", refused.line());
     assert_ne!(refused.line(), graph::GRAPHIFY_MISSING);
     assert_eq!(service::graphify_failure(&refused), refused.line());
     let deep = std::path::PathBuf::from(format!("/h/{}/python3", "deep/".repeat(40)));
