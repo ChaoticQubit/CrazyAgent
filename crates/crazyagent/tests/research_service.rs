@@ -3,7 +3,7 @@
 mod research_support;
 
 use crazyagent::protocol::CredentialRef;
-use crazyagent::research::accounts::AccountPick;
+use crazyagent::research::accounts::{AccountPick, Reach};
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
 use crazyagent::research::runner::{ResearchAccount, ResearchLimits, ResearchRunner};
 use crazyagent::research::service::{ResearchService, progress};
@@ -69,7 +69,7 @@ fn the_service_waits_for_a_pool_then_runs_research_and_reports_progress() {
     let resolver = {
         let pools = pools.clone();
         let project = project.clone();
-        move |id: &str, _harness: &str| {
+        move |id: &str, _harness: &str, _: Reach| {
             let pick = pools.lock().unwrap().get(id).cloned()?;
             Some((project.clone(), pick))
         }
@@ -156,7 +156,7 @@ fn a_service_dropped_by_a_panic_mid_run_leaves_no_agent_process() {
     let marker = runtime.state.join("agents").join("job-");
     let resolver = {
         let project = project.clone();
-        move |id: &str, _harness: &str| {
+        move |id: &str, _harness: &str, _: Reach| {
             (id == "project-c").then(|| {
                 (
                     project.clone(),
@@ -218,7 +218,7 @@ fn stopping_the_service_stops_running_agents_and_requeues_their_jobs() {
     let unknown = jobs
         .enqueue("project-unknown", "market_research", "codex", true)
         .unwrap();
-    let resolver = move |id: &str, _harness: &str| {
+    let resolver = move |id: &str, _harness: &str, _: Reach| {
         (id == "project-b").then(|| {
             (
                 project.clone(),
@@ -272,7 +272,7 @@ fn each_job_waits_on_the_account_for_its_own_harness_and_unsupported_harnesses_f
     let asked = Arc::new(Mutex::new(Vec::new()));
     let resolver = {
         let asked = asked.clone();
-        move |id: &str, harness: &str| {
+        move |id: &str, harness: &str, _: Reach| {
             asked.lock().unwrap().push(harness.to_owned());
             (id == "project-c").then(|| (project.clone(), AccountPick::NoUsableAccount))
         }
@@ -319,7 +319,7 @@ fn research_waits_with_the_rate_limit_code_and_its_end_while_every_pool_account_
     }));
     let resolver = {
         let pick = pick.clone();
-        move |id: &str, _harness: &str| {
+        move |id: &str, _harness: &str, _: Reach| {
             (id == "project-p").then(|| (project.clone(), pick.lock().unwrap().clone()))
         }
     };

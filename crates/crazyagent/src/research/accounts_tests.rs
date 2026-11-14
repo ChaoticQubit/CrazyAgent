@@ -118,3 +118,98 @@ fn research_runs_on_endpoint_accounts_with_or_without_a_key_by_wire_format() {
     );
     assert_eq!(picked("local", "claude-code"), AccountPick::NoUsableAccount);
 }
+
+/// One wait stands for several when no member can run now: a down provider's line beats a
+/// pause, the first line found stays, two pauses keep the earlier end and a pause beats
+/// having no usable account.
+#[test]
+fn a_down_providers_line_outranks_a_pause_and_the_first_line_found_is_kept() {
+    let line = |text: &str| AccountPick::Unreached { line: text.into() };
+    let paused = |until_ms| AccountPick::Paused { until_ms };
+    assert_eq!(paused(900).or_wait(line("first")), line("first"));
+    assert_eq!(line("first").or_wait(paused(400)), line("first"));
+    assert_eq!(line("first").or_wait(line("second")), line("first"));
+    assert_eq!(paused(900).or_wait(paused(400)), paused(400));
+    assert_eq!(
+        AccountPick::NoUsableAccount.or_wait(paused(900)),
+        paused(900)
+    );
+    assert_eq!(
+        AccountPick::NoUsableAccount.or_wait(AccountPick::NoUsableAccount),
+        AccountPick::NoUsableAccount
+    );
+}
+
+/// A read-only pick whose only reachable member is paused reports the down member's line,
+/// as the pick did before failover, when it ran on the down member and failed at once; the
+/// plain pick still gives the down member.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_read_only_pick_with_the_reachable_member_paused_keeps_the_down_providers_line() {
+    let (_held, down) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let up = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let up_port = up.local_addr().unwrap().port();
+    let access = ModelAccess {
+        accounts: vec![reference("owner-account")],
+        connections: vec![
+            endpoint(
+                "down",
+                &format!("http://127.0.0.1:{down}/v1"),
+                "openai-chat",
+                None,
+            ),
+            endpoint(
+                "up",
+                &format!("http://127.0.0.1:{up_port}/v1"),
+                "openai-chat",
+                None,
+            ),
+        ],
+        pools: vec![],
+    };
+    let members = [reference("down"), reference("up")];
+    let up_paused = |id: &CredentialRef| (id.as_str() == "up").then_some(5_000);
+    let pick = |reach| {
+        members_pick(
+            &access,
+            &members,
+            "codex",
+            &|_: &ModelConnection| false,
+            &up_paused,
+            &Choice::default(),
+            reach,
+        )
+    };
+    assert_eq!(
+        pick(Reach::Reachable),
+        AccountPick::Unreached {
+            line: format!(
+                "Can't reach the model provider at 127.0.0.1:{down}. Start it or pick another account in this pool, then try again."
+            ),
+        }
+    );
+    assert!(matches!(
+        pick(Reach::Unprobed),
+        AccountPick::Account { connection, .. } if connection.as_str() == "down"
+    ));
+}
+
+/// The log line for a member a read-only pick passed over names the member and its
+/// provider's host and port only: no key reference and no URL path.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_log_line_of_a_passed_over_member_names_it_and_its_providers_host_and_port_only() {
+    let (_held, down) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let account = ResearchAccount::Endpoint {
+        base_url: format!("http://127.0.0.1:{down}/private/v1"),
+        model: "some-model".into(),
+        key: Some(reference("owner-key")),
+    };
+    let line = unreached_provider_here(&account).unwrap();
+    assert_eq!(
+        skipped_line(&reference("member-0"), &line),
+        format!(
+            "read_only_pick_skipped connection=member-0 Can't reach the model provider at 127.0.0.1:{down}. Start it or pick another account in this pool, then try again."
+        )
+    );
+}
