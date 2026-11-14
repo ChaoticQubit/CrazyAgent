@@ -5,13 +5,13 @@ import {
   loadProjectCatalog, loadProjects, loadSetup, openLink, receiptState, setProjectPool, updateProjectSetup, type ProjectCatalog, type ResearchKind, type StoredSetup,
 } from "../../api-projects";
 import type { OnboardingView } from "../../engine-client";
-import { useAppSession, useLoad, type Loaded } from "../../state";
+import { readAfter, readsSoFar, useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, LoadError, Notice, NotReady, PageHeader, Panel, Skeleton, StatusBadge, navigate } from "../../ui";
 import { BasicsFields, LINKED_COPY, ResearchSwitches, RoadmapSwitch } from "../new-project/fields";
 import { basicsErrors, editRequest, type ProjectDraft } from "../new-project/wizard";
 import { MarkdownView } from "../project/markdown";
 import { ImportMoveCommit } from "../process";
-import { ONBOARDING_POLL_MS, confirmKept, confirmReady, inRepo, mappingRetry, missingLine, offerProposed, onboardingDraft, projectFolder, settled, startedProject, stepView, withProposed } from "./intake";
+import { ONBOARDING_POLL_MS, confirmKept, confirmReady, fillsForm, inRepo, mappingRetry, missingLine, offerProposed, onboardingDraft, projectFolder, settled, startedProject, stepView, withProposed } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -126,6 +126,7 @@ export function OnboardingReview({ id }: { id: string }) {
   const [stored] = useLoad(() => loadSetup(id), [id]);
   const [skipped, setSkipped] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [retried, setRetried] = useState<number | null>(null);
   const [catalog, setCatalog] = useState<Result<ProjectCatalog>>();
   const [names, setNames] = useState<string[]>([]);
   const [draft, setDraft] = useState<ProjectDraft | null>(null);
@@ -154,11 +155,11 @@ export function OnboardingReview({ id }: { id: string }) {
   }, [id]);
 
   useEffect(() => {
-    if (value === null || saved === null || !confirmReady(value).ready) return;
-    const empty = (about: string, stack: number) => about.trim() === "" && stack === 0;
-    const arrived = draft !== null && !touched && empty(draft.about, draft.stack.length) && !empty(value.draft.about, value.draft.tech_stack.length);
-    if (draft === null || arrived) setDraft(onboardingDraft(value, saved));
-  }, [value, saved, draft, touched]);
+    if (value === null || saved === null) return;
+    const fresh = retried === null || readAfter(value, retried);
+    if (fresh && retried !== null) setRetried(null);
+    if (fillsForm(value, fresh, draft, touched)) setDraft(onboardingDraft(value, saved));
+  }, [value, saved, draft, touched, retried]);
 
   const editDraft = (next: ProjectDraft) => {
     setTouched(true);
@@ -183,6 +184,7 @@ export function OnboardingReview({ id }: { id: string }) {
     const started = startedProject(result.value);
     if (started.kind === "rejected") { setProblem(intakeCopy(started)); return; }
     if (started.kind === "unconfirmed" && receiptState(result.value).kind !== "applied") { setProblem("We couldn't confirm the mapping started again. Check again in a moment."); return; }
+    setRetried(readsSoFar());
     setDraft(null);
     setTouched(false);
     setDropped([]);

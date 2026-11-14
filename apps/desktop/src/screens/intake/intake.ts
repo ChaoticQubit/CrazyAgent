@@ -701,6 +701,17 @@ export function confirmReady(view: OnboardingView): { ready: boolean; line: stri
   return { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." };
 }
 
+/** Whether the onboarding form fills from a view: never from one read before the last Retry
+ * mapping answered, only once the view can be confirmed, then while the form is empty, or when
+ * the mapping's About or tech stack arrives after an empty draft the owner has not typed in.
+ * Inputs: the view, whether it was read after the last retry, the draft on screen and whether
+ * the owner typed. Output: true to fill the form from the view. */
+export function fillsForm(view: OnboardingView, fresh: boolean, draft: ProjectDraft | null, touched: boolean): boolean {
+  if (!fresh || !confirmReady(view).ready) return false;
+  const empty = (about: string, stack: number) => about.trim() === "" && stack === 0;
+  return draft === null || (!touched && empty(draft.about, draft.stack.length) && !empty(view.draft.about, view.draft.tech_stack.length));
+}
+
 /** Whether the review offers the mapping's answers for a setup saved without them: the setup is
  * saved and the engine kept the mapping's draft as `proposed` with an About or a tech stack.
  * Input: the onboarding view. Output: true when "Use the mapping's answers" shows. */
