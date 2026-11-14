@@ -10,7 +10,7 @@ use crazyagent::projects_home::icloud::Progress;
 use crazyagent::projects_home::job::{JobState, JobView};
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::{CredentialRef, ProjectId, RequestId};
-use crazyagent::setup::{Dependency, SetupStatus};
+use crazyagent::setup::{Dependency, RefusedTool, SetupStatus};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
@@ -138,7 +138,7 @@ const GITHUB_CODES: [&str; 35] = [
     "not_connected",
 ];
 
-const SETUP_CODES: [&str; 34] = [
+const SETUP_CODES: [&str; 41] = [
     "owner_outcome_unknown_reconcile_same_identity",
     "stale_revision",
     "setup_checksum_mismatch",
@@ -170,6 +170,13 @@ const SETUP_CODES: [&str; 34] = [
     "pack_not_installed",
     "pack_id_invalid",
     "pack_too_many",
+    "tool_fix_off",
+    "tool_fix_not_needed",
+    "tool_fix_unavailable",
+    "tool_fix_changed",
+    "tool_fix_refused",
+    "tool_fix_too_large",
+    "tool_fix_failed",
     "not_connected",
     "busy",
     "owner_unavailable",
@@ -771,6 +778,33 @@ impl NativeBridge {
         generation: u64,
     ) -> Result<SetupStatus, BridgeError> {
         self.setup_change(OwnerMutation::InstallDependency { name }, generation)
+            .await
+    }
+
+    /// Removes group and other write from the tree the owner confirmed for one tool found and
+    /// passed over (DEC-162), as one owner intent. Inputs: the tool, the tree and the scope
+    /// the confirm named and a fresh draft generation. Output: the status as the fix starts;
+    /// a refusal comes back as its plain code.
+    pub async fn fix_tool_permissions(
+        &mut self,
+        name: Dependency,
+        tree: String,
+        recursive: bool,
+        generation: u64,
+    ) -> Result<SetupStatus, BridgeError> {
+        self.setup_change(OwnerMutation::FixToolPermissions { name, tree, recursive }, generation)
+            .await
+    }
+
+    /// Saves what setup offers for a tool found and passed over, the fix button or only the
+    /// command, as one owner intent. Inputs: the choice and a fresh draft generation. Output:
+    /// the new status.
+    pub async fn set_refused_tool(
+        &mut self,
+        choice: RefusedTool,
+        generation: u64,
+    ) -> Result<SetupStatus, BridgeError> {
+        self.setup_change(OwnerMutation::SetRefusedTool { choice }, generation)
             .await
     }
 

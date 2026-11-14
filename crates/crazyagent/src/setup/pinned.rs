@@ -3,6 +3,7 @@ use super::{
     Dependency, GRAPHIFY_PYTHON, InstallError, Installer, LOCK_FILE, Pin, ToolLock, Version,
     keep_only,
 };
+use crate::tools::permission_fix;
 use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -290,10 +291,12 @@ impl PinnedInstaller {
 
     /// Installs one Python tool exactly as its lock pins it: a fresh virtual environment
     /// under `setup/uv/tools/<package>`, into which uv installs only wheels whose SHA-256
-    /// the lock lists, then links to its programs in `setup/bin`. A tool already linked
-    /// from the same lock is kept. A failed install removes its environment and leaves
-    /// the old links. Inputs: the lock and the Python version. Output: `setup_install_failed`
-    /// when uv refuses a file or a program is missing, or another setup code.
+    /// the lock lists, then, with group and other write removed from setup's Pythons and the
+    /// environment (uv writes under the umask, DEC-162 R2), links to its programs in
+    /// `setup/bin`. A tool already linked from the same lock is kept. A failed install
+    /// removes its environment and leaves the old links. Inputs: the lock and the Python
+    /// version. Output: `setup_install_failed` when uv refuses a file or a program is
+    /// missing, or another setup code.
     pub(super) fn install_locked(
         &self,
         lock: &ToolLock<'_>,
@@ -331,7 +334,7 @@ impl PinnedInstaller {
         let mut env = self.env();
         env.extend([
             ("UV_CACHE_DIR", cache.into_os_string()),
-            ("UV_PYTHON_INSTALL_DIR", pythons.into_os_string()),
+            ("UV_PYTHON_INSTALL_DIR", pythons.clone().into_os_string()),
             ("UV_PYTHON_BIN_DIR", python_bin.into_os_string()),
             ("UV_NO_CONFIG", "1".into()),
             ("UV_NO_PROGRESS", "1".into()),
@@ -365,6 +368,10 @@ impl PinnedInstaller {
             });
             if !present {
                 return Err(InstallError("setup_install_failed"));
+            }
+            for tree in [&pythons, &staged] {
+                crate::tools::permission_fix::tighten_setup(&self.setup, tree)
+                    .map_err(|_| InstallError("setup_install_failed"))?;
             }
             for (program, name) in programs.iter().zip(lock.programs) {
                 link(program, &bin.join(name))?;
@@ -501,12 +508,40 @@ impl Installer for PinnedInstaller {
     }
 
     fn program(&self, name: &str) -> Option<PathBuf> {
+        self.lookup_program(name).ok()
+    }
+
+    fn lookup_program(&self, name: &str) -> Result<PathBuf, crate::tools::Missing> {
         if name.is_empty() || name.contains('/') || name.starts_with('.') {
+            return Err(super::program_not_found(name));
+        }
+        crate::tools::resolve(name, &self.places).map(|found| found.entry)
+    }
+
+    fn fix_target(&self, missing: &crate::tools::Missing) -> Option<permission_fix::Target> {
+        if missing.reason != crate::tools::Reason::Refused {
             return None;
         }
-        crate::tools::resolve(name, &self.places)
-            .ok()
-            .map(|found| found.entry)
+        permission_fix::target(missing.refused.as_deref()?, &self.places)
+    }
+
+    fn fix_permissions(
+        &self,
+        dep: Dependency,
+        confirmed: &str,
+        recursive: bool,
+    ) -> Result<permission_fix::Report, &'static str> {
+        let missing = match crate::tools::resolve(dep.program(), &self.places) {
+            Ok(_) => return Err(permission_fix::TOOL_FIX_NOT_NEEDED),
+            Err(missing) => missing,
+        };
+        let target = self
+            .fix_target(&missing)
+            .ok_or(permission_fix::TOOL_FIX_UNAVAILABLE)?;
+        if target.path.to_string_lossy() != confirmed || target.recursive != recursive {
+            return Err(permission_fix::TOOL_FIX_CHANGED);
+        }
+        permission_fix::fix(&target, &self.places)
     }
 
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError> {

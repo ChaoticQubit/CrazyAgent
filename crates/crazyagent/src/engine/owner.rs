@@ -213,6 +213,14 @@ pub enum OwnerMutation {
     InstallDependency {
         name: crate::setup::Dependency,
     },
+    FixToolPermissions {
+        name: crate::setup::Dependency,
+        tree: String,
+        recursive: bool,
+    },
+    SetRefusedTool {
+        choice: crate::setup::RefusedTool,
+    },
     SetProjectsHome {
         path: String,
     },
@@ -477,6 +485,20 @@ impl OwnerMutation {
             },
             Self::InstallDependency { name } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::Install { name: *name },
+            },
+            Self::FixToolPermissions {
+                name,
+                tree,
+                recursive,
+            } => Command::OwnerSetup {
+                action: crate::setup::SetupAction::FixPermissions {
+                    name: *name,
+                    tree: tree.clone(),
+                    recursive: *recursive,
+                },
+            },
+            Self::SetRefusedTool { choice } => Command::OwnerSetup {
+                action: crate::setup::SetupAction::SetRefusedTool { choice: *choice },
             },
             Self::RemovePackEntry { id, version } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::Remove {

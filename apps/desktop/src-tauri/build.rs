@@ -140,6 +140,8 @@ fn main() {
         "desktop_setup_status",
         "desktop_run_setup",
         "desktop_install_dependency",
+        "desktop_fix_tool_permissions",
+        "desktop_set_refused_tool",
         "desktop_set_pack_entry",
         "desktop_remove_pack_entry",
         "desktop_project_memories",

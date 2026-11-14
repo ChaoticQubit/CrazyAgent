@@ -1215,7 +1215,7 @@ fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
     std::fs::set_permissions(bin.join("graphify"), std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(
         service::engine_graphify(root.path()),
-        Some(bin.join("graphify"))
+        Ok(bin.join("graphify"))
     );
     std::fs::remove_file(bin.join("graphify")).unwrap();
     let elsewhere = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
@@ -2582,4 +2582,36 @@ fn a_graph_mark_longer_than_what_is_read_back_is_never_written() {
     let folder = tempfile::tempdir().unwrap();
     let long = "m".repeat(graph::MARK_BYTES_MAX as usize + 1);
     let _ = graph::write_mark(folder.path(), &long);
+}
+
+#[test]
+fn a_graph_step_whose_graphify_is_refused_fails_with_the_refused_line() {
+    let refused = crate::tools::Missing {
+        tool: "graphify".into(),
+        reason: crate::tools::Reason::Refused,
+        needs: None,
+        looked: Vec::new(),
+        refused: Some(Box::new(crate::tools::Refused {
+            file: std::path::PathBuf::from("/h/tool/bin/python3"),
+            why: crate::tools::Refusal::OthersCanChange(std::path::PathBuf::from(
+                "/h/py/bin/python3.13",
+            )),
+        })),
+    };
+    assert!(refused.line().len() <= 256, "{}", refused.line());
+    assert_ne!(refused.line(), graph::GRAPHIFY_MISSING);
+    assert_eq!(service::graphify_failure(&refused), refused.line());
+    let deep = std::path::PathBuf::from(format!("/h/{}/python3", "deep/".repeat(40)));
+    let long = crate::tools::Missing {
+        refused: Some(Box::new(crate::tools::Refused {
+            file: deep.clone(),
+            why: crate::tools::Refusal::OthersCanChange(deep),
+        })),
+        ..refused
+    };
+    assert!(long.line().len() > 256);
+    assert_eq!(service::graphify_failure(&long), service::GRAPHIFY_REFUSED);
+    assert!(service::GRAPHIFY_REFUSED.len() <= 256);
+    let missing = crate::setup::Dependency::Graphify.not_found();
+    assert_eq!(service::graphify_failure(&missing), graph::GRAPHIFY_MISSING);
 }

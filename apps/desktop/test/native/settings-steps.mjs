@@ -218,10 +218,10 @@ export async function reachAccountsStep(name) {
   await until(() => says("h1", "Add an account"), 15000, "the accounts step did not open");
 }
 
-/** Goes through first run the way an owner does up to the Harnesses step: saves the profile,
- * continues past the projects folder and skips tool setup, so nothing is installed.
- * Input: the owner's name. Output: none; fails when a step does not open. */
-export async function reachHarnessStep(name) {
+/** Goes through first run the way an owner does up to the Set up tools step: saves the profile
+ * and continues past the projects folder. Input: the owner's name. Output: none; fails when a
+ * step does not open. */
+export async function reachToolsStep(name) {
   await until(() => shown("#profile-name"), 60000, "first-run Welcome page did not appear");
   assert.deepEqual(await texts("h1"), ["Tell CrazyAgent about you"]);
   await type("#profile-name", name);
@@ -231,9 +231,23 @@ export async function reachHarnessStep(name) {
   await until(() => says("h1", "Choose your projects folder"), 15000, "the projects folder step did not open");
   await click("button=Continue");
   await until(() => says("h1", "Set up tools"), 15000, "the tools step did not open");
+}
+
+/** Leaves first run's Set up tools step without installing: Skip for now when offered, else
+ * Continue, then waits for the Harnesses step. Input: none. Output: none; fails when the step
+ * offers no way on or the next one does not open. */
+export async function skipToolsStep() {
   await until(async () => await shown("button=Skip for now") || await shown("button=Continue"), 30000, "the tools step offered no way on");
   await click(await shown("button=Skip for now") ? "button=Skip for now" : "button=Continue");
   await until(() => says("h1", "Choose your harnesses"), 15000, "the harnesses step did not open");
+}
+
+/** Goes through first run the way an owner does up to the Harnesses step: saves the profile,
+ * continues past the projects folder and skips tool setup, so nothing is installed.
+ * Input: the owner's name. Output: none; fails when a step does not open. */
+export async function reachHarnessStep(name) {
+  await reachToolsStep(name);
+  await skipToolsStep();
 }
 
 /** Waits for first run's Harnesses step with only RCLI picked, then continues without

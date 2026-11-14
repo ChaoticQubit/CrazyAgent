@@ -10,7 +10,8 @@ use crate::quit_settings::QuitSettings;
 use crate::sandbox_settings::SandboxSettings;
 use crate::setup::SetupStatus;
 
-/// One request from the setup page: setup status and runs, one tool installed alone,
+/// One request from the setup page: setup status and runs, one tool installed alone, a
+/// refused tool's confirmed permission fix and what setup offers for one (DEC-162),
 /// default-pack changes, the projects home folder, the GitHub account, the sandbox settings,
 /// when finished agents' worktrees go, what quitting does to team agents and the master
 /// step, time and frame size limits.
@@ -71,6 +72,16 @@ pub(in crate::tui) enum AppSetupJob {
         settings: MasterFrameSettings,
         generation: u64,
     },
+    FixPermissions {
+        name: crate::setup::Dependency,
+        tree: String,
+        recursive: bool,
+        generation: u64,
+    },
+    SetRefusedTool {
+        choice: crate::setup::RefusedTool,
+        generation: u64,
+    },
 }
 
 /// One change to an installed default-pack entry at the pack version the page showed.
@@ -104,6 +115,8 @@ pub(in crate::tui) enum AppSetupEvent {
     MasterTimeSet(Result<(), String>),
     MasterFrames(Result<MasterFrameSettings, String>),
     MasterFramesSet(Result<(), String>),
+    FixSet(Result<(), String>),
+    RefusedToolSet(Result<(), String>),
 }
 
 impl AppSetupJob {
@@ -132,6 +145,8 @@ impl AppSetupJob {
             Self::SetMasterTime { .. } => "SetMasterTime",
             Self::MasterFrames => "MasterFrames",
             Self::SetMasterFrames { .. } => "SetMasterFrames",
+            Self::FixPermissions { .. } => "FixPermissions",
+            Self::SetRefusedTool { .. } => "SetRefusedTool",
         }
     }
 }
@@ -162,6 +177,8 @@ impl AppSetupEvent {
             AppSetupJob::SetMasterTime { .. } => Self::MasterTimeSet(Err(problem)),
             AppSetupJob::MasterFrames => Self::MasterFrames(Err(problem)),
             AppSetupJob::SetMasterFrames { .. } => Self::MasterFramesSet(Err(problem)),
+            AppSetupJob::FixPermissions { .. } => Self::FixSet(Err(problem)),
+            AppSetupJob::SetRefusedTool { .. } => Self::RefusedToolSet(Err(problem)),
         }
     }
 }
@@ -330,6 +347,25 @@ impl NativeOwner {
                 "master_frame_settings_outcome_unknown",
                 lost,
             )),
+            AppSetupJob::FixPermissions {
+                name,
+                tree,
+                recursive,
+                generation,
+            } => AppSetupEvent::FixSet(applied(
+                controller
+                    .fix_tool_permissions(name, tree, recursive, generation)
+                    .await,
+                "setup_outcome_unknown",
+                lost,
+            )),
+            AppSetupJob::SetRefusedTool { choice, generation } => {
+                AppSetupEvent::RefusedToolSet(applied(
+                    controller.set_refused_tool(choice, generation).await,
+                    "setup_outcome_unknown",
+                    lost,
+                ))
+            }
         }
     }
 }

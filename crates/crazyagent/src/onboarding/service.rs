@@ -153,7 +153,7 @@ type AccountLookup = dyn Fn(&str, &CredentialRef, &[ResearchHarness]) -> Account
 struct Work {
     runner: Arc<ResearchRunner>,
     accounts: Box<AccountLookup>,
-    graphify: Box<dyn Fn() -> Option<PathBuf> + Send>,
+    graphify: Box<dyn Fn() -> Result<PathBuf, String> + Send>,
     limits: OnboardingLimits,
     tick: Duration,
     claimer: String,
@@ -186,12 +186,14 @@ impl OnboardingService {
         A: Fn(&str, &CredentialRef, &[ResearchHarness]) -> AccountPick + Send + 'static,
         G: Fn() -> Option<PathBuf> + Send + 'static,
     {
+        let graphify = move || graphify().ok_or_else(|| GRAPHIFY_MISSING.to_owned());
         Self::begin(runner, accounts, graphify, limits, tick, false)
     }
 
-    /// Starts the loop as [`OnboardingService::start`] does; with `main_graphs` set, as the
-    /// engine runs it, it also publishes each graph it builds for agents to copy and keeps
-    /// every onboarded project's main graph built and current (DEC-123).
+    /// Starts the loop as [`OnboardingService::start`] does, with `graphify` naming why the
+    /// graph step cannot run when it finds none; with `main_graphs` set, as the engine runs
+    /// it, it also publishes each graph it builds for agents to copy and keeps every
+    /// onboarded project's main graph built and current (DEC-123).
     fn begin<A, G>(
         runner: Arc<ResearchRunner>,
         accounts: A,
@@ -202,7 +204,7 @@ impl OnboardingService {
     ) -> Self
     where
         A: Fn(&str, &CredentialRef, &[ResearchHarness]) -> AccountPick + Send + 'static,
-        G: Fn() -> Option<PathBuf> + Send + 'static,
+        G: Fn() -> Result<PathBuf, String> + Send + 'static,
     {
         #[cfg(not(unix))]
         let _ = main_graphs;
@@ -563,8 +565,9 @@ fn graph_step(
     claimed: &Claimed,
     beat: &dyn Fn() -> bool,
 ) -> Step {
-    let Some(graphify) = (work.graphify)() else {
-        return Step::failed(GRAPHIFY_MISSING);
+    let graphify = match (work.graphify)() {
+        Ok(graphify) => graphify,
+        Err(line) => return Step::failed(&line),
     };
     let hidden = match crate::sandbox::hidden_paths::load(database, &claimed.project) {
         Ok(hidden) => hidden,
@@ -799,7 +802,7 @@ fn refresh_build(
     hidden: &[PathBuf],
     halted: &dyn Fn() -> bool,
 ) -> Refreshed {
-    let Some(graphify) = (work.graphify)() else {
+    let Ok(graphify) = (work.graphify)() else {
         return Refreshed::Failed;
     };
     let name = refresh_name(project, now_ms());
@@ -1269,11 +1272,36 @@ pub fn start_for_engine(
 /// The graphify an engine's graph step runs, looked up again on each step the way
 /// setup finds it: `<engine root>/setup/bin`, where setup installs it, first, then
 /// the system folders setup searches. Input: the engine root. Output: the program,
-/// or `None` when neither has one.
+/// or the line the graph step fails with when neither has one it can run.
 #[cfg(unix)]
-pub(crate) fn engine_graphify(runtime: &Path) -> Option<PathBuf> {
-    crate::setup::platform_installer(runtime).program(crate::setup::Dependency::Graphify.program())
+pub(crate) fn engine_graphify(runtime: &Path) -> Result<PathBuf, String> {
+    crate::setup::platform_installer(runtime)
+        .lookup_program(crate::setup::Dependency::Graphify.program())
+        .map_err(|missing| graphify_failure(&missing))
 }
+
+/// The line a graph step fails with when no graphify can run: why the one found was passed
+/// over (DEC-162), or where setup shows it when that line is longer than a step keeps,
+/// else that none is installed. Input: why graphify cannot run. Output: the line.
+#[cfg(unix)]
+pub(crate) fn graphify_failure(missing: &crate::tools::Missing) -> String {
+    match missing.reason {
+        crate::tools::Reason::Refused => {
+            let line = missing.line();
+            if line.len() <= super::REASON_BYTES_MAX {
+                line
+            } else {
+                GRAPHIFY_REFUSED.to_owned()
+            }
+        }
+        _ => GRAPHIFY_MISSING.to_owned(),
+    }
+}
+
+/// The graph step's line for a graphify found and passed over whose own line is longer than
+/// a step keeps: setup shows that line and the fix.
+#[cfg(unix)]
+pub(crate) const GRAPHIFY_REFUSED: &str = "graphify can't start: the file found for it is not used. Open setup in Settings to see why and how to fix it, then try again.";
 
 #[cfg(test)]
 mod claim_tests;

@@ -2619,6 +2619,36 @@ async fn desktop_install_dependency(
 }
 
 #[tauri::command]
+async fn desktop_fix_tool_permissions(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: crazyagent::setup::Dependency,
+    tree: String,
+    recursive: bool,
+    generation: u64,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .fix_tool_permissions(name, tree, recursive, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_set_refused_tool(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    choice: crazyagent::setup::RefusedTool,
+    generation: u64,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_refused_tool(choice, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_set_pack_entry(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5055,6 +5085,8 @@ native_commands! {
     desktop_setup_status,
     desktop_run_setup,
     desktop_install_dependency,
+    desktop_fix_tool_permissions,
+    desktop_set_refused_tool,
     desktop_set_pack_entry,
     desktop_remove_pack_entry,
     desktop_project_memories,

@@ -3,7 +3,7 @@ import type { Result } from "../../api";
 import { receiptState, type KeptFile, type StoredSetup } from "../../api-projects";
 import type {
   AddFolderMode, AddOverride, Dependency, DependencyName, DependencyState, FolderSize, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IcloudProgress, IntakeJob, IntentReceipt,
-  MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, ResearchKind, SetupStatus,
+  MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, RefusedTool, ResearchKind, SetupStatus, ToolFix,
 } from "../../engine-client";
 import type { Loaded } from "../../state";
 import { formatRoute, type IconName, type SidebarProject, type Tone } from "../../ui";
@@ -741,9 +741,51 @@ export function stateView(state: DependencyState): { word: string; tone: Tone; l
     case "checking": return { word: "Checking", tone: "info", line: null };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(state.reason) };
     case "unsupported": return { word: "Not supported", tone: "neutral", line: "Not supported on this system." };
+    case "refused": return { word: "Found, not used", tone: "warn", line: displayText(state.line) };
     default: return { word: "Not installed", tone: "warn", line: state.state === "missing" && state.line ? displayText(state.line) : "Setup installs it." };
   }
 }
+
+/** The fix a refused tool's row offers as a button (DEC-162): its fix while the setting is
+ * the fix button, which an engine without the setting means, and no setup run, install or
+ * check goes on. Inputs: the row and the status. Output: the fix, or null. */
+export function rowFix(dependency: Dependency, status: SetupStatus): ToolFix | null {
+  if (dependency.state.state !== "refused" || !dependency.state.fix) return null;
+  if ((status.refused_tool ?? "fix_button") !== "fix_button") return null;
+  return setupBusy(status) || toolsChecking(status) ? null : dependency.state.fix;
+}
+
+/** The command a refused tool's row shows when the setting asks for the command only.
+ * Inputs: the row and the status. Output: the command as plain text, or null. */
+export function fixCommand(dependency: Dependency, status: SetupStatus): string | null {
+  if (dependency.state.state !== "refused" || !dependency.state.fix) return null;
+  return status.refused_tool === "command_only" ? displayText(dependency.state.fix.command) : null;
+}
+
+/** Why a refused tool's last permission fix did not work, if it did not. Input: the row.
+ * Output: the sentence as plain text, or null. */
+export function fixFailed(dependency: Dependency): string | null {
+  return dependency.state.state === "refused" && dependency.state.fix_failed ? displayText(dependency.state.fix_failed) : null;
+}
+
+/** Words for the confirm before a permission fix, naming the tool, the tree it changes and the
+ * command that makes the same change. Inputs: the tool's label and the fix. Output: title,
+ * body, command, note and confirm label. */
+export function fixConfirm(label: string, fix: ToolFix): { title: string; body: string; command: string; note: string; confirm: string } {
+  const scope = fix.recursive ? " and everything in it" : "";
+  return {
+    title: `Fix permissions for ${displayText(label)}?`,
+    body: `CrazyAgent removes write access for group and others from ${displayText(fix.tree)}${scope}, the same as running this command:`,
+    command: displayText(fix.command),
+    note: "Files another user owns and links stay as they are. Nothing outside it changes.",
+    confirm: "Fix permissions",
+  };
+}
+
+export const REFUSED_TOOL_CHOICES: { value: RefusedTool; title: string; detail: string }[] = [
+  { value: "fix_button", title: "Show a fix button (recommended)", detail: "Setup offers to remove write access for others from the folder that blocks the tool, after you confirm the folder." },
+  { value: "command_only", title: "Show the command only", detail: "Setup shows the command to run yourself and never changes permissions." },
+];
 
 /** One tool row for setup. Input: the dependency. Output: its name, what it is for and its state. */
 export function dependencyView(dependency: Dependency): { title: string; about: string; word: string; tone: Tone; line: string | null } {
@@ -831,18 +873,18 @@ export function toolsChecking(status: SetupStatus): boolean {
   return status.dependencies.some((item) => item.state.state === "checking");
 }
 
-/** Tells whether a tool row offers its own Install: Node alone, while it is missing or failed
- * and no setup run, install or check goes on. Inputs: the row and the status. Output: the answer. */
+/** Tells whether a tool row offers its own Install: Node alone, while it is missing, failed or
+ * found and not used (CrazyAgent's own copy), and no setup run, install or check goes on. Inputs: the row and the status. Output: the answer. */
 export function rowInstall(dependency: Dependency, status: SetupStatus): boolean {
-  const wanted = dependency.state.state === "missing" || dependency.state.state === "failed";
+  const wanted = dependency.state.state === "missing" || dependency.state.state === "failed" || dependency.state.state === "refused";
   return INSTALL_ALONE.has(dependency.name) && wanted && !setupBusy(status) && !toolsChecking(status);
 }
 
-/** Tells whether Settings, Pack offers Install tools: a tool is missing or failed, never one
- * setup can't install on this system, and nothing is running or checking. Input: the status.
+/** Tells whether Settings, Pack offers Install tools: a tool is missing, failed or found and not
+ * used, never one setup can't install on this system, and nothing is running or checking. Input: the status.
  * Output: the answer. */
 export function toolsOffer(status: SetupStatus): boolean {
-  const wanted = status.dependencies.some((item) => item.state.state === "missing" || item.state.state === "failed");
+  const wanted = status.dependencies.some((item) => item.state.state === "missing" || item.state.state === "failed" || item.state.state === "refused");
   return wanted && !setupBusy(status) && !toolsChecking(status);
 }
 
@@ -857,7 +899,7 @@ export function setupBusy(status: SetupStatus): boolean {
 export function setupProgress(status: SetupStatus, ticked: string[]): { done: number; total: number; failed: number } {
   const states = [...status.dependencies.map((item) => item.state.state),
     ...status.pack.filter((item) => ticked.includes(item.id)).map((item) => item.state.state)];
-  const settledStates = new Set(["found", "installed", "bundled", "system", "on", "off", "failed", "unsupported"]);
+  const settledStates = new Set(["found", "installed", "bundled", "system", "on", "off", "failed", "unsupported", "refused"]);
   return { done: states.filter((state) => settledStates.has(state)).length, total: states.length, failed: states.filter((state) => state === "failed").length };
 }
 

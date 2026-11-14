@@ -417,7 +417,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_agent_scope" | "memory_move" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "learning_mark" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "install_dependency" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "create_demo" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_agent_scope" | "memory_move" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "learning_mark" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "install_dependency" | "fix_tool_permissions" | "refused_tool" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "create_demo" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -1543,7 +1543,19 @@ export type DependencyState =
   | { state: "bundled"; version: string }
   | { state: "system"; version: string; note: string }
   | { state: "failed"; reason: string }
-  | { state: "unsupported" };
+  | { state: "unsupported" }
+  | { state: "refused"; line: string; file: string; part?: string | null; fix?: ToolFix | null; fix_failed?: string | null };
+
+/** The permission fix a refused tool's row offers (DEC-162): the folder or file it changes,
+ * whether it changes as a whole tree, and the command that makes the same change. */
+export interface ToolFix {
+  tree: string;
+  recursive: boolean;
+  command: string;
+}
+
+/** What setup offers for a tool found and passed over: the fix button or the command only. */
+export type RefusedTool = "fix_button" | "command_only";
 
 export interface Dependency {
   name: DependencyName;
@@ -1573,6 +1585,7 @@ export interface SetupStatus {
   running: boolean;
   notes?: string[];
   version: number;
+  refused_tool?: RefusedTool;
 }
 
 /** Reads the projects home folder and whether the engine watches it. Output: the home. */
@@ -1711,6 +1724,19 @@ export function runSetup(pack: string[], generation: number): Promise<SetupStatu
  * Output: the status as the install starts. */
 export function installDependency(name: DependencyName, generation: number): Promise<SetupStatus> {
   return invoke<SetupStatus>("desktop_install_dependency", { name, generation });
+}
+
+/** Removes group and other write from the tree the owner confirmed for one refused tool.
+ * Inputs: its name, the tree the confirm named and a generation. Output: the status as the
+ * fix starts. */
+export function fixToolPermissions(name: DependencyName, tree: string, recursive: boolean, generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_fix_tool_permissions", { name, tree, recursive, generation });
+}
+
+/** Saves what setup offers for a tool found and passed over. Inputs: the choice and a
+ * generation. Output: the new status. */
+export function setRefusedTool(choice: RefusedTool, generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_set_refused_tool", { choice, generation });
 }
 
 /** Switches one installed pack entry on or off. Inputs: its id, the state, the pack
