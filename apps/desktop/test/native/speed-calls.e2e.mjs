@@ -1,0 +1,170 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
+import { test } from "node:test";
+import { setTimeout as pause } from "node:timers/promises";
+import { withPage } from "../browser.mjs";
+import { INTERNALS, STEP_MS, closedPort, endTerminals, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { countFindings } from "./speed-budget.mjs";
+
+const SETTLE_MS = 2000;
+const IDLE_MS = 60000;
+const LOOK_MS = 50;
+const CALLS_MAX = 20000;
+const HOME = "#/home";
+const SWITCHES = [
+  ["project", ".sidebar .nav-projects a.nav-item"],
+  ["agents", "a#tab-agents"],
+  ["settings", '.sidebar nav.app-nav a[href="#/settings/accounts"]'],
+  ["metrics", '.sidebar nav.app-nav a[href="#/metrics"]'],
+  ["home", `.sidebar nav.app-nav a[href="${HOME}"]`],
+];
+
+/** Reads one side's built artifacts, as build-speed-base.sh lays them out. Input: the
+ * environment variable naming the folder. Output: the engine, bridge and dist paths and the
+ * engine's sha256. */
+function artifacts(name) {
+  const folder = required(name, "speed artifact folder with bin/ and dist/ (build-speed-base.sh)");
+  const side = { folder, engine: join(folder, "bin", "crazyagent"), bridge: join(folder, "bin", "desktop-e2e-bridge"), dist: join(folder, "dist") };
+  for (const path of [side.engine, side.bridge, join(side.dist, "index.html")]) assert.ok(existsSync(path), `${name} has ${path}`);
+  side.sha256 = createHash("sha256").update(readFileSync(side.engine)).digest("hex");
+  assert.match(side.sha256, /^[0-9a-f]{64}$/);
+  return side;
+}
+
+/** Starts one side's real engine and bridge on a stand-in HOME, with the owner's profile and
+ * one project made through the bridge, and serves its dist. Inputs: the label, the artifacts and
+ * the evidence folder. Output: the running side. */
+async function boot(label, side, evidence) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `ca-sc-${label}-`)));
+  const runtime = join(root, "engine");
+  const home = join(root, "home");
+  for (const folder of [runtime, home, join(home, ".codex"), join(root, "projects")]) mkdirSync(folder, { recursive: true, mode: 0o700 });
+  const provider = await closedPort();
+  writeFileSync(join(runtime, "global.toml"), `version = 1
+timeout_ms = 2000
+allowed_destinations = []
+
+[model_access]
+accounts = ["local-account"]
+connections = [
+  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:${provider}/v1" }, model = { id = "e2e-model", author = "openai-compatible" }, auth = { method = "none" } },
+]
+pools = [{ id = "local-pool", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }]
+`, { mode: 0o600 });
+  const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8" };
+  const run = { label, root, runtime, log: { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false } };
+  ({ child: run.engine } = await launch(side.engine,
+    ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings"],
+    { ...env }, evidence, `${label}-engine`, /^ready$/m));
+  const started = await launch(side.bridge, [join(runtime, "engine.sock")], { ...env }, evidence, `${label}-bridge`, /^ready (\d+) ([0-9a-f]{64})$/m);
+  run.bridgeProcess = started.child;
+  run.bridge = { port: Number(started.match[1]), token: started.match[2] };
+  assert.equal((await value(run.bridge, "desktop_connect")).connected, true, `${label}: the bridge connects`);
+  assert.equal((await value(run.bridge, "desktop_save_owner_profile", { profile: { name: "Speed Owner" }, generation: 1 })).outcome, "applied");
+  assert.equal((await value(run.bridge, "desktop_set_projects_home", { path: join(root, "projects"), generation: 2 })).outcome, "applied");
+  const receipt = await value(run.bridge, "desktop_setup_project", {
+    spec: { name: "Speed Calls", repositories: [] },
+    setup: { about: "A project the call-count row walks", tech_stack: [], platforms: ["website"], research: [], pool: "local-pool", team: null, documents: [] },
+    generation: 3,
+  });
+  assert.equal(receipt.outcome, "applied", `${label}: the project is made: ${JSON.stringify(receipt)}`);
+  run.site = await serveApp(side.dist, run.bridge, [], run.log);
+  return run;
+}
+
+/** Stops one side's file server, bridge, engine and agent terminals. Input: the side. Output:
+ * none. */
+async function halt(run) {
+  if (!run) return;
+  run.log.closing = true;
+  run.site?.server.close();
+  await stop(run.bridgeProcess);
+  await stop(run.engine);
+  await endTerminals(run.runtime);
+}
+
+/** Waits until a page is usable: its address, a heading in main and no skeleton left in main.
+ * Inputs: the page's evaluate and the address. Output: none. */
+async function usable(evaluate, hash) {
+  assert.match(hash, /^#\//, "an app address");
+  const check = `location.hash === ${JSON.stringify(hash)} && Boolean(document.querySelector("main h1")) && !document.querySelector("main .skeleton")`;
+  for (const deadline = Date.now() + STEP_MS; !(await evaluate(check)); await pause(LOOK_MS)) {
+    if (Date.now() > deadline) assert.fail(`${hash} never became usable: ${await evaluate("document.body?.innerText?.slice(0, 2000) ?? ''")}`);
+  }
+}
+
+/** Counts the bridge calls made since a mark. Inputs: the call log and the mark. Output:
+ * `{ cmd: count }`. */
+function counted(log, mark) {
+  assert.ok(mark <= log.calls.length && log.calls.length <= CALLS_MAX, `the call log stays bounded: ${log.calls.length}`);
+  const counts = {};
+  for (const cmd of log.calls.slice(mark)) counts[cmd] = (counts[cmd] ?? 0) + 1;
+  return counts;
+}
+
+/** Walks one side's page the owner's way and counts its bridge calls per scenario: the start
+ * on Home, each sidebar or tab switch, and a minute idle on Home and on the project. Input: the
+ * running side. Output: `{ scenario: { cmd: count } }`. */
+async function walk(run, evidence) {
+  return withPage(async ({ evaluate, send }) => {
+    const me = owner({ evaluate, send }, evidence);
+    const counts = {};
+    await send("Page.enable");
+    await send("Page.addScriptToEvaluateOnNewDocument", { source: INTERNALS });
+    await send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+    let mark = run.log.calls.length;
+    await send("Page.navigate", { url: `http://127.0.0.1:${run.site.port}/${HOME}` });
+    await usable(evaluate, HOME);
+    await pause(SETTLE_MS);
+    counts.start = counted(run.log, mark);
+    for (const [page, selector] of SWITCHES) {
+      const hash = await evaluate(`document.querySelector(${JSON.stringify(selector)})?.getAttribute("href") ?? null`);
+      assert.ok(hash, `${run.label}: the ${page} link is shown (${selector})`);
+      mark = run.log.calls.length;
+      await me.follow(selector);
+      await usable(evaluate, hash);
+      await pause(SETTLE_MS);
+      counts[`switch:${page}`] = counted(run.log, mark);
+    }
+    mark = run.log.calls.length;
+    await pause(IDLE_MS);
+    counts["idle:home"] = counted(run.log, mark);
+    const project = await evaluate(`document.querySelector(${JSON.stringify(SWITCHES[0][1])}).getAttribute("href")`);
+    await me.follow(SWITCHES[0][1]);
+    await usable(evaluate, project);
+    await pause(SETTLE_MS);
+    mark = run.log.calls.length;
+    await pause(IDLE_MS);
+    counts["idle:project"] = counted(run.log, mark);
+    await me.capture(`${run.label}-speed-calls-end`);
+    assert.deepEqual(await evaluate("window.__e2eErrors"), [], `${run.label}: the page raised no errors`);
+    return counts;
+  });
+}
+
+test("C1: the candidate makes no bridge call 2.3.2 never made and none more than once beyond it, at start, on each page switch and in a minute idle (DEC-169)", { timeout: 900000 }, async () => {
+  const base = artifacts("SPEED_BASE");
+  const candidate = artifacts("SPEED_CANDIDATE");
+  assert.notEqual(base.sha256, candidate.sha256, "the base and the candidate are different engines");
+  process.umask(0o077);
+  const kept = process.env.E2E_EVIDENCE && isAbsolute(process.env.E2E_EVIDENCE) ? process.env.E2E_EVIDENCE : null;
+  const evidence = kept ?? realpathSync(mkdtempSync(join(tmpdir(), "ca-sc-evidence-")));
+  const counts = {};
+  for (const [label, side] of [["base", base], ["candidate", candidate]]) {
+    let run;
+    try {
+      run = await boot(label, side, evidence);
+      counts[label] = await walk(run, evidence);
+      writeFileSync(join(evidence, `calls-${label}.json`), JSON.stringify({ engine_sha256: side.sha256, folder: side.folder, counts: counts[label], calls: run.log.calls }, null, 1));
+    } finally {
+      await halt(run);
+      if (run && !kept) rmSync(run.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+  }
+  const findings = countFindings(counts.base, counts.candidate);
+  writeFileSync(join(evidence, "findings.json"), JSON.stringify(findings, null, 1));
+  assert.deepEqual(findings, [], `calls 2.4.x adds over 2.3.2 (scenario cmd base -> candidate):\n${findings.map((item) => `${item.scenario} ${item.cmd} ${item.base} -> ${item.candidate}`).join("\n")}\nevidence ${evidence}`);
+});
