@@ -272,10 +272,11 @@ export function cancelIcloudDownload(): Promise<Result<boolean>> {
 
 /** Starts the engine's intake job, which downloads what is only in iCloud and then moves or
  * copies the folder into the projects folder apart from the window, or attaches to the job
- * adding that folder already. Inputs: the absolute folder, move or copy and the overrides.
- * Output: the job, or intake_busy while another folder is being added. */
+ * adding that folder already. The native bridge checks the path by the host's own rule, so a
+ * Windows drive or network share folder goes through (RV-DS241-1). Inputs: the absolute folder,
+ * move or copy and the overrides. Output: the job, home_source_invalid for a path that is not
+ * absolute there, or intake_busy while another folder is being added. */
 export function startIntake(path: string, mode: AddFolderMode, overrides: AddOverride[]): Promise<Result<IntakeJob>> {
-  if (!path.startsWith("/")) return Promise.resolve(failure("home_source_invalid"));
   return wrap(() => intakeStart(path, mode, overrides));
 }
 

@@ -5,11 +5,13 @@ import { failureCopy } from "./api-projects";
 export type OverviewTabId = "quick_info" | "features" | "competitors" | "install_and_use";
 
 /** One generated tab: its Markdown or null before the first run, the version a save or an
- * accept must name, whether the owner edited it, a refresh's proposal waiting for review with
+ * accept must name, whether the owner edited it, whether its file came with the project's
+ * files instead, neither written by CrazyAgent nor saved by the owner, so its commands are
+ * never offered to run (RV-DS241-2), a refresh's proposal waiting for review with
  * the proposal's own version ("" without one), which an accept sends back, and
  * why its file can't be shown (`blank`, `too_large`, `not_utf8`, `not_a_file` for a link or
  * folder in the file's place, `not_a_folder` for a tabs folder that is none), null when it can. */
-export interface TabState { tab: OverviewTabId; text: string | null; version: string; edited: boolean; proposal: string | null; proposal_version: string; blocked: string | null }
+export interface TabState { tab: OverviewTabId; text: string | null; version: string; edited: boolean; foreign: boolean; proposal: string | null; proposal_version: string; blocked: string | null }
 
 /** The project's own README: its path in the project, its text and whether only the first
  * part of a long file is held. */

@@ -394,6 +394,54 @@ mod wire {
         desk.stop().await;
     }
 
+    /// RV-DS241-2 r1: the engine itself refuses a run while the project's Install & use tab
+    /// came with the project's files, whatever client asks, and runs once the owner saved
+    /// the tab; a later outside change refuses again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_run_is_refused_while_install_and_use_came_with_the_projects_files() {
+        use crate::project_overview::Tab;
+        let desk = Desk::start().await;
+        let (socket, alpha) = desk.capability("alpha").await;
+        let mut events = subscribe(&socket, alpha, "alpha").await;
+        let tab = desk.folders[0].join(".crazyagent/overview/install-and-use.md");
+        std::fs::create_dir_all(tab.parent().unwrap()).unwrap();
+        std::fs::write(&tab, "```sh\ncargo install alpha\n```\n").unwrap();
+
+        assert_eq!(
+            refused(&desk, "alpha", "cargo install alpha").await,
+            FOREIGN_TAB
+        );
+        assert!(quiet(&mut events).await, "a refused run sends no event");
+        let read = desk.desktop.overview_read(project("alpha")).await.unwrap();
+        let install = read
+            .tabs
+            .iter()
+            .find(|state| state.tab == Tab::InstallAndUse)
+            .unwrap();
+        assert!(install.foreign);
+        let saved = desk.desktop.overview_save(
+            project("alpha"),
+            Tab::InstallAndUse,
+            install.text.clone().unwrap(),
+            install.version.clone(),
+        );
+        saved.await.unwrap();
+        let asked = start_run(&desk, "alpha", "cargo install alpha");
+        let (request, sent, _) = next_run(&mut events).await;
+        assert_eq!(sent, "cargo install alpha", "the owner's saved tab runs");
+        assert_eq!(ack(&socket, alpha, "alpha", &request).await, done());
+        assert!(asked.await.unwrap().is_ok());
+
+        std::fs::write(&tab, "```sh\ncargo install beta\n```\n").unwrap();
+        assert_eq!(
+            refused(&desk, "alpha", "cargo install beta").await,
+            FOREIGN_TAB,
+            "an outside change after the save is foreign again"
+        );
+        assert!(quiet(&mut events).await);
+        desk.stop().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_run_setting_is_read_and_saved_per_project_through_the_owner_clients() {
         let desk = Desk::start().await;

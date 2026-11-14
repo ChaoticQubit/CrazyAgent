@@ -102,10 +102,14 @@ CREATE TABLE IF NOT EXISTS project_overview_tabs(
   project TEXT NOT NULL,
   tab TEXT NOT NULL CHECK(tab IN ('quick_info','features','competitors','install_and_use')),
   seal TEXT,
+  owner_seal TEXT,
   proposal TEXT CHECK(proposal IS NULL OR length(CAST(proposal AS BLOB)) <= 24576),
   PRIMARY KEY(project, tab)
 );
 ";
+
+/// Adds the owner's seal to a tabs table made before it was kept (RV-DS241-2).
+const OWNER_SEAL_COLUMN: &str = "ALTER TABLE project_overview_tabs ADD COLUMN owner_seal TEXT";
 
 /// One of the four Overview tabs an agent writes. The README tab is the repository's own
 /// file and is not one of these.
@@ -194,16 +198,20 @@ impl Apply {
 }
 
 /// One tab as the owner sees it: the file's text, the version an edit or an accept must
-/// name, whether the owner changed it since the engine last wrote it, a waiting proposal
-/// with the version an accept must name for it (empty without a proposal), and for a file
-/// the engine does not read the reason code (`blank`, `too_large`,
-/// `not_utf8`, `not_a_file`, `not_a_folder`), `None` for a readable or missing file.
+/// name, whether the owner saved it here since the engine last wrote it, whether it came
+/// with the project's files instead, neither written by the engine nor saved by the owner,
+/// so no client offers to run its commands (RV-DS241-2; false from an older engine), a
+/// waiting proposal with the version an accept must name for it (empty without one), and
+/// for a file the engine does not read the reason code (`blank`, `too_large`, `not_utf8`,
+/// `not_a_file`, `not_a_folder`), `None` for a readable or missing file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabState {
     pub tab: Tab,
     pub text: Option<String>,
     pub version: String,
     pub edited: bool,
+    #[serde(default)]
+    pub foreign: bool,
     pub proposal: Option<String>,
     pub proposal_version: String,
     pub blocked: Option<String>,
@@ -348,10 +356,32 @@ fn refresh_named(name: &str) -> Option<Refresh> {
         .find(|refresh| refresh_name(*refresh) == name)
 }
 
-/// Creates the Overview tables. Input: the engine connection. Output: unit, or
-/// `overview_unavailable`.
+/// Creates the Overview tables, and adds the owner's seal to a tabs table made before it was
+/// kept (RV-DS241-2); a connection that lost the race to add it finds it added. Input: the
+/// engine connection. Output: unit, or `overview_unavailable`.
 pub fn initialize(db: &Connection) -> Result<(), EngineError> {
-    db.execute_batch(SCHEMA).map_err(unavailable)
+    db.execute_batch(SCHEMA).map_err(unavailable)?;
+    if owner_sealed(db)? {
+        return Ok(());
+    }
+    let added = db.execute_batch(OWNER_SEAL_COLUMN);
+    if added.is_err() && !owner_sealed(db)? {
+        return Err(unavailable(()));
+    }
+    assert!(owner_sealed(db)?);
+    Ok(())
+}
+
+/// Whether the tabs table keeps the owner's seal. Input: the engine connection. Output: the
+/// answer, or `overview_unavailable`.
+fn owner_sealed(db: &Connection) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('project_overview_tabs')
+         WHERE name='owner_seal')",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
 }
 
 /// Opens the project's tab folder beneath its `.crazyagent` folder, each opened once and
@@ -641,33 +671,61 @@ fn state(db: &Connection, project: &ProjectId) -> Result<State, EngineError> {
     })
 }
 
-/// The stored seal and proposal of one tab. Inputs: the connection, the project and the
-/// tab. Output: the seal of the last text the engine wrote and the waiting proposal, both
-/// `None` while there is no row.
-fn tab_row(
-    db: &Connection,
-    project: &ProjectId,
-    tab: Tab,
-) -> Result<(Option<String>, Option<String>), EngineError> {
+/// One tab's stored row: the seal of the last text the engine wrote, the seal of the last
+/// text the owner saved here since, and the waiting proposal, each `None` while unset.
+#[derive(Default)]
+struct TabRow {
+    seal: Option<String>,
+    owner_seal: Option<String>,
+    proposal: Option<String>,
+}
+
+/// The stored row of one tab. Inputs: the connection, the project and the tab. Output: the
+/// row, all `None` while there is none.
+fn tab_row(db: &Connection, project: &ProjectId, tab: Tab) -> Result<TabRow, EngineError> {
     let row = db
         .query_row(
-            "SELECT seal,proposal FROM project_overview_tabs WHERE project=?1 AND tab=?2",
+            "SELECT seal,owner_seal,proposal FROM project_overview_tabs
+             WHERE project=?1 AND tab=?2",
             params![project.as_str(), tab.name()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| {
+                Ok(TabRow {
+                    seal: row.get(0)?,
+                    owner_seal: row.get(1)?,
+                    proposal: row.get(2)?,
+                })
+            },
         )
         .optional()
         .map_err(unavailable)?;
-    Ok(row.unwrap_or((None, None)))
+    Ok(row.unwrap_or_default())
 }
 
-/// Records that the engine wrote `text` as the tab's file: stores its seal and drops any
-/// proposal. Inputs: the connection, the project, the tab and the written text. Output:
-/// unit, or `overview_unavailable`.
+/// Records that the engine wrote `text` as the tab's file: stores its seal, forgets the
+/// owner's, since the engine wrote last, and drops any proposal. Inputs: the connection,
+/// the project, the tab and the written text. Output: unit, or `overview_unavailable`.
 fn wrote(db: &Connection, project: &ProjectId, tab: Tab, text: &str) -> Result<(), EngineError> {
     let stored = db
         .execute(
             "INSERT INTO project_overview_tabs(project,tab,seal,proposal) VALUES(?1,?2,?3,NULL)
-             ON CONFLICT(project,tab) DO UPDATE SET seal=excluded.seal, proposal=NULL",
+             ON CONFLICT(project,tab) DO UPDATE SET seal=excluded.seal, owner_seal=NULL,
+               proposal=NULL",
+            params![project.as_str(), tab.name(), overview_seal(text)],
+        )
+        .map_err(unavailable)?;
+    assert_eq!(stored, 1);
+    Ok(())
+}
+
+/// Records that the owner saved `text` as the tab's file through the engine, so a read
+/// knows it as the owner's and not as one the project's files brought (RV-DS241-2).
+/// Inputs: the connection, the project, the tab and the saved text. Output: unit, or
+/// `overview_unavailable`.
+fn saved(db: &Connection, project: &ProjectId, tab: Tab, text: &str) -> Result<(), EngineError> {
+    let stored = db
+        .execute(
+            "INSERT INTO project_overview_tabs(project,tab,owner_seal) VALUES(?1,?2,?3)
+             ON CONFLICT(project,tab) DO UPDATE SET owner_seal=excluded.owner_seal",
             params![project.as_str(), tab.name(), overview_seal(text)],
         )
         .map_err(unavailable)?;
@@ -702,7 +760,7 @@ pub fn offer(
     let replaces = match &now {
         None => true,
         Some(now) => {
-            let (seal, _) = tab_row(db, project, tab)?;
+            let seal = tab_row(db, project, tab)?.seal;
             let edited = seal.as_deref() != Some(overview_seal(now).as_str());
             !edited && state(db, project)?.apply == Apply::WhenUnedited
         }
@@ -724,10 +782,11 @@ pub fn offer(
 }
 
 /// Saves the owner's edit of a tab as its file, only at the version the owner saw, checked
-/// under the one-writer lock. The stored seal is kept, so the tab shows as edited; a
-/// proposal equal to the saved text is dropped. Inputs: the connection, the project, its
-/// folder, the tab, the text and the version. Output: unit, or the refusal
-/// (`overview_tab_changed` at another version).
+/// under the one-writer lock. The engine's seal is kept and the owner's is stored, so the
+/// tab shows as the owner's edit, never as a file the project's files brought; a proposal
+/// equal to the saved text is dropped. Inputs: the connection, the project, its folder, the
+/// tab, the text and the version. Output: unit, or the refusal (`overview_tab_changed` at
+/// another version).
 pub fn save(
     db: &Connection,
     project: &ProjectId,
@@ -744,6 +803,7 @@ pub fn save(
         return Err(failure(TAB_CHANGED));
     }
     write_tab(&place, tab, text, matches!(found, Found::Missing))?;
+    saved(db, project, tab, text)?;
     db.execute(
         "UPDATE project_overview_tabs SET proposal=NULL
          WHERE project=?1 AND tab=?2 AND proposal=?3",
@@ -768,7 +828,7 @@ pub fn accept(
     proposal_version: &str,
 ) -> Result<(), EngineError> {
     let _writing = writing();
-    let (_, proposal) = tab_row(db, project, tab)?;
+    let proposal = tab_row(db, project, tab)?.proposal;
     let proposal = proposal.ok_or_else(|| failure(NO_PROPOSAL))?;
     if overview_seal(&proposal) != proposal_version {
         return Err(failure(PROPOSAL_CHANGED));
@@ -1015,6 +1075,62 @@ pub fn competitors(
     })
 }
 
+/// One tab as the Overview shows it: its file, whose seal it carries, and its proposal.
+/// Inputs: the connection, the project, its tabs folder and the tab. Output: the tab's
+/// state, or `overview_unavailable`.
+fn tab_state(
+    db: &Connection,
+    project: &ProjectId,
+    place: &Place,
+    tab: Tab,
+) -> Result<TabState, EngineError> {
+    let row = tab_row(db, project, tab)?;
+    let found = match place {
+        Place::Open(folder) => found_in(folder, tab),
+        Place::NotAFolder => Found::Blocked(BLOCKED_NOT_A_FOLDER),
+        Place::Missing | Place::NoLayout => Found::Missing,
+    };
+    let (text, blocked) = match found {
+        Found::Text(text) => (Some(text), None),
+        Found::Blocked(why) => (None, Some(why.to_owned())),
+        Found::Missing => (None, None),
+    };
+    let version = text.as_deref().map(overview_seal).unwrap_or_default();
+    let engine_wrote = row.seal.as_deref() == Some(version.as_str());
+    let owner_saved = row.owner_seal.as_deref() == Some(version.as_str());
+    let edited = text.is_some() && !engine_wrote && owner_saved;
+    let foreign = text.is_some() && !engine_wrote && !owner_saved;
+    assert!(!(edited && foreign));
+    let proposal = row.proposal;
+    let proposal_version = proposal.as_deref().map(overview_seal).unwrap_or_default();
+    assert_eq!(proposal.is_none(), proposal_version.is_empty());
+    Ok(TabState {
+        tab,
+        text,
+        version,
+        edited,
+        foreign,
+        proposal,
+        proposal_version,
+        blocked,
+    })
+}
+
+/// Whether a tab's file came with the project's files, by the same check the Overview's
+/// read shows, with none of the read's other work: neither the engine wrote it nor the
+/// owner saved it here (RV-DS241-2). Inputs: the connection, the project, its folder and
+/// the tab. Output: the answer, false with no file, or `overview_unavailable`.
+pub fn tab_foreign(
+    db: &Connection,
+    project: &ProjectId,
+    folder: &Path,
+    tab: Tab,
+) -> Result<bool, EngineError> {
+    let state = tab_state(db, project, &tabs_folder(folder, false), tab)?;
+    assert!(!state.foreign || state.text.is_some());
+    Ok(state.foreign)
+}
+
 /// Reads the project's Overview. A read makes a project's row stale and due at once while
 /// no writing run has ever started for it under After each landed change set, even when a
 /// setting saved earlier made the row, which asks for the first writing run; a project with
@@ -1045,30 +1161,7 @@ pub fn read(
     let state = state(db, project)?;
     let mut tabs = Vec::with_capacity(Tab::ALL.len());
     for tab in Tab::ALL {
-        let (seal, proposal) = tab_row(db, project, tab)?;
-        let found = match &place {
-            Place::Open(folder) => found_in(folder, tab),
-            Place::NotAFolder => Found::Blocked(BLOCKED_NOT_A_FOLDER),
-            Place::Missing | Place::NoLayout => Found::Missing,
-        };
-        let (text, blocked) = match found {
-            Found::Text(text) => (Some(text), None),
-            Found::Blocked(why) => (None, Some(why.to_owned())),
-            Found::Missing => (None, None),
-        };
-        let version = text.as_deref().map(overview_seal).unwrap_or_default();
-        let edited = text.is_some() && seal.as_deref() != Some(version.as_str());
-        let proposal_version = proposal.as_deref().map(overview_seal).unwrap_or_default();
-        assert_eq!(proposal.is_none(), proposal_version.is_empty());
-        tabs.push(TabState {
-            tab,
-            text,
-            version,
-            edited,
-            proposal,
-            proposal_version,
-            blocked,
-        });
+        tabs.push(tab_state(db, project, &place, tab)?);
     }
     assert_eq!(tabs.len(), Tab::ALL.len());
     let failure = state
