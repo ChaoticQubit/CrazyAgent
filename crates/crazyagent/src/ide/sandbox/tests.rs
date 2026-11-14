@@ -2941,9 +2941,9 @@ fn the_remote_settings_lock_holds_against_a_long_s_spelling() {
 
 /// The project instructions file every later agent and the master get as the owner's text
 /// is read-only to the IDE server under every agent folders choice (SA vid 11): no
-/// overwrite, replace, removal, move, make where missing or case variant, nor a write of
-/// the file an owner's save stages before its rename (r2), while the rest of the project
-/// stays writable. The owner edits it through the app.
+/// overwrite, replace, removal, move, hard link, make where missing or case variant, nor a
+/// write of the file an owner's save stages before its rename (r2), while the rest of the
+/// project stays writable. The owner edits it through the app.
 #[test]
 fn the_project_instructions_file_is_read_only_to_the_ide_server() {
     let scratch = tempfile::Builder::new()
@@ -3001,6 +3001,8 @@ fn the_project_instructions_file_is_read_only_to_the_ide_server() {
         assert!(!sh(&profile, r#"/bin/mv "$1" "$1-aside""#, &instructions));
         let planted = r#"printf 'DUMMY-MARKER' > "$1-new" && /bin/mv "$1-new" "$1""#;
         assert!(!sh(&profile, planted, &instructions));
+        assert!(!sh(&profile, r#"/bin/ln "$1" "$1-alias""#, &instructions));
+        assert!(!state.join("instructions.md-alias").exists());
         assert_eq!(fs::read_to_string(&instructions).unwrap(), owner);
         let staged = crate::agent_home::staged(
             &crate::agent_home::project_staging(&state),

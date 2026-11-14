@@ -538,3 +538,36 @@ fn a_project_agent_cannot_reach_the_file_an_instructions_save_stages() {
     assert_eq!(fs::read_to_string(&staged).unwrap(), "Owner rule.\n");
     allowed(&sandbox, &profile, "printf x > .crazyagent/note.txt");
 }
+
+/// SA vid 11 r2 (rv-sec3 addendum): a project agent makes no hard link of a protected file
+/// under a writable name, through which it would rewrite the owner's file in place: the
+/// project instructions, a context file, the git config and a git hook all stay unlinked
+/// and unchanged, while a link of a plain project file still lands.
+#[test]
+fn a_project_agent_links_no_protected_file_under_another_name() {
+    let case = case();
+    let state = case.project.join(".crazyagent");
+    let hooks = case.project.join(".git").join("hooks");
+    fs::create_dir_all(state.join("context")).unwrap();
+    fs::create_dir_all(&hooks).unwrap();
+    let sandbox = sandbox(&case);
+    let profile = case.profiles.join("linked.sb");
+    let alias = case.project.join("alias");
+    for file in [
+        state.join("instructions.md"),
+        state.join("context").join("brief.md"),
+        case.project.join(".git").join("config"),
+        hooks.join("pre-commit"),
+    ] {
+        fs::write(&file, "owner\n").unwrap();
+        refused(
+            &sandbox,
+            &profile,
+            &format!("/bin/ln {} alias", quoted(&file)),
+            &alias,
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), "owner\n");
+    }
+    fs::write(case.project.join("notes.txt"), "plain\n").unwrap();
+    allowed(&sandbox, &profile, "/bin/ln notes.txt notes-link.txt");
+}
