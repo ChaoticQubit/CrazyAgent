@@ -158,9 +158,6 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "home_copy_linked_checkout" => {
             "This folder is a git worktree or submodule of another repository, so a copy would still share it. Use it where it is, or copy the main repository folder."
         }
-        "home_copy_unverified" | "home_add_unverified" => {
-            "The copy did not match the original, so the original was kept."
-        }
         "home_add_cancelled" => "Adding the folder stopped. Nothing was moved or copied.",
         "home_add_interrupted" => {
             "Adding the folder stopped part way. Check your projects folder before trying again."
