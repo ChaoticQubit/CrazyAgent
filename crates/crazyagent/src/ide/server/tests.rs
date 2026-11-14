@@ -1319,7 +1319,7 @@ fn a_confined_start_never_reuses_an_earlier_start_s_temp_folder() {
     fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
     let next = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
     let profile = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap_or_default();
-    fs::set_permissions(&shut, fs::Permissions::from_mode(0o700)).unwrap();
+    let _ = fs::set_permissions(&shut, fs::Permissions::from_mode(0o700));
     for made in [Some(&first), next.as_ref().ok()].into_iter().flatten() {
         let _ = fs::remove_dir_all(made);
     }
