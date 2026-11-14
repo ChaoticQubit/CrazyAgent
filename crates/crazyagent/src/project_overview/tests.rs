@@ -1848,9 +1848,7 @@ fn a_writing_run_whose_provider_refuses_connections_fails_at_once_with_the_reach
     std::fs::create_dir(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
     let runner =
         ResearchRunner::without_codex(&database, &state, ResearchLimits::default()).unwrap();
-    let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let port = closed.local_addr().unwrap().port();
-    drop(closed);
+    let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "local-model".into(),
