@@ -217,13 +217,6 @@ pub(crate) fn owner_excludes_setting() -> Option<String> {
     Some(format!("core.excludesFile={}", path.to_str()?))
 }
 
-/// The owner's global ignore file setting. Other systems: none, as before. Written, not
-/// tested.
-#[cfg(not(unix))]
-pub(crate) fn owner_excludes_setting() -> Option<String> {
-    None
-}
-
 /// A repository the engine runs git on through a git folder and work tree it computed
 /// itself, never a `.git` file in the work tree. Every call runs the real git, not the
 /// `/usr/bin/git` xcrun shim where xcrun resolves it, with a cleared environment, no
