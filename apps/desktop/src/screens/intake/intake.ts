@@ -223,10 +223,14 @@ export function jobRunning(job: IntakeJob | null): boolean {
 }
 
 /** Whether a start that came back with an error reached the engine all the same, read from the
- * job after it: a job adding the same folder that runs or ended done. Inputs: the folder and the
- * job read after the start, if any. Output: true when Add folder should go Home. */
-export function startReached(source: string, after: IntakeJob | null): boolean {
-  return after !== null && after.source === source && (jobRunning(after) || after.state.state === "done");
+ * job after it: a job adding the same folder that runs, or ended done and is not the job read
+ * just before the start. Without that read an ended job may be an older add, so it never counts.
+ * Inputs: the folder, the job read after and the read before. Output: true to go Home. */
+export function startReached(source: string, after: IntakeJob | null, before: Result<IntakeJob | null>): boolean {
+  if (after === null || after.source !== source) return false;
+  if (jobRunning(after)) return true;
+  if (after.state.state !== "done" || before.kind !== "ok") return false;
+  return before.value === null || before.value.id !== after.id;
 }
 
 /** How long until the app reads the intake job again: every second while one runs, else at
