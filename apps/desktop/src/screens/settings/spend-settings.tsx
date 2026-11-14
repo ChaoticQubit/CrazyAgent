@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { SPEND_DEFAULTS, setSpendSettings, usageRefusal, type AllLimited, type LimitedPool, type ResetsSource, type SpendConfirm, type SpendSettings, type SpendView, type UsageReport } from "../../api-usage";
 import { sameJson, useHeld, type Loaded } from "../../state";
-import { LoadError, Notice, NotReady, Segmented, SettingLine, SettingSection } from "../../ui";
+import { LoadError, Notice, Segmented, SettingLine, SettingSection } from "../../ui";
 import { andList } from "./account-drawer";
 import { SpendReset } from "./spend-reset";
 
@@ -136,7 +136,7 @@ export function SpendSettingsSection({ usage, onDone, onRetry }: { usage: Loaded
     return <SettingSection title="Free resets" about={SPEND_ABOUT}><div className="set-body">
       {usage.kind === "loading" && <p className="secondary" role="status">Loading your free resets settings...</p>}
       {usage.kind === "error" && <LoadError message={usage.message} onRetry={onRetry} />}
-      {(usage.kind === "not_ready" || usage.kind === "ok") && <NotReady what="Free resets settings" compact />}
+      {(usage.kind === "not_ready" || usage.kind === "ok") && <p className="secondary" role="status">The free resets settings aren't in this build yet.</p>}
     </div></SettingSection>;
   }
   return <SpendSettingsView settings={shown} refused={refused} onChange={change} />;
