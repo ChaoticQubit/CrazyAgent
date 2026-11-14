@@ -198,3 +198,28 @@ test("Free resets shows no choice while the usage read loads, failed or has no s
   for (const label of ["Off", "No hint", "As Claude Code"]) assert.match(stored, new RegExp(`aria-checked="true"[^>]*>${label}<`), label);
   for (const label of ["Confirm each", "Notice", "Don&#x27;t read"]) assert.match(stored, new RegExp(`aria-checked="false"[^>]*>${label}<`), label);
 });
+
+test("free resets saves go one at a time in the order picked, the ones picked meanwhile collapse to the latest, and only that one answers", async () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  const sent = [];
+  const answers = [];
+  const push = section.latestSaves((value) => { sent.push(value); return new Promise((resolve) => answers.push(resolve)); });
+  const done = { kind: "ok", value: undefined };
+  const asClaudeCode = push(settings("confirm_each", "notice", "as_claude_code"));
+  const throughClaudeCode = push(settings("confirm_each", "notice", "through_claude_code"));
+  const dontRead = push(settings("confirm_each", "notice", "off"));
+  await tick();
+  assert.deepEqual(sent.map((value) => value.resets_source), ["as_claude_code"]);
+  answers[0]({ kind: "error", code: "usage_unavailable", message: "Usage couldn't be read. Try again." });
+  assert.equal(await asClaudeCode, null);
+  assert.equal(await throughClaudeCode, null);
+  await tick();
+  assert.deepEqual(sent.map((value) => value.resets_source), ["as_claude_code", "off"]);
+  answers[1](done);
+  assert.deepEqual(await dontRead, done);
+  const later = push(settings("one_click", "notice", "off"));
+  await tick();
+  assert.equal(sent.length, 3);
+  answers[2](done);
+  assert.deepEqual(await later, done);
+});
