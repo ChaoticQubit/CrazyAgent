@@ -2496,8 +2496,12 @@ impl ProjectScreen {
 
     /// Opens the remove ask for a delete an engine stop cut short, as x does, with Delete
     /// everything picked once the engine's preview offers it; the exact name is still typed.
-    /// Takes the screen. Returns nothing.
+    /// Does nothing while another box is open, which keeps its keys. Takes the screen.
+    /// Returns nothing.
     pub fn ask_delete_again(&mut self) {
+        if self.boxed() {
+            return;
+        }
         self.close_remove();
         self.confirm_remove = true;
         self.removal_read_ms = None;
@@ -3198,7 +3202,10 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "move_project_busy" => {
             "Stop the team first (Stop all on the Team tab), then move the project. If its agents are still stopping, try again in a few seconds."
         }
-        code if code.starts_with("move_project_") || code.starts_with("home_") => {
+        code if code.starts_with("move_project_")
+            || code.starts_with("home_")
+            || code.starts_with("delete_") =>
+        {
             return crate::projects_home::plain_problem(code).map_or_else(
                 || coded("That didn't work. Try again.", code),
                 str::to_owned,

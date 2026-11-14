@@ -5,19 +5,23 @@ use rusqlite::Connection;
 
 /// Marks one Delete everything in the action ledger before it moves anything, so an engine
 /// stop that cuts it short is shown to the owner on the next start, never forgotten. A mark
-/// of the same project the owner was shown is closed first, since this delete replaces it.
-/// Call it inside the plan's write, after every refusal. Inputs: the plan's transaction, the
-/// project and the plan's exchange. Output: Ok, or the ledger's code, which refuses the
-/// delete with nothing written.
+/// of the same project the owner was shown is closed first, since this delete replaces it;
+/// a live mark means another Delete everything of the project still runs, which refuses this
+/// one. Call it inside the plan's write, after every other refusal. Inputs: the plan's
+/// transaction, the project and the plan's exchange. Output: Ok(Ok), Ok(Err) with
+/// `delete_in_progress`, or the ledger's failure; on either refusal the caller drops the write.
 pub(crate) fn begin(
     tx: &Connection,
     project: &ProjectId,
     exchange: i64,
-) -> Result<(), EngineError> {
+) -> Result<Result<(), &'static str>, EngineError> {
     assert!(exchange > 0);
     ledger::initialize(tx)?;
     if let Some(earlier) = ledger::pending_key(tx, ActionKind::ProjectDelete, project.as_str())? {
         assert_eq!(earlier.key, project.as_str());
+        if ledger::notice(&earlier).is_none() {
+            return Ok(Err("delete_in_progress"));
+        }
         ledger::finish(tx, earlier.id, Outcome::Unknown)?;
     }
     let payload = serde_json::json!({ "project": project.as_str(), "exchange": exchange });
@@ -29,7 +33,7 @@ pub(crate) fn begin(
     )?;
     let marked = ledger::pending_key(tx, ActionKind::ProjectDelete, project.as_str())?;
     assert!(marked.is_some_and(|action| exchange_of(&action) == Some(exchange)));
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// Ends the mark of one Delete everything once its exchange settled: done when the project's

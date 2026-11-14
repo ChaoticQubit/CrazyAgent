@@ -1277,6 +1277,12 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "delete_research_running" => {
             "Its research is still queued or running. Cancel it or let it finish, then delete the project. Nothing was deleted."
         }
+        "delete_in_progress" => {
+            "This project is already being deleted. Wait for that to finish; nothing else was changed."
+        }
+        "delete_not_recorded" => {
+            "Nothing was deleted. CrazyAgent couldn't record the delete before starting it. Try again; if it keeps failing, restart CrazyAgent."
+        }
         "delete_platform_unqualified" => {
             "Delete everything is only on macOS for now. Remove the project from the dashboard instead."
         }

@@ -477,16 +477,31 @@ fn a_delete_mark_shown_to_the_owner_outlives_a_settle_of_a_reused_exchange() {
     mark("gone", 8);
     projects_home::delete_settle(&connection, None).unwrap();
     let shown = marks();
-    assert_eq!(shown.len(), 1, "a start ends the mark of a project that went: {shown:?}");
+    assert_eq!(
+        shown.len(),
+        1,
+        "a start ends the mark of a project that went: {shown:?}",
+    );
     assert_eq!(shown[0].0, "kept");
     assert_eq!(outcome("gone").as_deref(), Some("done"));
     let payload: serde_json::Value = serde_json::from_str(&shown[0].1).unwrap();
     assert_eq!(payload["unknown"], true, "the kept project's mark is shown");
-    assert!(payload.get("exchange").is_none(), "a shown mark names no exchange");
+    assert!(
+        payload.get("exchange").is_none(),
+        "a shown mark names no exchange",
+    );
     mark("next", 7);
     projects_home::delete_settle(&connection, Some(7)).unwrap();
     let left = marks();
-    assert_eq!(left.len(), 1, "a settle ends only the live mark of its number: {left:?}");
+    assert_eq!(
+        left.len(),
+        1,
+        "a settle ends only the live mark of its number: {left:?}",
+    );
     assert_eq!(left[0].0, "kept");
-    assert_eq!(outcome("next").as_deref(), Some("failed"), "its records stayed");
+    assert_eq!(
+        outcome("next").as_deref(),
+        Some("failed"),
+        "its records stayed",
+    );
 }

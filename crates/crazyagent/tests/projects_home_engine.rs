@@ -1844,11 +1844,23 @@ async fn an_engine_start_sweeps_the_staging_an_engine_stop_left_in_the_home() {
     engine.restart().await;
     assert!(!new.exists(), "a New Project's staging");
     assert!(!adding.exists(), "an add's staging with no add row");
-    assert!(unlike.join("src/a.txt").is_file(), "a name the engine never makes");
-    assert!(nested.join("src/a.txt").is_file(), "a staging name below the home");
+    assert!(
+        unlike.join("src/a.txt").is_file(),
+        "a name the engine never makes",
+    );
+    assert!(
+        nested.join("src/a.txt").is_file(),
+        "a staging name below the home",
+    );
     let kept = fs::symlink_metadata(&link).unwrap();
-    assert!(kept.file_type().is_symlink(), "a link with a staging name stays");
-    assert!(outside.join("src/a.txt").is_file(), "the link's target is untouched");
+    assert!(
+        kept.file_type().is_symlink(),
+        "a link with a staging name stays",
+    );
+    assert!(
+        outside.join("src/a.txt").is_file(),
+        "the link's target is untouched",
+    );
     engine.stop().await;
 }
 

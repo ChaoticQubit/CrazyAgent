@@ -397,6 +397,10 @@ fn a_delete_cut_short_says_its_agents_stay_stopped_and_how_to_start_them() {
         "Ctrl-D Keep the project",
         "Ctrl-X Delete again",
     ] {
-        assert!(words.contains(wanted), "{wanted:?} is shown whole:\n{}", lines.join("\n"));
+        assert!(
+            words.contains(wanted),
+            "{wanted:?} is shown whole:\n{}",
+            lines.join("\n"),
+        );
     }
 }

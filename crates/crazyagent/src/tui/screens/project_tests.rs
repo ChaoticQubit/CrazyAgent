@@ -4770,7 +4770,10 @@ fn every_delete_refusal_reads_its_own_sentence() {
         "delete_shared_folder",
     ] {
         let sentence = plain_problem(code);
-        assert!(!sentence.contains("(code: "), "{code} reads as a sentence: {sentence}");
+        assert!(
+            !sentence.contains("(code: "),
+            "{code} reads as a sentence: {sentence}",
+        );
     }
     let unrecorded = plain_problem("delete_not_recorded");
     assert!(

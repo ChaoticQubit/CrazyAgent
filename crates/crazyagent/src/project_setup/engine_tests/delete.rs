@@ -773,7 +773,11 @@ async fn a_delete_cut_short_by_an_engine_stop_waits_for_keep_or_delete_again() {
         .delete_project(project.clone(), NAME.into(), 2)
         .await
         .unwrap();
-    assert_eq!(result(response), OwnerResult::Applied, "Delete again deletes");
+    assert_eq!(
+        result(response),
+        OwnerResult::Applied,
+        "Delete again deletes",
+    );
     assert_eq!(kept(&engine), 0);
     let deadline = std::time::Instant::now() + ENGINE_WAIT;
     while engine.rows(DELETES_PENDING) != 0 && std::time::Instant::now() < deadline {
@@ -805,7 +809,11 @@ async fn removing_a_project_whose_delete_was_cut_short_ends_its_mark() {
     let removed = owner.remove_project(project.clone(), 2).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
     assert_eq!(kept(&engine), 0);
-    assert_eq!(engine.rows(DELETES_PENDING), 0, "the mark goes with the records");
+    assert_eq!(
+        engine.rows(DELETES_PENDING),
+        0,
+        "the mark goes with the records",
+    );
     drop(owner);
     engine.stop().await;
 }

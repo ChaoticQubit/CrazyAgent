@@ -65,7 +65,7 @@ export function noticeSubject(notice: RecoveryNotice): string {
  * Output: one sentence. */
 export function noticeLine(notice: RecoveryNotice): string {
   const subject = noticeSubject(notice);
-  if (notice.action_kind === "project_delete") return "A delete was cut short. Some folders may already be in the Trash.";
+  if (notice.action_kind === "project_delete") return "A delete was cut short. Some folders may already be in the Trash. If you keep the project, its agents stay stopped until you start them again with Start all again in the project menu.";
   if (notice.shown === "landed") return `${subject} landed while CrazyAgent stopped.`;
   if (notice.shown === "dropped") return `${subject} did not land. Accept it again from Changes.`;
   if (notice.action_kind === "agent_spawn") return `${subject} may or may not have run. Check the agent, then dismiss this to let it start again.`;

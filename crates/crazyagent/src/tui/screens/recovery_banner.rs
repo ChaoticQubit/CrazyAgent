@@ -15,6 +15,8 @@ const GROUP_WIDTH: usize = 13;
 const GROUP_ITEMS_SHOWN: usize = 2;
 const GROUP_LINES_MAX: usize = 2;
 const QUIET_CODES: [&str; 2] = ["trusted_connection_unavailable", "not_ready"];
+const KEPT_STOPPED: &str =
+    "If you keep the project, its agents stay stopped until you start them again with S Start all on its Team screen.";
 
 /// One item the owner can act on in the banner: a failed resume by its agent, or a notice
 /// by its ledger kind and number.
@@ -309,12 +311,34 @@ impl ProjectRecovery {
                 rows.push(Row::of(lead, style).pad(GROUP_WIDTH).push(line, look.fg));
             }
         }
+        rows.extend(self.key_rows(banner, width, look, composer));
+        if let Some(note) = &self.note {
+            rows.push(Row::of(note.clone(), look.muted));
+        }
+        rows.push(Row::default());
+        rows
+    }
+
+    /// The banner's key lines for what the owner can do now, and on a picked delete cut short
+    /// what keeping the project leaves. Inputs: the banner, the width, the look and whether
+    /// the composer holds the keys. Output: the rows, none when nothing can be done.
+    fn key_rows(
+        &self,
+        banner: &RecoveryBanner,
+        width: usize,
+        look: &Look,
+        composer: bool,
+    ) -> Vec<Row> {
+        assert!(width > 0);
         let mut keys = Vec::new();
         if let Some(run) = self.retried(banner) {
             keys.push(format!("Ctrl-R Retry {}", run.label));
         }
-        match self.dismissed(banner) {
-            Some(notice) if notice.action_kind == ActionKind::ProjectDelete => {
+        let picked = self.dismissed(banner);
+        let cut_short =
+            picked.is_some_and(|notice| notice.action_kind == ActionKind::ProjectDelete);
+        match picked {
+            Some(_) if cut_short => {
                 keys.push("Ctrl-D Keep the project".to_owned());
                 keys.push("Ctrl-X Delete again".to_owned());
             }
@@ -324,16 +348,19 @@ impl ProjectRecovery {
         if picks(banner).len() > 1 {
             keys.push("Ctrl-N Next item".to_owned());
         }
+        let lead = if composer { "Tab first, then " } else { "" };
+        let mut rows = Vec::new();
         if !keys.is_empty() {
-            let lead = if composer { "Tab first, then " } else { "" };
             for line in key_lines(lead, &keys, width) {
                 rows.push(Row::of(line, look.accent));
             }
         }
-        if let Some(note) = &self.note {
-            rows.push(Row::of(note.clone(), look.muted));
+        if cut_short {
+            for line in wrap_words(KEPT_STOPPED, width) {
+                rows.push(Row::of(line, look.muted));
+            }
         }
-        rows.push(Row::default());
+        assert!(!cut_short || !keys.is_empty());
         rows
     }
 }
