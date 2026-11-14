@@ -94,7 +94,8 @@ test("a move that left part of the old folder is told as moved, with the old fol
   const clean = view.movedNotice("TessyAI", "move", "/Users/o/Desktop/TessyAI", false);
   assert.equal(clean, "TessyAI is now in your CrazyAgent folder. The team is stopped; start it again from Team.");
   const left = view.movedNotice("TessyAI", "move", "/Users/o/Desktop/TessyAI", true);
-  assert.match(left, /^TessyAI is now in your CrazyAgent folder\. Some items in the old folder couldn't be deleted: check .*Desktop\/TessyAI and delete it yourself\./);
+  assert.match(left, /^TessyAI is now in your CrazyAgent folder\. Some items in the old folder couldn't be deleted: check .*Desktop\/TessyAI\. The team/);
+  assert.doesNotMatch(left, /yourself|delete it|remove it/, "what a move leaves may be the only copy of newer edits (RV-DS241-102)");
   assert.match(left, /start it again from Team\.$/);
   assert.match(view.movedNotice("TessyAI", "copy", "/Users/o/Desktop/TessyAI", false), /now uses the copy/);
   const source = read("src/screens/project/move-home.tsx");
