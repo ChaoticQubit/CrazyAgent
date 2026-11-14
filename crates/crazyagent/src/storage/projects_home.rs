@@ -270,6 +270,9 @@ pub(super) fn add_plan(
         overrides,
         &guarded(&tx)?,
     )?;
+    if destination_held(&tx, plan.destination(), request)? {
+        return Err(error("home_add_in_progress"));
+    }
     let mode = match mode {
         AddMode::Move => "move",
         AddMode::Copy => "copy",
@@ -289,6 +292,26 @@ pub(super) fn add_plan(
     assert!(adding(&tx)?);
     tx.commit().map_err(error)?;
     Ok(plan)
+}
+
+/// Whether a running add other than `request` planned `destination`. Two adds of folders
+/// with the same name both find it free on disk until one lands, and an engine start reads
+/// each cut add's end from that one folder, so only one may plan it. Inputs: the connection,
+/// the destination and the asking add's request. Output: the answer.
+fn destination_held(
+    db: &Connection,
+    destination: &Path,
+    request: &RequestId,
+) -> Result<bool, EngineError> {
+    assert!(destination.is_absolute());
+    assert!(!request.as_str().is_empty());
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects_home_add
+         WHERE ended IS NULL AND destination=?1 AND request<>?2)",
+        params![text(destination)?, request.as_str()],
+        |row| row.get(0),
+    )
+    .map_err(error)
 }
 
 /// Whether an add is running: planned, and neither recorded nor settled yet. While one runs
