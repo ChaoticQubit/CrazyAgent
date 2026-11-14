@@ -841,3 +841,132 @@ fn research_follows_the_schedule_and_waits_for_a_held_account_to_reset() {
         AccountPick::Paused { until_ms: 9000 }
     );
 }
+
+/// Settings whose `local-pool` holds one keyless loopback endpoint member per port, in port
+/// order, and is assigned to project-a. Input: the members' ports. Output: the file text.
+#[cfg(target_os = "macos")]
+fn loopback_pool(ports: &[u16]) -> String {
+    let accounts: Vec<String> = (0..ports.len())
+        .map(|n| format!("\"account-{n}\""))
+        .collect();
+    let members: Vec<String> = (0..ports.len())
+        .map(|n| format!("\"member-{n}\""))
+        .collect();
+    let mut text = format!(
+        "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [{}]\n",
+        accounts.join(", ")
+    );
+    for (n, port) in ports.iter().enumerate() {
+        text.push_str(&format!("\n[[model_access.connections]]\nid = \"member-{n}\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"account-{n}\"\nendpoint = {{ kind = \"http\", url = \"http://127.0.0.1:{port}/v1\" }}\nmodel = {{ id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }}\nauth = {{ method = \"none\" }}\n"));
+    }
+    text.push_str(&format!("\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [{}]\nprojects = [\"project-a\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n", members.join(", ")));
+    text
+}
+
+/// A resolver over [`loopback_pool`] for project-a of `runtime`. Inputs: the runtime and the
+/// members' ports. Output: the resolver.
+#[cfg(target_os = "macos")]
+fn loopback_resolver(
+    runtime: &research_support::EngineRuntime,
+    ports: &[u16],
+) -> crazyagent::research::accounts::SettingsResolver {
+    let global = runtime.root.join("research-global.toml");
+    let project = runtime.root.join("research-project.toml");
+    std::fs::write(&project, "").unwrap();
+    std::fs::write(&global, loopback_pool(ports)).unwrap();
+    crazyagent::research::accounts::SettingsResolver::new(
+        &global,
+        &project,
+        &runtime.root.join("projects"),
+        &runtime.database,
+    )
+    .unwrap()
+}
+
+/// The pick of loopback member `n` on `port` for Codex. Inputs: the member and its port.
+/// Output: the pick.
+#[cfg(target_os = "macos")]
+fn loopback_member(n: usize, port: u16) -> AccountPick {
+    AccountPick::Account {
+        connection: CredentialRef::new(format!("member-{n}")).unwrap(),
+        account: Box::new(ResearchAccount::Endpoint {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            model: "qwen2.5:0.5b".into(),
+            key: None,
+        }),
+    }
+}
+
+/// A read-only pick (DEC-091 addendum) passes over a pool member whose loopback provider
+/// refuses every connect and takes the next one, through both the project's pool and a pool
+/// named outright. The plain pick research jobs and the service tick use makes no connect
+/// and still gives the first member.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_read_only_pick_passes_over_a_member_whose_loopback_provider_refuses_connects() {
+    use crazyagent::research::accounts::Reach;
+    use crazyagent::research::runner::ResearchHarness;
+    let runtime =
+        research_support::EngineRuntime::with_projects(&[("project-a", "Sells house plants.")]);
+    let (_held, down) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let up = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let up_port = up.local_addr().unwrap().port();
+    let resolver = loopback_resolver(&runtime, &[down, up_port]);
+    let pool = CredentialRef::new("local-pool").unwrap();
+    let codex = [ResearchHarness::Codex];
+    assert_eq!(
+        resolver.pool_pick_with("project-a", &pool, &codex, Reach::Reachable),
+        loopback_member(1, up_port)
+    );
+    assert_eq!(
+        resolver
+            .resolve_with("project-a", "codex", Reach::Reachable)
+            .unwrap()
+            .1,
+        loopback_member(1, up_port)
+    );
+    assert_eq!(
+        resolver.pool_pick("project-a", &pool, &codex),
+        loopback_member(0, down)
+    );
+    assert_eq!(
+        resolver.resolve("project-a", "codex").unwrap().1,
+        loopback_member(0, down)
+    );
+}
+
+/// When every member that could run has a loopback provider that refuses connects, the
+/// read-only pick gives the first one's line, the line the owner saw before failover.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_read_only_pick_with_every_member_down_carries_the_first_down_providers_line() {
+    use crazyagent::research::accounts::Reach;
+    use crazyagent::research::runner::ResearchHarness;
+    let runtime =
+        research_support::EngineRuntime::with_projects(&[("project-a", "Sells house plants.")]);
+    let (_first, first) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (_second, second) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let resolver = loopback_resolver(&runtime, &[first, second]);
+    let unreached = AccountPick::Unreached {
+        line: format!(
+            "Can't reach the model provider at 127.0.0.1:{first}. Start it or pick another account in this pool, then try again."
+        ),
+    };
+    let pool = CredentialRef::new("local-pool").unwrap();
+    assert_eq!(
+        resolver.pool_pick_with(
+            "project-a",
+            &pool,
+            &[ResearchHarness::Codex],
+            Reach::Reachable
+        ),
+        unreached
+    );
+    assert_eq!(
+        resolver
+            .resolve_with("project-a", "codex", Reach::Reachable)
+            .unwrap()
+            .1,
+        unreached
+    );
+}

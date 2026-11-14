@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
 import { POLL_MS, STEP_MS, bridgeCall, value } from "./e2e-harness.mjs";
@@ -153,6 +155,24 @@ test("Edit with AI: a pool whose model provider refuses connections says nothing
     assert.ok(!shown.includes(PROPOSED), "no proposal shows");
     assert.equal(await text(bridge, project), OWN, "the file stays as it was");
   }, 1, CODEX);
+});
+
+test("Edit with AI: a pool whose first member's model provider is stopped runs the edit on the next member, and the engine log names the member it passed over", { timeout: 600000 }, async (t) => {
+  await onEngine(t, "ca-edit-ai-failover-", async ({ project, me, page, site, bridge, evidence, stopped }) => {
+    assert.ok(Number.isInteger(stopped), "the pool lists the stopped member first");
+    await write(bridge, project, OWN);
+    await openProject(page, site, me, project);
+    await offers(page, true);
+    await me.click("Edit with AI", "button");
+    const shown = await me.waitFor("the proposal from the next member", (seen) => seen.includes(PROPOSED) || seen.includes(DOWN), RUN_MS);
+    await me.capture("project-failover-proposal");
+    assert.ok(!shown.includes(DOWN), "the owner sees no stopped-provider line while another member answers");
+    assert.ok(shown.includes(PROPOSED), "the edit ran and proposed");
+    const logged = readFileSync(join(evidence, "engine.err"), "utf8");
+    const skipped = `read_only_pick_skipped connection=stopped-connection Can't reach the model provider at 127.0.0.1:${stopped}. Start it or pick another account in this pool, then try again.`;
+    assert.ok(logged.includes(skipped), `the engine log names the member it passed over: ${logged.slice(-2000)}`);
+    assert.ok(!logged.includes(`127.0.0.1:${stopped}/v1`), "the log line carries no URL path");
+  }, 1, CODEX, { stoppedFirst: true });
 });
 
 test("Edit with AI: Off on a project hides its button and the engine refuses; the app editor keeps its own", { timeout: 600000 }, async (t) => {

@@ -1008,4 +1008,158 @@ mod tests {
         assert_eq!(roadmap.as_deref(), Some(crate::roadmap_status::NO_ACCOUNT));
     }
 
+    /// An engine whose pool for project alpha holds one keyless loopback endpoint member per
+    /// port, in order, with a runner that can run Codex and a hidden-folders table that cannot
+    /// be read, so a status run that gets past its reach check stops at the hidden-folders
+    /// check before any agent starts. Input: the ports. Output: the folder guard, the runner,
+    /// the connection and the resolve the research loop gets.
+    #[cfg(target_os = "macos")]
+    fn engine_with_loopback_pool(
+        ports: &[u16],
+    ) -> (
+        tempfile::TempDir,
+        Arc<ResearchRunner>,
+        rusqlite::Connection,
+        Arc<impl Fn(&str, &str, Reach) -> Option<(PathBuf, AccountPick)> + Send + Sync + 'static>,
+    ) {
+        let private = || std::fs::Permissions::from_mode(0o700);
+        let temp = tempfile::Builder::new()
+            .prefix("ca-upkeep-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(temp.path(), private()).unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let engine = base.join("engine");
+        let state = engine.join("research");
+        let projects = base.join("projects");
+        for folder in [&engine, &state, &projects] {
+            std::fs::create_dir(folder).unwrap();
+            std::fs::set_permissions(folder, private()).unwrap();
+        }
+        std::fs::create_dir_all(
+            projects
+                .join("alpha")
+                .join(crate::projects_home::CRAZYAGENT_DIRECTORY),
+        )
+        .unwrap();
+        let db = crate::questions::open(&engine).unwrap();
+        db.execute_batch("PRAGMA user_version=1; CREATE TABLE project_hidden_paths(unreadable)")
+            .unwrap();
+        let database = engine.join("engine.db");
+        std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+        crate::roadmap_status::initialize(&db).unwrap();
+        crate::project_overview::initialize(&db).unwrap();
+        let codex = engine.join("codex");
+        std::fs::write(&codex, "").unwrap();
+        let runner =
+            ResearchRunner::new(&database, &state, &codex, ResearchLimits::default()).unwrap();
+        assert!(runner.can_run(ResearchHarness::Codex));
+        let accounts: Vec<String> = (0..ports.len())
+            .map(|n| format!("\"account-{n}\""))
+            .collect();
+        let members: Vec<String> = (0..ports.len())
+            .map(|n| format!("\"member-{n}\""))
+            .collect();
+        let mut text = format!(
+            "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [{}]\n",
+            accounts.join(", ")
+        );
+        for (n, port) in ports.iter().enumerate() {
+            text.push_str(&format!("\n[[model_access.connections]]\nid = \"member-{n}\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"account-{n}\"\nendpoint = {{ kind = \"http\", url = \"http://127.0.0.1:{port}/v1\" }}\nmodel = {{ id = \"local-model\", author = \"openai-compatible\" }}\nauth = {{ method = \"none\" }}\n"));
+        }
+        text.push_str(&format!("\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [{}]\nprojects = [\"alpha\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n", members.join(", ")));
+        let global = base.join("global.toml");
+        let project = base.join("project.toml");
+        std::fs::write(&global, text).unwrap();
+        std::fs::write(&project, "").unwrap();
+        let resolver = SettingsResolver::new(&global, &project, &projects, &database).unwrap();
+        let resolve = Arc::new(move |id: &str, harness: &str, reach: Reach| {
+            resolver.resolve_with(id, harness, reach)
+        });
+        (temp, Arc::new(runner), db, resolve)
+    }
+
+    /// Starts one roadmap check and one overview run for alpha through the research loop's
+    /// starts, waits for both runs and reads the line each stored. Inputs: the runner, the
+    /// connection and the resolve. Output: the roadmap check's problem and the overview
+    /// run's failure.
+    #[cfg(target_os = "macos")]
+    fn upkeep_lines<F>(
+        runner: &Arc<ResearchRunner>,
+        db: &rusqlite::Connection,
+        resolve: &Arc<F>,
+    ) -> [Option<String>; 2]
+    where
+        F: Fn(&str, &str, Reach) -> Option<(PathBuf, AccountPick)> + Send + Sync + 'static,
+    {
+        let project = ProjectId::new("alpha").unwrap();
+        crate::roadmap_status::refresh(db, &project).unwrap();
+        crate::project_overview::refresh(db, &project).unwrap();
+        let mut checks = Vec::new();
+        let mut starts = StatusStarts {
+            runner,
+            resolve,
+            db,
+            checks: &mut checks,
+            upkeep: Upkeep::Roadmap,
+            settling: false,
+        };
+        let now = crate::team::now_ms();
+        assert_eq!(
+            crate::roadmap_status::tick(db, &mut starts, now).unwrap(),
+            1
+        );
+        starts.upkeep = Upkeep::Overview;
+        let mut noted = crate::project_overview::Started::default();
+        let steady = std::time::Instant::now();
+        let started =
+            crate::project_overview::tick(db, &mut starts, &mut noted, steady, now).unwrap();
+        assert_eq!(started, 1);
+        assert_eq!(checks.len(), 2, "both runs start on the tick's pick");
+        for check in checks {
+            assert!(check.join().unwrap().is_none(), "no agent ran");
+        }
+        [
+            waiting_row(db, "roadmap_status", "problem").3,
+            waiting_row(db, "project_overview", "failure").3,
+        ]
+    }
+
+    /// A roadmap check and an overview run whose pool lists a member with a stopped loopback
+    /// provider first run on the next member (DEC-091 addendum): the tick starts them with
+    /// no connect, each run picks again in its own thread and gets past its reach check, here
+    /// to the hidden-folders check, so no reach line is stored.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn status_runs_pick_again_in_their_thread_and_take_the_next_member_when_the_first_one_is_down()
+    {
+        let (_held, down) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let up = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let up_port = up.local_addr().unwrap().port();
+        let (_temp, runner, db, resolve) = engine_with_loopback_pool(&[down, up_port]);
+        assert_eq!(
+            upkeep_lines(&runner, &db, &resolve),
+            [
+                Some(crate::roadmap_status::run::HIDDEN_UNREADABLE.to_owned()),
+                Some(crate::project_overview::agent::HIDDEN_UNREADABLE.to_owned()),
+            ]
+        );
+    }
+
+    /// A roadmap check and an overview run whose pool members all have stopped loopback
+    /// providers store the first one's line, the line they stored before failover.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn status_runs_with_every_members_provider_down_store_the_first_ones_line() {
+        let (_first, first) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let (_second, second) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let (_temp, runner, db, resolve) = engine_with_loopback_pool(&[first, second]);
+        let line = format!(
+            "Can't reach the model provider at 127.0.0.1:{first}. Start it or pick another account in this pool, then try again."
+        );
+        assert_eq!(
+            upkeep_lines(&runner, &db, &resolve),
+            [Some(line.clone()), Some(line)]
+        );
+    }
 }
