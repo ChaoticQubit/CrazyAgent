@@ -1501,13 +1501,17 @@ async fn start_check(
     Ok(Reply::Server { server: *view })
 }
 
-/// Checks an approved command server inside the boundary agents run it in: its own
-/// project, home and temp folders under `mcp-checks/<id>` in the engine folder, reads of
-/// system paths and the command's folder only, open network without binding the owner's
-/// ports, and only its own secrets. Inputs: the engine folder, server id, command,
-/// arguments, secret values and the configured local model ports to keep. Output: the
-/// tool names, or a plain rejection code, or for a boundary that cannot hold the check
-/// the boundary's own reason ([`crate::plugins::check_refused`]).
+/// Checks an approved command server inside the boundary agents run it in, running what an
+/// agent launch runs once the default pack's context-mode has its shared install
+/// ([`crate::context_mode::for_check`]). That spec never runs as npx here: while its install
+/// runs, after a recent failure, without npm beside npx or for a version the pack does not
+/// pin, the check is not run and says why. Its own project, home and temp folders under
+/// `mcp-checks/<id>` in the engine folder, reads of system paths, the command's folder and
+/// that shared install only, open network without binding the owner's ports, and only its
+/// own secrets. Inputs: the engine folder, server id, approved command, arguments, secret
+/// values and the configured local model ports to keep. Output: the tool names, or a plain
+/// rejection code, or for a boundary that cannot hold the check the boundary's own reason
+/// ([`crate::plugins::check_refused`]).
 #[cfg(unix)]
 fn boundary_check(
     root: &Path,
@@ -1522,6 +1526,35 @@ fn boundary_check(
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     assert!(valid_id(id));
+    use crate::context_mode::ForCheck;
+    let approved = ServerSpec::Stdio {
+        command: command.to_owned(),
+        args: args.to_vec(),
+    };
+    let launched = match crate::context_mode::for_check(root, approved) {
+        ForCheck::Run(spec) => spec,
+        ForCheck::SettingUp => return Err("server_setting_up".into()),
+        ForCheck::Failed(left) => {
+            let most = crate::plugins::INSTALL_RETRY_MINUTES_MAX;
+            let minutes = left.as_secs().div_ceil(60).clamp(1, most);
+            return Err(crate::plugins::install_failed(minutes));
+        }
+        ForCheck::Refused("context_mode_npm_missing") => return Err("server_npm_missing".into()),
+        ForCheck::Refused("context_mode_integrity_unpinned") => {
+            return Err("server_version_unpinned".into());
+        }
+        ForCheck::Refused("context_mode_installs_busy") => {
+            return Err("server_installs_busy".into());
+        }
+        ForCheck::Refused(code) => {
+            eprintln!("plugin_check_install_refused cause={code}");
+            return Err("server_cant_start".into());
+        }
+    };
+    let ServerSpec::Stdio { command, args } = &launched else {
+        return Err("server_check_command_only".into());
+    };
+    let install = crate::context_mode::shared_install(&launched);
     let program = Path::new(command);
     match std::fs::metadata(program) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1571,6 +1604,10 @@ fn boundary_check(
         .and_then(|sandbox| sandbox.keep_ports(kept))
         .and_then(|sandbox| sandbox.guard_engine(root))
         .and_then(|sandbox| sandbox.allow_read(reads))
+        .and_then(|sandbox| match install {
+            Some(install) => sandbox.allow_read(install),
+            None => Ok(sandbox),
+        })
         .and_then(|sandbox| InstalledSandbox::install(sandbox, &check_profile(&checks, id)))
         .map_err(boundary)?;
     let mut server = std::process::Command::new(program);

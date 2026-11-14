@@ -33,6 +33,7 @@ const COMMAND_HINT: &str = if cfg!(target_os = "windows") {
 
 const NAME_WIDTH: usize = 22;
 const SKILL_STATE_WIDTH: usize = 5;
+const HOOK_STATE_WIDTH: usize = 9;
 const SERVER_STATE_WIDTH: usize = 22;
 const LABEL_WIDTH: usize = 11;
 const MODAL_WIDTH: u16 = 62;
@@ -153,6 +154,118 @@ pub fn hook_runs(hook: &HookView) -> String {
     }
 }
 
+/// One plugin's hooks as the Hooks list groups them: the plugin, where it applies, how many
+/// distinct events it runs on, the skills or servers it runs with and the indexes of its
+/// hooks in the engine's list, in that list's order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HookGroup {
+    pub plugin: String,
+    pub scope: Scope,
+    pub events: usize,
+    pub follows: Vec<String>,
+    pub hooks: Vec<usize>,
+}
+
+/// Whether a plugin's hooks are all on, all off or some of each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookGroupState {
+    On,
+    Off,
+    Partly,
+}
+
+impl HookGroupState {
+    /// The word the list shows for the state. Output: On, Off or Partly on.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::On => "On",
+            Self::Off => "Off",
+            Self::Partly => "Partly on",
+        }
+    }
+}
+
+/// Groups hooks per plugin and scope in the order the engine lists them, so a plugin with
+/// several events reads as one plugin and not as several installs. Input: the hooks. Output:
+/// the groups, each holding at least one hook and together every hook exactly once.
+pub fn hook_groups(hooks: &[HookView]) -> Vec<HookGroup> {
+    let mut groups: Vec<HookGroup> = Vec::new();
+    for (index, hook) in hooks.iter().enumerate() {
+        let at = match groups
+            .iter()
+            .position(|group| group.plugin == hook.plugin && group.scope == hook.scope)
+        {
+            Some(at) => at,
+            None => {
+                groups.push(HookGroup {
+                    plugin: hook.plugin.clone(),
+                    scope: hook.scope.clone(),
+                    events: 0,
+                    follows: Vec::new(),
+                    hooks: Vec::new(),
+                });
+                groups.len() - 1
+            }
+        };
+        let group = &mut groups[at];
+        if !group.hooks.iter().any(|&seen| hooks[seen].event == hook.event) {
+            group.events += 1;
+        }
+        if let Some(follows) = &hook.follows
+            && !group.follows.contains(follows)
+        {
+            group.follows.push(follows.clone());
+        }
+        group.hooks.push(index);
+    }
+    assert_eq!(
+        groups.iter().map(|group| group.hooks.len()).sum::<usize>(),
+        hooks.len()
+    );
+    groups
+}
+
+/// Reads whether a plugin's hooks are on, off or partly on. Inputs: the hooks, the group
+/// and what counts as on for one hook where the list is shown. Output: the state.
+pub fn hook_group_state(
+    hooks: &[HookView],
+    group: &HookGroup,
+    on: impl Fn(&HookView) -> bool,
+) -> HookGroupState {
+    assert!(!group.hooks.is_empty());
+    let count = group.hooks.iter().filter(|&&index| on(&hooks[index])).count();
+    if count == 0 {
+        HookGroupState::Off
+    } else if count == group.hooks.len() {
+        HookGroupState::On
+    } else {
+        HookGroupState::Partly
+    }
+}
+
+/// What a plugin's hooks row says: how many events it runs on and, when it came with a
+/// skill or MCP server, that it runs only while that item is on. Input: the group. Output:
+/// the line.
+pub fn hook_group_line(group: &HookGroup) -> String {
+    let events = match group.events {
+        1 => "1 event".to_owned(),
+        count => format!("{count} events"),
+    };
+    match group.follows.as_slice() {
+        [] => events,
+        follows => format!("{events}, runs while {} is on", follows.join(", ")),
+    }
+}
+
+/// What one event row under a plugin says it runs: the tools it matches, when set, and
+/// its command. Input: the hook. Output: the line.
+pub fn hook_event_runs(hook: &HookView) -> String {
+    match &hook.matcher {
+        Some(matcher) => format!("{matcher}: {}", hook.command),
+        None => hook.command.clone(),
+    }
+}
+
 /// Splits "command and arguments" as typed into a server spec.
 /// Input: the typed line. Output: the spec, or the plain reason it cannot be used.
 pub fn command_spec(line: &str) -> Result<ServerSpec, &'static str> {
@@ -223,7 +336,16 @@ pub fn words(line: &str) -> Result<Vec<String>, &'static str> {
 enum Picked {
     Skill(usize),
     Server(usize),
+    HookPlugin(usize),
     Hook(usize),
+}
+
+/// One row of the Hooks list: a plugin's row, by its group index, or one of its hooks shown
+/// under it, by the hook's index in the engine's list.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HookRow {
+    Plugin(usize),
+    Event(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -258,6 +380,7 @@ pub struct Plugins {
     skill_offset: usize,
     server_offset: usize,
     hook_offset: usize,
+    expanded: Option<(String, Scope)>,
     open: Open,
 }
 
@@ -283,6 +406,7 @@ impl Plugins {
             skill_offset: 0,
             server_offset: 0,
             hook_offset: 0,
+            expanded: None,
             open: Open::None,
         }
     }
@@ -314,7 +438,26 @@ impl Plugins {
     }
 
     fn count(&self) -> usize {
-        self.skills.len() + self.servers.len() + self.hooks.len()
+        self.skills.len() + self.servers.len() + self.hook_rows().len()
+    }
+
+    /// The Hooks list's rows: each plugin's row, followed by its hooks when it is the one
+    /// opened with Enter. Output: the rows in list order.
+    fn hook_rows(&self) -> Vec<HookRow> {
+        let groups = hook_groups(&self.hooks);
+        let mut rows = Vec::with_capacity(groups.len() + self.hooks.len());
+        for (at, group) in groups.iter().enumerate() {
+            rows.push(HookRow::Plugin(at));
+            if self
+                .expanded
+                .as_ref()
+                .is_some_and(|(plugin, scope)| *plugin == group.plugin && *scope == group.scope)
+            {
+                rows.extend(group.hooks.iter().map(|&index| HookRow::Event(index)));
+            }
+        }
+        assert!(rows.len() <= groups.len() + self.hooks.len());
+        rows
     }
 
     fn picked(&self) -> Option<Picked> {
@@ -323,10 +466,11 @@ impl Plugins {
             Some(Picked::Skill(self.selected))
         } else if self.selected < listed {
             Some(Picked::Server(self.selected - self.skills.len()))
-        } else if self.selected < self.count() {
-            Some(Picked::Hook(self.selected - listed))
         } else {
-            None
+            match self.hook_rows().get(self.selected - listed)? {
+                HookRow::Plugin(group) => Some(Picked::HookPlugin(*group)),
+                HookRow::Event(index) => Some(Picked::Hook(*index)),
+            }
         }
     }
 
@@ -353,7 +497,7 @@ impl Plugins {
                 actions.extend([Action::Edit, Action::Toggle, Action::Remove]);
                 actions
             }
-            Some(Picked::Skill(_) | Picked::Hook(_)) | None => Vec::new(),
+            Some(Picked::Skill(_) | Picked::HookPlugin(_) | Picked::Hook(_)) | None => Vec::new(),
         }
     }
 
@@ -397,6 +541,26 @@ impl Plugins {
                     version,
                 };
                 self.change(change, done, ctx);
+            }
+            Some(Picked::HookPlugin(at)) => {
+                let groups = hook_groups(&self.hooks);
+                let group = &groups[at];
+                let enabled =
+                    hook_group_state(&self.hooks, group, |hook| hook.enabled) != HookGroupState::On;
+                let ids: Vec<String> = group
+                    .hooks
+                    .iter()
+                    .map(|&index| &self.hooks[index])
+                    .filter(|hook| hook.enabled != enabled)
+                    .map(|hook| hook.id.clone())
+                    .collect();
+                assert!(!ids.is_empty());
+                let done = format!(
+                    "{} hooks are {}.",
+                    group.plugin,
+                    if enabled { "on" } else { "off" }
+                );
+                self.change(PluginChange::SetHooks { ids, enabled }, done, ctx);
             }
             Some(Picked::Hook(index)) => {
                 let hook = &self.hooks[index];
@@ -451,14 +615,14 @@ impl Plugins {
                 let (id, version) = (server.id.clone(), server.version);
                 self.change(PluginChange::RemoveServer { id, version }, done, ctx);
             }
-            Some(Picked::Hook(_)) | None => {}
+            Some(Picked::HookPlugin(_) | Picked::Hook(_)) | None => {}
         }
     }
 
     fn windows(&self, ctx: &Ctx, subtitle_rows: usize) -> (usize, usize, usize) {
         let content = (ctx.height as usize).saturating_sub(4 + 1 + ctx.extra_hint_rows());
         let avail = content.saturating_sub(1 + subtitle_rows + 1 + 3 + 2).max(3);
-        let hooks = self.hooks.len().max(1).min((avail / 3).max(1));
+        let hooks = self.hook_rows().len().max(1).min((avail / 3).max(1));
         let avail = avail.saturating_sub(hooks).max(2);
         let servers_wanted = self.servers.len().max(1);
         let skills = self
@@ -550,11 +714,13 @@ impl Plugins {
             Some(Picked::Server(index)) => Some(index),
             _ => None,
         };
+        let listed = self.skills.len() + self.servers.len();
+        let hook_rows = self.hook_rows();
         let hook_pick = match picked {
-            Some(Picked::Hook(index)) => Some(index),
+            Some(Picked::HookPlugin(_) | Picked::Hook(_)) => Some(self.selected - listed),
             _ => None,
         };
-        self.hook_offset = Self::follow(hook_pick, self.hook_offset, hook_window, self.hooks.len());
+        self.hook_offset = Self::follow(hook_pick, self.hook_offset, hook_window, hook_rows.len());
         self.skill_offset = Self::follow(
             skill_pick,
             self.skill_offset,
@@ -689,7 +855,7 @@ impl Plugins {
         }
         lines.push(Line::default());
         lines.push(join([
-            heading("Hooks", self.hooks.len()),
+            heading("Hooks", hook_groups(&self.hooks).len()),
             styled(
                 format!("   {}", crate::coord::settings::HOOKS_NONE_SHORT),
                 Role::Muted,
@@ -703,30 +869,44 @@ impl Plugins {
                 theme,
             ));
         } else {
-            let row_limit = if self.hooks.len() > hook_window {
+            let row_limit = if hook_rows.len() > hook_window {
                 limit - 1
             } else {
                 limit
             };
             let widths = [
                 NAME_WIDTH,
-                SKILL_STATE_WIDTH,
+                HOOK_STATE_WIDTH,
                 row_limit
-                    .saturating_sub(2 + NAME_WIDTH + SKILL_STATE_WIDTH + 4)
+                    .saturating_sub(2 + NAME_WIDTH + HOOK_STATE_WIDTH + 4)
                     .max(1),
             ];
-            let rows = self
-                .hooks
+            let groups = hook_groups(&self.hooks);
+            let rows = hook_rows
                 .iter()
                 .enumerate()
                 .skip(self.hook_offset)
                 .take(hook_window)
-                .map(|(index, hook)| {
-                    let values = vec![
-                        Line::raw(printable(hook.plugin.clone())),
-                        Line::raw(if hook.enabled { "On" } else { "Off" }),
-                        Line::raw(printable(hook_runs(hook))),
-                    ];
+                .map(|(index, row)| {
+                    let values = match *row {
+                        HookRow::Plugin(at) => {
+                            let group = &groups[at];
+                            let state = hook_group_state(&self.hooks, group, |hook| hook.enabled);
+                            vec![
+                                Line::raw(printable(group.plugin.clone())),
+                                Line::raw(state.word()),
+                                Line::raw(printable(hook_group_line(group))),
+                            ]
+                        }
+                        HookRow::Event(at) => {
+                            let hook = &self.hooks[at];
+                            vec![
+                                Line::raw(printable(format!("  {}", hook.event))),
+                                Line::raw(if hook.enabled { "On" } else { "Off" }),
+                                Line::raw(printable(hook_event_runs(hook))),
+                            ]
+                        }
+                    };
                     list_row(
                         cells(&widths, values, 2, glyphs),
                         row_limit,
@@ -739,7 +919,7 @@ impl Plugins {
                 .collect();
             lines.extend(Self::section(
                 rows,
-                self.hooks.len(),
+                hook_rows.len(),
                 hook_window,
                 self.hook_offset,
                 limit,
@@ -773,7 +953,7 @@ impl Plugins {
         let labels: Vec<&str> = actions.iter().map(|action| self.label(*action)).collect();
         let mut body = Vec::new();
         let title = match self.picked()? {
-            Picked::Skill(_) | Picked::Hook(_) => return None,
+            Picked::Skill(_) | Picked::HookPlugin(_) | Picked::Hook(_) => return None,
             Picked::Server(index) => {
                 let server = &self.servers[index];
                 let asking = server.status == ServerStatus::WaitingForApproval;
@@ -969,6 +1149,21 @@ impl Screen for Plugins {
                     )));
                 }
                 Some(Picked::Server(_)) => self.open = Open::Details { focus: 0 },
+                Some(Picked::HookPlugin(at)) => {
+                    let group = hook_groups(&self.hooks).swap_remove(at);
+                    let key = (group.plugin, group.scope);
+                    self.expanded = match self.expanded.take() {
+                        Some(open) if open == key => None,
+                        _ => Some(key),
+                    };
+                    let row = self
+                        .hook_rows()
+                        .iter()
+                        .position(|row| *row == HookRow::Plugin(at));
+                    assert!(row.is_some(), "every plugin keeps its row");
+                    self.selected =
+                        self.skills.len() + self.servers.len() + row.unwrap_or_default();
+                }
                 Some(Picked::Hook(_)) | None => {}
             },
             Key::Char('d')
@@ -1063,7 +1258,7 @@ impl Screen for Plugins {
                         self.servers[index].name.clone(),
                         "Agents lose its tools in every project. Its saved secrets are deleted.",
                     ),
-                    Picked::Hook(_) => return None,
+                    Picked::HookPlugin(_) | Picked::Hook(_) => return None,
                 };
                 let room = usize::from(MODAL_WIDTH) - 4;
                 let mut body = vec![Line::raw(format!("Remove {name}?")), Line::default()];

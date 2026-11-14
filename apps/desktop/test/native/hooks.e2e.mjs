@@ -12,7 +12,7 @@ import { INTERNALS, STEP_MS, closedPort, owner, required, serveApp, start as lau
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const COMMAND = 'sh "${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh"';
 
-/** Writes a Claude Code plugin folder with one command hook in hooks/hooks.json and, when
+/** Writes a Claude Code plugin folder with command hooks on two events in hooks/hooks.json and, when
  * named, the .claude-plugin/plugin.json a pack plugin ships. Inputs: the folder and the
  * plugin name, or null for a folder without plugin.json. Output: none. */
 function plugin(folder, name) {
@@ -23,11 +23,14 @@ function plugin(folder, name) {
   }
   writeFileSync(join(folder, "hooks", "guard.sh"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
   writeFileSync(join(folder, "hooks", "hooks.json"), JSON.stringify({
-    hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: COMMAND }] }] },
+    hooks: {
+      PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: COMMAND }] }],
+      SessionStart: [{ hooks: [{ type: "command", command: COMMAND }] }],
+    },
   }));
 }
 
-test("Settings, Plugins says where each skill came from, and Hooks lists the engine's hooks, refuses a folder without plugin.json, adds a plugin folder's hooks and turns one off and on", { timeout: 300000 }, async () => {
+test("Settings, Plugins says where each skill came from, and Hooks lists the engine's hooks, refuses a folder without plugin.json, adds a plugin folder's hooks as one plugin row, turns the plugin off, one event on, then the plugin on", { timeout: 300000 }, async () => {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
@@ -106,32 +109,48 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.capture("hooks-empty");
 
         await me.click("Add hooks from a plugin");
-        const refused = await me.waitFor("the refusal of a folder without plugin.json", (text) => text.includes("This folder has hooks but no .claude-plugin/plugin.json naming the plugin.") || text.includes("Added 1 hook.") || text.includes("Something went wrong"), STEP_MS);
-        assert.ok(refused.includes("This folder has hooks but no .claude-plugin/plugin.json naming the plugin.") && !refused.includes("Added 1 hook."),
+        const refused = await me.waitFor("the refusal of a folder without plugin.json", (text) => text.includes("This folder has hooks but no .claude-plugin/plugin.json naming the plugin.") || text.includes("Added 2 hooks.") || text.includes("Something went wrong"), STEP_MS);
+        assert.ok(refused.includes("This folder has hooks but no .claude-plugin/plugin.json naming the plugin.") && !refused.includes("Added 2 hooks."),
           `a folder without plugin.json is refused with its plain reason:\n${refused.slice(0, 2000)}`);
         assert.deepEqual(await hooks(), [], "the refused folder added no hooks");
         await me.capture("hooks-refused");
 
         await me.click("Add hooks from a plugin");
-        const listed = await me.waitFor("the added hook in the list", (text) => text.includes("Added 1 hook.") && text.includes("PreToolUse, matching Bash"), STEP_MS);
-        assert.ok(listed.includes("guard") && listed.includes(COMMAND), `the row names the plugin and its command:\n${listed.slice(0, 2000)}`);
+        const listed = await me.waitFor("the added plugin row in the list", (text) => text.includes("Added 2 hooks.") && text.includes("guard - 2 events"), STEP_MS);
+        assert.ok(listed.includes("Show events") && !listed.includes("PreToolUse, matching Bash") && !listed.includes(COMMAND),
+          `the plugin shows as one row with its events folded:\n${listed.slice(0, 2000)}`);
         assert.equal(log.picked, 2, "each Add hooks asked the owner for one plugin folder");
         const added = await hooks();
-        assert.equal(added.length, 1, JSON.stringify(added));
-        assert.deepEqual([added[0].plugin, added[0].event, added[0].matcher, added[0].command, added[0].enabled, added[0].scope],
-          ["guard", "PreToolUse", "Bash", COMMAND, true, { kind: "global" }]);
+        assert.equal(added.length, 2, JSON.stringify(added));
+        assert.deepEqual(added.map((hook) => [hook.plugin, hook.event, hook.command, hook.enabled, hook.scope]).sort((a, b) => a[1].localeCompare(b[1])),
+          [["guard", "PreToolUse", COMMAND, true, { kind: "global" }], ["guard", "SessionStart", COMMAND, true, { kind: "global" }]]);
         await me.capture("hooks-added");
 
-        const checked = () => page.evaluate("document.querySelector('#hook-on-0')?.getAttribute('aria-checked')");
-        assert.equal(await checked(), "true", "the hook shows On");
+        const checked = (selector) => page.evaluate(`document.querySelector(${JSON.stringify(selector)})?.getAttribute('aria-checked')`);
+        assert.equal(await checked("#hook-on-0"), "true", "the plugin shows On");
         await me.follow("#hook-on-0");
-        await me.waitFor("the hook turned off", (text) => text.includes("Hook turned off."), STEP_MS);
-        assert.equal((await hooks())[0].enabled, false, "the engine holds the hook off");
-        assert.equal(await checked(), "false", "the hook shows Off");
+        await me.waitFor("the plugin's hooks turned off", (text) => text.includes("guard hooks turned off."), STEP_MS);
+        assert.deepEqual((await hooks()).map((hook) => hook.enabled), [false, false], "the engine holds every hook of the plugin off");
+        assert.equal(await checked("#hook-on-0"), "false", "the plugin shows Off");
+
+        await me.click("Show guard events", "button");
+        const opened = await me.waitFor("the plugin's events", (text) => text.includes("PreToolUse, matching Bash") && text.includes("SessionStart") && text.includes("Hide events"), STEP_MS);
+        assert.ok(opened.includes(COMMAND), `each event shows its command:\n${opened.slice(0, 2000)}`);
+        await me.capture("hooks-events");
+        const bash = (await hooks()).findIndex((hook) => hook.event === "PreToolUse");
+        assert.ok(bash >= 0);
+        await me.follow(`#hook-on-0-${bash}`);
+        await me.waitFor("the one hook turned on", (text) => text.includes("Hook turned on.") && text.includes("Partly on"), STEP_MS);
+        assert.deepEqual((await hooks()).map((hook) => [hook.event, hook.enabled]).sort((a, b) => a[0].localeCompare(b[0])), [["PreToolUse", true], ["SessionStart", false]],
+          "the engine holds only that event's hook on");
+        assert.equal(await checked(`#hook-on-0-${bash}`), "true", "the event shows On");
+        assert.equal(await checked("#hook-on-0"), "false", "the plugin row shows Partly on, not On");
+        await me.capture("hooks-partly-on");
+
         await me.follow("#hook-on-0");
-        await me.waitFor("the hook turned on", (text) => text.includes("Hook turned on."), STEP_MS);
-        assert.equal((await hooks())[0].enabled, true, "the engine holds the hook on again");
-        assert.equal(await checked(), "true", "the hook shows On again");
+        await me.waitFor("the plugin's hooks turned on", (text) => text.includes("guard hooks turned on."), STEP_MS);
+        assert.deepEqual((await hooks()).map((hook) => hook.enabled), [true, true], "the engine holds every hook of the plugin on again");
+        assert.equal(await checked("#hook-on-0"), "true", "the plugin shows On again");
         await me.capture("hooks-on-again");
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {

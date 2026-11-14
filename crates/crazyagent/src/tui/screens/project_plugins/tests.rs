@@ -1462,6 +1462,192 @@ fn l_asks_for_the_tools_page_with_every_server_starting_on_the_selected_one() {
     assert!(view.help().contains(&("l", "Tools")), "{:?}", view.help());
 }
 
+fn hook(
+    plugin: &str,
+    event: &str,
+    matcher: Option<&str>,
+    scope: Scope,
+    enabled: bool,
+    on_here: Option<bool>,
+) -> HookView {
+    HookView {
+        id: format!("hook-{plugin}-{event}-{}", matcher.unwrap_or("all")),
+        name: format!("{plugin}/{event}/1"),
+        plugin: plugin.into(),
+        event: event.into(),
+        matcher: matcher.map(str::to_owned),
+        command: format!("node hooks/{}.mjs", event.to_lowercase()),
+        scope_label: scope.label().into(),
+        scope,
+        enabled,
+        on_here,
+        follows: Some(plugin.into()),
+        source: format!("/private/tmp/engine/setup/pack/{plugin}"),
+        version: 2,
+    }
+}
+
+fn project_hooks() -> Vec<HookView> {
+    let on = |plugin: &str, event: &str| hook(plugin, event, None, Scope::Global, true, Some(true));
+    vec![
+        on("caveman", "SessionStart"),
+        on("caveman", "UserPromptSubmit"),
+        on("caveman", "SubagentStart"),
+        on("caveman", "SessionEnd"),
+        hook("context-mode", "PreToolUse", Some("Bash"), Scope::Global, true, Some(true)),
+        hook("context-mode", "PreToolUse", Some("Read"), Scope::Global, false, Some(true)),
+        hook("context-mode", "SessionStart", None, Scope::Global, true, Some(false)),
+    ]
+}
+
+fn with_hooks(hooks: Vec<HookView>) -> ProjectPlugins {
+    let mut view = ProjectPlugins::new(project());
+    assert!(matches!(view.next_job(), Some(SettingsJob::ProjectPlugins { .. })));
+    view.apply(&SettingsEvent::ProjectPlugins(
+        project(),
+        Ok((Vec::new(), Vec::new())),
+    ));
+    assert!(matches!(view.next_job(), Some(SettingsJob::Hooks { .. })));
+    view.apply(&SettingsEvent::Hooks(Some(project()), Ok(hooks)));
+    view
+}
+
+#[test]
+fn hooks_in_a_project_show_one_row_per_plugin_and_enter_shows_its_events() {
+    let mut view = with_hooks(project_hooks());
+    let wide = frame(&view, 120, 36);
+    assert!(wide.iter().any(|row| row.contains("Hooks  2")), "{wide:#?}");
+    let caveman = find(&wide, "> caveman");
+    assert!(caveman.contains("On") && caveman.contains("Every project"));
+    assert!(caveman.contains("4 events, runs while caveman is on"));
+    assert!(
+        find(&wide, "context-mode").contains("Partly on"),
+        "a hook off in Settings is not the project's, so one on and one off here reads Partly on"
+    );
+    assert!(
+        wide.iter().all(|row| !row.contains("SubagentStart")),
+        "events stay folded"
+    );
+    assert!(wide.last().unwrap().contains("Enter Events"));
+
+    assert!(matches!(
+        view.key(press(KeyCode::Down)),
+        PluginsReply::Handled
+    ));
+    assert!(matches!(
+        view.key(press(KeyCode::Enter)),
+        PluginsReply::Handled
+    ));
+    let opened = frame(&view, 120, 36);
+    assert!(find(&opened, "> context-mode").contains("Partly on"));
+    assert!(find(&opened, "Bash: node hooks/pretooluse.mjs").contains("On"));
+    assert!(find(&opened, "Read: node hooks/pretooluse.mjs").contains("Off in Settings"));
+    assert!(find(&opened, "SessionStart").contains("Off here"));
+    assert!(
+        opened.iter().all(|row| !row.contains("SubagentStart")),
+        "only the opened plugin shows its events"
+    );
+    view.key(press(KeyCode::Enter));
+    assert!(
+        frame(&view, 120, 36)
+            .iter()
+            .all(|row| !row.contains("Read: node")),
+        "Enter again folds them"
+    );
+}
+
+#[test]
+fn space_on_a_plugin_row_switches_its_hooks_here_and_never_one_off_in_settings() {
+    let mut view = with_hooks(project_hooks());
+    match sent(view.key(press(KeyCode::Char(' ')))) {
+        PluginChange::Switches { project: asked, items, on } => {
+            assert_eq!(asked, project());
+            assert!(!on);
+            assert_eq!(
+                items.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+                [
+                    "hook-caveman-SessionStart-all",
+                    "hook-caveman-UserPromptSubmit-all",
+                    "hook-caveman-SubagentStart-all",
+                    "hook-caveman-SessionEnd-all",
+                ]
+            );
+            assert!(items.iter().all(|(_, version)| *version == 2));
+        }
+        _ => panic!("Space on a plugin row switches its hooks for this project"),
+    }
+    view.apply(&SettingsEvent::PluginChanged(Ok(None)));
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("caveman hooks are off for this project."))
+    );
+
+    let mut view = with_hooks(project_hooks());
+    view.key(press(KeyCode::Down));
+    let change = sent(view.key(press(KeyCode::Char(' '))));
+    assert!(
+        matches!(
+            change,
+            PluginChange::Switches { ref items, on: true, .. }
+                if items.as_slice() == [("hook-context-mode-SessionStart-all".to_owned(), 2)]
+        ),
+        "Partly on turns on only the hook off here, never the one off in Settings"
+    );
+
+    let mut view = with_hooks(project_hooks());
+    view.key(press(KeyCode::Down));
+    view.key(press(KeyCode::Enter));
+    view.key(press(KeyCode::Down));
+    let change = sent(view.key(press(KeyCode::Char(' '))));
+    assert!(matches!(
+        change,
+        PluginChange::Switch { ref id, on: false, .. } if id == "hook-context-mode-PreToolUse-Bash"
+    ));
+
+    let mut view = with_hooks(vec![hook(
+        "guard",
+        "PreToolUse",
+        Some("Bash"),
+        Scope::Global,
+        false,
+        Some(true),
+    )]);
+    assert!(matches!(
+        view.key(press(KeyCode::Char(' '))),
+        PluginsReply::Handled
+    ));
+    assert!(!view.busy());
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "guard is off in Settings for every project. Turn it on there first."
+        ))
+    );
+
+    let mut view = with_hooks(vec![
+        hook("tide", "PreToolUse", Some("Bash"), here(), true, None),
+        hook("tide", "SessionStart", None, here(), true, None),
+    ]);
+    let change = sent(view.key(press(KeyCode::Char(' '))));
+    assert!(matches!(
+        change,
+        PluginChange::SetHooks { ref ids, enabled: false } if ids.len() == 2
+    ));
+    view.apply(&SettingsEvent::PluginChanged(Ok(None)));
+    assert_eq!(view.notice, Some(Notice::plain("tide hooks are off.")));
+    assert!(matches!(
+        view.key(press(KeyCode::Char('d'))),
+        PluginsReply::Handled
+    ));
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "tide is a plugin's hooks. Press Space to turn them off."
+        ))
+    );
+    assert!(view.removing.is_none(), "a plugin's hooks are never removed here");
+}
+
 async fn drive_settings(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static str> {
     let mut sent = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(8);
@@ -1560,14 +1746,32 @@ fn shell_at(engine: &Engine, place: &Place) -> (Shell, Connection) {
 fn hook_row(shown: &str) -> &str {
     shown
         .lines()
-        .find(|line| line.contains("PreToolUse Bash:") || line.contains("  guard  "))
-        .unwrap_or_else(|| panic!("no hook row:\n{shown}"))
+        .find(|line| line.contains("guard") && line.contains("2 events"))
+        .unwrap_or_else(|| panic!("no guard plugin row:\n{shown}"))
+}
+
+fn event_row<'a>(shown: &'a str, event: &str) -> &'a str {
+    shown
+        .lines()
+        .find(|line| line.contains(event) && line.contains("hooks/guard.sh"))
+        .unwrap_or_else(|| panic!("no {event} row under guard:\n{shown}"))
+}
+
+fn enabled_by_event(hooks: &[HookView]) -> Vec<(String, bool)> {
+    let mut seen: Vec<(String, bool)> = hooks
+        .iter()
+        .map(|hook| (hook.event.clone(), hook.enabled))
+        .collect();
+    seen.sort();
+    seen
 }
 
 /// A real engine's hooks through the TUI: h in Settings, Plugins refuses a folder without
-/// plugin.json with its plain reason, then adds the folder's hooks for every project once it
-/// has one, Space turns the hook off and on again there, and a project's Settings tab
-/// switches that every-project hook off for the project only.
+/// plugin.json with its plain reason, then adds the folder's two hooks for every project once
+/// it has one as one plugin row. Space on that row turns both off, Enter opens its events,
+/// Space on one event turns only that hook on so the row reads Partly on, and Space on the row
+/// turns the other on. A project's Settings tab then switches both every-project hooks off for
+/// the project only, and one event back on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_through_the_engine() {
     let engine = engine().await;
@@ -1576,7 +1780,7 @@ async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_thr
     std::fs::write(plugin.join("hooks/guard.sh"), "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::write(
         plugin.join("hooks/hooks.json"),
-        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh\""}]}]}}"#,
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh\""}]}],"SessionStart":[{"hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh\""}]}]}}"#,
     )
     .unwrap();
     let global = || engine.controller.plugin_hooks(None);
@@ -1624,37 +1828,77 @@ async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_thr
     let sent = drive_settings(&mut shell, &mut connection).await;
     assert!(sent.contains(&"plugin change"), "{sent:?}");
     let hooks = global().await.unwrap();
-    assert_eq!(hooks.len(), 1, "{hooks:?}");
+    assert_eq!(hooks.len(), 2, "{hooks:?}");
+    let mut added: Vec<_> = hooks
+        .iter()
+        .map(|hook| {
+            (
+                hook.plugin.as_str(),
+                hook.event.as_str(),
+                hook.matcher.as_deref(),
+                hook.enabled,
+                &hook.scope,
+            )
+        })
+        .collect();
+    added.sort();
     assert_eq!(
-        (
-            hooks[0].plugin.as_str(),
-            hooks[0].event.as_str(),
-            hooks[0].matcher.as_deref(),
-            hooks[0].enabled,
-            &hooks[0].scope,
-        ),
-        ("guard", "PreToolUse", Some("Bash"), true, &Scope::Global)
+        added,
+        [
+            ("guard", "PreToolUse", Some("Bash"), true, &Scope::Global),
+            ("guard", "SessionStart", None, true, &Scope::Global),
+        ]
     );
+    let first = hooks[0].event.clone();
+    let second = hooks[1].event.clone();
     let shown = render(&mut shell, 120, 36);
     assert!(shown.contains("Hooks added for every project."), "{shown}");
     assert!(hook_row(&shown).contains("On"), "{shown}");
+    assert!(
+        !shown.contains("hooks/guard.sh"),
+        "the plugin's events stay folded:\n{shown}"
+    );
 
     shell.key(Key::Down);
     shell.key(Key::Char(' '));
     let sent = drive_settings(&mut shell, &mut connection).await;
     assert!(sent.contains(&"plugin change"), "{sent:?}");
-    assert!(
-        !global().await.unwrap()[0].enabled,
-        "Space turned the hook off"
+    assert_eq!(
+        enabled_by_event(&global().await.unwrap()),
+        [("PreToolUse".to_owned(), false), ("SessionStart".to_owned(), false)],
+        "Space on the plugin row turned both hooks off"
     );
     let shown = render(&mut shell, 120, 36);
     assert!(hook_row(&shown).contains("Off"), "{shown}");
+
+    shell.key(Key::Enter);
+    drive_settings(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 36);
+    assert!(event_row(&shown, "Bash:").contains("Off"), "{shown}");
+    assert!(event_row(&shown, &second).contains("Off"), "{shown}");
+    shell.key(Key::Down);
     shell.key(Key::Char(' '));
     let sent = drive_settings(&mut shell, &mut connection).await;
     assert!(sent.contains(&"plugin change"), "{sent:?}");
-    assert!(
-        global().await.unwrap()[0].enabled,
-        "Space turned the hook on again"
+    let now = global().await.unwrap();
+    assert_eq!(
+        now.iter()
+            .map(|hook| (hook.event.as_str(), hook.enabled))
+            .collect::<Vec<_>>(),
+        [(first.as_str(), true), (second.as_str(), false)],
+        "Space on the first event row turned only its hook on"
+    );
+    let shown = render(&mut shell, 120, 36);
+    assert!(hook_row(&shown).contains("Partly on"), "{shown}");
+
+    shell.key(Key::Up);
+    shell.key(Key::Char(' '));
+    let sent = drive_settings(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"plugin change"), "{sent:?}");
+    assert_eq!(
+        enabled_by_event(&global().await.unwrap()),
+        [("PreToolUse".to_owned(), true), ("SessionStart".to_owned(), true)],
+        "Space on a Partly on plugin row turned the other hook on"
     );
 
     let (mut shell, mut connection) = shell_at(
@@ -1672,17 +1916,43 @@ async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_thr
     shell.key(Key::Char(' '));
     let sent = drive_settings(&mut shell, &mut connection).await;
     assert!(sent.contains(&"plugin change"), "{sent:?}");
-    let here = engine
-        .controller
-        .plugin_hooks(Some(project()))
-        .await
-        .unwrap();
-    assert_eq!(here[0].on_here, Some(false), "{here:?}");
-    assert!(
-        global().await.unwrap()[0].enabled,
-        "every other project keeps it"
+    let here = || engine.controller.plugin_hooks(Some(project()));
+    assert_eq!(
+        here()
+            .await
+            .unwrap()
+            .iter()
+            .map(|hook| hook.on_here)
+            .collect::<Vec<_>>(),
+        [Some(false), Some(false)],
+        "Space on the plugin row switched both hooks off for this project"
+    );
+    assert_eq!(
+        enabled_by_event(&global().await.unwrap()),
+        [("PreToolUse".to_owned(), true), ("SessionStart".to_owned(), true)],
+        "every other project keeps them"
     );
     let shown = render(&mut shell, 120, 36);
     assert!(hook_row(&shown).contains("Off here"), "{shown}");
-    assert!(shown.contains("is off for this project."), "{shown}");
+    assert!(
+        shown.contains("guard hooks are off for this project."),
+        "{shown}"
+    );
+
+    shell.key(Key::Enter);
+    drive_settings(&mut shell, &mut connection).await;
+    shell.key(Key::Down);
+    shell.key(Key::Char(' '));
+    let sent = drive_settings(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"plugin change"), "{sent:?}");
+    let now = here().await.unwrap();
+    assert_eq!(
+        now.iter()
+            .map(|hook| (hook.event.as_str(), hook.on_here))
+            .collect::<Vec<_>>(),
+        [(first.as_str(), Some(true)), (second.as_str(), Some(false))],
+        "Space on the first event row switched only its hook back on here"
+    );
+    let shown = render(&mut shell, 120, 36);
+    assert!(hook_row(&shown).contains("Partly on"), "{shown}");
 }
