@@ -1011,3 +1011,55 @@ test("the secret and runner guards read every job of every workflow file, matrix
   assert.deepEqual(exposedJobs(added), ["lint", "deploy"]);
   assert.deepEqual(runnerProblems(added), ["deploy: ubuntu-latest", "odd: self-hosted"]);
 });
+
+test("the secret guard also catches a called workflow's secrets key and a workflow-level secret every job inherits, both guards refuse a workflow whose jobs do not parse, and a matrix runner that is not one plain value is a problem (RV-DS241-38 r2)", () => {
+  const call = [
+    "jobs:",
+    "  ci:",
+    "    uses: ./.github/workflows/ci.yml",
+    "    secrets: inherit",
+    "  plain:",
+    "    runs-on: ubuntu-22.04",
+    "",
+  ].join("\n");
+  assert.deepEqual(exposedJobs(call), ["ci"]);
+  const inherited = [
+    "env:",
+    "  TOKEN: ${{ secrets.TOKEN }}",
+    "jobs:",
+    "  lint:",
+    "    runs-on: ubuntu-22.04",
+    "  test:",
+    "    runs-on: ubuntu-22.04",
+    "",
+  ].join("\n");
+  assert.deepEqual(exposedJobs(inherited), ["lint", "test"]);
+  for (const jobs of [
+    ["jobs:", "    build:", "      runs-on: self-hosted"],
+    ["jobs:", '  "build":', "    runs-on: self-hosted"],
+    ["jobs:", "  lint:", "    runs-on: ubuntu-22.04", "  deploy: {runs-on: self-hosted}"],
+    ["jobs:", "  lint:", "    runs-on: ubuntu-22.04", "  deploy: # prod", "    runs-on: self-hosted"],
+    ["jobs:", "      runs-on: self-hosted", "  lint:", "    runs-on: ubuntu-22.04"],
+  ]) {
+    const text = [...jobs, ""].join("\n");
+    assert.throws(() => exposedJobs(text), /job/, text);
+    assert.throws(() => runnerProblems(text), /job/, text);
+  }
+  const runners = [
+    "jobs:",
+    "  odd:",
+    "    runs-on: ${{ matrix.runner }}",
+    "    strategy:",
+    "      matrix:",
+    "        include:",
+    "          - runner: macos-15",
+    "          - runner: [ubuntu-22.04, self-hosted]",
+    "  tail:",
+    "    runs-on: ${{ matrix.runner }}",
+    "    strategy:",
+    "      matrix:",
+    "        runner: self-hosted # pinned",
+    "",
+  ].join("\n");
+  assert.deepEqual(runnerProblems(runners), ["odd: runner line - runner: [ubuntu-22.04, self-hosted]", "tail: runner line runner: self-hosted # pinned"]);
+});
