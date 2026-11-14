@@ -313,6 +313,78 @@ fn the_remote_settings_folder_is_read_only_to_the_ide_server() {
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
 
+/// The server's data folder and its other writable folders are granted after the base
+/// profile, so the base denies there hold only when given again after that grant (sandbox-git
+/// r1 note 4): no `.git` at any depth in any letter case, no launch file or folder of an
+/// agent home, and no mode change of a granted folder itself. Everything else there stays
+/// writable.
+#[test]
+fn the_ide_data_folders_keep_the_git_launch_file_and_root_denies_after_their_grant() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("project");
+    let home = mine.join("server");
+    let work = mine.join("work");
+    for path in [&home, &work, &build, &root] {
+        folder(path);
+    }
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[work.as_path()],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let profile = install(
+        &mine,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        AgentFilesRule::default(),
+    )
+    .unwrap();
+    let make = r#"/bin/mkdir -p "$1""#;
+    let write = r#": > "$1""#;
+    for granted in [&home, &work] {
+        assert!(
+            !sh(&profile, make, &granted.join(".git")),
+            "{} takes no .git",
+            granted.display()
+        );
+        assert!(!sh(&profile, make, &granted.join("deep/.GIT")));
+        assert!(!sh(&profile, r#"/bin/chmod 777 "$1""#, granted));
+        assert!(sh(&profile, make, &granted.join("deep/kept")));
+        assert!(sh(&profile, write, &granted.join("kept.txt")));
+    }
+    for launch in ["settings.json", "CLAUDE.md", "Config.TOML"] {
+        assert!(!sh(&profile, write, &home.join(launch)), "{launch}");
+    }
+    assert!(!sh(&profile, make, &home.join("agents")));
+    assert!(sh(&profile, make, &home.join("data/User/globalStorage")));
+    assert!(sh(&profile, write, &home.join("data/User/settings.json")));
+    for granted in [&home, &work] {
+        assert!(!granted.join(".git").exists() && !granted.join("deep/.GIT").exists());
+        assert_eq!(
+            fs::metadata(granted).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    assert!(!home.join("settings.json").exists() && !home.join("agents").exists());
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}
+
 /// A lock outside every writable folder, a read-only folder inside a writable one, and a
 /// read-only folder holding a writable one are refused, so the profile never states a
 /// lock or a read-only grant that a writable grant overrides.
