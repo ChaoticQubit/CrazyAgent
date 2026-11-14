@@ -447,15 +447,6 @@ async fn answer(
             .await
         }
         Action::InstallMany { ids } => {
-            let queue = updates.clone();
-            let folder = root.clone();
-            blocking(move || {
-                queue
-                    .queue(&open(&folder)?, &ids)
-                    .map(|_| WireReply::Started)
-                    .map_err(failure)
-            })
-            .await?;
             let engine = engine.clone();
             let job = Job {
                 owner,
@@ -464,26 +455,54 @@ async fn answer(
                 search,
                 updates: updates.clone(),
             };
-            let left = updates.clone();
-            let started = std::thread::Builder::new()
-                .name(QUEUE_THREAD.into())
-                .spawn(move || {
-                    updates.drain(
-                        |id| job.install_next(&engine, &root, id),
-                        QUEUE_PAUSE,
-                        QUEUE_WAIT_MAX,
-                    );
-                });
-            if started.is_err() {
-                left.drain(|_| Err(update::START_FAILED), QUEUE_STOP, QUEUE_STOP);
-                return Err(failure(update::START_FAILED));
-            }
-            Ok(WireReply::Started)
+            let folder = root.clone();
+            install_many(updates, root, ids, move |id| {
+                job.install_next(&engine, &folder, id)
+            })
+            .await
         }
         Action::Queued => Ok(WireReply::Queued {
             ids: engine.harness_updates.queued(),
         }),
     }
+}
+
+/// Queues a list of harnesses for install, then starts the one drain thread that installs
+/// them through `start`. Inputs: the update state, the engine folder, the ids and what
+/// starts one install. Output: Started, or the refusal.
+async fn install_many(
+    updates: Arc<Updates>,
+    root: PathBuf,
+    ids: Vec<String>,
+    start: impl FnMut(&'static str) -> Result<(), &'static str> + Send + 'static,
+) -> Result<WireReply, EngineError> {
+    let queue = updates.clone();
+    blocking(move || {
+        queue
+            .queue(&open(&root)?, &ids)
+            .map(|_| WireReply::Started)
+            .map_err(failure)
+    })
+    .await?;
+    drain_on_thread(updates, start)
+}
+
+/// Starts the thread that drains the install queue through `start`; when no thread starts,
+/// every queued harness is refused at once so the queue never stays full. Inputs: the
+/// update state and what starts one install. Output: Started, or `START_FAILED`.
+fn drain_on_thread(
+    updates: Arc<Updates>,
+    start: impl FnMut(&'static str) -> Result<(), &'static str> + Send + 'static,
+) -> Result<WireReply, EngineError> {
+    let left = updates.clone();
+    let started = std::thread::Builder::new()
+        .name(QUEUE_THREAD.into())
+        .spawn(move || updates.drain(start, QUEUE_PAUSE, QUEUE_WAIT_MAX));
+    if started.is_err() {
+        left.drain(|_| Err(update::START_FAILED), QUEUE_STOP, QUEUE_STOP);
+        return Err(failure(update::START_FAILED));
+    }
+    Ok(WireReply::Started)
 }
 
 /// What one install job needs past the request: the owner runtime that pins the new
@@ -597,6 +616,46 @@ mod tests {
             harness_catalog: action.clone(),
         })
         .unwrap()
+    }
+
+    /// RV-DS241-74: an InstallMany whose request is dropped while its list is being queued
+    /// still drains that list, so the queue never stays full with no drain thread and a
+    /// later list is not refused busy. The install it starts is refused at once, so nothing
+    /// is installed.
+    #[tokio::test]
+    async fn an_install_list_cut_while_it_queues_still_drains() {
+        let folder = tempfile::tempdir().unwrap();
+        let root = folder.path().canonicalize().unwrap();
+        let updates = Updates::new();
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = asked.clone();
+        let cut = install_many(
+            updates.clone(),
+            root.clone(),
+            vec!["codex".into()],
+            move |_| {
+                seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                Err("install_refused_in_test")
+            },
+        );
+        let _ = tokio::time::timeout(Duration::ZERO, cut).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !(asked.load(std::sync::atomic::Ordering::SeqCst) && updates.queued().is_empty())
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            "the cut list reached a drain: {:?}",
+            updates.queued()
+        );
+        assert!(updates.queued().is_empty());
+        assert!(
+            updates
+                .queue(&open(&root).unwrap(), &["codex".into()])
+                .is_ok()
+        );
     }
 
     #[test]
