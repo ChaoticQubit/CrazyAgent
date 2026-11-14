@@ -334,6 +334,7 @@ struct NativeLead {
     record: PaneRecord,
     left: u32,
     beats: PathBuf,
+    worktree: PathBuf,
     _down: LeadServersDown,
 }
 
@@ -466,6 +467,7 @@ impl NativeLead {
             record,
             left,
             beats,
+            worktree: plan.working_dir.clone(),
             _down: down,
         }
     }
@@ -758,7 +760,8 @@ fn a_host_that_cannot_list_its_panes_is_not_kept() {
 
 /// DEC-158: a frozen native lead that the next engine refuses, here because its team was
 /// paused while no engine ran, is ended while still frozen: no process of it runs again,
-/// not even for the moment before the refusal, so it never runs with its proxy port free.
+/// not even for the moment before the refusal, so it never runs with its proxy port free,
+/// and its worktree stays, so nothing it left there uncommitted is lost.
 #[test]
 fn a_frozen_native_lead_the_next_engine_refuses_ends_without_running_again() {
     let mut lead = NativeLead::start_with(BEATING_CLAUDE);
@@ -812,6 +815,10 @@ fn a_frozen_native_lead_the_next_engine_refuses_ends_without_running_again() {
         "The terminal of team agent {} was closed: the team is paused.",
         lead.id
     )));
+    assert!(
+        lead.worktree.join(".git").is_file(),
+        "the next engine removed the refused paused lead's worktree"
+    );
     let deadline = Instant::now() + WAIT;
     while state_of(lead.left).is_some() {
         assert!(
