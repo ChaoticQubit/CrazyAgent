@@ -1543,6 +1543,63 @@ fn the_agents_tab_shows_only_the_newest_output_lines_that_fit() {
     );
 }
 
+/// RV-DS241-27 r2 (leader 11:00, DEC-141): a research job sent back to wait shows why on its
+/// status, the line the desktop research row shows, on the Overview's work list as on the
+/// Agents tab, never a bare Queued.
+#[test]
+fn a_queued_research_job_shows_why_it_waits_on_its_status() {
+    const REASON: &str = "Waiting for this account to be ready";
+    let project = ProjectId::new("tidepool").unwrap();
+    let kind = ResearchKind::TechStackResearch;
+    let queued = ResearchJob {
+        id: 9,
+        project_id: project.clone(),
+        kind,
+        kind_label: kind.label().into(),
+        status: ResearchStatus::Queued,
+        status_label: "Queued".into(),
+        report_path: kind.report_path(),
+        harness: "codex".into(),
+        tools: true,
+        attempts: 0,
+        claimer: None,
+        error: Some(REASON.into()),
+        cancel_requested: false,
+        output_bytes: 0,
+        created_ms: 1_000,
+        started_ms: None,
+        heartbeat_ms: None,
+        finished_ms: None,
+    };
+    let look = Look::plain();
+    let status = text(&[job_status(&queued, 0, 3_600, &look)]);
+    assert!(
+        status.contains("Queued") && status.contains(REASON),
+        "{status}"
+    );
+    let mut bare = queued.clone();
+    bare.error = Some("  ".into());
+    assert!(
+        !text(&[job_status(&bare, 0, 3_600, &look)]).contains("  Waiting"),
+        "a blank line adds nothing"
+    );
+
+    let mut screen = ProjectScreen::new(project.clone(), "Tidepool".into(), None);
+    screen.setup = Some(stored(&project));
+    screen.now_ms = 600_000;
+    screen.jobs = Some(vec![queued]);
+    screen.open(Tab::Overview);
+    for (width, height) in [(80u16, 24u16), (120, 36)] {
+        let shown = text(&project_screen(&mut screen, width, height, &look).rows);
+        assert!(
+            shown
+                .lines()
+                .any(|line| line.contains("Queued") && line.contains(REASON)),
+            "{width}x{height}: {shown}"
+        );
+    }
+}
+
 #[test]
 fn a_research_job_queued_again_shows_why_and_is_not_drawn_as_running() {
     const REASON: &str = "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it";

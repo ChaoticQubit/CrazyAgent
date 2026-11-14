@@ -72,6 +72,10 @@ pub fn progress(jobs: &ResearchJobs, project: &str) -> Result<Vec<ResearchProgre
         .map(|job| {
             let detail = match job.status {
                 ResearchStatus::Failed | ResearchStatus::NeedsPool => job.error.clone(),
+                ResearchStatus::Queued => job
+                    .error
+                    .clone()
+                    .filter(|line| super::runner::WAITING_LINES.contains(&line.as_str())),
                 _ => None,
             };
             let elapsed_seconds = job.started_ms.map(|started| {

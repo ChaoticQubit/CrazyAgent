@@ -86,6 +86,15 @@ static REPOSITORIES_SETTING_UP: Mutex<std::collections::BTreeSet<PathBuf>> =
 static REPOSITORY_FREED: Condvar = Condvar::new();
 const BRIEF_BYTES_MAX: u64 = 32 * 1024;
 const DOCUMENTS_LISTED_MAX: usize = 50;
+/// The lines a job shows while it waits out a refused launch, the same in the desktop app
+/// and the terminal app (DEC-141, DEC-170 addendum 6).
+const HOME_MOVE_WAITING: &str = "Waiting for the projects home move to finish";
+const PROFILE_BUSY_WAITING: &str = "Waiting for another run to finish with this account's sign-in";
+const ACCOUNT_WAITING: &str = "Waiting for this account to be ready";
+/// Every line a refused launch leaves on a job that waits Queued, so its progress reports why
+/// (RV-DS241-27 r2).
+pub(crate) const WAITING_LINES: [&str; 3] =
+    [HOME_MOVE_WAITING, PROFILE_BUSY_WAITING, ACCOUNT_WAITING];
 const LINKS_MAX: usize = 100;
 const POLL: Duration = Duration::from_millis(100);
 const HEARTBEAT: Duration = Duration::from_millis(250);
@@ -788,10 +797,7 @@ impl ResearchRunner {
             process_group,
         };
         if jobs.home_moving(project.root)? {
-            jobs.release(&job, None)?;
-            let status = jobs
-                .get(job.id)?
-                .map_or(ResearchStatus::Queued, |job| job.status);
+            let status = jobs.refused(&job, HOME_MOVE_WAITING)?;
             return Ok(run(status, None, None));
         }
         let Some(harness) = ResearchHarness::of(&job.harness) else {
@@ -869,14 +875,12 @@ impl ResearchRunner {
                 Ok(run(status, None, None))
             }
             Err(RunError::Busy) => {
-                jobs.release(&job, None)?;
-                let status = jobs
-                    .get(job.id)?
-                    .map_or(ResearchStatus::Queued, |job| job.status);
+                let status = jobs.refused(&job, PROFILE_BUSY_WAITING)?;
                 Ok(run(status, None, None))
             }
-            Err(RunError::Account(_)) => {
-                let status = jobs.needs_pool(&job)?;
+            Err(RunError::Account(code)) => {
+                eprintln!("research job {} account not ready: {code}", job.id);
+                let status = jobs.refused(&job, ACCOUNT_WAITING)?;
                 Ok(run(status, None, None))
             }
             Err(error) => {
@@ -1419,6 +1423,7 @@ impl ResearchRunner {
         counted: &AtomicU64,
         limited: &AtomicBool,
     ) -> Result<Ending, RunError> {
+        noted_launch(jobs, job);
         let started = Instant::now();
         let mut beat = Instant::now();
         let ending = loop {
@@ -1473,6 +1478,7 @@ impl ResearchRunner {
             }
             return Ok(Ending::Exited(false));
         }
+        noted_launch(jobs, job);
         let mut beat = Instant::now();
         let ending = loop {
             if self.is_stopping() {
@@ -3966,6 +3972,70 @@ fn agent_failure(log: &Path, harness: ResearchHarness, max: u64) -> String {
     )
 }
 
+/// The names of the plain files in the owner's documents folder, at most
+/// `DOCUMENTS_LISTED_MAX` entries read, from the folder opened below the project's context
+/// folder with no link followed (RV-DS241-29), so a documents folder that is a link lists
+/// nothing. Inputs: the context folder and the documents folder in it. Output: the names,
+/// none when the folder is missing, a link or unreadable.
+#[cfg(unix)]
+fn document_names(context: &Path, documents: &Path) -> Vec<String> {
+    use rustix::fs::{AtFlags, Dir, FileType, OFlags, statat};
+    let Ok(below) = documents.strip_prefix(context) else {
+        return Vec::new();
+    };
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(folder) = crate::platform::open_beneath(context, below, flags) else {
+        return Vec::new();
+    };
+    let Ok(listing) = Dir::read_from(&folder) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for entry in listing
+        .flatten()
+        .filter(|entry| !matches!(entry.file_name().to_bytes(), b"." | b".."))
+        .take(DOCUMENTS_LISTED_MAX)
+    {
+        let plain = statat(&folder, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)
+            .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile);
+        if plain
+            && let Ok(name) = entry.file_name().to_str()
+            && !name.chars().any(char::is_control)
+        {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
+/// The names of the plain files in the owner's documents folder, at most
+/// `DOCUMENTS_LISTED_MAX` entries read, none when the folder is a link. Inputs: the context
+/// folder, unused, and the documents folder. Output: the names. Written, not tested.
+#[cfg(not(unix))]
+fn document_names(_context: &Path, documents: &Path) -> Vec<String> {
+    let real = fs::symlink_metadata(documents)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    let Some(entries) = real.then(|| fs::read_dir(documents).ok()).flatten() else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .take(DOCUMENTS_LISTED_MAX)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| !name.chars().any(char::is_control))
+        .collect()
+}
+
+/// Records that a claimed job's harness really started, so the project's activity shows a
+/// start only for a run that launched (DEC-170 addendum 6); a lost claim is left to the next
+/// heartbeat. Takes the job store and the job.
+fn noted_launch(jobs: &ResearchJobs, job: &ResearchJob) {
+    if let Err(error) = jobs.launched(job) {
+        eprintln!("research job {} start not recorded: {error}", job.id);
+    }
+}
+
 /// Reads a report or brief an agent may have replaced, opened from a folder the engine
 /// holds with no link followed in any part below it and no FIFO waited on, so an agent
 /// that swapped its temp folder for a link is refused; the file is kept only when regular
@@ -4005,17 +4075,7 @@ fn research_prompt(
         Err(error) => return Err(error.into()),
     };
     let documents_dir = context.join("documents");
-    let mut documents = Vec::new();
-    if let Ok(entries) = fs::read_dir(&documents_dir) {
-        for entry in entries.flatten().take(DOCUMENTS_LISTED_MAX) {
-            if entry.file_type().is_ok_and(|kind| kind.is_file())
-                && let Some(name) = entry.file_name().to_str()
-                && !name.chars().any(char::is_control)
-            {
-                documents.push(name.to_string());
-            }
-        }
-    }
+    let mut documents = document_names(&context, &documents_dir);
     documents.sort();
     let label = kind_label(kind);
     let mut prompt = format!(
@@ -6192,6 +6252,149 @@ mod tests {
         );
         assert_eq!(kept, plain);
         assert!(none.is_empty());
+    }
+
+    /// The research prompt lists the owner's documents only from a real documents folder
+    /// below the project: a documents folder that is a link to a folder outside, as a
+    /// repository tracking `context/documents` as a link would make, lists none of that
+    /// folder's names (RV-DS241-29); a real one still lists its plain files.
+    #[test]
+    fn the_research_prompt_lists_no_documents_through_a_link() {
+        let folder = tempfile::tempdir().unwrap();
+        let base = folder.path().canonicalize().unwrap();
+        let root = base.join("project");
+        let outside = base.join("outside");
+        fs::create_dir_all(root.join("context")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("id_ed25519"), "key\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("context/documents")).unwrap();
+        let prompt = research_prompt(&root, "market_research", &[]).unwrap();
+        assert!(!prompt.contains("id_ed25519"), "{prompt}");
+        assert!(!prompt.contains("The owner attached these documents"));
+
+        fs::remove_file(root.join("context/documents")).unwrap();
+        fs::create_dir(root.join("context/documents")).unwrap();
+        fs::write(root.join("context/documents/pricing.pdf"), "pdf\n").unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("id_ed25519"),
+            root.join("context/documents/linked-key"),
+        )
+        .unwrap();
+        let prompt = research_prompt(&root, "market_research", &[]).unwrap();
+        assert!(
+            prompt.contains(": pricing.pdf. Read them if they help."),
+            "{prompt}"
+        );
+    }
+
+    /// DEC-170 addendum 6 (RV-DS241-26): a rate-limited end hands the attempt back, but the
+    /// third in a row ends the research job failed with the plain line, since its agent can
+    /// write the limit its harness reports. A run that ends another way starts the count
+    /// again.
+    #[test]
+    fn a_rate_limited_end_three_times_in_a_row_fails_the_research_job() {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        register_project(&root.database, "alpha", &folder);
+        let jobs = ResearchJobs::open(&root.database).unwrap();
+        let account = reference("codex-connection");
+        let id = jobs
+            .enqueue("alpha", "market_research", "codex", false)
+            .unwrap();
+        let mut ends = Vec::new();
+        for _ in 0..3 {
+            let held = jobs.claim("alpha", "runner-a", 1).unwrap().unwrap();
+            assert_eq!(held.id, id);
+            ends.push(jobs.rate_limited(&held, &account).unwrap().0);
+        }
+        assert_eq!(
+            ends,
+            [
+                ResearchStatus::Queued,
+                ResearchStatus::Queued,
+                ResearchStatus::Failed
+            ]
+        );
+        let job = jobs.get(id).unwrap().unwrap();
+        assert_eq!(
+            job.error.as_deref(),
+            Some("The account kept hitting its rate limit; run this research again later")
+        );
+        assert_eq!(job.claimer, None);
+        assert!(jobs.claim("alpha", "runner-a", 1).unwrap().is_none());
+
+        let again = jobs
+            .enqueue("alpha", "competitor_research", "codex", false)
+            .unwrap();
+        let mut ends = Vec::new();
+        for step in 0..5 {
+            let held = jobs.claim("alpha", "runner-a", 1).unwrap().unwrap();
+            assert_eq!(held.id, again);
+            ends.push(if step == 2 {
+                jobs.fail(&held, "Agent stopped with an error", 10).unwrap()
+            } else {
+                jobs.rate_limited(&held, &account).unwrap().0
+            });
+        }
+        assert_eq!(ends, [ResearchStatus::Queued; 5]);
+    }
+
+    /// DEC-170 addendum 6 (RV-DS241-27): a research job its runner hands back because a
+    /// projects home move holds its folder spends no attempt, is not claimed again until its
+    /// backoff ends, shows why it waits and records no start, since no harness ran.
+    #[test]
+    fn a_research_job_refused_for_a_home_move_backs_off_shows_why_and_records_no_start() {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        register_project(&root.database, "alpha", &folder);
+        let connection = rusqlite::Connection::open(&root.database).unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects_home_move VALUES (1,'request-7',7,?1,?2,'[\"repo\"]')",
+                rusqlite::params![
+                    root.base.to_str().unwrap(),
+                    root.base.join("next").to_str().unwrap()
+                ],
+            )
+            .unwrap();
+        let runner = ResearchRunner::new(
+            &root.database,
+            &root.state,
+            Path::new("/usr/bin/true"),
+            ResearchLimits::default(),
+        )
+        .unwrap();
+        let jobs = ResearchJobs::open(&root.database).unwrap();
+        let id = jobs
+            .enqueue("alpha", "market_research", "codex", false)
+            .unwrap();
+        let project = ResearchProject {
+            id: "alpha",
+            root: &folder,
+            account: None,
+        };
+        let run = runner.run_once(&project).unwrap().unwrap();
+        assert_eq!((run.job, run.status), (id, ResearchStatus::Queued));
+        assert!(
+            runner.run_once(&project).unwrap().is_none(),
+            "the job waits out its backoff"
+        );
+        let job = jobs.get(id).unwrap().unwrap();
+        assert_eq!((job.attempts, job.claimer), (0, None));
+        assert_eq!(
+            job.error.as_deref(),
+            Some("Waiting for the projects home move to finish")
+        );
+        let started: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM project_activity WHERE kind='research_started'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(started, 0, "no harness started");
     }
 
     #[test]

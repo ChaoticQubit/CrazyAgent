@@ -1176,10 +1176,11 @@ async fn owner_reads_the_project_activity_through_the_engine() {
     assert_eq!(result(response), OwnerResult::Applied);
     let store =
         crate::research::jobs::ResearchJobs::open(&engine.root.path().join("engine.db")).unwrap();
-    store
+    let claimed = store
         .claim("setup-pooled", "runner-test", 4)
         .unwrap()
         .unwrap();
+    store.launched(&claimed).unwrap();
 
     let read = owner.project_activity(project.clone(), 50).await.unwrap();
     assert!(!read.more, "every event fits");
