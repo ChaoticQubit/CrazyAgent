@@ -397,8 +397,11 @@ impl NativeBridge {
 
     /// Reads the folders a project's agents are kept out of (DEC-111 Q7).
     /// Takes the project id.
-    /// Returns the folders in saved order.
-    pub async fn project_hidden_paths(&self, id: &str) -> Result<Vec<String>, BridgeError> {
+    /// Returns the folders in saved order and the version a change sends back.
+    pub async fn project_hidden_paths(
+        &self,
+        id: &str,
+    ) -> Result<crazyagent::project_setup::HiddenPaths, BridgeError> {
         let paths = self
             .reader()?
             .project_hidden_paths(project(id)?)
@@ -483,11 +486,13 @@ impl NativeBridge {
 
     /// Replaces the folders a project's agents are kept out of (DEC-111 Q7); the engine refuses
     /// a path outside the project. Reads the folders first, so the change starts from the
-    /// engine's current revision. Takes the project id, the folders and the client generation.
-    /// Returns the actual commit receipt.
+    /// engine's current revision. Takes the project id, the version the screen showed, the
+    /// folders and the client generation. Returns the actual commit receipt; folders changed
+    /// since the screen read them are the plain rejection `stale_revision`.
     pub async fn set_project_hidden_paths(
         &mut self,
         id: &str,
+        version: u64,
         paths: Vec<String>,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
@@ -499,7 +504,11 @@ impl NativeBridge {
             .map_err(|e| read_failure(&e.0))?;
         self.controller()?
             .begin_mutation(
-                OwnerMutation::SetProjectHiddenPaths { project_id, paths },
+                OwnerMutation::SetProjectHiddenPaths {
+                    project_id,
+                    version,
+                    paths,
+                },
                 generation,
             )
             .map_err(|error| caused("owner_not_ready", &error.0))?;

@@ -2984,7 +2984,10 @@ fn settings_plans_a_roadmap_with_p_and_edits_hidden_folders_with_k() {
     let mut screen = loaded(&project);
     screen.open(Tab::Settings);
     screen.jobs = Some(Vec::new());
-    screen.hidden_paths = Some(vec!["/Users/owner/secret".into()]);
+    screen.hidden_paths = Some(crate::project_setup::HiddenPaths {
+        paths: vec!["/Users/owner/secret".into()],
+        version: 0,
+    });
     screen.context = Some(crate::project_setup::ProjectContext {
         project_id: project.clone(),
         folder: "/Users/owner/hidden".into(),
@@ -3062,7 +3065,10 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     );
     screen.apply(
         &read,
-        Ok(SetupView::HiddenPaths(vec!["/Users/owner/secret".into()])),
+        Ok(SetupView::HiddenPaths(crate::project_setup::HiddenPaths {
+            paths: vec!["/Users/owner/secret".into()],
+            version: 1,
+        })),
     );
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(
@@ -3088,6 +3094,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     );
     let save = SetupAction::SetHiddenPaths {
         project_id: project.clone(),
+        version: 1,
         paths: vec![
             "/Users/owner/secret".into(),
             "/Users/owner/project/vendor".into(),
@@ -3122,6 +3129,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     screen.hidden.as_mut().unwrap().input.set("");
     let clear = SetupAction::SetHiddenPaths {
         project_id: project.clone(),
+        version: 1,
         paths: vec![],
     };
     assert_eq!(
@@ -3138,7 +3146,10 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     assert!(screen.hidden.is_none());
     assert_eq!(screen.hidden_paths, None);
 
-    screen.hidden_paths = Some(vec![]);
+    screen.hidden_paths = Some(crate::project_setup::HiddenPaths {
+        paths: vec![],
+        version: 2,
+    });
     screen.key(key(KeyCode::Char('k')));
     screen.paste(&format!("/{}", "d".repeat(1100)));
     assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);

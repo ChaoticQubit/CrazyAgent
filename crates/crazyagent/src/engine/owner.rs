@@ -169,6 +169,7 @@ pub enum OwnerMutation {
     },
     SetProjectHiddenPaths {
         project_id: ProjectId,
+        version: u64,
         paths: Vec<String>,
     },
     SetProjectAgentPolicy {
@@ -412,9 +413,14 @@ impl OwnerMutation {
                 action.validate()?;
                 Command::ProjectSetup { action }
             }
-            Self::SetProjectHiddenPaths { project_id, paths } => {
+            Self::SetProjectHiddenPaths {
+                project_id,
+                version,
+                paths,
+            } => {
                 let action = crate::project_setup::SetupAction::SetHiddenPaths {
                     project_id: project_id.clone(),
+                    version: *version,
                     paths: paths.clone(),
                 };
                 action.validate()?;
@@ -1335,6 +1341,7 @@ pub enum OwnerData {
     ProjectHiddenPaths {
         project_id: ProjectId,
         paths: Vec<String>,
+        version: u64,
     },
     ProjectAgentPolicy {
         project_id: ProjectId,

@@ -714,7 +714,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub folders: Option<AddFile>,
     pub read_paths: Option<crate::project_setup::ReadPaths>,
     pub hidden: Option<AddFile>,
-    pub hidden_paths: Option<Vec<String>>,
+    pub hidden_paths: Option<crate::project_setup::HiddenPaths>,
     pub access: Option<AccessEdit>,
     pub agent_policy: Option<crate::sandbox::policy::PolicyView>,
     pub schedule: Option<crate::scheduling::Schedule>,
@@ -736,6 +736,8 @@ pub(in crate::tui) struct ProjectScreen {
     folders_version: u64,
     folders_stale: bool,
     hidden_paths_read_ms: Option<i64>,
+    hidden_version: u64,
+    hidden_stale: bool,
     agent_policy_read_ms: Option<i64>,
     access_stale: bool,
     memories_read_ms: Option<i64>,
@@ -822,6 +824,8 @@ impl ProjectScreen {
             folders_version: 0,
             folders_stale: false,
             hidden_paths_read_ms: None,
+            hidden_version: 0,
+            hidden_stale: false,
             agent_policy_read_ms: None,
             access_stale: false,
             memories_read_ms: None,
@@ -1146,8 +1150,19 @@ impl ProjectScreen {
                 self.read_paths = Some(saved);
                 self.read_paths_read_ms = Some(self.now_ms);
             }
-            SetupView::HiddenPaths(paths) => {
-                self.hidden_paths = Some(paths);
+            SetupView::HiddenPaths(saved) => {
+                if std::mem::take(&mut self.hidden_stale)
+                    && let Some(hidden) = self.hidden.as_mut()
+                {
+                    self.hidden_version = saved.version;
+                    let now = if saved.paths.is_empty() {
+                        "no hidden folders".to_owned()
+                    } else {
+                        saved.paths.join(":")
+                    };
+                    hidden.error = Some(format!("Saved now: {now}. {KEEP_MINE}"));
+                }
+                self.hidden_paths = Some(saved);
                 self.hidden_paths_read_ms = Some(self.now_ms);
             }
             SetupView::AgentPolicy(view) => {
@@ -1224,8 +1239,8 @@ impl ProjectScreen {
     }
 
     /// Puts a refused add, edit or remove back in its box with the reason. A General,
-    /// read-only folders or Agent access edit refused as stale keeps its draft and reads the
-    /// saved value again.
+    /// read-only folders, hidden folders or Agent access edit refused as stale keeps its draft
+    /// and reads the saved value again.
     /// Takes the change query and the plain problem code.
     /// Returns true when an open box took the refusal.
     fn refused(&mut self, query: &SetupQuery, code: &str) -> bool {
@@ -1262,6 +1277,11 @@ impl ProjectScreen {
                 if let Some(hidden) = self.hidden.as_mut() {
                     hidden.busy = false;
                     hidden.error = reason;
+                }
+                if stale {
+                    self.hidden_stale = true;
+                    self.hidden_paths = None;
+                    self.hidden_paths_read_ms = None;
                 }
                 true
             }
@@ -2601,9 +2621,11 @@ impl ProjectScreen {
             }
             KeyCode::Char('k') => {
                 match &self.hidden_paths {
-                    Some(paths) => {
+                    Some(saved) => {
                         let mut input = TextInput::single(FOLDERS_BYTES_MAX);
-                        input.set(&paths.join(":"));
+                        input.set(&saved.paths.join(":"));
+                        self.hidden_version = saved.version;
+                        self.hidden_stale = false;
                         self.hidden = Some(AddFile {
                             input,
                             busy: false,
@@ -2801,6 +2823,7 @@ impl ProjectScreen {
                     .collect();
                 let action = SetupAction::SetHiddenPaths {
                     project_id: self.project.clone(),
+                    version: self.hidden_version,
                     paths,
                 };
                 if let Err(error) = action.validate() {

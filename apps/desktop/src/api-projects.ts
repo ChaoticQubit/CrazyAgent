@@ -697,16 +697,21 @@ export function saveReadPaths(id: string, paths: string[], version: number, gene
   return call<IntentReceipt>("desktop_set_project_read_paths", { id, version, paths, generation });
 }
 
+/** The folders a project's agents are kept out of in saved order and the version a change
+ * sends back. */
+export type HiddenPaths = { paths: string[]; version: number };
+
 /** Reads the folders this project's agents are kept out of, read, write and run.
- * Input: project id. Output: the folders in saved order. */
-export function loadHiddenPaths(id: string): Promise<Result<string[]>> {
-  return call<string[]>("desktop_project_hidden_paths", { id });
+ * Input: project id. Output: the folders in saved order and their version. */
+export function loadHiddenPaths(id: string): Promise<Result<HiddenPaths>> {
+  return call<HiddenPaths>("desktop_project_hidden_paths", { id });
 }
 
 /** Replaces the folders this project's agents are kept out of; the engine refuses a path
- * outside the project. Inputs: project id, the folders and a generation. Output: the receipt. */
-export function saveHiddenPaths(id: string, paths: string[], generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_set_project_hidden_paths", { id, paths, generation });
+ * outside the project, and folders changed since the version shown with `stale_revision`.
+ * Inputs: project id, the folders, the version shown and a generation. Output: the receipt. */
+export function saveHiddenPaths(id: string, paths: string[], version: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_hidden_paths", { id, version, paths, generation });
 }
 
 /** Reads this project's agent access level and the toolchains its agents may use.

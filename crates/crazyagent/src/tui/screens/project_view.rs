@@ -2487,7 +2487,11 @@ fn folders_line(screen: &ProjectScreen, look: &Look) -> Row {
 /// The Settings line for a project's hidden folders: how many, or loading.
 /// Takes the screen and look. Returns the row with its edit key.
 fn hidden_line(screen: &ProjectScreen, look: &Look) -> Row {
-    let text = match screen.hidden_paths.as_deref() {
+    let text = match screen
+        .hidden_paths
+        .as_ref()
+        .map(|saved| saved.paths.as_slice())
+    {
         None => "Loading...".to_owned(),
         Some([]) => "None hidden".to_owned(),
         Some([one]) => one.clone(),
