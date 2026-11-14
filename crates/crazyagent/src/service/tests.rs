@@ -114,6 +114,25 @@ WantedBy=default.target
     );
 }
 
+/// systemd.exec: Environment= expands no variables, so a `$` in a PATH folder is written as
+/// is, while `%` (a specifier), backslash and double quote are still escaped.
+#[test]
+fn systemd_environment_keeps_a_dollar_in_a_path_folder_as_written() {
+    let mut linux = service(Platform::Linux);
+    linux.path = OsString::from(
+        r#"/home/owner/odd$dir/bin:/home/owner/50%/bin:/home/owner/"q"\/bin:/usr/bin"#,
+    );
+    let text = linux.definition_text().unwrap();
+    assert!(
+        text.contains(
+            r#"
+Environment="PATH=/home/owner/odd$dir/bin:/home/owner/50%%/bin:/home/owner/\"q\"\\/bin:/usr/bin"
+"#
+        ),
+        "{text}"
+    );
+}
+
 #[test]
 fn windows_task_runs_at_logon_for_the_user_and_appends_output_to_the_log() {
     let mut windows = service(Platform::Windows);
@@ -349,7 +368,6 @@ fn windows_path_command_hands_the_folder_over_in_its_environment_only() {
         .map(|part| part.to_str().unwrap())
         .collect();
     assert_eq!(args[..3], ["-NoProfile", "-NonInteractive", "-Command"]);
-    assert!(args[3].contains("[Environment]::SetEnvironmentVariable('Path'"));
     assert!(args[3].contains(&format!("$f=$env:{WINDOWS_PATH_FOLDER_VARIABLE};")));
     assert!(!args[3].contains("$args"));
     assert!(!args[3].contains("Cra'zy"));
@@ -364,18 +382,52 @@ fn windows_path_command_hands_the_folder_over_in_its_environment_only() {
     );
 }
 
-/// Reads the user's stored PATH through PowerShell. Takes nothing. Returns the value, empty
-/// when it is unset.
+/// The user's PATH is read as written, with its %VAR% references unexpanded, and stored back
+/// with the registry kind it had (REG_EXPAND_SZ when there was none), never as an expanded
+/// REG_SZ; a changed PATH is announced to running programs.
+#[test]
+fn windows_path_command_keeps_the_user_path_kind_and_its_unexpanded_text() {
+    let command = windows_path_command(Path::new(r"C:\Users\owner\AppData\Local\CrazyAgent"));
+    let script = command.get_args().nth(3).unwrap().to_str().unwrap();
+    assert!(script.contains("DoNotExpandEnvironmentNames"), "{script}");
+    assert!(script.contains("GetValueKind('Path')"), "{script}");
+    assert!(
+        script.contains("[Microsoft.Win32.RegistryValueKind]::ExpandString"),
+        "{script}"
+    );
+    assert!(script.contains("-Type $t"), "{script}");
+    assert!(
+        !script.contains("GetEnvironmentVariable('Path'"),
+        "{script}"
+    );
+    assert!(
+        !script.contains("SetEnvironmentVariable('Path'"),
+        "{script}"
+    );
+    assert!(
+        script.contains(
+            "[Environment]::SetEnvironmentVariable('CRAZYAGENT_PATH_REFRESH', $null, 'User')"
+        ),
+        "{script}"
+    );
+}
+
+/// Serializes the tests that change the user's stored PATH, so one never restores over
+/// another's change.
 #[cfg(windows)]
-fn user_path() -> String {
+static USER_PATH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Runs one PowerShell script with the given environment. Takes the script and the
+/// variables. Returns its standard output; panics when PowerShell fails.
+#[cfg(windows)]
+fn powershell(script: &str, env: &[(&str, &str)]) -> String {
+    let mut command = std::process::Command::new("powershell.exe");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    for (name, value) in env {
+        command.env(name, value);
+    }
     let output = crate::spawn_gate::output(
-        std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "[Console]::Out.Write([Environment]::GetEnvironmentVariable('Path','User'))",
-            ])
+        command
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped()),
@@ -385,44 +437,84 @@ fn user_path() -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-/// Stores the user's PATH back as it was, handing the value over in the environment.
-/// Takes the value. Returns nothing; panics when PowerShell fails.
+/// Reads the user's stored PATH as written, %VAR% references unexpanded, with its registry
+/// kind. Takes nothing. Returns the kind name and the value, both empty when it is unset.
 #[cfg(windows)]
-fn restore_user_path(value: &str) {
-    let output = crate::spawn_gate::output(
-        std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "[Environment]::SetEnvironmentVariable('Path', $env:CRAZYAGENT_TEST_PATH, 'User')",
-            ])
-            .env("CRAZYAGENT_TEST_PATH", value)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .unwrap();
-    assert!(output.status.success(), "{output:?}");
+fn raw_user_path() -> (String, String) {
+    let shown = powershell(
+        "$k=Get-Item -LiteralPath 'HKCU:\\Environment'; \
+if ($k.GetValueNames() -contains 'Path') { [Console]::Out.Write($k.GetValueKind('Path').ToString() + \"`n\" + \
+$k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)) }",
+        &[],
+    );
+    match shown.split_once('\n') {
+        Some((kind, value)) => (kind.to_owned(), value.to_owned()),
+        None => (String::new(), String::new()),
+    }
+}
+
+/// Stores the user's PATH back as it was: the same text with the same registry kind, or no
+/// value when the kind is empty. Takes the kind name and the value. Returns nothing.
+#[cfg(windows)]
+fn restore_raw_user_path(kind: &str, value: &str) {
+    powershell(
+        "if ([string]::IsNullOrEmpty($env:CRAZYAGENT_TEST_KIND)) { \
+Remove-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -ErrorAction SilentlyContinue } else { \
+Set-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -Value $env:CRAZYAGENT_TEST_PATH -Type $env:CRAZYAGENT_TEST_KIND }",
+        &[
+            ("CRAZYAGENT_TEST_KIND", kind),
+            ("CRAZYAGENT_TEST_PATH", value),
+        ],
+    );
 }
 
 #[cfg(windows)]
 #[test]
 fn link_cli_adds_a_folder_named_like_powershell_code_to_the_user_path_once() {
-    let before = user_path();
+    let _held = USER_PATH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (kind, before) = raw_user_path();
     let root = tempfile::tempdir().unwrap();
     let folder = root.path().join("cra'zy;$(exit 7)");
     std::fs::create_dir(&folder).unwrap();
     let executable = folder.join("crazyagent.exe");
     let first = link_cli(&executable, root.path());
     let second = link_cli(&executable, root.path());
-    let after = user_path();
-    restore_user_path(&before);
+    let (_, after) = raw_user_path();
+    restore_raw_user_path(&kind, &before);
     assert_eq!(first.unwrap(), folder);
     assert_eq!(second.unwrap(), folder);
     let shown = folder.to_str().unwrap();
     assert_eq!(after.split(';').filter(|entry| *entry == shown).count(), 1);
-    assert_eq!(user_path(), before);
+    assert_eq!(raw_user_path(), (kind, before));
+}
+
+#[cfg(windows)]
+#[test]
+fn link_cli_keeps_the_user_path_kind_and_its_unexpanded_references() {
+    let _held = USER_PATH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (kind, before) = raw_user_path();
+    let reference = r"%USERPROFILE%\crazyagent-kind-check";
+    restore_raw_user_path("ExpandString", &format!("{reference};{before}"));
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("bin");
+    std::fs::create_dir(&folder).unwrap();
+    let linked = link_cli(&folder.join("crazyagent.exe"), root.path());
+    let after = raw_user_path();
+    restore_raw_user_path(&kind, &before);
+    assert_eq!(linked.unwrap(), folder);
+    assert_eq!(after.0, "ExpandString", "{after:?}");
+    assert!(after.1.starts_with(&format!("{reference};")), "{after:?}");
+    let shown = folder.to_str().unwrap();
+    assert_eq!(
+        after.1.split(';').filter(|entry| *entry == shown).count(),
+        1,
+        "{after:?}"
+    );
+    assert_eq!(raw_user_path(), (kind, before));
 }
 
 #[cfg(unix)]

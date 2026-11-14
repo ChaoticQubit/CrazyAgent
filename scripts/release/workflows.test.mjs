@@ -267,7 +267,7 @@ test("a self-hosted release builds in a clean Rust folder and Cargo home, never 
 test("tools kept in the runner tool cache are checked against their pinned SHA-256 on every use, not once per version", async () => {
   for (const [name, job, title] of [["ci.yml", "macos", "Install pinned Node on the owner's runner"], ["ci.yml", "macos", "Install pinned arm64 bun on the owner's runner"],
     ["release.yml", "build", "Install x86_64 bun for the Intel rcli host"], ["release.yml", "build", "Install pinned Node on the owner's runner"],
-    ["release.yml", "build", "Install pinned arm64 bun for macOS"]]) {
+    ["release.yml", "build", "Install pinned arm64 bun for macOS"], ["release.yml", "build", "Install pinned x64 bun for Linux"]]) {
     const step = steps(await workflow(name), job).find((text) => text.includes(`name: ${title}`));
     assert(step, `${job}: ${title}`);
     assert.doesNotMatch(step, /\.complete/, `${job}: ${title} keeps no install marker`);
@@ -302,9 +302,9 @@ test("the committed context-mode lock CI installs from holds the default pack's 
   }
 });
 
-test("a release signs with pinned, checksum-checked Node and Rust on the owner's runner and embeds a checksum-checked bun on every macOS runner, never the tool cache, rustup or Cargo settings CI left on the runner", async () => {
+test("a release signs with pinned, checksum-checked Node and Rust on the owner's runner and embeds a checksum-checked bun on every runner, never the tool cache, rustup or Cargo settings CI left on the runner", async () => {
   const release = await workflow("release.yml");
-  for (const pin of ["BUN_DARWIN_ARM64_SHA256", "NODE_DARWIN_ARM64_SHA256", "RUSTC_DARWIN_ARM64_SHA256", "CARGO_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_X64_SHA256"]) {
+  for (const pin of ["BUN_DARWIN_ARM64_SHA256", "BUN_LINUX_X64_SHA256", "NODE_DARWIN_ARM64_SHA256", "RUSTC_DARWIN_ARM64_SHA256", "CARGO_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_X64_SHA256"]) {
     assert.match(release, new RegExp(`^ {2}${pin}: [0-9a-f]{64}$`, "m"), pin);
   }
   const all = steps(release, "build");
@@ -314,7 +314,12 @@ test("a release signs with pinned, checksum-checked Node and Rust on the owner's
     assert(step, String(shared));
     assert.match(step, /^ {6}- (?:id: \S+\n {8})?(?:name: [^\n]+\n {8})?if: runner\.environment == 'github-hosted'\n/, `${shared} runs only on GitHub's fresh runners`);
   }
-  assert.match(all[at(/uses: oven-sh\/setup-bun@/)], /^ {6}- id: bun\n {8}if: runner\.environment == 'github-hosted' && matrix\.os != 'macos'\n/, "setup-bun's unchecked bun runs only on a GitHub-hosted Linux runner");
+  assert.doesNotMatch(release, /uses: oven-sh\/setup-bun@/, "no release runner builds with setup-bun's unchecked bun");
+  const linux = all[at(/id: bun\n/)];
+  assert.match(linux, /^ {6}- id: bun\n {8}name: Install pinned x64 bun for Linux\n {8}if: matrix\.os == 'linux'\n/, "every Linux runner, GitHub-hosted included, runs the pinned x64 bun");
+  assert.match(linux, /\/bun-v\$BUN_VERSION\/bun-linux-x64\.zip"/);
+  assert.match(linux, /\n\s+echo "\$BUN_LINUX_X64_SHA256  \$work\/bun\.zip" \| sha256sum -c -\n/, "a downloaded Linux bun that does not match its pin fails the job");
+  assert.match(linux, /\n\s+install -m 0755 "\$work\/bun-linux-x64\/bun" "\$work\/bin\/bun"\n/);
   const rust = all[at(/name: Install pinned Rust on the owner's runner/)];
   assert(rust, "the release on the owner's runner installs its own Rust");
   assertPinnedRust(rust, "release");
@@ -329,7 +334,13 @@ test("a release signs with pinned, checksum-checked Node and Rust on the owner's
   for (const name of ["Install rcli source dependencies", "Build rcli host"]) {
     const index = at(new RegExp(`name: ${name}\n`));
     assert.equal(all[index].match(/\n\s+BUN_PATH: (.+)\n/)[1], "${{ steps.bun-x64.outputs.bun-path || steps.bun-arm64.outputs.bun-path || steps.bun.outputs.bun-path }}", name);
-    assert(bun < index && at(/id: bun-x64\n/) < index, `${name}: a macOS rcli gets the checksum-checked x86_64 or arm64 bun, never setup-bun's`);
+    assert(bun < index && at(/id: bun-x64\n/) < index && at(/id: bun\n/) < index, `${name}: an rcli gets the checksum-checked bun of its runner`);
+    for (const id of all[index].match(/\bsteps\.([a-z0-9-]+)\.outputs\.bun-path\b/g).map((ref) => ref.split(".")[1])) {
+      const source = all[at(new RegExp(`^ {6}- id: ${id}\\n`))];
+      assert(source, `${name}: ${id} is a step of this job`);
+      assert.doesNotMatch(source, /\n {8}uses: /, `${name}: ${id} is a step this workflow writes, not an action`);
+      assert.match(source, /\n\s+echo "\$BUN_[A-Z0-9_]+_SHA256  \$work\/bun\.zip" \| (?:sha256sum|shasum -a 256) -c -\n/, `${name}: ${id} checks its bun against a pinned SHA-256`);
+    }
   }
   assert(node < at(/\bnode scripts\//) && node < at(/\bnpm ci\b/), "no node or npm run comes before the pinned Node");
   assert(at(/name: Install pinned Rust/) < at(/\bcargo build\b/), "no cargo run comes before the pinned Rust");
