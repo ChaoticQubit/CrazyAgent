@@ -1,5 +1,5 @@
 use super::extras::{
-    Adapter, CLAUDE_DETAIL_QUERY, Extras, Field, Resets, claude_credits, claude_resets,
+    Adapter, CLAUDE_DETAIL_QUERY, Extras, Field, Resets, Unread, claude_credits, claude_resets,
     codex_from_usage, key_balance,
 };
 use super::{LimitWindow, Observation, PLAN_BYTES_MAX, RESET_MS_MAX, checked_text, failure};
@@ -246,17 +246,19 @@ pub fn poll(
     loopback: bool,
     now_ms: i64,
 ) -> Result<Observation, EngineError> {
-    let body = fetch(provider, url, credential, loopback)?;
+    let body = fetch(provider, url, credential, loopback, None)?;
     observe(provider, &body, credential, now_ms)
 }
 
-/// Makes one usage call and maps its status. Inputs: the provider, the URL, the credential
-/// and whether loopback is allowed. Output: the body of a 200 reply, or `poll`'s failure.
+/// Makes one usage call and maps its status. Inputs: the provider, the URL, the credential,
+/// whether loopback is allowed and the User-Agent in place of the engine's own, if any.
+/// Output: the body of a 200 reply, or `poll`'s failure.
 fn fetch(
     provider: Provider,
     url: url::Url,
     credential: &PollCredential,
     loopback: bool,
+    user_agent: Option<&str>,
 ) -> Result<Vec<u8>, EngineError> {
     let account_id = credential.account_id.as_deref().filter(|id| {
         !id.is_empty()
@@ -273,6 +275,9 @@ fn fetch(
                 headers.push(("ChatGPT-Account-Id", id));
             }
         }
+    }
+    if let Some(agent) = user_agent {
+        headers.push(("User-Agent", agent));
     }
     let request = Request {
         url,
@@ -314,27 +319,62 @@ fn observe(
 }
 
 /// Reads Claude's free resets from the private detail call: the poll's URL with
-/// `CLAUDE_DETAIL_QUERY`. Any failure or bad body reads them absent and never becomes the
+/// `CLAUDE_DETAIL_QUERY`, sent with the given User-Agent. A failed call reads them unread
+/// with no answer and a body that is not JSON unread as not understood; neither becomes the
 /// account's poll failure. Inputs: the poll's URL, the credential, whether loopback is
-/// allowed and the time. Output: the resets, or absent.
+/// allowed, the time and the User-Agent. Output: the resets, or unread with why.
 pub fn claude_detail(
     mut url: url::Url,
     credential: &PollCredential,
     loopback: bool,
     now_ms: i64,
+    user_agent: &str,
 ) -> Field<Resets> {
     url.set_query(Some(CLAUDE_DETAIL_QUERY));
-    let Ok(body) = fetch(Provider::Claude, url, credential, loopback) else {
-        return Field::Absent;
+    let Ok(body) = fetch(
+        Provider::Claude,
+        url,
+        credential,
+        loopback,
+        Some(user_agent),
+    ) else {
+        return Field::Unread(Unread::NoAnswer);
     };
-    serde_json::from_slice::<Value>(&body)
-        .map_or(Field::Absent, |value| claude_resets(&value, now_ms))
+    serde_json::from_slice::<Value>(&body).map_or(Field::Unread(Unread::NotUnderstood), |value| {
+        claude_resets(&value, now_ms)
+    })
+}
+
+/// The Claude Code version the detail call names when the installed one is not known: the
+/// one whose call this was traced from (DEC-154 addendum 2026-11-13 22:01).
+pub const CLAUDE_CODE_PINNED: &str = "2.1.322";
+/// The longest installed version text the detail call's User-Agent names.
+const CLAUDE_VERSION_BYTES_MAX: usize = 32;
+
+/// The User-Agent Claude Code sends on the detail call, naming the installed version when it
+/// is three plain numbers, else `CLAUDE_CODE_PINNED`. Input: the installed version, none when
+/// unknown. Output: the header value.
+pub fn claude_user_agent(version: Option<&str>) -> String {
+    let named = version.filter(|text| {
+        text.len() <= CLAUDE_VERSION_BYTES_MAX && {
+            let parts: Vec<&str> = text.split('.').collect();
+            parts.len() == 3
+                && parts
+                    .iter()
+                    .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        }
+    });
+    format!(
+        "claude-cli/{} (external, cli)",
+        named.unwrap_or(CLAUDE_CODE_PINNED)
+    )
 }
 
 /// Reads one account's windows as `poll` does, with its free resets and credits: Codex's from
-/// the same reply, Claude's credits from the same reply and, when `detail` is set, its free
-/// resets from a second call with `CLAUDE_DETAIL_QUERY` whose failure only reads them absent.
-/// Inputs: as `poll`, and whether to make the detail call. Output: the observation and
+/// the same reply, Claude's credits from the same reply and, when `detail` names a
+/// User-Agent, its free resets from a second call with `CLAUDE_DETAIL_QUERY` whose failure
+/// only reads them unread. Inputs: as `poll`, and the detail call's User-Agent, none to skip
+/// it. Output: the observation and
 /// extras, or `poll`'s failure.
 pub fn poll_with_extras(
     provider: Provider,
@@ -342,18 +382,17 @@ pub fn poll_with_extras(
     credential: &PollCredential,
     loopback: bool,
     now_ms: i64,
-    detail: bool,
+    detail: Option<&str>,
 ) -> Result<(Observation, Extras), EngineError> {
-    let body = fetch(provider, url.clone(), credential, loopback)?;
+    let body = fetch(provider, url.clone(), credential, loopback, None)?;
     let observation = observe(provider, &body, credential, now_ms)?;
     let value: Value = serde_json::from_slice(&body).map_err(|_| invalid())?;
     let extras = match provider {
         Provider::Codex => codex_from_usage(&value),
         Provider::Claude => Extras {
-            resets: if detail {
-                claude_detail(url, credential, loopback, now_ms)
-            } else {
-                Field::NotAsked
+            resets: match detail {
+                Some(user_agent) => claude_detail(url, credential, loopback, now_ms, user_agent),
+                None => Field::NotAsked,
             },
             credits: claude_credits(&value),
         },

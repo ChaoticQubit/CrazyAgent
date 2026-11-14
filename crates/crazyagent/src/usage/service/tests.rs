@@ -524,3 +524,140 @@ fn an_open_pools_page_between_polls_makes_only_the_detail_reads() {
         PollPlan::Nothing
     );
 }
+
+/// Each source picks the detail call's User-Agent: through Claude Code and as Claude Code
+/// both name Claude Code's version (installed, else pinned) while no Claude Code version can
+/// report free resets itself, and "Don't read" makes no detail call.
+#[test]
+fn each_claude_free_resets_source_picks_the_detail_user_agent_or_none() {
+    use super::spend::ResetsSource;
+    for source in [ResetsSource::ThroughClaudeCode, ResetsSource::AsClaudeCode] {
+        assert_eq!(
+            detail_agent(source, Some("2.1.330")).as_deref(),
+            Some("claude-cli/2.1.330 (external, cli)"),
+            "{source:?}"
+        );
+        assert_eq!(
+            detail_agent(source, None).as_deref(),
+            Some("claude-cli/2.1.322 (external, cli)"),
+            "{source:?}"
+        );
+    }
+    assert_eq!(detail_agent(ResetsSource::Off, Some("2.1.330")), None);
+    assert_eq!(detail_agent(ResetsSource::Off, None), None);
+}
+
+/// "Don't read" forgets the stored free resets of every Claude account and only those, so
+/// spend and the limited pool notice never act on an old count.
+#[test]
+fn dont_read_forgets_the_stored_claude_free_resets_and_keeps_codex() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    let account = |id: &str, harness: &str| ModelConnection {
+        id: CredentialRef::new(id).unwrap(),
+        provider: CredentialRef::new("vendor").unwrap(),
+        harness: CredentialRef::new(harness).unwrap(),
+        protocol: CredentialRef::new("native").unwrap(),
+        account_ref: CredentialRef::new(id).unwrap(),
+        endpoint: ModelEndpoint::Native {},
+        model: crate::config::ModelReference {
+            id: "e2e-model".into(),
+            author: CredentialRef::new("vendor").unwrap(),
+        },
+        auth: ModelAuthentication::NativeManaged {
+            profile_ref: CredentialRef::new(id).unwrap(),
+        },
+    };
+    let access = ModelAccess {
+        accounts: vec![
+            CredentialRef::new("claude-a").unwrap(),
+            CredentialRef::new("codex-a").unwrap(),
+        ],
+        connections: vec![account("claude-a", "claude"), account("codex-a", "codex")],
+        pools: Vec::new(),
+    };
+    let two = Extras {
+        resets: Field::Known(extras::Resets {
+            count: 2,
+            kinds: Vec::new(),
+            next_expiry_ms: None,
+        }),
+        credits: Field::NotAsked,
+    };
+    for connection in &access.connections {
+        extras::record_extras(&db, &connection.id, &two, NOW).unwrap();
+    }
+    forget_claude_resets(&db, &access).unwrap();
+    let claude = extras::extras_of(&db, &access.connections[0].id, NOW).unwrap();
+    assert_eq!(claude.resets, None);
+    assert_eq!(claude.resets_unread, None);
+    let codex = extras::extras_of(&db, &access.connections[1].id, NOW).unwrap();
+    assert_eq!(codex.resets.map(|resets| resets.count), Some(2));
+}
+
+/// The detail call names the installed Claude Code, found under the engine's harness id
+/// `claude-code`: its `--version` is read once per executable and again after the executable
+/// changes, Don't read never asks it, and an executable that prints no version names the
+/// pinned one (DEC-154 addendum, secreview r1 F1).
+#[cfg(unix)]
+#[test]
+fn the_detail_user_agent_names_the_installed_claude_code_and_reads_it_again_after_an_update() {
+    use super::spend::ResetsSource;
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let team = root.path().join("team");
+    std::fs::create_dir(&team).unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let claude = bin.join("claude");
+    let runs = bin.join("runs");
+    let install = |printed: &str, at: std::time::SystemTime| {
+        let script = format!(
+            "#!/bin/sh\necho x >> '{}'\necho '{printed}'\n",
+            runs.display()
+        );
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&claude)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    };
+    let ran = || std::fs::read_to_string(&runs).map_or(0, |text| text.lines().count());
+    let start = std::time::SystemTime::now();
+    install("2.1.330 (Claude Code)", start);
+    let mut usage = Usage::open(
+        &root.path().join("engine.db"),
+        &team,
+        Box::new(|| None),
+        BTreeMap::from([("claude-code", claude.clone())]),
+    )
+    .unwrap();
+    for source in [ResetsSource::ThroughClaudeCode, ResetsSource::AsClaudeCode] {
+        assert_eq!(
+            usage.detail_user_agent(source).as_deref(),
+            Some("claude-cli/2.1.330 (external, cli)"),
+            "{source:?}"
+        );
+    }
+    assert_eq!(ran(), 1, "one executable is asked once");
+    assert_eq!(usage.detail_user_agent(ResetsSource::Off), None);
+    assert_eq!(ran(), 1, "Don't read never asks");
+    install("2.1.331 (Claude Code)", start + Duration::from_secs(60));
+    assert_eq!(
+        usage
+            .detail_user_agent(ResetsSource::ThroughClaudeCode)
+            .as_deref(),
+        Some("claude-cli/2.1.331 (external, cli)")
+    );
+    assert_eq!(ran(), 2, "an updated executable is asked again");
+    install("Claude Code", start + Duration::from_secs(120));
+    assert_eq!(
+        usage
+            .detail_user_agent(ResetsSource::AsClaudeCode)
+            .as_deref(),
+        Some("claude-cli/2.1.322 (external, cli)")
+    );
+}

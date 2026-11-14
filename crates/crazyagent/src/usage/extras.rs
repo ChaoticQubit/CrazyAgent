@@ -1,4 +1,5 @@
 use super::poll::rfc3339_ms;
+use super::spend::ResetsSource;
 use super::{RESET_MS_MAX, checked_text, storage};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::engine::EngineError;
@@ -44,12 +45,22 @@ pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS account_limit_extras (
     resets_checked_ms INTEGER,
     resets_gained_ms INTEGER,
     credits TEXT CHECK (credits IS NULL OR length(credits) BETWEEN 1 AND 64),
-    credits_checked_ms INTEGER
+    credits_checked_ms INTEGER,
+    resets_unread TEXT CHECK (resets_unread IS NULL OR resets_unread IN ('surface','cli_version',
+        'config_off','mobile','other_experiment','unavailable','unknown','other','no_reason',
+        'no_answer','not_understood'))
 );
 CREATE TABLE IF NOT EXISTS usage_detail (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     until_ms INTEGER NOT NULL
 );";
+
+/// Adds the unread reason to an extras table made before it, with the same check as
+/// `SCHEMA`; old rows read with no code.
+pub(super) const ADD_UNREAD: &str = "ALTER TABLE account_limit_extras ADD COLUMN resets_unread TEXT
+    CHECK (resets_unread IS NULL OR resets_unread IN ('surface','cli_version','config_off',
+        'mobile','other_experiment','unavailable','unknown','other','no_reason','no_answer',
+        'not_understood'));";
 
 /// One saved-key provider whose documented balance call the engine makes: the exact API
 /// host a base URL must name, its adapter, the constant balance URL and where the owner
@@ -176,12 +187,117 @@ fn kinds_bounded(kinds: &[ResetKind]) -> bool {
 }
 
 /// One field of a read: not asked for (the stored value stays), asked and absent or
-/// malformed (cleared, so it reads not reported), or known.
+/// malformed (cleared, so it reads not reported), asked and unread with why (cleared, the
+/// code kept), or known.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Field<T> {
     NotAsked,
     Absent,
+    Unread(Unread),
     Known(T),
+}
+
+/// Why the last free resets read found no count, stored as its code: the server's own
+/// reason for an ineligible account (`Other` for one this version does not know), no reason
+/// given, no answer, or an answer not understood.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unread {
+    Surface,
+    CliVersion,
+    ConfigOff,
+    Mobile,
+    OtherExperiment,
+    Unavailable,
+    Unknown,
+    Other,
+    NoReason,
+    NoAnswer,
+    NotUnderstood,
+}
+
+/// What the clients say for an unread count: why in one class, `Unspecified` for a read
+/// that kept no code, and `Off` when the owner turned the Claude read off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnreadClass {
+    Unspecified,
+    Asker,
+    Withheld,
+    NoReason,
+    NoAnswer,
+    NotUnderstood,
+    Off,
+}
+
+impl Unread {
+    /// Every code, in the schema's order.
+    pub const ALL: [Unread; 11] = [
+        Unread::Surface,
+        Unread::CliVersion,
+        Unread::ConfigOff,
+        Unread::Mobile,
+        Unread::OtherExperiment,
+        Unread::Unavailable,
+        Unread::Unknown,
+        Unread::Other,
+        Unread::NoReason,
+        Unread::NoAnswer,
+        Unread::NotUnderstood,
+    ];
+
+    /// The stored code. Output: the code.
+    pub fn code(self) -> &'static str {
+        match self {
+            Unread::Surface => "surface",
+            Unread::CliVersion => "cli_version",
+            Unread::ConfigOff => "config_off",
+            Unread::Mobile => "mobile",
+            Unread::OtherExperiment => "other_experiment",
+            Unread::Unavailable => "unavailable",
+            Unread::Unknown => "unknown",
+            Unread::Other => "other",
+            Unread::NoReason => "no_reason",
+            Unread::NoAnswer => "no_answer",
+            Unread::NotUnderstood => "not_understood",
+        }
+    }
+
+    /// The code's entry. Input: stored text. Output: the entry, none for any other text.
+    pub fn of_code(code: &str) -> Option<Self> {
+        Unread::ALL.into_iter().find(|unread| unread.code() == code)
+    }
+
+    /// The class the clients word. Output: the class.
+    pub fn class(self) -> UnreadClass {
+        match self {
+            Unread::Surface | Unread::CliVersion => UnreadClass::Asker,
+            Unread::ConfigOff
+            | Unread::Mobile
+            | Unread::OtherExperiment
+            | Unread::Unavailable
+            | Unread::Unknown
+            | Unread::Other => UnreadClass::Withheld,
+            Unread::NoReason => UnreadClass::NoReason,
+            Unread::NoAnswer => UnreadClass::NoAnswer,
+            Unread::NotUnderstood => UnreadClass::NotUnderstood,
+        }
+    }
+
+    /// The entry for Anthropic's reason an account is ineligible, when that reason is about
+    /// who asks or unknown. Input: the reason text. Output: its entry, `Other` for any reason
+    /// this version does not name.
+    fn of_reason(reason: &str) -> Self {
+        match reason {
+            "surface" => Unread::Surface,
+            "cli_version" => Unread::CliVersion,
+            "config_off" => Unread::ConfigOff,
+            "mobile" => Unread::Mobile,
+            "other_experiment" => Unread::OtherExperiment,
+            "unavailable" => Unread::Unavailable,
+            "unknown" => Unread::Unknown,
+            _ => Unread::Other,
+        }
+    }
 }
 
 /// What one read found beyond the windows: free resets and credits, the credits as a
@@ -213,8 +329,9 @@ pub enum Spend {
 }
 
 /// An account's stored extras as they stand now: none for a field never read, read absent,
-/// or a count whose next expiry has passed; with when each was last read, and when a read
-/// last found more free resets than the unexpired count before it.
+/// or a count whose next expiry has passed; with when each was last read, when a read last
+/// found more free resets than the unexpired count before it, and whether the last free
+/// resets read found no count (unread, never true for an expired count).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredExtras {
@@ -223,13 +340,15 @@ pub struct StoredExtras {
     pub resets_checked_ms: Option<i64>,
     pub credits_checked_ms: Option<i64>,
     pub resets_gained_ms: Option<i64>,
+    #[serde(default)]
+    pub resets_unread: Option<UnreadClass>,
 }
 
-/// The limits contract every client shows for one account (DEC-154): the harness's display
-/// name, the account's adapter, whether its read or spend is a private call that may break,
-/// the free resets and credits (none means not reported, never 0), where to spend, the words
-/// for a field that is not reported ("not reported by <harness>"), when each field was last
-/// read, and when new free resets last arrived, for a notice shown once per time.
+/// The limits contract every client shows for one account (DEC-154): the harness's name, its
+/// adapter, whether its read or spend is a private call that may break, the free resets and
+/// credits (none means not reported, never 0), where to spend, the not reported words, when
+/// each field was last read and new resets arrived, and whether the last resets read found no
+/// count, which clients say as "couldn't read", never as none.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitExtras {
@@ -243,6 +362,8 @@ pub struct LimitExtras {
     pub resets_checked_ms: Option<i64>,
     pub credits_checked_ms: Option<i64>,
     pub resets_gained_ms: Option<i64>,
+    #[serde(default)]
+    pub resets_unread: Option<UnreadClass>,
 }
 
 /// The adapter entry of a harness for its managed sign-ins, by catalog id or the name a
@@ -434,56 +555,70 @@ pub fn codex_reset_credits(result: &Value, now_ms: i64) -> Field<Resets> {
     }
 }
 
+/// The reasons Claude's detail reply gives for an ineligible account that mean the account
+/// itself has no free resets, as Claude Code 2.1.322 names them; any other reason is about who
+/// asks or unknown, so it never reads as none.
+const NONE_FOR_ACCOUNT: [&str; 4] = ["no_grant", "seat", "tenure", "tier"];
+
 /// Reads free resets from Claude's private detail reply: the resets left summed over grants
 /// that are not paused and have not ended, and the earliest end of those after `now_ms`; an
-/// account that is not eligible holds none. Grant ids are never read. Inputs: the parsed body
-/// and the time. Output: the resets, or absent.
+/// ineligible account holds none only for a `NONE_FOR_ACCOUNT` reason, any other reads unread
+/// with that reason. Grant ids are never read. Inputs: the parsed body and the time. Output:
+/// the resets, or unread with why.
 pub fn claude_resets(body: &Value, now_ms: i64) -> Field<Resets> {
+    let unclear = Field::Unread(Unread::NotUnderstood);
     let detail = &body["cedar_ember"];
     if !detail.is_object() {
-        return Field::Absent;
+        return unclear;
     }
     let Some(eligible) = detail["eligible"].as_bool() else {
-        return Field::Absent;
+        return unclear;
     };
     if !eligible {
-        return Field::Known(Resets {
-            count: 0,
-            kinds: Vec::new(),
-            next_expiry_ms: None,
-        });
+        return match &detail["ineligible_reason"] {
+            Value::Null => Field::Unread(Unread::NoReason),
+            Value::String(reason) if NONE_FOR_ACCOUNT.contains(&reason.as_str()) => {
+                Field::Known(Resets {
+                    count: 0,
+                    kinds: Vec::new(),
+                    next_expiry_ms: None,
+                })
+            }
+            Value::String(reason) => Field::Unread(Unread::of_reason(reason)),
+            _ => unclear,
+        };
     }
     let Value::Array(grants) = &detail["grants"] else {
-        return Field::Absent;
+        return unclear;
     };
     if grants.len() > RESETS_MAX as usize {
-        return Field::Absent;
+        return unclear;
     }
     let mut total: u32 = 0;
     let mut next: Option<i64> = None;
     for grant in grants {
         let Some(left) = reset_count(&grant["resets_left"]) else {
-            return Field::Absent;
+            return unclear;
         };
         let paused = match &grant["paused"] {
             Value::Null => false,
             Value::Bool(paused) => *paused,
-            _ => return Field::Absent,
+            _ => return unclear,
         };
         let ends = match &grant["ends_at"] {
             Value::Null => None,
             Value::String(text) => match rfc3339_ms(text) {
                 Some(at) => Some(at),
-                None => return Field::Absent,
+                None => return unclear,
             },
-            _ => return Field::Absent,
+            _ => return unclear,
         };
         if paused || left == 0 || ends.is_some_and(|at| at <= now_ms) {
             continue;
         }
         total += left;
         if total > RESETS_MAX {
-            return Field::Absent;
+            return unclear;
         }
         if let Some(at) = ends {
             next = Some(next.map_or(at, |soonest| soonest.min(at)));
@@ -610,6 +745,7 @@ struct Row {
     resets_gained_ms: Option<i64>,
     credits: Option<String>,
     credits_checked_ms: Option<i64>,
+    unread: Option<String>,
 }
 
 impl Row {
@@ -623,13 +759,14 @@ impl Row {
         self.kinds = None;
         self.expire_ms = None;
         self.resets_checked_ms = Some(now_ms);
+        self.unread = None;
     }
 }
 
 fn read_row(db: &Connection, account: &CredentialRef) -> Result<Option<Row>, EngineError> {
     db.query_row(
         "SELECT resets_count,reset_kinds,resets_expire_ms,resets_checked_ms,resets_gained_ms,
-                credits,credits_checked_ms
+                credits,credits_checked_ms,resets_unread
          FROM account_limit_extras WHERE account=?1",
         params![account.as_str()],
         |found| {
@@ -641,6 +778,7 @@ fn read_row(db: &Connection, account: &CredentialRef) -> Result<Option<Row>, Eng
                 resets_gained_ms: found.get(4)?,
                 credits: found.get(5)?,
                 credits_checked_ms: found.get(6)?,
+                unread: found.get(7)?,
             })
         },
     )
@@ -657,8 +795,8 @@ fn resets_bounded(resets: &Resets) -> bool {
 }
 
 /// Stores what a read found beyond the windows: a field not asked keeps the stored value, an
-/// absent or out-of-bounds one is cleared, a known one replaced; only counts, kinds, expiry
-/// and the composed words are kept. A count above the unexpired one stored before stamps
+/// absent, unread or out-of-bounds one is cleared, a known one replaced; only counts, kinds,
+/// expiry, an unread code and the composed words are kept. A count above the unexpired one stored before stamps
 /// `resets_gained_ms`. Inputs: the store, the account, the extras and the time. Output: the
 /// unexpired count stored before, or `usage_unavailable`.
 pub fn record_extras(
@@ -683,6 +821,11 @@ pub fn record_extras(
             next.kinds = Some(kinds_text(&resets.kinds));
             next.expire_ms = resets.next_expiry_ms;
             next.resets_checked_ms = Some(now_ms);
+            next.unread = None;
+        }
+        Field::Unread(unread) => {
+            next.clear_resets(now_ms);
+            next.unread = Some(unread.code().to_owned());
         }
         Field::Known(_) | Field::Absent => next.clear_resets(now_ms),
     }
@@ -692,20 +835,21 @@ pub fn record_extras(
             next.credits = Some(text.clone());
             next.credits_checked_ms = Some(now_ms);
         }
-        Field::Known(_) | Field::Absent => {
+        Field::Known(_) | Field::Absent | Field::Unread(_) => {
             next.credits = None;
             next.credits_checked_ms = Some(now_ms);
         }
     }
     db.execute(
         "INSERT INTO account_limit_extras (account,resets_count,reset_kinds,resets_expire_ms,
-             resets_checked_ms,resets_gained_ms,credits,credits_checked_ms)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+             resets_checked_ms,resets_gained_ms,credits,credits_checked_ms,resets_unread)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
          ON CONFLICT(account) DO UPDATE SET resets_count=excluded.resets_count,
              reset_kinds=excluded.reset_kinds,resets_expire_ms=excluded.resets_expire_ms,
              resets_checked_ms=excluded.resets_checked_ms,
              resets_gained_ms=excluded.resets_gained_ms,credits=excluded.credits,
-             credits_checked_ms=excluded.credits_checked_ms",
+             credits_checked_ms=excluded.credits_checked_ms,
+             resets_unread=excluded.resets_unread",
         params![
             account.as_str(),
             next.count,
@@ -714,7 +858,8 @@ pub fn record_extras(
             next.resets_checked_ms,
             next.resets_gained_ms,
             next.credits,
-            next.credits_checked_ms
+            next.credits_checked_ms,
+            next.unread
         ],
     )
     .map_err(storage)?;
@@ -722,8 +867,10 @@ pub fn record_extras(
 }
 
 /// An account's stored extras at `now_ms`, a count whose next expiry has passed read as not
-/// reported. Inputs: the store, the account and the time. Output: the extras, empty for an
-/// account never read, or `usage_unavailable`.
+/// reported, and unread, in the class of its stored code, when the last resets read cleared
+/// the count. Inputs: the store, the
+/// account and the time. Output: the extras, empty for an account never read, or
+/// `usage_unavailable`.
 pub fn extras_of(
     db: &Connection,
     account: &CredentialRef,
@@ -737,23 +884,37 @@ pub fn extras_of(
         kinds: kinds_of(row.kinds.as_deref()),
         next_expiry_ms: row.expire_ms,
     });
+    let resets_unread = (row.count.is_none() && row.resets_checked_ms.is_some()).then(|| {
+        row.unread
+            .as_deref()
+            .and_then(Unread::of_code)
+            .map_or(UnreadClass::Unspecified, Unread::class)
+    });
+    assert!(resets_unread.is_none() || resets.is_none());
     Ok(StoredExtras {
         resets,
         credits: row.credits,
         resets_checked_ms: row.resets_checked_ms,
         credits_checked_ms: row.credits_checked_ms,
         resets_gained_ms: row.resets_gained_ms,
+        resets_unread,
     })
 }
 
 /// The limits contract for one account from its connection and stored extras. A field the
-/// adapter does not read is none even when an old value is stored; where to spend and every
+/// adapter does not read is none even when an old value is stored, and a Claude account's
+/// free resets read off in Settings when the owner chose Don't read; where to spend and every
 /// label come from constants, never from the account's URL or a reply. Inputs: the
-/// connection and the stored extras. Output: the contract.
-pub fn limit_extras(connection: &ModelConnection, stored: &StoredExtras) -> LimitExtras {
+/// connection, the stored extras and the Claude free resets source. Output: the contract.
+pub fn limit_extras(
+    connection: &ModelConnection,
+    stored: &StoredExtras,
+    source: ResetsSource,
+) -> LimitExtras {
     let harness = connection.harness.as_str();
     let adapter = account_adapter(connection);
-    let resets = matches!(adapter, Adapter::Codex | Adapter::Claude);
+    let off = adapter == Adapter::Claude && source == ResetsSource::Off;
+    let resets = matches!(adapter, Adapter::Codex | Adapter::Claude) && !off;
     let credits = adapter != Adapter::NotReported;
     let spend = match adapter {
         Adapter::Codex | Adapter::Claude => Spend::InApp,
@@ -777,7 +938,27 @@ pub fn limit_extras(connection: &ModelConnection, stored: &StoredExtras) -> Limi
         resets_checked_ms: stored.resets_checked_ms.filter(|_| resets),
         credits_checked_ms: stored.credits_checked_ms.filter(|_| credits),
         resets_gained_ms: stored.resets_gained_ms.filter(|_| resets),
+        resets_unread: if off {
+            Some(UnreadClass::Off)
+        } else {
+            stored.resets_unread.filter(|_| resets)
+        },
     }
+}
+
+/// Forgets an account's stored free resets, their read times and unread code, keeping its
+/// credits; an account never read stays unread. Inputs: the store and the account. Output:
+/// done, or `usage_unavailable`.
+pub fn forget_resets(db: &Connection, account: &CredentialRef) -> Result<(), EngineError> {
+    db.execute(
+        "UPDATE account_limit_extras SET resets_count=NULL,reset_kinds=NULL,
+             resets_expire_ms=NULL,resets_checked_ms=NULL,resets_gained_ms=NULL,
+             resets_unread=NULL
+         WHERE account=?1 AND (resets_checked_ms IS NOT NULL OR resets_gained_ms IS NOT NULL)",
+        params![account.as_str()],
+    )
+    .map_err(storage)?;
+    Ok(())
 }
 
 /// Keeps the private detail reads on for `DETAIL_LEASE_MS` from `now_ms`, as an open Pools

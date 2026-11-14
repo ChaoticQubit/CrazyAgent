@@ -1960,6 +1960,134 @@ fn first_run_with_the_guide_unticked_adds_an_account_and_skips_the_guide() {
     engine.stop();
 }
 
+const RESETS_ID: &str = "e2e-free-resets";
+const RESETS_PROJECT: &str = "Free resets e2e";
+
+/// The screen's words joined by single spaces, so a sentence the TUI wrapped still reads
+/// whole. Input: the screen. Output: the words.
+fn flat(screen: &str) -> String {
+    screen.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Opens Settings, Pools in the TUI on a fresh engine with a saved profile, home and one
+/// project, once the Pools spend part shows its Claude free resets line.
+/// Input: the scratch prefix. Output: the engine, the TUI and the scratch home.
+fn pools_settings(prefix: &str) -> (Engine, Pty, tempfile::TempDir) {
+    let engine = Engine::start(prefix);
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+            assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+            assert_eq!(
+                owner.create_project(RESETS_ID, RESETS_PROJECT).await,
+                OwnerResult::Applied
+            );
+            owner.controller.detach();
+        });
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, RESETS_PROJECT));
+    setup_checked(&pty);
+    pty.keys(&["s"]);
+    pty.until("s on Home opens Settings", |screen| {
+        screen.contains("Settings") && !at_home(screen, RESETS_PROJECT)
+    });
+    pty.keys(&["]"]);
+    pty.until(
+        "] steps to Pools with its Claude free resets line",
+        |screen| flat(screen).contains("Claude free resets (f):"),
+    );
+    (engine, pty, disk)
+}
+
+/// Reads where the engine keeps reading Claude free resets from, as any client reads it.
+/// Input: the engine. Output: the source.
+fn kept_source(engine: &Engine) -> crazyagent::usage::spend::ResetsSource {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(engine).await;
+            let report = owner
+                .controller
+                .owner_client()
+                .unwrap()
+                .usage_report(None, None, 0)
+                .await
+                .unwrap();
+            owner.controller.detach();
+            report.spend.settings.resets_source
+        })
+}
+
+/// Through Claude Code (the default, DEC-154 addendum): Pools says CrazyAgent asks Claude
+/// Code first and, while Claude Code can't report free resets, asks Anthropic as Claude Code.
+#[test]
+fn the_tui_reads_claude_free_resets_through_claude_code_by_default() {
+    let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-through-");
+    pty.until("the default names itself and how it asks", |screen| {
+        flat(screen).contains("Claude free resets (f): Through Claude Code.")
+            && flat(screen).contains("asks Anthropic as Claude Code.")
+    });
+    assert_eq!(
+        kept_source(&engine),
+        crazyagent::usage::spend::ResetsSource::ThroughClaudeCode
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// As Claude Code (DEC-154 addendum): f saves it in the engine, and Pools says CrazyAgent
+/// asks the way Claude Code itself asks.
+#[test]
+fn the_tui_saves_claude_free_resets_as_claude_code() {
+    let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-as-");
+    pty.keys(&["f"]);
+    pty.until("f saves As Claude Code and says how it asks", |screen| {
+        flat(screen).contains("Claude free resets (f): As Claude Code.")
+            && flat(screen).contains("the way Claude Code itself asks.")
+    });
+    assert_eq!(
+        kept_source(&engine),
+        crazyagent::usage::spend::ResetsSource::AsClaudeCode
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// Don't read (DEC-154 addendum): f twice saves it in the engine, and Pools says Claude
+/// accounts say off in Settings.
+#[test]
+fn the_tui_saves_claude_free_resets_dont_read() {
+    let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-off-");
+    pty.keys(&["f"]);
+    pty.until("the first f saves As Claude Code", |screen| {
+        flat(screen).contains("Claude free resets (f): As Claude Code.")
+    });
+    pty.keys(&["f"]);
+    pty.until(
+        "the second f saves Don't read and says what it does",
+        |screen| {
+            flat(screen).contains("Claude free resets (f): Don't read.")
+                && flat(screen).contains("Claude accounts say off in Settings.")
+        },
+    );
+    assert_eq!(
+        kept_source(&engine),
+        crazyagent::usage::spend::ResetsSource::Off
+    );
+    drop(pty);
+    engine.stop();
+}
+
 /// Reads the option the engine keeps for When a model provider can't be reached.
 /// Input: the engine. Output: the stored option.
 async fn stored_retry(engine: &Engine) -> crazyagent::provider_retry::ProviderRetry {

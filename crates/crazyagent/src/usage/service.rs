@@ -199,6 +199,51 @@ pub fn pool_of(
         .map(|pool| pool.id.clone())
 }
 
+/// The User-Agent the Claude detail call sends under the owner's source, none when the read
+/// is off. Through Claude Code asks as Claude Code too while Claude Code cannot report free
+/// resets itself. Inputs: the source and the installed Claude Code version. Output: the
+/// header.
+pub(super) fn detail_agent(source: spend::ResetsSource, installed: Option<&str>) -> Option<String> {
+    match source {
+        spend::ResetsSource::ThroughClaudeCode | spend::ResetsSource::AsClaudeCode => {
+            Some(super::poll::claude_user_agent(installed))
+        }
+        spend::ResetsSource::Off => None,
+    }
+}
+
+/// Forgets the stored free resets of every Claude account, as "Don't read" asks. Inputs:
+/// the store and the access. Output: done, or `usage_unavailable`.
+pub(super) fn forget_claude_resets(
+    db: &Connection,
+    access: &ModelAccess,
+) -> Result<(), EngineError> {
+    for connection in &access.connections {
+        if MemberKind::of(connection) == MemberKind::Claude {
+            extras::forget_resets(db, &connection.id)?;
+        }
+    }
+    Ok(())
+}
+
+/// Who an installed executable is, so a version read once is asked again only after an
+/// update: its resolved path and modified time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExecutableStamp {
+    path: PathBuf,
+    modified: std::time::SystemTime,
+}
+
+impl ExecutableStamp {
+    /// Stamps an executable. Input: its entry. Output: the stamp, none when the entry does
+    /// not resolve or cannot be read.
+    fn of(entry: &Path) -> Option<Self> {
+        let path = std::fs::canonicalize(entry).ok()?;
+        let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+        Some(Self { path, modified })
+    }
+}
+
 /// One engine's usage upkeep: it counts what every team agent and research run's records
 /// gained and polls every signed-in subscription account's limits. `doing` names the part
 /// of the step running now, so a panic is counted against it, and `unrecovered` holds the
@@ -214,6 +259,7 @@ pub struct Usage {
     endpoints: (url::Url, url::Url, bool),
     polled_ms: Option<i64>,
     detail_ms: Option<i64>,
+    claude_version: Option<(ExecutableStamp, Option<String>)>,
     polls: u64,
     doing: UsageStep,
     unrecovered: BTreeSet<UsageStep>,
@@ -254,6 +300,7 @@ impl Usage {
             ),
             polled_ms: None,
             detail_ms: None,
+            claude_version: None,
             polls: 0,
             doing: UsageStep::Poll,
             unrecovered: BTreeSet::new(),
@@ -281,6 +328,34 @@ impl Usage {
         Some(entry)
     }
 
+    /// The User-Agent of this pass's Claude detail reads under the owner's source, naming the
+    /// installed Claude Code version, asked again only when its executable changed. Input: the
+    /// source. Output: the header, none when the read is off.
+    fn detail_user_agent(&mut self, source: spend::ResetsSource) -> Option<String> {
+        if source == spend::ResetsSource::Off {
+            return None;
+        }
+        let entry = self.harness("claude-code");
+        let stamp = entry.as_deref().and_then(ExecutableStamp::of);
+        let known = self
+            .claude_version
+            .as_ref()
+            .is_some_and(|(seen, _)| stamp.as_ref() == Some(seen));
+        if !known {
+            self.claude_version = match (entry.as_deref(), stamp) {
+                (Some(entry), Some(stamp)) => {
+                    Some((stamp, crate::harnesses::update::version_under_home(entry)))
+                }
+                _ => None,
+            };
+        }
+        let installed = self
+            .claude_version
+            .as_ref()
+            .and_then(|(_, version)| version.as_deref());
+        detail_agent(source, installed)
+    }
+
     /// Points the polls at other usage calls, such as a loopback server in a test.
     /// Inputs: the Claude and Codex URLs. Output: the upkeep.
     pub fn with_endpoints(mut self, claude: url::Url, codex: url::Url) -> Self {
@@ -298,19 +373,28 @@ impl Usage {
         self.doing = UsageStep::Poll;
         let access = (self.access)().unwrap_or_default();
         let refresh = refresh_requested(&self.db)?;
+        let source = spend::read(&self.db)?.resets_source;
+        if source == spend::ResetsSource::Off {
+            forget_claude_resets(&self.db, &access)?;
+        }
         let detail = extras::detail_due(&self.db, self.detail_ms, now_ms)?;
         match poll_plan(self.polled_ms, refresh, detail, now_ms) {
             PollPlan::Every { detail } => {
                 self.polled_ms = Some(now_ms);
-                if detail {
+                let agent = if detail {
                     self.detail_ms = Some(now_ms);
-                }
-                self.poll_all(&access, now_ms, detail)?;
+                    self.detail_user_agent(source)
+                } else {
+                    None
+                };
+                self.poll_all(&access, now_ms, agent.as_deref())?;
                 self.completed(UsageStep::Poll, now_ms)?;
             }
             PollPlan::DetailOnly => {
                 self.detail_ms = Some(now_ms);
-                self.detail_all(&access, now_ms)?;
+                if let Some(agent) = self.detail_user_agent(source) {
+                    self.detail_all(&access, now_ms, &agent)?;
+                }
                 self.completed(UsageStep::Poll, now_ms)?;
             }
             PollPlan::Nothing => {}
@@ -538,7 +622,7 @@ impl Usage {
         &mut self,
         access: &ModelAccess,
         now_ms: i64,
-        detail: bool,
+        detail: Option<&str>,
     ) -> Result<(), EngineError> {
         for connection in &access.connections {
             match MemberKind::of(connection) {
@@ -572,9 +656,14 @@ impl Usage {
     /// Makes only the private Claude detail read for each managed Claude account, as an open
     /// Pools page asks between polls: no window poll, no Codex or key balance call, and the
     /// last poll's time stays. A refusal of any kind is skipped and never stored as the
-    /// account's failure. Inputs: the access and the time. Output: done, or
+    /// account's failure. Inputs: the access, the time and the User-Agent. Output: done, or
     /// `usage_unavailable`.
-    fn detail_all(&mut self, access: &ModelAccess, now_ms: i64) -> Result<(), EngineError> {
+    fn detail_all(
+        &mut self,
+        access: &ModelAccess,
+        now_ms: i64,
+        user_agent: &str,
+    ) -> Result<(), EngineError> {
         for connection in &access.connections {
             if MemberKind::of(connection) != MemberKind::Claude {
                 continue;
@@ -585,7 +674,7 @@ impl Usage {
             };
             let (claude, _, loopback) = &self.endpoints;
             let read = Extras {
-                resets: claude_detail(claude.clone(), &credential, *loopback, now_ms),
+                resets: claude_detail(claude.clone(), &credential, *loopback, now_ms, user_agent),
                 credits: Field::NotAsked,
             };
             extras::record_extras(&self.db, &connection.id, &read, now_ms)?;
@@ -623,13 +712,13 @@ impl Usage {
 
     /// Polls one managed account with the credential `credential` reads: the provider's usage
     /// call, and the private detail call when asked. Inputs: the connection, the time and
-    /// whether to make the detail call. Output: the observation and extras, None for an
+    /// the detail call's User-Agent, none to skip it. Output: the observation and extras, None for an
     /// account that is not signed in or is busy signing in, or the poll's plain failure.
     fn poll_one(
         &mut self,
         connection: &ModelConnection,
         now_ms: i64,
-        detail: bool,
+        detail: Option<&str>,
     ) -> Result<Option<(super::Observation, Extras)>, EngineError> {
         let Some((provider, credential)) = self.credential(connection, "poll")? else {
             return Ok(None);
