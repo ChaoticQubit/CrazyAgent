@@ -79,3 +79,18 @@ test("signing out, and reading or releasing what uses an account, reach the engi
     assert.equal(result.code, "engine_unreachable");
   }
 });
+
+test("a late sign-out, rename or check result stays with its own account and never reopens it over another", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { openedAfterChange } = await import("../src/screens/settings/accounts.tsx");
+  const alpha = account();
+  const bravo = account({ id: "acct-2", name: "Claude B" });
+  const renamed = { ...alpha, name: "Claude A" };
+  assert.deepEqual(openedAfterChange({ account: alpha, signIn: true }, renamed), { account: renamed, signIn: false });
+  const showing = { account: bravo, signIn: false };
+  assert.equal(openedAfterChange(showing, renamed), showing);
+  assert.equal(openedAfterChange(undefined, renamed), undefined);
+  const source = readFileSync(new URL("../src/screens/settings/accounts.tsx", import.meta.url), "utf8");
+  assert.match(source, /<AccountDrawer key=\{current\?\.id\}/);
+  assert.match(source, /setOpened\(\(now\) => openedAfterChange\(now, account\)\)/);
+});
