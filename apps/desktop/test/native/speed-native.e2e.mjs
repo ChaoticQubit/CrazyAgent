@@ -28,13 +28,26 @@ function evidenceJson(name) {
   return JSON.parse(text);
 }
 
-/** Whether Home is usable now, read in the page with the page's own clock. Output: the answer
- * and the wall-clock ms it was read at. */
+/** Whether Home is usable now, read in the page with the page's own clock. Output: the answer,
+ * the wall-clock ms it was read at and the wall-clock ms the page's document started at. */
 function homeNow() {
   return browser.execute((hashes) => ({
     ok: hashes.includes(location.hash) && Boolean(document.querySelector("main h1")) && !document.querySelector("main .skeleton"),
     at: performance.timeOrigin + performance.now(),
+    origin: performance.timeOrigin,
   }), HOME_HASHES);
+}
+
+/** Reloads the app's page and times, with the new document's clock, from its start until Home
+ * is usable: the app's own boot (scripts, engine connect, Home's reads) on every run, however
+ * late WebDriver attached after the launch. Input: the old document's start. Output: the ms. */
+async function reloadHome(before) {
+  await browser.execute(() => { setTimeout(() => location.reload(), 0); });
+  for (const deadline = Date.now() + LAUNCH_MS_MAX; ; await pause(LOOK_MS)) {
+    const now = await homeNow().catch(() => null);
+    if (now?.ok && now.origin > before) return now.at - now.origin;
+    assert.ok(Date.now() < deadline, "Home never became usable after a reload");
+  }
 }
 
 /** Clicks an element inside the page and times, with the page's clock, until the page at its
@@ -105,8 +118,9 @@ describe("speed rows on the real desktop app and the real engine (DEC-169)", () 
     let first = true;
     for (const deadline = Date.now() + LAUNCH_MS_MAX; ; await pause(LOOK_MS)) {
       const now = await homeNow();
+      assert.ok(now.origin >= launch.at_ms, "the page started after the launch stamp");
       if (now.ok) {
-        result.launch = { ms: now.at - launch.at_ms, first_look_usable: first };
+        result.launch = { ms: now.at - launch.at_ms, first_look_usable: first, webview_ms: now.origin - launch.at_ms };
         break;
       }
       first = false;
@@ -114,6 +128,8 @@ describe("speed rows on the real desktop app and the real engine (DEC-169)", () 
     }
     await browser.switchToWindow(await browser.getWindowHandle());
     await browser.setWindowSize(1180, 800);
+    await pause(SETTLE_MS);
+    result.launch.reload_ms = await reloadHome(launch.at_ms + result.launch.webview_ms);
     await pause(SETTLE_MS);
     const others = engine.seeded.sessions - 1;
     assert.ok(others >= 1, "the big project has sessions besides the live one");

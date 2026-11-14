@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { KEPT_MIN, REFUSED_EXIT, countFindings, joinSample, judge, margin, noise, noiseShares, quiet, sampleMetrics, schedule, stayedQuiet, summary, verdict } from "./speed-budget.mjs";
+import { KEPT_MIN, REFUSED_EXIT, REQUIRED, countFindings, incomplete, joinSample, judge, margin, noise, noiseShares, quiet, sampleMetrics, schedule, stayedQuiet, summary, verdict } from "./speed-budget.mjs";
 
 const QUIET = { load1: 0.8, compilers: [], memoryLevel: 80, onAC: true, screenLocked: false, busy: false };
 
@@ -112,7 +112,7 @@ test("REFUSED exits 75 (EX_TEMPFAIL), never 0 or 1", () => {
 
 const ENGINE = { engine_start_ms: 310, seeded: { project: "p", sessions: 50 }, round_trip_ms: { desktop_master_state: [3, 1, 2], desktop_open_project: [5, 4, 6] } };
 const APP = {
-  launch: { ms: 1450, first_look_usable: false },
+  launch: { ms: 1450, first_look_usable: false, webview_ms: 380, reload_ms: 520 },
   big: { open_ms: 120, conversation_ms: 80, sessions_ms: 200 },
   switch_cold: { home: 40, metrics: 90 },
   switch_warm: { home: 30, metrics: 60 },
@@ -121,7 +121,7 @@ const APP = {
 
 test("a run's records flatten into one value per metric, round trips as their median", () => {
   assert.deepEqual(sampleMetrics(ENGINE, APP), {
-    launch_ms: 1450, engine_start_ms: 310,
+    launch_ms: 1450, launch_webview_ms: 380, reload_home_ms: 520, engine_start_ms: 310,
     big_open_ms: 120, big_conversation_ms: 80, big_sessions_ms: 200,
     switch_cold_home_ms: 40, switch_cold_metrics_ms: 90, switch_warm_home_ms: 30, switch_warm_metrics_ms: 60,
     round_trip_desktop_master_state_ms: 2, round_trip_desktop_open_project_ms: 5,
@@ -129,10 +129,13 @@ test("a run's records flatten into one value per metric, round trips as their me
   });
 });
 
-test("a launch whose first look already found Home usable has no launch time", () => {
-  const metrics = sampleMetrics(ENGINE, { ...APP, launch: { ms: 1450, first_look_usable: true } });
+test("a launch whose first look already found Home usable has no launch time, but always its webview start and reload", () => {
+  const metrics = sampleMetrics(ENGINE, { ...APP, launch: { ...APP.launch, first_look_usable: true } });
   assert.equal(Object.hasOwn(metrics, "launch_ms"), false);
+  assert.equal(metrics.launch_webview_ms, 380);
+  assert.equal(metrics.reload_home_ms, 520);
   assert.equal(metrics.engine_start_ms, 310);
+  assert.throws(() => sampleMetrics(ENGINE, { ...APP, launch: { ms: 1450, first_look_usable: true } }), /webview start and a reload/);
 });
 
 test("the schedule warms each side once, then alternates them", () => {
@@ -160,8 +163,8 @@ test("judge passes, fails, reports and leaves unmeasured each metric by its rule
 });
 
 test("judge refuses a timed metric with no noise reading", () => {
-  const side = Array.from({ length: KEPT_MIN }, () => ({ launch_ms: 1000 }));
-  assert.throws(() => judge(side, side, {}), /noise for launch_ms/);
+  const side = Array.from({ length: KEPT_MIN }, () => ({ reload_home_ms: 1000 }));
+  assert.throws(() => judge(side, side, {}), /noise for reload_home_ms/);
 });
 
 test("judge rows carry their floor: launches and engine start 100 ms, TUI keys and pages 20 ms, memory 10 MB", () => {
@@ -176,4 +179,21 @@ test("a TUI sample joins a run's sample under its own names only", () => {
   assert.deepEqual(joined, { launch_ms: 900, memory_app_mb: 80, tui_launch_ms: 300, tui_home_ms: 12 });
   assert.throws(() => joinSample({ launch_ms: 900 }, { launch_ms: 1 }), /tui_<step>_ms/);
   assert.throws(() => joinSample({ launch_ms: 900 }, { tui_home_ms: -1 }), /a reading/);
+});
+
+test("a verdict is incomplete while a required metric is missing or unmeasured; only the launch may be", () => {
+  const row = (metric, status) => ({ metric, status });
+  const whole = REQUIRED.map((metric) => row(metric, "pass"));
+  assert.deepEqual(incomplete(whole), []);
+  assert.deepEqual(incomplete([...whole, row("launch_ms", "unmeasured")]), []);
+  assert.deepEqual(incomplete(whole.filter((item) => item.metric !== "reload_home_ms")), ["reload_home_ms"]);
+  assert.deepEqual(incomplete([...whole.slice(1), row(REQUIRED[0], "unmeasured")]), [REQUIRED[0]]);
+  assert.deepEqual(incomplete([...whole, row("switch_cold_home_ms", "unmeasured")]), ["switch_cold_home_ms"]);
+  assert.ok(REQUIRED.includes("launch_webview_ms") && REQUIRED.includes("tui_launch_ms") && !REQUIRED.includes("launch_ms"));
+});
+
+test("judge leaves the optional launch unmeasured when the noise run never measured it", () => {
+  const side = Array.from({ length: KEPT_MIN }, () => ({ launch_ms: 1000, reload_home_ms: 500 }));
+  const rows = judge(side, side, { reload_home_ms: 0 });
+  assert.deepEqual(rows.map((item) => [item.metric, item.status]), [["launch_ms", "unmeasured"], ["reload_home_ms", "pass"]]);
 });

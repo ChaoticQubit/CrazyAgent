@@ -181,6 +181,14 @@ export function footprintMb(pid) {
 export const KEPT_MIN = 8;
 /** Metrics read and shown but never failing a run until their reading is proven (DEC-169 Q9). */
 export const REPORT_ONLY = new Set(["memory_webkit_mb"]);
+/** Metrics a run may lack: the launch is only timed when the spec's first look comes before
+ * Home is usable; `launch_webview_ms` and `reload_home_ms` always time the launch path. */
+const OPTIONAL = new Set(["launch_ms"]);
+/** One metric of each row (T1-T6, U1) a verdict must judge; any other metric a run reads must
+ * be judged too, unless it is optional. */
+export const REQUIRED = ["launch_webview_ms", "reload_home_ms", "engine_start_ms", "big_open_ms", "big_conversation_ms",
+  "big_sessions_ms", "switch_cold_home_ms", "switch_warm_home_ms", "round_trip_desktop_open_project_ms",
+  "memory_engine_mb", "memory_app_mb", "tui_launch_ms", "tui_open_project_ms"];
 const KEPT_MAX = 32;
 
 /** Flattens one speed run's records into one value per metric. Inputs: run.mjs's
@@ -189,8 +197,11 @@ const KEPT_MAX = 32;
 export function sampleMetrics(engine, app) {
   assert.ok(Number.isFinite(engine.engine_start_ms), "an engine start time");
   assert.ok(app.launch && app.big && app.switch_cold && app.switch_warm && app.memory, "a complete app record");
+  assert.ok(Number.isFinite(app.launch.webview_ms) && Number.isFinite(app.launch.reload_ms), "a webview start and a reload");
   const metrics = {};
   if (!app.launch.first_look_usable) metrics.launch_ms = app.launch.ms;
+  metrics.launch_webview_ms = app.launch.webview_ms;
+  metrics.reload_home_ms = app.launch.reload_ms;
   metrics.engine_start_ms = engine.engine_start_ms;
   for (const [name, ms] of Object.entries(app.big)) metrics[`big_${name}`] = ms;
   for (const [page, ms] of Object.entries(app.switch_cold)) metrics[`switch_cold_${page}_ms`] = ms;
@@ -247,6 +258,9 @@ export function judge(base, candidate, shares) {
     if (kept < KEPT_MIN) return { metric, status: "unmeasured", kept };
     const sides = { base: summary(valuesOf(base, metric).slice(0, kept)), candidate: summary(valuesOf(candidate, metric).slice(0, kept)) };
     if (REPORT_ONLY.has(metric)) return { metric, status: "report", ...sides };
+    if (OPTIONAL.has(metric) && !Object.hasOwn(shares, metric)) {
+      return { metric, status: "unmeasured", kept, reasons: ["the noise run never measured it"] };
+    }
     assert.ok(Object.hasOwn(shares, metric), `a noise for ${metric}; run the noise mode first`);
     const share = margin(shares[metric]);
     const floor = floorFor(metric);
@@ -257,8 +271,19 @@ export function judge(base, candidate, shares) {
   return rows;
 }
 
+/** The metrics a verdict could not judge: a required one missing, or any one unmeasured that
+ * is not optional. A verdict with any is not a pass. Input: judge's rows. Output: the metrics. */
+export function incomplete(rows) {
+  assert.ok(Array.isArray(rows), "judge's rows");
+  const status = new Map(rows.map((row) => [row.metric, row.status]));
+  assert.equal(status.size, rows.length, "one row per metric");
+  const missing = REQUIRED.filter((metric) => !status.has(metric));
+  const unmeasured = rows.filter((row) => row.status === "unmeasured" && !OPTIONAL.has(row.metric)).map((row) => row.metric);
+  return [...missing, ...unmeasured];
+}
+
 /** The metrics timed from a process start, which take the launch floor. */
-const LAUNCHES = ["launch_ms", "engine_start_ms", "tui_launch_ms"];
+const LAUNCHES = ["launch_ms", "launch_webview_ms", "reload_home_ms", "engine_start_ms", "tui_launch_ms"];
 
 /** Joins one TUI run's times (row U1, tui_speed.py) to the same slot's app sample. Inputs: the
  * app sample and the TUI's `{ tui_<step>_ms: ms }`. Output: one sample holding both. */

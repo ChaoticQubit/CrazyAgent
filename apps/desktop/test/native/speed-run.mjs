@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { endTerminals, start, stop } from "./e2e-harness.mjs";
 import {
-  KEPT_MIN, REFUSED_EXIT, joinSample, judge, noiseShares, quiet, readQuiet, sampleMetrics, schedule,
+  KEPT_MIN, REFUSED_EXIT, incomplete, joinSample, judge, noiseShares, quiet, readQuiet, sampleMetrics, schedule,
   stayedQuiet,
 } from "./speed-budget.mjs";
 import { PROJECT } from "./speed-seed.mjs";
@@ -149,22 +149,25 @@ async function collect(mode, sides, kept, out) {
   assert.notEqual(states.base, states.candidate, "each side keeps its own state");
   const samples = { base: [], candidate: [] };
   const runs = [];
-  for (const { side, warm } of schedule(kept)) {
-    for (let tainted = 0; ; tainted += 1) {
-      if (tainted >= TAINTED_MAX) refuse(out, [`${TAINTED_MAX} runs in a row saw the Mac get busy`], runs);
-      const busy = await waitQuiet();
-      if (busy) refuse(out, busy, runs);
-      const run = await runOnce(sides[side], states[side]);
-      const tui = await tuiOnce(sides[side], states[side], run.evidence);
-      const after = stayedQuiet(readQuiet());
-      runs.push({ side, warm, evidence: run.evidence, quiet_after: after.quiet, reasons: after.reasons });
-      if (!after.quiet) continue;
-      if (!warm) samples[side].push(joinSample(sampleMetrics(run.engine, run.app), tui));
-      break;
+  try {
+    for (const { side, warm } of schedule(kept)) {
+      for (let tainted = 0; ; tainted += 1) {
+        if (tainted >= TAINTED_MAX) refuse(out, [`${TAINTED_MAX} runs in a row saw the Mac get busy`], runs);
+        const busy = await waitQuiet();
+        if (busy) refuse(out, busy, runs);
+        const run = await runOnce(sides[side], states[side]);
+        const tui = await tuiOnce(sides[side], states[side], run.evidence);
+        const after = stayedQuiet(readQuiet());
+        runs.push({ side, warm, evidence: run.evidence, quiet_after: after.quiet, reasons: after.reasons });
+        if (!after.quiet) continue;
+        if (!warm) samples[side].push(joinSample(sampleMetrics(run.engine, run.app), tui));
+        break;
+      }
     }
+  } finally {
+    record(out, "runs.json", runs);
+    record(out, "samples.json", samples);
   }
-  record(out, "runs.json", runs);
-  record(out, "samples.json", samples);
   assert.equal(samples.base.length, kept);
   assert.equal(samples.candidate.length, kept);
   return samples;
@@ -195,12 +198,14 @@ async function main() {
     return 0;
   }
   const rows = judge(samples.base, samples.candidate, shares);
-  record(values.out, "verdict.json", { base: base.digest, candidate: candidate.digest, rows });
+  const gaps = incomplete(rows);
+  record(values.out, "verdict.json", { base: base.digest, candidate: candidate.digest, rows, incomplete: gaps });
   for (const row of rows) {
     const medians = row.base ? `${row.base.median} -> ${row.candidate.median}` : `kept ${row.kept}`;
     console.log(`${row.status.padEnd(10)} ${row.metric} ${medians} ${(row.reasons ?? []).join("; ")}`);
   }
-  return rows.some((row) => row.status === "fail") ? 1 : 0;
+  if (gaps.length > 0) console.error(`NOT JUDGED: ${gaps.join(", ")}`);
+  return rows.some((row) => row.status === "fail") || gaps.length > 0 ? 1 : 0;
 }
 
 /** Reads the noise a `noise` run wrote, refusing one read on another base or a candidate that
