@@ -1320,6 +1320,160 @@ fn stale_replaces_a_definition_only_for_a_private_copy_of_the_bundled_engine() {
     }
 }
 
+/// An app engine `<root>/<folder>/CrazyAgent.app/Contents/MacOS/crazyagent` written on disk.
+/// Inputs: the row's folder and the folder the app sits in. Output: the engine's path.
+fn app_engine(root: &Path, folder: &str) -> PathBuf {
+    let engine = root
+        .join(folder)
+        .join("CrazyAgent.app")
+        .join("Contents")
+        .join("MacOS")
+        .join("crazyagent");
+    std::fs::create_dir_all(engine.parent().unwrap()).unwrap();
+    std::fs::write(&engine, b"engine").unwrap();
+    engine
+}
+
+/// A dev build's app engine inside a cargo target folder, which [`Service::may_replace`]
+/// refuses. Input: the row's folder. Output: the engine's path.
+fn dev_engine(root: &Path) -> PathBuf {
+    let target = root.join("worktree").join("target");
+    let built = app_engine(&target.join("release").join("bundle"), "macos");
+    std::fs::write(
+        target.join("CACHEDIR.TAG"),
+        b"Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .unwrap();
+    built
+}
+
+/// RV-DS241-118: a login service left naming a program that is gone, as after the app was
+/// moved or renamed, is reinstalled for this app's engine when no engine answers and never
+/// started as it is, also by a dev build, which only keeps away from a program that still
+/// exists. A definition naming this engine starts as it is.
+#[cfg(unix)]
+#[test]
+fn a_definition_naming_a_missing_program_is_reinstalled_not_started() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = app_engine(temp.path(), "Applications");
+    let built = dev_engine(temp.path());
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join("engine");
+        own.executable = bundled.clone();
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        let mut gone = own.clone();
+        gone.executable = temp
+            .path()
+            .join("Moved")
+            .join("CrazyAgent.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("crazyagent");
+        write_definition(&own.definition, &gone.definition_text().unwrap(), platform).unwrap();
+        assert!(own.runs_another_program());
+        assert_eq!(own.broken_program(), Some(gone.executable.clone()));
+        assert_eq!(own.repair(&bundled, true, false), Repair::Install);
+        let mut dev = own.clone();
+        dev.executable = built.clone();
+        assert!(!dev.may_replace());
+        assert_eq!(dev.repair(&built, true, false), Repair::Install);
+        write_definition(&own.definition, &own.definition_text().unwrap(), platform).unwrap();
+        assert_eq!(own.broken_program(), None);
+        assert_eq!(own.repair(&bundled, true, false), Repair::Start);
+        assert_eq!(own.repair(&bundled, true, true), Repair::Install);
+        assert_eq!(own.repair(&bundled, false, false), Repair::Install);
+    }
+}
+
+/// RV-DS241-118: a definition naming an engine on a disk image or another disk (`/Volumes`)
+/// or in a Gatekeeper AppTranslocation folder is never started as it is, since the path goes
+/// away and another disk of the same name could take its place. An engine there is itself
+/// never installed as a login service: it starts a usable installed definition and is
+/// refused otherwise.
+#[cfg(unix)]
+#[test]
+fn a_definition_naming_a_volumes_or_translocated_program_is_never_started_as_is() {
+    let mounted = Path::new("/Volumes/CrazyAgent/CrazyAgent.app/Contents/MacOS/crazyagent");
+    let translocated = Path::new(
+        "/private/var/folders/ab/xyz/T/AppTranslocation/0A1B2C3D/d/CrazyAgent.app/Contents/MacOS/crazyagent",
+    );
+    assert!(transient(mounted));
+    assert!(transient(translocated));
+    assert!(!transient(Path::new(
+        "/Applications/CrazyAgent.app/Contents/MacOS/crazyagent"
+    )));
+    assert!(!transient(Path::new(
+        "/Users/owner/Volumes/CrazyAgent.app/Contents/MacOS/crazyagent"
+    )));
+    assert!(!transient(Path::new(
+        "/VolumesX/CrazyAgent.app/Contents/MacOS/crazyagent"
+    )));
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = app_engine(temp.path(), "Applications");
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join("engine");
+        own.executable = bundled.clone();
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        for program in [mounted, translocated] {
+            let mut there = own.clone();
+            there.executable = program.to_path_buf();
+            write_definition(&own.definition, &there.definition_text().unwrap(), platform).unwrap();
+            assert_eq!(own.broken_program().as_deref(), Some(program));
+            assert_eq!(own.repair(&bundled, true, false), Repair::Install);
+            assert_eq!(there.broken_program().as_deref(), Some(program));
+            assert_eq!(there.repair(program, true, false), Repair::Refuse);
+            assert_eq!(there.repair(program, true, true), Repair::Refuse);
+            assert_eq!(there.repair(program, false, false), Repair::Refuse);
+        }
+        write_definition(&own.definition, &own.definition_text().unwrap(), platform).unwrap();
+        let mut there = own.clone();
+        there.executable = mounted.to_path_buf();
+        assert_eq!(there.broken_program(), None);
+        assert_eq!(there.repair(mounted, true, false), Repair::Start);
+        assert_eq!(there.repair(mounted, true, true), Repair::Refuse);
+    }
+}
+
+/// RV-DS241-118: before a plain start the installed definition is checked for another
+/// program, as `service start` does: one that still exists is replaced only by an engine
+/// that may replace it, so a dev build or a PATH-only difference starts it as it is.
+#[cfg(unix)]
+#[test]
+fn a_definition_running_another_existing_program_is_replaced_only_by_an_engine_that_may() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = app_engine(temp.path(), "Applications");
+    let other = app_engine(temp.path(), "Older");
+    let built = dev_engine(temp.path());
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join("engine");
+        own.executable = bundled.clone();
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        let mut older = own.clone();
+        older.executable = other.clone();
+        write_definition(&own.definition, &older.definition_text().unwrap(), platform).unwrap();
+        assert!(own.runs_another_program());
+        assert!(own.may_replace());
+        assert_eq!(own.broken_program(), None);
+        assert_eq!(own.repair(&bundled, true, false), Repair::Install);
+        let mut dev = own.clone();
+        dev.executable = built.clone();
+        assert_eq!(dev.repair(&built, true, false), Repair::Start);
+        let mut elsewhere = own.clone();
+        elsewhere.path = OsString::from("/usr/bin:/bin");
+        write_definition(
+            &own.definition,
+            &elsewhere.definition_text().unwrap(),
+            platform,
+        )
+        .unwrap();
+        assert!(!own.runs_another_program());
+        assert_eq!(own.repair(&bundled, true, false), Repair::Start);
+    }
+}
+
 /// A Nix-style store, a sticky folder its group can write such as /nix/store
 /// (root:nixbld 1775), is fine two or more levels above an entry whose folder below it
 /// exists, since its group cannot replace an entry another user owns; the entry's own

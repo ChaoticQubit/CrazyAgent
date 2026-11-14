@@ -69,6 +69,19 @@ pub struct Service {
     pub user: Option<String>,
 }
 
+/// What a client does with the installed engine service when no engine answers
+/// ([`Service::repair`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Repair {
+    /// Starts the installed definition as it is.
+    Start,
+    /// Writes and registers this service's definition in place of what is installed.
+    Install,
+    /// Neither: this engine is on a disk image, another disk or a temporary folder
+    /// ([`transient`]), where a login service never points, and nothing usable is installed.
+    Refuse,
+}
+
 /// What a service manager reports about the engine service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
@@ -561,6 +574,29 @@ WantedBy=default.target\n",
         self.executable != bundled && !self.current()
     }
 
+    /// The program the installed definition runs when it is gone or [`transient`], as after
+    /// the app was moved or renamed, or first opened from a disk image or a Gatekeeper
+    /// AppTranslocation folder: a definition naming it can never be started as it is.
+    /// Output: none when nothing readable is installed or the program it names is usable.
+    pub fn broken_program(&self) -> Option<PathBuf> {
+        None
+    }
+
+    /// What to do with the engine service when no engine answers: install this definition
+    /// when asked, when none is installed, when the installed one names a broken program
+    /// ([`Self::broken_program`]), when it is [`Self::stale`], or when it runs another program
+    /// this engine may replace ([`Self::may_replace`]); otherwise start it as it is. An engine
+    /// that is itself [`transient`] is never installed: it starts a usable installed definition
+    /// and is refused otherwise. Inputs: the bundled engine, whether a definition is installed
+    /// and whether the owner asked for a reinstall. Output: the repair.
+    pub fn repair(&self, bundled: &Path, installed: bool, reinstall: bool) -> Repair {
+        if reinstall || !installed || self.stale(bundled) {
+            Repair::Install
+        } else {
+            Repair::Start
+        }
+    }
+
     /// The executable as [`Self::definition_text`] writes it on this platform: XML-escaped in
     /// a plist, quoted for systemd, quoted for cmd and then XML-escaped in a Windows task.
     /// Output: the text that names the executable in the definition.
@@ -937,6 +973,15 @@ pub fn changeable_by_others(_path: &Path) -> Option<PathBuf> {
 #[cfg(not(unix))]
 pub(crate) fn changeable_past_sticky(_path: &Path) -> Option<PathBuf> {
     None
+}
+
+/// Whether a path lies on a disk image or another disk (`/Volumes/...`) or in a Gatekeeper
+/// AppTranslocation folder, which go away when the image is ejected, the disk is removed or
+/// the app is moved, and which another disk of the same name could later take the place of.
+/// Read as written, without touching the file system. Input: the path. Output: the answer.
+pub fn transient(path: &Path) -> bool {
+    let _ = path;
+    false
 }
 
 /// Refuses an engine that a login service or the command line link would keep running
