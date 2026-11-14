@@ -2005,3 +2005,73 @@ fn a_writing_run_whose_provider_refuses_connections_fails_at_once_with_the_reach
         "no agent folder was made"
     );
 }
+
+/// RV-DS241-80: Delete everything records the project's Overview writing runs as engine
+/// files and removes each run's folder, which holds the evidence prompt and the session
+/// transcript, and its Seatbelt profile; the runs of a project whose id only starts the
+/// same, a name in no run's shape and a research job's run all stay.
+#[test]
+fn delete_everything_removes_the_projects_overview_runs_and_no_other_projects() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let agents = base.join("research").join("agents");
+    let profiles = base.join("research").join("profiles");
+    std::fs::create_dir_all(&profiles).unwrap();
+    let own = "overview-demo-1794000000000";
+    let others = [
+        "overview-demo-2-1794000000000",
+        "overview-demonstration-1794000000000",
+        "overview-demo-later",
+        "job-7-1",
+    ];
+    for name in others.iter().chain([&own]) {
+        std::fs::create_dir_all(agents.join(name).join("home")).unwrap();
+        std::fs::write(agents.join(name).join("prompt.md"), "evidence").unwrap();
+        std::fs::write(profiles.join(format!("{name}.sb")), "(version 1)").unwrap();
+    }
+    let plan = crate::projects_home::DeletePlan {
+        database: base.join("engine.db"),
+        project: ProjectId::new("demo").unwrap(),
+        home: base.join("home"),
+        folders: vec![],
+        agents: vec![],
+    };
+    let files = plan.engine_files(&[]);
+    let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, [own]);
+    assert_eq!(
+        crate::projects_home::remove_engine_files(&plan.database, &files),
+        [own.to_owned()]
+    );
+    assert!(std::fs::symlink_metadata(agents.join(own)).is_err());
+    assert!(std::fs::symlink_metadata(profiles.join(format!("{own}.sb"))).is_err());
+    for name in others {
+        assert!(agents.join(name).join("prompt.md").is_file(), "{name}");
+        assert!(profiles.join(format!("{name}.sb")).is_file(), "{name}");
+    }
+}
+
+/// RV-DS241-80: what a finished Overview writing run left in the research state, its folder
+/// and its Seatbelt profile, is named for the research loop's later removal as a roadmap
+/// status run's is, and removed once the usage upkeep has counted the run.
+#[cfg(unix)]
+#[test]
+fn a_finished_overview_run_is_removed_like_a_status_run() {
+    use crate::roadmap_status::run::{RUN_KEPT, RunLeft};
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().canonicalize().unwrap();
+    let folder = state.join("agents").join("overview-demo-1794000000000");
+    std::fs::create_dir_all(folder.join("home")).unwrap();
+    std::fs::write(folder.join("prompt.md"), "evidence").unwrap();
+    std::fs::create_dir(state.join("profiles")).unwrap();
+    let profile = state
+        .join("profiles")
+        .join("overview-demo-1794000000000.sb");
+    std::fs::write(&profile, "(version 1)").unwrap();
+    let ended = std::time::Instant::now().checked_sub(RUN_KEPT).unwrap();
+    let left = RunLeft::at(folder.clone(), profile.clone(), ended);
+    assert!(left.due());
+    left.remove();
+    assert!(std::fs::symlink_metadata(&folder).is_err());
+    assert!(std::fs::symlink_metadata(&profile).is_err());
+}
