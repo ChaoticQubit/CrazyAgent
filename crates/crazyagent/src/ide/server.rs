@@ -57,9 +57,15 @@ const PROJECTS_MAX: usize = 256;
 /// timed-out open can hold one for as long as its lookup hangs.
 const STOP_LEFTOVER_WAIT: Duration = Duration::from_secs(10);
 const GROUP_BYTES_MAX: u64 = 256;
-/// How many entries a confined start reads in its server data folder before it refuses:
-/// far above what a VSCodium server keeps there, so only a padded folder reaches it.
+/// How many entries a confined start reads in its server data folder, and again in its temp
+/// folder, before it refuses: far above what a VSCodium server keeps there, so only a padded
+/// folder reaches it.
 const SERVER_DATA_ENTRIES_MAX: usize = 200_000;
+/// The name a Full access start's temp folder is keyed by, beside its server data folder. A
+/// Full access session's tools leave what they like in their temp folder, a temporary clone
+/// included, so that folder is never the one a confined start walks and hands its server.
+/// Nothing is made at this path; only its name keys the temp folder.
+const FULL_ACCESS_TMP: &str = "full-access-tmp";
 const READY_POLL: Duration = Duration::from_millis(100);
 const CONNECT_TIME: Duration = Duration::from_millis(500);
 const WATCH_POLL: Duration = Duration::from_secs(1);
@@ -1042,7 +1048,8 @@ async fn holding_start<T: Send + 'static>(
 /// is held by [`confined_git`]. A Full access server's git is the owner's own, hooks and
 /// config included, so its shim holds no hooks path, whose count line needs the forced keys.
 /// A confined start is refused while its server data folder or its temp folder holds a
-/// `.git` ([`refuse_planted_git`]). Inputs: the launch, the server's info and the output pipe.
+/// `.git` ([`refuse_planted_git`]); a Full access start gets a temp folder of its own
+/// ([`FULL_ACCESS_TMP`]). Inputs: the launch, the server's info and the output pipe.
 fn command(
     launch: Launch<'_>,
     info: &ServerInfo,
@@ -1057,9 +1064,13 @@ fn command(
         .and_then(Path::parent)
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
-    let tmp = crate::sandbox::toolchains::make_tmp(&home)
-        .map_err(|_| failure("ide_state_unavailable"))?;
     let confined = policy.access != AgentAccess::Full;
+    let tmp = crate::sandbox::toolchains::make_tmp(&if confined {
+        home.clone()
+    } else {
+        folder.join(FULL_ACCESS_TMP)
+    })
+    .map_err(|_| failure("ide_state_unavailable"))?;
     if confined {
         for place in [&home, &tmp] {
             refuse_planted_git(place, SERVER_DATA_ENTRIES_MAX)?;
