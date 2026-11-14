@@ -385,6 +385,129 @@ fn the_ide_data_folders_keep_the_git_launch_file_and_root_denies_after_their_gra
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
 
+/// Whether any entry named `.git` in any ASCII letter case is at or below `top`, links not
+/// followed. Input: the folder. Output: true when one is.
+fn holds_git(top: &Path) -> bool {
+    fs::read_dir(top).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry.file_name().eq_ignore_ascii_case(".git")
+                || (entry.file_type().is_ok_and(|kind| kind.is_dir()) && holds_git(&entry.path()))
+        })
+    })
+}
+
+/// SA vid 101: with the grants the server's launcher builds (no other writable folder, the
+/// extensions folder read only, the Remote settings folder locked), the server data folder
+/// takes no `.git` as a gitdir file, a symlink, a hard link or a folder renamed to `.Git`,
+/// so none can be moved into the project, and the folder itself can be neither renamed nor
+/// removed. A writable folder's own root is likewise pinned against a rename and `rmdir`.
+#[test]
+fn the_ide_server_data_folder_takes_no_git_in_any_form_and_keeps_its_root() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("project");
+    let home = mine.join(crate::ide::server::SERVER_DATA);
+    let extensions = mine.join("extensions");
+    let machine = crate::ide::settings::machine_folder(&home);
+    for path in [&home, &extensions, &machine, &build, &root] {
+        folder(path);
+    }
+    let token = mine.join("token");
+    fs::write(&token, "token").unwrap();
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[extensions.as_path()],
+        readable: &[token.as_path()],
+        locked: &[machine.as_path()],
+    };
+    let profile = install(
+        &mine,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        AgentFilesRule::default(),
+    )
+    .unwrap();
+    let git = home.join(".git");
+    assert!(!sh(
+        &profile,
+        r#"printf 'gitdir: /private/tmp/x\n' > "$1""#,
+        &git
+    ));
+    assert!(!sh(&profile, r#"/bin/ln -s /private/tmp "$1""#, &git));
+    assert!(!sh(
+        &profile,
+        r#": > "${1%/*}/plain" && /bin/ln "${1%/*}/plain" "$1""#,
+        &git
+    ));
+    assert!(!sh(
+        &profile,
+        r#"/bin/mkdir "${1%/*}/aside" && /bin/mv "${1%/*}/aside" "$1""#,
+        &home.join(".Git")
+    ));
+    assert!(!sh(&profile, r#"/bin/mkdir -p "$1""#, &home.join("r/.git")));
+    let (moved, _) = run(
+        &profile,
+        "/bin/sh",
+        &[
+            OsStr::new("-c"),
+            OsStr::new(r#"/bin/mkdir -p "$1/r/sub" && /bin/mv "$1/r" "$2/r""#),
+            OsStr::new("sh"),
+            home.as_os_str(),
+            root.as_os_str(),
+        ],
+    );
+    assert!(
+        !holds_git(&home),
+        "a .git was made in the server data folder"
+    );
+    assert!(
+        !holds_git(&root),
+        "a .git reached the project (moved: {moved})"
+    );
+    assert!(!sh(&profile, r#"/bin/mv "$1" "$1-aside""#, &home));
+    assert!(!sh(&profile, r#"/bin/chmod 777 "$1""#, &home));
+    assert!(home.is_dir() && !home.is_symlink());
+    assert_eq!(
+        fs::metadata(&home).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert!(sh(&profile, r#": > "$1""#, &home.join("kept.txt")));
+
+    let spare = mine.join("spare");
+    folder(&spare);
+    let grants = Grants {
+        writable: &[spare.as_path()],
+        ..grants
+    };
+    let profile = install(
+        &mine,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        AgentFilesRule::default(),
+    )
+    .unwrap();
+    assert!(!sh(&profile, r#"/bin/rmdir "$1""#, &spare));
+    assert!(!sh(&profile, r#"/bin/mv "$1" "$1-aside""#, &spare));
+    assert!(spare.is_dir());
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}
+
 /// A lock outside every writable folder, a read-only folder inside a writable one, and a
 /// read-only folder holding a writable one are refused, so the profile never states a
 /// lock or a read-only grant that a writable grant overrides.
