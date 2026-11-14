@@ -1328,7 +1328,7 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "home_copy_unverified" => "The copy did not match the original, so the original was kept.",
         "home_move_source_left" => {
-            "The folder was added, but some of the original could not be removed."
+            "The folder was added, but part of the original couldn't be removed. Check its old place."
         }
         "home_icloud_not_downloaded" => {
             "Some files are still only in iCloud, so the folder was not added. Nothing was removed. Download them and try again."
@@ -1385,7 +1385,7 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
             "A project is still being moved into your projects folder. Try again when it finishes."
         }
         "move_project_old_folder_left" => {
-            "The project moved, but part of its old folder couldn't be deleted. Check the old folder and delete it yourself."
+            "The project moved, but part of its old folder couldn't be deleted. Check the old folder."
         }
         "move_project_unavailable" => {
             "The engine could not check the project's agents. Nothing was moved."

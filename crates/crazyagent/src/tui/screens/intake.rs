@@ -161,9 +161,6 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "home_copy_unverified" | "home_add_unverified" => {
             "The copy did not match the original, so the original was kept."
         }
-        "home_move_source_left" => {
-            "The folder was copied in, but the original could not be removed. Remove it yourself."
-        }
         "home_add_cancelled" => "Adding the folder stopped. Nothing was moved or copied.",
         "home_add_interrupted" => {
             "Adding the folder stopped part way. Check your projects folder before trying again."
