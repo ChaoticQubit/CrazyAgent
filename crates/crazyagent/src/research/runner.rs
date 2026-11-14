@@ -45,8 +45,10 @@ pub(crate) const GIT: &str = "/usr/bin/git";
 /// The settings every engine git runs with, whatever the repository configures: no hooks,
 /// fsmonitor or pager, no submodule recursion, no transport and no signature program, so a
 /// log or show that meets a signed commit in any armor runs `/usr/bin/false`, never a
-/// program the repository names (RV-DS241-39).
-pub(crate) const GIT_SAFE: [&str; 16] = [
+/// program the repository names (RV-DS241-39), and no signature check on a log or show at
+/// all, so a repository that turns `log.showSignature` on gets no check output mixed into
+/// what the engine reads (RV-DS241-39 r2 F2).
+pub(crate) const GIT_SAFE: [&str; 18] = [
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
@@ -63,6 +65,8 @@ pub(crate) const GIT_SAFE: [&str; 16] = [
     "gpg.x509.program=/usr/bin/false",
     "-c",
     "gpg.ssh.program=/usr/bin/false",
+    "-c",
+    "log.showSignature=false",
 ];
 #[cfg(unix)]
 const GIT_CONFIG_LISTING_BYTES_MAX: usize = 64 * 1024;
