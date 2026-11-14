@@ -166,7 +166,6 @@ Status of each version:
 
 ### Security
 
-- On macOS each harness agent's private home gets its own keychain, so agent sign-ins never touch or prompt for your login keychain.
 - Shared local folders are read-only by default, and secret files are left out of them.
 - Access grants are explicit: sockets and ports are granted per agent, a request for more access waits for you, and a grant that could let agents act as you shows a warning. Terminal and editor control sockets, Docker and debugger ports are refused.
 - Free resets are used only as the spend settings allow, and the engine refuses one you did not confirm while Confirm each is on. A retried Codex free reset never spends twice.
@@ -344,7 +343,7 @@ Status of each version:
 - The IDE writes nothing under its agents' git admin folders, and a gc from the IDE keeps every reflog.
 - The IDE keeps your local model ports free, and a settings file that does not parse stops its start.
 - On Linux the agent git wrapper is now written, so the merge guard holds there too.
-- Windows builds are held back: the Windows sandbox did not hold its deny rules, so an agent could have written protected git folders.
+- Windows builds are held back until the Windows sandbox work is finished.
 
 ## [2.2.1] - 2026-11-11 - Internal build
 
