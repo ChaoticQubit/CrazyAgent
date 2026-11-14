@@ -524,18 +524,21 @@ impl Repo {
     }
 
     /// Runs one confined Linux step on the copy of the worktree's index in the engine's step
-    /// folder, holding the worktree's `index.lock` the whole time as git would, and once git
-    /// exits 0 having rewritten the copy puts it in place of the index, so a step that only
-    /// reads leaves the index as it was; the step itself never writes the git folder
-    /// ([`Self::confined`]). Input: the step. Output: its output, git's [`INDEX_LOCKED`] exit
-    /// when the lock is already held, or `changes_git_failed` when the index cannot be
-    /// locked, copied or put back.
+    /// folder, holding the worktree's `index.lock` the whole time as git would. The folder
+    /// starts empty and is emptied after, and the index is copied only from a plain file with
+    /// one link, opened without following a link or waiting on a FIFO. Once git exits 0
+    /// having rewritten the copy, the copy takes the index's place only when it too is a
+    /// plain file with one link, so whatever a raced step leaves there is never taken, and a
+    /// step that only reads leaves the index as it was; the step itself never writes the git
+    /// folder ([`Self::confined`]). Input: the step. Output: its output, git's
+    /// [`INDEX_LOCKED`] exit when the lock is already held, or `changes_git_failed` when the
+    /// index cannot be locked, copied or put back.
     #[cfg(target_os = "linux")]
     pub(super) fn swapped(
         &self,
         step: impl FnOnce() -> Result<Output, EngineError>,
     ) -> Result<Output, EngineError> {
-        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         let copy = self
             .index
             .as_deref()
@@ -562,33 +565,46 @@ impl Repo {
             }
             Err(_) => return Err(failed()),
         }
-        let gone = |done: std::io::Result<()>| {
-            done.err()
-                .is_none_or(|error| error.kind() == std::io::ErrorKind::NotFound)
-        };
-        let file = |path: &Path| {
-            std::fs::symlink_metadata(path)
+        let folder = copy.parent().expect("the copy sits in the step folder");
+        let plain = |meta: &std::fs::Metadata| meta.file_type().is_file() && meta.nlink() == 1;
+        let renewed = std::fs::remove_dir_all(folder)
+            .err()
+            .is_none_or(|error| error.kind() == std::io::ErrorKind::NotFound)
+            && std::fs::create_dir(folder).is_ok();
+        let copied = renewed
+            && match std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&index)
+            {
+                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                Ok(mut real) => {
+                    real.metadata().is_ok_and(|meta| plain(&meta))
+                        && std::fs::File::create_new(copy)
+                            .and_then(|mut written| std::io::copy(&mut real, &mut written))
+                            .is_ok()
+                }
+            };
+        let identity = |meta: &std::fs::Metadata| (meta.dev(), meta.ino());
+        let ran = if copied {
+            let before = std::fs::symlink_metadata(copy)
                 .ok()
-                .map(|meta| (meta.dev(), meta.ino()))
-        };
-        let prepared = gone(std::fs::remove_file(copy))
-            && gone(std::fs::remove_file(copy.with_extension("lock")))
-            && gone(std::fs::copy(&index, copy).map(|_| ()));
-        let ran = if prepared {
-            let copied = file(copy);
-            step().map(|output| (copied, output))
+                .map(|meta| identity(&meta));
+            step().map(|output| (before, output))
         } else {
             Err(failed())
         };
-        let rewritten = matches!(&ran, Ok((copied, output))
-            if output.code == 0 && file(copy).is_some_and(|now| Some(now) != *copied));
+        let left = std::fs::symlink_metadata(copy).ok();
+        let rewritten = matches!(&ran, Ok((before, output))
+            if output.code == 0 && left.as_ref().is_some_and(|meta| Some(identity(meta)) != *before));
         let kept = rewritten
+            && left.as_ref().is_some_and(plain)
             && std::fs::rename(copy, &lock).is_ok()
             && std::fs::rename(&lock, &index).is_ok();
         if !kept {
             let _ = std::fs::remove_file(&lock);
         }
-        let _ = std::fs::remove_file(copy);
+        let _ = std::fs::remove_dir_all(folder);
         match ran {
             Ok(_) if rewritten && !kept => Err(failed()),
             ran => ran.map(|(_, output)| output),
