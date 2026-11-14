@@ -944,6 +944,24 @@ fn each_claude_launch_gets_the_project_context_as_files_it_is_pointed_at() {
 
 #[test]
 fn a_managed_account_not_signed_in_for_this_engine_run_waits_for_a_pool() {
+    managed_job_waits_for_a_pool(found_everywhere());
+}
+
+/// A lookup of a managed account's hosts that failed on this machine, with too many open
+/// files, names nothing, so the job runs on to its own sign-in read as before and waits for
+/// a pool, not failed with the No network line (DEC-163 addendum 8, r1 F1).
+#[test]
+fn a_managed_job_whose_lookup_failed_on_this_machine_runs_on_to_its_sign_in() {
+    managed_job_waits_for_a_pool(ProviderReach::new(
+        |_, _| Err(std::io::Error::from_raw_os_error(24)),
+        |address| panic!("a managed account's hosts are never dialed: {address}"),
+    ));
+}
+
+/// Runs one Codex research job on a managed account no sign-in of this engine run holds,
+/// with `reach` as the runner's reach, and checks it waits for a pool with no attempt, no
+/// agent worktree and no agent folder. Input: the reach.
+fn managed_job_waits_for_a_pool(reach: ProviderReach) {
     let case = case("A site for a neighbourhood tool library.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
@@ -966,7 +984,7 @@ fn a_managed_account_not_signed_in_for_this_engine_run_waits_for_a_pool() {
         },
     };
     let run = runner(&case, limits(Duration::from_secs(5)))
-        .with_reach(found_everywhere())
+        .with_reach(reach)
         .run_once(&project(
             &case,
             Some(ResearchAccount::ManagedCodex {

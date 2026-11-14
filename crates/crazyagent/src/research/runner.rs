@@ -4802,8 +4802,8 @@ mod tests {
     /// A remote endpoint whose name has no address, or whose every address refuses, is
     /// named with its host and port and the way out; an IP literal is dialed with no lookup.
     /// A managed account is named only when no host of its sign-in is found, by lookup alone,
-    /// with no connect. Every lookup and dial goes to stand-ins, so no row does real DNS
-    /// (DEC-163 addendum 8).
+    /// with no connect. A lookup that failed on this machine names neither. Every lookup and
+    /// dial goes to stand-ins, so no row does real DNS (DEC-163 addendum 8, r1 F1).
     #[test]
     fn a_remote_or_managed_provider_is_named_through_the_reach_with_its_own_line() {
         use std::sync::{Arc, Mutex};
@@ -4822,6 +4822,10 @@ mod tests {
         );
         let found = ProviderReach::new(
             |_, port| Ok(vec![std::net::SocketAddr::from(([192, 0, 2, 1], port))]),
+            |_| Ok(()),
+        );
+        let failed_here = ProviderReach::new(
+            |_, _| Err(io::Error::from_raw_os_error(24)),
             |_| Ok(()),
         );
         let codex = |base_url: &str| ResearchAccount::Endpoint {
@@ -4891,6 +4895,7 @@ mod tests {
             managed_claude,
         ] {
             assert_eq!(unreached_provider(&found, &account), None, "{account:?}");
+            assert_eq!(unreached_provider(&failed_here, &account), None, "{account:?}");
         }
     }
 
@@ -4924,11 +4929,7 @@ mod tests {
                 model: None,
             },
         ] {
-            assert_eq!(
-                unreached_loopback_here(&refusing, &account),
-                None,
-                "{account:?}"
-            );
+            assert_eq!(unreached_loopback_here(&refusing, &account), None, "{account:?}");
         }
         let expected = confined_unavailable(std::env::consts::OS).is_none().then(|| {
             "Can't reach the model provider at 127.0.0.1:9. Start it or pick another account in this pool, then try again.".to_owned()

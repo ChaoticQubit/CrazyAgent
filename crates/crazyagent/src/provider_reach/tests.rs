@@ -104,6 +104,26 @@ fn a_lookup_that_ran_out_of_time_names_nothing_and_dials_nothing() {
     assert!(dialed.lock().unwrap().is_empty());
 }
 
+/// A lookup that failed on this machine, with too many open files or no memory, carries the
+/// system's error number and says nothing about the name: neither a remote name nor a
+/// managed account's hosts are named, and nothing is dialed. Only the resolver's own answer,
+/// which carries no error number, reads as no address (DEC-163 addendum 8, r1 F1).
+#[test]
+fn a_lookup_that_failed_on_this_machine_names_nothing_and_dials_nothing() {
+    /// EMFILE, ENFILE and ENOMEM in POSIX numbering.
+    const SYSTEM_ERRORS: [i32; 3] = [24, 23, 12];
+    const HOSTS: &[(&str, u16)] = &[("chatgpt.com", 443), ("api.openai.com", 443)];
+    for number in SYSTEM_ERRORS {
+        let (failed, looked, dialed) =
+            stand_in(move |_| Err(io::Error::from_raw_os_error(number)), |_| refusal());
+        assert!(!failed.unreached_name("models.example.test", 443), "{number}");
+        assert!(!failed.offline(HOSTS), "{number}");
+        assert_eq!(*looked.lock().unwrap(), ["models.example.test", "chatgpt.com"], "{number}");
+        assert!(dialed.lock().unwrap().is_empty(), "{number}");
+    }
+    assert_eq!(no_address().unwrap_err().raw_os_error(), None);
+}
+
 /// The check dials only addresses the model proxy would: never loopback, unspecified,
 /// link-local or 0.0.0.0/8, also inside IPv6, so a remote name's DNS never steers the
 /// engine to this machine (CS-4). With nothing left to dial it names nothing; with some
