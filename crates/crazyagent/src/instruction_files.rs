@@ -1055,14 +1055,13 @@ fn imported(names: &str, text: &str) -> String {
 }
 
 /// Imported text where only labels (`### Imported from` then whitespace or the line end)
-/// read as a heading at their level or above: other ATX headings of level one to three get
-/// three more `#`, and an `=` or `-` underline under a non-blank line gets a blank line of
-/// the same ending above it (SA vid 7 r2, r2b). A second pass, or trimming the end, changes
-/// nothing. Input: the text. Output: the text, the same when it has no such line.
+/// read as a heading at their level or above, with every `memory::hidden_char` dropped:
+/// other ATX headings of level one to three get three more `#`, an underline under a line of
+/// more than spaces and tabs a blank line above (SA vid 7 r2, r2b, r2d). Input: the text.
+/// Output: the text, the same when it has no such line; a second pass or end trim keeps it.
 fn demoted(text: &str) -> String {
-    let lead = |c: char| {
-        c.is_whitespace() || matches!(c, '\u{200B}'..='\u{200F}' | '\u{2060}' | '\u{FEFF}')
-    };
+    let lead = |c: char| c.is_whitespace() || crate::memory::hidden_char(c);
+    let blank = |text: &str| text.bytes().all(|byte| byte == b' ' || byte == b'\t');
     let mut out = String::with_capacity(text.len());
     let (mut above, mut above_ending) = ("", "\n");
     let mut rest = text;
@@ -1074,11 +1073,15 @@ fn demoted(text: &str) -> String {
             after => &after[..after.len().min(1)],
         };
         let body = line.trim_start_matches(lead);
-        let hashes = body.len() - body.trim_start_matches('#').len();
-        let rule = body.trim();
+        let shown: String = body
+            .chars()
+            .filter(|c| !crate::memory::hidden_char(*c))
+            .collect();
+        let hashes = shown.len() - shown.trim_start_matches('#').len();
+        let rule = shown.trim();
         let underline = !rule.is_empty()
             && (rule.bytes().all(|byte| byte == b'=') || rule.bytes().all(|byte| byte == b'-'));
-        if underline && !above.trim().is_empty() {
+        if underline && !blank(above) {
             out.push_str(above_ending);
         }
         out.push_str(&line[..line.len() - body.len()]);
@@ -1087,7 +1090,7 @@ fn demoted(text: &str) -> String {
             .is_some_and(|after| after.chars().next().is_none_or(char::is_whitespace));
         if !label
             && (1..=3).contains(&hashes)
-            && body[hashes..]
+            && shown[hashes..]
                 .chars()
                 .next()
                 .is_none_or(char::is_whitespace)
