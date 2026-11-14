@@ -1075,6 +1075,62 @@ pub fn competitors(
     })
 }
 
+/// One tab as the Overview shows it: its file, whose seal it carries, and its proposal.
+/// Inputs: the connection, the project, its tabs folder and the tab. Output: the tab's
+/// state, or `overview_unavailable`.
+fn tab_state(
+    db: &Connection,
+    project: &ProjectId,
+    place: &Place,
+    tab: Tab,
+) -> Result<TabState, EngineError> {
+    let row = tab_row(db, project, tab)?;
+    let found = match place {
+        Place::Open(folder) => found_in(folder, tab),
+        Place::NotAFolder => Found::Blocked(BLOCKED_NOT_A_FOLDER),
+        Place::Missing | Place::NoLayout => Found::Missing,
+    };
+    let (text, blocked) = match found {
+        Found::Text(text) => (Some(text), None),
+        Found::Blocked(why) => (None, Some(why.to_owned())),
+        Found::Missing => (None, None),
+    };
+    let version = text.as_deref().map(overview_seal).unwrap_or_default();
+    let engine_wrote = row.seal.as_deref() == Some(version.as_str());
+    let owner_saved = row.owner_seal.as_deref() == Some(version.as_str());
+    let edited = text.is_some() && !engine_wrote && owner_saved;
+    let foreign = text.is_some() && !engine_wrote && !owner_saved;
+    assert!(!(edited && foreign));
+    let proposal = row.proposal;
+    let proposal_version = proposal.as_deref().map(overview_seal).unwrap_or_default();
+    assert_eq!(proposal.is_none(), proposal_version.is_empty());
+    Ok(TabState {
+        tab,
+        text,
+        version,
+        edited,
+        foreign,
+        proposal,
+        proposal_version,
+        blocked,
+    })
+}
+
+/// Whether a tab's file came with the project's files, by the same check the Overview's
+/// read shows, with none of the read's other work: neither the engine wrote it nor the
+/// owner saved it here (RV-DS241-2). Inputs: the connection, the project, its folder and
+/// the tab. Output: the answer, false with no file, or `overview_unavailable`.
+pub fn tab_foreign(
+    db: &Connection,
+    project: &ProjectId,
+    folder: &Path,
+    tab: Tab,
+) -> Result<bool, EngineError> {
+    let state = tab_state(db, project, &tabs_folder(folder, false), tab)?;
+    assert!(!state.foreign || state.text.is_some());
+    Ok(state.foreign)
+}
+
 /// Reads the project's Overview. A read makes a project's row stale and due at once while
 /// no writing run has ever started for it under After each landed change set, even when a
 /// setting saved earlier made the row, which asks for the first writing run; a project with
@@ -1105,36 +1161,7 @@ pub fn read(
     let state = state(db, project)?;
     let mut tabs = Vec::with_capacity(Tab::ALL.len());
     for tab in Tab::ALL {
-        let row = tab_row(db, project, tab)?;
-        let found = match &place {
-            Place::Open(folder) => found_in(folder, tab),
-            Place::NotAFolder => Found::Blocked(BLOCKED_NOT_A_FOLDER),
-            Place::Missing | Place::NoLayout => Found::Missing,
-        };
-        let (text, blocked) = match found {
-            Found::Text(text) => (Some(text), None),
-            Found::Blocked(why) => (None, Some(why.to_owned())),
-            Found::Missing => (None, None),
-        };
-        let version = text.as_deref().map(overview_seal).unwrap_or_default();
-        let engine_wrote = row.seal.as_deref() == Some(version.as_str());
-        let owner_saved = row.owner_seal.as_deref() == Some(version.as_str());
-        let edited = text.is_some() && !engine_wrote && owner_saved;
-        let foreign = text.is_some() && !engine_wrote && !owner_saved;
-        assert!(!(edited && foreign));
-        let proposal = row.proposal;
-        let proposal_version = proposal.as_deref().map(overview_seal).unwrap_or_default();
-        assert_eq!(proposal.is_none(), proposal_version.is_empty());
-        tabs.push(TabState {
-            tab,
-            text,
-            version,
-            edited,
-            foreign,
-            proposal,
-            proposal_version,
-            blocked,
-        });
+        tabs.push(tab_state(db, project, &place, tab)?);
     }
     assert_eq!(tabs.len(), Tab::ALL.len());
     let failure = state
