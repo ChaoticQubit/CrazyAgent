@@ -102,26 +102,27 @@ fn a_mapping_paused_with_no_end_in_sight_asks_for_its_account_again_after_a_whil
 fn a_waiting_onboarding_step_halts_a_refresh_build() {
     let database = database();
     let running = || false;
-    assert!(!gives_way(&database, &running)());
+    let elsewhere = Path::new("/repos/elsewhere");
+    assert!(!gives_way(&database, elsewhere, &running)());
     assert!(
-        gives_way(&database, &|| true)(),
+        gives_way(&database, elsewhere, &|| true)(),
         "the engine's stop halts it"
     );
 
     waiting_to_map(&database, "paused", 1);
     pause(&database, "paused", now_ms() + 60 * 60 * 1000);
     assert!(
-        !gives_way(&database, &running)(),
+        !gives_way(&database, elsewhere, &running)(),
         "a step paused on its account lets the build run"
     );
 
     waiting_to_map(&database, "fresh", 2);
-    let stop = gives_way(&database, &running);
+    let stop = gives_way(&database, elsewhere, &running);
     assert!(stop(), "a waiting step halts the build");
     assert!(stop(), "and the stop stays");
     assert_eq!(claimed(&database).as_deref(), Some("fresh"));
     assert!(
-        !gives_way(&database, &running)(),
+        !gives_way(&database, elsewhere, &running)(),
         "a claimed step halts no later build"
     );
 }
@@ -131,6 +132,7 @@ fn a_waiting_onboarding_step_halts_a_refresh_build() {
 fn a_mapping_rechecking_its_account_pause_never_halts_a_refresh_build() {
     let database = database();
     let running = || false;
+    let elsewhere = Path::new("/repos/elsewhere");
     waiting_to_map(&database, "rechecking", 1);
     pause(&database, "rechecking", i64::MAX);
     database
@@ -140,7 +142,7 @@ fn a_mapping_rechecking_its_account_pause_never_halts_a_refresh_build() {
         )
         .unwrap();
     assert!(
-        !gives_way(&database, &running)(),
+        !gives_way(&database, elsewhere, &running)(),
         "a pause recheck waits one build"
     );
     assert_eq!(
@@ -151,7 +153,7 @@ fn a_mapping_rechecking_its_account_pause_never_halts_a_refresh_build() {
 
     waiting_to_map(&database, "ended", 2);
     pause(&database, "ended", now_ms() + 60 * 60 * 1000);
-    assert!(!gives_way(&database, &running)());
+    assert!(!gives_way(&database, elsewhere, &running)());
     database
         .execute(
             "UPDATE onboarding SET mapping_reason=?1 WHERE project='ended'",
@@ -159,7 +161,7 @@ fn a_mapping_rechecking_its_account_pause_never_halts_a_refresh_build() {
         )
         .unwrap();
     assert!(
-        gives_way(&database, &running)(),
+        gives_way(&database, elsewhere, &running)(),
         "a pause that ended halts the build"
     );
 }
@@ -608,4 +610,46 @@ fn a_step_of_a_project_whose_folder_is_being_moved_is_not_claimed() {
         .execute("DELETE FROM projects_home_project_move", [])
         .unwrap();
     assert_eq!(claimed(&database).as_deref(), Some("alpha"));
+}
+
+const MOVE_ALPHA: &str = "INSERT INTO projects_home_project_move
+    VALUES (1,'request-1',1,'alpha','/repos/alpha','/home/alpha','move')";
+
+/// RV-DS241-43: a refresh build gives way once a project move holds its folder, and a
+/// refresh in flight is seen in its folder until its last mark is dropped.
+#[cfg(unix)]
+#[test]
+fn a_refresh_build_gives_way_to_a_move_of_its_folder_and_is_seen_while_it_runs() {
+    let database = database();
+    crate::projects_home::initialize(&database).unwrap();
+    let running = || false;
+    let alpha = Path::new("/repos/alpha");
+    assert!(!gives_way(&database, alpha, &running)());
+    database.execute(MOVE_ALPHA, []).unwrap();
+    assert!(
+        gives_way(&database, alpha, &running)(),
+        "a move of its folder halts the build"
+    );
+    assert!(
+        gives_way(&database, &alpha.join("packages"), &running)(),
+        "and of a folder holding it"
+    );
+    assert!(!gives_way(&database, Path::new("/repos/beta"), &running)());
+
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().canonicalize().unwrap();
+    let (repo, other) = (folder.join("app"), folder.join("other"));
+    assert!(!refreshing_in(&folder));
+    let first = Refreshing::start(&repo);
+    assert!(refreshing_in(&folder));
+    assert!(refreshing_in(&repo));
+    assert!(!refreshing_in(&other));
+    let second = Refreshing::start(&repo);
+    drop(first);
+    assert!(
+        refreshing_in(&repo),
+        "a second refresh of the folder still runs"
+    );
+    drop(second);
+    assert!(!refreshing_in(&repo));
 }

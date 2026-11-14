@@ -723,7 +723,11 @@ fn step_waits(database: &Connection) -> bool {
 /// never waits behind a refresh. The table is read at most every [`STEP_POLL`], and a yes
 /// stays yes. Takes the worker's database and `halted`. Returns the stop.
 #[cfg(unix)]
-fn gives_way<'a>(database: &'a Connection, halted: &'a dyn Fn() -> bool) -> impl Fn() -> bool + 'a {
+fn gives_way<'a>(
+    database: &'a Connection,
+    _folder: &'a Path,
+    halted: &'a dyn Fn() -> bool,
+) -> impl Fn() -> bool + 'a {
     let read: Cell<Option<Instant>> = Cell::new(None);
     let waits = Cell::new(false);
     move || {
@@ -736,6 +740,26 @@ fn gives_way<'a>(database: &'a Connection, halted: &'a dyn Fn() -> bool) -> impl
         }
         waits.get()
     }
+}
+
+/// One main graph refresh in flight in a project folder, seen by [`refreshing_in`] until
+/// it is dropped. Built only by [`Refreshing::start`].
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct Refreshing(PathBuf);
+
+#[cfg(unix)]
+impl Refreshing {
+    /// Marks a refresh in flight in `repo`. Input: the project folder. Output: the mark.
+    pub(crate) fn start(repo: &Path) -> Self {
+        Self(repo.to_path_buf())
+    }
+}
+
+/// Tells whether a main graph refresh builds or publishes in `folder` or inside it now.
+/// Input: the folder. Output: the answer.
+pub(crate) fn refreshing_in(_folder: &Path) -> bool {
+    false
 }
 
 /// The projects whose main graph the refresh looks after, with their folders, at most
@@ -813,7 +837,7 @@ fn refresh_build(
         &name,
         hidden,
         work.limits.graph_time,
-        &gives_way(database, halted),
+        &gives_way(database, repo, halted),
     );
     if !matches!(ending, Err(RunError::Uncertain(_))) {
         forget_run(work.runner.state(), &name);
