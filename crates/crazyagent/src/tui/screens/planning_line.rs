@@ -14,6 +14,7 @@ pub(in crate::tui) enum Planning {
     Active {
         job: i64,
         status: ResearchStatus,
+        reason: Option<String>,
     },
     Done {
         job: i64,
@@ -57,6 +58,12 @@ pub(in crate::tui) fn planning(jobs: &[ResearchJob]) -> Planning {
         Some(job) if ACTIVE.contains(&job.status) => Planning::Active {
             job: job.id,
             status: job.status,
+            reason: job
+                .error
+                .as_deref()
+                .map(str::trim)
+                .filter(|reason| job.status == ResearchStatus::Queued && !reason.is_empty())
+                .map(str::to_owned),
         },
         Some(job) if job.status == ResearchStatus::Done => Planning::Done { job: job.id },
         Some(job) => Planning::Failed {
@@ -79,6 +86,10 @@ pub(in crate::tui) fn planning_value(state: &Planning, look: &Look) -> Row {
     match state {
         Planning::Idle => Row::of("Not planned", look.fg).push(plan, look.muted),
         Planning::Waiting => Row::of("Waiting for research", look.muted),
+        Planning::Active {
+            reason: Some(reason),
+            ..
+        } => Row::of("Planning", look.running).push(format!("  {reason}"), look.muted),
         Planning::Active { status, .. } => Row::of(
             match status {
                 ResearchStatus::Queued => "Planning, waiting to start",

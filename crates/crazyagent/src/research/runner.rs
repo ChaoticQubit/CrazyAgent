@@ -68,6 +68,10 @@ const DOCUMENTS_LISTED_MAX: usize = 50;
 const HOME_MOVE_WAITING: &str = "Waiting for the projects home move to finish";
 const PROFILE_BUSY_WAITING: &str = "Waiting for another run to finish with this account's sign-in";
 const ACCOUNT_WAITING: &str = "Waiting for this account to be ready";
+/// Every line a refused launch leaves on a job that waits Queued, so its progress reports why
+/// (RV-DS241-27 r2).
+pub(crate) const WAITING_LINES: [&str; 3] =
+    [HOME_MOVE_WAITING, PROFILE_BUSY_WAITING, ACCOUNT_WAITING];
 const LINKS_MAX: usize = 100;
 const POLL: Duration = Duration::from_millis(100);
 const HEARTBEAT: Duration = Duration::from_millis(250);

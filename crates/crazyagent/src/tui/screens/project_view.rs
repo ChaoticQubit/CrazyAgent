@@ -759,7 +759,15 @@ pub(in crate::tui) fn job_status(job: &ResearchJob, now_ms: i64, offset: i64, lo
                 look.muted,
             )
         }
-        ResearchStatus::Queued => Row::of(format!("{} Queued", look.glyph("\u{25cc}")), look.muted),
+        ResearchStatus::Queued => {
+            let queued = Row::of(format!("{} Queued", look.glyph("\u{25cc}")), look.muted);
+            match job.error.as_deref().map(str::trim) {
+                Some(reason) if !reason.is_empty() => {
+                    queued.push(format!("  {reason}"), look.muted)
+                }
+                _ => queued,
+            }
+        }
         ResearchStatus::NeedsPool => match job.rate_limited() {
             Some((until, _)) => Row::of(
                 format!("! Rate limited until {}", clock(until, offset)),
