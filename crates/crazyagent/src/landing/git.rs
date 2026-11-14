@@ -623,16 +623,17 @@ impl Repo {
     /// Runs one confined Linux step on the copy of the worktree's index in the engine's step
     /// folder, holding the worktree's `index.lock` the whole time as git would. The lock holds
     /// [`step_lock_text`] for this engine process, so the start sweep removes only a lock the
-    /// engine took ([`clear_step_locks`]). A step that does not take the lock removes its step
-    /// folder when empty and leaves one holding another step's copy to that step
-    /// (RV-DS241-135). The folder starts empty and is emptied after, and the index is copied
+    /// engine took ([`clear_step_locks`]); where the process cannot be named, as for process
+    /// 1, the lock is taken empty and the sweep keeps it. A step that does not take the lock
+    /// removes its step folder when empty and leaves one holding another step's copy to that
+    /// step (RV-DS241-135). The folder starts empty and is emptied after, and the index is copied
     /// only from a plain file with one link, opened without following a link or waiting on a
     /// FIFO. Once git exits 0 having rewritten the copy, the copy takes the index's place only
     /// when it too is a plain file with one link, so whatever a raced step leaves there is
     /// never taken, and a step that only reads leaves the index as it was; the step itself
     /// never writes the git folder ([`Self::confined`]). Input: the step. Output: its output,
     /// git's [`INDEX_LOCKED`] exit when the lock is already held, or `changes_git_failed` when
-    /// this process cannot be named or the index cannot be locked, copied or put back.
+    /// the index cannot be locked, copied or put back.
     #[cfg(target_os = "linux")]
     pub(super) fn swapped(
         &self,
@@ -651,16 +652,15 @@ impl Repo {
         let lock = self.git_dir.join("index.lock");
         let failed = || failure("changes_git_failed");
         let folder = copy.parent().expect("the copy sits in the step folder");
-        let own = i32::try_from(std::process::id()).ok().and_then(|pid| {
-            crate::storage::harness_groups::start_identity(pid)
-                .ok()
-                .flatten()
-                .map(|started| step_lock_text(pid, &started))
-        });
-        let Some(own) = own else {
-            let _ = std::fs::remove_dir(folder);
-            return Err(failed());
-        };
+        let own = i32::try_from(std::process::id())
+            .ok()
+            .and_then(|pid| {
+                crate::storage::harness_groups::start_identity(pid)
+                    .ok()
+                    .flatten()
+                    .map(|started| step_lock_text(pid, &started))
+            })
+            .unwrap_or_default();
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
