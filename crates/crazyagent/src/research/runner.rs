@@ -4757,9 +4757,7 @@ mod tests {
         repository_git(&folder, &["init", "-q"]);
         repository_git(&folder, &["commit", "-q", "--allow-empty", "-m", "Start"]);
         register_project(&root.database, "alpha", &folder);
-        let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-        let port = closed.local_addr().unwrap().port();
-        drop(closed);
+        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
         let runner = ResearchRunner::new(
             &root.database,
             &root.state,
