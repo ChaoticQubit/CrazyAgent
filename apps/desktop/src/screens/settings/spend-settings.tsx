@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { SPEND_DEFAULTS, setSpendSettings, usageRefusal, type AllLimited, type LimitedPool, type ResetsSource, type SpendConfirm, type SpendSettings, type SpendView, type UsageReport } from "../../api-usage";
-import type { Loaded } from "../../state";
+import { useHeld, type Loaded } from "../../state";
 import { LoadError, Notice, NotReady, Segmented, SettingLine, SettingSection } from "../../ui";
 import { andList } from "./account-drawer";
 import { SpendReset } from "./spend-reset";
@@ -87,34 +87,67 @@ export function SpendSettingsView({ settings, refused, onChange }: {
 
 const SPEND_ABOUT = "Some accounts hold free resets that start their limits over. These choose how CrazyAgent uses them.";
 
-/** The three free resets settings on Pools: until the usage read holds the stored settings, a
- * loading line, its failure with Try again or a not ready line and no control, so nothing shows
- * a default as stored or saves one; then shows a choice at once, stores it, and rereads the usage
- * once the engine kept it. Inputs: the usage read, the reread and the retry. Output: the section. */
-export function SpendSettingsSection({ usage, onDone, onRetry }: { usage: Loaded<UsageReport>; onDone: () => void; onRetry: () => void }) {
-  const [shown, setShown] = useState<SpendSettings>();
-  const [refused, setRefused] = useState("");
-  const stored = usage.kind === "ok" ? usage.value.spend?.settings : undefined;
-  useEffect(() => {
-    if (shown && stored && shown.confirm === stored.confirm && shown.all_limited === stored.all_limited
-      && (shown.resets_source ?? SPEND_DEFAULTS.resets_source) === (stored.resets_source ?? SPEND_DEFAULTS.resets_source)) setShown(undefined);
-  }, [shown, stored]);
-  const change = (next: SpendSettings) => {
-    setShown(next);
-    void setSpendSettings(next).then((result) => {
-      setRefused(result.kind === "ok" ? "" : usageRefusal(result.kind === "error" ? result : { code: "usage_unavailable" }));
-      if (result.kind === "ok") onDone();
-      else setShown(undefined);
+/** Runs saves one at a time in the order asked: a save asked while another is on its way waits
+ * for it, and of the saves waiting only the latest is sent, so the engine never keeps an older
+ * pick that landed after a newer one. Input: the save. Output: the call that asks for a save and
+ * answers with its result, or null once a later save took its place. */
+export function latestSaves<T, R>(save: (value: T) => Promise<R>): (value: T) => Promise<R | null> {
+  let asked = 0;
+  let last: Promise<void> | null = null;
+  return (value) => {
+    asked += 1;
+    const mine = asked;
+    const start = () => mine === asked ? save(value) : null;
+    const sent = last === null ? new Promise<R | null>((resolve) => resolve(start())) : last.then(start);
+    const settled = sent.then(() => undefined, () => undefined);
+    last = settled;
+    void settled.then(() => { if (last === settled) last = null; });
+    return sent.then((result) => mine === asked ? result : null, (failure: unknown) => {
+      if (mine === asked) throw failure;
+      return null;
     });
   };
-  if (stored === undefined) {
+}
+
+const saveSpend = latestSaves(setSpendSettings);
+
+/** Whether two spend settings read the same, a missing Claude free resets source as Don't read.
+ * Inputs: the two settings, if read. Output: true when they do. */
+function sameSpend(a: SpendSettings | undefined, b: SpendSettings | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  return a.confirm === b.confirm && a.all_limited === b.all_limited
+    && (a.resets_source ?? SPEND_DEFAULTS.resets_source) === (b.resets_source ?? SPEND_DEFAULTS.resets_source);
+}
+
+/** The three free resets settings on Pools: until the usage read holds the stored settings, a
+ * loading line, its failure with Try again or a not ready line and no control, so nothing shows
+ * a default as stored or saves one; then shows a pick at once and stores it, one save at a time,
+ * and only the latest pick's answer shows a refusal or rereads the usage; the pick shows until a
+ * read started after that answer lands. Inputs: the usage read, the reread and the retry.
+ * Output: the section. */
+export function SpendSettingsSection({ usage, onDone, onRetry }: { usage: Loaded<UsageReport>; onDone: () => void; onRetry: () => void }) {
+  const [refused, setRefused] = useState("");
+  const read = usage.kind === "ok" ? usage.value : undefined;
+  const stored = read?.spend?.settings;
+  const [shown, hold] = useHeld<SpendSettings | undefined>(stored, sameSpend, read);
+  const change = (next: SpendSettings) => {
+    const settle = hold(next);
+    void saveSpend(next).then((result) => {
+      if (result === null) return;
+      const note = result.kind === "ok" ? "" : usageRefusal(result.kind === "error" ? result : { code: "usage_unavailable" });
+      setRefused(note);
+      settle(note);
+      onDone();
+    });
+  };
+  if (stored === undefined || shown === undefined) {
     return <SettingSection title="Free resets" about={SPEND_ABOUT}><div className="set-body">
       {usage.kind === "loading" && <p className="secondary" role="status">Loading your free resets settings...</p>}
       {usage.kind === "error" && <LoadError message={usage.message} onRetry={onRetry} />}
       {(usage.kind === "not_ready" || usage.kind === "ok") && <NotReady what="Free resets settings" compact />}
     </div></SettingSection>;
   }
-  return <SpendSettingsView settings={shown ?? stored} refused={refused} onChange={change} />;
+  return <SpendSettingsView settings={shown} refused={refused} onChange={change} />;
 }
 
 /** The notice line for a pool whose every account is at its limit. Inputs: the pool and the
