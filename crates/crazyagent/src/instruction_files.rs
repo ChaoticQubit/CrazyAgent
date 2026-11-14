@@ -999,39 +999,19 @@ pub fn pending(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
 
 /// Where the project instructions file sits in a project folder.
 const CARRIED_PATH: &str = ".crazyagent/instructions.md";
-/// The heading project instructions the folder's repository committed are kept under: their
-/// text is whoever committed it, not the owner (SA vid 7, DEC-106 A).
+/// The heading project instructions a folder arrived with are kept under: the app did not
+/// write them, so they are whoever wrote them, not the owner (SA vid 7, leader 09:27 A).
 pub const CARRIED_HEADING: &str = "## Imported from .crazyagent/instructions.md";
 /// What the setup review tells the owner when the project instructions came with the
-/// repository, word for word in the desktop and the TUI (DEC-141).
-pub const CARRIED_NOTICE: &str = "The repository came with its own .crazyagent/instructions.md. CrazyAgent gives it to your agents under the heading Imported from .crazyagent/instructions.md. Check it in Process before you start the team.";
+/// folder, word for word in the desktop and the TUI (DEC-141).
+pub const CARRIED_NOTICE: &str = "The folder came with its own .crazyagent/instructions.md. CrazyAgent gives it to your agents under the heading Imported from .crazyagent/instructions.md. Check it in Process before you start the team.";
 
-/// The project text to keep: project instructions the folder's repository tracks go under
-/// [`CARRIED_HEADING`] unless they already start with it, and a tracking check that fails
-/// counts as tracked; an untracked file, the engine's or the owner's, and an empty one stay
-/// as they are. Text the heading leaves no room for is cut at the limit. Inputs: the
-/// canonical project folder and its project text. Output: the text and whether it was cut.
-fn carried(root: &Path, existing: &str) -> (String, bool) {
-    assert_eq!(
-        CARRIED_PATH,
-        format!(
-            "{}/{}",
-            crate::projects_home::CRAZYAGENT_DIRECTORY,
-            crate::agent_home::PROJECT_FILE
-        )
-    );
+/// The project text a folder arrived with, under [`CARRIED_HEADING`] unless it is empty or
+/// already starts with it; text the heading leaves no room for is cut at the limit.
+/// Input: the project text. Output: the text to keep and whether it was cut.
+fn carried(existing: &str) -> (String, bool) {
     let part = existing.trim();
     if part.is_empty() || existing.starts_with(CARRIED_HEADING) {
-        return (existing.to_owned(), false);
-    }
-    let tracked = match fs::symlink_metadata(root.join(".git")) {
-        Ok(metadata) if metadata.is_dir() || metadata.is_file() => !matches!(
-            crate::landing::tracked_files(root, &[CARRIED_PATH]),
-            Ok(tracked) if tracked == [false]
-        ),
-        _ => false,
-    };
-    if !tracked {
         return (existing.to_owned(), false);
     }
     let room = crate::agent_home::TEXT_BYTES_MAX - CARRIED_HEADING.len() - 3;
@@ -1044,8 +1024,8 @@ fn carried(root: &Path, existing: &str) -> (String, bool) {
     (text, end < part.len())
 }
 
-/// Whether a project's instructions came with its folder's repository: they start with
-/// [`CARRIED_HEADING`], as the import keeps them. Input: the project folder. Output: the
+/// Whether a project's instructions came with its folder: they start with
+/// [`CARRIED_HEADING`], as the first import keeps them. Input: the project folder. Output: the
 /// answer, false when they cannot be read.
 pub fn carried_in(folder: &Path) -> bool {
     crate::agent_home::read_project(folder).is_ok_and(|text| text.starts_with(CARRIED_HEADING))
@@ -1054,14 +1034,35 @@ pub fn carried_in(folder: &Path) -> bool {
 /// Copies the project's own instruction files into its project instructions, each text
 /// once under a heading naming every file that held it, after the text already there and
 /// never twice, then moves each copied file into `.crazyagent/imported/` at its same path.
-/// A file that cannot be imported stays where it is. Project instructions the folder's
-/// repository committed are first saved under their own Imported heading ([`carried`]),
-/// even when the files imported after them do not fit, the whole file kept aside when the
-/// heading leaves it no room.
-/// A project without `.crazyagent/` gets it first. Input: the project folder. Output: the
-/// moved files, or a plain code with nothing moved, such as `process_text_too_large` when
-/// the result would not fit.
+/// A file that cannot be imported stays where it is. The project instructions are taken as
+/// they are; only [`import_arrived`] labels them. A project without `.crazyagent/` gets it
+/// first. Input: the project folder. Output: the moved files, or a plain code with nothing
+/// moved, such as `process_text_too_large` when the result would not fit.
 pub fn import(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
+    import_as(folder, false)
+}
+
+/// The import a new project's onboarding start runs, before the app has written its project
+/// instructions: what `.crazyagent/instructions.md` the folder arrived with is first saved
+/// under [`CARRIED_HEADING`] ([`carried`]), git or not, even when the files imported after
+/// it do not fit, the whole file kept aside when the heading leaves it no room; later
+/// imports never label again. Input: the project folder. Output: as [`import`].
+pub fn import_arrived(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
+    import_as(folder, true)
+}
+
+/// Runs [`import`], labelling arrived project instructions first when `arrived` is set.
+/// Inputs: the project folder and whether this is the onboarding start's import. Output: as
+/// [`import`].
+fn import_as(folder: &Path, arrived: bool) -> Result<Vec<ImportFile>, EngineError> {
+    assert_eq!(
+        CARRIED_PATH,
+        format!(
+            "{}/{}",
+            crate::projects_home::CRAZYAGENT_DIRECTORY,
+            crate::agent_home::PROJECT_FILE
+        )
+    );
     let _importing = IMPORTING
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1072,9 +1073,15 @@ pub fn import(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
         .into_iter()
         .filter(|found| found.read.is_some())
         .collect();
+    if found.is_empty() && !arrived {
+        return Ok(Vec::new());
+    }
     let code = |problem: crate::agent_home::AgentHomeError| EngineError(problem.0);
     let existing = crate::agent_home::read_project(&root).map_err(code)?;
-    let (kept, cut) = carried(&root, &existing);
+    let (kept, cut) = match arrived {
+        true => carried(&existing),
+        false => (existing.clone(), false),
+    };
     if found.is_empty() && kept == existing {
         return Ok(Vec::new());
     }

@@ -1640,12 +1640,14 @@ mod import {
         );
     }
 
-    /// SA vid 7 (DEC-106 A): a project instructions file the folder's repository committed
-    /// is whoever committed it's text, so the import keeps it under its own Imported heading,
-    /// ahead of the files it imports, once however often it runs, while a file the
-    /// repository does not track, the engine's or the owner's, stays as it is.
+    /// SA vid 7 (leader 09:27 A): project instructions a folder arrived with, committed, in a
+    /// folder with no git or with a git folder that cannot be read, are the app's to label:
+    /// the onboarding start's import keeps them under their own Imported heading ahead of the
+    /// files it imports, once however often it runs, and a later import never labels again,
+    /// not even text the owner took the heading off.
     #[test]
-    fn a_committed_project_instructions_file_is_kept_under_its_imported_heading_once() {
+    fn arrived_project_instructions_are_labelled_once_and_later_imports_never_label() {
+        let heading = "## Imported from .crazyagent/instructions.md\n\n";
         let carried = Checkout::new();
         write(
             &carried.folder.join(".crazyagent/instructions.md"),
@@ -1653,14 +1655,15 @@ mod import {
         );
         carried.git(&["add", "-f", ".crazyagent/instructions.md"]);
         carried.git(&["commit", "-q", "-m", "carried"]);
-        import(&carried.folder).unwrap();
+        import_arrived(&carried.folder).unwrap();
         let text = crate::agent_home::read_project(&carried.folder).unwrap();
         assert!(
-            text.starts_with(
-                "## Imported from .crazyagent/instructions.md\n\nDUMMY-CARRIED-MARKER-7\n\n## Imported from "
-            ),
+            text.starts_with(&format!(
+                "{heading}DUMMY-CARRIED-MARKER-7\n\n## Imported from "
+            )),
             "{text}"
         );
+        import_arrived(&carried.folder).unwrap();
         import(&carried.folder).unwrap();
         assert_eq!(
             crate::agent_home::read_project(&carried.folder).unwrap(),
@@ -1670,6 +1673,34 @@ mod import {
             carried.git(&["ls-files", ".crazyagent/instructions.md"]),
             ".crazyagent/instructions.md\n"
         );
+        crate::agent_home::save_project(&carried.folder, "OWNER-EDIT\n").unwrap();
+        write(&carried.folder.join("AGENTS.md"), "NEW-RULE\n");
+        import(&carried.folder).unwrap();
+        assert_eq!(
+            crate::agent_home::read_project(&carried.folder).unwrap(),
+            "OWNER-EDIT\n\n## Imported from AGENTS.md\n\nNEW-RULE\n"
+        );
+
+        for broken in [false, true] {
+            let plain = tempfile::tempdir().unwrap();
+            let folder = fs::canonicalize(plain.path()).unwrap();
+            if broken {
+                write(
+                    &folder.join(".git"),
+                    &format!("gitdir: {}\n", folder.join("missing.git").display()),
+                );
+            }
+            write(
+                &folder.join(".crazyagent/instructions.md"),
+                "DUMMY-PLAIN-7\n",
+            );
+            assert_eq!(marks(&import_arrived(&folder).unwrap()), []);
+            assert_eq!(
+                crate::agent_home::read_project(&folder).unwrap(),
+                format!("{heading}DUMMY-PLAIN-7\n"),
+                "broken git: {broken}"
+            );
+        }
 
         let own = Checkout::new();
         write(
@@ -1684,12 +1715,12 @@ mod import {
         );
     }
 
-    /// SA vid 7: the Imported heading lands on its own, when the repository carries only its
+    /// SA vid 7: the Imported heading lands on its own, when the folder arrives with only its
     /// project instructions, when the instruction files imported beside them do not fit, and
     /// when the heading leaves no room for the last bytes, which are cut only after the whole
     /// file is kept in `.crazyagent/imported/`.
     #[test]
-    fn a_committed_project_instructions_file_gets_its_heading_alone_crowded_and_at_the_limit() {
+    fn arrived_project_instructions_get_their_heading_alone_crowded_and_at_the_limit() {
         let heading = "## Imported from .crazyagent/instructions.md\n\n";
         let max = crate::agent_home::TEXT_BYTES_MAX;
         let carry = |checkout: &Checkout, text: &str| {
@@ -1705,7 +1736,7 @@ mod import {
 
         let alone = bare();
         carry(&alone, "DUMMY-ALONE-7\n");
-        assert_eq!(marks(&import(&alone.folder).unwrap()), []);
+        assert_eq!(marks(&import_arrived(&alone.folder).unwrap()), []);
         assert_eq!(
             crate::agent_home::read_project(&alone.folder).unwrap(),
             format!("{heading}DUMMY-ALONE-7\n")
@@ -1715,7 +1746,7 @@ mod import {
         write(&crowded.folder.join("CLAUDE.md"), &"x".repeat(max - 10));
         crowded.git(&["add", "CLAUDE.md"]);
         carry(&crowded, "DUMMY-CROWDED-7\n");
-        assert!(import(&crowded.folder).is_err());
+        assert!(import_arrived(&crowded.folder).is_err());
         assert_eq!(
             crate::agent_home::read_project(&crowded.folder).unwrap(),
             format!("{heading}DUMMY-CROWDED-7\n")
@@ -1725,7 +1756,7 @@ mod import {
         let body = format!("DUMMY-FULL-7\n{}\n", "y".repeat(max - 30));
         assert!(body.len() <= max && heading.len() + body.len() > max);
         carry(&full, &body);
-        assert_eq!(marks(&import(&full.folder).unwrap()), []);
+        assert_eq!(marks(&import_arrived(&full.folder).unwrap()), []);
         let text = crate::agent_home::read_project(&full.folder).unwrap();
         assert!(
             text.starts_with(&format!("{heading}DUMMY-FULL-7\nyyy")) && text.len() <= max,

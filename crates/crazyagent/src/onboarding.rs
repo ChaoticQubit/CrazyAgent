@@ -460,7 +460,8 @@ fn real_dir(path: &Path) -> bool {
 /// same name that is gone, and is refused as `onboarding_project_mismatch`
 /// while that folder is still there. A new project's own instruction files
 /// (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md, CLAUDE.local.md) are copied into its
-/// project instructions and moved into `.crazyagent/imported/` last, and the moved
+/// project instructions and moved into `.crazyagent/imported/` last, after the project
+/// instructions the folder arrived with are labelled Imported (SA vid 7), and the moved
 /// files are kept for the onboarding view; a file or import the engine refuses
 /// stays in place for the owner's later import. Takes the transaction,
 /// configuration, engine database path and action. Returns Applied or a plain
@@ -606,7 +607,7 @@ pub(crate) fn execute(
         ],
     )
     .map_err(error)?;
-    let moved = crate::instruction_files::import(&repo).unwrap_or_default();
+    let moved = crate::instruction_files::import_arrived(&repo).unwrap_or_default();
     if !moved.is_empty() {
         crate::instruction_files::record_moved(tx, &project_id, &moved)?;
     }
