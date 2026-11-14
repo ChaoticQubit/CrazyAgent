@@ -336,6 +336,49 @@ fn on_the_engines_places_the_programs_setup_starts_never_get_a_temp_folder_on_th
     );
 }
 
+/// RV-DS241-93: uv's Python discovery, which setup runs as the owner for a locked tool, never
+/// starts a python planted in a project folder on the engine's PATH, such as a `.venv/bin`
+/// from the shell that started the engine: setup's PATH leaves that folder out, so uv finds
+/// the owner's Python, the install ends well and the planted python never runs.
+#[test]
+fn uv_python_discovery_in_setup_never_runs_a_python_planted_in_a_project_folder() {
+    let uv = found("uv");
+    let python = found("python3");
+    let root = private_root();
+    let work = tempfile::tempdir().unwrap();
+    let (wheel, sha256) = wheel(work.path(), &python);
+    let project = root.path().join("proj");
+    std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
+    let planted = project.join(".venv/bin");
+    std::fs::create_dir_all(&planted).unwrap();
+    let marker = root.path().join("planted-python-ran");
+    for name in ["python3", "python"] {
+        let file = planted.join(name);
+        std::fs::write(
+            &file,
+            format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let folders = vec![
+        planted,
+        uv.parent().unwrap().to_path_buf(),
+        python.parent().unwrap().to_path_buf(),
+    ];
+    let installer = PinnedInstaller::with_paths(root.path(), folders);
+    let good = hashed(&wheel, &sha256);
+    let lock = ToolLock {
+        package: "demo-tool",
+        version: "1.0",
+        programs: &["demo-tool"],
+        requirements: &good,
+    };
+    let installed = installer.install_locked(&lock, "3");
+    assert!(!marker.exists(), "a python planted in a project never runs");
+    assert_eq!(installed, Ok(()));
+}
+
 #[test]
 fn a_locked_tool_installs_only_files_whose_sha256_its_lock_lists() {
     let uv = found("uv");
