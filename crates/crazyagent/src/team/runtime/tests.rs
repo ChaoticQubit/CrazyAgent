@@ -18126,6 +18126,169 @@ fn an_asleep_agent_with_a_waking_message_gets_one_pinned_wake_task() {
     team.workers.clear();
 }
 
+/// The owner cancels a queued task while a dispatch pass is still handing out the tasks it
+/// read before it: the cancel lands as the pass starts the earlier task, as a trigger does
+/// here. The cancelled task stays cancelled, its agent gets no turn and stays idle, and the
+/// earlier task runs as before (RV-DS241-124).
+#[test]
+fn an_owner_cancel_during_a_dispatch_pass_keeps_the_task_cancelled_and_sends_no_turn() {
+    let fixture = Fixture::new(2);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let first_agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let second_agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let mut queued = |agent: i64, prompt: &str| -> (i64, Receiver<Order>) {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,?2,'queued',1)",
+                params![PROJECT, prompt],
+            )
+            .unwrap();
+        let task = fixture.connection.last_insert_rowid();
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+                params![task, PROJECT, agent],
+            )
+            .unwrap();
+        let mut worker = between_turns(&project, AgentRole::Sub, true, true);
+        let (orders, turns) = channel();
+        worker.orders = orders;
+        team.workers.insert(agent, worker);
+        (task, turns)
+    };
+    let (first, first_turns) = queued(first_agent, "Write the index page.");
+    let (second, second_turns) = queued(second_agent, "Delete the release branch.");
+    fixture
+        .connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER owner_cancel_mid_pass AFTER UPDATE OF status ON team_tasks
+             WHEN NEW.id={first} AND NEW.status='running'
+             BEGIN
+               UPDATE team_tasks SET status='cancelled', finished_ms=2, error='Cancelled by the owner', cancel_by='task'
+               WHERE id={second} AND status IN ('queued','needs_pool');
+             END;"
+        ))
+        .unwrap();
+
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+
+    assert!(
+        matches!(first_turns.try_recv(), Ok(Order::Turn(..))),
+        "the earlier task still gets its turn"
+    );
+    assert!(
+        second_turns.try_recv().is_err(),
+        "the cancelled task is typed to no agent"
+    );
+    let status = |task: i64| -> (String, Option<i64>, i64) {
+        fixture
+            .connection
+            .query_row(
+                "SELECT status,agent,attempts FROM team_tasks WHERE id=?1",
+                [task],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(status(first), ("running".to_owned(), Some(first_agent), 1));
+    assert_eq!(status(second), ("cancelled".to_owned(), None, 0));
+    assert!(team.workers[&second_agent].busy.is_none());
+    team.workers.clear();
+}
+
+/// A dispatch failure written for a task the owner cancelled meanwhile leaves it cancelled
+/// with the owner's reason (RV-DS241-124).
+#[test]
+fn failing_a_task_the_owner_cancelled_keeps_it_cancelled() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,error,cancel_by,finished_ms,created_ms)
+             VALUES (?1,'master','codex',0,'Delete the release branch.','cancelled','Cancelled by the owner','task',2,1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+
+    team.fail_task(task, "The sub-agent could not start: no account")
+        .unwrap();
+
+    let (status, error): (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT status,error FROM team_tasks WHERE id=?1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (status.as_str(), error.as_deref()),
+        ("cancelled", Some("Cancelled by the owner"))
+    );
+}
+
+/// The owner cancels a task the dispatch pass has just claimed, and the turn for it then
+/// cannot reach its agent: the cancel lands as the claim does, as a trigger does here. The
+/// task ends cancelled, never back in the queue for another agent to run (RV-DS241-124).
+#[test]
+fn an_owner_cancel_of_a_claimed_task_whose_turn_cannot_be_sent_keeps_it_cancelled() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Delete the release branch.','queued',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+            params![task, PROJECT, agent],
+        )
+        .unwrap();
+    let mut worker = between_turns(&project, AgentRole::Sub, true, true);
+    let (orders, turns) = channel();
+    drop(turns);
+    worker.orders = orders;
+    team.workers.insert(agent, worker);
+    fixture
+        .connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER owner_cancel_at_claim AFTER UPDATE OF status ON team_tasks
+             WHEN NEW.id={task} AND NEW.status='running'
+             BEGIN
+               UPDATE team_tasks SET cancel_requested=1, cancel_by='task' WHERE id={task};
+             END;"
+        ))
+        .unwrap();
+
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+
+    let status: String = fixture
+        .connection
+        .query_row(
+            "SELECT status FROM team_tasks WHERE id=?1",
+            [task],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "cancelled");
+    assert!(team.workers[&agent].busy.is_none());
+    team.workers.clear();
+}
+
 /// F30: the Task-start reminder marks the start of a task, not every turn. While the setting
 /// is On, a kept session's turn that only carries its team messages (`WAKE_TASK`) gets no
 /// reminder, while a real task pinned to the same kind of kept session still gets it once.
@@ -31141,6 +31304,205 @@ fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shar
     assert_eq!(
         config["projects"][work.to_str().unwrap()]["hasTrustDialogAccepted"],
         serde_json::Value::Bool(true)
+    );
+}
+
+/// An agent leaves no shell code in its own home for its next start (SA vid 12). In its
+/// installed profile a tools-on agent cannot write a zsh, bash or sh startup file there, in
+/// any letter case, compiled or as a link, while it still writes the folders whose scripts
+/// Claude Code and Codex source ahead of each shell command, its shell history and the rest
+/// of its home. The next launch then removes those folders and a startup file an earlier
+/// build let it plant, so the shells that start later in its profile run nothing planted.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
+    let fixture = Fixture::new(1);
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    let home = agent_home(&runtime.state, id);
+    let work = plan.working_dir.clone();
+    let marker = work.join("planted.txt");
+    let plant = format!("echo planted >> {}", marker.display());
+    let session = home
+        .join("session-env")
+        .join("0b6f1c2e-5d4a-4f3e-9a8b-7c6d5e4f3a2b");
+    let tried = work.join("tried.txt");
+    let script = work.join("plant.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "try() {{ name=$1; shift; \"$@\" 2>/dev/null; echo \"$name=$?\" >> {tried}; }}\n\
+             try zshenv sh -c \"printf '{plant}\\n' >> '{home}/.zshenv'\"\n\
+             try zshenv_case sh -c \"printf '{plant}\\n' >> '{home}/.ZshEnv'\"\n\
+             try zshrc sh -c \"printf '{plant}\\n' > '{home}/.zshrc'\"\n\
+             try zprofile_compiled sh -c \"printf x > '{home}/.zprofile.zwc'\"\n\
+             try bash_profile sh -c \"printf '{plant}\\n' > '{home}/.bash_profile'\"\n\
+             try profile sh -c \"printf '{plant}\\n' > '{home}/.profile'\"\n\
+             try link ln -s '{script}' '{home}/.zlogin'\n\
+             try control_launch sh -c \"printf x > '{home}/settings.json'\"\n\
+             try session sh -c \"mkdir -p '{session}' && printf '{plant}\\n' > '{session}/sessionstart-hook-0.sh'\"\n\
+             try snapshot sh -c \"mkdir -p '{home}/shell-snapshots' && printf '{plant}\\n' > '{home}/shell-snapshots/snapshot-zsh-1-dummy.sh'\"\n\
+             try codex_snapshot sh -c \"mkdir -p '{home}/shell_snapshots' && printf '{plant}\\n' > '{home}/shell_snapshots/dummy.sh'\"\n\
+             try history sh -c \"printf ok > '{home}/.zsh_history'\"\n\
+             try control_note sh -c \"printf ok > '{home}/note'\"\n",
+            home = home.display(),
+            session = session.display(),
+            script = script.display(),
+            tried = tried.display(),
+        ),
+    )
+    .unwrap();
+    let planted = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&plan.sandbox_profile)
+            .arg("/bin/sh")
+            .arg(&script)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(planted.status.success(), "{planted:?}");
+    let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
+    std::fs::write(home.join(".zshenv"), format!("{plant}\n")).unwrap();
+
+    let context = runtime
+        .context(
+            &fixture.setup.project_id,
+            id,
+            AgentRole::Sub,
+            true,
+            Layout::Linked,
+        )
+        .unwrap();
+    let installed = context.install("claude-code", &home, true).unwrap();
+    drop(installed);
+    let mut shells = Vec::new();
+    let mut problems = Vec::new();
+    for (shell, arguments) in [
+        ("/bin/zsh", &["-c", "true"][..]),
+        ("/bin/zsh", &["-l", "-c", "true"][..]),
+        ("/bin/bash", &["-l", "-c", "true"][..]),
+    ] {
+        let ran = crate::spawn_gate::output(
+            Command::new(crate::sandbox::SANDBOX_EXEC)
+                .arg("-f")
+                .arg(&plan.sandbox_profile)
+                .arg(shell)
+                .args(arguments)
+                .current_dir(&work)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        shells.push(format!("{shell} {arguments:?}: {:?}", ran.status));
+        if !ran.status.success() {
+            problems.push(format!("{shell} {arguments:?} failed: {ran:?}"));
+        }
+    }
+
+    let exit = |attempt: &str| {
+        attempts
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{attempt}=")))
+            .map(str::to_owned)
+    };
+    for attempt in [
+        "zshenv",
+        "zshenv_case",
+        "zshrc",
+        "zprofile_compiled",
+        "bash_profile",
+        "profile",
+        "link",
+        "control_launch",
+    ] {
+        if !exit(attempt).is_some_and(|code| code != "0") {
+            problems.push(format!("{attempt} written: {:?}", exit(attempt)));
+        }
+    }
+    for attempt in [
+        "session",
+        "snapshot",
+        "codex_snapshot",
+        "history",
+        "control_note",
+    ] {
+        if exit(attempt).as_deref() != Some("0") {
+            problems.push(format!("{attempt} refused: {:?}", exit(attempt)));
+        }
+    }
+    for entry in [
+        ".zshenv",
+        ".zshrc",
+        ".zprofile.zwc",
+        ".bash_profile",
+        ".profile",
+        ".zlogin",
+        "session-env",
+        "shell-snapshots",
+        "shell_snapshots",
+    ] {
+        if std::fs::symlink_metadata(home.join(entry)).is_ok() {
+            problems.push(format!("{entry} kept by the launch"));
+        }
+    }
+    for entry in [".zsh_history", "note"] {
+        if std::fs::symlink_metadata(home.join(entry)).is_err() {
+            problems.push(format!("{entry} removed by the launch"));
+        }
+    }
+    if marker.exists() {
+        problems.push(format!(
+            "a later shell ran planted code: {:?}",
+            std::fs::read_to_string(&marker).unwrap_or_default()
+        ));
+    }
+    assert!(
+        problems.is_empty(),
+        "an agent left shell code in its own home {} for its next start:\n{}\nattempts:\n{attempts}\nshells: {shells:?}",
+        home.display(),
+        problems.join("\n")
     );
 }
 

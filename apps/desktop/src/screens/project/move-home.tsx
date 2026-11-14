@@ -29,7 +29,7 @@ const MOVE_COPY: Record<string, string> = {
   move_project_in_progress: "A project is being moved. Try again when it is done.",
   move_project_unavailable: "CrazyAgent couldn't check the team, so nothing was moved. Try again.",
   move_project_interrupted: "The move stopped part way. Check the project folder before trying again.",
-  move_project_old_folder_left: "The project moved, but part of its old folder couldn't be deleted. Check the old folder and delete it yourself.",
+  move_project_old_folder_left: "The project moved, but part of its old folder couldn't be deleted. What's left there may be newer than the copy, so check it before you delete anything.",
   home_move_project: "Another project uses this folder too, so it can't be moved or copied.",
 };
 
@@ -44,7 +44,7 @@ export function movedNotice(name: string, way: AddFolderMode, folder: string, le
   const team = "The team is stopped; start it again from Team.";
   if (way === "copy") return `${name} now uses the copy in your CrazyAgent folder. ${team}`;
   if (!left) return `${name} is now in your CrazyAgent folder. ${team}`;
-  return `${name} is now in your CrazyAgent folder. Some items in the old folder couldn't be deleted: check ${folderLabel(folder)} and delete it yourself. ${team}`;
+  return `${name} is now in your CrazyAgent folder. Some items in the old folder couldn't be deleted and may be newer than the copy: check ${folderLabel(folder)} before you delete anything. ${team}`;
 }
 
 /** Whether a project folder is the projects folder or inside it. Inputs: the project folder and

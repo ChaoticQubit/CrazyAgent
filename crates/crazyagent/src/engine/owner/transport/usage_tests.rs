@@ -197,6 +197,78 @@ async fn a_usage_change_holds_the_owner_barrier_until_it_is_committed() {
     usage.stop().await;
 }
 
+/// RV-DS241-68: a usage change whose request is cut short while it waits behind a held
+/// write keeps the owner barrier until the write commits, so a revocation returns only
+/// after that change, never while it is still committing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_usage_change_cut_short_keeps_the_owner_barrier_until_it_commits() {
+    let usage = Usage::start().await;
+    let runtime = usage.runtime();
+    let packet = usage.packet();
+    let admission = runtime.authority.authenticate(&packet).unwrap();
+    let (mut server, _client) = small_buffers();
+    let account = CredentialRef::new("cut-account").unwrap();
+    let body = serde_json::to_vec(&json!({
+        "usage": {
+            "kind": "set_reset",
+            "account": account,
+            "window": crate::usage::WindowKind::FiveHour,
+            "at_ms": AT_MS
+        }
+    }))
+    .unwrap();
+    let held = crate::usage::open(&usage.engine_root).unwrap();
+    held.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let served = super::usage::serve(
+        &mut server,
+        &runtime.engine,
+        &runtime.authority,
+        &packet,
+        &admission,
+        &body,
+    );
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, served).await.is_err(),
+        "the change is cut short while it waits behind the held write"
+    );
+    let still_held = runtime.engine.owner_egress.try_write().is_err();
+    let mut revoke = Box::pin(runtime.control(OwnerControl {
+        operation_id: RequestId::new("revoke-during-cut-usage").unwrap(),
+        target: OwnerClientKind::Tui,
+        expected_epoch: runtime.epoch(OwnerClientKind::Tui).unwrap(),
+        decision: OwnerDecision::Revoke,
+    }));
+    let first = tokio::time::timeout(IN_FLIGHT, &mut revoke).await;
+    let revoke_waited = first.is_err();
+    held.execute_batch("ROLLBACK").unwrap();
+    let revoked = match first {
+        Ok(done) => done,
+        Err(_) => tokio::time::timeout(Duration::from_secs(10), &mut revoke)
+            .await
+            .expect("the revocation runs once the change commits"),
+    }
+    .unwrap();
+    drop(revoke);
+    assert!(
+        still_held,
+        "the change still owns the owner barrier after its request is cut"
+    );
+    assert!(
+        revoke_waited,
+        "the revocation waits for the change it was ordered after"
+    );
+    assert!(!revoked.active);
+    let stored = crate::usage::limits(&held, &account).unwrap().unwrap();
+    assert_eq!(
+        stored.five_hour_reset_override_ms,
+        Some(AT_MS),
+        "the change committed before the revocation returned"
+    );
+    assert!(runtime.engine.owner_egress.try_write().is_ok());
+    drop(server);
+    usage.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_revocation_waits_for_a_usage_reply_in_flight_and_refuses_the_next() {
     let usage = Usage::start().await;

@@ -3,6 +3,7 @@ use super::{
     prompt, read, unavailable,
 };
 use crate::engine::EngineError;
+use crate::onboarding::draft::names;
 use crate::protocol::ProjectId;
 use crate::roadmap_status::{Claim, Runs};
 use rusqlite::{Connection, params};
@@ -202,7 +203,10 @@ pub fn tick(
 
 /// What a claimed run asks its agent: the evidence and the prompt built on it, with each
 /// current tab and whether the owner edited it; the Competitors tab is asked for and shown
-/// only when competitor research exists. Inputs: the connection, the project, its folder,
+/// only when competitor research exists. The evidence keeps the onboarding mapping's skip
+/// rules ([`names::offered`], RV-DS241-78/-79): no document, file path or research file in
+/// a folder the owner hid, none at all when a hidden folder is not below `folder`, and no
+/// path that looks like it holds a secret. Inputs: the connection, the project, its folder,
 /// the competitor research read, the project's file paths and now. Output: the prompt and
 /// whether competitor research was in it, or `overview_unavailable`.
 pub fn brief(
@@ -213,6 +217,19 @@ pub fn brief(
     tree: &[String],
     now_ms: i64,
 ) -> Result<(String, bool), EngineError> {
+    let hidden = crate::sandbox::hidden_paths::load(db, project.as_str()).map_err(unavailable)?;
+    let below = names::below_root(folder, &hidden);
+    let offered = |path: &str| {
+        below
+            .as_deref()
+            .is_some_and(|below| names::offered(path, below))
+    };
+    let research: Vec<Research> = research
+        .iter()
+        .filter(|file| offered(&file.path))
+        .cloned()
+        .collect();
+    let tree: Vec<String> = tree.iter().filter(|path| offered(path)).cloned().collect();
     let with_competitors = !research.is_empty();
     let current: Vec<(Tab, String, bool)> = read(db, project, folder, now_ms)?
         .tabs
@@ -222,7 +239,7 @@ pub fn brief(
         .collect();
     assert!(current.len() <= Tab::ALL.len());
     let text = prompt(
-        &evidence(folder, research, tree),
+        &evidence(folder, &hidden, &research, &tree),
         &current,
         with_competitors,
     );

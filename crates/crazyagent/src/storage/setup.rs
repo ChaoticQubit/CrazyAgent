@@ -48,6 +48,18 @@ struct PackRecord {
     skills: Vec<String>,
     server: Option<String>,
     enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    hooks: Vec<KeptHook>,
+}
+
+/// A hook the owner switched off, everywhere or in some projects, on a pin a new one
+/// replaced, kept by name until setup adds the new pin's hooks ([`keep_hooks`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeptHook {
+    name: String,
+    enabled: bool,
+    projects: Vec<String>,
 }
 
 /// Creates the installed default-pack tables when the engine database opens.
@@ -106,6 +118,7 @@ fn present(
         skills,
         server,
         enabled,
+        hooks: Vec::new(),
     }))
 }
 
@@ -161,13 +174,20 @@ fn taken(problem: EngineError) -> EngineError {
 }
 
 /// Writes the next default-pack version when an installed entry holds this plugin, so a
-/// change made on the plugin screen refuses a pack screen opened before it. Inputs: the
-/// transaction and the plugin id. Output: Ok, or a store failure.
-pub(super) fn plugin_changed(tx: &Transaction<'_>, id: &str) -> Result<(), EngineError> {
+/// change made on the plugin screen refuses a pack screen opened before it. A removal also
+/// takes the item out of the entry's row, and a row left with nothing is deleted, so the
+/// entry reads not installed and setup installs it again. Inputs: the transaction, the
+/// plugin id and whether it is being removed. Output: Ok, or a store failure.
+pub(super) fn plugin_changed(
+    tx: &Transaction<'_>,
+    id: &str,
+    removed: bool,
+) -> Result<(), EngineError> {
     let manifest = manifest()?;
     for entry in &manifest.entries {
-        let record = match load_pack(tx, &entry.id)? {
-            Some(record) => Some(record),
+        let stored = load_pack(tx, &entry.id)?;
+        let record = match &stored {
+            Some(record) => Some(record.clone()),
             None => present(tx, entry)?,
         };
         let held = record.is_some_and(|record| {
@@ -178,6 +198,18 @@ pub(super) fn plugin_changed(tx: &Transaction<'_>, id: &str) -> Result<(), Engin
             let current = versioned::current(tx, &item)?.version;
             let written = versioned::owner_write(tx, &item, current)?;
             assert_eq!(written.ok(), Some(current + 1));
+            if removed && let Some(mut record) = stored {
+                record.skills.retain(|skill| skill != id);
+                if record.server.as_deref() == Some(id) {
+                    record.server = None;
+                }
+                if record.skills.is_empty() && record.server.is_none() {
+                    tx.execute("DELETE FROM setup_pack WHERE id=?1", [&record.id])
+                        .map_err(error)?;
+                } else {
+                    save_pack(tx, &record)?;
+                }
+            }
             return Ok(());
         }
     }
@@ -252,19 +284,22 @@ fn restore(moved: &[(PathBuf, PathBuf)]) {
 }
 
 /// What a new pin keeps from the pin it replaces: whether the entry is on, each skill's
-/// on/off state and per-project switches by skill name, and the server when the new pin
-/// names the same one.
+/// on/off state and per-project switches by skill name, the hooks the owner switched off
+/// ([`KeptHook`]), and the server when the new pin names the same one.
 #[cfg(unix)]
 struct Kept {
     enabled: bool,
     server: Option<String>,
     skills: Vec<(String, bool, Vec<String>)>,
+    hooks: Vec<KeptHook>,
 }
 
 /// Reads what the owner set on an older pin, then removes its skills, and its server
 /// unless the new pin names the same server, which is then reused so its secrets,
-/// switches and on/off state stay. Inputs: the transaction, engine root, old row, new
-/// server and the moved-aside folders. Output: what the new pin keeps.
+/// switches and on/off state stay. Hooks the owner switched off are read from the live
+/// hooks, or kept from the old row when none were seeded while the entry was off. Inputs:
+/// the transaction, engine root, old row, new server and the moved-aside folders. Output:
+/// what the new pin keeps.
 #[cfg(unix)]
 fn carry(
     tx: &Transaction<'_>,
@@ -317,11 +352,27 @@ fn carry(
     if reused.is_some() {
         dropped.server = None;
     }
+    let mut hooks = Vec::new();
+    for item in dropped.skills.iter().chain(dropped.server.iter()) {
+        for (name, enabled, projects) in plugins::following_hooks(tx, item)? {
+            if !enabled || !projects.is_empty() {
+                hooks.push(KeptHook {
+                    name,
+                    enabled,
+                    projects,
+                });
+            }
+        }
+    }
+    if hooks.is_empty() {
+        hooks = std::mem::take(&mut dropped.hooks);
+    }
     remove_items(tx, root, &dropped, moved)?;
     Ok(Kept {
         enabled: dropped.enabled,
         server: reused,
         skills,
+        hooks,
     })
 }
 
@@ -360,6 +411,10 @@ fn install(
         return save_pack(tx, &owned);
     }
     let mut record = record;
+    record.hooks = kept
+        .as_ref()
+        .map(|kept| kept.hooks.clone())
+        .unwrap_or_default();
     for folder in folders {
         let source = folder
             .to_str()
@@ -792,10 +847,11 @@ fn seed_hooks(
         follows: Some(follows),
     };
     match plugins::run(&tx, root, command) {
-        Ok(plugins::ResultValue::HooksAdded(_, copy)) => tx.commit().map_err(|problem| {
-            let _ = std::fs::remove_dir_all(&copy);
-            error(problem)
-        }),
+        Ok(plugins::ResultValue::HooksAdded(views, copy)) => keep_hooks(&tx, root, &record, &views)
+            .and_then(|()| tx.commit().map_err(error))
+            .inspect_err(|_| {
+                let _ = std::fs::remove_dir_all(&copy);
+            }),
         Ok(_) => Err(error("setup_record_invalid")),
         Err(problem)
             if matches!(
@@ -807,6 +863,47 @@ fn seed_hooks(
         }
         Err(problem) => Err(problem),
     }
+}
+
+/// Switches the hooks setup just added off as the owner had them on the pin they replace
+/// ([`KeptHook`]), matched by name, everywhere or in the same projects, then forgets what
+/// was kept. Inputs: the transaction, engine root, the entry's row and the added hooks.
+/// Output: any failure.
+#[cfg(unix)]
+fn keep_hooks(
+    tx: &Transaction<'_>,
+    root: &Path,
+    record: &PackRecord,
+    added: &[crate::plugins::HookView],
+) -> Result<(), EngineError> {
+    if record.hooks.is_empty() {
+        return Ok(());
+    }
+    for hook in added {
+        let Some(kept) = record.hooks.iter().find(|kept| kept.name == hook.name) else {
+            continue;
+        };
+        if !kept.enabled {
+            plugins::run(
+                tx,
+                root,
+                plugins::Command::SetHook {
+                    id: hook.id.clone(),
+                    enabled: false,
+                },
+            )?;
+        }
+        for project in &kept.projects {
+            tx.execute(
+                "INSERT OR IGNORE INTO plugin_switches(project,item) VALUES(?1,?2)",
+                [project, &hook.id],
+            )
+            .map_err(error)?;
+        }
+    }
+    let mut record = record.clone();
+    record.hooks.clear();
+    save_pack(tx, &record)
 }
 
 /// Runs one default-pack job for the engine: install an entry's skills and its approved
@@ -850,6 +947,7 @@ pub(crate) fn execute(
         skills: Vec::new(),
         server: None,
         enabled: true,
+        hooks: Vec::new(),
     };
     let mut added = Vec::new();
     let mut moved = Vec::new();
