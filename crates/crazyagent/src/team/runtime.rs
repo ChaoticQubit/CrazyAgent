@@ -13945,13 +13945,14 @@ fn end_keepers(pins: &[KeeperPin]) -> bool {
 }
 
 /// Ends the keepers as [`end_keepers`] does, each keeper's state read by `seen`: running
-/// as its pin names, gone, or none when it cannot be read. A keeper that is not gone is
-/// signalled and waited for. Takes the keepers and the reader. Returns whether they all
-/// exited in time.
+/// as its pin names, gone, or none when it cannot be read. Only a keeper seen running is
+/// signalled, since an unread id may by then name another process; every keeper not seen
+/// gone is waited for. Takes the keepers and the reader. Returns whether they all exited
+/// in time.
 #[cfg(target_os = "macos")]
 fn end_seen_keepers(pins: &[KeeperPin], seen: impl Fn(&KeeperPin) -> Option<bool>) -> bool {
     use crate::harnesses::terminal_session::{KEEPER_POLL, KEEPER_WAIT};
-    for pin in pins.iter().filter(|pin| seen(pin) != Some(false)) {
+    for pin in pins.iter().filter(|pin| seen(pin) == Some(true)) {
         if let Some(process) = i32::try_from(pin.pid)
             .ok()
             .filter(|pid| *pid > 1)
