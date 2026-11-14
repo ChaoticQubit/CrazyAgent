@@ -837,6 +837,45 @@ done
         host.close(&[]).unwrap();
     }
 
+    /// RV-DS241-125 r3 (rv-sec4 r2 F2): a sub-agent cut short in a turn and stopped by the
+    /// owner before its run resumed is never started again by Recovery: the run is recorded
+    /// failed with that reason and a team note, its task stays held, and the agent stays
+    /// stopped with the owner's stop kept, so only the owner starts it (AW-1).
+    #[test]
+    fn a_run_of_an_owner_stopped_agent_is_not_restarted_by_recovery() {
+        let fixture = Team::new();
+        let host = fixture.host();
+        let mut team = fixture.runtime(&host);
+        let (task, sub) = fixture.hung(&mut team);
+        team.shutdown().unwrap();
+        drop(team);
+        host.kill(&AgentId::team(sub).unwrap()).unwrap();
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+                params![sub, PROJECT],
+            )
+            .unwrap();
+
+        let mut team = fixture.runtime(&host);
+        let reason = "it was stopped, so it waits for you to start it again";
+        fixture.until(&mut team, "the stopped agent's run is not resumed", |f| {
+            f.runs()[0].state == RunState::Failed
+        });
+        assert_eq!(fixture.runs()[0].reason.as_deref(), Some(reason));
+        assert!(fixture.noted(&format!(
+            "An agent cut short when CrazyAgent stopped could not resume: {reason}. {RETRY_LATER}."
+        )));
+        fixture.idle(&mut team);
+        assert_eq!(fixture.launches(sub).len(), 1, "never started again");
+        assert_eq!(fixture.task(task), ("queued".into(), None, 1), "held");
+        assert_eq!(fixture.agent_status(sub), "stopped");
+        assert!(crate::team::owner_stopped(&fixture.connection, sub).unwrap());
+        team.shutdown().unwrap();
+        host.close(&[]).unwrap();
+    }
+
     /// A sub-agent cut short in a turn while the store cannot be written at the next start
     /// holds its task: the runtime's tick fails before it does anything else, the run stays
     /// `stopped`, and no agent starts the task fresh. Once the store is writable again the

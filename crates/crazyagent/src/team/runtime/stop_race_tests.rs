@@ -96,6 +96,68 @@ fn a_stopping_leads_spawn_drained_on_its_stop_tick_starts_no_worker() {
     host.close(&[]).unwrap();
 }
 
+/// RV-DS241-122 r3 (rv-sec4 r2 F1): a lead the owner stopped is refused `transfer_work`
+/// assign and handoff in the stop's words, since they hand work on and prompt a running
+/// agent with it, while release and decline, which hand work back, are still answered.
+#[test]
+fn a_stopped_leads_transfer_work_hands_no_work_on() {
+    let mut fixture = Fixture::new(2);
+    let lead = 7;
+    let (host, mut team) = asking_team(&mut fixture, &[lead]);
+    let mailbox = team.mailbox(lead);
+    let tmp = mailbox.parent().unwrap().to_path_buf();
+    for folder in [team.agent_folder(lead), tmp, mailbox.clone()] {
+        private_directory(&folder).unwrap();
+    }
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+            params![lead, PROJECT],
+        )
+        .unwrap();
+    let calls = [
+        ("assign", Some("master"), true),
+        ("handoff", Some("master"), true),
+        ("release", None, false),
+        ("decline", None, false),
+    ];
+    for (index, (action, to, _)) in calls.iter().enumerate() {
+        let mut call = serde_json::json!({
+            "tool": "transfer_work",
+            "work": 1,
+            "version": 1,
+            "action": action,
+        });
+        if let Some(to) = to {
+            call["to"] = serde_json::json!(to);
+        }
+        std::fs::write(
+            mailbox.join(format!("{:032x}.call", index + 1)),
+            serde_json::to_vec(&call).unwrap(),
+        )
+        .unwrap();
+    }
+    let reply = |index: usize| mailbox.join(format!("{:032x}.reply", index + 1));
+    for _ in 0..calls.len() {
+        if (0..calls.len()).all(|index| reply(index).exists()) {
+            break;
+        }
+        team.serve_agent_calls(&fixture.setup, &fixture.access);
+    }
+    for (index, (action, _, refused)) in calls.iter().enumerate() {
+        let answer: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(reply(index)).unwrap()).unwrap();
+        assert_eq!(
+            answer["text"].as_str() == Some(STOPPED_LEAD_REFUSAL),
+            *refused,
+            "{action}: {answer}"
+        );
+    }
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 /// RV-DS241-122 (b): a lead whose stop is recorded, by the owner, the master or its own
 /// lead, is refused a new worker in the same words, while the same lead before the stop
 /// has its worker queued, so the refusal is the stop's and no other check's.
