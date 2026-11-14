@@ -268,6 +268,24 @@ fn the_master_cannot_settle_an_access_question_from_its_chat() {
     assert_eq!(case.status(), ["pending"]);
 }
 
+/// RV-DS241-13: a master cannot close the owner's access question by relaying an answer
+/// typed in its terminal either, so the request stays for the owner to decide, and the
+/// owner's dismissal still denies it.
+#[test]
+fn the_master_cannot_relay_an_answer_to_an_access_question() {
+    let case = Case::new();
+    let question = case.ask_port(47_821);
+    let key = crate::team::now_ms() + 60_000;
+    let relayed =
+        crate::questions::relay(&case.db, &case.project, 7, question, 0, "Allow", Some(key));
+    assert_eq!(relayed.unwrap_err().0, "questions_not_found");
+    assert!(case.policy().grants.is_empty());
+    assert_eq!(case.status(), ["pending"]);
+    let dismissed = crate::questions::dismiss(&case.db, question, 0).unwrap();
+    assert_eq!(dismissed, Settlement::Settled);
+    assert_eq!(case.status(), ["denied"]);
+}
+
 #[test]
 fn a_held_grant_or_full_access_asks_nothing_and_requests_are_bounded() {
     let case = Case::new();
