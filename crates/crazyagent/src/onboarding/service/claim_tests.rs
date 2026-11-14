@@ -615,6 +615,35 @@ fn a_step_of_a_project_whose_folder_is_being_moved_is_not_claimed() {
 const MOVE_ALPHA: &str = "INSERT INTO projects_home_project_move
     VALUES (1,'request-1',1,'alpha','/repos/alpha','/home/alpha','move')";
 
+/// RV-DS241-42: a step a pending project move holds, first in the claim order, never
+/// stalls the others: the next project's waiting step is claimed, the held step alone
+/// halts no refresh build, and it is claimed once the move is gone.
+#[cfg(unix)]
+#[test]
+fn a_held_step_first_in_line_lets_the_next_project_be_claimed_and_halts_no_refresh() {
+    let database = database();
+    crate::projects_home::initialize(&database).unwrap();
+    let running = || false;
+    let elsewhere = Path::new("/repos/elsewhere");
+    waiting_to_map(&database, "alpha", 1);
+    database.execute(MOVE_ALPHA, []).unwrap();
+    assert!(
+        !gives_way(&database, elsewhere, &running)(),
+        "a held step halts no refresh build"
+    );
+    waiting_to_map(&database, "beta", 2);
+    assert!(
+        gives_way(&database, elsewhere, &running)(),
+        "a step no move holds halts it"
+    );
+    assert_eq!(claimed(&database).as_deref(), Some("beta"));
+    assert_eq!(claimed(&database), None);
+    database
+        .execute("DELETE FROM projects_home_project_move", [])
+        .unwrap();
+    assert_eq!(claimed(&database).as_deref(), Some("alpha"));
+}
+
 /// RV-DS241-43: a refresh build gives way once a project move holds its folder, and a
 /// refresh in flight is seen in its folder until its last mark is dropped.
 #[cfg(unix)]
