@@ -1348,6 +1348,50 @@ mod tests {
     }
 
     #[test]
+    fn a_closed_bubblewrap_agent_gets_no_name_resolver_and_starts_behind_the_socket_filter() {
+        let grants = Grants {
+            read: Vec::new(),
+            write: Vec::new(),
+        };
+        let command = bwrap_command(
+            Path::new(BWRAP_PATHS[0]),
+            &grants,
+            Path::new("/tmp"),
+            &SandboxNetwork::Only(Vec::new()),
+        );
+        let args: Vec<&OsStr> = command.get_args().collect();
+        assert!(
+            !args.contains(&OsStr::new("/run/systemd/resolve")),
+            "{args:?}"
+        );
+        let [split, helper, filter] = args[args.len() - 3..] else {
+            panic!("{args:?}");
+        };
+        assert_eq!(split, "--", "{args:?}");
+        assert_eq!(
+            Path::new(helper).file_name(),
+            Some(OsStr::new(HELPER_NAME)),
+            "{args:?}"
+        );
+        assert_eq!(filter, "--filter-sockets", "{args:?}");
+        let bound = args
+            .windows(3)
+            .any(|three| three[0] == "--ro-bind" && three[1] == helper && three[2] == helper);
+        assert!(bound, "the helper is bound into the namespace: {args:?}");
+    }
+
+    #[test]
+    fn without_the_helper_bubblewrap_starts_no_agent() {
+        let (_closed, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+        match LinuxSandbox::detect(sandbox, Path::new("/nonexistent/crazyagent-landlock")) {
+            Err(SandboxError::Unavailable(reason)) => {
+                assert!(reason.contains("helper"), "{reason}");
+            }
+            other => panic!("bubblewrap without the socket filter must be refused: {other:?}"),
+        }
+    }
+
+    #[test]
     fn no_agent_is_granted_the_git_state_the_owners_git_reads_and_runs() {
         let (_temp, sandbox) = project(SandboxNetwork::Only(Vec::new()));
         let git = sandbox.project_root().join(".git");

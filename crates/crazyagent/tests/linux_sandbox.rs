@@ -904,6 +904,45 @@ fn a_linux_agent_reaches_ip_endpoints_but_no_unix_socket_in_the_engine_runtime()
     );
 }
 
+/// A closed bubblewrap agent reaches no Unix socket even in a folder bound for it, such as an
+/// owner's socket in the project folder: the helper's socket filter refuses every Unix-domain
+/// socket there as it does under Landlock (RV-DS241-84).
+#[test]
+fn a_bubblewrap_agent_reaches_no_unix_socket_in_a_folder_bound_for_it() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let runtime = case.outside.parent().unwrap().join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    let socket = case.project.join("owner.sock");
+    let _listener = crazyagent::spawn_gate::bind_unix_std(&socket).unwrap();
+    let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = endpoint.local_addr().unwrap().port();
+    assert_eq!(
+        reach(None, &case, &socket, port, &runtime),
+        "pair=ok\nunix=ok\ntcp=ok\nruntime=present\n",
+        "the unsandboxed control must reach the socket"
+    );
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Only(Vec::new())),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        reach(Some(&bubblewrap), &case, &socket, port, &runtime),
+        "pair=ok\nunix=refused\ntcp=refused\nruntime=absent\n"
+    );
+}
+
 const LISTEN: &str = "import socket, sys
 for port in sys.argv[1:]:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
