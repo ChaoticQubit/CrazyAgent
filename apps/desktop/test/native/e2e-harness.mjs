@@ -372,27 +372,42 @@ export function owner({ evaluate, send }, evidence) {
 
 let nextLowPort = null;
 
-/** Picks a loopback port nothing listens on now from 20000 to 28999, below every port the
- * system hands out by itself and below both model proxy blocks, so no port-0 listener takes
- * it before the caller's own server does. Each call starts past the last port it gave.
- * Input: none. Output: the port. */
+/** Picks a port from 20000 to 28999 that nothing of this user holds now on 127.0.0.1, ::1,
+ * 0.0.0.0 or ::, below every port the system hands out by itself and below both model proxy
+ * blocks, so no port-0 listener takes it before the caller's own server does. Each call
+ * starts past the last port it gave. Input: none. Output: the port. */
 export async function freeLowPort() {
   const start = 20000;
   const span = 9000;
   const first = nextLowPort ?? (process.pid * 2654435761) % span;
   for (let step = 0; step < span; step += 1) {
     const offset = (first + step) % span;
-    const server = createServer();
-    const bound = await new Promise((done) => {
-      server.once("error", () => done(false));
-      server.listen(start + offset, "127.0.0.1", () => done(true));
-    });
-    if (bound) {
-      await new Promise((done) => server.close(done));
+    let free = true;
+    for (const host of ["127.0.0.1", "::1", "0.0.0.0", "::"]) {
+      free = free && (await bindable(start + offset, host));
+    }
+    if (free) {
       nextLowPort = (offset + 1) % span;
       assert.ok(start + offset <= 28999);
       return start + offset;
     }
   }
   throw new Error("every low loopback port is taken");
+}
+
+/** Tells whether a listener can bind a local port on one address now. Node binds with
+ * SO_REUSEADDR, which on macOS conflicts only with a socket on that exact address, so each
+ * address is asked on its own. Input: the port and the address. Output: true when the bind
+ * worked, or when the address is IPv6 and this system has no IPv6 there. */
+async function bindable(port, host) {
+  const server = createTcpServer();
+  const error = await new Promise((done) => {
+    server.once("error", done);
+    server.listen(port, host, () => done(null));
+  });
+  if (error === null) {
+    await new Promise((done) => server.close(done));
+    return true;
+  }
+  return host.includes(":") && ["EADDRNOTAVAIL", "EAFNOSUPPORT"].includes(error.code);
 }
