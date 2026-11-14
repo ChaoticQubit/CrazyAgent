@@ -138,6 +138,16 @@ const SIGN_IN_REJECTED: &str = "master_sign_in_rejected";
 const SIGN_IN_CHECKING: &str = "master_sign_in_checking";
 const AGENT_RESTART_CHECKING: &str = "The agent did not restart yet: account sign-ins are still being checked after the restart. Restart it again in a moment.";
 const LEFT_RUNNING_NOTE: &str = "Kept running while CrazyAgent was closed";
+
+/// What became of a kept pane whose model proxy ends with the engine at quit (DEC-158):
+/// frozen with its record stored, ended with every process confirmed gone, or ended with
+/// its sandbox not confirmed empty, as when its agent killed its own warden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtQuit {
+    Frozen,
+    Ended,
+    Unconfirmed,
+}
 const FROZEN_NOTE: &str = "Frozen while CrazyAgent was closed; it continues when CrazyAgent opens";
 const TURN_LIMIT: &str = "team_turn_limit";
 const TIME_LIMIT_NOTE: &str = "stopped by a time limit";
@@ -1636,9 +1646,14 @@ impl TeamRuntime {
             && !(host.pane_pid(&agent).ok().flatten() == Some(record.pid)
                 && hold_keeper(record.pid, &agent_pane_state(&self.state, id), Hold::Thaw))
         {
-            let _ = end_left_pane(host.as_ref(), &agent, "team");
+            let ended = end_left_pane(host.as_ref(), &agent, "team");
             drop(proxy);
-            return Ok(Err("it could not be continued after its freeze".into()));
+            let reason = "it could not be continued after its freeze";
+            return Ok(Err(match ended {
+                Ok(true) => reason.into(),
+                Err(problem) if problem.0 == "terminal_agent_unknown" => reason.into(),
+                _ => format!("{reason}. {}", crate::sandbox::warden::CLEANUP_UNCERTAIN),
+            }));
         }
         let record = &match (record.frozen_ms, u64::try_from(now_ms())) {
             (Some(at), Ok(now)) => PaneRecord {
@@ -3037,18 +3052,26 @@ impl TeamRuntime {
                     .is_some_and(|worker| worker.proxy.is_some())
             })
             .collect();
+        let mut unconfirmed = BTreeSet::new();
         let mut failed = None;
         for id in proxied {
-            let (held, problem) = self.freeze_or_end(id);
-            if held {
+            let (left, problem) = self.freeze_or_end(id);
+            if left == AtQuit::Frozen {
                 frozen.insert(id);
             } else {
                 kept.remove(&id);
+            }
+            if left == AtQuit::Unconfirmed {
+                unconfirmed.insert(id);
             }
             if failed.is_none() {
                 failed = problem;
             }
         }
+        let uncertain = with_code(
+            crate::sandbox::warden::CLEANUP_UNCERTAIN,
+            Some(crate::harnesses::leftovers::UNCERTAIN),
+        );
         let now = now_ms();
         let ids: Vec<i64> = self.workers.keys().copied().collect();
         self.workers.clear();
@@ -3065,11 +3088,15 @@ impl TeamRuntime {
             )
             .map_err(error)?;
             note_left_tasks(&tx, &left, now);
-            let note = kept.contains(&id).then_some(if frozen.contains(&id) {
-                FROZEN_NOTE
+            let note = if unconfirmed.contains(&id) {
+                Some(uncertain.as_str())
             } else {
-                LEFT_RUNNING_NOTE
-            });
+                kept.contains(&id).then_some(if frozen.contains(&id) {
+                    FROZEN_NOTE
+                } else {
+                    LEFT_RUNNING_NOTE
+                })
+            };
             tx.execute(
                 "UPDATE team_agents SET status='stopped', task=NULL, error=?3, stopped_ms=?2 WHERE id=?1 AND status IN ('starting','idle','working')",
                 params![id, now, note],
@@ -3099,17 +3126,19 @@ impl TeamRuntime {
     /// that says so (DEC-158). A pane that cannot be frozen, whose record cannot be read or
     /// stored, or whose frozen record no longer fits is ended instead, so none runs on with
     /// its port free or stays frozen with nothing to thaw it by. Takes the agent. Returns
-    /// whether it stays frozen, and the store problem a pane was ended over.
-    fn freeze_or_end(&self, id: i64) -> (bool, Option<EngineError>) {
+    /// whether it stays frozen or its end was confirmed, and the store problem it ended over.
+    fn freeze_or_end(&self, id: i64) -> (AtQuit, Option<EngineError>) {
         let host = self.terminal.clone();
         let (record, mut problem) = match self.kept_record(id) {
             Ok(record) => (record, None),
             Err(failed) => (None, Some(failed)),
         };
-        let held = match (&host, &record) {
+        let frozen = match (&host, &record) {
             (Some(host), Some(record)) => self.freeze_kept(host, id, record),
-            _ => None,
+            _ => Err(true),
         };
+        let mut confirmed = frozen.as_ref().err().copied().unwrap_or(true);
+        let held = frozen.ok();
         let stored = held.as_ref().and_then(PaneRecord::encode).map(|text| {
             self.connection
                 .execute(
@@ -3119,17 +3148,25 @@ impl TeamRuntime {
                 .map_err(error)
         });
         match stored {
-            Some(Ok(_)) => return (true, problem),
+            Some(Ok(_)) => return (AtQuit::Frozen, problem),
             Some(Err(failed)) => problem = Some(failed),
             None => {}
         }
         if let Some(pins) = held.as_ref().and_then(|record| record.keepers.as_deref()) {
-            end_keepers(pins);
+            confirmed &= end_keepers(pins);
         }
         if let (Some(host), Ok(agent)) = (&host, AgentId::team(id)) {
-            let _ = end_left_pane(host.as_ref(), &agent, "team");
+            confirmed &= match end_left_pane(host.as_ref(), &agent, "team") {
+                Ok(swept) => swept,
+                Err(problem) => problem.0 == "terminal_agent_unknown",
+            };
         }
-        (false, problem)
+        let left = if confirmed {
+            AtQuit::Ended
+        } else {
+            AtQuit::Unconfirmed
+        };
+        (left, problem)
     }
 
     /// Reads the pane record the engine keeps for a team agent. Takes the id. Returns the
@@ -3154,17 +3191,18 @@ impl TeamRuntime {
     /// engine's freeze record is asked. A native lead whose servers did not all freeze has
     /// them ended through their keepers, so no frozen server is left for the caller's end.
     /// Takes the host, the agent and its record. Returns the record to keep, with the
-    /// freeze time and a native lead's keepers, or none when the pane could not be frozen.
+    /// freeze time and a native lead's keepers, or, when the pane could not be frozen,
+    /// whether every keeper it ended exited in time, true when it ended none.
     fn freeze_kept(
         &self,
         host: &Arc<dyn Host>,
         id: i64,
         record: &PaneRecord,
-    ) -> Option<PaneRecord> {
+    ) -> Result<PaneRecord, bool> {
         if record.freeze != Some(true) {
-            return None;
+            return Err(true);
         }
-        let agent = AgentId::team(id).ok()?;
+        let agent = AgentId::team(id).map_err(|_| true)?;
         let held = host.server_keepers(&agent);
         let pins: Vec<KeeperPin> = if held.is_empty() {
             record
@@ -3202,12 +3240,11 @@ impl TeamRuntime {
                 && hold_keeper(record.pid, &agent_pane_state(&self.state, id), Hold::Freeze)
         };
         if !held {
-            end_keepers(&pins);
-            return None;
+            return Err(end_keepers(&pins));
         }
-        let at = u64::try_from(now_ms()).ok()?;
+        let at = u64::try_from(now_ms()).map_err(|_| true)?;
         assert!(!lead || pins.len() == KEEPERS_MAX);
-        Some(PaneRecord {
+        Ok(PaneRecord {
             frozen_ms: Some(at),
             keepers: lead.then_some(pins),
             ..record.clone()
@@ -6873,6 +6910,19 @@ impl TeamRuntime {
                 super::time_limits(&self.connection, &stored.project_id)?,
                 self.workers[&agent].ran(),
             );
+            let claimed = self
+                .connection
+                .execute(
+                    "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1
+                     WHERE id=?1 AND status='queued'",
+                    params![task, agent],
+                )
+                .map_err(error)?;
+            assert!(claimed <= 1);
+            if claimed == 0 {
+                delivery::ended(&self.connection, Some(Busy::Task(task)), false)?;
+                continue;
+            }
             let worker = self.workers.get_mut(&agent).expect("worker exists");
             if worker
                 .orders
@@ -6886,6 +6936,14 @@ impl TeamRuntime {
                 ))
                 .is_err()
             {
+                self.connection
+                    .execute(
+                        "UPDATE team_tasks SET status='queued', agent=NULL, attempts=MAX(attempts-1,0)
+                         WHERE id=?1 AND status='running' AND cancel_requested=0",
+                        [task],
+                    )
+                    .map_err(error)?;
+                cancel_requested_tasks(&self.connection, Some(task), CancelPath::Held, now_ms())?;
                 delivery::ended(&self.connection, Some(Busy::Task(task)), false)?;
                 continue;
             }
@@ -6900,8 +6958,8 @@ impl TeamRuntime {
             crate::coord::delivery::delivered(&self.connection, &carried, now_ms())?;
             self.connection
                 .execute(
-                    "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL, wait=NULL WHERE id=?1",
-                    params![task, agent, now_ms()],
+                    "UPDATE team_tasks SET started_ms=?2, error=NULL, wait=NULL WHERE id=?1",
+                    params![task, now_ms()],
                 )
                 .map_err(error)?;
             self.connection
@@ -7336,10 +7394,13 @@ impl TeamRuntime {
         }))
     }
 
+    /// Ends a task dispatch could not hand out as failed with `reason`, only while it still
+    /// waits queued, so a task the owner cancelled meanwhile stays cancelled (RV-DS241-124).
+    /// Takes the task and the reason. Returns any SQLite failure.
     fn fail_task(&mut self, task: i64, reason: &str) -> Result<(), EngineError> {
         self.connection
             .execute(
-                "UPDATE team_tasks SET status='failed', agent=NULL, error=?2, finished_ms=?3 WHERE id=?1",
+                "UPDATE team_tasks SET status='failed', agent=NULL, error=?2, finished_ms=?3 WHERE id=?1 AND status='queued'",
                 params![task, reason, now_ms()],
             )
             .map_err(error)?;
@@ -9451,19 +9512,6 @@ impl TeamRuntime {
         expose_graph(&root, &working_dir, &hidden);
         #[cfg(not(unix))]
         expose_graph(&root, &working_dir)?;
-        if let Some(engine) = self
-            .delegation_tool
-            .as_ref()
-            .filter(|_| role == AgentRole::Master && tools)
-        {
-            let changed = |e: EngineError| with_code("the delegate engine changed", Some(&e.0));
-            if sandbox.writes(engine.verified_path().map_err(changed)?) {
-                return Err(with_code(
-                    "the delegate engine is in a folder the agent can write",
-                    Some("team_delegate_writable"),
-                ));
-            }
-        }
         #[cfg(target_os = "macos")]
         if let Some(runtime) = self.state.parent() {
             use crate::sandbox::tool_cache::{CacheShape, grant};
@@ -9476,6 +9524,19 @@ impl TeamRuntime {
             let mates = format!("{agent}-teammates");
             teammates = teammates
                 .map(|team| grant(team, runtime, &root, &policy, CacheShape::Teammate, &mates));
+        }
+        if let Some(engine) = &self.delegation_tool {
+            let changed = |e: EngineError| with_code("the delegate engine changed", Some(&e.0));
+            let engine = engine.verified_path().map_err(changed)?;
+            if std::iter::once(&sandbox)
+                .chain(teammates.as_ref())
+                .any(|agent| agent.writes(engine))
+            {
+                return Err(with_code(
+                    "the delegate engine is in a folder the agent can write",
+                    Some("team_delegate_writable"),
+                ));
+            }
         }
         if let Some(mates) = &teammates {
             mates
@@ -11778,14 +11839,20 @@ fn native_session(
     }
 }
 
+/// The owner's line for a native lead whose launch's run time passed before this engine took
+/// it over, as after an app quit or a long freeze.
+const LEAD_RUN_TIME_PASSED: &str = "The native lead's run time ended before it was taken over";
+
 /// Takes over a native-mode lead on a signed-in account that an earlier engine left running
 /// in its own server: waits for the runtime's first order, a turn or a start, which carries
 /// a fresh custody use of the account, hands the credential to the lead's home again, then
 /// serves turns on the running session, so the lead and its teammates never run on without
-/// the account. A first order without the account ends the lead. A lead's end not proven
-/// gone reports the uncertain cleanup before the cause it ended for, and keeps a credential
-/// already handed over held (S4B-B1). Takes the adoption and the worker's channels and
-/// flags. Returns the problem that ended it, if any.
+/// the account. A first order without the account ends the lead, and so does any first
+/// order once the launch's run time has passed, with the launch deadline and before any
+/// handoff (RV-DS241-130). A lead's end not proven gone reports the uncertain cleanup before
+/// the cause it ended for, and keeps a credential already handed over held (S4B-B1). Takes
+/// the adoption and the worker's channels and flags. Returns the problem that ended it, if
+/// any.
 #[allow(clippy::too_many_arguments)]
 fn native_adopted(
     adoption: Adoption,
@@ -11828,6 +11895,22 @@ fn native_adopted(
         }
     };
     let taken = first.is_some();
+    let left = record.run_time_left(limits.run_time);
+    if left.is_zero() {
+        let cause = Some(with_code(LEAD_RUN_TIME_PASSED, Some("launch_deadline")));
+        let ended = end(false, None);
+        if taken {
+            let _ = reports.send(Report::Finished {
+                text: String::new(),
+                end: TurnEnd::TimedOut,
+                cause: Some("launch_deadline".to_owned()),
+            });
+        }
+        if !ended {
+            return ended_with(settle_stop(Err(Unstopped::Uncertain), None, by), cause);
+        }
+        return cause;
+    }
     let Some(grant) = grant else {
         let cause = Some("The native lead was taken over without its signed-in account".into());
         if !end(taken, None) {
@@ -11836,11 +11919,7 @@ fn native_adopted(
         return cause;
     };
     let Grant { profile, .. } = *grant;
-    let credential = match profile.hand_to_agent(
-        &managed.home,
-        record.run_time_left(limits.run_time),
-        &managed.executable,
-    ) {
+    let credential = match profile.hand_to_agent(&managed.home, left, &managed.executable) {
         Ok(credential) => credential,
         Err(problem) => {
             let cause = Some(with_code(
@@ -12149,6 +12228,8 @@ fn serve(
 /// continues it; a refused resume is reported and ends the agent as a kept one does. A
 /// master's turn starts a fresh conversation, since its feed briefs it again each turn; only
 /// the first turn of a run the engine resumes after an interruption continues its session.
+/// A turn given no time, as a used-up session limit gives one, ends timed out by the turn
+/// limit before any handoff, as a turn that ran out of time ends its worker (RV-DS241-130).
 #[allow(clippy::too_many_arguments)]
 fn per_turn(
     plan: &Plan,
@@ -12162,6 +12243,14 @@ fn per_turn(
 ) -> Option<String> {
     let mut resume = plan.resume.clone();
     while let Next::Turn(prompt, grant, rules) = next_turn(orders, cancel, None) {
+        if rules.limit == Some(Duration::ZERO) {
+            let _ = reports.send(Report::Finished {
+                text: String::new(),
+                end: TurnEnd::TimedOut,
+                cause: Some(TURN_LIMIT.to_owned()),
+            });
+            return None;
+        }
         let Some(grant) = grant else {
             let _ = reports.send(Report::Finished {
                 text: String::new(),

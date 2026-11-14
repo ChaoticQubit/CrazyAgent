@@ -3,6 +3,7 @@ use crate::engine::Client;
 use crate::engine::owner::{OwnerClientKind, TerminalOutput, TerminalSession};
 use crate::terminal::{AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame};
 use crate::tui::seam::Request;
+use crate::tui::terminal_pane::{PASTE_CLOSE, PASTE_OPEN};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::thread::JoinHandle;
@@ -18,6 +19,11 @@ const FRAMES_QUEUED: usize = 64;
 const THREADS_MAX: usize = 4;
 const NOTICES_MAX: usize = 8;
 const DRAIN_TIME: Duration = Duration::from_secs(5);
+/// The most bytes one key event types into an agent terminal: a paste of
+/// `PASTE_CHARS_MAX` characters of up to four bytes each inside its bracketed paste markers.
+const TYPED_BYTES_MAX: usize =
+    4 * crate::tui::run::PASTE_CHARS_MAX + PASTE_OPEN.len() + PASTE_CLOSE.len();
+const _: () = assert!(TYPED_BYTES_MAX.div_ceil(INPUT_BYTES_MAX) <= COMMANDS_QUEUED);
 
 struct Session {
     agent: AgentId,
@@ -75,9 +81,9 @@ impl Terminals {
                 self.want(agent, Some(pane));
             }
             Request::TerminalInput { agent, bytes } => {
-                assert!(!bytes.is_empty() && bytes.len() <= INPUT_BYTES_MAX);
+                assert!(!bytes.is_empty() && bytes.len() <= TYPED_BYTES_MAX);
                 self.start();
-                self.command(&agent, bytes);
+                self.command(&agent, &bytes);
             }
             Request::TerminalResize { agent, cols, rows } => {
                 assert!((SIZE_MIN..=SIZE_MAX).contains(&cols));
@@ -200,7 +206,10 @@ impl Terminals {
         }
     }
 
-    fn command(&mut self, agent: &AgentId, bytes: Vec<u8>) {
+    /// Hands one key event's bytes to the session's stream as host inputs, all or none: when
+    /// the stream cannot take every input now, the session closes as backlogged, so a program
+    /// never gets part of a paste. Inputs: the agent and the bytes. Output: none.
+    fn command(&mut self, agent: &AgentId, bytes: &[u8]) {
         let Some(session) = self
             .session
             .as_ref()
@@ -208,10 +217,16 @@ impl Terminals {
         else {
             return;
         };
-        let reason = match session.commands.try_send(bytes) {
-            Ok(()) => return,
-            Err(TrySendError::Full(_)) => "terminal_input_backlog",
-            Err(TrySendError::Closed(_)) => "terminal_closed",
+        let parts = inputs(bytes);
+        let reason = match session.commands.try_reserve_many(parts.len()) {
+            Ok(permits) => {
+                for (permit, part) in permits.zip(parts) {
+                    permit.send(part.to_vec());
+                }
+                return;
+            }
+            Err(TrySendError::Full(())) => "terminal_input_backlog",
+            Err(TrySendError::Closed(())) => "terminal_closed",
         };
         let agent = session.agent.clone();
         self.session = None;
@@ -287,6 +302,32 @@ fn stream(
         let _ = control.detach().await;
         let _ = tokio::time::timeout(DRAIN_TIME, reader).await;
     });
+}
+
+/// Splits one key event's bytes into host inputs of at most `INPUT_BYTES_MAX` bytes, never
+/// inside the closing bracketed paste marker, so a program that reads paste markers per read
+/// sees it whole. Input: the bytes, at least one. Output: the inputs in order.
+fn inputs(bytes: &[u8]) -> Vec<&[u8]> {
+    assert!(!bytes.is_empty());
+    let marker = if bytes.ends_with(PASTE_CLOSE) {
+        bytes.len() - PASTE_CLOSE.len()
+    } else {
+        bytes.len()
+    };
+    let mut parts = Vec::new();
+    let mut start = 0;
+    while start < bytes.len() {
+        let mut end = (start + INPUT_BYTES_MAX).min(bytes.len());
+        if marker < end && end < bytes.len() {
+            end = marker;
+        }
+        assert!(end > start);
+        parts.push(&bytes[start..end]);
+        start = end;
+    }
+    assert!(parts.iter().all(|part| part.len() <= INPUT_BYTES_MAX));
+    assert_eq!(parts.concat(), bytes);
+    parts
 }
 
 /// Opens an owner connection and attaches to the agent's terminal, or to one

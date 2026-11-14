@@ -1136,7 +1136,12 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
         "start" => {
             let since = crazyagent::service::log_length(&layout);
             let another = service.runs_another_program();
-            if another && service.may_replace() {
+            let installed = service.definition.is_file();
+            let repair = service.repair(&service.executable, installed, false);
+            if installed && repair == crazyagent::service::Repair::Refuse {
+                return Err(service.refuse().0);
+            }
+            if installed && repair == crazyagent::service::Repair::Install {
                 let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
                 let executable = crazyagent::service::persistable(
                     &service.executable,

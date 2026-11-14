@@ -72,6 +72,10 @@ pub fn progress(jobs: &ResearchJobs, project: &str) -> Result<Vec<ResearchProgre
         .map(|job| {
             let detail = match job.status {
                 ResearchStatus::Failed | ResearchStatus::NeedsPool => job.error.clone(),
+                ResearchStatus::Queued => job
+                    .error
+                    .clone()
+                    .filter(|line| super::runner::WAITING_LINES.contains(&line.as_str())),
                 _ => None,
             };
             let elapsed_seconds = job.started_ms.map(|started| {
@@ -281,9 +285,9 @@ enum Upkeep {
 }
 
 /// The roadmap status and Overview tabs upkeep of the research loop: its own engine
-/// connection, the runs going now, what finished status checks left for later removal and
-/// the loop passes counted, so each store is asked for due runs every `STATUS_EVERY_TICKS`
-/// passes.
+/// connection, the runs going now, what finished status checks and Overview runs left for
+/// later removal and the loop passes counted, so each store is asked for due runs every
+/// `STATUS_EVERY_TICKS` passes.
 #[cfg(unix)]
 struct StatusUpkeep {
     db: Option<rusqlite::Connection>,
@@ -297,10 +301,17 @@ struct StatusUpkeep {
 
 #[cfg(unix)]
 impl StatusUpkeep {
-    /// Opens the upkeep on the engine database and closes the runs an engine that stopped
-    /// left open. Input: the database path. Output: the upkeep, idle for good when the
-    /// database cannot be opened.
+    /// Opens the upkeep on the engine database, closes the runs an engine that stopped
+    /// left open and removes the status run folders an engine before 2.4.1 left in the
+    /// research state beside the database. Input: the database path. Output: the upkeep,
+    /// idle for good when the database cannot be opened.
     fn open(database: &Path) -> Self {
+        if let Some(runtime) = database.parent() {
+            let swept = crate::roadmap_status::run::sweep_unhashed(&runtime.join("research"));
+            if swept > 0 {
+                eprintln!("roadmap_status_old_runs_removed count={swept}");
+            }
+        }
         let db = database
             .parent()
             .and_then(|root| crate::questions::open(root).ok());
@@ -475,12 +486,9 @@ where
                         Upkeep::Roadmap => crate::roadmap_status::run::check(
                             &runner, &project, claim, &root, &account,
                         ),
-                        Upkeep::Overview => {
-                            crate::project_overview::agent::write(
-                                &runner, &project, claim, &root, &account,
-                            );
-                            None
-                        }
+                        Upkeep::Overview => crate::project_overview::agent::write(
+                            &runner, &project, claim, &root, &account,
+                        ),
                     }
                 }));
                 Ok(true)
@@ -1160,5 +1168,45 @@ mod tests {
             upkeep_lines(&runner, &db, &resolver),
             [Some(line.clone()), Some(line)]
         );
+    }
+    /// The status upkeep's start removes every status run folder an engine before 2.4.1
+    /// left, named without the run-id hash, with its profile, whatever project it held: no
+    /// run of this engine has such a name, and Delete everything no longer matches it.
+    /// Status runs named with the hash, research job runs and other folders stay
+    /// (RV-DS241-45 r2, rv-secreview F1).
+    #[test]
+    fn the_status_upkeep_start_removes_status_runs_older_engines_left_and_nothing_else() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = temp.path().canonicalize().unwrap();
+        let state = engine.join("research");
+        std::fs::create_dir_all(state.join("profiles")).unwrap();
+        let demo = crate::protocol::ProjectId::new("demo").unwrap();
+        let hashed = format!("{}-1700000000000", crate::roadmap_status::run_stem(&demo));
+        let made = |name: &str| {
+            std::fs::create_dir_all(state.join("agents").join(name).join("home")).unwrap();
+            let profile = state.join("profiles").join(format!("{name}.sb"));
+            std::fs::write(profile, "(version 1)").unwrap();
+        };
+        let old = [
+            "roadmap-status-demo-1700000000000",
+            "roadmap-status-v1_2-1700000000001",
+            "roadmap-status-team_one-5",
+        ];
+        let kept = [hashed.as_str(), "job-1-1", "job-2-1-3"];
+        for name in old.iter().chain(&kept) {
+            made(name);
+        }
+        let _upkeep = StatusUpkeep::open(&engine.join("engine.db"));
+        for name in old {
+            let folder = state.join("agents").join(name);
+            let profile = state.join("profiles").join(format!("{name}.sb"));
+            assert!(std::fs::symlink_metadata(folder).is_err(), "{name}");
+            assert!(std::fs::symlink_metadata(profile).is_err(), "{name}");
+        }
+        for name in kept {
+            assert!(state.join("agents").join(name).join("home").is_dir(), "{name}");
+            let profile = state.join("profiles").join(format!("{name}.sb"));
+            assert!(profile.is_file(), "{name}");
+        }
     }
 }

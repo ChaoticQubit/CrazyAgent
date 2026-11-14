@@ -241,11 +241,13 @@ impl Shell {
             .as_ref()
     }
 
-    /// Records a new window size.
+    /// Records a new window size, capped to the area the TUI draws, so screens size agent
+    /// terminals for what is shown and drawing never resizes them again.
     /// Inputs: width and height. Output: none.
     pub fn resize(&mut self, width: u16, height: u16) {
-        self.ctx.width = width;
-        self.ctx.height = height;
+        let area = super::bounded_area(width, height);
+        self.ctx.width = area.width;
+        self.ctx.height = area.height;
         let ctx = &mut self.ctx;
         self.stack
             .last_mut()
@@ -475,9 +477,10 @@ impl Shell {
         }
     }
 
-    /// Handles one key: overlays first, then a screen in raw mode takes every
-    /// key, then the global keys, then the top screen; an Esc the screen
-    /// ignores goes back.
+    /// Handles one key: below the smallest window only Ctrl+Q or Ctrl+C acts
+    /// ([`Self::small_key`]); otherwise overlays first, then a screen in raw mode
+    /// takes every key, then the global keys, then the top screen; an Esc the
+    /// screen ignores goes back.
     /// Input: the key. Output: none; check `quitting` afterwards.
     pub fn key(&mut self, key: Key) {
         self.take_key(key);
@@ -485,6 +488,9 @@ impl Shell {
     }
 
     fn take_key(&mut self, key: Key) {
+        if self.ctx.width < MIN_WIDTH || self.ctx.height < MIN_HEIGHT {
+            return self.small_key(&key);
+        }
         if let Some(overlay) = self.overlay.take() {
             self.overlay_key(overlay, &key);
             return;
@@ -534,6 +540,20 @@ impl Shell {
         match flow {
             Flow::Ignored if key == Key::Esc => self.apply(Flow::Back),
             other => self.apply(other),
+        }
+    }
+
+    /// The one key a window below [`MIN_WIDTH`] x [`MIN_HEIGHT`] acts on, where the shell
+    /// draws only the bigger-window notice and no screen or overlay: Ctrl+Q or Ctrl+C quits
+    /// as it does elsewhere, past a quit question already open, so no screen, overlay or raw
+    /// terminal takes a key it could not show (DS-99 r2). Input: the key. Output: none.
+    fn small_key(&mut self, key: &Key) {
+        if global(key, false) != Some(Global::Quit) {
+            return;
+        }
+        match self.overlay.take() {
+            Some(Overlay::Quit(_)) => self.quit = true,
+            _ => self.ask_quit(),
         }
     }
 
@@ -1295,6 +1315,34 @@ mod tests {
         shell.key(Key::ShiftRight);
         assert_eq!(shell.place(), Some(Place::Settings(SettingsSection::Pools)));
         assert_eq!(shell.depth(), 2, "sections replace each other");
+    }
+
+    /// DS-99 r2 (rv-sec2 F1): below 80x24 the shell draws no quit question, so one open there
+    /// takes no arrow or Enter, and Ctrl+Q or Ctrl+C still quits: at once when nothing runs,
+    /// past the hidden question when agents do.
+    #[test]
+    fn below_80x24_only_ctrl_q_acts_and_a_hidden_quit_question_takes_no_enter() {
+        let mut shell = at(Place::Home, ctx());
+        shell.resize(79, 24);
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "nothing running, so no question");
+
+        let mut ctx = ctx();
+        ctx.store.projects = Load::Ready(vec![card("Tidepool", 1)]);
+        let mut shell = at(Place::Home, ctx);
+        shell.key(Key::Ctrl('q'));
+        assert!(matches!(shell.overlay, Some(Overlay::Quit(_))));
+        shell.resize(80, 23);
+        for key in [Key::Right, Key::Enter, Key::Esc, Key::Tab] {
+            shell.key(key);
+        }
+        assert!(!shell.quitting());
+        assert!(matches!(&shell.overlay, Some(Overlay::Quit(ask)) if !ask.quit_focused));
+        shell.key(Key::Ctrl('c'));
+        assert!(
+            shell.quitting(),
+            "a second Ctrl-C quits past the hidden question"
+        );
     }
 
     #[test]

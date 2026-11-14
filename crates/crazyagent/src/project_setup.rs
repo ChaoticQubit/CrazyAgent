@@ -2535,7 +2535,7 @@ const DELETE_NAME_BYTES_MAX: usize = 1024;
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 57] = [
+const REMOVED_WITH_PROJECT: [&str; 62] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2593,6 +2593,11 @@ const REMOVED_WITH_PROJECT: [&str; 57] = [
     "project_doc_links",
     "roadmap_status",
     "roadmap_status_settings",
+    "project_overview",
+    "project_overview_tabs",
+    "team_master_retries",
+    "team_master_turns",
+    "team_master_conversations",
 ];
 
 /// Saves a project's extra read-only folders once each passes
@@ -2811,6 +2816,7 @@ fn remove(
         .map_err(error)?;
     assert_eq!(removed, 1);
     crate::memory::library::forget_orphan_agent_memories(tx)?;
+    crate::memory::forget_project(tx, project_id)?;
     crate::storage::plugins::remove_project(tx, project_id)?;
     Ok(Outcome::Applied)
 }

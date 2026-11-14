@@ -889,6 +889,32 @@ fn documents_by_path_check_type_size_count_and_duplicates() {
 }
 
 #[test]
+fn a_folder_of_documents_adds_only_its_own_files_never_where_its_links_point() {
+    let home = tempfile::tempdir().unwrap();
+    let shared = home.path().join("Shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::write(shared.join("notes.md"), "# Notes\n").unwrap();
+    std::fs::write(home.path().join("Passwords.csv"), "DUMMY-SECRET-106\n").unwrap();
+    std::os::unix::fs::symlink("../Passwords.csv", shared.join("leak.csv")).unwrap();
+    let mut wizard = Wizard::new(Vec::new(), Some(home.path().to_path_buf()));
+    wizard.go(Step::Documents);
+    wizard.key(control('u'));
+    type_text(&mut wizard, "~/Shared");
+    wizard.key(key(KeyCode::Enter));
+    assert_eq!(wizard.note.as_ref().map(|n| n.text.clone()), None);
+    let listed = std::fs::canonicalize(&shared).unwrap();
+    assert_eq!(
+        wizard
+            .documents
+            .iter()
+            .map(|d| (d.name.as_str(), d.path.as_str()))
+            .collect::<Vec<_>>(),
+        [("notes.md", listed.join("notes.md").to_str().unwrap())],
+        "a link in the folder is skipped, not followed to its target"
+    );
+}
+
+#[test]
 fn tab_completes_a_path_like_a_shell() {
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir(home.path().join("Research")).unwrap();

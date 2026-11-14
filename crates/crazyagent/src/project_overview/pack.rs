@@ -1,6 +1,6 @@
 use super::{TAB_BYTES_MAX, Tab, clipped};
 use crate::onboarding::draft;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The most bytes of the evidence one writing run is shown.
 pub const EVIDENCE_BYTES_MAX: usize = 96 * 1024;
@@ -68,10 +68,11 @@ fn plain_path(path: &str) -> bool {
 }
 
 /// The Documents part: the README, the manifests and the project's documents as the
-/// onboarding reader gathers them, which screens secret names, bounds each text and never
-/// follows a link. Input: the project folder. Output: the text.
-fn documents_part(folder: &Path) -> String {
-    let found = draft::gather(folder, &[]);
+/// onboarding reader gathers them, which screens secret names, leaves out the `hidden`
+/// folders, bounds each text and never follows a link. Inputs: the project folder and its
+/// hidden folders. Output: the text.
+fn documents_part(folder: &Path, hidden: &[PathBuf]) -> String {
+    let found = draft::gather(folder, hidden);
     let mut text = String::from("# Documents\n");
     if let Some((name, readme)) = &found.readme {
         text.push_str(&format!("\n## {name}\n\n{readme}\n"));
@@ -142,14 +143,22 @@ fn research_part(research: &[Research]) -> String {
 /// The evidence a writing run is shown: the documents, then the file paths, then the
 /// competitor research. The files and the research keep their own bounds and the documents
 /// are cut to what is left, so a large document never pushes the research out. Inputs: the
-/// project folder, the research read and the project's file paths. Output: the text,
-/// within [`EVIDENCE_BYTES_MAX`].
-pub fn evidence(folder: &Path, research: &[Research], tree: &[String]) -> String {
+/// project folder, its hidden folders, the research read and the project's file paths.
+/// Output: the text, within [`EVIDENCE_BYTES_MAX`].
+pub fn evidence(
+    folder: &Path,
+    hidden: &[PathBuf],
+    research: &[Research],
+    tree: &[String],
+) -> String {
     let files = files_part(tree);
     let research = research_part(research);
     let rest = files.len() + research.len();
     assert!(rest < EVIDENCE_BYTES_MAX);
-    let mut text = clipped(documents_part(folder), EVIDENCE_BYTES_MAX - rest - 1);
+    let mut text = clipped(
+        documents_part(folder, hidden),
+        EVIDENCE_BYTES_MAX - rest - 1,
+    );
     if !text.ends_with('\n') {
         text.push('\n');
     }

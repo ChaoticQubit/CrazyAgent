@@ -99,7 +99,7 @@ fn git_command(git: &Path, empty_home: &Path) -> Command {
     command
         .env_clear()
         .env("HOME", empty_home)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .envs(crate::research::runner::GIT_SAFE_ENV)
         .env("GIT_CONFIG_GLOBAL", NULL_DEVICE)
         .current_dir(empty_home);
     #[cfg(not(windows))]
@@ -142,9 +142,7 @@ pub(super) fn clone_command(
     assert_eq!(remote.scheme(), scheme);
     let mut command = git_command(git, empty_home);
     command
-        .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "")
-        .env("GIT_NO_LAZY_FETCH", "1")
         .args(["-c", "credential.helper="])
         .arg("-c")
         .arg(format!("credential.helper={helper}"))
@@ -386,7 +384,15 @@ mod tests {
     fn a_git_command_takes_nothing_else_from_the_engine_environment() {
         let home = tempfile::tempdir().unwrap();
         let command = git_command(Path::new("/usr/bin/git"), home.path());
-        let mut expected = vec!["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "HOME", "PATH"];
+        let mut expected = vec![
+            "GIT_ATTR_NOSYSTEM",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_NO_LAZY_FETCH",
+            "GIT_TERMINAL_PROMPT",
+            "HOME",
+            "PATH",
+        ];
         for name in SESSION_BUS_NAMES {
             let set = std::env::var_os(name).is_some_and(|value| !value.is_empty());
             if cfg!(target_os = "linux") && set {

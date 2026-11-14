@@ -4,7 +4,7 @@ use crate::onboarding::draft::{self, Folder, overview_seal};
 use crate::project_setup::ResearchKind;
 use crate::project_setup::links::{self, LinkKind};
 use crate::protocol::ProjectId;
-use crate::roadmap_status::{QUIET_MS, Refresh};
+use crate::roadmap_status::{QUIET_MS, Refresh, run_project_part};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -332,6 +332,49 @@ thread_local! {
 /// folder. Output: the answer.
 pub fn needs_home(folder: &Path) -> bool {
     crate::projects_home::state_folder(folder).as_path() == folder
+}
+
+/// The start of the research state name of every Overview writing run.
+pub(crate) const RUN_NAME_HEAD: &str = "overview-";
+const RUN_NAME_BYTES_MAX: usize = 96;
+const RUN_TIME_DIGITS_MAX: usize = 19;
+
+/// The research state name of one writing run: the head, the project's
+/// [`run_project_part`] sized for the longest start time, so a project's part never changes,
+/// then `-` and the start time. Inputs: the project and the time in plain digits. Output:
+/// the name.
+fn run_name_at(project: &ProjectId, time: &str) -> String {
+    assert!((1..=RUN_TIME_DIGITS_MAX).contains(&time.len()));
+    let room = RUN_NAME_BYTES_MAX - RUN_NAME_HEAD.len() - 1 - RUN_TIME_DIGITS_MAX;
+    let named = run_project_part(project, room);
+    let name = format!("{RUN_NAME_HEAD}{named}-{time}");
+    assert!(name.is_ascii() && name.len() <= RUN_NAME_BYTES_MAX);
+    name
+}
+
+/// The research state name of one writing run of `project` started at `now_ms`, so no run
+/// reuses the folder of an earlier one and [`names_run`] reads it back as this project's.
+/// Inputs: the project and now. Output: the name.
+#[cfg(unix)]
+pub(crate) fn run_name(project: &ProjectId, now_ms: i64) -> String {
+    let name = run_name_at(project, &now_ms.max(0).to_string());
+    assert!(names_run(project, &name));
+    name
+}
+
+/// Whether a research state name is a writing run of this project, the exact shape only:
+/// [`run_name`] gives that name for the start time it ends in, so the runs of a project whose
+/// id merely starts the same are not taken for it (RV-DS241-80). Inputs: the project and the
+/// name. Output: whether the name is one of its runs.
+pub(crate) fn names_run(project: &ProjectId, name: &str) -> bool {
+    assert!(name.len() <= 4096, "a file name is bounded by the system");
+    name.strip_prefix(RUN_NAME_HEAD)
+        .and_then(|run| run.rsplit_once('-'))
+        .is_some_and(|(_, time)| {
+            (1..=RUN_TIME_DIGITS_MAX).contains(&time.len())
+                && time.bytes().all(|byte| byte.is_ascii_digit())
+                && run_name_at(project, time) == name
+        })
 }
 
 fn unavailable<E>(_: E) -> EngineError {
@@ -857,16 +900,18 @@ pub fn reject(db: &Connection, project: &ProjectId, tab: Tab) -> Result<(), Engi
 }
 
 /// Marks the project's Overview stale after a landed change set, due once the quiet period
-/// has passed, only while its tabs refresh after landings (the default with no row). A
-/// run that already waits to start at once (the first read, a Refresh) keeps its time.
-/// Inputs: the landing's connection, the project and the time. Output: unit, or
-/// `overview_unavailable`.
+/// has passed, only while its tabs refresh after landings (the default with no row) and the
+/// project is still set up, checked in the same statement, so a landing that ends after the
+/// project's removal makes no row (RV-DS241-81 r1 F1). A run that already waits to start at
+/// once (the first read, a Refresh) keeps its time. Inputs: the landing's connection, the
+/// project and the time. Output: unit, or `overview_unavailable`.
 pub fn mark_stale(db: &Connection, project: &ProjectId, now_ms: i64) -> Result<(), EngineError> {
     assert!(now_ms >= 0);
     let due_ms = now_ms.saturating_add(QUIET_MS);
     assert!(due_ms >= now_ms);
     db.execute(
-        "INSERT INTO project_overview(project,stale,due_ms) VALUES(?1,1,?2)
+        "INSERT INTO project_overview(project,stale,due_ms)
+           SELECT ?1,1,?2 WHERE EXISTS (SELECT 1 FROM project_setups WHERE project=?1)
          ON CONFLICT(project) DO UPDATE SET stale=1,
            due_ms=CASE WHEN stale=1 AND due_ms=0 THEN 0 ELSE excluded.due_ms END
          WHERE refresh='after_landing'",

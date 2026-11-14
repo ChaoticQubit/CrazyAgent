@@ -945,25 +945,26 @@ fn each_claude_launch_gets_the_project_context_as_files_it_is_pointed_at() {
 }
 
 #[test]
-fn a_managed_account_not_signed_in_for_this_engine_run_waits_for_a_pool() {
-    managed_job_waits_for_a_pool(found_everywhere());
+fn a_managed_account_not_signed_in_for_this_engine_run_waits_for_its_account() {
+    managed_job_waits_for_its_account(found_everywhere());
 }
 
 /// A lookup of a managed account's hosts that failed on this machine, with too many open
 /// files, names nothing, so the job runs on to its own sign-in read as before and waits for
-/// a pool, not failed with the No network line (DEC-163 addendum 8, r1 F1).
+/// its account, not failed with the No network line (DEC-163 addendum 8, r1 F1).
 #[test]
 fn a_managed_job_whose_lookup_failed_on_this_machine_runs_on_to_its_sign_in() {
-    managed_job_waits_for_a_pool(ProviderReach::new(
+    managed_job_waits_for_its_account(ProviderReach::new(
         |_, _| Err(std::io::Error::from_raw_os_error(24)),
         |address| panic!("a managed account's hosts are never dialed: {address}"),
     ));
 }
 
 /// Runs one Codex research job on a managed account no sign-in of this engine run holds,
-/// with `reach` as the runner's reach, and checks it waits for a pool with no attempt, no
-/// agent worktree and no agent folder. Input: the reach.
-fn managed_job_waits_for_a_pool(reach: ProviderReach) {
+/// with `reach` as the runner's reach, and checks it goes back to the queue to wait out its
+/// backoff (DEC-170 addendum 6, RV-DS241-27) showing why, with no attempt, no agent
+/// worktree and no agent folder. Input: the reach.
+fn managed_job_waits_for_its_account(reach: ProviderReach) {
     let case = case("A site for a neighbourhood tool library.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
@@ -997,10 +998,14 @@ fn managed_job_waits_for_a_pool(reach: ProviderReach) {
         .unwrap()
         .unwrap();
     assert_eq!(run.job, id);
-    assert_eq!(run.status, ResearchStatus::NeedsPool);
+    assert_eq!(run.status, ResearchStatus::Queued);
     assert_eq!(run.process_group, None);
     let job = jobs.get(id).unwrap().unwrap();
-    assert_eq!(job.status.label(), "Needs a pool");
+    assert_eq!(job.status, ResearchStatus::Queued);
+    assert_eq!(
+        job.error.as_deref(),
+        Some("Waiting for this account to be ready")
+    );
     assert_eq!(job.attempts, 0);
     assert_no_agent_worktree(&case);
     assert!(

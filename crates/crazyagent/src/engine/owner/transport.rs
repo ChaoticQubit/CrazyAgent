@@ -2469,6 +2469,9 @@ async fn serve_admitted(
         }
         let submitted = request.clone();
         let _barrier = engine.owner_egress.write().await;
+        if authority.authenticate(auth)? != a {
+            return Err(failure("owner_grant_stale_or_revoked"));
+        }
         if let Err(error) = authority.master_dispatch.lock().await.room(&submitted) {
             return write_owner_reply(stream, Err(error), id, mutation)
                 .await
@@ -3113,10 +3116,8 @@ async fn observe_dispatch(
             std::process::Command::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .env("GIT_NO_LAZY_FETCH", "1")
+                .envs(crate::research::runner::GIT_SAFE_ENV)
                 .env("GIT_OPTIONAL_LOCKS", "0")
                 .args([
                     "--no-replace-objects",

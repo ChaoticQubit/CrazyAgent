@@ -158,12 +158,6 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "home_copy_linked_checkout" => {
             "This folder is a git worktree or submodule of another repository, so a copy would still share it. Use it where it is, or copy the main repository folder."
         }
-        "home_copy_unverified" | "home_add_unverified" => {
-            "The copy did not match the original, so the original was kept."
-        }
-        "home_move_source_left" => {
-            "The folder was copied in, but the original could not be removed. Remove it yourself."
-        }
         "home_add_cancelled" => "Adding the folder stopped. Nothing was moved or copied.",
         "home_add_interrupted" => {
             "Adding the folder stopped part way. Check your projects folder before trying again."
@@ -385,5 +379,69 @@ mod tests {
         }
         assert!(not_ready("github_unsupported"));
         assert!(!not_ready("github_unreachable"));
+    }
+
+    /// RV-DS241-102: what a move leaves of the original are the entries that changed after
+    /// its copy check, which can be the only copy of newer edits. For an added folder and a
+    /// moved project alike the TUI says it in the desktop's own words (DEC-141), says what is
+    /// left may be newer than the copy, tells the owner to check it and never to remove or
+    /// delete what is there. A folder that did not arrive, a copy that did not match and an
+    /// add that stopped part way are told in the desktop's words too (r1 F1).
+    #[test]
+    fn a_move_that_left_part_of_the_original_says_check_it_in_the_desktop_words() {
+        let read = |path: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../apps/desktop/src/{path}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        let desktop = |source: &str, code: &str| {
+            let key = format!("  {code}: \"");
+            let start = source.find(&key).unwrap() + key.len();
+            let rest = &source[start..];
+            rest[..rest.find("\",\n").unwrap()].to_owned()
+        };
+        let intake = read("api-intake.ts");
+        let moved = read("screens/project/move-home.tsx");
+        for code in [
+            "home_add_unverified",
+            "home_copy_unverified",
+            "home_add_interrupted",
+        ] {
+            assert_eq!(copy(code), desktop(&intake, code), "{code}");
+        }
+        for (code, said, words) in [
+            (
+                "home_move_source_left",
+                copy("home_move_source_left"),
+                desktop(&intake, "home_move_source_left"),
+            ),
+            (
+                "move_project_old_folder_left",
+                super::super::project::plain_problem("move_project_old_folder_left"),
+                desktop(&moved, "move_project_old_folder_left"),
+            ),
+        ] {
+            assert_eq!(said, words, "{code}");
+            let lower = said.to_lowercase();
+            assert!(lower.contains("check"), "{code}: {said}");
+            assert!(
+                lower.contains("newer than the copy"),
+                "{code} does not say what is left may be newer than the copy: {said}"
+            );
+            for told in [
+                "yourself",
+                "remove it",
+                "delete it",
+                "remove the",
+                "delete the",
+            ] {
+                assert!(
+                    !lower.contains(told),
+                    "{code} tells the owner to remove what may be the only copy of newer edits: {said}"
+                );
+            }
+        }
     }
 }

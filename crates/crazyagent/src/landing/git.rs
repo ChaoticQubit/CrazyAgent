@@ -170,8 +170,7 @@ pub(super) fn owner_excludes(home: &Path, xdg: Option<&Path>) -> Option<PathBuf>
         .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
         .env("HOME", home)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
+        .envs(crate::research::runner::GIT_SAFE_ENV)
         .args([
             "config",
             "--global",
@@ -205,6 +204,17 @@ pub(super) fn owner_excludes(home: &Path, xdg: Option<&Path>) -> Option<PathBuf>
     let fits = text.len() <= EXCLUDES_PATH_BYTES_MAX && !text.chars().any(char::is_control);
     (metadata.is_file() && (owner == rustix::process::getuid().as_raw() || owner == 0) && fits)
         .then_some(real)
+}
+
+/// The `core.excludesFile=<path>` setting naming the owner's global ignore file
+/// ([`owner_excludes`]), for an engine git that clears its environment yet must keep out what
+/// the owner's own git ignores (RV-DS241-73). Takes nothing. Returns the setting, none when
+/// the owner has no usable ignore file or its path is not UTF-8.
+#[cfg(unix)]
+pub(crate) fn owner_excludes_setting() -> Option<String> {
+    let (home, xdg) = owner_folders();
+    let path = owner_excludes(&home?, xdg.as_deref())?;
+    Some(format!("core.excludesFile={}", path.to_str()?))
 }
 
 /// A repository the engine runs git on through a git folder and work tree it computed
@@ -263,15 +273,7 @@ impl Repo {
             git_dir == metadata || git_dir.parent() == Some(metadata.join("worktrees").as_path()),
             "engine git opens only the owner checkout's git folder or a linked worktree's"
         );
-        let excludes = work_tree
-            .and_then(|_| {
-                let (home, xdg) = owner_folders();
-                owner_excludes(&home?, xdg.as_deref())
-            })
-            .and_then(|path| {
-                path.to_str()
-                    .map(|path| format!("core.excludesFile={path}"))
-            });
+        let excludes = work_tree.and_then(|_| owner_excludes_setting());
         let mut repo = Self {
             git_dir: git_dir.to_path_buf(),
             work_tree: work_tree.map(Path::to_path_buf),
@@ -285,6 +287,10 @@ impl Repo {
         let keys = crate::research::runner::listed_filter_keys(&listing)
             .ok_or_else(|| failure("changes_git_failed"))?;
         assert!(keys.len() < listing.len());
+        if crate::research::runner::listed_hook(keys).is_some() {
+            eprintln!("landing_config_hook_refused");
+            return Err(failure("changes_git_hooks"));
+        }
         repo.overrides = crate::research::runner::filter_overrides(keys)
             .map_err(|_| failure("changes_git_unsupported"))?;
         assert!(repo.overrides.len().is_multiple_of(8));
@@ -508,11 +514,8 @@ impl Repo {
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("LC_ALL", "C")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .envs(crate::research::runner::GIT_SAFE_ENV)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_ATTR_NOSYSTEM", "1")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_NO_REPLACE_OBJECTS", "1")
             .env("GIT_GRAFT_FILE", "/dev/null")
             .envs(env.iter().copied())

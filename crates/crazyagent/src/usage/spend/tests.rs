@@ -119,7 +119,10 @@ fn the_defaults_are_confirm_each_spend_and_a_notice_when_a_pool_is_limited() {
     let (_root, db) = store();
     assert_eq!(
         read(&db).unwrap(),
-        settings(SpendConfirm::ConfirmEach, AllLimited::Notice)
+        SpendSettings {
+            resets_source: ResetsSource::Off,
+            ..settings(SpendConfirm::ConfirmEach, AllLimited::Notice)
+        }
     );
     assert!(read(&db).unwrap().spends());
     assert!(!read(&db).unwrap().auto_spends());

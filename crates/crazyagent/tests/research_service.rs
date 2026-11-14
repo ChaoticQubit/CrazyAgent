@@ -403,3 +403,48 @@ fn research_on_linux_fails_once_with_the_plain_unavailable_line() {
     assert!(fs::read_dir(state.join("agents")).unwrap().next().is_none());
     assert!(!project.join(".git").exists());
 }
+
+/// RV-DS241-27 r2 (leader 11:00): a research job sent back to wait for a home move, a busy
+/// sign-in or an account that is not ready reports why in its progress while it is Queued,
+/// and a Queued job holding any other line reports nothing, as before.
+#[test]
+fn a_queued_job_waiting_on_a_refusal_reports_why_in_its_progress() {
+    const WAITING: [&str; 3] = [
+        "Waiting for the projects home move to finish",
+        "Waiting for another run to finish with this account's sign-in",
+        "Waiting for this account to be ready",
+    ];
+    const OTHER: &str = "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it";
+    let runtime = EngineRuntime::with_projects(&[("project-a", "A plain project.")]);
+    let jobs = ResearchJobs::open(&runtime.database).unwrap();
+    let database = rusqlite::Connection::open(&runtime.database).unwrap();
+    for (kind, line) in [
+        ("market_research", WAITING[0]),
+        ("competitor_research", WAITING[1]),
+        ("design_research", WAITING[2]),
+        ("tech_stack_research", OTHER),
+    ] {
+        let id = jobs.enqueue("project-a", kind, "codex", false).unwrap();
+        database
+            .execute(
+                "UPDATE research_jobs SET error = ?2 WHERE id = ?1",
+                rusqlite::params![id, line],
+            )
+            .unwrap();
+    }
+
+    let shown = progress(&jobs, "project-a").unwrap();
+
+    assert_eq!(
+        shown
+            .iter()
+            .map(|row| (row.status, row.detail.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            ("Queued", Some(WAITING[0])),
+            ("Queued", Some(WAITING[1])),
+            ("Queued", Some(WAITING[2])),
+            ("Queued", None),
+        ]
+    );
+}

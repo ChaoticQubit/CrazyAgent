@@ -425,3 +425,34 @@ fn r_asks_for_a_check_then_reads_the_status_again_and_off_refuses_it() {
     exchange(&mut refused, NOW, Err("roadmap_status_off".into()));
     assert_eq!(shown(&refused), format!("! {STATUS_OFF}"));
 }
+
+/// RV-DS241-27 r2 (leader 11:00, DEC-141): a planning job sent back to wait shows why, the
+/// line the desktop planning line shows, and a queued one with no line still says it waits
+/// to start.
+#[test]
+fn a_queued_planning_job_shows_why_it_waits() {
+    const REASON: &str = "Waiting for this account to be ready";
+    let waiting = planning(&[job(
+        5,
+        ResearchKind::RoadmapPlanning,
+        ResearchStatus::Queued,
+        Some(REASON),
+    )]);
+    let shown = planning_value(&waiting, &Look::plain()).text();
+    assert!(
+        shown.starts_with("Planning") && shown.contains(REASON),
+        "{shown}"
+    );
+    for blank in [None, Some("  ")] {
+        let queued = planning(&[job(
+            6,
+            ResearchKind::RoadmapPlanning,
+            ResearchStatus::Queued,
+            blank,
+        )]);
+        assert_eq!(
+            planning_value(&queued, &Look::plain()).text(),
+            "Planning, waiting to start"
+        );
+    }
+}

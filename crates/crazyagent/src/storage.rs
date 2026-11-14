@@ -1159,6 +1159,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::instruction_files::initialize(connection).map_err(error)?;
     crate::scheduling::initialize(connection)?;
     crate::roadmap_status::initialize(connection)?;
+    crate::project_overview::initialize(connection)?;
     plugins::initialize(connection)?;
     accounts::initialize(connection)?;
     trash::initialize(connection)?;
@@ -1864,6 +1865,7 @@ pub(crate) fn create_project(
     assert_eq!(count, 1);
     crate::activity::note_created(tx, project_id, &spec.name, created_ms());
     plugins::remove_project(tx, project_id)?;
+    crate::memory::forget_project(tx, project_id)?;
     if let Some(root) = tx.path().map(Path::new).and_then(Path::parent) {
         plugins::remove_skill_project_folder(root, project_id.as_str())?;
     }

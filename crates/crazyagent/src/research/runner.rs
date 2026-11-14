@@ -42,7 +42,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The `/usr/bin/git` xcrun shim, the git every resolver here falls back to.
 pub(crate) const GIT: &str = "/usr/bin/git";
-pub(crate) const GIT_SAFE: [&str; 10] = [
+/// The settings every engine git runs with, whatever the repository configures: no hooks,
+/// fsmonitor or pager, no submodule recursion, no transport and no signature program, so a
+/// log or show that meets a signed commit in any armor runs `/usr/bin/false`, never a
+/// program the repository names (RV-DS241-39), and no signature check on a log or show at
+/// all, so a repository that turns `log.showSignature` on gets no check output mixed into
+/// what the engine reads (RV-DS241-39 r2 F2).
+pub(crate) const GIT_SAFE: [&str; 18] = [
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
@@ -53,6 +59,23 @@ pub(crate) const GIT_SAFE: [&str; 10] = [
     "submodule.recurse=false",
     "-c",
     "protocol.allow=never",
+    "-c",
+    "gpg.program=/usr/bin/false",
+    "-c",
+    "gpg.x509.program=/usr/bin/false",
+    "-c",
+    "gpg.ssh.program=/usr/bin/false",
+    "-c",
+    "log.showSignature=false",
+];
+/// The variables every engine git sets whatever else it needs: no lazy fetch of an object a
+/// partial clone lacks, so a repository's own promisor remote never runs a command on a read
+/// (RV-DS241-71), no system config or attributes and no prompt.
+pub(crate) const GIT_SAFE_ENV: [(&str, &str); 4] = [
+    ("GIT_NO_LAZY_FETCH", "1"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_ATTR_NOSYSTEM", "1"),
+    ("GIT_TERMINAL_PROMPT", "0"),
 ];
 #[cfg(unix)]
 const GIT_CONFIG_LISTING_BYTES_MAX: usize = 64 * 1024;
@@ -63,6 +86,15 @@ static REPOSITORIES_SETTING_UP: Mutex<std::collections::BTreeSet<PathBuf>> =
 static REPOSITORY_FREED: Condvar = Condvar::new();
 const BRIEF_BYTES_MAX: u64 = 32 * 1024;
 const DOCUMENTS_LISTED_MAX: usize = 50;
+/// The lines a job shows while it waits out a refused launch, the same in the desktop app
+/// and the terminal app (DEC-141, DEC-170 addendum 6).
+const HOME_MOVE_WAITING: &str = "Waiting for the projects home move to finish";
+const PROFILE_BUSY_WAITING: &str = "Waiting for another run to finish with this account's sign-in";
+const ACCOUNT_WAITING: &str = "Waiting for this account to be ready";
+/// Every line a refused launch leaves on a job that waits Queued, so its progress reports why
+/// (RV-DS241-27 r2).
+pub(crate) const WAITING_LINES: [&str; 3] =
+    [HOME_MOVE_WAITING, PROFILE_BUSY_WAITING, ACCOUNT_WAITING];
 const LINKS_MAX: usize = 100;
 const POLL: Duration = Duration::from_millis(100);
 const HEARTBEAT: Duration = Duration::from_millis(250);
@@ -765,10 +797,7 @@ impl ResearchRunner {
             process_group,
         };
         if jobs.home_moving(project.root)? {
-            jobs.release(&job, None)?;
-            let status = jobs
-                .get(job.id)?
-                .map_or(ResearchStatus::Queued, |job| job.status);
+            let status = jobs.refused(&job, HOME_MOVE_WAITING)?;
             return Ok(run(status, None, None));
         }
         let Some(harness) = ResearchHarness::of(&job.harness) else {
@@ -846,14 +875,12 @@ impl ResearchRunner {
                 Ok(run(status, None, None))
             }
             Err(RunError::Busy) => {
-                jobs.release(&job, None)?;
-                let status = jobs
-                    .get(job.id)?
-                    .map_or(ResearchStatus::Queued, |job| job.status);
+                let status = jobs.refused(&job, PROFILE_BUSY_WAITING)?;
                 Ok(run(status, None, None))
             }
-            Err(RunError::Account(_)) => {
-                let status = jobs.needs_pool(&job)?;
+            Err(RunError::Account(code)) => {
+                eprintln!("research job {} account not ready: {code}", job.id);
+                let status = jobs.refused(&job, ACCOUNT_WAITING)?;
                 Ok(run(status, None, None))
             }
             Err(error) => {
@@ -1396,6 +1423,7 @@ impl ResearchRunner {
         counted: &AtomicU64,
         limited: &AtomicBool,
     ) -> Result<Ending, RunError> {
+        noted_launch(jobs, job);
         let started = Instant::now();
         let mut beat = Instant::now();
         let ending = loop {
@@ -1450,6 +1478,7 @@ impl ResearchRunner {
             }
             return Ok(Ending::Exited(false));
         }
+        noted_launch(jobs, job);
         let mut beat = Instant::now();
         let ending = loop {
             if self.is_stopping() {
@@ -1728,10 +1757,13 @@ impl ResearchRunner {
             ));
         }
         let agent = self.state.join("agents").join(run.name);
-        if fs::symlink_metadata(&agent).is_ok() {
-            return Err(RunError::Invalid(RUN_NAME_USED.into()));
+        match fs::DirBuilder::new().mode(0o700).create(&agent) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(RunError::Invalid(RUN_NAME_USED.into()));
+            }
+            Err(error) => return Err(error.into()),
         }
-        private_directory(&agent)?;
         let home = agent.join("home");
         private_directory(&home)?;
         self.register_usage(
@@ -2677,11 +2709,18 @@ fn repository_setup(root: &Path) -> RepositorySetup {
 }
 
 /// Runs one git command the engine makes in a project folder it created: the safe git
-/// options, a cleared environment with a private HOME and TMPDIR, no system config, no input
-/// or output, bounded by SETUP_TIMEOUT. Inputs: the folder, the private home and the
-/// arguments. Output: whether git succeeded, or the spawn or wait failure.
+/// options, a cleared environment with a private HOME and TMPDIR, no system or global
+/// config, so no hook a config in that home names runs (RV-DS241-39 r2 F1), no input
+/// or output, in a process group of its own so SETUP_TIMEOUT stops git and what it started.
+/// Inputs: the folder, the private home and the arguments. Output: whether git succeeded,
+/// or the spawn or wait failure.
 pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<bool, RunError> {
     let mut command = Command::new(GIT);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     command
         .args(GIT_SAFE)
         .args(arguments)
@@ -2690,7 +2729,8 @@ pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<
         .env("HOME", tmp)
         .env("TMPDIR", tmp)
         .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .envs(GIT_SAFE_ENV)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -2780,9 +2820,11 @@ pub(crate) fn add_worktree_at(
 
 /// Adds a detached git worktree at `worktree` in the project folder, running git under the
 /// sandbox's profile, which it installs at `profile` as the only one that may make a
-/// checkout's `.git` link; the caller confines and reinstalls it before any agent runs. The
-/// worktree is added without a checkout and made local-only, and the checkout blanks every
-/// filter driver its own effective config names. Takes the sandbox, profile path, worktree.
+/// checkout's `.git` link; the caller confines and reinstalls it before any agent runs. A
+/// project whose effective config names a hook gets no worktree, refused before the first
+/// git write. The worktree is added without a checkout and made local-only, and the
+/// checkout blanks every filter driver its own effective config names. Takes the sandbox,
+/// profile path, worktree.
 #[cfg(unix)]
 pub(crate) fn add_worktree(
     sandbox: &ProjectSandbox,
@@ -2813,6 +2855,7 @@ pub(crate) fn add_worktree_at(
     }
     fs::create_dir_all(&worktrees)?;
     sandbox.clone().adding_worktrees().install(profile)?;
+    hook_refusal(&filter_keys(sandbox, profile, sandbox.project_root())?)?;
     let mut add = worktree_git(sandbox, profile);
     add.args(["worktree", "add", "-q", "--no-checkout", "--detach"])
         .arg(worktree)
@@ -2820,7 +2863,9 @@ pub(crate) fn add_worktree_at(
     setup_step(&mut add, "worktree_add_failed")?;
     crate::worktrees::lock_remotes(sandbox.project_root(), worktree)
         .map_err(|_| RunError::Setup("worktree_remote_lock_failed"))?;
-    let overrides = filter_overrides(&filter_keys(sandbox, profile, worktree)?)?;
+    let keys = filter_keys(sandbox, profile, worktree)?;
+    hook_refusal(&keys)?;
+    let overrides = filter_overrides(&keys)?;
     let mut checkout = worktree_git(sandbox, profile);
     checkout
         .args(&overrides)
@@ -2864,6 +2909,7 @@ pub(crate) fn add_teammate_worktree_at(
         ));
     }
     let _setup = repository_setup(sandbox.project_root());
+    hook_refusal(&filter_keys(sandbox, profile, sandbox.project_root())?)?;
     let mut add = worktree_git(sandbox, profile);
     add.args(["worktree", "add", "-q", "--no-checkout"]);
     match base {
@@ -2871,7 +2917,9 @@ pub(crate) fn add_teammate_worktree_at(
         None => add.arg(worktree).arg(branch),
     };
     setup_step(&mut add, "worktree_add_failed")?;
-    let overrides = filter_overrides(&filter_keys(sandbox, profile, worktree)?)?;
+    let keys = filter_keys(sandbox, profile, worktree)?;
+    hook_refusal(&keys)?;
+    let overrides = filter_overrides(&keys)?;
     let mut checkout = worktree_git(sandbox, profile);
     checkout
         .args(&overrides)
@@ -3012,7 +3060,7 @@ fn real_git() -> Option<PathBuf> {
 fn worktree_git(sandbox: &ProjectSandbox, profile: &Path) -> Command {
     let mut git = sandbox.command(profile, sandboxed_git());
     git.env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_NO_LAZY_FETCH", "1")
+        .envs(GIT_SAFE_ENV)
         .args(GIT_SAFE)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -3048,7 +3096,6 @@ pub(crate) fn agent_git(
 ) -> Result<AgentGit, RunError> {
     let mut command = worktree_git(sandbox, profile);
     command
-        .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
         .envs(variables.iter().copied())
         .arg("-C")
@@ -3125,11 +3172,12 @@ fn setup_debug_stderr() -> Stdio {
     Stdio::null()
 }
 
-/// The git arguments that list, NUL-separated, the filter keys of every config file git
-/// reads, the only keys [`filter_overrides`] uses, so the listing grows with a repository's
-/// filter drivers and never with its branches or remotes. The `-c` adds one key of the
-/// engine's own, which git reads last: a listing that ends with it ([`FILTER_KEYS_END`])
-/// is whole, and git always has a key to print, so no exit status stands for "no filter".
+/// The git arguments that list, NUL-separated, the filter and hook keys of every config
+/// file git reads: the filter keys [`filter_overrides`] uses and the hook keys
+/// [`listed_hook`] refuses, so the listing grows with a repository's filter drivers and
+/// hooks and never with its branches or remotes. The `-c` adds one key of the engine's own,
+/// which git reads last: a listing that ends with it ([`FILTER_KEYS_END`]) is whole, and
+/// git always has a key to print, so no exit status stands for "no filter".
 #[cfg(unix)]
 pub(crate) const FILTER_KEYS: [&str; 7] = [
     "-c",
@@ -3138,8 +3186,52 @@ pub(crate) const FILTER_KEYS: [&str; 7] = [
     "--name-only",
     "-z",
     "--get-regexp",
-    "^filter\\.",
+    "^(filter|hook)\\.",
 ];
+
+/// The most bytes of a hook key an owner line shows.
+#[cfg(unix)]
+const HOOK_KEY_SHOWN_MAX: usize = 128;
+
+/// The first config hook key a [`FILTER_KEYS`] listing names: `hook.<name>.<key>`, which
+/// git 2.54 runs whatever `core.hooksPath` says, so no engine git may run in a repository
+/// whose config holds one (RV-DS241-39 r2 F1). Takes the NUL-separated keys
+/// [`listed_filter_keys`] gives. Returns the key as an owner line shows it, at most
+/// [`HOOK_KEY_SHOWN_MAX`] bytes with every byte outside letters, digits, `.`, `-` and `_`
+/// shown as `?`, or None when the listing names no hook.
+#[cfg(unix)]
+pub(crate) fn listed_hook(keys: &[u8]) -> Option<String> {
+    let key = keys
+        .split(|byte| *byte == 0)
+        .find(|key| key.starts_with(b"hook."))?;
+    let shown: String = key
+        .iter()
+        .copied()
+        .take(HOOK_KEY_SHOWN_MAX)
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_') {
+                char::from(byte)
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    assert!(shown.starts_with("hook.") && shown.len() <= HOOK_KEY_SHOWN_MAX);
+    Some(shown)
+}
+
+/// Refuses a worktree setup in a repository whose effective config names a hook, before
+/// any git that could run it. Takes the NUL-separated keys a [`FILTER_KEYS`] listing gave.
+/// Returns unit, or `Invalid` with the owner's line naming the first hook key.
+#[cfg(unix)]
+fn hook_refusal(keys: &[u8]) -> Result<(), RunError> {
+    match listed_hook(keys) {
+        None => Ok(()),
+        Some(key) => Err(RunError::Invalid(format!(
+            "the project's Git config sets {key}, a hook the engine never runs; remove it from the repository's config, then start again"
+        ))),
+    }
+}
 
 /// The key the `-c` of [`FILTER_KEYS`] sets with its NUL, as git prints it at the end of a
 /// whole listing.
@@ -3273,12 +3365,14 @@ fn wait_bounded(mut child: Child, limit: Duration) -> Result<Ended, RunError> {
     }
 }
 
-/// Stops a setup command that ran past its limit: kills the process group it leads,
-/// reaps it and waits for the group to empty. Takes the command's process.
+/// Stops a setup command that ran past its limit: kills the process group it leads and
+/// the command itself, so one that leads no group still ends, reaps it and waits for the
+/// group to empty. Takes the command's process.
 #[cfg(unix)]
 fn stop_timed_out(child: &mut Child) {
     let group = child.id();
     kill_group(group);
+    let _ = child.kill();
     let _ = child.wait();
     await_group_exit(group);
 }
@@ -3878,6 +3972,70 @@ fn agent_failure(log: &Path, harness: ResearchHarness, max: u64) -> String {
     )
 }
 
+/// The names of the plain files in the owner's documents folder, at most
+/// `DOCUMENTS_LISTED_MAX` entries read, from the folder opened below the project's context
+/// folder with no link followed (RV-DS241-29), so a documents folder that is a link lists
+/// nothing. Inputs: the context folder and the documents folder in it. Output: the names,
+/// none when the folder is missing, a link or unreadable.
+#[cfg(unix)]
+fn document_names(context: &Path, documents: &Path) -> Vec<String> {
+    use rustix::fs::{AtFlags, Dir, FileType, OFlags, statat};
+    let Ok(below) = documents.strip_prefix(context) else {
+        return Vec::new();
+    };
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(folder) = crate::platform::open_beneath(context, below, flags) else {
+        return Vec::new();
+    };
+    let Ok(listing) = Dir::read_from(&folder) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for entry in listing
+        .flatten()
+        .filter(|entry| !matches!(entry.file_name().to_bytes(), b"." | b".."))
+        .take(DOCUMENTS_LISTED_MAX)
+    {
+        let plain = statat(&folder, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)
+            .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile);
+        if plain
+            && let Ok(name) = entry.file_name().to_str()
+            && !name.chars().any(char::is_control)
+        {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
+/// The names of the plain files in the owner's documents folder, at most
+/// `DOCUMENTS_LISTED_MAX` entries read, none when the folder is a link. Inputs: the context
+/// folder, unused, and the documents folder. Output: the names. Written, not tested.
+#[cfg(not(unix))]
+fn document_names(_context: &Path, documents: &Path) -> Vec<String> {
+    let real = fs::symlink_metadata(documents)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    let Some(entries) = real.then(|| fs::read_dir(documents).ok()).flatten() else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .take(DOCUMENTS_LISTED_MAX)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| !name.chars().any(char::is_control))
+        .collect()
+}
+
+/// Records that a claimed job's harness really started, so the project's activity shows a
+/// start only for a run that launched (DEC-170 addendum 6); a lost claim is left to the next
+/// heartbeat. Takes the job store and the job.
+fn noted_launch(jobs: &ResearchJobs, job: &ResearchJob) {
+    if let Err(error) = jobs.launched(job) {
+        eprintln!("research job {} start not recorded: {error}", job.id);
+    }
+}
+
 /// Reads a report or brief an agent may have replaced, opened from a folder the engine
 /// holds with no link followed in any part below it and no FIFO waited on, so an agent
 /// that swapped its temp folder for a link is refused; the file is kept only when regular
@@ -3917,17 +4075,7 @@ fn research_prompt(
         Err(error) => return Err(error.into()),
     };
     let documents_dir = context.join("documents");
-    let mut documents = Vec::new();
-    if let Ok(entries) = fs::read_dir(&documents_dir) {
-        for entry in entries.flatten().take(DOCUMENTS_LISTED_MAX) {
-            if entry.file_type().is_ok_and(|kind| kind.is_file())
-                && let Some(name) = entry.file_name().to_str()
-                && !name.chars().any(char::is_control)
-            {
-                documents.push(name.to_string());
-            }
-        }
-    }
+    let mut documents = document_names(&context, &documents_dir);
     documents.sort();
     let label = kind_label(kind);
     let mut prompt = format!(
@@ -6106,6 +6254,149 @@ mod tests {
         assert!(none.is_empty());
     }
 
+    /// The research prompt lists the owner's documents only from a real documents folder
+    /// below the project: a documents folder that is a link to a folder outside, as a
+    /// repository tracking `context/documents` as a link would make, lists none of that
+    /// folder's names (RV-DS241-29); a real one still lists its plain files.
+    #[test]
+    fn the_research_prompt_lists_no_documents_through_a_link() {
+        let folder = tempfile::tempdir().unwrap();
+        let base = folder.path().canonicalize().unwrap();
+        let root = base.join("project");
+        let outside = base.join("outside");
+        fs::create_dir_all(root.join("context")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("id_ed25519"), "key\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("context/documents")).unwrap();
+        let prompt = research_prompt(&root, "market_research", &[]).unwrap();
+        assert!(!prompt.contains("id_ed25519"), "{prompt}");
+        assert!(!prompt.contains("The owner attached these documents"));
+
+        fs::remove_file(root.join("context/documents")).unwrap();
+        fs::create_dir(root.join("context/documents")).unwrap();
+        fs::write(root.join("context/documents/pricing.pdf"), "pdf\n").unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("id_ed25519"),
+            root.join("context/documents/linked-key"),
+        )
+        .unwrap();
+        let prompt = research_prompt(&root, "market_research", &[]).unwrap();
+        assert!(
+            prompt.contains(": pricing.pdf. Read them if they help."),
+            "{prompt}"
+        );
+    }
+
+    /// DEC-170 addendum 6 (RV-DS241-26): a rate-limited end hands the attempt back, but the
+    /// third in a row ends the research job failed with the plain line, since its agent can
+    /// write the limit its harness reports. A run that ends another way starts the count
+    /// again.
+    #[test]
+    fn a_rate_limited_end_three_times_in_a_row_fails_the_research_job() {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        register_project(&root.database, "alpha", &folder);
+        let jobs = ResearchJobs::open(&root.database).unwrap();
+        let account = reference("codex-connection");
+        let id = jobs
+            .enqueue("alpha", "market_research", "codex", false)
+            .unwrap();
+        let mut ends = Vec::new();
+        for _ in 0..3 {
+            let held = jobs.claim("alpha", "runner-a", 1).unwrap().unwrap();
+            assert_eq!(held.id, id);
+            ends.push(jobs.rate_limited(&held, &account).unwrap().0);
+        }
+        assert_eq!(
+            ends,
+            [
+                ResearchStatus::Queued,
+                ResearchStatus::Queued,
+                ResearchStatus::Failed
+            ]
+        );
+        let job = jobs.get(id).unwrap().unwrap();
+        assert_eq!(
+            job.error.as_deref(),
+            Some("The account kept hitting its rate limit; run this research again later")
+        );
+        assert_eq!(job.claimer, None);
+        assert!(jobs.claim("alpha", "runner-a", 1).unwrap().is_none());
+
+        let again = jobs
+            .enqueue("alpha", "competitor_research", "codex", false)
+            .unwrap();
+        let mut ends = Vec::new();
+        for step in 0..5 {
+            let held = jobs.claim("alpha", "runner-a", 1).unwrap().unwrap();
+            assert_eq!(held.id, again);
+            ends.push(if step == 2 {
+                jobs.fail(&held, "Agent stopped with an error", 10).unwrap()
+            } else {
+                jobs.rate_limited(&held, &account).unwrap().0
+            });
+        }
+        assert_eq!(ends, [ResearchStatus::Queued; 5]);
+    }
+
+    /// DEC-170 addendum 6 (RV-DS241-27): a research job its runner hands back because a
+    /// projects home move holds its folder spends no attempt, is not claimed again until its
+    /// backoff ends, shows why it waits and records no start, since no harness ran.
+    #[test]
+    fn a_research_job_refused_for_a_home_move_backs_off_shows_why_and_records_no_start() {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        register_project(&root.database, "alpha", &folder);
+        let connection = rusqlite::Connection::open(&root.database).unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects_home_move VALUES (1,'request-7',7,?1,?2,'[\"repo\"]')",
+                rusqlite::params![
+                    root.base.to_str().unwrap(),
+                    root.base.join("next").to_str().unwrap()
+                ],
+            )
+            .unwrap();
+        let runner = ResearchRunner::new(
+            &root.database,
+            &root.state,
+            Path::new("/usr/bin/true"),
+            ResearchLimits::default(),
+        )
+        .unwrap();
+        let jobs = ResearchJobs::open(&root.database).unwrap();
+        let id = jobs
+            .enqueue("alpha", "market_research", "codex", false)
+            .unwrap();
+        let project = ResearchProject {
+            id: "alpha",
+            root: &folder,
+            account: None,
+        };
+        let run = runner.run_once(&project).unwrap().unwrap();
+        assert_eq!((run.job, run.status), (id, ResearchStatus::Queued));
+        assert!(
+            runner.run_once(&project).unwrap().is_none(),
+            "the job waits out its backoff"
+        );
+        let job = jobs.get(id).unwrap().unwrap();
+        assert_eq!((job.attempts, job.claimer), (0, None));
+        assert_eq!(
+            job.error.as_deref(),
+            Some("Waiting for the projects home move to finish")
+        );
+        let started: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM project_activity WHERE kind='research_started'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(started, 0, "no harness started");
+    }
+
     #[test]
     fn the_research_prompt_asks_for_owner_questions_in_the_shared_shape() {
         let folder = tempfile::tempdir().unwrap();
@@ -6459,6 +6750,90 @@ mod tests {
         );
     }
 
+    /// The engine's setup git runs unconfined with the agent's own tmp folder as its home,
+    /// so a global config an agent planted there names hooks that git 2.54 runs whatever
+    /// `core.hooksPath` says. The project repository the setup makes runs none of them
+    /// (RV-DS241-39 r2 F1).
+    #[test]
+    fn engine_setup_git_runs_no_hook_a_config_in_its_home_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let (project, tmp, markers) = (
+            base.join("project"),
+            base.join("tmp"),
+            base.join("markers"),
+        );
+        for folder in [&project, &tmp, &markers] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let mut config = String::new();
+        for event in [
+            "pre-commit",
+            "commit-msg",
+            "post-commit",
+            "reference-transaction",
+            "post-index-change",
+        ] {
+            config.push_str(&format!(
+                "[hook \"{event}\"]\n\tcommand = touch '{}'\n\tevent = {event}\n",
+                markers.join(event).display()
+            ));
+        }
+        fs::write(tmp.join(".gitconfig"), config).unwrap();
+        ensure_repository(&project, &tmp).unwrap();
+        assert!(project.join(".git").is_dir());
+        let ran: Vec<String> = fs::read_dir(&markers)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(ran, Vec::<String>::new());
+    }
+
+    /// A project whose own git config names hooks, which git 2.54 runs whatever
+    /// `core.hooksPath` says, gets no agent worktree: the setup refuses before its first git
+    /// write with a line naming the key, and no hook runs (RV-DS241-39 r2 F1).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_project_whose_config_names_a_hook_gets_no_agent_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let (project, home, tmp, profiles) = (
+            base.join("project"),
+            base.join("home"),
+            base.join("tmp"),
+            base.join("profiles"),
+        );
+        for folder in [&project, &home, &tmp, &profiles] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        ensure_repository(&project, &tmp).unwrap();
+        let worktrees = project.join("worktrees");
+        fs::create_dir_all(&worktrees).unwrap();
+        for (name, event) in [("x", "post-index-change"), ("y", "post-checkout")] {
+            let marker = worktrees.join(format!("hook-{name}"));
+            for (key, value) in [
+                ("command", format!("touch '{}'", marker.display())),
+                ("event", event.to_owned()),
+            ] {
+                let key = format!("hook.{name}.{key}");
+                assert!(engine_git(&project, &tmp, &["config", &key, &value]).unwrap());
+            }
+        }
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let profile = profiles.join("agent.sb");
+        sandbox.install(&profile).unwrap();
+        let refused = add_worktree(&sandbox, &profile, &worktrees.join("agent-1")).unwrap_err();
+        let RunError::Invalid(line) = &refused else {
+            panic!("{refused:?}");
+        };
+        assert!(line.contains("hook.x.command"), "{line}");
+        for name in ["x", "y"] {
+            let marker = worktrees.join(format!("hook-{name}"));
+            assert!(fs::symlink_metadata(&marker).is_err(), "{name}");
+        }
+    }
+
     /// Many agent worktrees add at once, each project in its own sandbox under one profile,
     /// the way a run of the team tests drives the setup path. Every add must succeed; a
     /// refusal here is the load flake the real-git setup fixes.
@@ -6577,6 +6952,57 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(20));
         let pid = rustix::process::Pid::from_raw(i32::try_from(group).unwrap()).unwrap();
         assert!(rustix::process::test_kill_process_group(pid).is_err());
+    }
+
+    /// A setup command that leads no process group of its own is still stopped at its
+    /// limit: the stop ends the command itself, not only a group it does not lead
+    /// (RV-DS241-28).
+    #[test]
+    fn a_bounded_setup_command_that_leads_no_group_is_stopped_at_its_limit() {
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = crate::spawn_gate::spawn(&mut command).unwrap();
+        let started = Instant::now();
+        assert_eq!(
+            wait_bounded(child, Duration::from_millis(200)).unwrap(),
+            Ended::TimedOut
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The engine's own git leads a process group of its own, so the setup time limit
+    /// stops git and every program git started (RV-DS241-28).
+    #[test]
+    fn engine_git_leads_its_own_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let folder = base.join("folder");
+        let tmp = base.join("tmp");
+        for made in [&folder, &tmp] {
+            fs::create_dir_all(made).unwrap();
+        }
+        let ran = engine_git(
+            &folder,
+            &tmp,
+            &["-c", "alias.group=!ps -o pgid= -p $$ > group.txt", "group"],
+        )
+        .unwrap();
+        assert!(ran);
+        let group: i32 = fs::read_to_string(folder.join("group.txt"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(group > 1);
+        assert_ne!(group, rustix::process::getpgrp().as_raw_nonzero().get());
     }
 
     /// A worktree add that git refuses names its own step, not the generic setup refusal:

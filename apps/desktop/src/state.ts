@@ -114,6 +114,9 @@ export interface Unconfirmed {
 
 export interface Session {
   engine: EngineState;
+  /** Why the last start found no engine, in plain words, when it says more than that the
+   * engine isn't running; null otherwise. */
+  engineProblem: string | null;
   unconfirmed: Unconfirmed | null;
   profileCheck: { busy: boolean } | null;
   stuckSignIn: { busy: boolean } | null;
@@ -146,6 +149,7 @@ export interface Session {
  * a change unconfirmed starts a few spaced automatic checks of that change. Output: the session. */
 export function useSession(): Session {
   const [engine, setEngine] = useState<EngineState>("connecting");
+  const [engineProblem, setEngineProblem] = useState<string | null>(null);
   const [unconfirmed, setUnconfirmed] = useState<Unconfirmed | null>(null);
   const tracking = useRef(false);
   const [profileCheck, setProfileCheck] = useState<{ busy: boolean } | null>(null);
@@ -165,7 +169,10 @@ export function useSession(): Session {
   const [foundTick, setFoundTick] = useState(0);
 
   function noteResult<T>(result: Result<T>): Result<T> {
-    if (result.kind === "error" && result.code === "engine_unreachable") setEngine("down");
+    if (result.kind === "error" && result.code === "engine_unreachable") {
+      setEngine("down");
+      setEngineProblem(null);
+    }
     if (result.kind === "error" && STUCK_SIGN_IN_CODES.includes(result.code)) void refreshStuckSignIn();
     return result;
   }
@@ -267,6 +274,7 @@ export function useSession(): Session {
     const result = await api.connect();
     const state = engineState(result);
     setEngine(state);
+    setEngineProblem(state === "down" && result.kind === "error" && result.code !== "engine_unreachable" ? result.message : null);
     setStuckSignIn(result.kind === "ok" && result.value.stuck_sign_in !== null ? { busy: false } : null);
     if (state !== "running") return;
     setRevision((value) => value + 1);
@@ -321,7 +329,7 @@ export function useSession(): Session {
   useEffect(() => { if (ready) void refreshProjects(); }, [ready]);
 
   return {
-    engine, unconfirmed, profileCheck, stuckSignIn, profile, projects, projectsMore, toast, toastOpen, revision, intake, found,
+    engine, engineProblem, unconfirmed, profileCheck, stuckSignIn, profile, projects, projectsMore, toast, toastOpen, revision, intake, found,
     retry: () => { void start(); },
     refreshIntake: (started?: IntakeJob) => {
       if (started) {

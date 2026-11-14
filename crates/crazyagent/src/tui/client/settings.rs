@@ -19,9 +19,9 @@ use crate::memory::library::{
 use crate::memory::{KnowledgeStatus, ReviewDecision};
 use crate::plugins::{HookView, Scope, ServerSpec, ServerView, SkillView, ToolView};
 use crate::protocol::CredentialRef;
-use crate::usage::money::MoneySettings;
+use crate::usage::money::MoneyChoice;
 use crate::usage::report::UsageReport;
-use crate::usage::spend::SpendSettings;
+use crate::usage::spend::SpendChoice;
 
 const POOL_JOINS_MAX: usize = 64;
 const SUGGESTION_PROJECTS_MAX: usize = 50;
@@ -71,8 +71,8 @@ pub(in crate::tui) enum SettingsJob {
     Extras {
         detail: bool,
     },
-    SetMoney(MoneySettings),
-    SetSpend(SpendSettings),
+    SetMoneyOne(MoneyChoice),
+    SetSpendOne(SpendChoice),
     Spend {
         account: CredentialRef,
         confirmed: bool,
@@ -261,8 +261,8 @@ impl std::fmt::Debug for SettingsJob {
             Self::Usage { .. } => "Usage",
             Self::RefreshUsage => "RefreshUsage",
             Self::Extras { .. } => "Extras",
-            Self::SetMoney(_) => "SetMoney",
-            Self::SetSpend(_) => "SetSpend",
+            Self::SetMoneyOne(_) => "SetMoneyOne",
+            Self::SetSpendOne(_) => "SetSpendOne",
             Self::Spend { .. } => "Spend",
             Self::DecideRecount(_) => "DecideRecount",
             Self::SignIn(_) => "SignIn",
@@ -462,8 +462,8 @@ impl SettingsEvent {
             SettingsJob::Usage { .. } => Self::Usage(Err(problem)),
             SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
             SettingsJob::Extras { .. } => Self::Extras(Err(problem)),
-            SettingsJob::SetMoney(_) => Self::MoneySet(Err(problem)),
-            SettingsJob::SetSpend(_) => Self::SpendSet(Err(problem)),
+            SettingsJob::SetMoneyOne(_) => Self::MoneySet(Err(problem)),
+            SettingsJob::SetSpendOne(_) => Self::SpendSet(Err(problem)),
             SettingsJob::Spend { .. } => Self::Spent(Err(problem)),
             SettingsJob::DecideRecount(_) => Self::RecountDecided(Err(problem)),
             SettingsJob::SignIn(_) => Self::SignIn(Err(problem)),
@@ -736,19 +736,19 @@ impl NativeOwner {
                     Err(error) => Err(error),
                 })
             }
-            SettingsJob::SetMoney(settings) => {
+            SettingsJob::SetMoneyOne(choice) => {
                 SettingsEvent::MoneySet(match self.settings_controller() {
                     Ok(controller) => controller
-                        .usage_set_money(settings)
+                        .usage_set_money_one(choice)
                         .await
                         .map_err(|error| problem(&error, lost)),
                     Err(error) => Err(error),
                 })
             }
-            SettingsJob::SetSpend(settings) => {
+            SettingsJob::SetSpendOne(choice) => {
                 SettingsEvent::SpendSet(match self.settings_controller() {
                     Ok(controller) => controller
-                        .usage_set_spend(settings)
+                        .usage_set_spend_one(choice)
                         .await
                         .map_err(|error| problem(&error, lost)),
                     Err(error) => Err(error),

@@ -3,6 +3,7 @@ use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -857,8 +858,8 @@ fn tilde_run(parts: &[(Vec<String>, usize)]) -> usize {
 
 /// Gathers what a status run reads beside the roadmap: the numbered items, the project's
 /// landed change sets, the newest commit subjects on the owner's checked-out branch and the
-/// tracked paths that look like tests, read through the engine's confined git and fenced as
-/// data. A folder that is no git checkout gives the items and the landed sets only. Inputs:
+/// tracked paths that look like tests, read by the engine's own git outside any sandbox,
+/// which runs nothing the repository configures, and fenced as data. A folder that is no git checkout gives the items and the landed sets only. Inputs:
 /// the project folder, the items and the landed sets, newest first, each as its name and
 /// title. Output: the evidence within `EVIDENCE_PACK_BYTES_MAX`, or a plain git code.
 pub fn evidence(
@@ -1075,12 +1076,20 @@ pub fn held(db: &Connection, project: &ProjectId, claim: Claim) -> bool {
 pub(crate) const RUN_NAME_HEAD: &str = "roadmap-status-";
 const RUN_NAME_BYTES_MAX: usize = 96;
 const RUN_TIME_DIGITS_MAX: usize = 19;
+const RUN_ID_HASH_BYTES: usize = 8;
 
-/// The part of a status run's state name that names its project: the head and the project
-/// id with every byte outside ASCII letters, digits, `-` and `_` written as `_`, cut so the
-/// name with its time fits `RUN_NAME_BYTES_MAX`. Input: the project. Output: the stem.
-pub(crate) fn run_stem(project: &ProjectId) -> String {
-    let room = RUN_NAME_BYTES_MAX - RUN_NAME_HEAD.len() - 1 - RUN_TIME_DIGITS_MAX;
+/// The bytes of a run's state name that stand for its project: the project id with every
+/// byte outside ASCII letters, digits, `-` and `_` written as `_` and cut to fit `room`, then
+/// `-` and the first `RUN_ID_HASH_BYTES` of the SHA-256 of the whole id in lowercase hex, so
+/// two ids that read the same once written or cut still get parts of their own (RV-DS241-45,
+/// RV-DS241-80 r1 F1). Inputs: the project and the room. Output: at most `room` bytes.
+pub(crate) fn run_project_part(project: &ProjectId, room: usize) -> String {
+    let hash: String = Sha256::digest(project.as_str().as_bytes())[..RUN_ID_HASH_BYTES]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(hash.len(), 2 * RUN_ID_HASH_BYTES);
+    assert!(room > hash.len() + 1);
     let named: String = project
         .as_str()
         .chars()
@@ -1091,9 +1100,19 @@ pub(crate) fn run_stem(project: &ProjectId) -> String {
                 '_'
             }
         })
-        .take(room)
+        .take(room - 1 - hash.len())
         .collect();
-    let stem = format!("{RUN_NAME_HEAD}{named}");
+    let part = format!("{named}-{hash}");
+    assert!(part.is_ascii() && part.len() <= room);
+    part
+}
+
+/// The part of a status run's state name that names its project: the head and the
+/// project's [`run_project_part`], sized so the name with its time fits
+/// `RUN_NAME_BYTES_MAX`. Input: the project. Output: the stem.
+pub(crate) fn run_stem(project: &ProjectId) -> String {
+    let room = RUN_NAME_BYTES_MAX - RUN_NAME_HEAD.len() - 1 - RUN_TIME_DIGITS_MAX;
+    let stem = format!("{RUN_NAME_HEAD}{}", run_project_part(project, room));
     assert!(stem.is_ascii());
     assert!(stem.len() + 1 + RUN_TIME_DIGITS_MAX <= RUN_NAME_BYTES_MAX);
     stem
