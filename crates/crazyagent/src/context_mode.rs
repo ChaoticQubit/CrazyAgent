@@ -50,6 +50,20 @@ pub fn for_launch(root: &Path, spec: ServerSpec) -> ServerSpec {
     spec
 }
 
+/// Whether the engine is installing the shared copy a pinned context-mode spec runs from,
+/// so [`for_launch`] still hands that spec back unchanged. Inputs: the engine root and the
+/// approved spec. Output: true only while that version's install runs in this engine.
+pub fn installing(root: &Path, spec: &ServerSpec) -> bool {
+    let Some((_, version)) = pinned(spec) else {
+        return false;
+    };
+    let folder = install_folder(root, version);
+    INSTALLING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&folder)
+}
+
 /// The shared install folder a launch spec from [`for_launch`] runs from, which an agent's
 /// sandbox must let it read whole, dependencies included. Input: the launch spec. Output:
 /// the install folder, or none for any other spec.

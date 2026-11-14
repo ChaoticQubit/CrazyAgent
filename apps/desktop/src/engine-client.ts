@@ -284,6 +284,7 @@ export function errorMessage(error: unknown): string {
     server_cant_start: "The server can't start.",
     server_exited: "The server stopped before answering.",
     server_check_timeout: "The server did not answer within 10 seconds.",
+    server_setting_up: "context-mode is still being set up. Check again in a minute.",
     server_output_too_large: "The server sent too much output.",
     server_refused: "The server refused the request.",
     server_reply_invalid: "The server's answer was not valid MCP.",

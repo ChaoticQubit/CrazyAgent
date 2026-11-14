@@ -404,3 +404,36 @@ fn no_package_script_runs_before_npm_s_record_of_the_tarball_hash_is_checked_aga
         "no package script runs before the pin is checked"
     );
 }
+
+#[test]
+fn only_a_pinned_spec_whose_install_runs_now_reads_as_installing() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("engine");
+    let pinned_spec = npx(&format!("context-mode@{VERSION}"));
+    assert!(
+        !installing(&root, &pinned_spec),
+        "no install runs for a new engine root"
+    );
+    let folder = install_folder(&root, VERSION);
+    INSTALLING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(folder.clone());
+    let during = installing(&root, &pinned_spec);
+    let loose = installing(&root, &npx("context-mode@latest"));
+    let other = installing(&directory.path().join("other"), &pinned_spec);
+    finish(&folder);
+    assert!(
+        during,
+        "the pinned spec reads as installing while its install runs"
+    );
+    assert!(
+        !loose,
+        "a tag never installs, so it never reads as installing"
+    );
+    assert!(!other, "another engine root's install is not this one's");
+    assert!(
+        !installing(&root, &pinned_spec),
+        "the install is over once it finished"
+    );
+}

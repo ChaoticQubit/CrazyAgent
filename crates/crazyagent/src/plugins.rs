@@ -537,6 +537,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "The server did not answer within 10 seconds.",
     ),
     (
+        "server_setting_up",
+        "context-mode is still being set up. Check again in a minute.",
+    ),
+    (
         "server_output_too_large",
         "The server sent too much output.",
     ),
@@ -781,6 +785,10 @@ mod tests {
         assert_eq!(
             check_problem("server_exited"),
             "The server stopped before answering."
+        );
+        assert_eq!(
+            check_problem("server_setting_up"),
+            "context-mode is still being set up. Check again in a minute."
         );
         for other in ["server_cant_start", "no_such_code", CHECK_REFUSED, ""] {
             assert_eq!(check_problem(other), "The server can't start.", "{other:?}");

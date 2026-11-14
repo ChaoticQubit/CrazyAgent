@@ -1526,17 +1526,18 @@ fn boundary_check(
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     assert!(valid_id(id));
-    let launched = crate::context_mode::for_launch(
-        root,
-        ServerSpec::Stdio {
-            command: command.to_owned(),
-            args: args.to_vec(),
-        },
-    );
+    let approved = ServerSpec::Stdio {
+        command: command.to_owned(),
+        args: args.to_vec(),
+    };
+    let launched = crate::context_mode::for_launch(root, approved.clone());
     let ServerSpec::Stdio { command, args } = &launched else {
         return Err("server_check_command_only".into());
     };
     let install = crate::context_mode::shared_install(&launched);
+    if install.is_none() && crate::context_mode::installing(root, &approved) {
+        return Err("server_setting_up".into());
+    }
     let program = Path::new(command);
     match std::fs::metadata(program) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

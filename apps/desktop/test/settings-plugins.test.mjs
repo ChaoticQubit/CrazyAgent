@@ -32,6 +32,7 @@ test("plugin refusals from the engine read as the plugin sentences, not the gene
   assert.equal(api.plainError("hooks_none_found"), "This folder has no Claude Code hooks.");
   assert.equal(api.plainError("hooks_plugin_manifest_missing"), "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.");
   assert.equal(api.plainError("hook_plugin_name_invalid"), "The plugin name must be 1 to 32 letters, digits, ., - or _.");
+  assert.equal(api.plainError("server_setting_up"), "context-mode is still being set up. Check again in a minute.");
   assert.equal(api.classifyFailure({ code: "server_secret_invalid" }).message, "Enter the secret on one line, up to 8192 characters.");
   assert.equal(api.plainError("picker_failed"), "Couldn't open the folder chooser. Type the full path instead.");
   assert.equal(api.plainError("skillful <b>"), "Something went wrong. Try again. (unknown)");

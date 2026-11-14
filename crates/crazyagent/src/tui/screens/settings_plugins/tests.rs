@@ -1434,3 +1434,11 @@ fn every_plugins_hint_stays_on_the_bar_at_80_by_24_with_the_last_server_in_view(
         rows.join("\n")
     );
 }
+
+#[test]
+fn a_check_while_context_mode_is_set_up_reads_the_setting_up_words() {
+    assert_eq!(
+        plugin_plain("server_setting_up"),
+        "context-mode is still being set up. Check again in a minute."
+    );
+}
