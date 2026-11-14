@@ -220,6 +220,20 @@ pub fn run(
     )
 }
 
+/// How long the loop waits for a key before it looks again: a frame while an agent terminal
+/// streams, a tick while an engine reply is awaited, a request waits to go or the shell
+/// animates, otherwise the idle wake. Inputs: whether a terminal streams, whether a reply or
+/// a request waits, and whether the shell animates. Output: the wait.
+fn wake(streaming: bool, awaiting: bool, animating: bool) -> Duration {
+    if streaming {
+        STREAM_WAKE
+    } else if awaiting || animating {
+        TICK
+    } else {
+        IDLE_WAKE
+    }
+}
+
 fn drive(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     shell: &mut Shell,
@@ -319,13 +333,7 @@ fn drive(
             dirty = false;
         }
         let waiting = shell.ctx.link == Link::Ready && shell.ctx.queued() > 0;
-        let wait = if terminals.live() {
-            STREAM_WAKE
-        } else if shell.busy() || connection.busy() || waiting {
-            TICK
-        } else {
-            IDLE_WAKE
-        };
+        let wait = wake(terminals.live(), connection.busy() || waiting, shell.busy());
         if !event::poll(wait).map_err(|error| TuiError(error.to_string()))? {
             continue;
         }
@@ -589,6 +597,18 @@ fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_engine_reply_the_loop_waits_for_is_read_within_a_frame_not_a_tick() {
+        assert!(STREAM_WAKE < TICK);
+        assert!(TICK < IDLE_WAKE);
+        for animating in [false, true] {
+            assert_eq!(wake(false, true, animating), STREAM_WAKE, "a reply or request waits");
+            assert_eq!(wake(true, false, animating), STREAM_WAKE, "a terminal streams");
+        }
+        assert_eq!(wake(false, false, true), TICK, "only the shell animates");
+        assert_eq!(wake(false, false, false), IDLE_WAKE, "nothing waits");
+    }
 
     #[test]
     fn a_restore_hands_the_terminal_back_in_full() {
