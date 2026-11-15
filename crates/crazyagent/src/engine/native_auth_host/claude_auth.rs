@@ -259,7 +259,7 @@ pub(in crate::engine) async fn run(
         + match first {
             Some(ClaudeAuthCommand::Login) => Duration::from_secs(590),
             None => CHECK_TIME + RENEWAL_TIME,
-            _ => CHECK_TIME,
+            _ => CHECK_TIME + CHECK_TIME,
         };
     if matches!(
         session.check(channel).await?,

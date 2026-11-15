@@ -21,14 +21,15 @@ const CHECK: Duration = Duration::from_millis(100);
 
 /// The longest one official `claude` command may run, inside its operation's own deadline. A
 /// status may use the whole account check bound: under build load a cold start passed 2 s and
-/// cut checks of signed-in accounts (v2.4.0 owner update). Input: the command. Output: its
-/// bound.
+/// cut checks of signed-in accounts (v2.4.0 owner update). A logout starts the same cold
+/// `claude`, so it may too, and is never cut partway through removing a sign-in
+/// (RV-DS241-55). Input: the command. Output: its bound.
 pub(super) fn command_bound(action: ClaudeAuthCommand) -> Duration {
     match action {
         ClaudeAuthCommand::Login => Duration::from_secs(575),
         ClaudeAuthCommand::Renew => RENEWAL_TIME,
         ClaudeAuthCommand::Status => CHECK_TIME,
-        ClaudeAuthCommand::Logout => Duration::from_secs(2),
+        ClaudeAuthCommand::Logout => CHECK_TIME,
     }
 }
 

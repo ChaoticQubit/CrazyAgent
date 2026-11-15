@@ -32,6 +32,10 @@ use std::task::Poll;
 
 const READ_BOUND: Duration = Duration::from_secs(10);
 const CLEANUP_BOUND: Duration = Duration::from_secs(2);
+/// The longest a logout's custody holds its slot: a `claude auth logout` and the status
+/// check after it, each allowed the whole 9 s account check bound, plus the launch and the
+/// exchanges around them; a Codex logout's own 5 s fits inside it (RV-DS241-55).
+const LOGOUT_BOUND: Duration = Duration::from_secs(30);
 
 #[cfg(all(test, unix))]
 thread_local! {
@@ -60,7 +64,7 @@ async fn held_reply() {
 fn operation_bound(fact: &NativeAuthFact) -> Duration {
     match fact.action {
         NativeAuthAction::SignIn { method } => method.sign_in_window(),
-        NativeAuthAction::Logout => READ_BOUND,
+        NativeAuthAction::Logout => LOGOUT_BOUND,
     }
 }
 
