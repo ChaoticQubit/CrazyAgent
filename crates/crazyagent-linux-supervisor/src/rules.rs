@@ -524,8 +524,20 @@ mod tests {
             assert!(is_git(OsStr::new(name)), "a name some filesystem reads as .git: {name:?}");
         }
         let others = [
-            "git", ".gi", ".gitignore", " .git", "..git", "", ".", "x.git", "\u{65e5}.git", ".git2.",
-            ".g\u{131}t", ".gi\u{fffd}t", ".git\u{e9}", ". git",
+            "git",
+            ".gi",
+            ".gitignore",
+            " .git",
+            "..git",
+            "",
+            ".",
+            "x.git",
+            "\u{65e5}.git",
+            ".git2.",
+            ".g\u{131}t",
+            ".gi\u{fffd}t",
+            ".git\u{e9}",
+            ". git",
         ];
         for name in others {
             assert!(!is_git(OsStr::new(name)), "{name:?}");
@@ -712,7 +724,7 @@ mod tests {
         assert_eq!(dest(&unix(b"\0name\0x")), Dest::UnixName(b"name\0x".to_vec()));
         assert_eq!(dest(&[0u8; 16]), Dest::Unspec);
         assert_eq!(dest(&AF_UNSPEC.to_ne_bytes()), Dest::Unspec);
-        let netlink = [&16u16.to_ne_bytes()[..], &[0u8; 10]].concat();
+        let netlink = [&16u16.to_ne_bytes()[..], &[0u8; 10][..]].concat();
         assert_eq!(dest(&netlink), Dest::Other);
         assert_eq!(dest(&v4([127, 0, 0, 1], 8080)[..7]), Dest::Other, "a cut address");
         assert_eq!(dest(&[]), Dest::Other);
