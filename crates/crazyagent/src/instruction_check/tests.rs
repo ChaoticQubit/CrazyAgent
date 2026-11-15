@@ -99,6 +99,34 @@ fn a_file_reference_counts_only_when_shaped_as_a_file_the_project_lacks() {
     assert!(broken(text, &app).is_empty(), "no files for the app");
 }
 
+/// DEC-172 r2 F1: a path through a link inside the project is never judged, so whether the
+/// link's outside target is there never decides a finding and nothing outside is read, while
+/// a missing plain file beside the links still counts.
+#[cfg(unix)]
+#[test]
+fn a_file_reference_through_a_link_is_never_judged_whatever_lies_outside() {
+    let directory = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let folder = directory.path().canonicalize().unwrap();
+    std::fs::create_dir_all(folder.join("docs")).unwrap();
+    let kept = outside.path().join("kept.md");
+    let gone = outside.path().join("gone.md");
+    std::fs::write(&kept, "kept").unwrap();
+    std::os::unix::fs::symlink(&kept, folder.join("docs/kept.md")).unwrap();
+    std::os::unix::fs::symlink(&gone, folder.join("docs/gone.md")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), folder.join("away")).unwrap();
+    let text = "Read `docs/kept.md`, `docs/gone.md`, `away/kept.md` and `away/gone.md`.\n\
+                Then `docs/plain.md`.\n";
+    let known = Known {
+        folder: Some(folder.as_path()),
+        skills: None,
+        servers: None,
+        program: &nothing,
+    };
+    let plain = "`docs/plain.md` is not a file or folder in this project.";
+    assert_eq!(noted(broken(text, &known)), [one(plain, &[2])]);
+}
+
 #[test]
 fn a_skill_reference_counts_only_on_a_skill_line_and_only_for_a_skill_not_given() {
     let skills = vec!["grill-me".to_owned(), "brainstorming".to_owned()];
