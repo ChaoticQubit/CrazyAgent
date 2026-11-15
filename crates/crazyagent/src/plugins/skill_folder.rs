@@ -1185,4 +1185,29 @@ mod tests {
             );
         }
     }
+
+    /// DS-148 code F1: a folder named `.git` with a code point HFS+ ignores in names, before
+    /// the dot or inside, is left out like `.git` itself, since such a volume opens it as
+    /// `.git`.
+    #[test]
+    fn a_git_folder_spelled_with_a_code_point_hfs_ignores_is_left_out() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("store")).unwrap();
+        let source = skill(root.path(), GOOD);
+        let spelled = ["\u{feff}.git", ".g\u{200c}it", "scripts/\u{200d}.Git"];
+        for folder in spelled {
+            fs::create_dir(source.join(folder)).unwrap();
+            fs::write(source.join(folder).join("config"), "[core]\n").unwrap();
+        }
+        for (index, rules) in [PICKED, IMPORTED].iter().enumerate() {
+            let destination = root.path().join("store").join(index.to_string());
+            copy_with(&source, &destination, rules).unwrap();
+            for folder in spelled {
+                assert!(
+                    fs::symlink_metadata(destination.join(folder)).is_err(),
+                    "{folder} was copied under {rules:?}"
+                );
+            }
+        }
+    }
 }

@@ -3093,7 +3093,8 @@ fn the_ide_plants_no_admin_root_under_a_kelvin_or_long_s_spelling() {
 /// planted `core.fsmonitor` and no later agent reads planted instructions. Nor under a
 /// spelling holding a code point HFS+ ignores in names (U+200C, U+FEFF), which that volume
 /// opens as the plain name, and it reads no project file whose path holds one. A project
-/// file named with such a fold of letters no rule protects stays writable.
+/// file named with such a fold of letters no rule protects stays writable and readable, as
+/// does one whose name holds other letters beside such a code point, as Persian names do.
 #[test]
 fn the_ide_plants_no_git_config_or_instructions_under_a_ligature_or_hfs_ignored_spelling() {
     let s = server();
@@ -3117,8 +3118,13 @@ fn the_ide_plants_no_git_config_or_instructions_under_a_ligature_or_hfs_ignored_
     let hidden = s.root.join("no\u{200c}tes.md");
     fs::write(&hidden, "owner\n").unwrap();
     assert!(!sh(&s.profile, r#"/bin/cat "$1""#, &hidden));
-    for kept in [s.root.join("Gro\u{df}.md"), s.root.join("o\u{fb03}ce.md")] {
+    for kept in [
+        s.root.join("Gro\u{df}.md"),
+        s.root.join("o\u{fb03}ce.md"),
+        s.root.join("\u{646}\u{627}\u{645}\u{200c}\u{647}\u{627}.md"),
+    ] {
         assert!(sh(&s.profile, write, &kept), "{}", kept.display());
+        assert!(sh(&s.profile, r#"/bin/cat "$1""#, &kept), "{}", kept.display());
     }
     crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
 }

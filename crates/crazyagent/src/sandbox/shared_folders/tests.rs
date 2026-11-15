@@ -749,3 +749,23 @@ fn the_secret_names_hold_every_kind_the_owner_asked_for() {
         assert!(joined.contains(kind), "{kind}");
     }
 }
+
+/// DS-148 code F1: an engine name spelled with a code point HFS+ ignores in names, or in
+/// another letter case, is never written and never a plain chosen name, since such a
+/// volume opens it as the engine's own folder.
+#[test]
+fn an_engine_name_in_any_spelling_the_volume_opens_is_never_written_or_chosen() {
+    let scratch = tempfile::tempdir().unwrap();
+    let root = scratch.path();
+    for name in [
+        "\u{feff}.git",
+        "graphify\u{200d}-out",
+        "GRAPHIFY-OUT",
+        "cont\u{200c}ext",
+    ] {
+        assert!(never_written(root, name), "{name}");
+    }
+    for name in ["\u{feff}.git", "\u{200c}.crazyagent", "graphify\u{feff}-out"] {
+        assert!(!plain_name(name), "{name}");
+    }
+}

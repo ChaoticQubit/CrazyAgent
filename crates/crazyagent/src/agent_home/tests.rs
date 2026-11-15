@@ -195,6 +195,28 @@ fn a_linked_instruction_file_or_state_folder_is_never_read() {
     );
 }
 
+/// SA vid 11 link route: an instructions file with a second hard link, such as one code in
+/// the IDE made before its deny, is never read, since a write through the other name
+/// rewrites the owner's text; once that name is gone the file reads again.
+#[cfg(unix)]
+#[test]
+fn an_instructions_file_with_a_second_hard_link_is_never_read() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let folder = project.folder.clone().unwrap();
+    let file = folder.join(".crazyagent/instructions.md");
+    fs::write(&file, "Owner rules.\n").unwrap();
+    let alias = folder.join("notes.md");
+    fs::hard_link(&file, &alias).unwrap();
+    assert_eq!(read_project(&folder).unwrap_err().0, "process_text_unsafe");
+    fs::remove_file(&alias).unwrap();
+    assert_eq!(read_project(&folder).unwrap(), "Owner rules.\n");
+    let app = project.data.join(APP_FILE);
+    fs::write(&app, "App rules.\n").unwrap();
+    fs::hard_link(&app, root.join("app-alias")).unwrap();
+    assert_eq!(read_app(&project.data).unwrap_err().0, "process_text_unsafe");
+}
+
 #[test]
 fn render_puts_app_text_first_and_project_text_last_under_headings() {
     assert_eq!(render("", " \n", Repeated::LeaveOut), "");

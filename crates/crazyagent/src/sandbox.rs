@@ -4840,25 +4840,30 @@ mod profile_string_tests {
     /// SA vid 202: a name is spelled with every code point the case-insensitive volume folds
     /// onto its letters, also those for two or three letters (U+00DF and U+1E9E for `ss`,
     /// U+FB00 to U+FB06 for `ff`, `fi`, `fl`, `ffi`, `ffl` and `st`), and the Greek question
-    /// mark and varia for `;` and the backtick. In a pattern a fold reaches into a wildcard
+    /// mark and varia for `;` and the backtick, and U+0131 for `i` as NTFS maps it. In a
+    /// pattern a fold reaches into a wildcard
     /// next to the letters, never into a literal or an alternation, so the env templates the
     /// secret rule gives back stay exact.
     #[test]
     fn a_name_is_spelled_with_every_fold_of_the_volume_also_for_two_or_three_letters() {
         let spelled = [
-            ("config", "[cC][oO][nN]([fF][iI]|\u{fb01})[gG]"),
+            ("config", "[cC][oO][nN]([fF](i|I|\u{131})|\u{fb01})[gG]"),
             (
                 "instructions.md",
                 concat!(
-                    "[iI][nN]((s|S|\u{17f})[tT]|\u{fb05}|\u{fb06})",
-                    "[rR][uU][cC][tT][iI][oO][nN](s|S|\u{17f})\\.[mM][dD]",
+                    "(i|I|\u{131})[nN]((s|S|\u{17f})[tT]|\u{fb05}|\u{fb06})",
+                    "[rR][uU][cC][tT](i|I|\u{131})[oO][nN](s|S|\u{17f})\\.[mM][dD]",
                 ),
             ),
             (
                 ".ssh",
                 "\\.((s|S|\u{17f})(s|S|\u{17f})|\u{df}|\u{1e9e})[hH]",
             ),
-            ("ffi", "([fF][fF][iI]|[fF]\u{fb01}|\u{fb00}[iI]|\u{fb03})"),
+            (
+                "ffi",
+                "([fF][fF](i|I|\u{131})|[fF]\u{fb01}|\u{fb00}(i|I|\u{131})|\u{fb03})",
+            ),
+            (".git", "\\.[gG](i|I|\u{131})[tT]"),
             ("k", "(k|K|\u{212a})"),
             (";`", "(;|\u{37e})(`|\u{1fef})"),
         ];
@@ -4867,7 +4872,7 @@ mod profile_string_tests {
         }
         assert_eq!(
             fold_case(".*service"),
-            ".*((s|S|\u{17f})|\u{df}|\u{1e9e})[eE][rR][vV][iI][cC][eE]"
+            ".*((s|S|\u{17f})|\u{df}|\u{1e9e})[eE][rR][vV](i|I|\u{131})[cC][eE]"
         );
         assert_eq!(
             fold_case("of.*"),

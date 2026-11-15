@@ -1619,17 +1619,18 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
     );
     let text = sandbox.profile();
     let pattern = case.project.display().to_string().replace('.', "\\.");
-    let dot_git = "\\.[gG][iI][tT]";
+    let any_i = "(i|I|\u{131})";
+    let dot_git = format!("\\.[gG]{any_i}[tT]");
     let state = "\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]";
     let context = "[cC][oO][nN][tT][eE][xX][tT](/.*)?";
     let any_k = "(k|K|\u{212a})";
     let any_s = "(s|S|\u{17f})";
     let st = format!("({any_s}[tT]|\u{fb05}|\u{fb06})");
-    let fi = "([fF][iI]|\u{fb01})";
+    let fi = format!("([fF]{any_i}|\u{fb01})");
     for path in [
         context.to_owned(),
         format!("{state}/{context}"),
-        format!("{state}/[iI][nN]{st}[rR][uU][cC][tT][iI][oO][nN]{any_s}\\.[mM][dD]"),
+        format!("{state}/{any_i}[nN]{st}[rR][uU][cC][tT]{any_i}[oO][nN]{any_s}\\.[mM][dD]"),
         format!("{dot_git}/[hH][oO][oO]{any_k}{any_s}(/.*)?"),
         format!("{dot_git}/[cC][oO][nN]{fi}[gG]"),
         format!("{dot_git}/[cC][oO][nN]{fi}[gG]\\.[lL][oO][cC]{any_k}"),
