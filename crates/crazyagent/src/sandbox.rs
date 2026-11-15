@@ -4444,6 +4444,33 @@ pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
 }
 
 #[cfg(test)]
+mod harness_folder_tests {
+    use super::credential_places;
+    use crate::harnesses::registry::registry;
+
+    #[test]
+    fn the_owner_secret_list_holds_every_harness_folder_where_the_three_stood_before() {
+        let places: Vec<&str> = credential_places().collect();
+        let from = places
+            .iter()
+            .position(|place| *place == ".kube")
+            .unwrap()
+            + 1;
+        let to = places
+            .iter()
+            .position(|place| *place == ".cargo/credentials")
+            .unwrap();
+        let listed: Vec<&str> = registry()
+            .all()
+            .iter()
+            .flat_map(|harness| harness.owner_folders().iter().map(String::as_str))
+            .collect();
+        assert_eq!(places[from..from + 3], [".codex", ".claude", ".claude.json"]);
+        assert_eq!(places[from..to], listed);
+    }
+}
+
+#[cfg(test)]
 mod windows_path_tests {
     use super::windows_clean_text;
 

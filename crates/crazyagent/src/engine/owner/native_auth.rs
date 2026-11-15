@@ -1267,9 +1267,29 @@ auth = { method = "native_managed", profile_ref = "codex-profile" }"#,
             NativeAuthMethod::for_way("codex", SignInWay::Check),
             Some(NativeAuthMethod::CodexExisting)
         );
-        assert!(SignInWay::Code.unavailable("claude").is_some());
+        for way in SignInWay::ALL {
+            for harness in ["claude-code", "opencode"] {
+                assert_eq!(
+                    NativeAuthMethod::for_way(harness, way),
+                    None,
+                    "{harness} {way:?}"
+                );
+                assert_eq!(
+                    way.unavailable(harness),
+                    Some("This account kind has no managed sign-in."),
+                    "{harness} {way:?}"
+                );
+            }
+        }
+        assert_eq!(
+            SignInWay::Code.unavailable("claude"),
+            Some("Claude Code has no sign-in code. It signs in through your browser.")
+        );
         assert!(SignInWay::Code.unavailable("codex").is_none());
-        assert!(SignInWay::Check.unavailable("rcli").is_some());
+        assert_eq!(
+            SignInWay::Check.unavailable("rcli"),
+            Some("This account kind has no managed sign-in.")
+        );
     }
 
     #[test]

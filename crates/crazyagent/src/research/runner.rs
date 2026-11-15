@@ -4304,6 +4304,21 @@ mod tests {
     use crate::protocol::{ConfigId, CredentialRef, Cursor};
     use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn research_runs_on_codex_and_on_claude_code_under_both_its_names_and_on_nothing_else() {
+        assert_eq!(ResearchHarness::of("codex"), Some(ResearchHarness::Codex));
+        for name in ["claude", "claude-code"] {
+            assert_eq!(
+                ResearchHarness::of(name),
+                Some(ResearchHarness::ClaudeCode),
+                "{name}"
+            );
+        }
+        for name in ["rcli", "opencode", "pi", "aider", ""] {
+            assert_eq!(ResearchHarness::of(name), None, "{name}");
+        }
+    }
+
     /// A Claude Code research agent with no signed-in account handed to it gets one agent
     /// keychain of its own as its home's default and search list, and a Codex one gets no
     /// keychain folder at all (DEC-146 r1 KCA-M2).
