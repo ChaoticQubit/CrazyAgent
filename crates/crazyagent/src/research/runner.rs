@@ -883,6 +883,10 @@ impl ResearchRunner {
                 let status = jobs.refused(&job, ACCOUNT_WAITING)?;
                 Ok(run(status, None, None))
             }
+            Err(RunError::Invalid(line)) if owner_refusal(&line) => {
+                let status = jobs.fail(&job, &line, 1)?;
+                Ok(run(status, None, None))
+            }
             Err(error) => {
                 let (reason, attempts_max) = match &error {
                     RunError::Context(problem) => (
@@ -2737,6 +2741,24 @@ pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<
     Ok(wait_bounded(crate::spawn_gate::spawn(&mut command)?, SETUP_TIMEOUT)? == Ended::Succeeded)
 }
 
+/// The owner's line refusing agents a folder of the owner's that is no git repository.
+/// Only the owner's `git init` and first commit clear it, so a research job meeting it fails
+/// on that try with this line (RV-DS241-158).
+const NOT_A_REPOSITORY: &str = "The project folder is not a git repository, so agents cannot get their own copy of it; run git init there and make a first commit";
+
+/// How the owner's line refusing a worktree in a repository whose effective Git config
+/// names a hook starts. Only the owner's change to that config clears it, so a research job
+/// meeting it fails on that try with the line (RV-DS241-158).
+const HOOK_REFUSAL_START: &str = "The project's Git config sets ";
+
+/// Whether a setup refusal is one only the owner's change to the project clears, a hook
+/// its Git config names or an owner's folder that is no repository, which a later attempt
+/// meets again. Takes the refusal's line, the engine's own words with at most a hook key
+/// `listed_hook` bounded. Returns true for those two refusals only.
+fn owner_refusal(line: &str) -> bool {
+    line.starts_with(HOOK_REFUSAL_START) || line == NOT_A_REPOSITORY
+}
+
 /// Makes a project folder the engine created a git repository with one empty start commit,
 /// one setup per repository at a time. A folder with any `.git` entry is the owner's repository and
 /// stays as it is; an owner's folder holding `.crazyagent/`, or that folder itself, never
@@ -2750,9 +2772,7 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
     let owners = root.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY)
         || fs::symlink_metadata(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).is_ok();
     if owners {
-        return Err(RunError::Invalid(
-            "the project folder is not a git repository, so agents cannot get their own copy of it; run git init there and make a first commit".into(),
-        ));
+        return Err(RunError::Invalid(NOT_A_REPOSITORY.into()));
     }
     let git = |arguments: &[&str]| engine_git(root, tmp, arguments);
     let created = git(&["init", "-q", "--template="])?
@@ -3228,7 +3248,7 @@ fn hook_refusal(keys: &[u8]) -> Result<(), RunError> {
     match listed_hook(keys) {
         None => Ok(()),
         Some(key) => Err(RunError::Invalid(format!(
-            "the project's Git config sets {key}, a hook the engine never runs; remove it from the repository's config, then start again"
+            "{HOOK_REFUSAL_START}{key}, a hook the engine never runs; remove it from the repository's config, then start again"
         ))),
     }
 }
