@@ -8,9 +8,8 @@ use super::hold::{HoldError, REASON};
 use async_io::Async;
 use std::io;
 use std::os::fd::OwnedFd;
-use std::os::linux::net::SocketAddrExt;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::net::{SocketAddr, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Duration;
 use zbus::address::transport::{Transport, UnixSocket};
@@ -67,8 +66,8 @@ impl ReadHalf for NoDescriptors {
     }
 }
 
-/// Connects to the session bus the environment names, read the way zbus reads it. Output:
-/// the connected socket, close-on-exec as every std socket is, or `Unavailable`.
+/// Connects to the session bus the environment names, read the way zbus reads it, inside
+/// the spawn gate. Output: the connected socket, close-on-exec, or `Unavailable`.
 fn session_socket() -> Result<UnixStream, HoldError> {
     let address = zbus::Address::session()
         .map_err(|problem| HoldError::unavailable("session bus", problem))?;
@@ -76,9 +75,8 @@ fn session_socket() -> Result<UnixStream, HoldError> {
         return Err(HoldError::unavailable("session bus", "not a local socket"));
     };
     let connected = match unix.path() {
-        UnixSocket::File(path) => UnixStream::connect(path),
-        UnixSocket::Abstract(name) => SocketAddr::from_abstract_name(name.as_bytes())
-            .and_then(|at| UnixStream::connect_addr(&at)),
+        UnixSocket::File(path) => crate::spawn_gate::connect_unix_std(path),
+        UnixSocket::Abstract(name) => crate::spawn_gate::connect_unix_abstract_std(name.as_bytes()),
         _ => return Err(HoldError::unavailable("session bus", "not a socket path")),
     };
     connected.map_err(|problem| HoldError::unavailable("session bus", problem))

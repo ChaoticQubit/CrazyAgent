@@ -256,6 +256,17 @@ pub fn connect_unix_std(
     guarded(|| std::os::unix::net::UnixStream::connect(&address))
 }
 
+/// Connects a blocking Unix stream to a Linux abstract socket name inside the gate, as a
+/// D-Bus session bus started outside systemd may listen on. Input: the name without its
+/// leading NUL. Output: the stream.
+#[cfg(target_os = "linux")]
+#[allow(clippy::disallowed_methods)]
+pub fn connect_unix_abstract_std(name: &[u8]) -> io::Result<std::os::unix::net::UnixStream> {
+    use std::os::linux::net::SocketAddrExt;
+    let address = std::os::unix::net::SocketAddr::from_abstract_name(name)?;
+    guarded(|| std::os::unix::net::UnixStream::connect_addr(&address))
+}
+
 /// Accepts one waiting connection on a non-blocking Unix listener inside the gate, never
 /// waiting for one. Input: the listener. Output: the stream, or `WouldBlock` when none
 /// waits, or the accept failure.
