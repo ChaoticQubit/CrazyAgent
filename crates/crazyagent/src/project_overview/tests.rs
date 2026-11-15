@@ -2238,3 +2238,44 @@ fn the_name_of_an_overview_run_is_read_back_as_its_own_projects_only() {
         assert!(!names_run(&demo, odd), "{odd}");
     }
 }
+
+/// RV-DS241-80/81: an engine start forgets the Overview rows of a project that is no longer
+/// recorded, left by a removal from before they went with it, so its stale row stops
+/// queueing a run every minute; a recorded project keeps its rows, and with no project
+/// record to check against nothing is forgotten.
+#[test]
+fn an_engine_start_forgets_the_overview_rows_of_projects_that_are_gone() {
+    let (db, _, _folder) = case();
+    db.execute_batch(
+        "INSERT INTO project_overview(project, stale) VALUES ('alpha', 1), ('gone', 1);
+         INSERT INTO project_overview_tabs(project, tab) VALUES
+           ('alpha', 'features'), ('gone', 'features');",
+    )
+    .unwrap();
+    let rows = |db: &Connection| -> Vec<String> {
+        db.prepare(
+            "SELECT project FROM project_overview UNION ALL
+             SELECT project FROM project_overview_tabs ORDER BY 1",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    };
+
+    close_orphans(&db).unwrap();
+    assert_eq!(
+        rows(&db),
+        ["alpha", "alpha", "gone", "gone"],
+        "no project record, nothing forgotten"
+    );
+    db.execute_batch(
+        "CREATE TABLE projects(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+         INSERT INTO projects VALUES ('alpha', '{}');",
+    )
+    .unwrap();
+    close_orphans(&db).unwrap();
+
+    assert_eq!(rows(&db), ["alpha", "alpha"]);
+}

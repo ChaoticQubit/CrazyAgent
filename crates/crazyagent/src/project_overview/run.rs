@@ -506,8 +506,10 @@ pub(crate) fn waits_for_account(stored: &str) -> bool {
 
 /// Makes the Overview tables and closes every run an engine that stopped left open: a run
 /// lives on a thread of its engine, so at engine start none can still report, and each is
-/// closed with [`UNFINISHED`] without a new try. Input: the connection. Output: how many
-/// runs were closed, or `overview_unavailable`.
+/// closed with [`UNFINISHED`] without a new try. Then forgets the Overview rows of projects
+/// no longer recorded, which removals from before they went with their project left
+/// (RV-DS241-80/81). Input: the connection. Output: how many runs were closed, or
+/// `overview_unavailable`.
 pub fn close_orphans(db: &Connection) -> Result<usize, EngineError> {
     super::initialize(db)?;
     let closed = db
@@ -525,5 +527,7 @@ pub fn close_orphans(db: &Connection) -> Result<usize, EngineError> {
         )
         .map_err(unavailable)?;
     assert_eq!(open, 0, "no run stays open once every open one is closed");
+    crate::project_setup::forget_removed(db, &["project_overview", "project_overview_tabs"])
+        .map_err(unavailable)?;
     Ok(closed)
 }
