@@ -900,7 +900,7 @@ export const OVERLAP_CHOICES = ["warn", "block", "off", "wait"] as const;
  * engine's `coord::settings::BARE_NO_HOOKS` says it (DEC-141 PA-12). */
 export const BARE_NO_HOOKS = "Claude Code on an API key or URL account starts without hooks, so it runs none of your hooks and Block and Wait cannot hold its edits.";
 /** Why an rcli master gets no hooks, as the engine's `RCLI_NO_HOOKS` says it. */
-export const RCLI_NO_HOOKS = "rcli has no hooks, so it runs none of yours and Block and Wait cannot hold its edits.";
+export const RCLI_NO_HOOKS = "RCLI has no hooks, so it runs none of yours and Block and Wait cannot hold its edits.";
 /** Which owner hooks a Codex agent runs, as the engine's `CODEX_HOOK_EVENTS_ONLY` says it. */
 export const CODEX_HOOK_EVENTS_ONLY = "Codex agents run your hooks on the events Codex has.";
 /** What happens when two agents claim the same files: one of `OVERLAP_CHOICES`. */

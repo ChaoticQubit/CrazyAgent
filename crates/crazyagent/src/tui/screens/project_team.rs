@@ -4210,7 +4210,7 @@ fn delivery_scope(kind: HarnessKind) -> &'static str {
             "Auto hands a message to a Codex agent with tools on through its app-server bridge and types it in when the bridge can't take it. Native only never types: with tools off, a Codex agent gets its messages as a task of their own once it is idle. Typing only types every message in."
         }
         HarnessKind::Rcli => {
-            "rcli runs no team agents, so no message goes to one here. A master on any harness hears its messages through the engine under every choice."
+            "RCLI runs no team agents, so no message goes to one here. A master on any harness hears its messages through the engine under every choice."
         }
         HarnessKind::Listed(_) => {
             "This harness has no channel of its own: Auto and Typing only type every message in, and Native only never types."
@@ -4378,7 +4378,7 @@ fn next_limit(choices: &[u32], current: Option<u32>) -> Option<u32> {
 /// TUI and the desktop alike: every choice on Claude Code and Codex panes, whose records
 /// report their background commands (PA-10), a turn-end stop for agents run per turn, and
 /// none for rcli, which has no tools (rv-code BHT-M1).
-const BACKGROUND_SCOPE: &str = "Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an rcli agent has no tools, so it starts none.";
+const BACKGROUND_SCOPE: &str = "Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an RCLI agent has no tools, so it starts none.";
 
 /// The most holds the Team rows list; the rest stay in the team view.
 const LEFTOVER_ROWS_MAX: usize = 5;
