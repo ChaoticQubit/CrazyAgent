@@ -11,6 +11,7 @@ pub mod rules;
 pub enum Piped {
     Codex,
     Claude,
+    JsonlTurn,
 }
 
 /// The one dispatch point of piped launches: the driver the engine runs for a driver kind.
