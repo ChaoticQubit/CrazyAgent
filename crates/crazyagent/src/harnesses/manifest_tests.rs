@@ -427,7 +427,9 @@ fn a_wire_format_a_limits_reader_or_a_sign_in_minimum_that_is_not_allowed_is_ref
             ))),
             (
                 VALUE,
-                format!("version.sign_in_minimum: {minimum} is not digits and dots.")
+                format!(
+                    "version.sign_in_minimum: {minimum} is not a version of two to six numbers joined by dots."
+                )
             ),
             "{minimum}"
         );

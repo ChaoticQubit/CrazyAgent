@@ -287,13 +287,6 @@ fn protocol(text: &str) -> bool {
         .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-fn version(text: &str) -> bool {
-    text.as_bytes().first().is_some_and(u8::is_ascii_digit)
-        && text
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte == b'.')
-}
-
 fn entries<'a>(value: &'a Value, path: &str) -> Result<&'a [(String, Value)], Refused> {
     match value {
         Value::Map(entries) => Ok(entries),
@@ -606,11 +599,19 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, Refused> {
         ),
         None => (None, None),
     };
-    if let Some(minimum) = sign_in_minimum.as_deref().filter(|floor| !version(floor)) {
-        return refuse(
-            VALUE,
-            format!("version.sign_in_minimum: {minimum} is not digits and dots."),
-        );
+    for (floor, path) in [
+        (&minimum_version, "version.minimum"),
+        (&sign_in_minimum, "version.sign_in_minimum"),
+    ] {
+        if let Some(floor) = floor
+            .as_deref()
+            .filter(|floor| !super::update::plain_version(floor))
+        {
+            return refuse(
+                VALUE,
+                format!("{path}: {floor} is not a version of two to six numbers joined by dots."),
+            );
+        }
     }
     let account_protocols = shaped(
         texts(
