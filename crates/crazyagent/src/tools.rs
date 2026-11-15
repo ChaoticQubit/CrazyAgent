@@ -940,20 +940,25 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
     if let Some(step) = between_program_and_check(entry) {
         step();
     }
+    let refused = |file: &Path, why: Refusal| Missing {
+        reason: Reason::Refused,
+        refused: Some(Box::new(Refused {
+            file: file.to_path_buf(),
+            why,
+        })),
+        ..not_there()
+    };
     match check_candidate(places, entry) {
         Some(Ok(())) => {}
-        Some(Err(why)) => {
-            return Err(Missing {
-                reason: Reason::Refused,
-                refused: Some(Box::new(Refused {
-                    file: entry.to_path_buf(),
-                    why,
-                })),
-                ..not_there()
-            });
-        }
+        Some(Err(why)) => return Err(refused(entry, why)),
         None => return Err(not_there()),
     }
+    match check_candidate(places, &program) {
+        Some(Ok(())) if program.canonicalize().ok().as_ref() == Some(&program) => {}
+        Some(Err(why)) => return Err(refused(program.as_path(), why)),
+        _ => return Err(not_there()),
+    }
+    assert!(program.is_absolute());
     let Some(shebang) = shebang(&program) else {
         return Ok(Resolved {
             entry: entry.to_path_buf(),
