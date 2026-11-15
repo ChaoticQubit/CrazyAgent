@@ -729,3 +729,155 @@ fn the_keeper_looks_each_second_and_evaluates_on_a_change_or_every_five_seconds(
         "an evaluation that changes nothing writes nothing"
     );
 }
+
+#[cfg(target_os = "macos")]
+mod with_a_real_hold {
+    use super::*;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const WAIT: Duration = Duration::from_secs(5);
+    const STEP: Duration = Duration::from_millis(50);
+
+    /// A real process that stands in for the engine the hold is taken for.
+    fn stand_in() -> Child {
+        let child = Command::new("/bin/sleep")
+            .arg("120")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(child.id() > 1);
+        child
+    }
+
+    /// Counts the running caffeinate children that hold for one engine pid. Input: the pid.
+    /// Output: how many `pgrep` finds by their exact command line; an exited child that
+    /// nobody reaped yet has no command line and is not counted.
+    fn holders(engine: u32) -> usize {
+        let line = format!("^/usr/bin/caffeinate (-d )?-i -w {engine}$");
+        let output = Command::new("/usr/bin/pgrep")
+            .args(["-f", &line])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap().lines().count()
+    }
+
+    fn until(mut condition: impl FnMut() -> bool) -> bool {
+        let end = Instant::now() + WAIT;
+        loop {
+            if condition() {
+                return true;
+            }
+            if Instant::now() >= end {
+                return false;
+            }
+            std::thread::sleep(STEP);
+        }
+    }
+
+    #[test]
+    fn the_keeper_takes_the_hold_while_work_runs_and_drops_it_when_the_owner_ends() {
+        let (_folder, connection) = engine();
+        let mut process = stand_in();
+        let pid = process.id();
+        let mut keeper = Keeper::with_hold(platform_hold(pid));
+        let worker = agent(&connection, "working");
+
+        let view = keeper.tick(&connection, NOW_MS).unwrap().unwrap();
+        assert_eq!(view.state.want, IDLE);
+        assert!(until(|| holders(pid) == 1));
+
+        assert_eq!(
+            act(&connection, KeepAwakeAction::End, NOW_MS + SECOND_MS),
+            Outcome::Applied
+        );
+        let ended = keeper
+            .tick(&connection, NOW_MS + 2 * SECOND_MS)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ended.state.want, Want::Nothing);
+        assert_eq!(ended.state.ended, Some(EndReason::Manual));
+        assert!(until(|| holders(pid) == 0));
+
+        mark(&connection, worker, "idle");
+        let idle = keeper
+            .tick(&connection, NOW_MS + 3 * SECOND_MS)
+            .unwrap()
+            .unwrap();
+        assert_eq!(idle.state.want, Want::Nothing);
+        mark(&connection, worker, "working");
+        let again = keeper
+            .tick(&connection, NOW_MS + 4 * SECOND_MS)
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.state.want, IDLE);
+        assert!(until(|| holders(pid) == 1));
+        keeper.release();
+        assert!(until(|| holders(pid) == 0));
+
+        let _ = process.kill();
+        process.wait().unwrap();
+    }
+
+    #[test]
+    fn a_hold_lost_twice_in_a_row_ends_with_hold_lost_and_stands_down() {
+        let (_folder, connection) = engine();
+        let mut process = stand_in();
+        let pid = process.id();
+        process.kill().unwrap();
+        process.wait().unwrap();
+        let mut keeper = Keeper::with_hold(platform_hold(pid));
+        let worker = agent(&connection, "working");
+
+        let first = keeper.tick(&connection, NOW_MS).unwrap().unwrap();
+        assert_eq!(first.state.want, IDLE);
+        assert!(until(|| holders(pid) == 0));
+
+        let retaken = keeper.tick(&connection, NOW_MS + TICK_MS).unwrap().unwrap();
+        assert_eq!(retaken.state.want, IDLE, "lost once: taken again");
+        assert_eq!(retaken.state.ended, None);
+        assert!(until(|| holders(pid) == 0));
+
+        let failed = keeper
+            .tick(&connection, NOW_MS + 2 * TICK_MS)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.state.want, Want::Nothing);
+        assert_eq!(failed.state.ended, Some(EndReason::HoldLost));
+        assert_eq!(super::view(&connection).unwrap(), failed);
+
+        let stood = keeper
+            .tick(&connection, NOW_MS + 3 * TICK_MS)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stood.state.want, Want::Nothing, "stands down while work runs");
+        assert_eq!(stood.state.ended, Some(EndReason::HoldLost));
+
+        mark(&connection, worker, "idle");
+        let idle = keeper
+            .tick(&connection, NOW_MS + 4 * TICK_MS)
+            .unwrap()
+            .unwrap();
+        assert_eq!(idle.state.want, Want::Nothing);
+        mark(&connection, worker, "working");
+        let tried = keeper
+            .tick(&connection, NOW_MS + 5 * TICK_MS)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tried.state.want, IDLE, "new work tries the hold again");
+        assert_eq!(tried.state.ended, None);
+    }
+
+    #[test]
+    fn a_keeper_without_a_platform_hold_decides_and_takes_nothing() {
+        let (_folder, connection) = engine();
+        let mut keeper = Keeper::default();
+        agent(&connection, "working");
+        let view = keeper.tick(&connection, NOW_MS).unwrap().unwrap();
+        assert_eq!(view.state.want, IDLE);
+        assert_eq!(view.state.ended, None);
+        keeper.release();
+    }
+}
