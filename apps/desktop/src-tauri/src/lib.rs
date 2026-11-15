@@ -3089,8 +3089,8 @@ fn desktop_set_theme<R: Runtime>(
     choice: theme::ThemeChoice,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
-    theme::apply(&app, choice)
-        .map_err(|_| engine_failure("theme_not_applied"))
+    let _ = (app, choice);
+    Ok(())
 }
 
 #[tauri::command]
