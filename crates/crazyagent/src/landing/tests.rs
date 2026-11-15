@@ -14861,6 +14861,32 @@ fn a_confined_git_step_cannot_read_a_file_behind_a_link() {
     assert_ne!(hash("link"), 0, "a step read the file behind the link");
 }
 
+/// SA vid 2, with no timing: on Linux a step on the work tree cannot read the owner's ignore
+/// file behind a link either, so a file an agent swaps for a link to it during the turn end
+/// never puts its bytes in the object store, while a plain file in the work tree still reads.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_git_step_cannot_read_the_owners_ignore_file_behind_a_link() {
+    let case = Case::new();
+    let ignore = case.home.join(".config/git/ignore");
+    write(&ignore, "scratch.log\n");
+    let worktree = &case.workspace.worktree;
+    std::os::unix::fs::symlink(&ignore, worktree.join("link")).unwrap();
+    write(&worktree.join("plain"), "plain\n");
+    let repo = confined_agent(&case, git::Writes::Objects);
+    let hash = |path: &str| {
+        repo.exec(&["hash-object", "--", path], None, &[], 4096)
+            .unwrap()
+            .code
+    };
+    assert_eq!(hash("plain"), 0);
+    assert_ne!(
+        hash("link"),
+        0,
+        "a step read the owner's ignore file behind the link"
+    );
+}
+
 /// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree, with no timing: a step writes
 /// only what it names. Neither step reaches the owner's hooks or anywhere outside, a step
 /// filling the work tree writes no git metadata, and a step adding the work tree writes
