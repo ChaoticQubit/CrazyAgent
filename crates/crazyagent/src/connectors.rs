@@ -72,6 +72,76 @@ const PLAIN: &[(&str, &str)] = &[
         "the engine did not answer in time; check the list again.",
     ),
     ("connectors_unavailable", "the engine could not be reached."),
+    (
+        "connector_address_refused",
+        "the connector's address is not one the engine calls.",
+    ),
+    (
+        "connector_arguments_invalid",
+        "the tool's arguments could not be read.",
+    ),
+    ("connector_call_failed", "the vendor could not be reached."),
+    (
+        "connector_host_private",
+        "the vendor's name points at a private network address, so the engine did not call it.",
+    ),
+    (
+        "connector_host_unknown",
+        "the vendor's name could not be found; check the network.",
+    ),
+    (
+        "connector_key_missing",
+        "the connector's key is gone; enter it again.",
+    ),
+    (
+        "connector_needs_input",
+        "the vendor asked a question this build cannot pass on.",
+    ),
+    (
+        "connector_protocol_unsupported",
+        "the vendor speaks a protocol version this build does not.",
+    ),
+    (
+        "connector_redirect_refused",
+        "the vendor sent the call elsewhere, which the engine never follows.",
+    ),
+    (
+        "connector_reply_invalid",
+        "the vendor's reply could not be read.",
+    ),
+    (
+        "connector_reply_too_large",
+        "the vendor's reply was too large to read.",
+    ),
+    (
+        "connector_request_too_large",
+        "the call is too large to send.",
+    ),
+    (
+        "connector_sign_in_needed",
+        "the vendor refused the key or it lacks access; check the key.",
+    ),
+    ("connector_timeout", "the vendor took too long to answer."),
+    (
+        "connector_tool_name_invalid",
+        "that tool name cannot be called.",
+    ),
+    (
+        "connector_tool_unknown",
+        "the vendor does not list that tool.",
+    ),
+    (
+        "connector_tools_limit",
+        "the vendor lists more tools than the engine takes.",
+    ),
+    (
+        "connector_unavailable_here",
+        "connectors are not available on this system.",
+    ),
+    (
+        "connector_vendor_error",
+        "the vendor answered with an error.",
+    ),
 ];
 
 /// The plain sentence for a code the Connectors page can show: this module's own, or an

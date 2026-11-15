@@ -116,7 +116,10 @@ impl Vendor {
     }
 
     fn calls(&self) -> Vec<String> {
-        self.seen().iter().map(|seen| seen.rpc().to_owned()).collect()
+        self.seen()
+            .iter()
+            .map(|seen| seen.rpc().to_owned())
+            .collect()
     }
 }
 
@@ -179,7 +182,12 @@ fn http(status: &str, kind: &str, extra: &[(&str, &str)], body: &[u8]) -> Vec<u8
 }
 
 fn json_reply(status: &str, extra: &[(&str, &str)], body: &Value) -> Vec<u8> {
-    http(status, "application/json", extra, body.to_string().as_bytes())
+    http(
+        status,
+        "application/json",
+        extra,
+        body.to_string().as_bytes(),
+    )
 }
 
 fn result(seen: &Seen, result: Value) -> Vec<u8> {
@@ -306,7 +314,14 @@ fn desk() -> Desk {
     ] {
         add(&case, text, false);
         for (secret, value) in secrets {
-            store::set_key(&case.db, &case.root, name, secret, value.as_bytes().to_vec()).unwrap();
+            store::set_key(
+                &case.db,
+                &case.root,
+                name,
+                secret,
+                value.as_bytes().to_vec(),
+            )
+            .unwrap();
         }
     }
     let bearer = credential(&case, "board");
@@ -397,7 +412,10 @@ fn a_tools_list_over_sse_from_a_loopback_mcp_server_reads_every_page() {
     );
     let seen = vendor.seen();
     for request in &seen {
-        assert_eq!((request.verb.as_str(), request.path.as_str()), ("POST", "/mcp"));
+        assert_eq!(
+            (request.verb.as_str(), request.path.as_str()),
+            ("POST", "/mcp")
+        );
         assert_eq!(
             request.header("authorization"),
             Some(format!("Bearer {KEY}").as_str())
@@ -465,12 +483,19 @@ fn an_older_server_gets_the_handshake_and_a_session_it_ended_is_opened_again_onc
     assert_eq!(seen[3].header("mcp-session-id"), Some("sess-1"));
     assert_eq!(seen[4].header("mcp-session-id"), None);
     assert_eq!(seen[6].header("mcp-session-id"), Some("sess-2"));
-    assert_eq!(seen[6].body["params"], json!({"name": "get_issue", "arguments": {"id": "A-1"}}));
+    assert_eq!(
+        seen[6].body["params"],
+        json!({"name": "get_issue", "arguments": {"id": "A-1"}})
+    );
     assert_eq!(
         session.call("always_gone", &json!({})),
         Err(McpError::Vendor("HTTP 404".into()))
     );
-    assert_eq!(opened.load(Ordering::SeqCst), 3, "one new session per call, not a loop");
+    assert_eq!(
+        opened.load(Ordering::SeqCst),
+        3,
+        "one new session per call, not a loop"
+    );
     let before = vendor.seen().len();
     session.close();
     let seen = vendor.seen();
@@ -548,8 +573,14 @@ fn a_server_of_the_per_request_era_gets_no_handshake_and_every_request_names_its
             Some(format!("Bearer {KEY}").as_str())
         );
         let meta = &request.body["params"]["_meta"];
-        assert_eq!(meta["io.modelcontextprotocol/protocolVersion"], MODERN_VERSION);
-        assert_eq!(meta["io.modelcontextprotocol/clientCapabilities"], json!({}));
+        assert_eq!(
+            meta["io.modelcontextprotocol/protocolVersion"],
+            MODERN_VERSION
+        );
+        assert_eq!(
+            meta["io.modelcontextprotocol/clientCapabilities"],
+            json!({})
+        );
         assert_eq!(
             meta["io.modelcontextprotocol/clientInfo"]["name"],
             "CrazyAgent"
@@ -583,7 +614,8 @@ fn a_server_of_the_per_request_era_gets_no_handshake_and_every_request_names_its
 #[test]
 fn a_tool_whose_header_marks_break_the_rules_is_left_out() {
     let desk = desk();
-    let marked = |name: &str, schema: Value| json!({"name": name, "description": "", "inputSchema": schema});
+    let marked =
+        |name: &str, schema: Value| json!({"name": name, "description": "", "inputSchema": schema});
     let vendor = Vendor::start(move |seen, _, stream| {
         let reply = modern(seen).unwrap_or_else(|| {
             result(
@@ -634,7 +666,12 @@ fn a_tool_whose_header_marks_break_the_rules_is_left_out() {
 #[test]
 fn a_redirect_is_refused() {
     let desk = desk();
-    for status in ["301 Moved Permanently", "302 Found", "307 Temporary Redirect", "308 Permanent Redirect"] {
+    for status in [
+        "301 Moved Permanently",
+        "302 Found",
+        "307 Temporary Redirect",
+        "308 Permanent Redirect",
+    ] {
         let vendor = Vendor::start(move |_, _, stream| {
             send(stream, &empty(status, &[("Location", "/elsewhere")]));
         });
@@ -701,7 +738,10 @@ fn a_response_over_the_cap_is_cut_and_marked() {
         let reply = session.call(name, &json!({})).unwrap();
         assert!(reply.cut, "{name}");
         assert!(reply.text.len() <= cap.bytes(), "{name}");
-        assert!(reply.text.len() > cap.bytes() - 8 - CUT_MARK.len(), "{name}");
+        assert!(
+            reply.text.len() > cap.bytes() - 8 - CUT_MARK.len(),
+            "{name}"
+        );
         assert!(reply.text.ends_with(CUT_MARK), "{name}");
         assert_eq!(reply.text.matches(CUT_MARK).count(), 1, "{name}");
     }
@@ -794,11 +834,7 @@ fn a_401_with_a_scope_is_reported_as_unauthorized_with_that_scope() {
             "Bearer error=\"invalid_token\", SCOPE=read",
             Some("read"),
         ),
-        (
-            "401 Unauthorized",
-            "Bearer scope=\"a\\\"b\"",
-            None,
-        ),
+        ("401 Unauthorized", "Bearer scope=\"a\\\"b\"", None),
     ];
     for (status, challenge, scope) in cases {
         let vendor = Vendor::start(move |_, _, stream| {
@@ -811,7 +847,11 @@ fn a_401_with_a_scope_is_reported_as_unauthorized_with_that_scope() {
             },
             "{challenge}"
         );
-        assert_eq!(vendor.calls(), ["server/discover"], "no fall back on a refused key");
+        assert_eq!(
+            vendor.calls(),
+            ["server/discover"],
+            "no fall back on a refused key"
+        );
     }
     let vendor = Vendor::start(|_, _, stream| send(stream, &empty("401 Unauthorized", &[])));
     assert_eq!(
@@ -820,7 +860,10 @@ fn a_401_with_a_scope_is_reported_as_unauthorized_with_that_scope() {
     );
     let vendor = Vendor::start(|seen, _, stream| {
         let reply = modern(seen).unwrap_or_else(|| match seen.rpc() {
-            "tools/list" => result(seen, json!({"resultType": "complete", "tools": [tool("create_issue"), tool("blocked")]})),
+            "tools/list" => result(
+                seen,
+                json!({"resultType": "complete", "tools": [tool("create_issue"), tool("blocked")]}),
+            ),
             _ if seen.tool() == "blocked" => empty("403 Forbidden", &[]),
             _ => empty(
                 "403 Forbidden",
@@ -927,7 +970,14 @@ fn a_tool_with_a_hidden_character_in_its_name_is_left_out_and_never_renamed() {
         ["list_issues", long.as_str(), "Dots.and-dashes_1"]
     );
     assert_eq!(session.left_out(), 10);
-    for name in ["list\u{200b}_issues", "has space", "", "line\nbreak", "a/b", "caf\u{e9}"] {
+    for name in [
+        "list\u{200b}_issues",
+        "has space",
+        "",
+        "line\nbreak",
+        "a/b",
+        "caf\u{e9}",
+    ] {
         assert_eq!(
             session.call(name, &json!({})),
             Err(McpError::Refused("connector_tool_name_invalid")),
@@ -1048,11 +1098,21 @@ fn a_vendor_error_a_wrong_reply_and_a_request_for_input_are_named() {
     let mut session = open(&desk, &vendor.endpoint(), Access::Full).unwrap();
     session.list_tools().unwrap();
     let mut call = |name: &str| session.call(name, &json!({}));
-    assert_eq!(call("asks"), Err(McpError::Refused("connector_needs_input")));
-    assert_eq!(call("unknown"), Err(McpError::Vendor("Unknown tool: x".into())));
+    assert_eq!(
+        call("asks"),
+        Err(McpError::Refused("connector_needs_input"))
+    );
+    assert_eq!(
+        call("unknown"),
+        Err(McpError::Vendor("Unknown tool: x".into()))
+    );
     match call("wordy") {
         Err(McpError::Vendor(text)) => {
-            assert!(text.len() <= 300 && text.starts_with("www"), "{}", text.len());
+            assert!(
+                text.len() <= 300 && text.starts_with("www"),
+                "{}",
+                text.len()
+            );
         }
         other => panic!("{other:?}"),
     }
@@ -1065,7 +1125,10 @@ fn a_vendor_error_a_wrong_reply_and_a_request_for_input_are_named() {
             "{name}"
         );
     }
-    assert_eq!(call("asks_back").map(|reply| reply.text), Ok("after".into()));
+    assert_eq!(
+        call("asks_back").map(|reply| reply.text),
+        Ok("after".into())
+    );
     assert!(
         vendor
             .seen()
@@ -1154,7 +1217,10 @@ fn a_request_over_the_limit_or_a_bad_tool_name_never_leaves_the_engine() {
     let desk = desk();
     let vendor = Vendor::start(|seen, _, stream| {
         let reply = modern(seen).unwrap_or_else(|| match seen.rpc() {
-            "tools/list" => result(seen, json!({"resultType": "complete", "tools": [tool("create_issue")]})),
+            "tools/list" => result(
+                seen,
+                json!({"resultType": "complete", "tools": [tool("create_issue")]}),
+            ),
             _ => result(seen, text_result("made")),
         });
         send(stream, &reply);
@@ -1163,7 +1229,10 @@ fn a_request_over_the_limit_or_a_bad_tool_name_never_leaves_the_engine() {
     session.list_tools().unwrap();
     let before = vendor.seen().len();
     assert_eq!(
-        session.call("create_issue", &json!({"body": "b".repeat(REQUEST_BYTES_MAX)})),
+        session.call(
+            "create_issue",
+            &json!({"body": "b".repeat(REQUEST_BYTES_MAX)})
+        ),
         Err(McpError::Refused("connector_request_too_large"))
     );
     for name in ["create issue", "create_issue\r\nX-Evil: 1", "", "caf\u{e9}"] {
@@ -1198,7 +1267,8 @@ fn a_request_over_the_limit_or_a_bad_tool_name_never_leaves_the_engine() {
 fn a_basic_key_is_sent_as_the_user_and_the_key_and_a_missing_key_sends_nothing() {
     let desk = desk();
     let vendor = Vendor::start(|seen, _, stream| {
-        let reply = modern(seen).unwrap_or_else(|| result(seen, json!({"resultType": "complete", "tools": []})));
+        let reply = modern(seen)
+            .unwrap_or_else(|| result(seen, json!({"resultType": "complete", "tools": []})));
         send(stream, &reply);
     });
     let mut session = McpSession::open_with(
@@ -1229,7 +1299,11 @@ fn a_basic_key_is_sent_as_the_user_and_the_key_and_a_missing_key_sends_nothing()
         );
         assert!(!request.path.contains(KEY) && !request.body.to_string().contains(KEY));
     }
-    for shown in [format!("{session:?}"), format!("{:?}", desk.basic), format!("{:?}", desk.bearer)] {
+    for shown in [
+        format!("{session:?}"),
+        format!("{:?}", desk.basic),
+        format!("{:?}", desk.bearer),
+    ] {
         assert!(!shown.contains(KEY) && !shown.contains(USER), "{shown}");
     }
     store::remove(&desk.case.db, &desk.case.root, "desk").unwrap();
@@ -1263,8 +1337,12 @@ fn while_writes_are_off_the_vendor_read_only_address_or_header_is_used() {
     let desk = desk();
     let serve = || {
         Vendor::start(|seen, _, stream| {
-            let reply = modern(seen)
-                .unwrap_or_else(|| result(seen, json!({"resultType": "complete", "tools": [tool("list_issues")]})));
+            let reply = modern(seen).unwrap_or_else(|| {
+                result(
+                    seen,
+                    json!({"resultType": "complete", "tools": [tool("list_issues")]}),
+                )
+            });
             send(stream, &reply);
         })
     };
@@ -1518,8 +1596,7 @@ fn a_name_that_resolves_to_a_private_or_mapped_address_is_refused() {
         "https://mcp.vendor.example:8443/mcp",
         &["mcp.vendor.example", "ro.vendor.example"],
     );
-    read_only.read_only =
-        ReadOnly::Url(url::Url::parse("https://ro.vendor.example/mcp").unwrap());
+    read_only.read_only = ReadOnly::Url(url::Url::parse("https://ro.vendor.example/mcp").unwrap());
     let asked = Arc::new(Mutex::new(Vec::new()));
     for (access, host, port) in [
         (Access::ReadOnly, "ro.vendor.example", 443),
@@ -1537,10 +1614,7 @@ fn a_name_that_resolves_to_a_private_or_mapped_address_is_refused() {
             .unwrap_err(),
             McpError::Refused("connector_host_private")
         );
-        assert_eq!(
-            asked.lock().unwrap().last(),
-            Some(&(host.to_owned(), port))
-        );
+        assert_eq!(asked.lock().unwrap().last(), Some(&(host.to_owned(), port)));
     }
     let asked = Arc::new(Mutex::new(Vec::new()));
     assert_eq!(
@@ -1578,7 +1652,11 @@ fn the_production_parser_refuses_plain_http_with_a_credential() {
         "app_plugin_connector_url_not_https"
     );
     let loopback = BOARD
-        .replacen("https://mcp.board.example/mcp", "http://127.0.0.1:8080/mcp", 1)
+        .replacen(
+            "https://mcp.board.example/mcp",
+            "http://127.0.0.1:8080/mcp",
+            1,
+        )
         .replacen("[mcp.board.example]", "[127.0.0.1]", 1);
     assert!(manifest::parse(&loopback).is_err());
     let desk = desk();
@@ -1591,19 +1669,58 @@ fn the_production_parser_refuses_plain_http_with_a_credential() {
     read_only_elsewhere.read_only =
         ReadOnly::Url(url::Url::parse("http://mcp.vendor.example/mcp").unwrap());
     let refused = [
-        (remote("http://mcp.vendor.example/mcp", &["mcp.vendor.example"]), Access::Full),
-        (remote(&format!("http://localhost:{port}/mcp"), &["localhost"]), Access::Full),
-        (remote(&format!("https://127.0.0.1:{port}/mcp"), &["127.0.0.1"]), Access::Full),
-        (remote(&format!("http://127.0.0.2:{port}/mcp"), &["127.0.0.2"]), Access::Full),
-        (remote(&format!("http://[::1]:{port}/mcp"), &["[::1]"]), Access::Full),
+        (
+            remote("http://mcp.vendor.example/mcp", &["mcp.vendor.example"]),
+            Access::Full,
+        ),
+        (
+            remote(&format!("http://localhost:{port}/mcp"), &["localhost"]),
+            Access::Full,
+        ),
+        (
+            remote(&format!("https://127.0.0.1:{port}/mcp"), &["127.0.0.1"]),
+            Access::Full,
+        ),
+        (
+            remote(&format!("http://127.0.0.2:{port}/mcp"), &["127.0.0.2"]),
+            Access::Full,
+        ),
+        (
+            remote(&format!("http://[::1]:{port}/mcp"), &["[::1]"]),
+            Access::Full,
+        ),
         (undeclared, Access::Full),
         (read_only_elsewhere, Access::ReadOnly),
-        (remote("https://mcp.vendor.example/mcp", &["other.vendor.example"]), Access::Full),
-        (remote("https://93.184.216.34/mcp", &["93.184.216.34"]), Access::Full),
-        (remote("https://user:pw@mcp.vendor.example/mcp", &["mcp.vendor.example"]), Access::Full),
-        (remote("https://mcp.vendor.example/mcp?x=1", &["mcp.vendor.example"]), Access::Full),
-        (remote("https://mcp.vendor.example/mcp#x", &["mcp.vendor.example"]), Access::Full),
-        (remote("ftp://mcp.vendor.example/mcp", &["mcp.vendor.example"]), Access::Full),
+        (
+            remote("https://mcp.vendor.example/mcp", &["other.vendor.example"]),
+            Access::Full,
+        ),
+        (
+            remote("https://93.184.216.34/mcp", &["93.184.216.34"]),
+            Access::Full,
+        ),
+        (
+            remote(
+                "https://user:pw@mcp.vendor.example/mcp",
+                &["mcp.vendor.example"],
+            ),
+            Access::Full,
+        ),
+        (
+            remote(
+                "https://mcp.vendor.example/mcp?x=1",
+                &["mcp.vendor.example"],
+            ),
+            Access::Full,
+        ),
+        (
+            remote("https://mcp.vendor.example/mcp#x", &["mcp.vendor.example"]),
+            Access::Full,
+        ),
+        (
+            remote("ftp://mcp.vendor.example/mcp", &["mcp.vendor.example"]),
+            Access::Full,
+        ),
     ];
     for (endpoint, access) in refused {
         assert_eq!(
@@ -1621,7 +1738,10 @@ fn the_production_parser_refuses_plain_http_with_a_credential() {
             endpoint.url
         );
     }
-    assert!(asked.lock().unwrap().is_empty(), "a refused address is never looked up");
+    assert!(
+        asked.lock().unwrap().is_empty(),
+        "a refused address is never looked up"
+    );
     assert!(vendor.seen().is_empty());
 }
 

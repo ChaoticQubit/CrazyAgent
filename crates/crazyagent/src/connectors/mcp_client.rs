@@ -11,7 +11,11 @@ use serde_json::Value;
 use std::path::Path;
 
 #[cfg(unix)]
+mod clean;
+#[cfg(unix)]
 mod guard;
+#[cfg(unix)]
+mod live;
 #[cfg(unix)]
 mod wire;
 
@@ -62,6 +66,7 @@ pub enum Credential {
 /// Where a connector's key is saved and how it is sent: the header, the scheme, and the
 /// bindings in declaration order (the key first, then the user name of a Basic key).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub struct KeyRef {
     header: String,
     scheme: Scheme,
@@ -141,10 +146,19 @@ impl McpError {
 }
 
 /// One conversation with one vendor server for one launch: where it calls, how it signs in
-/// and which protocol era the server answered in.
-#[derive(Debug)]
+/// and which protocol era the server answered in. It holds no key value.
 pub struct McpSession {
-    left_out: usize,
+    #[cfg(unix)]
+    live: live::Live,
+}
+
+impl std::fmt::Debug for McpSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpSession")
+            .field("left_out", &self.left_out())
+            .finish_non_exhaustive()
+    }
 }
 
 impl McpSession {
@@ -161,8 +175,50 @@ impl McpSession {
     ) -> Result<Self, McpError> {
         Self::open_with(root, endpoint, auth, access, cap, ProviderReach::system())
     }
+}
 
+#[cfg(unix)]
+impl McpSession {
     /// [`Self::open`] with the name lookup given, so rows do no real DNS.
+    pub(crate) fn open_with(
+        root: &Path,
+        endpoint: &McpEndpoint,
+        auth: &Credential,
+        access: Access,
+        cap: SizeCap,
+        reach: ProviderReach,
+    ) -> Result<Self, McpError> {
+        live::Live::open(root, endpoint, auth, access, cap, reach).map(|live| Self { live })
+    }
+
+    /// Lists the vendor's tools, every page, cleaned. Output: at most `TOOLS_MAX` tools, or
+    /// `connector_tools_limit` for a longer list.
+    pub fn list_tools(&mut self) -> Result<Vec<VendorTool>, McpError> {
+        self.live.list_tools()
+    }
+
+    /// How many tools the last list left out because their name or schema could not be
+    /// shown or called safely.
+    pub fn left_out(&self) -> usize {
+        self.live.left_out()
+    }
+
+    /// Calls one tool. Inputs: the vendor's tool name and the arguments, a JSON object.
+    /// Output: the result as text, cut to the size setting, or why there is none.
+    pub fn call(&mut self, name: &str, args: &Value) -> Result<ToolResult, McpError> {
+        self.live.call(name, args)
+    }
+
+    /// Ends the session at an older server that gave it an id; best effort.
+    pub fn close(self) {
+        self.live.close();
+    }
+}
+
+#[cfg(not(unix))]
+impl McpSession {
+    /// No vendor call where the private request file cannot be made. Output:
+    /// `connector_unavailable_here`.
     pub(crate) fn open_with(
         _root: &Path,
         _endpoint: &McpEndpoint,
@@ -174,25 +230,22 @@ impl McpSession {
         Err(McpError::Refused("connector_unavailable_here"))
     }
 
-    /// Lists the vendor's tools, every page, cleaned. Output: at most `TOOLS_MAX` tools, or
-    /// `connector_tools_limit` for a longer list.
+    /// No session exists here. Output: `connector_unavailable_here`.
     pub fn list_tools(&mut self) -> Result<Vec<VendorTool>, McpError> {
         Err(McpError::Refused("connector_unavailable_here"))
     }
 
-    /// How many tools the last list left out because their name or schema could not be
-    /// shown or called safely.
+    /// No session exists here. Output: zero.
     pub fn left_out(&self) -> usize {
-        self.left_out
+        0
     }
 
-    /// Calls one tool. Inputs: the vendor's tool name and the arguments, a JSON object.
-    /// Output: the result as text, cut to the size setting, or why there is none.
+    /// No session exists here. Output: `connector_unavailable_here`.
     pub fn call(&mut self, _name: &str, _args: &Value) -> Result<ToolResult, McpError> {
         Err(McpError::Refused("connector_unavailable_here"))
     }
 
-    /// Ends the session at an older server that gave it an id; best effort.
+    /// No session exists here.
     pub fn close(self) {}
 }
 

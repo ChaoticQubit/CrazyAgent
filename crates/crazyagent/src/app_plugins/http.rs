@@ -164,12 +164,17 @@ pub(crate) fn push_basic(config: &mut Config, user: &str, key: &str) -> Result<(
     joined.push(key);
     let size = joined.0.len().div_ceil(3) * 4;
     let mut encoded = Config::with_capacity(size);
+    let capacity = encoded.0.capacity();
     encoded.0.resize(size, 0);
     let written = base64::engine::general_purpose::STANDARD
         .encode_slice(&joined.0, &mut encoded.0)
         .map_err(|_| failed())?;
     assert_eq!(written, size, "padded base64 fills its buffer");
-    assert_eq!(encoded.0.capacity(), size, "the encoding buffer never grows");
+    assert_eq!(
+        encoded.0.capacity(),
+        capacity,
+        "the encoding buffer never grows"
+    );
     let text = std::str::from_utf8(&encoded.0).map_err(|_| failed())?;
     push_quoted(config, text)
 }

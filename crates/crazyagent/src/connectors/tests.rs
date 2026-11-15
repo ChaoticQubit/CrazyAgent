@@ -622,7 +622,11 @@ fn a_leftover_key_that_cannot_be_deleted_keeps_its_row_until_it_is() {
         "SELECT COUNT(*) FROM app_plugin_trust WHERE name='linear'",
         "SELECT COUNT(*) FROM app_plugin_secrets WHERE plugin='linear'",
     ] {
-        assert_eq!(count(&case, sql), 1, "the row stays so the next pass finds the key: {sql}");
+        assert_eq!(
+            count(&case, sql),
+            1,
+            "the row stays so the next pass finds the key: {sql}"
+        );
     }
     store::list(&case.db, &case.root).unwrap();
     assert!(!accounts::key_saved_in(&case.root, PLUGIN_KEYS, &old_key).unwrap());
