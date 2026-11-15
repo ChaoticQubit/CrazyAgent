@@ -14,7 +14,7 @@ pub const LIST_BYTES_MAX: usize = 48 * 1024;
 pub const FOLDER_NAME_BYTES_MAX: usize = 255;
 const ROOT_ENTRIES_MAX: usize = 1024;
 const DIGEST_ENTRIES_MAX: usize = 4096;
-const IMPORT_KEYS: [&str; 1] = ["skills"];
+const IMPORT_KEYS: [(&str, &str); 2] = [("skills", "folder"), ("instructions", "file")];
 
 /// Where a found skill lives: the owner's Claude Code or Codex skills folder, or the skills
 /// folder a listed harness's manifest names in `import.skills`, with that harness's catalog
@@ -134,9 +134,10 @@ impl<'de> Deserialize<'de> for ImportFrom {
     }
 }
 
-/// Checks a manifest's `import` block: only the keys imports read, and `import.skills` a
-/// folder inside one of the same manifest's `home.owner_folders`, so a manifest never points
-/// an import at another harness's folders or anything else in the owner's home.
+/// Checks a manifest's `import` block: only its two keys, `import.skills` (the skills folder
+/// the skills import reads) and `import.instructions` (the harness's own instruction file),
+/// each a path inside one of the same manifest's `home.owner_folders`, so a manifest never
+/// points an import at another harness's folders or anything else in the owner's home.
 /// Input: a parsed manifest. Output: Ok, or a refusal that names the setting.
 pub fn check(manifest: &Manifest) -> Result<(), Refused> {
     let Some(import) = manifest.block("import") else {
@@ -147,40 +148,43 @@ pub fn check(manifest: &Manifest) -> Result<(), Refused> {
     };
     if let Some((key, _)) = entries
         .iter()
-        .find(|(key, _)| !IMPORT_KEYS.contains(&key.as_str()))
+        .find(|(key, _)| !IMPORT_KEYS.iter().any(|(known, _)| known == key))
     {
         return Err(Refused {
             code: manifest::UNKNOWN_KEY,
             message: format!("import.{key}: this key is not one an import block has."),
         });
     }
-    let folder = match import.get("skills") {
-        None | Some(Value::Null) => return Ok(()),
-        Some(Value::Str(folder)) => folder,
-        Some(_) => {
+    for (key, kind) in IMPORT_KEYS {
+        let path = match import.get(key) {
+            None | Some(Value::Null) => continue,
+            Some(Value::Str(path)) => path,
+            Some(_) => {
+                return Err(Refused {
+                    code: manifest::TYPE,
+                    message: format!("import.{key}: this must be text in quotes."),
+                });
+            }
+        };
+        if !under_home(path) {
             return Err(Refused {
-                code: manifest::TYPE,
-                message: "import.skills: this must be text in quotes.".to_owned(),
+                code: manifest::VALUE,
+                message: format!(
+                    "import.{key}: this must be a {kind} under the home folder, written \
+                     without ~, . or .. parts or a leading /."
+                ),
             });
         }
-    };
-    if !under_home(folder) {
-        return Err(Refused {
-            code: manifest::VALUE,
-            message: "import.skills: this must be a folder under the home folder, written \
-                      without ~, . or .. parts or a leading /."
-                .to_owned(),
-        });
-    }
-    if !manifest
-        .owner_folders
-        .iter()
-        .any(|owner| Path::new(folder).starts_with(owner))
-    {
-        return Err(Refused {
-            code: manifest::VALUE,
-            message: "import.skills: this must be inside one of home.owner_folders.".to_owned(),
-        });
+        if !manifest
+            .owner_folders
+            .iter()
+            .any(|owner| Path::new(path).starts_with(owner))
+        {
+            return Err(Refused {
+                code: manifest::VALUE,
+                message: format!("import.{key}: this must be inside one of home.owner_folders."),
+            });
+        }
     }
     Ok(())
 }
