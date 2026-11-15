@@ -11,8 +11,20 @@ pub const ENV_MAX: usize = 16;
 const NAME_BYTES_MAX: usize = 64;
 const VALUE_BYTES_MAX: usize = 1024;
 const HANDED: [&str; 3] = ["relay_url", "token", "model"];
-const OWNED: [&str; 2] = ["PATH", "HOME"];
-const OWNED_PREFIXES: [&str; 2] = ["DYLD_", "LD_"];
+const OWNED: [&str; 11] = [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "SHELL",
+    "TERM",
+    "LANG",
+    "TZ",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+];
+const OWNED_PREFIXES: [&str; 5] = ["DYLD_", "LD_", "GIT_", "LC_", "CRAZYAGENT_"];
 
 /// What a listed harness is given to reach the model of one pool account: the address it
 /// sends model requests to, the placeholder it presents there, the model, and the
@@ -198,8 +210,9 @@ fn check_env(env: &Value, path: &str) -> Result<(), Refused> {
 
 /// Checks the `accounts` block of a manifest, which says how a listed harness is given an
 /// account of each wire format it lists: each entry is named after one wire format the
-/// manifest lists, and its `env` sets plain variables the engine does not own to text that
-/// holds no placeholder but `{relay_url}`, `{token}` and `{model}`. A harness on a shared
+/// manifest lists, and its `env` sets plain variables the engine does not own (none it sets
+/// on a launch: search path, home, temp folder, shell, locale, git, proxy or its own) to
+/// text that holds no placeholder but `{relay_url}`, `{token}` and `{model}`. A harness on a shared
 /// driver lists each wire format by its full name and has an entry for every one; the
 /// engine's own adapters need none. Input: the manifest. Output: Ok, or a refusal that
 /// names the setting.
