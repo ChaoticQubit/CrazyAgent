@@ -50,13 +50,16 @@ impl Supervised {
 }
 
 /// Starts the harness with its guarded calls trapped and answers them until it ends. The
-/// harness dies with the thread that started it, so that thread waits here. It first makes
-/// itself not dumpable, so no program of the agent can trace it or take its listener, and a
-/// worker that stops ends it with no call unanswered. Inputs: what to hold and the harness
-/// command. Output: its exit code, 128 plus the signal that ended it, or why none started.
+/// harness dies with the thread that started it, so that thread waits here. It refuses to
+/// run as root and makes itself not dumpable, so no program of the agent can trace it or
+/// take its listener; a worker that stops ends it with no call unanswered. Inputs: what to
+/// hold and the harness command. Output: its exit code, 128 plus its signal, or why not.
 pub fn run(config: Supervised, command: &mut Command) -> io::Result<i32> {
     let guards = config.guards();
     assert!(guards != Guards::default());
+    if rustix::process::geteuid().is_root() {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
     let calls = Calls::host().ok_or(io::ErrorKind::Unsupported)?;
     sys::sizes_fit()?;
     let program = sys::Program::new(&filter::program(&calls, guards));

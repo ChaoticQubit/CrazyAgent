@@ -67,6 +67,11 @@ const PROBE_SUPERVISED: &str = "--probe-supervised";
 /// How long [`host_now`] keeps what it read: a policy view asks on every read, and each
 /// answer starts the helper twice.
 const HOST_AGE_MAX: Duration = Duration::from_secs(60);
+/// The longest the call supervisor probe may run: its one wait is a 2 s connect timeout,
+/// reached only when a guard does not hold (rv-sec3 linux-t4b N4).
+const SUPERVISOR_PROBE_TIME_MAX: Duration = Duration::from_secs(10);
+/// How often [`passes_within`] looks whether its probe has ended.
+const PROBE_POLL: Duration = Duration::from_millis(20);
 /// The set-user-ID and set-group-ID mode bits: a bubblewrap with either runs as someone
 /// other than the engine's user, so [`trusted`] refuses it.
 const SET_ID_BITS: u32 = 0o6000;
@@ -1318,9 +1323,43 @@ impl LinuxSandbox {
     /// host holds it as the launch starts it ([`supervises`]); bubblewrap alone never runs
     /// it. Off, or a host where the probe fails, keeps the launch as it was. Input: the
     /// owner's choice. Output: the sandbox.
-    pub fn supervise(self, calls: LinuxSupervisor) -> Self {
-        let _ = calls;
+    pub fn supervise(mut self, calls: LinuxSupervisor) -> Self {
+        assert!(self.supervision.is_none());
+        if calls == LinuxSupervisor::Off {
+            return self;
+        }
+        let supervision = match &self.backend {
+            LinuxBackend::Landlock { helper } if supervises(helper, None) => {
+                let scoped = passes(Command::new(helper).arg(SCOPED));
+                Some(Supervision { signals: !scoped })
+            }
+            LinuxBackend::Nested { bwrap, helper } if supervises(helper, Some(bwrap.as_path())) => {
+                Some(Supervision { signals: false })
+            }
+            LinuxBackend::Landlock { .. }
+            | LinuxBackend::Nested { .. }
+            | LinuxBackend::Bubblewrap { .. } => None,
+        };
+        self.supervision = supervision;
         self
+    }
+
+    /// The policy with the guards this launch's supervision carries, none without one,
+    /// checked as the helper checks it ([`guard_fits`]). A nested launch never carries the
+    /// signal guard. Input: the policy. Output: the policy, or `Invalid` for more own git
+    /// folders than the helper takes.
+    fn with_guard(&self, policy: LandlockPolicy) -> Result<LandlockPolicy, SandboxError> {
+        let Some(supervision) = self.supervision else {
+            return Ok(policy);
+        };
+        let guarded = LandlockPolicy {
+            guard: guard(&self.sandbox, supervision),
+            ..policy
+        };
+        assert!(!guarded.nested || !guarded.guard.signals);
+        assert!(guarded.guard != Guard::default());
+        guard_fits(&guarded).map_err(|reason| invalid(&reason))?;
+        Ok(guarded)
     }
 
     /// Picks the backend this machine holds: Landlock when the helper exists and its probe
@@ -1416,6 +1455,56 @@ impl LinuxSandbox {
     }
 }
 
+/// Runs a probe as [`passes`] does, but ends it once `time_max` has gone by; the harness
+/// the call supervisor probe starts dies with it. Inputs: the probe and its longest run.
+/// Output: true only when it exited 0 in time.
+fn passes_within(probe: &mut Command, time_max: Duration) -> bool {
+    let started = Instant::now();
+    let quiet = probe
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let Ok(mut child) = crate::spawn_gate::spawn(quiet) else {
+        return false;
+    };
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if started.elapsed() < time_max => std::thread::sleep(PROBE_POLL),
+            Ok(None) | Err(_) => break,
+        }
+    }
+    if child.kill().is_ok() {
+        let reaped = child.wait();
+        assert!(reaped.is_ok(), "a killed probe is this process's child to reap");
+    }
+    false
+}
+
+/// Tells whether the call supervisor holds every guard on this host as a launch starts it:
+/// the helper's probe ([`probe_supervisor`]) run plainly, or inside bubblewrap's
+/// namespaces for a host that nests agents. Never as root: a root agent may trace the
+/// supervisor whatever its dumpable mark (rv-sec3 linux-t4b N1). Inputs: the helper and
+/// the bubblewrap launches nest under, if any. Output: true only when the probe held.
+fn supervises(helper: &Path, bwrap: Option<&Path>) -> bool {
+    if rustix::process::geteuid().is_root() {
+        return false;
+    }
+    let mut probe = Command::new(helper);
+    match bwrap {
+        None => {}
+        Some(bwrap) if clean_absolute(bwrap) && trusted(bwrap) => {
+            probe.arg(NEST).arg("--").arg(bwrap);
+            probe.args(NEST_ARGS).arg("--").arg(helper);
+        }
+        Some(_) => return false,
+    }
+    probe.arg(PROBE_SUPERVISOR);
+    let usable = clean_absolute(helper) && helper.is_file();
+    usable && passes_within(&mut probe, SUPERVISOR_PROBE_TIME_MAX)
+}
+
 /// Runs a probe with no environment and no input or output. Input: the probe command.
 /// Output: true only when it ran and exited 0.
 fn passes(probe: &mut Command) -> bool {
@@ -1494,10 +1583,11 @@ pub fn read_host(helper: &Path) -> super::LinuxHost {
         .find(|path| path.is_file());
     let apart = |bwrap: &Path| !held || nests(bwrap, helper, &[PROBE.into()]);
     let nested = usable && bwrap.is_some_and(apart);
+    let supervised = held && supervises(helper, bwrap.filter(|_| nested));
     super::LinuxHost {
         nested,
         scoped,
-        supervised: false,
+        supervised,
     }
 }
 
@@ -1582,15 +1672,16 @@ impl Sandbox for LinuxSandbox {
         let grants = Grants::of(&self.sandbox)?;
         let mut command = match &self.backend {
             LinuxBackend::Landlock { helper } => {
+                let policy = self.with_guard(landlock_policy(&grants, &self.sandbox))?;
                 let mut command = Command::new(helper);
-                command.args(landlock_policy(&grants, &self.sandbox).args());
+                command.args(policy.args());
                 command
             }
             LinuxBackend::Nested { bwrap, helper } => {
-                let policy = LandlockPolicy {
+                let policy = self.with_guard(LandlockPolicy {
                     nested: true,
                     ..landlock_policy(&grants, &self.sandbox)
-                };
+                })?;
                 let bridged = self.sandbox.bridged_ports().unwrap_or_default();
                 nest_command(bwrap, helper, &policy, cwd, &bridged)
             }
@@ -1724,8 +1815,29 @@ fn writable_children(
 /// ([`git_own`]); and signals where [`Supervision`] says nothing else holds them. Inputs:
 /// the policy and what the supervisor holds here. Output: the guard.
 fn guard(sandbox: &ProjectSandbox, supervision: Supervision) -> Guard {
-    let _ = (sandbox, supervision);
-    Guard::default()
+    let loopback = match sandbox.network() {
+        SandboxNetwork::Only(remotes) if sandbox.linux_sockets() == LinuxSockets::TcpOnly => {
+            let anywhere = |port: u16| {
+                remotes.contains(&SandboxRemote::AnyHost(port))
+                    || (sandbox.resolves_over_tcp() && port == DNS_PORT)
+            };
+            ports(remotes)
+                .into_iter()
+                .filter(|port| {
+                    remotes.contains(&SandboxRemote::Loopback(*port)) && !anywhere(*port)
+                })
+                .collect()
+        }
+        SandboxNetwork::Only(_) | SandboxNetwork::Open => Vec::new(),
+    };
+    let held = Guard {
+        loopback,
+        git: Some(git_own(sandbox)),
+        signals: supervision.signals,
+    };
+    assert!(!held.loopback.contains(&0));
+    assert!(held.loopback.windows(2).all(|pair| pair[0] < pair[1]));
+    held
 }
 
 /// The folders an agent may make a `.git` entry in, as the macOS boundary's nested git
@@ -1733,8 +1845,25 @@ fn guard(sandbox: &ProjectSandbox, supervision: Supervision) -> Guard {
 /// inside the engine's worktree folders (when it adds worktrees) or inside a setup folder.
 /// Input: the policy. Output: the agent's own git folders.
 fn git_own(sandbox: &ProjectSandbox) -> GitOwn {
-    let _ = sandbox;
-    GitOwn::default()
+    assert!(sandbox.checkout.is_none());
+    assert!(sandbox.clone.is_none());
+    let (working, _) = sandbox.git_deny_roots();
+    let mut kids = Vec::new();
+    if sandbox.adds_worktrees {
+        let project = sandbox.project_root();
+        let state = project.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        kids.extend([project.join("worktrees"), state.join("worktrees")]);
+    }
+    if let Some(setup) = &sandbox.setup {
+        kids.push(setup.folder.clone());
+    }
+    let own = GitOwn {
+        trees: working.into_iter().map(Path::to_path_buf).collect(),
+        kids,
+        exact: Vec::new(),
+    };
+    assert!(!own.trees.is_empty());
+    own
 }
 
 fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy {

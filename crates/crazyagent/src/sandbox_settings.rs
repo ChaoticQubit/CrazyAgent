@@ -112,8 +112,18 @@ pub fn load(connection: &Connection) -> Result<SandboxSettings, EngineError> {
 /// when the database cannot be opened, or [`load`]'s refusal, so the launch fails closed.
 #[cfg(any(target_os = "linux", all(test, unix)))]
 pub(crate) fn stored(engine: &std::path::Path) -> Result<SandboxSettings, EngineError> {
-    let _ = engine;
-    Ok(SandboxSettings::default())
+    let unavailable = |_: rusqlite::Error| error("sandbox_settings_unavailable");
+    let connection = Connection::open_with_flags(
+        engine.join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(unavailable)?;
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(unavailable)?;
+    load(&connection)
 }
 
 /// The owner read of the sandbox settings. Input: the open transaction. Output: the
