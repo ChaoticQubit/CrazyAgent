@@ -910,7 +910,11 @@ fn create_makes_a_private_squash_only_repository_under_the_chosen_account() {
     let server = Server::start(move |seen, _| {
         let body: serde_json::Value = serde_json::from_slice(&seen.body).unwrap_or_default();
         let name = body["name"].as_str().unwrap_or_default().to_owned();
-        let private = body["private"].clone();
+        let private = if name == "exposed" {
+            serde_json::json!(false)
+        } else {
+            body["private"].clone()
+        };
         let made = |owner: &str, node: &str| {
             let full_name = if name == "renamed" {
                 format!("{owner}/other")
@@ -1015,6 +1019,7 @@ fn create_makes_a_private_squash_only_repository_under_the_chosen_account() {
         ("octo-cat", "taken", "github_repo_name_taken"),
         ("beta-org", "tool", "github_repo_create_refused"),
         ("octo-cat", "renamed", "github_reply_invalid"),
+        ("octo-cat", "exposed", "github_repo_visibility_mismatch"),
     ] {
         assert_eq!(
             account.create_repo(&repo(owner, name, true)).unwrap_err().0,
