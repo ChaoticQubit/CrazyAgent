@@ -15623,10 +15623,7 @@ fn a_confined_step_on_linux_keeps_a_racy_entry_racy_in_its_index_copy() {
             .unwrap();
     };
     git_in(&case.home, &case.repo, &["config", "core.checkStat", "minimal"]);
-    write(&case.repo.join("README"), "uno
-dos
-tres
-");
+    write(&case.repo.join("README"), "uno\ndos\ntres\n");
     git_in(&case.home, &case.repo, &["commit", "-q", "-am", "Target"]);
     let target = git_in(&case.home, &case.repo, &["rev-parse", "HEAD"]);
     stamp(&readme);
