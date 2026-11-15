@@ -3647,7 +3647,7 @@ fn a_fresh_agent_home_starts_context_mode_from_the_engine_install_not_npx() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let root = private_folder(&base.join("engine"));
-    let bin = private_folder(&base.join("bin"));
+    let bin = private_folder(&root.join("setup").join("bin"));
     for program in ["npx", "node"] {
         fs::write(bin.join(program), "").unwrap();
         fs::set_permissions(bin.join(program), fs::Permissions::from_mode(0o755)).unwrap();
@@ -4622,6 +4622,10 @@ fn a_launch_that_left_context_mode_out_says_why_in_its_tools_section() {
         (
             ContextModeOff::Unsupported,
             "- context-mode is off for this launch: CrazyAgent cannot run it on this platform yet. Use the shell instead.\n",
+        ),
+        (
+            ContextModeOff::NpxNotFound,
+            "- context-mode is off for this launch: CrazyAgent did not find the npx it runs on this computer, so it did not start it. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n",
         ),
     ] {
         let plugins = LaunchPlugins {

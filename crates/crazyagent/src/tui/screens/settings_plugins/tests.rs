@@ -1638,6 +1638,18 @@ fn a_check_on_a_node_too_old_for_context_mode_reads_the_engine_words() {
     );
 }
 
+#[test]
+fn a_check_of_a_context_mode_npx_the_resolver_does_not_find_reads_the_engine_words() {
+    assert_eq!(
+        plugin_plain("server_npx_not_found"),
+        "CrazyAgent did not find the npx this context-mode server runs on this computer, so it did not start it."
+    );
+    assert_eq!(
+        Some(plugin_plain("server_npx_not_found")),
+        crate::plugins::plain_problem("server_npx_not_found")
+    );
+}
+
 fn hook(plugin: &str, event: &str, matcher: Option<&str>, enabled: bool) -> HookView {
     HookView {
         id: format!("hook-{plugin}-{event}-{}", matcher.unwrap_or("all")),

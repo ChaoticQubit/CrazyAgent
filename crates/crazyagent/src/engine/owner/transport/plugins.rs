@@ -1503,9 +1503,10 @@ async fn start_check(
 
 /// Checks an approved command server inside the boundary agents run it in, running what an
 /// agent launch runs once the default pack's context-mode has its shared install
-/// ([`crate::context_mode::for_check`]). That spec never runs as npx here: while its install
-/// runs, after a recent failure, without npm beside npx or for a version the pack does not
-/// pin, the check is not run and says why. Its own project, home and temp folders under
+/// ([`crate::context_mode::for_check`]). That spec never runs as npx here, nor does one only
+/// shaped like it whose npx the tool resolver does not find: while its install runs, after a
+/// recent failure, without npm beside npx, for a version the pack does not pin or for such an
+/// npx, the check is not run and says why. Its own project, home and temp folders under
 /// `mcp-checks/<id>` in the engine folder, reads of system paths, the command's folder and
 /// that shared install only, open network without binding the owner's ports, and only its
 /// own secrets. Inputs: the engine folder, server id, approved command, arguments, secret
@@ -1548,6 +1549,9 @@ fn boundary_check(
         }
         ForCheck::Refused("context_mode_node_too_old") => {
             return Err("server_node_too_old".into());
+        }
+        ForCheck::Refused("context_mode_npx_not_found") => {
+            return Err("server_npx_not_found".into());
         }
         ForCheck::Refused(code) => {
             eprintln!("plugin_check_install_refused cause={code}");

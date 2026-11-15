@@ -1478,11 +1478,15 @@ pub(crate) fn launch_set(
 
 /// The spec an agent launch runs where the engine has no shared context-mode install: the
 /// default pack's pinned context-mode launch is left out, never run through npx, which would
-/// let npm run dependency install scripts, and every other spec runs as approved. Input: the
-/// approved spec. Output: the spec, or why it is left out.
+/// let npm run dependency install scripts, as is a spec only shaped like it, for the reason
+/// [`crate::plugins::found_context_mode`] gives, and every other spec runs as approved.
+/// Inputs: the engine root and the approved spec. Output: the spec, or why it is left out.
 #[cfg(any(test, not(unix)))]
-fn without_shared_install(spec: ServerSpec) -> Result<ServerSpec, crate::plugins::ContextModeOff> {
-    match crate::plugins::pinned_context_mode(&spec) {
+fn without_shared_install(
+    root: &Path,
+    spec: ServerSpec,
+) -> Result<ServerSpec, crate::plugins::ContextModeOff> {
+    match crate::plugins::found_context_mode(root, &spec)? {
         Some(_) => Err(crate::plugins::ContextModeOff::Unsupported),
         None => Ok(spec),
     }
@@ -1495,7 +1499,7 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
         #[cfg(unix)]
         let spec = crate::context_mode::for_launch(root, server.spec);
         #[cfg(not(unix))]
-        let spec = without_shared_install(server.spec);
+        let spec = without_shared_install(root, server.spec);
         let spec = match spec {
             Ok(spec) => spec,
             Err(off) => {
