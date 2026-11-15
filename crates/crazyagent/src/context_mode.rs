@@ -34,9 +34,10 @@ const _: () =
 static INSTALLING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// What a server check runs for one approved spec. The check never runs the default pack's
-/// pinned context-mode npx launch: that spec runs from the engine's shared install once it is
-/// complete, waits while its install runs in this engine, and otherwise says why no install
-/// can run, with the time left after a recent failure. Every other spec runs as approved.
+/// pinned context-mode npx launch, one whose npx the tool resolver finds ([`found_pinned`]):
+/// it runs from the engine's shared install once that is complete, waits while its install
+/// runs in this engine, and otherwise says why no install can run, with the time left after a
+/// recent failure. Every other spec, one only shaped like it included, runs as approved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ForCheck {
     Run(ServerSpec),

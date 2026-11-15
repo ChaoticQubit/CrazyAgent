@@ -1503,7 +1503,8 @@ async fn start_check(
 
 /// Checks an approved command server inside the boundary agents run it in, running what an
 /// agent launch runs once the default pack's context-mode has its shared install
-/// ([`crate::context_mode::for_check`]). That spec never runs as npx here: while its install
+/// ([`crate::context_mode::for_check`]). That spec, with an npx the tool resolver finds,
+/// never runs as npx here, and one only shaped like it runs as approved: while its install
 /// runs, after a recent failure, without npm beside npx or for a version the pack does not
 /// pin, the check is not run and says why. Its own project, home and temp folders under
 /// `mcp-checks/<id>` in the engine folder, reads of system paths, the command's folder and
