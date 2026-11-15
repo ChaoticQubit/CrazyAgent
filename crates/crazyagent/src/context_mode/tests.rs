@@ -583,7 +583,7 @@ fn the_node_version_check_runs_inside_a_boundary_with_a_cleared_environment() {
     fs::write(
         &node,
         format!(
-            "#!/bin/sh\n: > '{}' 2>/dev/null\n\
+            "#!/bin/sh\n/usr/bin/touch '{}' 2>/dev/null\n\
              if [ \"$HOME\" = '{home}' ]; then echo v1.0.0; else echo v24.0.0; fi\n",
             outside.display()
         ),
@@ -596,6 +596,19 @@ fn the_node_version_check_runs_inside_a_boundary_with_a_cleared_environment() {
         "the check ran inside the boundary and read a supported version"
     );
     assert!(!outside.exists(), "the version check wrote outside a boundary");
+}
+
+/// RV-DS241-150: the engine's own `setup/bin` is a folder the tool resolver looks in, so an
+/// npx there, a script or an empty file, is the pinned launch's; every row here and in the
+/// check and launch rows that runs the pinned path keeps its npx there and rests on this.
+#[test]
+fn an_npx_in_the_engines_own_setup_bin_is_one_the_resolver_finds() {
+    let case = case("/usr/bin/false");
+    let spec = npx_in(&case, VERSION);
+    let found = Some((case.bin.as_path(), VERSION));
+    assert_eq!(found_pinned(&case.root, &spec), found);
+    fs::write(case.bin.join("npx"), "").unwrap();
+    assert_eq!(found_pinned(&case.root, &spec), found, "an empty npx file too");
 }
 
 #[test]
