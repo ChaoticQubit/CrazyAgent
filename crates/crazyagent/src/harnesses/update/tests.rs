@@ -2184,10 +2184,32 @@ fn a_harness_the_resolver_refuses_as_changeable_is_never_asked_its_version() {
     assert!(!ran.exists(), "a refused harness file is never run");
 }
 
-/// security-audit vid 1 (NEXT-02:50 step 1), on macOS, where the owner's cache folder lies
-/// outside every temp folder: an entry there that leads to a harness file in the temp folder
-/// is refused on the engine's places as one in a temp folder, is never run for its version,
-/// and what it needs names that refusal.
+/// A folder for a row's owner entry outside every temp folder, where this user's cache folder
+/// is not on macOS (it lies in `/private/var/folders`): next to the test build, which runs
+/// outside every temp folder, checked here. Input: the folder name's prefix. Output: the
+/// folder, removed when dropped.
+#[cfg(target_os = "macos")]
+fn outside_temp(prefix: &str) -> tempfile::TempDir {
+    let build = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let folder = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(build.parent().unwrap())
+        .unwrap();
+    let place = folder.path().canonicalize().unwrap();
+    assert!(
+        !crate::tools::temp_roots()
+            .iter()
+            .any(|temp| place.starts_with(temp)),
+        "the test build runs in a temp folder: {}",
+        place.display()
+    );
+    folder
+}
+
+/// security-audit vid 1 (NEXT-02:50 step 1), on macOS: an owner entry outside every temp
+/// folder that leads to a harness file in the temp folder is refused on the engine's places
+/// as one in a temp folder, is never run for its version, and what it needs names that
+/// refusal.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_harness_entry_that_leads_into_temp_is_never_asked_its_version_on_macos() {
@@ -2204,7 +2226,7 @@ fn a_harness_entry_that_leads_into_temp_is_never_asked_its_version_on_macos() {
             ran.display()
         ),
     );
-    let outside = crate::harnesses::finding::owner_folder("vid1-temp-");
+    let outside = outside_temp("vid1-temp-");
     let link = outside.path().join("bin/codex");
     std::fs::create_dir_all(link.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&real, &link).unwrap();
@@ -2354,16 +2376,16 @@ fn a_self_update_is_refused_when_a_middle_link_sits_where_agents_or_others_can_m
     }
 }
 
-/// security-audit vid 1 r2 (3), on macOS, where the owner's cache folder lies outside every
-/// temp folder: on the engine's places a command is refused when a link on its program's way
-/// to the real file lies in the temp folder while the program's own place does not, since
-/// agents granted the owner's temp folder can move that link; the chain without it passes.
+/// security-audit vid 1 r2 (3), on macOS, with the program's own place outside every temp
+/// folder: on the engine's places a command is refused when a link on its program's way to
+/// the real file lies in the temp folder while the program's own place does not, since agents
+/// granted the owner's temp folder can move that link; the chain without it passes.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_command_whose_link_chain_passes_through_the_temp_folder_is_refused_on_macos() {
     let machine = Machine::new();
     let at = machine.root.path();
-    let outside = crate::harnesses::finding::owner_folder("vid1-hop-");
+    let outside = outside_temp("vid1-hop-");
     let real = outside.path().join("real/codex");
     executable(&real, "#!/bin/sh\n");
     let middle = at.join("tools/codex");
