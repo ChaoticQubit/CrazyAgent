@@ -161,3 +161,188 @@ async fn a_harness_registered_through_its_link_is_listed_by_the_link_its_updater
         "still listed by the entry once it leads to versions/2.1.300"
     );
 }
+
+/// security-audit vid 1 with rv-sa241 f-10: when the registered Codex cannot be used, here
+/// because its pinned file was rewritten in place, the Versions route lists what the engine
+/// search finds instead. A Codex an agent planted in a project's `node_modules/.bin` that the
+/// search finds there is still never run for its version: the row names the resolver's
+/// refusal, and neither the planted file nor the owner's changed one starts.
+#[tokio::test]
+async fn a_versions_read_that_falls_back_from_a_broken_pin_never_runs_a_planted_codex() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-hc-fallback-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.path().join("g.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root.path(),
+        "e.sock",
+        &global,
+        &root.path().join("p.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let outside = crate::harnesses::finding::owner_folder("hc-fallback-");
+    std::fs::set_permissions(outside.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let host = root.path().join("crazyagent-pin-only");
+    let owner_ran = outside.path().join("owner-ran");
+    let planted_ran = outside.path().join("planted-ran");
+    let owned = outside.path().join("owner/codex-0.167.1");
+    let work = outside.path().join("proj");
+    let planted = work.join("node_modules/@openai/codex/bin/codex.js");
+    let link = work.join("node_modules/.bin/codex");
+    let version = |ran: &Path| {
+        format!(
+            "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+            ran.display()
+        )
+    };
+    program(&host, "host", 0o700);
+    program(&owned, &version(&owner_ran), 0o700);
+    program(&planted, &version(&planted_ran), 0o755);
+    std::fs::create_dir_all(work.join(".crazyagent")).unwrap();
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&planted, &link).unwrap();
+    service.register_native_auth_host(&host).unwrap();
+    service.register_codex_executable(&owned).unwrap();
+    service
+        .set_harness_search(crate::harnesses::Search::new(
+            vec![link.parent().unwrap().to_path_buf()],
+            None,
+            Vec::new(),
+        ))
+        .unwrap();
+    service.ensure_ready(&stopped).unwrap();
+    let client = OwnerClient::discover(root.path(), OwnerClientKind::Tui, Duration::from_secs(20))
+        .await
+        .unwrap()
+        .0;
+
+    std::fs::write(&owned, version(&owner_ran).replace("0.167.1", "0.167.2")).unwrap();
+    let versions = client.harness_versions("codex", false).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(versions.installed, None);
+    assert!(
+        versions.needs.is_some(),
+        "the fallback lists the planted Codex and names the resolver's refusal"
+    );
+    assert!(!planted_ran.exists(), "a planted Codex is never run");
+    assert!(!owner_ran.exists(), "a pinned file rewritten in place is never run");
+}
+
+/// security-audit vid 1 with rv-sa241 f-11: a Versions request re-pins a registered Codex
+/// whose entry now leads to another file only once that file passes the checks of engine
+/// start. An entry relinked to a Codex in a project's `.crazyagent` folder, in a folder
+/// anyone can write, or to a version-manager shim is refused there with the code engine
+/// start gives it: the pin is not replaced, and neither that file nor the owner's first one
+/// is run for its version.
+#[tokio::test]
+async fn a_versions_read_never_repins_an_entry_relinked_to_a_file_engine_start_refuses() {
+    use crate::harnesses::finding::{PATH_AGENT_SPACE, PATH_CHANGEABLE, PATH_SHIM};
+    let root = tempfile::Builder::new()
+        .prefix("ca-hc-repin-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.path().join("g.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root.path(),
+        "e.sock",
+        &global,
+        &root.path().join("p.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let outside = crate::harnesses::finding::owner_folder("hc-repin-");
+    std::fs::set_permissions(outside.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let host = root.path().join("crazyagent-pin-only");
+    let owner_ran = outside.path().join("owner-ran");
+    let owned = outside.path().join("owner/codex-0.167.1");
+    let entry = outside.path().join("bin/codex");
+    let crazyagent = outside.path().join("proj/.crazyagent/worktrees/a/codex");
+    let open_folder = outside.path().join("open");
+    let open = open_folder.join("codex");
+    let shim = outside.path().join("shims/mise");
+    let refused = [
+        ("agent space", &crazyagent, PATH_AGENT_SPACE),
+        ("open folder", &open, PATH_CHANGEABLE),
+        ("shim", &shim, PATH_SHIM),
+    ];
+    let version = |ran: &Path| {
+        format!(
+            "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+            ran.display()
+        )
+    };
+    program(&host, "host", 0o700);
+    program(&owned, &version(&owner_ran), 0o700);
+    for (_, file, _) in &refused {
+        program(file, &version(&file.with_extension("ran")), 0o700);
+    }
+    std::fs::set_permissions(&open_folder, std::fs::Permissions::from_mode(0o777)).unwrap();
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&owned, &entry).unwrap();
+    service.register_native_auth_host(&host).unwrap();
+    service.register_codex_executable(&entry).unwrap();
+    service
+        .set_harness_search(crate::harnesses::Search::new(
+            vec![entry.parent().unwrap().to_path_buf()],
+            None,
+            Vec::new(),
+        ))
+        .unwrap();
+    service.ensure_ready(&stopped).unwrap();
+    let client = OwnerClient::discover(root.path(), OwnerClientKind::Tui, Duration::from_secs(20))
+        .await
+        .unwrap()
+        .0;
+
+    let runs = |ran: &Path| std::fs::read_to_string(ran).map_or(0, |text| text.lines().count());
+    let before = runs(&owner_ran);
+    let mut seen = Vec::new();
+    for (name, file, code) in &refused {
+        std::fs::remove_file(&entry).unwrap();
+        std::os::unix::fs::symlink(file, &entry).unwrap();
+        let versions = client.harness_versions("codex", false).await.unwrap();
+        let refusal = service
+            .owner_runtime()
+            .unwrap()
+            .registered_codex_executable()
+            .err()
+            .map(|error| error.0);
+        let ran = file.with_extension("ran").exists();
+        seen.push((*name, *code, versions.installed, refusal, ran));
+    }
+    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+
+    for (name, code, installed, refusal, ran) in seen {
+        assert_eq!(installed, None, "{name}");
+        assert_eq!(
+            refusal.as_deref(),
+            Some(code),
+            "{name}: the re-pin is refused with the code of engine start"
+        );
+        assert!(!ran, "{name}: a refused file is never run for its version");
+    }
+    assert_eq!(
+        runs(&owner_ran),
+        before,
+        "the reads never run the owner's first file once the entry leads elsewhere"
+    );
+}

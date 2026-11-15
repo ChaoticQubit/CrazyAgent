@@ -399,6 +399,23 @@ impl Places {
         !self.agent_writable(folder) && !(self.temp_refused && in_temp_of(folder, &self.temps))
     }
 
+    /// Whether a path run as written meets only links no one else can move: every link and
+    /// `..` folder on its way to the real file ([`crate::harnesses::finding::link_hops`]) is
+    /// one agents cannot write, no other user or group can change and, on the engine's
+    /// places, not one in a temp folder the path itself lies outside ([`leads_into_temp`]).
+    /// Input: the absolute path. Output: the answer, false past the link bound.
+    pub(crate) fn link_hops_kept(&self, path: &Path) -> bool {
+        assert!(path.is_absolute());
+        let Some(hops) = crate::harnesses::finding::link_hops(path) else {
+            return false;
+        };
+        hops.iter().all(|hop| {
+            !self.agent_writable(hop)
+                && crate::service::changeable_past_sticky(hop).is_none()
+                && !(self.temp_refused && leads_into_temp(path, hop, &self.temps))
+        })
+    }
+
     /// Whether agents can write a folder or file, read as written and with its links
     /// resolved: inside a `.crazyagent` folder, inside a project ([`in_project`]), inside a
     /// project the engine set up ([`Places::in_set_up_project`]), inside the engine's data
@@ -936,20 +953,29 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         .ok()
         .filter(|_| entry.is_absolute())
         .ok_or_else(not_there)?;
+    #[cfg(test)]
+    if let Some(step) = between_program_and_check(entry) {
+        step();
+    }
+    let refused = |file: &Path, why: Refusal| Missing {
+        reason: Reason::Refused,
+        refused: Some(Box::new(Refused {
+            file: file.to_path_buf(),
+            why,
+        })),
+        ..not_there()
+    };
     match check_candidate(places, entry) {
         Some(Ok(())) => {}
-        Some(Err(why)) => {
-            return Err(Missing {
-                reason: Reason::Refused,
-                refused: Some(Box::new(Refused {
-                    file: entry.to_path_buf(),
-                    why,
-                })),
-                ..not_there()
-            });
-        }
+        Some(Err(why)) => return Err(refused(entry, why)),
         None => return Err(not_there()),
     }
+    match check_candidate(places, &program) {
+        Some(Ok(())) if program.canonicalize().ok().as_ref() == Some(&program) => {}
+        Some(Err(why)) => return Err(refused(program.as_path(), why)),
+        _ => return Err(not_there()),
+    }
+    assert!(program.is_absolute());
     let Some(shebang) = shebang(&program) else {
         return Ok(Resolved {
             entry: entry.to_path_buf(),
@@ -1004,6 +1030,28 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
             by_name: shebang.by_name.is_some() || through_shim,
         },
     })
+}
+
+/// A step a row runs once in `entry_at` between reading an entry's real file and checking
+/// the entry.
+#[cfg(test)]
+type Step = Box<dyn FnOnce() + Send>;
+
+/// The steps rows set, each by the entry whose resolution runs it.
+#[cfg(test)]
+static BETWEEN_PROGRAM_AND_CHECK: std::sync::Mutex<Vec<(PathBuf, Step)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Takes the step a row set for this entry, to run in `entry_at` once the entry's real file
+/// was read and before the entry is checked, so a row can move a link of its chain in that
+/// gap. Input: the entry. Output: the step, none for every other entry.
+#[cfg(test)]
+fn between_program_and_check(entry: &Path) -> Option<Step> {
+    let mut steps = BETWEEN_PROGRAM_AND_CHECK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let at = steps.iter().position(|(path, _)| path == entry)?;
+    Some(steps.remove(at).1)
 }
 
 /// Finds the interpreter a script's first line asks `env` for by name: for `node`, first the

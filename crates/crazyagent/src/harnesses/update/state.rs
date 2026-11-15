@@ -349,16 +349,51 @@ fn updated(
 /// Asks a harness for its version only when the tool resolver would run it and every
 /// interpreter its first line names, with no refused copy of one in its own folder
 /// ([`super::vetted`]), so a file agents can write, or one whose program is missing, is never
-/// started for a version. Inputs: the harness executable, the home folder and the resolver's
-/// places. Output: the version, or none.
+/// started for a version. It runs the real file the resolver checked, once that file passes
+/// again by its own path, with the entry's folder kept as the search an interpreter asked for
+/// by name is found in, so no link of the entry's chain is followed after the check.
+/// Inputs: the harness executable, the home folder and the resolver's places. Output: the
+/// version, or none.
 pub(super) fn version_if_runs(
     executable: &Path,
     home: &Path,
     places: &crate::tools::Places,
 ) -> Option<String> {
-    let fixed = version_command(executable)?;
-    super::vetted(&fixed, places).ok()?;
+    let entry = version_command(executable)?;
+    let real = super::vetted(&entry, places).ok()?;
+    let fixed = Fixed {
+        program: real,
+        ..entry
+    };
+    if super::vetted(&fixed, places).ok()? != fixed.program {
+        return None;
+    }
+    assert!(fixed.program.is_absolute());
+    #[cfg(test)]
+    if let Some(step) = between_vetted_and_run(executable) {
+        step();
+    }
     version_ran(&fixed, home)
+}
+
+/// A step a row runs once between the check of a version command and its run.
+#[cfg(test)]
+pub(super) type Step = Box<dyn FnOnce() + Send>;
+
+/// The steps rows set, each by the entry whose version read runs it.
+#[cfg(test)]
+pub(super) static BETWEEN_VETTED_AND_RUN: Mutex<Vec<(PathBuf, Step)>> = Mutex::new(Vec::new());
+
+/// Takes the step a row set for this entry, to run in `version_if_runs` once its command
+/// passed `vetted` and before it runs, so a row can move a link in the entry's chain in that
+/// gap. Input: the entry. Output: the step, none for every other entry.
+#[cfg(test)]
+fn between_vetted_and_run(entry: &Path) -> Option<Step> {
+    let mut steps = BETWEEN_VETTED_AND_RUN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let at = steps.iter().position(|(path, _)| path == entry)?;
+    Some(steps.remove(at).1)
 }
 
 /// Runs one install, then looks for the harness with the caller's search and reads its

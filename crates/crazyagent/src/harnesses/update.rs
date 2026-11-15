@@ -801,12 +801,16 @@ fn npm_install_args(npm: &'static Npm) -> Vec<&'static str> {
 
 /// Passes a built command only when its program is a tool this user can trust and one the
 /// tool resolver would run: no part of its path, as written or real, that agents or another
-/// user can change, and an interpreter its first line names vetted the same way.
-/// Inputs: the command and the resolver's places. Output: the same command, or the refusal
-/// code of the tool check.
+/// user can change, an interpreter its first line names vetted the same way, and no link on
+/// its way to the real file that could be moved before the command runs the path as written
+/// ([`crate::tools::Places::link_hops_kept`]). Inputs: the command and the resolver's
+/// places. Output: the same command, or the refusal code of the tool check.
 fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'static str> {
     trusted(&fixed.program)?;
     vetted(&fixed, places)?;
+    if !places.link_hops_kept(&fixed.program) {
+        return Err(TOOL_UNSAFE);
+    }
     assert!(fixed.program.is_absolute());
     assert!(fixed.args.len() <= ARGS_MAX);
     assert!(fixed.search.iter().all(|folder| folder.is_absolute()));
@@ -817,9 +821,9 @@ fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'stati
 /// Passes a command only when the tool resolver would run its program and every copy of an
 /// interpreter the program asks `env` for by name that the command's own search folders
 /// hold, since the child's PATH looks there first and would find that copy ahead of the one
-/// the resolver vetted. Inputs: the command and the resolver's places. Output: Ok, or
-/// `TOOL_UNSAFE`.
-fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<(), &'static str> {
+/// the resolver vetted. Inputs: the command and the resolver's places. Output: the real file
+/// the resolver resolved the program to and checked, or `TOOL_UNSAFE`.
+fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<PathBuf, &'static str> {
     let resolved = crate::tools::resolve_entry(&fixed.program, places).map_err(|_| TOOL_UNSAFE)?;
     let mut at = &resolved;
     for _ in 0..=crate::tools::INTERPRETER_DEPTH_MAX {
@@ -829,7 +833,7 @@ fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<(), &'static s
             ..
         } = &at.kind
         else {
-            return Ok(());
+            return Ok(resolved.program.clone());
         };
         if *by_name {
             let name = interpreter.entry.file_name().ok_or(TOOL_UNSAFE)?;
