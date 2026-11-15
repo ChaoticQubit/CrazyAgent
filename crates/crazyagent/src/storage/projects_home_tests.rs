@@ -518,7 +518,7 @@ fn a_delete_records_run_names_up_to_the_recorded_width_and_refuses_a_longer_one(
     let base = root.path().canonicalize().unwrap();
     let mut connection = Connection::open(base.join("engine.db")).unwrap();
     initialize_authority_schemas(&connection).unwrap();
-    let width = projects_home::RECORDED_NAME_BYTES_MAX;
+    let width = crate::projects_home::RECORDED_NAME_BYTES_MAX;
     let pad = width - "overview--1794000000000".len();
     let name = format!("overview-{}-1794000000000", "a".repeat(pad));
     assert_eq!(name.len(), width);
