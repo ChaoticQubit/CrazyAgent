@@ -18,8 +18,9 @@ use std::ffi::{CString, OsStr, OsString};
 use std::fs;
 use std::io::Read;
 use std::ops::RangeInclusive;
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -841,16 +842,24 @@ fn scoped() -> ExitCode {
     }
 }
 
-/// Starts bubblewrap for a nested agent, from outside its namespaces. It takes the session
-/// as [`own_session`] does, where a pane's first process can still be told apart, then
-/// blocks every signal: bubblewrap's outer process and its first process inside inherit the
-/// mask, so they end only with the harness or by KILL, and a stop signal to the group is
-/// the harness's to handle. Last it gives up new privileges, so a bubblewrap swapped for a
-/// set-user-ID one after [`trusted`] looked still runs as this user. Output: 3 when any of
-/// the three fails, 126 when bubblewrap cannot start. With a bridge it first starts the
+/// Starts bubblewrap for a nested agent, from outside its namespaces. It opens bubblewrap
+/// once ([`trusted_file`]) and starts that open file, so the file it checked is the file
+/// that runs. It takes the session as [`own_session`] does, where a pane's first process
+/// can still be told apart, then blocks every signal: bubblewrap's outer process and its
+/// first process inside inherit the mask, so they end only with the harness or by KILL,
+/// and a stop signal to the group is the harness's to handle. Last it gives up new
+/// privileges. Output: 3 when bubblewrap is refused or any of the three fails, 126 when
+/// bubblewrap cannot start. With a bridge it first starts the
 /// broker on this network and writes the bridge flags for the helper inside
 /// ([`bridge::open`]), keeping its end of the bridge open until bubblewrap has it.
 fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
+    let Some(program) = trusted_file(bwrap) else {
+        eprintln!(
+            "crazyagent-landlock: {} is not a bubblewrap to nest under",
+            bwrap.display()
+        );
+        return ExitCode::from(3);
+    };
     let ready = own_session()
         .and_then(|()| match bridge {
             Some(bridge) => bridge::open(&bridge.ports, args)
@@ -873,7 +882,7 @@ fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
         }
     };
     assert_eq!(nix::sys::prctl::get_no_new_privs(), Ok(true));
-    let error = exec_keeping_mask(bwrap, &args);
+    let error = exec_keeping_mask(&program, bwrap, &args);
     eprintln!(
         "crazyagent-landlock: cannot start {}: {error}",
         bwrap.display()
@@ -881,19 +890,24 @@ fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
     ExitCode::from(126)
 }
 
-/// Replaces this process with `program`, keeping its signal mask and its environment.
-/// `std`'s exec empties the mask first, which would undo [`nest`]. Inputs: the program and
-/// its arguments after its own name. Output: only the reason the exec failed.
-fn exec_keeping_mask(program: &Path, args: &[OsString]) -> String {
-    let words: Result<Vec<CString>, _> = std::iter::once(program.as_os_str())
+/// Replaces this process with the open `program`, keeping its signal mask and its
+/// environment. `std`'s exec empties the mask first, which would undo [`nest`], and an exec
+/// by path could start another file than the one [`trusted_file`] checked. Inputs: the open
+/// program, the name it starts under and its arguments after that name. Output: only the
+/// reason the exec failed.
+fn exec_keeping_mask(program: &fs::File, name: &Path, args: &[OsString]) -> String {
+    let words: Result<Vec<CString>, _> = std::iter::once(name.as_os_str())
         .chain(args.iter().map(OsString::as_os_str))
         .map(|word| CString::new(word.as_bytes()))
         .collect();
-    let Ok(words) = words else {
-        return "an argument holds a NUL byte".into();
+    let kept: Result<Vec<CString>, _> = std::env::vars_os()
+        .map(|(key, value)| CString::new([key.as_bytes(), &b"="[..], value.as_bytes()].concat()))
+        .collect();
+    let (Ok(words), Ok(kept)) = (words, kept) else {
+        return "an argument or a variable holds a NUL byte".into();
     };
     assert!(words.len() > NEST_ARGS.len());
-    let Err(errno) = nix::unistd::execv(&words[0], &words);
+    let Err(errno) = nix::unistd::fexecve(program.as_raw_fd(), &words, &kept);
     errno.to_string()
 }
 
@@ -1117,22 +1131,28 @@ fn passes(probe: &mut Command) -> bool {
     .is_ok_and(|status| status.success())
 }
 
-/// Opens the bubblewrap a nest starts. Input: its path. Output: the open file, none when
-/// it cannot be opened.
+/// Opens a bubblewrap the helper may nest an agent under and checks the file it opened, not
+/// the path again: a file that root or this user owns, with neither [`SET_ID_BITS`] bit, so
+/// it runs with this user's privileges and was put there by root or by this user. It opens
+/// without reading, so a bubblewrap that can only be run still opens. Input: its path.
+/// Output: the open file, which [`nest`] starts, or none.
 fn trusted_file(bwrap: &Path) -> Option<fs::File> {
-    fs::File::open(bwrap).ok()
+    let own = rustix::process::geteuid().as_raw();
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH)
+        .open(bwrap)
+        .ok()?;
+    let held = file.metadata().ok()?;
+    let plain = held.is_file() && held.mode() & SET_ID_BITS == 0;
+    (plain && [0, own].contains(&held.uid())).then_some(file)
 }
 
-/// Tells whether a bubblewrap is one the helper may nest an agent under: a file that root
-/// or this user owns, with neither [`SET_ID_BITS`] bit, so it runs with this user's
-/// privileges and was put there by root or by this user. A host whose bubblewrap fails
-/// this stays on plain Landlock with its gap lines. Input: its path. Output: true when it
-/// may.
+/// Tells whether a bubblewrap is one the helper may nest an agent under ([`trusted_file`]).
+/// A host whose bubblewrap fails this stays on plain Landlock with its gap lines. Input:
+/// its path. Output: true when it may.
 fn trusted(bwrap: &Path) -> bool {
-    let own = rustix::process::geteuid().as_raw();
-    fs::metadata(bwrap).is_ok_and(|file| {
-        file.is_file() && file.mode() & SET_ID_BITS == 0 && [0, own].contains(&file.uid())
-    })
+    trusted_file(bwrap).is_some()
 }
 
 /// Tells whether this machine starts the helper inside bubblewrap's namespaces and holds
