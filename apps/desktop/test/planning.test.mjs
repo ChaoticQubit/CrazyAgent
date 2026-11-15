@@ -77,6 +77,17 @@ test("the roadmap toggle is on by default when a project is created, imported or
     "saving it later keeps the planning job");
 });
 
+test("a planning job parked on a rate limit reads Rate limited until its local end, never the engine's raw text", () => {
+  const reason = "Every account in this project's pool that can run this research hit its rate limit";
+  const parked = job(2, "roadmap_planning", "needs_pool", { error: `rate_limited until 2026-10-23 04:32 UTC: ${reason}` });
+  const end = research.localClock(Date.UTC(2026, 9, 23, 4, 32));
+  const view = planning.planningView(planning.planningState([parked]));
+  assert.deepEqual(view, { word: `Rate limited until ${end}`, tone: "warn", line: reason, action: null, report: null });
+  assert.doesNotMatch(`${view.word} ${view.line}`, /rate_limited|UTC/, "no engine code or UTC time reaches the owner");
+  const other = job(2, "roadmap_planning", "needs_pool", { error: "No account in the pool can run Codex." });
+  assert.equal(planning.planningView(planning.planningState([other])).word, "Planning", "any other wait keeps the Planning word");
+});
+
 test("the planning state reads waiting, planning, done and failed from the real job list", () => {
   const view = (jobs) => planning.planningView(planning.planningState(jobs));
   assert.deepEqual(view([]), { word: "Not planned", tone: "neutral", line: "No roadmap yet. Plan one from the brief, research and code.", action: "plan", report: null });

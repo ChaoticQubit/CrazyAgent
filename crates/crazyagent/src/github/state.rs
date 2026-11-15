@@ -1,15 +1,18 @@
+use super::rules::RepoRecord;
 use super::{CLIENT_ID, GitHubMethod};
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::Path;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
 
 const CONFIG: &str = "github.toml";
 const STATE: &str = "github.json";
+const RECORDS: &str = "github-repos";
 #[cfg(unix)]
 const FILE_BYTES_MAX: u64 = 4096;
 const CLIENT_ID_BYTES_MAX: usize = 64;
@@ -118,13 +121,21 @@ pub(super) fn forget(root: &Path) -> Result<(), EngineError> {
 /// Inputs: the engine root and what to remember.
 #[cfg(unix)]
 pub(super) fn save(root: &Path, saved: &Saved) -> Result<(), EngineError> {
+    let bytes = serde_json::to_vec(saved).map_err(|_| failure("github_state_unavailable"))?;
+    write_private(root, STATE, &bytes)
+}
+
+/// Writes a private 0600 file in a private folder, replaced in one rename, so a reader
+/// sees the old file or the new one. Inputs: the folder, the file name and the bytes, at
+/// most `FILE_BYTES_MAX`. Output: Ok, or `github_state_unavailable`.
+#[cfg(unix)]
+fn write_private(folder: &Path, name: &str, bytes: &[u8]) -> Result<(), EngineError> {
     let unavailable = || failure("github_state_unavailable");
-    let bytes = serde_json::to_vec(saved).map_err(|_| unavailable())?;
     assert!(bytes.len() as u64 <= FILE_BYTES_MAX);
     let mut random = [0_u8; 8];
     getrandom::fill(&mut random).map_err(|_| unavailable())?;
     let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
-    let temporary = root.join(format!(".{STATE}.{suffix}"));
+    let temporary = folder.join(format!(".{name}.{suffix}"));
     let written = (|| {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -132,15 +143,82 @@ pub(super) fn save(root: &Path, saved: &Saved) -> Result<(), EngineError> {
             .mode(0o600)
             .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
             .open(&temporary)?;
-        file.write_all(&bytes)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
-        std::fs::rename(&temporary, root.join(STATE))
+        std::fs::rename(&temporary, folder.join(name))
     })();
     if written.is_err() {
         let _ = std::fs::remove_file(&temporary);
         return Err(unavailable());
     }
     Ok(())
+}
+
+/// The folder and file that hold what CrazyAgent remembers about one repository: the file
+/// is named by the SHA-256 of the lowercase `owner/name`, since GitHub matches names in
+/// any case, so every name maps to one plain file name. Inputs: the engine root and
+/// `owner/name`. Output: the folder and the file name, or `github_repo_name_invalid`.
+fn record_file(root: &Path, full_name: &str) -> Result<(PathBuf, String), EngineError> {
+    super::clone::full_name(full_name)?;
+    let digest = Sha256::digest(full_name.to_ascii_lowercase().as_bytes());
+    let name: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok((root.join(RECORDS), format!("{name}.json")))
+}
+
+/// Reads what CrazyAgent remembers about one repository. Inputs: the engine root and
+/// `owner/name`. Output: the record, empty when none is saved, or
+/// `github_state_invalid` for a file that is not a record of CrazyAgent's rulesets.
+pub(super) fn load_record(root: &Path, full_name: &str) -> Result<RepoRecord, EngineError> {
+    let (folder, name) = record_file(root, full_name)?;
+    let Some(bytes) = read_private(&folder.join(name))? else {
+        return Ok(RepoRecord::default());
+    };
+    let record: RepoRecord =
+        serde_json::from_slice(&bytes).map_err(|_| failure("github_state_invalid"))?;
+    if !record.valid() {
+        return Err(failure("github_state_invalid"));
+    }
+    Ok(record)
+}
+
+/// Saves what CrazyAgent remembers about one repository as a private file in the engine
+/// root's private `github-repos` folder, made 0700 when missing. Inputs: the engine root,
+/// `owner/name` and the record. Output: Ok, or `github_config_unsafe` for a folder that is
+/// a link or open to others, or `github_state_unavailable`.
+#[cfg(unix)]
+pub(super) fn save_record(
+    root: &Path,
+    full_name: &str,
+    record: &RepoRecord,
+) -> Result<(), EngineError> {
+    let (folder, name) = record_file(root, full_name)?;
+    match std::fs::DirBuilder::new().mode(0o700).create(&folder) {
+        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+            return Err(failure("github_state_unavailable"));
+        }
+        _ => {}
+    }
+    let metadata =
+        std::fs::symlink_metadata(&folder).map_err(|_| failure("github_config_unsafe"))?;
+    if !metadata.is_dir()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(failure("github_config_unsafe"));
+    }
+    let bytes = serde_json::to_vec(record).map_err(|_| failure("github_state_unavailable"))?;
+    write_private(&folder, &name, &bytes)
+}
+
+/// Refuses to save a repository record where no owner-only file can be made. Takes the
+/// engine root, name and record, all unused. Returns `github_state_unavailable`.
+#[cfg(not(unix))]
+pub(super) fn save_record(
+    _root: &Path,
+    _full_name: &str,
+    _record: &RepoRecord,
+) -> Result<(), EngineError> {
+    Err(failure("github_state_unavailable"))
 }
 
 /// Refuses to save the sign-in where no owner-only 0600 no-follow file can be made.

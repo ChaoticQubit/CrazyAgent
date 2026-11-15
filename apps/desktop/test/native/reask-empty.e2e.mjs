@@ -25,11 +25,11 @@ const EMPTY = "Done, with no reply text.";
 
 /** The Codex stand-in the engine runs every team agent with: it keeps a conversation file
  * as Codex does and ends each turn with no reply text, except a turn that asks it again for
- * its reply, which it answers with "pear". Every pasted line goes to `typed` in its home. */
+ * its reply, which it answers with "pear". Every pasted line goes to `.cache/typed` in its home. */
 const QUIET_ONCE_CODEX = String.raw`#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/11/02"
-/bin/mkdir -p "$d" || exit 1
+/bin/mkdir -p "$d" "$CODEX_HOME/.cache" || exit 1
 id=$(printf '%08x-0000-4000-8000-%012x' $$ $$)
 f="$d/rollout-2026-11-02T00-00-00-$id.jsonl"
 printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$(/bin/pwd -P)" > "$f"
@@ -38,9 +38,9 @@ e=$(printf '\033')
 open=0
 while IFS= read -r line; do
   case "$line" in
-    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CODEX_HOME/typed" ;;
+    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CODEX_HOME/.cache/typed" ;;
     *"$e[200~"*) open=1; continue ;;
-    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CODEX_HOME/typed"; continue; } ;;
+    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CODEX_HOME/.cache/typed"; continue; } ;;
   esac
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
   /bin/sleep 0.3
@@ -80,7 +80,7 @@ function taskRow(runtime, project) {
     const task = store.prepare("SELECT status, result, agent FROM team_tasks WHERE project=? AND prompt=?").get(project, TASK);
     if (!task) return null;
     const turns = task.agent === null ? null : store.prepare("SELECT turns FROM team_agents WHERE id=?").get(task.agent)?.turns ?? null;
-    const typed = join(runtime, "team", "agents", `agent-${task.agent}`, "home", "typed");
+    const typed = join(runtime, "team", "agents", `agent-${task.agent}`, "home", ".cache", "typed");
     const asked = existsSync(typed) ? readFileSync(typed, "utf8").split(REASK).length - 1 : 0;
     return { status: task.status, result: task.result, turns, asked };
   } finally {

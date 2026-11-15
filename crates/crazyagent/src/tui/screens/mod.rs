@@ -222,6 +222,12 @@ pub enum Place {
     AnswerAdd {
         job: RequestId,
     },
+    /// A project's Settings with its remove ask open on Delete everything, as Finish delete or
+    /// Try again opens it for a delete job; the exact name is typed again (DEC-177 add.1).
+    DeleteAsk {
+        id: ProjectId,
+        name: String,
+    },
     CloneRepo,
     Usage,
     Demo,
@@ -376,7 +382,8 @@ pub trait Screen {
             | Place::TeamSettings { id, .. }
             | Place::Master { id, .. }
             | Place::ProjectProcess { id, .. }
-            | Place::ProjectMemory { id, .. } => Some(id),
+            | Place::ProjectMemory { id, .. }
+            | Place::DeleteAsk { id, .. } => Some(id),
             Place::Onboarding { project, .. } => project,
             Place::Home
             | Place::Welcome
@@ -453,6 +460,11 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
             id.clone(),
             name.clone(),
             *tab,
+            ctx,
+        )),
+        Place::DeleteAsk { id, name } => Box::new(project_page::ProjectPage::deleting(
+            id.clone(),
+            name.clone(),
             ctx,
         )),
     };

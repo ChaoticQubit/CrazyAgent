@@ -533,7 +533,11 @@ fn a_project_agent_cannot_reach_the_file_an_instructions_save_stages() {
         &staged,
     );
     fs::write(&staged, "Owner rule.\n").unwrap();
-    let rewrite = run(&sandbox, &profile, &format!("printf x > {}", quoted(&staged)));
+    let rewrite = run(
+        &sandbox,
+        &profile,
+        &format!("printf x > {}", quoted(&staged)),
+    );
     assert!(!rewrite.status.success());
     assert_eq!(fs::read_to_string(&staged).unwrap(), "Owner rule.\n");
     allowed(&sandbox, &profile, "printf x > .crazyagent/note.txt");

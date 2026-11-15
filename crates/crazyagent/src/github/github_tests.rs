@@ -158,7 +158,10 @@ fn curl_command_keeps_url_headers_token_and_form_out_of_argv_and_env() {
         &format!("Authorization: Bearer {secret_text}")
     ));
     assert!(contains(&config, "client_id=Ov23-public"));
-    assert!(contains(&config, "scope=repo+read%3Auser"));
+    assert!(contains(
+        &config,
+        "scope=repo+read%3Auser+read%3Aorg+workflow"
+    ));
     let plain = http::Request {
         url: url::Url::parse("http://api.github.com/user").unwrap(),
         accept: "application/json",
@@ -706,6 +709,418 @@ fn a_dot_named_repository_is_listed_and_never_stops_the_rest_of_the_page() {
     );
 }
 
+#[test]
+fn a_reply_carries_the_scopes_github_sent_even_with_a_full_size_body() {
+    let server = Server::start(|seen, _| {
+        let mut answer = Answer::bytes(200, vec![b'x'; 4 << 20]);
+        let scopes = match seen.path.as_str() {
+            "/classic" => Some("repo, read:org, workflow"),
+            "/odd" => Some("%header{x-oauth-scopes}"),
+            _ => None,
+        };
+        if let Some(scopes) = scopes {
+            answer
+                .headers
+                .push(("X-OAuth-Scopes".into(), scopes.into()));
+        }
+        answer
+    });
+    let send = |path: &str| {
+        http::Request {
+            url: url::Url::parse(&format!("http://127.0.0.1:{}{path}", server.port)).unwrap(),
+            accept: "application/json",
+            token: None,
+            form: None,
+            headers: Vec::new(),
+            allow_http: true,
+        }
+        .send()
+        .unwrap()
+    };
+    let classic = send("/classic");
+    assert_eq!(classic.status, 200);
+    assert_eq!(classic.body.len(), 4 << 20);
+    assert_eq!(
+        classic.scopes,
+        Some(vec![
+            "repo".to_owned(),
+            "read:org".to_owned(),
+            "workflow".to_owned()
+        ])
+    );
+    let fine_grained = send("/fine");
+    assert_eq!(fine_grained.body.len(), 4 << 20);
+    assert_eq!(fine_grained.scopes, None);
+    assert_eq!(send("/odd").scopes, None);
+}
+
+fn scoped(mut answer: Answer, scopes: Option<&str>) -> Answer {
+    if let Some(scopes) = scopes {
+        answer
+            .headers
+            .push(("X-OAuth-Scopes".into(), scopes.into()));
+    }
+    answer
+}
+
+fn owners_server(secret_text: &str, scopes: Option<&'static str>, memberships: u16) -> Server {
+    let expected = secret_text.to_owned();
+    Server::start(move |seen, _| match seen.path.as_str() {
+        "/user" => scoped(user(seen, &expected), scopes),
+        "/user/memberships/orgs" if bearer(seen, &expected) && memberships == 200 => Answer::json(
+            200,
+            serde_json::json!([
+                { "state": "active", "role": "admin", "organization": { "login": "acme-labs" } },
+                { "state": "active", "role": "member", "organization": { "login": "beta-org" } },
+                { "state": "active", "role": "billing_manager", "organization": { "login": "billing-only" } },
+                { "state": "pending", "role": "admin", "organization": { "login": "not-yet" } },
+            ]),
+        ),
+        "/user/memberships/orgs" => Answer::json(
+            memberships,
+            serde_json::json!({
+                "message": "Forbidden"
+            }),
+        ),
+        _ => Answer::json(404, serde_json::json!({ "message": "Not Found" })),
+    })
+}
+
+#[test]
+fn owners_list_the_personal_account_first_then_the_organizations_the_owner_is_a_member_of() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let server = owners_server(&secret_text, Some("repo, read:org, workflow"), 200);
+    let account = scratch.account(&server);
+    assert_eq!(account.owners().unwrap_err().0, "github_not_signed_in");
+    account.use_token(secret(&secret_text)).unwrap();
+    let owners = account.owners().unwrap();
+    assert_eq!(owners.problem, None);
+    let listed: Vec<(&str, bool)> = owners
+        .owners
+        .iter()
+        .map(|owner| (owner.login.as_str(), owner.personal))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("octo-cat", true),
+            ("acme-labs", false),
+            ("beta-org", false)
+        ]
+    );
+    let asked = server
+        .seen()
+        .into_iter()
+        .find(|seen| seen.path == "/user/memberships/orgs")
+        .unwrap();
+    let query = asked.query_pairs();
+    assert_eq!(query.get("state").map(String::as_str), Some("active"));
+    assert_eq!(query.get("per_page").map(String::as_str), Some("100"));
+}
+
+#[test]
+fn owners_without_read_org_still_offer_the_personal_account_and_say_why() {
+    let reauth = "gh auth refresh -s read:org";
+    for (scopes, memberships, asks, sentence) in [
+        (Some("repo, read:user"), 200, false, Some(reauth)),
+        (None, 403, true, Some(reauth)),
+        (Some("repo, admin:org"), 200, true, None),
+        (
+            Some("repo, read:org"),
+            403,
+            true,
+            Some("refused to list your organizations"),
+        ),
+    ] {
+        let scratch = Scratch::new();
+        let secret_text = token();
+        let server = owners_server(&secret_text, scopes, memberships);
+        let account = scratch.account(&server);
+        account.use_token(secret(&secret_text)).unwrap();
+        let owners = account.owners().unwrap();
+        let asked = server
+            .seen()
+            .iter()
+            .any(|seen| seen.path == "/user/memberships/orgs");
+        assert_eq!(asked, asks, "{scopes:?}");
+        let Some(sentence) = sentence else {
+            assert_eq!(owners.owners.len(), 3, "{scopes:?}");
+            assert_eq!(owners.problem, None, "{scopes:?}");
+            continue;
+        };
+        assert_eq!(
+            owners.owners,
+            [GitHubOwner {
+                login: "octo-cat".into(),
+                personal: true,
+            }],
+            "{scopes:?}"
+        );
+        let problem = owners.problem.unwrap();
+        assert!(problem.contains(sentence), "{scopes:?}: {problem}");
+        assert_eq!(
+            problem.contains("read:org"),
+            sentence == reauth,
+            "{scopes:?}: {problem}"
+        );
+    }
+}
+
+fn paged_server(secret_text: &str, full_pages: u32, extra: usize) -> Server {
+    let expected = secret_text.to_owned();
+    Server::start(move |seen, _| match seen.path.as_str() {
+        "/user" => scoped(user(seen, &expected), Some("repo, read:org")),
+        "/user/memberships/orgs" if bearer(seen, &expected) => {
+            let page: u32 = seen
+                .query_pairs()
+                .get("page")
+                .map_or(1, |page| page.parse().unwrap());
+            let count = if page <= full_pages {
+                100
+            } else if page == full_pages + 1 {
+                extra
+            } else {
+                0
+            };
+            let listed: Vec<serde_json::Value> = (0..count)
+                .map(|index| {
+                    serde_json::json!({
+                        "state": "active",
+                        "role": "member",
+                        "organization": { "login": format!("org-{page}-{index}") }
+                    })
+                })
+                .collect();
+            Answer::json(200, serde_json::Value::Array(listed))
+        }
+        _ => Answer::json(404, serde_json::json!({ "message": "Not Found" })),
+    })
+}
+
+#[test]
+fn owners_follow_the_next_page_up_to_ten_pages_and_say_when_more_were_left_out() {
+    for (full_pages, extra, asked, offered, cut) in [
+        (1, 3, 2, 104, false),
+        (1, 0, 2, 101, false),
+        (12, 0, 10, 1001, true),
+    ] {
+        let scratch = Scratch::new();
+        let secret_text = token();
+        let server = paged_server(&secret_text, full_pages, extra);
+        let account = scratch.account(&server);
+        account.use_token(secret(&secret_text)).unwrap();
+        let owners = account.owners().unwrap();
+        let pages: Vec<String> = server
+            .seen()
+            .iter()
+            .filter(|seen| seen.path == "/user/memberships/orgs")
+            .map(|seen| seen.query_pairs().get("page").cloned().unwrap_or_default())
+            .collect();
+        let expected: Vec<String> = (1..=asked).map(|page| page.to_string()).collect();
+        assert_eq!(pages, expected, "{full_pages} {extra}");
+        assert_eq!(owners.owners.len(), offered, "{full_pages} {extra}");
+        assert!(owners.owners[0].personal);
+        match owners.problem {
+            Some(problem) => assert!(cut && problem.contains("1,000"), "{problem}"),
+            None => assert!(!cut, "{full_pages} {extra}"),
+        }
+    }
+}
+
+#[test]
+fn a_repository_name_is_free_on_a_404_taken_otherwise_and_checked_before_any_request() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let expected = secret_text.clone();
+    let server = Server::start(move |seen, _| match seen.path.as_str() {
+        "/user" => user(seen, &expected),
+        "/repos/octo-cat/tool" if bearer(seen, &expected) => {
+            Answer::json(200, serde_json::json!({ "full_name": "octo-cat/tool" }))
+        }
+        "/repos/acme-labs/moved" if bearer(seen, &expected) => {
+            Answer::json(301, serde_json::json!({ "message": "Moved Permanently" }))
+        }
+        _ => Answer::json(404, serde_json::json!({ "message": "Not Found" })),
+    });
+    let account = scratch.account(&server);
+    assert_eq!(
+        account.name_free("octo-cat", "tool").unwrap_err().0,
+        "github_not_signed_in"
+    );
+    account.use_token(secret(&secret_text)).unwrap();
+    assert!(!account.name_free("octo-cat", "tool").unwrap());
+    assert!(!account.name_free("acme-labs", "moved").unwrap());
+    assert!(account.name_free("octo-cat", "new-tool").unwrap());
+    let before = server.seen().len();
+    let long = "x".repeat(101);
+    for (owner, name) in [
+        ("octo-cat", ""),
+        ("octo-cat", "a b"),
+        ("octo-cat", ".."),
+        ("octo-cat", "tool.git"),
+        ("octo-cat", long.as_str()),
+        ("", "tool"),
+        ("octo/cat", "tool"),
+        ("octo-cat", "../tool"),
+    ] {
+        assert_eq!(
+            account.name_free(owner, name).unwrap_err().0,
+            "github_repo_name_invalid",
+            "{owner}/{name}"
+        );
+    }
+    assert_eq!(server.seen().len(), before);
+}
+
+#[test]
+fn create_makes_a_private_squash_only_repository_under_the_chosen_account() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let expected = secret_text.clone();
+    let server = Server::start(move |seen, _| {
+        let body: serde_json::Value = serde_json::from_slice(&seen.body).unwrap_or_default();
+        let name = body["name"].as_str().unwrap_or_default().to_owned();
+        let private = if name == "exposed" {
+            serde_json::json!(false)
+        } else {
+            body["private"].clone()
+        };
+        let made = |owner: &str, node: &str| {
+            let full_name = if name == "renamed" {
+                format!("{owner}/other")
+            } else {
+                format!("{owner}/{name}")
+            };
+            Answer::json(
+                201,
+                serde_json::json!({ "full_name": full_name, "node_id": node, "private": private }),
+            )
+        };
+        match (seen.method.as_str(), seen.path.as_str()) {
+            (_, "/user") => user(seen, &expected),
+            ("POST", "/user/repos") if bearer(seen, &expected) && name == "taken" => Answer::json(
+                422,
+                serde_json::json!({
+                    "message": "Repository creation failed.",
+                    "errors": [{
+                        "resource": "Repository",
+                        "code": "custom",
+                        "field": "name",
+                        "message": "name already exists on this account"
+                    }]
+                }),
+            ),
+            ("POST", "/user/repos") if bearer(seen, &expected) => made("octo-cat", "R_kgDOtest01"),
+            ("POST", "/orgs/acme-labs/repos") if bearer(seen, &expected) => {
+                made("acme-labs", "R_kgDOtest02")
+            }
+            ("POST", "/orgs/beta-org/repos") => Answer::json(
+                403,
+                serde_json::json!({
+                    "message": "You need admin access to the organization before adding a repository to it."
+                }),
+            ),
+            _ => Answer::json(404, serde_json::json!({ "message": "Not Found" })),
+        }
+    });
+    let account = scratch.account(&server);
+    let repo = |owner: &str, name: &str, private: bool| GitHubNewRepo {
+        owner: owner.into(),
+        name: name.into(),
+        description: "A tool that sorts things.".into(),
+        private,
+    };
+    assert_eq!(
+        account
+            .create_repo(&repo("octo-cat", "tool", true))
+            .unwrap_err()
+            .0,
+        "github_not_signed_in"
+    );
+    account.use_token(secret(&secret_text)).unwrap();
+    let created = account
+        .create_repo(&repo("octo-cat", "tool", true))
+        .unwrap();
+    assert_eq!(
+        created,
+        GitHubCreated {
+            full_name: "octo-cat/tool".into(),
+            node_id: "R_kgDOtest01".into(),
+            private: true,
+        }
+    );
+    let sent = server
+        .seen()
+        .into_iter()
+        .find(|seen| seen.path == "/user/repos")
+        .unwrap();
+    assert_eq!(sent.header("content-type"), Some("application/json"));
+    let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "name": "tool",
+            "description": "A tool that sorts things.",
+            "private": true,
+            "has_issues": true,
+            "has_wiki": false,
+            "has_projects": false,
+            "allow_squash_merge": true,
+            "allow_merge_commit": false,
+            "allow_rebase_merge": false,
+            "delete_branch_on_merge": true,
+            "allow_auto_merge": false,
+            "auto_init": false,
+        })
+    );
+    let public = account
+        .create_repo(&repo("acme-labs", "site", false))
+        .unwrap();
+    assert_eq!(public.full_name, "acme-labs/site");
+    assert!(!public.private);
+    let org_sent = server
+        .seen()
+        .into_iter()
+        .find(|seen| seen.path == "/orgs/acme-labs/repos")
+        .unwrap();
+    let org_body: serde_json::Value = serde_json::from_slice(&org_sent.body).unwrap();
+    assert_eq!(org_body["private"], serde_json::json!(false));
+    for (owner, name, code) in [
+        ("octo-cat", "taken", "github_repo_name_taken"),
+        ("beta-org", "tool", "github_repo_create_refused"),
+        ("octo-cat", "renamed", "github_reply_invalid"),
+        ("octo-cat", "exposed", "github_repo_visibility_mismatch"),
+    ] {
+        assert_eq!(
+            account.create_repo(&repo(owner, name, true)).unwrap_err().0,
+            code,
+            "{owner}/{name}"
+        );
+    }
+    let before = server.seen().len();
+    for (bad, code) in [
+        (
+            GitHubNewRepo {
+                description: "x".repeat(351),
+                ..repo("octo-cat", "long", true)
+            },
+            "github_repo_description_invalid",
+        ),
+        (
+            GitHubNewRepo {
+                description: "line\nbreak".into(),
+                ..repo("octo-cat", "lines", true)
+            },
+            "github_repo_description_invalid",
+        ),
+        (repo("octo-cat", "a b", true), "github_repo_name_invalid"),
+    ] {
+        assert_eq!(account.create_repo(&bad).unwrap_err().0, code);
+    }
+    assert_eq!(server.seen().len(), before);
+}
+
 fn served_repository(full_name: &str, secret_text: &str) -> (tempfile::TempDir, Server) {
     let source = tempfile::tempdir().unwrap();
     let work = source.path().join("work");
@@ -921,4 +1336,189 @@ fn namespaces_differ_per_engine_root_and_stay_short() {
     assert!(first.starts_with("dev.crazyagent.e"));
     assert_eq!(first.len(), "dev.crazyagent.e".len() + 12);
     assert!(crate::credentials::checked_name(&format!("{first}.github")).is_ok());
+}
+
+#[test]
+fn the_rulesets_crazyagent_made_are_remembered_for_the_next_pass() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let made: Arc<Mutex<Vec<(u64, String)>>> = Arc::default();
+    let rulesets = Arc::clone(&made);
+    let expected = secret_text.clone();
+    let list = "/repos/octo-cat/tool/rulesets";
+    let server = Server::start(move |seen, index| {
+        if seen.path == "/user" {
+            return user(seen, &expected);
+        }
+        if !bearer(seen, &expected) {
+            return Answer::json(401, serde_json::json!({ "message": "Bad credentials" }));
+        }
+        match seen.method.as_str() {
+            "GET" if seen.path == list => {
+                let listed: Vec<serde_json::Value> = rulesets
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(id, name)| {
+                        serde_json::json!({ "id": id, "name": name, "source_type": "Repository" })
+                    })
+                    .collect();
+                Answer::json(200, serde_json::Value::Array(listed))
+            }
+            "POST" if seen.path == list => {
+                let body: serde_json::Value = serde_json::from_slice(&seen.body).unwrap();
+                let id = 500 + index as u64;
+                rulesets
+                    .lock()
+                    .unwrap()
+                    .push((id, body["name"].as_str().unwrap().to_owned()));
+                Answer::json(201, serde_json::json!({ "id": id }))
+            }
+            "PUT" if seen.path.starts_with(&format!("{list}/")) => {
+                Answer::json(200, serde_json::json!({}))
+            }
+            "PATCH" if seen.path == "/repos/octo-cat/tool" => Answer::json(
+                200,
+                serde_json::from_slice::<serde_json::Value>(&seen.body).unwrap(),
+            ),
+            "PATCH" => Answer::json(202, serde_json::json!({})),
+            _ => Answer::bytes(204, Vec::new()),
+        }
+    });
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let facts = GitHubRepoFacts {
+        private: true,
+        ci: GitHubCi::None,
+    };
+    let first = account
+        .apply_rules("octo-cat/tool", &GitHubRule::defaults(), &facts)
+        .unwrap();
+    assert!(
+        first
+            .iter()
+            .all(|outcome| !matches!(outcome.state, GitHubRuleState::Refused { .. })),
+        "{first:?}"
+    );
+    let folder = scratch.root.path().join("github-repos");
+    let files: Vec<PathBuf> = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        std::fs::metadata(&files[0]).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::metadata(&folder).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+    let mut recorded: Vec<u64> = record["rulesets"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|id| id.as_u64().unwrap())
+        .collect();
+    recorded.sort_unstable();
+    let ids: Vec<u64> = made.lock().unwrap().iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids.len(), 5);
+    assert_eq!(recorded, ids);
+    let before = server.seen().len();
+    let second = account
+        .apply_rules("octo-cat/tool", &GitHubRule::defaults(), &facts)
+        .unwrap();
+    assert_eq!(second, first);
+    let again: Vec<String> = server.seen()[before..]
+        .iter()
+        .filter(|seen| seen.path.contains("/rulesets"))
+        .map(|seen| format!("{} {}", seen.method, seen.path))
+        .collect();
+    assert!(
+        again.iter().all(|call| !call.starts_with("POST")),
+        "{again:?}"
+    );
+    assert_eq!(
+        again.iter().filter(|call| call.starts_with("PUT")).count(),
+        5
+    );
+    assert_eq!(made.lock().unwrap().len(), 5);
+}
+
+#[test]
+fn a_repository_record_is_found_in_any_case_and_a_tampered_one_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let expected = secret_text.clone();
+    let server = Server::start(move |seen, _| {
+        if seen.path == "/user" {
+            return user(seen, &expected);
+        }
+        match seen.method.as_str() {
+            "GET" => Answer::json(
+                200,
+                serde_json::json!([{ "id": 7, "name": "CrazyAgent pull requests" }]),
+            ),
+            "PUT" => Answer::json(200, serde_json::json!({ "id": 7 })),
+            _ => Answer::bytes(204, Vec::new()),
+        }
+    });
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let folder = scratch.root.path().join("github-repos");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let file: String = Sha256::digest(b"octo-cat/tool")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let write = |text: &str| {
+        let path = folder.join(format!("{file}.json"));
+        let _ = std::fs::remove_file(&path);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        std::io::Write::write_all(&mut options.open(&path).unwrap(), text.as_bytes()).unwrap();
+    };
+    let facts = GitHubRepoFacts {
+        private: true,
+        ci: GitHubCi::None,
+    };
+    write(r#"{"rulesets":{"pull_request":7}}"#);
+    let outcome = account
+        .set_rule(
+            "Octo-Cat/Tool",
+            GitHubRule::PullRequest,
+            &GitHubRule::defaults(),
+            &facts,
+        )
+        .unwrap();
+    assert_eq!(outcome.state, GitHubRuleState::Applied);
+    assert_eq!(server.seen().last().unwrap().method, "PUT");
+    assert_eq!(
+        server.seen().last().unwrap().path,
+        "/repos/Octo-Cat/Tool/rulesets/7"
+    );
+    for tampered in [
+        r#"{"rulesets":{"squash_only":7}}"#,
+        r#"{"rulesets":{"conversation_resolution":7}}"#,
+        r#"{"rulesets":{"pull_request":-1}}"#,
+        r#"{"rulesets":{},"extra":1}"#,
+        "not json",
+    ] {
+        write(tampered);
+        let before = server.seen().len();
+        assert_eq!(
+            account
+                .apply_rules("octo-cat/tool", &GitHubRule::defaults(), &facts)
+                .unwrap_err()
+                .0,
+            "github_state_invalid",
+            "{tampered}"
+        );
+        assert_eq!(server.seen().len(), before, "{tampered}");
+    }
 }

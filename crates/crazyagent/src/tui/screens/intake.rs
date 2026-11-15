@@ -162,10 +162,7 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "home_add_interrupted" => {
             "Adding the folder stopped part way. Check your projects folder before trying again."
         }
-        "home_add_in_progress" => {
-            "A folder is being added to your projects folder. Try again when it finishes."
-        }
-        "intake_busy" => "Another folder is being added. Wait for it to finish on Home.",
+        "job_busy" => "Another job is running. Wait for it to finish on Home.",
         "intake_failed" => {
             "Adding the folder failed. Check your projects folder before trying again."
         }

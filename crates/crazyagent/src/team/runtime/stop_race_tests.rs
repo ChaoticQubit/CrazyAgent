@@ -280,11 +280,9 @@ fn tasks_held_for_an_owner_stopped_lead_never_fill_the_dispatch_window() {
     });
     let later = "Write the index page.";
     owner(&fixture, &[hand_off(&fixture, later)]);
-    fixture.until(
-        &mut team,
-        "a task queued after the held ones starts",
-        |f| task_of(f, later).0 != "queued",
-    );
+    fixture.until(&mut team, "a task queued after the held ones starts", |f| {
+        task_of(f, later).0 != "queued"
+    });
     let waiting: i64 = fixture
         .connection
         .query_row(
@@ -382,7 +380,11 @@ fn a_run_time_switched_to_no_limit_while_the_master_run_ends_never_panics() {
             let began = Instant::now();
             let mut flips = 0_u64;
             while !done.load(Ordering::SeqCst) && began.elapsed() < Duration::from_secs(60) {
-                let run = if flips % 2 == 0 { 0 } else { i64::from(secs) };
+                let run = if flips.is_multiple_of(2) {
+                    0
+                } else {
+                    i64::from(secs)
+                };
                 if connection
                     .execute(
                         "UPDATE team_master_limits SET run_secs=?2 WHERE project=?1",
