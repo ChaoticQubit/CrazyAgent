@@ -49,11 +49,11 @@ impl Supervised {
     }
 }
 
-/// Starts the harness with its guarded calls trapped and answers them until it ends, on the
-/// thread that waits here. It first makes itself not dumpable, so no program of the agent
-/// can trace it or take its listener; a worker that stops ends it with no call unanswered.
-/// Inputs: what to hold and the harness command. Output: the harness's exit code, 128
-/// plus the signal that ended it, or the reason no harness was supervised.
+/// Starts the harness with its guarded calls trapped and answers them until it ends. The
+/// harness dies with the thread that started it, so that thread waits here. It first makes
+/// itself not dumpable, so no program of the agent can trace it or take its listener, and a
+/// worker that stops ends it with no call unanswered. Inputs: what to hold and the harness
+/// command. Output: its exit code, 128 plus the signal that ended it, or why none started.
 pub fn run(config: Supervised, command: &mut Command) -> io::Result<i32> {
     let guards = config.guards();
     assert!(guards != Guards::default());
