@@ -1671,9 +1671,9 @@ impl Wizard {
 }
 
 /// Names a harness in plain words.
-/// Takes the engine id or an alias of it, and the harness catalog when known.
-/// Returns the catalog name, the name of a harness that is no longer supported, the name
-/// the harness's manifest gives it, or the id itself for a harness the engine does not list.
+/// Takes the engine id and the harness catalog when known.
+/// Returns the catalog name, a known product name, the name of a harness that is no longer
+/// supported, or the id itself.
 pub(in crate::tui) fn harness_name(id: &str, catalog: Option<&[HarnessChoice]>) -> String {
     if let Some(choice) = catalog.and_then(|c| c.iter().find(|h| same_harness(&h.id, id))) {
         return choice.name.clone();
@@ -1681,9 +1681,17 @@ pub(in crate::tui) fn harness_name(id: &str, catalog: Option<&[HarnessChoice]>) 
     if let Some(name) = crate::harnesses::removed(id) {
         return name.to_owned();
     }
-    crate::harnesses::spec(id)
-        .map_or(id, |spec| spec.name)
-        .to_owned()
+    match id {
+        "codex" => "Codex",
+        "claude" | "claude-code" => "Claude Code",
+        "opencode" => "OpenCode",
+        "gemini" | "gemini-cli" => "Gemini CLI",
+        "fx" => "fx by Vercel",
+        "openclaw" => "OpenClaw",
+        "pi" => "Pi",
+        other => other,
+    }
+    .to_owned()
 }
 
 /// What an empty sub-agent list means (DEC-096 addendum 3), shown where the list would be.
