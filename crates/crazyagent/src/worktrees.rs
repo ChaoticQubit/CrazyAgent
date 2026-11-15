@@ -3363,6 +3363,50 @@ mod tests {
         }
     }
 
+    /// A tree path with a part a case-insensitive HFS+ volume opens as `.git`, such as
+    /// `.g\u{200c}it` or `\u{feff}.GIT`, is refused like `.git` itself, so a lease never
+    /// writes into a git folder on such a volume (RV-DS241-148).
+    #[test]
+    fn tree_listing_refuses_a_path_part_hfs_opens_as_git() {
+        for part in [".g\u{200c}it", "\u{feff}.GIT"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let repository = committed_repository(temporary.path());
+            let folder = repository.join("sub").join(part);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("config"), b"[core]\n").unwrap();
+            for args in [
+                &[
+                    "-c",
+                    "core.protectHFS=false",
+                    "-c",
+                    "core.protectNTFS=false",
+                    "add",
+                    "-A",
+                ][..],
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@invalid",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "planted",
+                ],
+            ] {
+                git(&repository, args).unwrap();
+            }
+            let later = Instant::now() + Duration::from_secs(5);
+            assert_eq!(
+                tree_entries(&repository, "HEAD", &TREE_BOUNDS, later)
+                    .unwrap_err()
+                    .0,
+                "unsupported_or_unsafe_tree_entry",
+                "{part:?}"
+            );
+        }
+    }
+
     #[test]
     fn writing_a_tree_stops_at_its_deadline() {
         let temporary = tempfile::tempdir().unwrap();
@@ -3410,6 +3454,8 @@ mod tests {
             ("none", "", false),
             ("a/git", "../.git/config", false),
             ("a/git-case", "../.GIT", false),
+            ("a/git-hfs", "../.g\u{200c}it/config", false),
+            ("a/git-bom", "../\u{feff}.GIT", false),
             ("a/nul", "x\0y", false),
         ] {
             assert_eq!(

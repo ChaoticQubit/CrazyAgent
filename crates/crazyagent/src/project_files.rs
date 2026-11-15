@@ -308,6 +308,20 @@ mod tests {
         assert_eq!(list(&repo, "", 1, later()).unwrap().len(), 1);
     }
 
+    /// A listed path with a part a case-insensitive HFS+ volume opens as `.git`, such as
+    /// `.g\u{200c}it` or `\u{feff}.git`, is never inside the project, as `.git` is not
+    /// (RV-DS241-148).
+    #[test]
+    fn a_path_part_hfs_opens_as_git_is_never_inside() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().canonicalize().unwrap();
+        for part in [".g\u{200c}it", "\u{feff}.git"] {
+            fs::create_dir(root.join(part)).unwrap();
+            fs::write(root.join(part).join("config"), "[core]\n").unwrap();
+            assert!(!inside(&root, &format!("{part}/config")), "{part:?}");
+        }
+    }
+
     #[test]
     fn a_folder_without_its_own_repository_is_refused_with_a_plain_code() {
         let scratch = tempfile::tempdir().unwrap();

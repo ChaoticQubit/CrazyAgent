@@ -1171,7 +1171,7 @@ fn a_git_left_in_the_server_data_folder_stops_a_confined_start() {
     let (checkout, data, outside) = (scratch(), scratch(), scratch());
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let root = fs::canonicalize(checkout.path()).unwrap();
-    let plants: [(&str, fn(&Path, &Path)); 5] = [
+    let plants: [(&str, fn(&Path, &Path)); 6] = [
         (".git/hooks", |home, _| {
             fs::create_dir_all(home.join(".git").join("hooks")).unwrap();
         }),
@@ -1183,6 +1183,9 @@ fn a_git_left_in_the_server_data_folder_stops_a_confined_start() {
         }),
         ("r/sub/.gIt", |home, _| {
             fs::create_dir_all(home.join("r").join("sub").join(".gIt")).unwrap();
+        }),
+        ("r/.g\u{200c}it", |home, _| {
+            fs::create_dir_all(home.join("r").join(".g\u{200c}it")).unwrap();
         }),
         (".git", |home, _| {
             fs::write(home.join("plain"), "x").unwrap();

@@ -161,6 +161,9 @@ fn a_roadmap_in_a_hidden_folder_is_found_but_git_internals_and_the_engine_folder
         (".git/plan.md", plan),
         (".hidden.md", plan),
     ]);
+    let hfs_git = repo.path().join(".g\u{200c}it");
+    std::fs::create_dir(&hfs_git).unwrap();
+    std::fs::write(hfs_git.join("plan.md"), plan).unwrap();
     let (documents, unread) = read(repo.path(), None, &[]).unwrap();
     let paths: Vec<&str> = documents
         .iter()
