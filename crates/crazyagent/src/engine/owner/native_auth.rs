@@ -119,7 +119,9 @@ impl SignInWay {
     /// Every way, in the order the clients offer them.
     pub const ALL: [Self; 3] = [Self::Browser, Self::Code, Self::Check];
 
-    /// Why one harness cannot offer this way, as the sign-in screens say it. Input: the
+    /// Why one harness cannot offer this way, as the sign-in screens say it. A harness that
+    /// signs in through the browser the way Claude Code does and lacks this way lacks the
+    /// sign-in code, and is told so; every other case gets the general sentence. Input: the
     /// connection's harness. Output: the sentence, None when the harness offers the way.
     pub fn unavailable(self, harness: &str) -> Option<&'static str> {
         if NativeAuthMethod::for_way(harness, self).is_some() {
