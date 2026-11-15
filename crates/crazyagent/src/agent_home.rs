@@ -53,7 +53,9 @@ const KEPT_DEPTH_MAX: usize = 2;
 /// engine's launch state, lock, relay plugin and key file; both harnesses' instruction and
 /// Codex config files, which the launch rewrites, and the skills; Claude Code's sign-in,
 /// transcripts and team, task, todo and plan state; Codex's sign-in and sessions; the
-/// per-agent keychain; and the download caches. No entry kept holds config a tool runs.
+/// per-agent keychain; the download caches; and `.config` with nothing in it, which every
+/// agent sandbox makes and keeps in place, so no folder built elsewhere takes its name
+/// (RV-DS241-186). No entry kept holds config a tool runs.
 const HOME_KEPT: &[(&str, Kept)] = &[
     (crate::launch_context::STATE, Kept::Folder),
     (crate::launch_context::LOCK, Kept::Lock),
@@ -75,9 +77,11 @@ const HOME_KEPT: &[(&str, Kept)] = &[
     ("sessions", Kept::Folder),
     ("Library", Kept::Only(LIBRARY_KEPT)),
     (".cargo", Kept::Only(CARGO_KEPT)),
-    (".cache", Kept::Folder),
+    (".cache", Kept::Cache),
     (".npm", Kept::Only(NPM_KEPT)),
+    (".config", Kept::Only(&[])),
 ];
+const _: () = assert!(!HOME_KEPT.is_empty());
 /// What a launch keeps in an agent home's `.claude`, where some Claude Code versions keep a
 /// native team's config and tasks, which the engine reads there.
 const CLAUDE_FOLDER_KEPT: &[(&str, Kept)] = &[("teams", Kept::Folder), ("tasks", Kept::Folder)];
@@ -98,7 +102,7 @@ const LIBRARY_KEPT: &[(&str, Kept)] = &[
 const CARGO_KEPT: &[(&str, Kept)] = &[("registry", Kept::Link), ("git", Kept::Link)];
 /// What a launch keeps in an agent home's `.npm`: npm's content-addressed cache, never the
 /// packages npx installed, which it runs as they are.
-const NPM_KEPT: &[(&str, Kept)] = &[("_cacache", Kept::Folder)];
+const NPM_KEPT: &[(&str, Kept)] = &[("_cacache", Kept::Cache)];
 const TOO_LARGE: &str = "agent_instructions_too_large_";
 const SKILLS_FOLDER: &str = "agent-skills";
 const FILES_FOLDER: &str = "agent-instruction-files";
@@ -123,11 +127,15 @@ enum Kept {
     Lock,
     /// A real folder with all it holds.
     Folder,
+    /// A real folder with all it holds that no launch step writes, removes or reads in: a
+    /// download cache, where an agent's tools may set flags and ACLs on what they copy
+    /// (RV-DS241-187).
+    Cache,
     /// A link, never followed: a cache the engine links to the owner's read-only one
     /// ([`crate::sandbox::toolchains::prepare_cargo_home`]), which the agent's profile keeps
     /// it from moving, removing or making itself.
     Link,
-    /// A real folder holding only the entries its list keeps.
+    /// A real folder holding only the entries its list keeps, none when the list is empty.
     Only(&'static [(&'static str, Kept)]),
 }
 
@@ -1260,7 +1268,7 @@ fn keep_in(
     use std::os::fd::AsFd;
     use std::os::unix::ffi::OsStrExt;
     assert!(depth <= KEPT_DEPTH_MAX);
-    assert!(!kept.is_empty());
+    assert!(depth > 0 || !kept.is_empty());
     let unwritable = |_| failure("agent_home_unwritable");
     let remove = |name: &std::ffi::CStr| {
         crate::team::cleanup::remove_home_entry(folder, name)
@@ -1299,7 +1307,9 @@ fn keep_in(
                 Some(Kept::Lock) if crate::launch_context::lock_kept(&found) => {
                     unpin_at(folder, name)
                 }
-                Some(Kept::Folder) if form == FileType::Directory => unpin_at(folder, name),
+                Some(Kept::Folder | Kept::Cache) if form == FileType::Directory => {
+                    unpin_at(folder, name)
+                }
                 Some(Kept::Link) if form == FileType::Symlink => unpin_at(folder, name),
                 Some(Kept::Only(inner)) if form == FileType::Directory => {
                     #[cfg(all(test, unix))]
@@ -1344,7 +1354,6 @@ fn keep_only(
     held: &mut Vec<PathBuf>,
 ) -> Result<(), AgentHomeError> {
     assert!(folder.is_absolute());
-    assert!(!kept.is_empty());
     let before = held.len();
     for _ in 0..HOME_PASSES_MAX {
         held.truncate(before);
@@ -1369,7 +1378,7 @@ fn keep_only(
             match wanted {
                 Some(Kept::File) if metadata.is_file() && sole_own_link(&metadata) => {}
                 Some(Kept::Lock) if crate::launch_context::lock_kept(&metadata) => {}
-                Some(Kept::Folder) if metadata.is_dir() => {}
+                Some(Kept::Folder | Kept::Cache) if metadata.is_dir() => {}
                 Some(Kept::Link) if link => {}
                 Some(Kept::Only(inner)) if metadata.is_dir() => {
                     keep_only(&path, inner, held)?;
@@ -1486,19 +1495,50 @@ pub(crate) fn pinned_entries() -> Vec<String> {
 /// the home, empty for the home, the list and the paths found so far.
 fn pin_below(prefix: &str, kept: &[(&str, Kept)], pinned: &mut Vec<String>) {
     for (name, kind) in kept {
-        let path = if prefix.is_empty() {
-            (*name).to_owned()
-        } else {
-            format!("{prefix}/{name}")
-        };
+        let path = below(prefix, name);
         match kind {
             Kept::Only(inner) => {
                 pinned.push(path.clone());
                 pin_below(&path, inner, pinned);
             }
             Kept::Link => pinned.push(path),
-            Kept::File | Kept::Lock | Kept::Folder => {}
+            Kept::File | Kept::Lock | Kept::Folder | Kept::Cache => {}
         }
+    }
+}
+
+/// Names, as paths below the home, each entry a launch keeps whole that the engine writes,
+/// removes or reads at a launch or after: every file, lock and folder of [`HOME_KEPT`] at any
+/// depth but the download caches and the links. The agent's profile keeps it from setting a
+/// flag or an ACL on one or on anything in it, so none holds against the engine
+/// (RV-DS241-138, -187). Output: the paths.
+pub(crate) fn kept_entries() -> Vec<String> {
+    let mut kept = Vec::new();
+    keep_below("", HOME_KEPT, &mut kept);
+    kept
+}
+
+/// Adds to `kept` each file, lock and folder kept whole in one list, below `prefix`, and
+/// does the same in each folder kept only in part. Inputs: the path of the list's folder
+/// below the home, empty for the home, the list and the paths found so far.
+fn keep_below(prefix: &str, list: &[(&str, Kept)], kept: &mut Vec<String>) {
+    for (name, kind) in list {
+        let path = below(prefix, name);
+        match kind {
+            Kept::Only(inner) => keep_below(&path, inner, kept),
+            Kept::File | Kept::Lock | Kept::Folder => kept.push(path),
+            Kept::Cache | Kept::Link => {}
+        }
+    }
+}
+
+/// Joins one name of a kept list to the path of the list's folder below the home. Inputs:
+/// that path, empty for the home, and the name. Output: the path below the home.
+fn below(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{prefix}/{name}")
     }
 }
 
