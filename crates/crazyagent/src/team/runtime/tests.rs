@@ -5562,7 +5562,9 @@ fn an_owner_line_waits_until_the_live_masters_app_reads_keys() {
 /// R10-M1 / F1: while the engine cannot watch a new live master's first screen, as when
 /// every terminal viewer of the host is taken, the owner's line waits and the engine looks
 /// again on the next pass; once a viewer is free the app's screen is watched as usual and
-/// the line opens a turn, instead of waiting forever.
+/// the line opens a turn, instead of waiting forever. Views count per pane and per server,
+/// so the row takes every view the server serves, over enough other panes, since the live
+/// master's own pane has none (GB-5).
 #[cfg(target_os = "macos")]
 #[test]
 fn an_owner_line_reaches_a_live_master_once_its_first_screen_can_be_watched() {
@@ -5570,21 +5572,37 @@ fn an_owner_line_reaches_a_live_master_once_its_first_screen_can_be_watched() {
     let host = fixture.host();
     let mut team = live_runtime(&fixture, &host, LIVE_CODEX);
     let project = fixture.setup.project_id.clone();
-    let held = AgentId::new("viewers-held").unwrap();
     let command = InteractiveCommand {
         argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/sleep 300".into()],
         cwd: fixture.base.clone(),
         env: Vec::new(),
         transcript: Transcript::Unavailable,
     };
-    host.spawn(&held, &command).unwrap();
-    let viewers: Vec<_> = (0..crate::terminal::VIEWERS_MAX)
-        .map(|_| host.attach(&held).unwrap())
+    let (all, per_pane) = (
+        crate::terminal::CONNECTIONS_MAX,
+        crate::terminal::VIEWERS_MAX,
+    );
+    let held: Vec<AgentId> = (0..=all.div_ceil(per_pane))
+        .map(|at| AgentId::new(&format!("viewers-held-{at}")).unwrap())
         .collect();
+    for pane in &held {
+        host.spawn(pane, &command).unwrap();
+    }
+    let (fresh, filled) = held.split_last().unwrap();
+    let mut viewers = Vec::new();
+    for pane in filled {
+        while viewers.len() < all {
+            match host.attach(pane) {
+                Ok(view) => viewers.push(view),
+                Err(full) if full.0 == "terminal_viewers_full" => break,
+                Err(other) => panic!("{other:?}"),
+            }
+        }
+    }
     assert_eq!(
-        host.attach(&held).map(drop).unwrap_err().0,
+        host.attach(fresh).map(drop).unwrap_err().0,
         "terminal_viewers_full",
-        "every viewer of the host is taken"
+        "a pane with no view of its own finds every viewer of the host taken"
     );
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
     fixture.until(&mut team, "the live master's pane runs", |f| {
