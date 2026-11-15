@@ -3396,7 +3396,7 @@ fn prepared_git(runtime: &TeamRuntime, fixture: &Fixture, id: i64, role: AgentRo
             &account,
             kept,
             crate::agent_git::Layout::Linked,
-            live_switch(&runtime, &fixture.setup.project_id, role),
+            live_switch(runtime, &fixture.setup.project_id, role),
         )
         .unwrap();
     if !kept {

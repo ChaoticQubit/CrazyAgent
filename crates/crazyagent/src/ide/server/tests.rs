@@ -1162,6 +1162,11 @@ fn server_command(
     )
 }
 
+/// Plants one `.git` spelling for the confined-start row. Inputs: the server data folder
+/// and a folder outside it, for the spelling that is a link. Output: nothing; the entry is
+/// on disk.
+type Plant = fn(&Path, &Path);
+
 /// A `.git` a server of an older profile left in its data folder, as a folder, a gitdir file,
 /// a link, a hard link or a deep folder in any letter case, stops a confined start with
 /// `ide_server_data_git` and stays where it was, so no later server renames it into the
@@ -1171,7 +1176,7 @@ fn a_git_left_in_the_server_data_folder_stops_a_confined_start() {
     let (checkout, data, outside) = (scratch(), scratch(), scratch());
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let root = fs::canonicalize(checkout.path()).unwrap();
-    let plants: [(&str, fn(&Path, &Path)); 6] = [
+    let plants: [(&str, Plant); 6] = [
         (".git/hooks", |home, _| {
             fs::create_dir_all(home.join(".git").join("hooks")).unwrap();
         }),
