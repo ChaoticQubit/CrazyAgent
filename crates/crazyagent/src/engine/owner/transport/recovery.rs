@@ -269,9 +269,10 @@ pub(super) async fn serve(
 /// Answers a parsed request under the owner barrier it is handed: checks the grant again,
 /// then runs the action on a blocking thread that owns the barrier until the action
 /// returns, so a request cut short never lets a revocation pass a dismissal still
-/// committing. Inputs: the authority, packet, admission, parsed request and barrier.
-/// Output: the reply or refusal, with the barrier to hold while it is written; no barrier
-/// when the blocking thread failed.
+/// committing. A dismissed delete cut short also leaves the engine's job slot, so Home
+/// stops offering it (DEC-177 addendum 1). Inputs: the authority, packet, admission,
+/// parsed request and barrier. Output: the reply or refusal, with the barrier to hold while
+/// it is written; no barrier when the blocking thread failed.
 async fn answer(
     authority: &Authority,
     packet: &[u8; 37],
@@ -290,7 +291,13 @@ async fn answer(
         Err(error) => return (rejected(error), Some(barrier)),
     };
     match tokio::task::spawn_blocking(move || (run(&root, action), barrier)).await {
-        Ok((result, barrier)) => (result.unwrap_or_else(rejected), Some(barrier)),
+        Ok((Ok((reply, kept)), barrier)) => {
+            if let Some(project) = kept {
+                authority.intake.forget_cut_short(&project);
+            }
+            (reply, Some(barrier))
+        }
+        Ok((Err(error), barrier)) => (rejected(error), Some(barrier)),
         Err(_) => (rejected(failure("recovery_unavailable")), None),
     }
 }
@@ -313,17 +320,28 @@ fn parse(bytes: &[u8]) -> Result<Action, EngineError> {
 }
 
 /// Runs one authenticated Recovery action against the recovery store and action ledger in
-/// the engine root. Inputs: the engine root and the action. Output: the reply, or the
-/// plain refusal.
-fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
+/// the engine root. Inputs: the engine root and the action. Output: the reply with the
+/// project whose delete cut short was dismissed, if one was, or the plain refusal.
+fn run(root: &Path, action: Action) -> Result<(Reply, Option<String>), EngineError> {
     match action {
         Action::Dismiss { action_kind, id } => {
-            ledger::dismiss(&ledger::open(root)?, action_kind, id)?;
-            Ok(Reply::Dismissed)
+            let db = ledger::open(root)?;
+            let kept = match action_kind {
+                ActionKind::ProjectDelete => ledger::pending(&db, action_kind)?
+                    .into_iter()
+                    .find(|action| action.id.get() == id)
+                    .map(|action| action.key),
+                _ => None,
+            };
+            ledger::dismiss(&db, action_kind, id)?;
+            Ok((Reply::Dismissed, kept))
         }
-        Action::List { project } => Ok(Reply::Listed {
-            banner: banner(root, &project)?,
-        }),
+        Action::List { project } => Ok((
+            Reply::Listed {
+                banner: banner(root, &project)?,
+            },
+            None,
+        )),
         Action::Retry { agent } => {
             if agent <= 0 {
                 return Err(failure("recovery_request_invalid"));
@@ -331,7 +349,7 @@ fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
             if !recovery::retry(root, agent)? {
                 return Err(failure("recovery_not_failed"));
             }
-            Ok(Reply::Retried)
+            Ok((Reply::Retried, None))
         }
     }
 }

@@ -52,6 +52,9 @@ pub enum RateLimitStatus {
     Allowed,
     AllowedWarning,
     Rejected,
+    /// A status a newer harness added that this engine does not know. No reader takes it
+    /// for a rejection: a refused request still ends its turn with the turn's own error.
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

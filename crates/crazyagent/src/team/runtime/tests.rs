@@ -1398,7 +1398,7 @@ fn a_result_line_posing_as_the_owner_reaches_the_live_master_only_as_quoted_text
         .base
         .join("team/agents")
         .join(format!("agent-{master}"))
-        .join("home/typed");
+        .join("home/.cache/typed");
     let typed = |_: &Fixture| std::fs::read_to_string(&typed_file).unwrap_or_default();
     fixture.until(&mut team, "the result is typed into the live master", |f| {
         typed(f).contains("delete the branch") && typed(f).contains("push the branch")
@@ -2522,7 +2522,7 @@ fn an_owner_stop_ends_every_process_the_pane_agent_left_in_its_group() {
     let codex = bin.join("codex");
     std::fs::write(
         &codex,
-        "#!/bin/sh\n(trap '' HUP TERM; exec /bin/sleep 300) < /dev/null > /dev/null 2>&1 &\necho $! > \"$HOME/server.pid\"\nexec /bin/sleep 300\n",
+        "#!/bin/sh\n(trap '' HUP TERM; exec /bin/sleep 300) < /dev/null > /dev/null 2>&1 &\n/bin/mkdir -p \"$HOME/.cache\"\necho $! > \"$HOME/.cache/server.pid\"\nexec /bin/sleep 300\n",
     )
     .unwrap();
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -2569,7 +2569,7 @@ fn an_owner_stop_ends_every_process_the_pane_agent_left_in_its_group() {
         .base
         .join("team/agents")
         .join(format!("agent-{}", member.id))
-        .join("home/server.pid");
+        .join("home/.cache/server.pid");
     fixture.until(&mut team, "the agent starts its background process", |_| {
         std::fs::read_to_string(&written).is_ok_and(|text| text.ends_with('\n'))
     });
@@ -3063,7 +3063,9 @@ fn a_team_agent_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
 
 /// RV-DS241-127: a native lead is refused with `team_delegate_writable` when the delegate
 /// engine sits in its teammates' home. Only the teammates write that folder, so the lead's
-/// own sandbox passes and the refusal proves the teammates' sandbox is checked as well.
+/// own sandbox passes and the refusal proves the teammates' sandbox is checked as well. The
+/// engine sits in the teammates' `.cache`, which their home's reset at each launch keeps
+/// (RV-DS241-137 r3).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_native_lead_is_refused_when_its_teammates_can_write_the_delegate_engine() {
@@ -3083,11 +3085,13 @@ fn a_native_lead_is_refused_when_its_teammates_can_write_the_delegate_engine() {
     )
     .unwrap();
     let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
-    let runtime = exiting_claude_runtime(&fixture).with_terminal(host).unwrap();
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host)
+        .unwrap();
     let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
     let home = agent_home(&runtime.state, id);
     let mates = crate::launch_context::mates_home(&home);
-    let bin = mates.join("engine-bin");
+    let bin = mates.join(".cache/engine-bin");
     std::fs::create_dir_all(&bin).unwrap();
     for folder in [home.parent().unwrap(), mates.as_path()] {
         std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -3394,7 +3398,7 @@ fn prepared_git(runtime: &TeamRuntime, fixture: &Fixture, id: i64, role: AgentRo
             &account,
             kept,
             crate::agent_git::Layout::Linked,
-            live_switch(&runtime, &fixture.setup.project_id, role),
+            live_switch(runtime, &fixture.setup.project_id, role),
         )
         .unwrap();
     if !kept {
@@ -5602,14 +5606,14 @@ fn an_owner_line_reaches_a_live_master_once_its_first_screen_can_be_watched() {
     host.close(&[]).unwrap();
 }
 
-/// `LIVE_CODEX` that turns bracketed paste on only once `go` exists in its Codex home, as
-/// an app that reads no keys for a long while. Returns the script.
+/// `LIVE_CODEX` that turns bracketed paste on only once `go` exists in its home's `.cache`,
+/// as an app that reads no keys for a long while. Returns the script.
 #[cfg(target_os = "macos")]
 fn paste_later_codex() -> String {
     let ready = "printf '\\033[?2004hCodex stand-in ready\\n'\n";
     let script = LIVE_CODEX.replacen(
         ready,
-        "( while [ ! -e \"$CODEX_HOME/go\" ]; do /bin/sleep 0.1; done; printf '\\033[?2004h' ) &\nprintf 'Codex stand-in ready\\n'\n",
+        "/bin/mkdir -p \"$CODEX_HOME/.cache\"\n( while [ ! -e \"$CODEX_HOME/.cache/go\" ]; do /bin/sleep 0.1; done; printf '\\033[?2004h' ) &\nprintf 'Codex stand-in ready\\n'\n",
         1,
     );
     assert_ne!(script, LIVE_CODEX);
@@ -5756,8 +5760,8 @@ fn an_owner_line_waits_until_the_live_masters_screen_is_quiet() {
 const RESUMING_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
-/bin/mkdir -p "$d" || exit 1
-printf '%s\n' "$*" >> "$CODEX_HOME/launches"
+/bin/mkdir -p "$d" "$CODEX_HOME/.cache" || exit 1
+printf '%s\n' "$*" >> "$CODEX_HOME/.cache/launches"
 id=""
 prev=""
 for a in "$@"; do
@@ -5778,9 +5782,9 @@ e=$(printf '\033')
 open=0
 while IFS= read -r line; do
   case "$line" in
-    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CODEX_HOME/typed" ;;
+    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CODEX_HOME/.cache/typed" ;;
     *"$e[200~"*) open=1; continue ;;
-    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CODEX_HOME/typed"; continue; } ;;
+    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CODEX_HOME/.cache/typed"; continue; } ;;
   esac
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
   /bin/sleep 0.3
@@ -5828,7 +5832,7 @@ fn launches(fixture: &Fixture, master: i64) -> Vec<String> {
         .base
         .join("team/agents")
         .join(format!("agent-{master}"))
-        .join("home/launches");
+        .join("home/.cache/launches");
     std::fs::read_to_string(log)
         .unwrap_or_default()
         .lines()
@@ -9108,7 +9112,7 @@ fn an_idle_stopped_live_master_starts_again_on_the_same_conversation() {
     fixture.until(&mut team, "the master runs again", |f| {
         live_agent(&f.connection) == Some(id) && f.agent_status(id).0 == AgentStatus::Idle
     });
-    let launched = record.ancestors().nth(5).unwrap().join("launches");
+    let launched = record.ancestors().nth(5).unwrap().join(".cache/launches");
     fixture.until(&mut team, "the master launched again", |_| {
         std::fs::read_to_string(&launched).unwrap().lines().count() == 2
     });
@@ -10281,7 +10285,7 @@ fn master_replies(fixture: &Fixture) -> usize {
 fn recording_codex() -> String {
     let script = RESUMING_CODEX.replacen(
         "*\"$e[200~\"*) open=1; continue ;;",
-        "*\"$e[200~\"*) open=1; printf '%s\\n' \"$line\" >> \"$CODEX_HOME/typed\"; continue ;;",
+        "*\"$e[200~\"*) open=1; printf '%s\\n' \"$line\" >> \"$CODEX_HOME/.cache/typed\"; continue ;;",
         1,
     );
     assert_ne!(script, RESUMING_CODEX);
@@ -10404,9 +10408,10 @@ fn with_restart_the_agent_restarts_at_its_next_idle_with_the_new_text() {
     let fixture = Fixture::new(1);
     reuse_idle_on(&fixture);
     let host = fixture.host();
+    let made = "/bin/mkdir -p \"$CLAUDE_CONFIG_DIR/.cache\" || exit 1\n";
     let counting = RESUMING_CLAUDE.replacen(
-        "#!/bin/sh\n",
-        "#!/bin/sh\nprintf '%s\\n' \"$$\" >> \"$CLAUDE_CONFIG_DIR/pids\"\n",
+        made,
+        &format!("{made}printf '%s\\n' \"$$\" >> \"$CLAUDE_CONFIG_DIR/.cache/pids\"\n"),
         1,
     );
     assert_ne!(counting, RESUMING_CLAUDE);
@@ -10437,9 +10442,10 @@ fn with_restart_the_agent_restarts_at_its_next_idle_with_the_new_text() {
     });
     let (conversation, _) = agent_conversation(&fixture, agent).unwrap();
     let started = launches(&fixture, agent);
-    let given =
-        std::fs::read_to_string(stand_in_file(&fixture, agent, "crazyagent/instructions.md"))
-            .unwrap();
+    let given = std::fs::read_to_string(
+        agent_home(&fixture.base.join("team"), agent).join("crazyagent/instructions.md"),
+    )
+    .unwrap();
     delegate_claude(&fixture, "Write the second page.");
     fixture.until(&mut team, "the second task ends", |f| {
         task_of(f, "Write the second page.").0 == "done"
@@ -10674,10 +10680,11 @@ fn with_next_message_an_edit_past_the_input_limit_reaches_the_live_master_once_c
 /// answers it.
 #[cfg(target_os = "macos")]
 const PIPED_CLAUDE: &str = r#"#!/bin/sh
+/bin/mkdir -p "$CLAUDE_CONFIG_DIR/.cache" || exit 1
 n=0
 while IFS= read -r turn; do
   n=$((n+1))
-  printf '%s\n' "$turn" >> "$CLAUDE_CONFIG_DIR/turns"
+  printf '%s\n' "$turn" >> "$CLAUDE_CONFIG_DIR/.cache/turns"
   printf '{"type":"system","subtype":"init","uuid":"init-%s","session_id":"piped-session","model":"observed-model","capabilities":[]}\n' "$n"
   printf '{"type":"assistant","uuid":"step-%s","session_id":"piped-session","parent_tool_use_id":null,"message":{"id":"message-%s","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"Done."}]}}\n' "$n" "$n"
   printf '{"type":"result","subtype":"success","uuid":"result-%s","session_id":"piped-session","is_error":false,"result":"Done."}\n' "$n"
@@ -11488,7 +11495,8 @@ fn the_master_status_lists_the_newest_twenty_finished_sub_agents() {
 
 #[cfg(target_os = "macos")]
 const RESUMING_CLAUDE: &str = r#"#!/bin/sh
-printf '%s\n' "$*" >> "$CLAUDE_CONFIG_DIR/launches"
+/bin/mkdir -p "$CLAUDE_CONFIG_DIR/.cache" || exit 1
+printf '%s\n' "$*" >> "$CLAUDE_CONFIG_DIR/.cache/launches"
 id=""
 prev=""
 for a in "$@"; do
@@ -11504,11 +11512,11 @@ printf '\033[?2004hClaude stand-in ready\n'
 e=$(printf '\033')
 open=0
 while IFS= read -r line; do
-  printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/input"
+  printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/.cache/input"
   case "$line" in
-    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed" ;;
-    *"$e[200~"*) open=1; printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed"; continue ;;
-    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed"; continue; } ;;
+    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/.cache/typed" ;;
+    *"$e[200~"*) open=1; printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/.cache/typed"; continue ;;
+    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/.cache/typed"; continue; } ;;
   esac
   printf '{"type":"user","message":{"content":"Owner turn"}}\n' >> "$f"
   /bin/sleep 0.3
@@ -11523,7 +11531,8 @@ done
 /// lead's real transcript showed on 2026-10-29 (agent 38, task 44).
 #[cfg(target_os = "macos")]
 const BACKGROUND_CLAUDE: &str = r#"#!/bin/sh
-printf '%s\n' "$*" >> "$CLAUDE_CONFIG_DIR/launches"
+/bin/mkdir -p "$CLAUDE_CONFIG_DIR/.cache" || exit 1
+printf '%s\n' "$*" >> "$CLAUDE_CONFIG_DIR/.cache/launches"
 id=""
 prev=""
 for a in "$@"; do
@@ -11539,14 +11548,14 @@ e=$(printf '\033')
 open=0
 while IFS= read -r line; do
   case "$line" in
-    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed" ;;
-    *"$e[200~"*) open=1; printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed"; continue ;;
-    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed"; continue; } ;;
+    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/.cache/typed" ;;
+    *"$e[200~"*) open=1; printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/.cache/typed"; continue ;;
+    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/.cache/typed"; continue; } ;;
   esac
   printf '{"type":"user","message":{"content":"Owner turn"}}\n' >> "$f"
   (
     /bin/sleep 2
-    printf done > "$CLAUDE_CONFIG_DIR/background-done"
+    printf done > "$CLAUDE_CONFIG_DIR/.cache/background-done"
     printf '%s\n' '{"type":"user","message":{"content":"<task-notification>\n<task-id>bgcheck1</task-id>\n<status>completed</status>\n</task-notification>"}}' >> "$f"
     /bin/sleep 0.3
     printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Check passed."}],"stop_reason":"end_turn"}}' '{"type":"system","subtype":"turn_duration","durationMs":300}' >> "$f"
@@ -11690,7 +11699,8 @@ fn check_end(fixture: &Fixture) -> Option<(String, Option<String>, Option<String
         .unwrap()
 }
 
-/// The file a sub-agent's Claude Code stand-in writes in its home, its CLAUDE_CONFIG_DIR.
+/// The file a sub-agent's stand-in writes in `.cache` in its home, the one folder there
+/// every launch keeps whole, so the file outlives the agent's next launch.
 /// Takes the fixture, the agent and the file name. Returns the path.
 #[cfg(target_os = "macos")]
 fn stand_in_file(fixture: &Fixture, agent: i64, name: &str) -> PathBuf {
@@ -11698,7 +11708,7 @@ fn stand_in_file(fixture: &Fixture, agent: i64, name: &str) -> PathBuf {
         .base
         .join("team/agents")
         .join(format!("agent-{agent}"))
-        .join("home")
+        .join("home/.cache")
         .join(name)
 }
 
@@ -11909,7 +11919,7 @@ fn running_turn() -> String {
         "  printf '{\"type\":\"user\",\"message\":{\"content\":\"Owner turn\"}}\\n' >> \"$f\"\n";
     let (head, _) = BACKGROUND_CLAUDE.split_once(start).unwrap();
     format!(
-        "{head}{start}  printf running > \"$CLAUDE_CONFIG_DIR/running\"\n  /bin/sleep 20\n  printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Checked.\"}}],\"stop_reason\":\"end_turn\"}}}}' '{{\"type\":\"system\",\"subtype\":\"turn_duration\",\"durationMs\":300}}' >> \"$f\"\ndone\n"
+        "{head}{start}  printf running > \"$CLAUDE_CONFIG_DIR/.cache/running\"\n  /bin/sleep 20\n  printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Checked.\"}}],\"stop_reason\":\"end_turn\"}}}}' '{{\"type\":\"system\",\"subtype\":\"turn_duration\",\"durationMs\":300}}' >> \"$f\"\ndone\n"
     )
 }
 
@@ -11956,8 +11966,9 @@ fn held_then_running() -> String {
     let running = running_turn();
     let (_, tail) = running.split_once(start).unwrap();
     let body = tail.strip_suffix("done\n").unwrap();
-    let later =
-        format!("{start}  if [ -e \"$CLAUDE_CONFIG_DIR/held\" ]; then\n{body}  continue\n  fi\n");
+    let later = format!(
+        "{start}  if [ -e \"$CLAUDE_CONFIG_DIR/.cache/held\" ]; then\n{body}  continue\n  fi\n"
+    );
     long_background(2).replace(start, &later)
 }
 
@@ -12043,7 +12054,7 @@ fn mid_turn_background() -> String {
     let (head, _) = BACKGROUND_CLAUDE.split_once(start).unwrap();
     let notice = MID_TURN_NOTICE.replace('\'', "'\\''");
     format!(
-        "{head}{start}  (\n    /bin/sleep 1\n    printf mine > background.txt\n    printf done > \"$CLAUDE_CONFIG_DIR/background-done\"\n  ) &\n  printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"toolu_bg\",\"name\":\"Bash\",\"input\":{{\"command\":\"check\",\"run_in_background\":true}}}}],\"stop_reason\":\"tool_use\"}}}}' '{{\"type\":\"user\",\"message\":{{\"content\":[{{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_bg\",\"content\":\"Command running in background with ID: bgcheck1.\"}}]}},\"toolUseResult\":{{\"backgroundTaskId\":\"bgcheck1\"}}}}' >> \"$f\"\n  while [ ! -e \"$CLAUDE_CONFIG_DIR/background-done\" ]; do /bin/sleep 0.1; done\n  printf '%s\\n' '{notice}' >> \"$f\"\n  printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Check passed.\"}}],\"stop_reason\":\"end_turn\"}}}}' '{{\"type\":\"system\",\"subtype\":\"turn_duration\",\"durationMs\":300}}' >> \"$f\"\ndone\n"
+        "{head}{start}  (\n    /bin/sleep 1\n    printf mine > background.txt\n    printf done > \"$CLAUDE_CONFIG_DIR/.cache/background-done\"\n  ) &\n  printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"toolu_bg\",\"name\":\"Bash\",\"input\":{{\"command\":\"check\",\"run_in_background\":true}}}}],\"stop_reason\":\"tool_use\"}}}}' '{{\"type\":\"user\",\"message\":{{\"content\":[{{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_bg\",\"content\":\"Command running in background with ID: bgcheck1.\"}}]}},\"toolUseResult\":{{\"backgroundTaskId\":\"bgcheck1\"}}}}' >> \"$f\"\n  while [ ! -e \"$CLAUDE_CONFIG_DIR/.cache/background-done\" ]; do /bin/sleep 0.1; done\n  printf '%s\\n' '{notice}' >> \"$f\"\n  printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Check passed.\"}}],\"stop_reason\":\"end_turn\"}}}}' '{{\"type\":\"system\",\"subtype\":\"turn_duration\",\"durationMs\":300}}' >> \"$f\"\ndone\n"
     )
 }
 
@@ -12069,7 +12080,7 @@ fn a_task_whose_background_command_ends_during_its_turn_ends_with_that_turn() {
 /// Takes the lines to run after the write. Returns the script.
 #[cfg(target_os = "macos")]
 fn held_background_writes(then: &str) -> String {
-    let done = "    printf done > \"$CLAUDE_CONFIG_DIR/background-done\"\n";
+    let done = "    printf done > \"$CLAUDE_CONFIG_DIR/.cache/background-done\"\n";
     let script = long_background(2);
     assert_eq!(script.matches(done).count(), 1);
     script.replace(
@@ -12154,7 +12165,7 @@ fn a_held_own_branch_task_posts_the_commit_its_agent_made() {
         "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
     );
     let script = held_background_writes(&format!(
-        "    {git} add background.txt > /dev/null 2>&1\n    {git} commit -q -m work > /dev/null 2>&1\n    printf $? > \"$CLAUDE_CONFIG_DIR/commit-code\"\n"
+        "    {git} add background.txt > /dev/null 2>&1\n    {git} commit -q -m work > /dev/null 2>&1\n    printf $? > \"$CLAUDE_CONFIG_DIR/.cache/commit-code\"\n"
     ));
     assert!(script.contains("commit-code"));
     let host = fixture.host();
@@ -12251,18 +12262,20 @@ fn long_background(secs: u32) -> String {
         .replace("/bin/sleep 2\n", &format!("/bin/sleep {secs}\n"))
         .replace(
             "  ) &\n",
-            "  ) &\n  printf %s \"$!\" > \"$CLAUDE_CONFIG_DIR/background-pid\"\n",
+            "  ) &\n  printf %s \"$!\" > \"$CLAUDE_CONFIG_DIR/.cache/background-pid\"\n",
         )
         .replace(
             ">> \"$f\"\ndone\n",
-            ">> \"$f\"\n  printf held > \"$CLAUDE_CONFIG_DIR/held\"\ndone\n",
+            ">> \"$f\"\n  printf held > \"$CLAUDE_CONFIG_DIR/.cache/held\"\ndone\n",
         );
     assert_eq!(script.matches(&format!("sleep {secs}\n")).count(), 1);
     assert_eq!(
-        script.matches("CLAUDE_CONFIG_DIR/background-pid").count(),
+        script
+            .matches("CLAUDE_CONFIG_DIR/.cache/background-pid")
+            .count(),
         1
     );
-    assert_eq!(script.matches("CLAUDE_CONFIG_DIR/held").count(), 1);
+    assert_eq!(script.matches("CLAUDE_CONFIG_DIR/.cache/held").count(), 1);
     script
 }
 
@@ -12448,23 +12461,23 @@ for a in "$@"; do
 done
 [ -n "$id" ] || { echo "no session id"; exit 4; }
 d="$CLAUDE_CONFIG_DIR/projects/$(/bin/pwd -P | /usr/bin/tr -c 'A-Za-z0-9\n' '-' | /usr/bin/tr -d '\n')"
-/bin/mkdir -p "$d" || exit 1
+/bin/mkdir -p "$d" "$CLAUDE_CONFIG_DIR/.cache" || exit 1
 f="$d/$id.jsonl"
 printf '\033[?2004hClaude stand-in ready\n'
-while [ ! -e "$CLAUDE_CONFIG_DIR/go" ]; do /bin/sleep 0.1; done
+while [ ! -e "$CLAUDE_CONFIG_DIR/.cache/go" ]; do /bin/sleep 0.1; done
 printf '%s\n' '{"type":"user","message":{"content":"A teammate wrote"}}' >> "$f"
 (
   /bin/sleep SECS
-  printf done > "$CLAUDE_CONFIG_DIR/background-done"
+  printf done > "$CLAUDE_CONFIG_DIR/.cache/background-done"
   printf '%s\n' '{"type":"user","message":{"content":"<task-notification>\n<task-id>bgcheck1</task-id>\n<status>completed</status>\n</task-notification>"}}' >> "$f"
   /bin/sleep 0.3
   printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Check passed."}],"stop_reason":"end_turn"}}' '{"type":"system","subtype":"turn_duration","durationMs":300}' >> "$f"
 ) &
-printf %s "$!" > "$CLAUDE_CONFIG_DIR/background-pid"
+printf %s "$!" > "$CLAUDE_CONFIG_DIR/.cache/background-pid"
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Bash","input":{"command":"check","run_in_background":true}}],"stop_reason":"tool_use"}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":"Command running in background with ID: bgcheck1."}]},"toolUseResult":{"backgroundTaskId":"bgcheck1"}}' >> "$f"
 /bin/sleep 0.3
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Waiting for the check."}],"stop_reason":"end_turn"}}' '{"type":"system","subtype":"turn_duration","durationMs":300}' >> "$f"
-printf held > "$CLAUDE_CONFIG_DIR/held"
+printf held > "$CLAUDE_CONFIG_DIR/.cache/held"
 exec /bin/sleep 300
 "#;
 
@@ -12541,7 +12554,7 @@ fn own_turn_outliving(
         Some(LaunchEvent::Ready { .. })
     ));
     session.follow_own_turns();
-    std::fs::write(home.join("go"), "").unwrap();
+    std::fs::write(home.join(".cache/go"), "").unwrap();
     let (order, orders) = channel();
     let (reports, reported) = channel();
     let cancel = AtomicBool::new(false);
@@ -12556,7 +12569,7 @@ fn own_turn_outliving(
         let mut held = None;
         let mut later = later;
         let (end, text, at) = loop {
-            if held.is_none() && home.join("held").exists() {
+            if held.is_none() && home.join(".cache/held").exists() {
                 held = Some(Instant::now());
                 if let Some(saved) = later.take() {
                     order.send(Order::Rules(saved)).unwrap();
@@ -12569,7 +12582,7 @@ fn own_turn_outliving(
                 }) => {
                     let at = Instant::now();
                     while held.is_none() && Instant::now() < deadline {
-                        if home.join("held").exists() {
+                        if home.join(".cache/held").exists() {
                             held = Some(Instant::now());
                         } else {
                             std::thread::sleep(Duration::from_millis(10));
@@ -12605,9 +12618,9 @@ fn own_turn_outliving(
     });
     assert!(matches!(next, Next::Stop));
     let held_at_end = session.own_held();
-    let finished = home.join("background-done").exists();
+    let finished = home.join(".cache/background-done").exists();
     session.stop().unwrap();
-    let alive = alive_by_pid_file(&home.join("background-pid"));
+    let alive = alive_by_pid_file(&home.join(".cache/background-pid"));
     host.close(&[]).unwrap();
     OwnOutlived {
         end,
@@ -13511,7 +13524,7 @@ fn under_stop_a_per_turn_agent_is_told_its_background_commands_stop() {
         })
         .collect();
     assert_eq!(ends, [TurnEnd::Success]);
-    let typed = std::fs::read_to_string(agent.home.join("typed")).unwrap();
+    let typed = std::fs::read_to_string(agent.home.join(".cache/typed")).unwrap();
     assert!(
         typed.contains("Write the page") && typed.contains(BACKGROUND_STOPS_LINE),
         "{typed}"
@@ -13567,7 +13580,8 @@ fn a_task_cut_by_its_time_limit_says_its_background_command_was_stopped() {
 /// the owner types are kept in `typed`.
 #[cfg(target_os = "macos")]
 const STAGED_BACKGROUND_CLAUDE: &str = r#"#!/bin/sh
-printf '%s\n' "$*" >> "$CLAUDE_CONFIG_DIR/launches"
+/bin/mkdir -p "$CLAUDE_CONFIG_DIR/.cache" || exit 1
+printf '%s\n' "$*" >> "$CLAUDE_CONFIG_DIR/.cache/launches"
 id=""
 prev=""
 for a in "$@"; do
@@ -13579,8 +13593,8 @@ d="$CLAUDE_CONFIG_DIR/projects/$(/bin/pwd -P | /usr/bin/tr -c 'A-Za-z0-9\n' '-' 
 /bin/mkdir -p "$d" || exit 1
 f="$d/$id.jsonl"
 (
-  while [ ! -e "$CLAUDE_CONFIG_DIR/release" ]; do /bin/sleep 0.1; done
-  printf done > "$CLAUDE_CONFIG_DIR/background-done"
+  while [ ! -e "$CLAUDE_CONFIG_DIR/.cache/release" ]; do /bin/sleep 0.1; done
+  printf done > "$CLAUDE_CONFIG_DIR/.cache/background-done"
 ) &
 printf '{"type":"user","message":{"content":"Owner turn"}}\n' >> "$f"
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Bash","input":{"command":"check","run_in_background":true}}],"stop_reason":"tool_use"}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":"Command running in background with ID: bgcheck1."}]},"toolUseResult":{"backgroundTaskId":"bgcheck1"}}' >> "$f"
@@ -13588,7 +13602,7 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id"
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Waiting for the check."}],"stop_reason":"end_turn"}}' '{"type":"system","subtype":"turn_duration","durationMs":300}' >> "$f"
 printf '\033[?2004hClaude stand-in ready\n'
 while IFS= read -r line; do
-  printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed"
+  printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/.cache/typed"
 done
 "#;
 
@@ -13645,9 +13659,9 @@ fn an_owner_interrupt_ends_a_held_task_and_stops_its_background_command() {
         .replace("/bin/sleep 2\n", "/bin/sleep 4\n")
         .replace(
             ">> \"$f\"\ndone\n",
-            ">> \"$f\"\n  printf held > \"$CLAUDE_CONFIG_DIR/held\"\ndone\n",
+            ">> \"$f\"\n  printf held > \"$CLAUDE_CONFIG_DIR/.cache/held\"\ndone\n",
         );
-    assert_eq!(script.matches("CLAUDE_CONFIG_DIR/held").count(), 1);
+    assert_eq!(script.matches("CLAUDE_CONFIG_DIR/.cache/held").count(), 1);
     let agents = Arc::new(Agents::open(&fixture.base).unwrap());
     let mut team = check_runtime(&fixture, &host, &script, None, Some(agents.clone()));
     fixture.until(&mut team, "the agent waits for its background check", |f| {
@@ -13724,7 +13738,7 @@ fn pasted(fixture: &Fixture, agent: i64) -> String {
             .base
             .join("team/agents")
             .join(format!("agent-{agent}"))
-            .join("home/typed"),
+            .join("home/.cache/typed"),
     )
     .unwrap_or_default()
 }
@@ -14208,12 +14222,12 @@ fn a_restarted_engine_keeps_a_master_whose_saved_harness_changed_and_names_each_
 }
 
 /// `RESUMING_CODEX` whose turn on a line with "long" in it stays open until `go` exists in
-/// the agent's Codex home. Returns the script.
+/// `.cache` in the agent's Codex home. Returns the script.
 #[cfg(target_os = "macos")]
 fn holding_codex() -> String {
     let script = RESUMING_CODEX.replacen(
         "  printf '{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\\n' >> \"$f\"\n",
-        "  printf '{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\\n' >> \"$f\"\n  case \"$line\" in *long*) while [ ! -e \"$CODEX_HOME/go\" ]; do /bin/sleep 0.1; done ;; esac\n",
+        "  printf '{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\\n' >> \"$f\"\n  case \"$line\" in *long*) while [ ! -e \"$CODEX_HOME/.cache/go\" ]; do /bin/sleep 0.1; done ;; esac\n",
         1,
     );
     assert_ne!(script, RESUMING_CODEX);
@@ -14417,7 +14431,7 @@ fn a_live_master_types_nothing_before_the_owners_first_line() {
         .base
         .join("team/agents")
         .join(format!("agent-{master}"))
-        .join("home/input");
+        .join("home/.cache/input");
     idle_ticks(&mut team);
     idle_ticks(&mut team);
     assert_eq!(
@@ -16221,7 +16235,7 @@ fn a_signed_in_agent_continues_its_conversation_across_turns_and_after_a_wake() 
     std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
     let home = agent.home.clone();
     let launched = || -> Vec<String> {
-        std::fs::read_to_string(home.join("launches"))
+        std::fs::read_to_string(home.join(".cache/launches"))
             .unwrap_or_default()
             .lines()
             .map(str::to_owned)
@@ -16347,7 +16361,7 @@ fn a_signed_in_master_starts_each_turn_fresh_so_its_briefing_is_not_repeated() {
         })
         .collect();
     assert_eq!(ends, [TurnEnd::Success, TurnEnd::Success]);
-    let launched: Vec<String> = std::fs::read_to_string(master.home.join("launches"))
+    let launched: Vec<String> = std::fs::read_to_string(master.home.join(".cache/launches"))
         .unwrap()
         .lines()
         .map(str::to_owned)
@@ -16362,7 +16376,7 @@ fn a_signed_in_master_starts_each_turn_fresh_so_its_briefing_is_not_repeated() {
         Vec::<String>::new(),
         "no conversation is kept for a master that is briefed every turn"
     );
-    let typed = std::fs::read_to_string(master.home.join("typed")).unwrap();
+    let typed = std::fs::read_to_string(master.home.join(".cache/typed")).unwrap();
     assert_eq!(typed.matches(briefing).count(), 2, "{typed}");
     let conversations = std::fs::read_dir(master.home.join("sessions/2026/10/27"))
         .unwrap()
@@ -17434,6 +17448,7 @@ fn between_turns(
         narrowed: None,
         ran_before: Duration::ZERO,
         proxy: None,
+        keyed: false,
         told_finished: BTreeSet::new(),
         parent: None,
         ready: true,
@@ -18375,11 +18390,9 @@ fn an_owner_cancel_of_a_claimed_task_whose_turn_cannot_be_sent_keeps_it_cancelle
 
     let status: String = fixture
         .connection
-        .query_row(
-            "SELECT status FROM team_tasks WHERE id=?1",
-            [task],
-            |row| row.get(0),
-        )
+        .query_row("SELECT status FROM team_tasks WHERE id=?1", [task], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(status, "cancelled");
     assert!(team.workers[&agent].busy.is_none());
@@ -28305,12 +28318,12 @@ fn a_woken_agent_never_shows_the_process_group_its_stop_ended() {
 }
 
 /// A Codex stand-in whose task turns end with no reply text until it is asked again for
-/// its reply, which it answers with "pear"; every typed line goes to `typed` in its home.
+/// its reply, which it answers with "pear"; every typed line goes to `.cache/typed` in its home.
 #[cfg(target_os = "macos")]
 const QUIET_ONCE_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/11/02"
-/bin/mkdir -p "$d" || exit 1
+/bin/mkdir -p "$d" "$CODEX_HOME/.cache" || exit 1
 id=$(printf '%08x-0000-4000-8000-%012x' $$ $$)
 f="$d/rollout-2026-11-02T00-00-00-$id.jsonl"
 printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$(/bin/pwd -P)" > "$f"
@@ -28319,9 +28332,9 @@ e=$(printf '\033')
 open=0
 while IFS= read -r line; do
   case "$line" in
-    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CODEX_HOME/typed" ;;
+    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CODEX_HOME/.cache/typed" ;;
     *"$e[200~"*) open=1; continue ;;
-    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CODEX_HOME/typed"; continue; } ;;
+    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CODEX_HOME/.cache/typed"; continue; } ;;
   esac
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
   /bin/sleep 0.3
@@ -28333,12 +28346,12 @@ done
 "#;
 
 /// A Codex stand-in whose turns all end with no reply text; every typed line goes to
-/// `typed` in its home.
+/// `.cache/typed` in its home.
 #[cfg(target_os = "macos")]
 const QUIET_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/11/02"
-/bin/mkdir -p "$d" || exit 1
+/bin/mkdir -p "$d" "$CODEX_HOME/.cache" || exit 1
 id=$(printf '%08x-0000-4000-8000-%012x' $$ $$)
 f="$d/rollout-2026-11-02T00-00-00-$id.jsonl"
 printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$(/bin/pwd -P)" > "$f"
@@ -28347,9 +28360,9 @@ e=$(printf '\033')
 open=0
 while IFS= read -r line; do
   case "$line" in
-    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CODEX_HOME/typed" ;;
+    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CODEX_HOME/.cache/typed" ;;
     *"$e[200~"*) open=1; continue ;;
-    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CODEX_HOME/typed"; continue; } ;;
+    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CODEX_HOME/.cache/typed"; continue; } ;;
   esac
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
   /bin/sleep 0.3
@@ -29347,7 +29360,7 @@ fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
             .base
             .join("team/agents")
             .join(format!("agent-{master}"))
-            .join("home/typed"),
+            .join("home/.cache/typed"),
     )
     .unwrap_or_default();
     assert!(
@@ -29906,7 +29919,7 @@ fn a_task_passes_an_idle_agent_past_its_session_and_goes_to_another_idle_agent_a
 fn a_fresh_switch_whose_new_harness_ends_before_reporting_starts_fresh_again() {
     let exits_first = RESUMING_CLAUDE.replacen(
         "/launches\"\n",
-        "/launches\"\n[ \"$(/usr/bin/wc -l < \"$CLAUDE_CONFIG_DIR/launches\")\" -gt 1 ] || exit 3\n",
+        "/launches\"\n[ \"$(/usr/bin/wc -l < \"$CLAUDE_CONFIG_DIR/.cache/launches\")\" -gt 1 ] || exit 3\n",
         1,
     );
     assert_ne!(exits_first, RESUMING_CLAUDE);
@@ -31434,8 +31447,10 @@ fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shar
 /// installed profile a tools-on agent cannot write a zsh, bash or sh startup file there, in
 /// any letter case, compiled or as a link, while it still writes the folders whose scripts
 /// Claude Code and Codex source ahead of each shell command, its shell history and the rest
-/// of its home. The next launch then removes those folders and a startup file an earlier
-/// build let it plant, so the shells that start later in its profile run nothing planted.
+/// of its home. The next launch then removes those folders, its shell history, any other
+/// entry the harness does not keep (RV-DS241-137) and a startup file an earlier build let
+/// it plant, while its transcripts stay, so the shells that start later in its profile run
+/// nothing planted.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
@@ -31499,7 +31514,8 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
              try snapshot sh -c \"mkdir -p '{home}/shell-snapshots' && printf '{plant}\\n' > '{home}/shell-snapshots/snapshot-zsh-1-dummy.sh'\"\n\
              try codex_snapshot sh -c \"mkdir -p '{home}/shell_snapshots' && printf '{plant}\\n' > '{home}/shell_snapshots/dummy.sh'\"\n\
              try history sh -c \"printf ok > '{home}/.zsh_history'\"\n\
-             try control_note sh -c \"printf ok > '{home}/note'\"\n",
+             try control_note sh -c \"printf ok > '{home}/note'\"\n\
+             try control_projects sh -c \"mkdir -p '{home}/projects' && printf ok > '{home}/projects/note'\"\n",
             home = home.display(),
             session = session.display(),
             script = script.display(),
@@ -31591,6 +31607,7 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
         "codex_snapshot",
         "history",
         "control_note",
+        "control_projects",
     ] {
         if exit(attempt).as_deref() != Some("0") {
             problems.push(format!("{attempt} refused: {:?}", exit(attempt)));
@@ -31606,12 +31623,14 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
         "session-env",
         "shell-snapshots",
         "shell_snapshots",
+        ".zsh_history",
+        "note",
     ] {
         if std::fs::symlink_metadata(home.join(entry)).is_ok() {
             problems.push(format!("{entry} kept by the launch"));
         }
     }
-    for entry in [".zsh_history", "note"] {
+    for entry in ["projects/note"] {
         if std::fs::symlink_metadata(home.join(entry)).is_err() {
             problems.push(format!("{entry} removed by the launch"));
         }
@@ -31625,6 +31644,184 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
     assert!(
         problems.is_empty(),
         "an agent left shell code in its own home {} for its next start:\n{}\nattempts:\n{attempts}\nshells: {shells:?}",
+        home.display(),
+        problems.join("\n")
+    );
+}
+
+/// An agent leaves neither cargo's, git's, npm's nor yarn's own config in its home, nor a
+/// cargo subcommand, a file flag or an ACL there, for its next start (RV-DS241-137, -138,
+/// sec r1 F1, F2). In its installed profile a tools-on agent cannot write `.cargo/config`,
+/// `.cargo/config.toml`, `.npmrc`, `.yarnrc` or `.yarnrc.yml`, in any letter case, nor make
+/// `.config/git` or `.cargo/bin`, nor set a flag or an ACL on its home or on anything in it,
+/// while it still writes a `.gitconfig`, which no agent git reads, and its own caches. The
+/// next launch removes that `.gitconfig` and keeps the caches.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
+    let fixture = Fixture::new(1);
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+            false,
+        )
+        .unwrap();
+    let home = agent_home(&runtime.state, id);
+    let work = plan.working_dir.clone();
+    let tried = work.join("tried.txt");
+    let script = work.join("plant.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "try() {{ name=$1; shift; \"$@\" 2>/dev/null; echo \"$name=$?\" >> {tried}; }}\n\
+             try cargo_config sh -c \"printf '[build]\\n' > '{home}/.cargo/config.toml'\"\n\
+             try cargo_config_case sh -c \"printf '[build]\\n' > '{home}/.CARGO/Config.Toml'\"\n\
+             try cargo_config_old sh -c \"printf '[build]\\n' > '{home}/.cargo/config'\"\n\
+             try git_config sh -c \"mkdir -p '{home}/.config/git' && printf '[core]\\n' > '{home}/.config/git/config'\"\n\
+             try gitconfig sh -c \"printf '[core]\\n' > '{home}/.gitconfig'\"\n\
+             try control_cache sh -c \"mkdir -p '{home}/.cache/tool' && printf ok > '{home}/.cache/tool/data'\"\n\
+             try npmrc sh -c \"printf 'node-options=--require=x\\n' > '{home}/.npmrc'\"\n\
+             try npmrc_case sh -c \"printf x > '{home}/.NPMRC'\"\n\
+             try yarnrc sh -c \"printf x > '{home}/.yarnrc'\"\n\
+             try yarnrc_yml sh -c \"printf x > '{home}/.yarnrc.yml'\"\n\
+             try cargo_bin sh -c \"mkdir -p '{home}/.cargo/bin' && printf x > '{home}/.cargo/bin/cargo-x'\"\n\
+             try acl_file /bin/chmod +a 'everyone deny delete' '{home}/.cache/tool/data'\n\
+             try flag_file /usr/bin/chflags uchg '{home}/.cache/tool/data'\n\
+             try flag_home /usr/bin/chflags uchg '{home}'\n",
+            home = home.display(),
+            tried = tried.display(),
+        ),
+    )
+    .unwrap();
+    let planted = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&plan.sandbox_profile)
+            .arg("/bin/sh")
+            .arg(&script)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
+    let unpinned = crate::spawn_gate::output(
+        Command::new("/usr/bin/chflags")
+            .arg("nouchg")
+            .arg(&home)
+            .arg(home.join(".cache/tool/data"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+    let acl_cleared = crate::spawn_gate::output(
+        Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(home.join(".cache/tool/data"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+    assert!(planted.status.success(), "{planted:?}");
+
+    let context = runtime
+        .context(
+            &fixture.setup.project_id,
+            id,
+            AgentRole::Sub,
+            true,
+            Layout::Linked,
+        )
+        .unwrap();
+    let installed = context.install("claude-code", &home, true).unwrap();
+    drop(installed);
+
+    let exit = |attempt: &str| {
+        attempts
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{attempt}=")))
+            .map(str::to_owned)
+    };
+    let mut problems = Vec::new();
+    for attempt in [
+        "cargo_config",
+        "cargo_config_case",
+        "cargo_config_old",
+        "git_config",
+        "npmrc",
+        "npmrc_case",
+        "yarnrc",
+        "yarnrc_yml",
+        "cargo_bin",
+        "acl_file",
+        "flag_file",
+        "flag_home",
+    ] {
+        if !exit(attempt).is_some_and(|code| code != "0") {
+            problems.push(format!("{attempt} written: {:?}", exit(attempt)));
+        }
+    }
+    for attempt in ["gitconfig", "control_cache"] {
+        if exit(attempt).as_deref() != Some("0") {
+            problems.push(format!("{attempt} refused: {:?}", exit(attempt)));
+        }
+    }
+    for entry in [
+        ".gitconfig",
+        ".config",
+        ".cargo/config",
+        ".cargo/config.toml",
+        ".cargo/bin",
+        ".npmrc",
+        ".yarnrc",
+        ".yarnrc.yml",
+    ] {
+        if std::fs::symlink_metadata(home.join(entry)).is_ok() {
+            problems.push(format!("{entry} kept by the launch"));
+        }
+    }
+    if std::fs::read_to_string(home.join(".cache/tool/data"))
+        .ok()
+        .as_deref()
+        != Some("ok")
+    {
+        problems.push("the agent's cache removed by the launch".to_owned());
+    }
+    assert!(
+        problems.is_empty(),
+        "an agent left config, a flag or an ACL in its own home {} for its next start:\n{}\nattempts:\n{attempts}\nunpinned: {unpinned:?}\nACL cleared: {acl_cleared:?}",
         home.display(),
         problems.join("\n")
     );
@@ -32516,7 +32713,7 @@ fn a_coordination_message_forges_no_owner_line_at_the_live_master() {
         .base
         .join("team/agents")
         .join(format!("agent-{master}"))
-        .join("home/typed");
+        .join("home/.cache/typed");
     let typed = |_: &Fixture| std::fs::read_to_string(&typed_file).unwrap_or_default();
     fixture.until(
         &mut team,
@@ -33743,4 +33940,53 @@ fn the_team_runtime_refuses_a_store_that_keeps_a_rollback_journal() {
         Err(EngineError(code)) => assert_eq!(code, "database_wal_refused: delete"),
         Ok(_) => panic!("the team runtime opened a store that keeps a rollback journal"),
     }
+}
+
+/// RV-DS241-137 code r2 F1: a native lead's teammates' home is reset as an agent home is at
+/// each launch, so a crate source a teammate planted in its cargo home where the owner has
+/// none, a package npx installed and a tool config no list names are gone, while the links
+/// to the lead's team and task folders and Claude Code's answered config stay.
+#[cfg(unix)]
+#[test]
+fn a_native_leads_teammates_home_is_reset_at_each_launch() {
+    use std::os::unix::fs::DirBuilderExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let owner = root.join("owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    let homes = ToolHomes::at(&owner);
+    let home = root.join("agent/home");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&home)
+        .unwrap();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let mates = prepare_mates_home(&home, &homes, &project).unwrap();
+    let planted = [
+        mates.join(".cargo/registry/src/index/x-1.0.0/build.rs"),
+        mates.join(".npm/_npx/0/node_modules/x/index.js"),
+        mates.join(".bunfig.toml"),
+    ];
+    for path in &planted {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "planted\n").unwrap();
+    }
+
+    let again = prepare_mates_home(&home, &homes, &project).unwrap();
+
+    assert_eq!(again, mates);
+    let left: Vec<&PathBuf> = planted
+        .iter()
+        .filter(|path| std::fs::symlink_metadata(path).is_ok())
+        .collect();
+    assert!(left.is_empty(), "the teammates' home kept {left:?}");
+    for folder in crate::sandbox::CLAUDE_TEAM_SHARED {
+        assert_eq!(
+            std::fs::read_link(mates.join(folder)).unwrap(),
+            home.join(folder)
+        );
+    }
+    assert!(mates.join(".claude.json").is_file());
 }

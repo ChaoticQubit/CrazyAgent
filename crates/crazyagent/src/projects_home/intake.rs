@@ -41,18 +41,64 @@ const STAMP_SETTLE: Duration = Duration::from_secs(4);
 const DEADLINE_EVERY: u64 = 1024;
 const GITDIR_FILE_BYTES_MAX: u64 = 4096;
 
-/// What one add reports while it copies and the stop it obeys: the entries copied and
-/// checked so far, whether the checked copy is in place and the old folder being cleared,
-/// and a stop asked between entries, which ends the copy before clearing starts.
+/// What one add, project move or delete reports while it works and the stop it obeys:
+/// whether a project move or a delete still waits for its agents to stop and how many are
+/// left, the entries copied and checked so far, whether the checked copy is in place and the
+/// old folder being cleared, a delete's Trash moves once it committed to them, and a stop
+/// asked between entries, which ends the work before clearing starts. The gate makes a stop
+/// and a delete's commit exclusive: whichever comes first wins.
 #[derive(Debug, Default)]
 pub struct Tally {
+    waiting: AtomicBool,
+    agents: AtomicU64,
     copied: AtomicU64,
     checked: AtomicU64,
     clearing: AtomicBool,
     stop: AtomicBool,
+    trashing: AtomicBool,
+    trash_total: AtomicU64,
+    trashed: AtomicU64,
+    gate: std::sync::Mutex<()>,
 }
 
 impl Tally {
+    /// How many of the project's agents a project move waits for before anything moves,
+    /// or None when it does not wait. The count is stored before the wait is marked and
+    /// never goes back to 0, so a read during a change never sees a wait for none.
+    pub fn waiting_for(&self) -> Option<u64> {
+        if !self.waiting.load(Ordering::SeqCst) {
+            return None;
+        }
+        let left = self.agents.load(Ordering::SeqCst);
+        assert!(left > 0);
+        Some(left)
+    }
+
+    /// Whether a project move waits for its agents to stop before anything moves.
+    pub fn waiting(&self) -> bool {
+        self.waiting_for().is_some()
+    }
+
+    /// How many of the project's agents a waiting move waits for, 0 when it does not wait.
+    pub fn agents_left(&self) -> u64 {
+        self.waiting_for().unwrap_or(0)
+    }
+
+    /// Marks the move waiting for `left` agents to stop. Input: the count, above 0.
+    pub(super) fn wait_for(&self, left: u64) {
+        assert!(left > 0);
+        assert!(!self.clearing());
+        self.agents.store(left, Ordering::SeqCst);
+        self.waiting.store(true, Ordering::SeqCst);
+        assert!(self.waiting());
+    }
+
+    /// Marks the move done waiting: no agent of the project runs.
+    pub(super) fn waited(&self) {
+        self.waiting.store(false, Ordering::SeqCst);
+        assert!(!self.waiting());
+    }
+
     /// Entries copied so far.
     pub fn copied(&self) -> u64 {
         self.copied.load(Ordering::SeqCst)
@@ -74,19 +120,65 @@ impl Tally {
     }
 
     /// Marks the checked copy in place and the old folder being cleared.
-    pub(super) fn mark_clearing(&self) {
+    pub(crate) fn mark_clearing(&self) {
         let before = self.clearing.swap(true, Ordering::SeqCst);
         assert!(!before, "clearing starts once");
     }
 
     /// Asks the copy to stop at its next entry. Clearing the old folder never stops, since
-    /// the copy it follows is complete and checked.
-    pub fn stop(&self) {
+    /// the copy it follows is complete and checked, and a delete that committed to its Trash
+    /// moves refuses the stop. Output: whether the stop was taken.
+    pub fn stop(&self) -> bool {
+        let _gate = self.gate();
+        if self.trashing.load(Ordering::SeqCst) {
+            assert!(!self.stopped());
+            return false;
+        }
         self.stop.store(true, Ordering::SeqCst);
+        true
+    }
+
+    /// The folders a delete moved to the Trash so far and how many it moves, once it
+    /// committed to them; None before. Output: (done, total).
+    pub fn trashing(&self) -> Option<(u64, u64)> {
+        if !self.trashing.load(Ordering::SeqCst) {
+            return None;
+        }
+        let total = self.trash_total.load(Ordering::SeqCst);
+        let done = self.trashed.load(Ordering::SeqCst);
+        assert!(done <= total);
+        Some((done, total))
+    }
+
+    /// Commits a delete to its Trash moves, just before the first: from here a stop is
+    /// refused. A stop asked first wins and the delete moves nothing. Input: how many folders
+    /// it moves. Output: Ok, or `home_add_cancelled` when a stop came first.
+    pub(crate) fn commit_trash(&self, total: u64) -> Result<(), EngineError> {
+        let _gate = self.gate();
+        self.go_on()?;
+        let before = self.trashing.load(Ordering::SeqCst);
+        assert!(!before, "a delete commits once");
+        self.trash_total.store(total, Ordering::SeqCst);
+        self.trashing.store(true, Ordering::SeqCst);
+        assert_eq!(self.trashing(), Some((0, total)));
+        Ok(())
+    }
+
+    /// Counts one folder a committed delete moved to the Trash.
+    pub(crate) fn trashed_one(&self) {
+        assert!(self.trashing.load(Ordering::SeqCst));
+        let before = self.trashed.fetch_add(1, Ordering::SeqCst);
+        assert!(before < self.trash_total.load(Ordering::SeqCst));
+    }
+
+    fn gate(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Ok while no stop was asked, else `home_add_cancelled`, logged without a path.
-    fn go_on(&self) -> Result<(), EngineError> {
+    pub(super) fn go_on(&self) -> Result<(), EngineError> {
         if !self.stop.load(Ordering::SeqCst) {
             return Ok(());
         }

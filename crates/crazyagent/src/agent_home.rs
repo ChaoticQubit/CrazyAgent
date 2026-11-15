@@ -25,7 +25,6 @@ pub const PROCESS_BYTES_MAX: usize = TITLE.len()
 /// app and project instructions and the instruction files together. A launch over it is
 /// refused with a code naming the largest part, never cut or moved out of the prompt.
 pub const GIVEN_BYTES_MAX: usize = 64 * 1024;
-const STALE_CONTEXT_FOLDER: &str = "crazyagent-context";
 /// The startup files zsh reads from `$HOME` ahead of a command, as every zsh a harness starts
 /// in an agent home does, since no `ZDOTDIR` reaches it (SA vid 12).
 pub(crate) const ZSH_STARTUP: [&str; 5] = [".zshenv", ".zprofile", ".zshrc", ".zlogin", ".zlogout"];
@@ -42,9 +41,64 @@ pub(crate) const SH_STARTUP: [&str; 5] = [
 /// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
 /// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
 pub(crate) const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
-/// The folder of a Codex home holding the shell snapshots Codex 0.167 sources ahead of its
-/// shell commands.
-const CODEX_SHELL_SNAPSHOTS: &str = "shell_snapshots";
+/// The most passes a launch makes over one folder of an agent home it keeps only part of,
+/// each removing what the last left: a second finds what a listing skipped as entries went,
+/// and only a process still adding entries outlasts them all, which refuses the launch.
+const HOME_PASSES_MAX: usize = 8;
+/// How many lists deep [`HOME_KEPT`] nests below the home's own, `Library/Preferences` being
+/// the deepest folder a launch keeps only part of.
+#[cfg(unix)]
+const KEPT_DEPTH_MAX: usize = 2;
+/// What a launch keeps in an agent home (RV-DS241-137), every other entry going: the
+/// engine's launch state, lock, relay plugin and key file; both harnesses' instruction and
+/// Codex config files, which the launch rewrites, and the skills; Claude Code's sign-in,
+/// transcripts and team, task, todo and plan state; Codex's sign-in and sessions; the
+/// per-agent keychain; and the download caches. No entry kept holds config a tool runs.
+const HOME_KEPT: &[(&str, Kept)] = &[
+    (crate::launch_context::STATE, Kept::Folder),
+    (crate::launch_context::LOCK, Kept::Lock),
+    (crate::coord::relay::PLUGIN_FOLDER, Kept::Folder),
+    (crate::harnesses::interactive::KEY_FILE, Kept::File),
+    (Harness::Claude.instruction_file(), Kept::File),
+    (Harness::Codex.instruction_file(), Kept::File),
+    ("config.toml", Kept::File),
+    ("skills", Kept::Folder),
+    (".claude.json", Kept::File),
+    (".credentials.json", Kept::File),
+    ("projects", Kept::Folder),
+    ("teams", Kept::Folder),
+    ("tasks", Kept::Folder),
+    ("todos", Kept::Folder),
+    ("plans", Kept::Folder),
+    (".claude", Kept::Only(CLAUDE_FOLDER_KEPT)),
+    ("auth.json", Kept::File),
+    ("sessions", Kept::Folder),
+    ("Library", Kept::Only(LIBRARY_KEPT)),
+    (".cargo", Kept::Only(CARGO_KEPT)),
+    (".cache", Kept::Folder),
+    (".npm", Kept::Only(NPM_KEPT)),
+];
+/// What a launch keeps in an agent home's `.claude`, where some Claude Code versions keep a
+/// native team's config and tasks, which the engine reads there.
+const CLAUDE_FOLDER_KEPT: &[(&str, Kept)] = &[("teams", Kept::Folder), ("tasks", Kept::Folder)];
+/// What a launch keeps in an agent home's `Library`: the per-agent keychain and the one
+/// settings file the engine's `security` calls write (DEC-146), never a Python user site or
+/// another tool's settings.
+const LIBRARY_KEPT: &[(&str, Kept)] = &[
+    ("Keychains", Kept::Folder),
+    (
+        "Preferences",
+        Kept::Only(&[("com.apple.security.plist", Kept::File)]),
+    ),
+];
+/// What a launch keeps in an agent's cargo home: its crates and git checkouts only as the
+/// links the engine makes to the owner's read-only ones (DEC-173), never a cache folder the
+/// agent made, whose sources a later run's cargo would build unchecked, a cargo config or
+/// the subcommands in `bin`, which cargo runs ahead of those on the `PATH`.
+const CARGO_KEPT: &[(&str, Kept)] = &[("registry", Kept::Link), ("git", Kept::Link)];
+/// What a launch keeps in an agent home's `.npm`: npm's content-addressed cache, never the
+/// packages npx installed, which it runs as they are.
+const NPM_KEPT: &[(&str, Kept)] = &[("_cacache", Kept::Folder)];
 const TOO_LARGE: &str = "agent_instructions_too_large_";
 const SKILLS_FOLDER: &str = "agent-skills";
 const FILES_FOLDER: &str = "agent-instruction-files";
@@ -56,6 +110,26 @@ const SKILLS_RECORD_BYTES_MAX: usize =
     SKILLS_RECORD_MAX * (crate::plugins::skill_folder::NAME_BYTES_MAX + 1);
 
 static TEMPORARY: AtomicU64 = AtomicU64::new(0);
+
+/// What a launch keeps of one entry of an agent home, judged without following a link
+/// (RV-DS241-137). An entry of another kind than the one its name keeps, such as a link
+/// where a folder belongs, goes like an entry no list names.
+#[derive(Clone, Copy)]
+enum Kept {
+    /// A plain file.
+    File,
+    /// The launch lock, kept as [`crate::launch_context::lock_kept`] judges it, the lock
+    /// the launch holds (RV-DS241-137 r3 code F2).
+    Lock,
+    /// A real folder with all it holds.
+    Folder,
+    /// A link, never followed: a cache the engine links to the owner's read-only one
+    /// ([`crate::sandbox::toolchains::prepare_cargo_home`]), which the agent's profile keeps
+    /// it from moving, removing or making itself.
+    Link,
+    /// A real folder holding only the entries its list keeps.
+    Only(&'static [(&'static str, Kept)]),
+}
 
 /// The CrazyAgent default process the owner can seed the Process page with: the owner's
 /// working rules for every master and sub-agent, without machine-only tools.
@@ -139,7 +213,7 @@ impl Harness {
     }
 
     /// Returns the file name of this harness's global instruction file in its home.
-    pub fn instruction_file(self) -> &'static str {
+    pub const fn instruction_file(self) -> &'static str {
         match self {
             Self::Claude => "CLAUDE.md",
             Self::Codex => "AGENTS.md",
@@ -582,18 +656,14 @@ fn mark(lines: &[Entry<'_>], from: Option<usize>, marks: &mut [bool]) {
     }
 }
 
-/// Takes out of the project text each plain line the app text also has in the same place:
-/// under the same headings and hanging on the same lines, compared whole with only trailing
-/// spaces ignored. So the same words under another heading, under another lead-in line or
-/// parent item, or at another indent stay. A line also stays when a line the project keeps
-/// hangs on it, such as a lead-in of a kept list item or code block. Rules, table rows, code
-/// fence markers, every line inside a code block and every line indented by four columns or
-/// more always stay; a heading goes only when lines under it were left out and nothing under
-/// it is kept. A blank line goes only where lines left out would leave two in a row. A text
-/// with no such line comes back as it is; one left with only headings, rules and blank
-/// lines comes back empty. Inputs: both texts. Output: the kept text and how many plain
-/// lines were left out.
-fn without_repeats(app: &str, project: &str) -> (String, usize) {
+/// Marks the project lines `without_repeats` leaves out: each plain line the app text also
+/// has in the same place, unless a line the project keeps hangs on it. Inputs: both texts.
+/// Output: the project lines as `outline` reads them, one left-out mark and one needed mark
+/// per line, and whether the project keeps any line that holds content.
+fn repeat_marks<'a>(
+    app: &'a str,
+    project: &'a str,
+) -> (Vec<Entry<'a>>, Vec<bool>, Vec<bool>, bool) {
     assert!(app.len() <= TEXT_BYTES_MAX && project.len() <= TEXT_BYTES_MAX);
     let mut places = Places::default();
     let known: std::collections::HashSet<(usize, &str)> = outline(app, &mut places)
@@ -623,6 +693,63 @@ fn without_repeats(app: &str, project: &str) -> (String, usize) {
     for (index, held) in needed.iter().enumerate() {
         gone[index] &= !*held;
     }
+    assert!(gone.len() == lines.len() && needed.len() == lines.len());
+    (lines, gone, needed, content)
+}
+
+/// Numbers the project lines a joined text leaves out because the app text already has
+/// them, by the rule of `without_repeats`, for Edit with AI's check (DEC-172). Inputs: both
+/// texts, each at most `TEXT_BYTES_MAX` bytes. Output: the line numbers, counted from 1, in
+/// order; as many as `repeated_lines` counts.
+pub(crate) fn repeated_line_numbers(app: &str, project: &str) -> Vec<usize> {
+    let (lines, gone, _, _) = repeat_marks(app, project);
+    let numbers: Vec<usize> = (1..=lines.len()).filter(|line| gone[line - 1]).collect();
+    assert!(numbers.is_empty() || !app.trim().is_empty());
+    numbers
+}
+
+/// Pairs each plain line of one text with the earlier line it repeats in the same place, by
+/// the rule `without_repeats` uses between the app and project texts, for Edit with AI's
+/// check (DEC-172). Input: the text, at most `TEXT_BYTES_MAX` bytes. Output: (repeat, first)
+/// line numbers, counted from 1, in reading order.
+pub(crate) fn repeats_within(text: &str) -> Vec<(usize, usize)> {
+    let mut places = Places::default();
+    let lines = outline(text, &mut places);
+    let mut first: std::collections::HashMap<(usize, &str), usize> =
+        std::collections::HashMap::new();
+    let mut pairs = Vec::new();
+    for (index, entry) in lines.iter().enumerate() {
+        if entry.kind != LineKind::Plain {
+            continue;
+        }
+        let earlier = *first
+            .entry((entry.place, entry.text.trim_end()))
+            .or_insert(index);
+        if earlier != index {
+            pairs.push((index + 1, earlier + 1));
+        }
+    }
+    assert!(
+        pairs
+            .iter()
+            .all(|(later, earlier)| earlier < later && *later <= lines.len())
+    );
+    pairs
+}
+
+/// Takes out of the project text each plain line the app text also has in the same place:
+/// under the same headings and hanging on the same lines, compared whole with only trailing
+/// spaces ignored. So the same words under another heading, under another lead-in line or
+/// parent item, or at another indent stay. A line also stays when a line the project keeps
+/// hangs on it, such as a lead-in of a kept list item or code block. Rules, table rows, code
+/// fence markers, every line inside a code block and every line indented by four columns or
+/// more always stay; a heading goes only when lines under it were left out and nothing under
+/// it is kept. A blank line goes only where lines left out would leave two in a row. A text
+/// with no such line comes back as it is; one left with only headings, rules and blank
+/// lines comes back empty. Inputs: both texts. Output: the kept text and how many plain
+/// lines were left out.
+fn without_repeats(app: &str, project: &str) -> (String, usize) {
+    let (lines, mut gone, needed, content) = repeat_marks(app, project);
     let left_out = gone.iter().filter(|out| **out).count();
     if left_out == 0 {
         return (project.to_owned(), 0);
@@ -725,8 +852,9 @@ pub fn with_agent(mut text: String, agent: &str) -> String {
 /// Writes the owner's instructions into one agent's private home for one launch: the
 /// harness's global instruction file holds exactly the given text, and is removed when it
 /// is empty, so a stale copy never outlives a cleared page; the engine's own record of the
-/// instruction files it found, kept outside the home, replaces the last launch's; no shell
-/// code an earlier run left in the home stays for this one ([`remove_shell_code`]).
+/// instruction files it found, kept outside the home, replaces the last launch's; nothing
+/// an earlier run left in the home but what its harness keeps stays for this one
+/// ([`keep_only`] with [`HOME_KEPT`]).
 /// Input: the agent's 0700 home (its CLAUDE_CONFIG_DIR or CODEX_HOME), the harness, the
 /// project and what `text` built. Output: unit, or a plain code.
 pub fn prepare(
@@ -744,8 +872,9 @@ pub fn prepare(
     real_folder(home)?;
     record_files(&project.data, home, &given.files)?;
     write_record(&project.data, GIVEN_FOLDER, home, &given.text)?;
-    remove_entry(&home.join(STALE_CONTEXT_FOLDER))?;
-    remove_shell_code(home)?;
+    let mut held = Vec::new();
+    keep_only(home, HOME_KEPT, &mut held)?;
+    crate::team::cleanup::clear_acls(held.iter().map(PathBuf::as_path));
     let name = harness.instruction_file();
     if given.text.is_empty() {
         return remove_entry(&home.join(name));
@@ -1026,36 +1155,367 @@ fn real_folder(folder: &Path) -> Result<(), AgentHomeError> {
     Ok(())
 }
 
+/// Removes one entry of an agent home, or of an engine folder no agent writes, with all it
+/// holds and without following a link, so a link goes and what it names stays. Its parent
+/// is opened by path without following a link in its last part ([`open_real_folder`]), so
+/// the folders above the parent must be ones no agent can change, and the entry goes through
+/// handles from there ([`crate::team::cleanup::remove_home_entry`]), with the flags, modes
+/// and ACLs an agent set cleared on the way (RV-DS241-138, -137 code r1 F2, sec r1 F2, code
+/// r2 F3, sec F1 ds137-lock-linux). Input: the entry. Output: unit, or
+/// `agent_home_unwritable` when it stays, refusing the launch.
+#[cfg(unix)]
 pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
-    let removed = match fs::symlink_metadata(path) {
-        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(failure("agent_home_unwritable")),
-        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path),
-        Ok(_) => fs::remove_file(path),
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(failure("agent_home_unwritable"));
     };
-    removed.map_err(|_| failure("agent_home_unwritable"))
+    let folder = match open_real_folder(parent) {
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        opened => opened.map_err(|_| failure("agent_home_unwritable"))?,
+    };
+    crate::team::cleanup::remove_home_entry(folder, name)
+        .map_err(|_| failure("agent_home_unwritable"))
 }
 
-/// Removes from an agent home what a shell its harness starts there runs ahead of its
-/// command: the zsh, bash and sh startup files, zsh's compiled forms of its own, and the
-/// folders whose scripts Claude Code and Codex source before each shell command, which the
-/// harness writes again as it starts. Nothing an earlier run left there runs in the next
-/// (SA vid 12). Input: the agent home. Output: unit, or `agent_home_unwritable` when one
-/// cannot be removed, which refuses the launch.
-fn remove_shell_code(home: &Path) -> Result<(), AgentHomeError> {
+/// Removes one entry of an agent home without following a link in its last part, where no
+/// agent sandbox runs and no handle walk is built ([`crate::team::cleanup::remove_agent_tree`]
+/// once a plain removal stops). Input: the entry. Output: unit, or `agent_home_unwritable`.
+#[cfg(not(unix))]
+pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
+    let folder = match fs::symlink_metadata(path) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(failure("agent_home_unwritable")),
+        Ok(metadata) => metadata.is_dir(),
+    };
+    let removed = if folder {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    if removed.is_ok() {
+        return Ok(());
+    }
+    if folder {
+        return crate::team::cleanup::remove_agent_tree(path)
+            .map_err(|_| failure("agent_home_unwritable"));
+    }
+    fs::remove_file(path).map_err(|_| failure("agent_home_unwritable"))
+}
+
+/// Opens a real folder by its path without following a link in its last part, clearing its
+/// ACL by its path and opening it once more when an ACL an earlier run left denies listing
+/// it (code r2 F3). Input: the folder. Output: its handle, or the error.
+#[cfg(unix)]
+fn open_real_folder(folder: &Path) -> rustix::io::Result<std::os::fd::OwnedFd> {
+    use rustix::fs::{CWD, Mode, OFlags};
+    let flags =
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    let open = || rustix::fs::openat(CWD, folder, flags, Mode::empty());
+    open().or_else(|_| {
+        crate::team::cleanup::release_acls([folder]);
+        open()
+    })
+}
+
+/// Removes from an agent home every entry `kept` does not name with its kind, and does the
+/// same in each kept folder that has its own list ([`keep_in`]), never following a link
+/// (RV-DS241-137). The home is opened once, by its path without following a link in its last
+/// part, and each folder below it is opened, listed and changed only through handles opened
+/// relative to its parent's, so a process an agent left that swaps a folder for a link
+/// meanwhile never leads the reset outside the home (sec F1 ds137-lock-linux). Flags an agent
+/// set on the home are cleared first (RV-DS241-138). Inputs: the home, what stays in it and
+/// the entries held so far. Output: unit, or `agent_home_unwritable` when a folder will not
+/// open or list, one entry stays or a folder still changes after [`HOME_PASSES_MAX`] passes.
+#[cfg(unix)]
+fn keep_only(
+    home: &Path,
+    kept: &[(&str, Kept)],
+    held: &mut Vec<PathBuf>,
+) -> Result<(), AgentHomeError> {
+    use std::os::fd::AsFd;
     assert!(home.is_absolute());
-    for name in ZSH_STARTUP {
-        remove_entry(&home.join(name))?;
-        remove_entry(&home.join(format!("{name}{ZSH_COMPILED}")))?;
+    unpin_at(rustix::fs::CWD, home);
+    let folder = open_real_folder(home).map_err(|_| failure("agent_home_unwritable"))?;
+    keep_in(folder.as_fd(), home, kept, held, 0)
+}
+
+/// Removes from one open real folder of an agent home, at `at`, every entry `kept` does not
+/// name with its kind, and does the same in each kept folder that has its own list. A kept
+/// file stays only as this user's file with one link, so a name an agent linked to the
+/// owner's file goes as a plain unlink and that file never changes (V231-ACL, r3). Flags an
+/// agent set on an entry it keeps are cleared (RV-DS241-138), and the folder and every entry
+/// it keeps are added to `held`, whose ACLs the caller clears in one step (sec r1 F2). The
+/// folder is listed as it goes, in passes until one removes nothing and leaves each kept
+/// folder it walked under its name; a listing that stops clears the folder's ACL by its path
+/// and tries once more (code r2 F3). Inputs: the folder, its path, what stays in it, the
+/// entries held so far and how many lists deep it is. Output: as [`keep_only`].
+#[cfg(unix)]
+fn keep_in(
+    folder: std::os::fd::BorrowedFd<'_>,
+    at: &Path,
+    kept: &[(&str, Kept)],
+    held: &mut Vec<PathBuf>,
+    depth: usize,
+) -> Result<(), AgentHomeError> {
+    use rustix::fs::{AtFlags, FileType};
+    use std::os::fd::AsFd;
+    use std::os::unix::ffi::OsStrExt;
+    assert!(depth <= KEPT_DEPTH_MAX);
+    assert!(!kept.is_empty());
+    let unwritable = |_| failure("agent_home_unwritable");
+    let remove = |name: &std::ffi::CStr| {
+        crate::team::cleanup::remove_home_entry(folder, name)
+            .map_err(|_| failure("agent_home_unwritable"))
+    };
+    let before = held.len();
+    for _ in 0..HOME_PASSES_MAX {
+        held.truncate(before);
+        held.push(at.to_path_buf());
+        let mut removed = false;
+        let listed = rustix::fs::Dir::read_from(folder).or_else(|_| {
+            crate::team::cleanup::release_acls([at]);
+            rustix::fs::Dir::read_from(folder)
+        });
+        for entry in listed.map_err(unwritable)? {
+            let entry = entry.map_err(unwritable)?;
+            let name = entry.file_name();
+            if matches!(name.to_bytes(), b"." | b"..") {
+                continue;
+            }
+            let found = match rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Err(rustix::io::Errno::NOENT) => continue,
+                Err(_) => return Err(failure("agent_home_unwritable")),
+                Ok(found) => found,
+            };
+            let form = FileType::from_raw_mode(found.st_mode);
+            let path = at.join(std::ffi::OsStr::from_bytes(name.to_bytes()));
+            let wanted = kept
+                .iter()
+                .find(|(known, _)| name.to_bytes() == known.as_bytes())
+                .map(|(_, kind)| *kind);
+            match wanted {
+                Some(Kept::File) if form == FileType::RegularFile && sole_own(&found) => {
+                    unpin_at(folder, name)
+                }
+                Some(Kept::Lock) if crate::launch_context::lock_kept(&found) => {
+                    unpin_at(folder, name)
+                }
+                Some(Kept::Folder) if form == FileType::Directory => unpin_at(folder, name),
+                Some(Kept::Link) if form == FileType::Symlink => unpin_at(folder, name),
+                Some(Kept::Only(inner)) if form == FileType::Directory => {
+                    #[cfg(all(test, unix))]
+                    before_home_step(&path);
+                    unpin_at(folder, name);
+                    let opened = crate::team::cleanup::open_home_folder(folder, name);
+                    let Some(inside) = opened.map_err(unwritable)? else {
+                        remove(name)?;
+                        removed = true;
+                        continue;
+                    };
+                    keep_in(inside.as_fd(), &path, inner, held, depth + 1)?;
+                    removed |= !same_entry(folder, name, &inside);
+                    continue;
+                }
+                _ => {
+                    #[cfg(all(test, unix))]
+                    before_home_step(&path);
+                    remove(name)?;
+                    removed = true;
+                    continue;
+                }
+            }
+            held.push(path);
+        }
+        if !removed {
+            return Ok(());
+        }
     }
-    let folders = CLAUDE_BASH_PRELUDES
+    Err(failure("agent_home_unwritable"))
+}
+
+/// Removes from one real folder of an agent home every entry `kept` does not name with its
+/// kind, and does the same in each kept folder that has its own list, by path, where no
+/// agent sandbox runs and no handle walk is built. Inputs: the folder, what stays in it and
+/// the entries held so far. Output: unit, or `agent_home_unwritable` when it cannot be
+/// listed, one entry stays or it still changes after [`HOME_PASSES_MAX`] passes.
+#[cfg(not(unix))]
+fn keep_only(
+    folder: &Path,
+    kept: &[(&str, Kept)],
+    held: &mut Vec<PathBuf>,
+) -> Result<(), AgentHomeError> {
+    assert!(folder.is_absolute());
+    assert!(!kept.is_empty());
+    let before = held.len();
+    for _ in 0..HOME_PASSES_MAX {
+        held.truncate(before);
+        held.push(folder.to_path_buf());
+        let mut removed = false;
+        let listed = fs::read_dir(folder).map_err(|_| failure("agent_home_unwritable"))?;
+        for entry in listed {
+            let name = entry
+                .map_err(|_| failure("agent_home_unwritable"))?
+                .file_name();
+            let path = folder.join(&name);
+            let metadata = match fs::symlink_metadata(&path) {
+                Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return Err(failure("agent_home_unwritable")),
+                Ok(metadata) => metadata,
+            };
+            let link = metadata.file_type().is_symlink();
+            let wanted = kept
+                .iter()
+                .find(|(known, _)| name == *known)
+                .map(|(_, kind)| *kind);
+            match wanted {
+                Some(Kept::File) if metadata.is_file() && sole_own_link(&metadata) => {}
+                Some(Kept::Lock) if crate::launch_context::lock_kept(&metadata) => {}
+                Some(Kept::Folder) if metadata.is_dir() => {}
+                Some(Kept::Link) if link => {}
+                Some(Kept::Only(inner)) if metadata.is_dir() => {
+                    keep_only(&path, inner, held)?;
+                    continue;
+                }
+                _ => {
+                    remove_entry(&path)?;
+                    removed = true;
+                    continue;
+                }
+            }
+            held.push(path);
+        }
+        if !removed {
+            return Ok(());
+        }
+    }
+    Err(failure("agent_home_unwritable"))
+}
+
+/// Whether `name` in an open folder still names the open entry `held`, judged by device and
+/// inode without following a link. Inputs: the folder, the name and the entry. Output: the
+/// answer, false when either cannot be read.
+#[cfg(unix)]
+fn same_entry(
+    folder: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::CStr,
+    held: &std::os::fd::OwnedFd,
+) -> bool {
+    let named = rustix::fs::statat(folder, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW);
+    match (named, rustix::fs::fstat(held)) {
+        (Ok(named), Ok(held)) => named.st_dev == held.st_dev && named.st_ino == held.st_ino,
+        _ => false,
+    }
+}
+
+/// Whether an entry, read without following a link, is this user's with one link. Input:
+/// what was read. Output: the answer.
+#[cfg(unix)]
+fn sole_own(found: &rustix::fs::Stat) -> bool {
+    found.st_nlink == 1 && found.st_uid == rustix::process::geteuid().as_raw()
+}
+
+/// What [`BEFORE_HOME_STEP`] holds: the entry the step waits for and the step.
+#[cfg(all(test, unix))]
+type HomeStep = (PathBuf, Box<dyn FnOnce()>);
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// A step a reset test runs once, when the reset is about to walk into or remove the
+    /// entry its path names, standing in for a process an agent left that swaps a folder
+    /// meanwhile. None runs nothing.
+    static BEFORE_HOME_STEP: std::cell::RefCell<Option<HomeStep>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs the test step [`BEFORE_HOME_STEP`] holds, once, when it names `entry`. Input: the
+/// entry the reset is about to walk into or remove.
+#[cfg(all(test, unix))]
+fn before_home_step(entry: &Path) {
+    let step = BEFORE_HOME_STEP.with(|step| {
+        let mut step = step.borrow_mut();
+        if step.as_ref().is_some_and(|(named, _)| named == entry) {
+            step.take()
+        } else {
+            None
+        }
+    });
+    if let Some((_, step)) = step {
+        step();
+    }
+}
+
+/// Resets a native lead's teammates' home as [`prepare`] resets an agent home: only what
+/// [`HOME_KEPT`] names stays, with the folders [`crate::sandbox::CLAUDE_TEAM_SHARED`] names
+/// kept only as links, since there they lead to the lead's own folders (RV-DS241-137 code
+/// r2 F1). Input: the teammates' 0700 home. Output: unit, or a plain code when it is not a
+/// real folder or an entry stays.
+#[cfg(unix)]
+pub(crate) fn reset_mates_home(mates: &Path) -> Result<(), AgentHomeError> {
+    if !mates.is_absolute() {
+        return Err(failure("agent_home_invalid"));
+    }
+    real_folder(mates)?;
+    let kept: Vec<(&str, Kept)> = HOME_KEPT
         .iter()
-        .chain(std::iter::once(&CODEX_SHELL_SNAPSHOTS));
-    for name in SH_STARTUP.iter().chain(folders) {
-        remove_entry(&home.join(name))?;
-    }
+        .map(|&(name, kind)| {
+            if crate::sandbox::CLAUDE_TEAM_SHARED.contains(&name) {
+                (name, Kept::Link)
+            } else {
+                (name, kind)
+            }
+        })
+        .collect();
+    let mut held = Vec::new();
+    keep_only(mates, &kept, &mut held)?;
+    crate::team::cleanup::clear_acls(held.iter().map(PathBuf::as_path));
     Ok(())
 }
+
+/// Names, as paths below the home, the folders of an agent home a launch keeps only part
+/// of and the links it keeps, which the agent's profile keeps it from moving, removing or
+/// replacing with a link, or making itself as a link, so the launch never walks through a
+/// link a running process swapped in after its check and no cargo cache link leads
+/// elsewhere (DEC-173). Output: the paths, each folder ahead of what it holds.
+pub(crate) fn pinned_entries() -> Vec<String> {
+    let mut pinned = Vec::new();
+    pin_below("", HOME_KEPT, &mut pinned);
+    pinned
+}
+
+/// Adds to `pinned` each folder kept only in part and each link kept in one list, below
+/// `prefix`, and what the folders hold in turn. Inputs: the path of the list's folder below
+/// the home, empty for the home, the list and the paths found so far.
+fn pin_below(prefix: &str, kept: &[(&str, Kept)], pinned: &mut Vec<String>) {
+    for (name, kind) in kept {
+        let path = if prefix.is_empty() {
+            (*name).to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        match kind {
+            Kept::Only(inner) => {
+                pinned.push(path.clone());
+                pin_below(&path, inner, pinned);
+            }
+            Kept::Link => pinned.push(path),
+            Kept::File | Kept::Lock | Kept::Folder => {}
+        }
+    }
+}
+
+/// Clears the immutable and append-only flags an agent may set on one entry of its home,
+/// without following a link ([`crate::team::cleanup::unpin_home_entry`]), so they keep
+/// nothing from going or being rewritten, also on an entry that will not open (RV-DS241-138,
+/// -137 code r1 F2). Inputs: the entry's open parent and its name there, absolute when the
+/// parent is the working folder.
+#[cfg(target_os = "macos")]
+fn unpin_at<P: rustix::path::Arg + Copy>(parent: std::os::fd::BorrowedFd<'_>, name: P) {
+    crate::team::cleanup::unpin_home_entry(parent, name);
+}
+
+/// Leaves flags alone where no flag an agent may set keeps an entry from going. Inputs:
+/// unused.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unpin_at<P: rustix::path::Arg + Copy>(_: std::os::fd::BorrowedFd<'_>, _: P) {}
 
 /// Clears a directory planted where a file is about to be written; a file or link stays
 /// for the rename to replace atomically, so a reader never finds the name missing.
@@ -1070,7 +1530,9 @@ fn remove_folder(path: &Path) -> Result<(), AgentHomeError> {
 /// Reads an instruction file through one open that follows no link in its last part and
 /// never waits on a FIFO, then checks the opened file itself, so nothing swapped in after
 /// a check is read or waited on. Takes the path. Returns the text, empty for a missing
-/// file, `process_text_unsafe` for a link or any other non-regular file, or another code.
+/// file, `process_text_unsafe` for a link, a file with a second hard link (which a write
+/// through the other name rewrites, SA vid 11) or any other non-regular file, or another
+/// code.
 fn read_bounded(path: &Path) -> Result<String, AgentHomeError> {
     let file = match crate::platform::open_plain(path) {
         Ok(file) => file,
@@ -1086,6 +1548,10 @@ fn read_bounded(path: &Path) -> Result<String, AgentHomeError> {
         .metadata()
         .map_err(|_| failure("process_text_unreadable"))?;
     if !held.is_file() {
+        return Err(failure("process_text_unsafe"));
+    }
+    #[cfg(unix)]
+    if held.nlink() > 1 {
         return Err(failure("process_text_unsafe"));
     }
     read_text(file)

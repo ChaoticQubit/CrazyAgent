@@ -3,7 +3,8 @@ use super::*;
 fn job() -> IntakeJob {
     IntakeJob::new(
         RequestId::new("add-1").unwrap(),
-        "owner".into(),
+        JobKind::Add,
+        None,
         "/Users/someone/Library/Mobile Documents/com~apple~CloudDocs/site".into(),
         AddMode::Move,
         Vec::new(),
@@ -125,7 +126,8 @@ fn a_job_ends_once() {
 fn a_view_shows_the_overrides_the_job_goes_past_so_an_answer_keeps_them() {
     let job = IntakeJob::new(
         RequestId::new("add-2").unwrap(),
-        "owner".into(),
+        JobKind::Add,
+        None,
         "/Users/someone/site".into(),
         AddMode::Copy,
         vec![AddOverride::TooLarge],
@@ -153,7 +155,14 @@ fn a_view_crosses_the_wire_as_tagged_json() {
 fn a_job_an_engine_stop_cut_short_restores_as_the_disk_read_it() {
     let restored = |ended: &str| {
         let site = "/Users/someone/site".to_owned();
-        IntakeJob::restored(id_of("add-9"), "owner".into(), site, AddMode::Move, ended)
+        IntakeJob::restored(
+            id_of("add-9"),
+            JobKind::Add,
+            None,
+            site,
+            AddMode::Move,
+            ended,
+        )
     };
     assert_eq!(restored("done").view().state, JobState::Done);
     let left = JobState::Failed {
@@ -173,4 +182,189 @@ fn a_job_an_engine_stop_cut_short_restores_as_the_disk_read_it() {
 
 fn id_of(text: &str) -> RequestId {
     RequestId::new(text).unwrap()
+}
+
+fn move_job() -> IntakeJob {
+    IntakeJob::new(
+        id_of("move-1"),
+        JobKind::MoveProject,
+        Some(ProjectId::new("reading").unwrap()),
+        "/Users/someone/Code/reading-list".into(),
+        AddMode::Move,
+        Vec::new(),
+    )
+}
+
+#[test]
+fn a_move_job_reads_its_agents_stopping_and_a_stop_there_cancels_it_in_that_phase() {
+    let job = move_job();
+    job.copying();
+    job.tally().wait_for(2);
+    assert_eq!(job.view().state, JobState::Stopping { agents_left: 2 });
+    job.tally().wait_for(1);
+    assert_eq!(job.view().state, JobState::Stopping { agents_left: 1 });
+    job.stop();
+    job.end(failure("home_add_cancelled"));
+    let cancelled = JobState::Cancelled {
+        phase: Phase::Stopping,
+    };
+    assert_eq!(job.view().state, cancelled);
+    let busy = move_job();
+    busy.copying();
+    busy.tally().wait_for(1);
+    busy.end(failure("move_project_busy"));
+    let failed = JobState::Failed {
+        code: "move_project_busy".into(),
+        phase: Phase::Stopping,
+    };
+    assert_eq!(busy.view().state, failed);
+}
+
+#[test]
+fn a_move_job_copies_once_its_agents_stopped_and_names_its_kind_and_project() {
+    let job = move_job();
+    job.copying();
+    job.tally().wait_for(1);
+    job.tally().waited();
+    assert_eq!(
+        job.view().state,
+        JobState::Copying {
+            copied: 0,
+            checked: 0
+        }
+    );
+    let view = job.view();
+    assert_eq!(view.kind, JobKind::MoveProject);
+    assert_eq!(view.project_id, Some(ProjectId::new("reading").unwrap()));
+    let subject = JobSubject::MoveProject {
+        project_id: ProjectId::new("reading").unwrap(),
+    };
+    assert_eq!(view.subject(), Some(subject));
+    assert_eq!(job.interrupted(), "move_project_interrupted");
+    assert_eq!(self::job().interrupted(), "home_add_interrupted");
+    let text = serde_json::to_string(&view).unwrap();
+    assert!(text.contains(r#""kind":"move_project""#), "{text}");
+    assert!(text.contains(r#""project_id":"reading""#), "{text}");
+}
+
+fn delete_job() -> IntakeJob {
+    IntakeJob::new(
+        id_of("delete-1"),
+        JobKind::Delete,
+        Some(ProjectId::new("meals").unwrap()),
+        "Meal planner".into(),
+        AddMode::Move,
+        Vec::new(),
+    )
+}
+
+/// DEC-177 step 2: a Delete everything waits for its agents, then moves its folders to the
+/// Trash one by one, then clears the engine's files with no Stop. Once it committed to the
+/// first Trash move a stop is refused, so a half-deleted project never comes from a Stop.
+#[test]
+fn a_delete_job_reads_stopping_then_trashing_then_clearing_and_refuses_a_stop_once_committed() {
+    let job = delete_job();
+    job.copying();
+    job.tally().wait_for(2);
+    assert_eq!(job.view().state, JobState::Stopping { agents_left: 2 });
+    job.tally().waited();
+    job.tally().commit_trash(2).unwrap();
+    assert_eq!(job.view().state, JobState::Trashing { done: 0, total: 2 });
+    job.tally().trashed_one();
+    assert_eq!(job.view().state, JobState::Trashing { done: 1, total: 2 });
+    assert!(!job.stop(), "a stop after the first Trash move is refused");
+    assert!(!job.view().stopping);
+    job.tally().trashed_one();
+    job.tally().mark_clearing();
+    assert_eq!(job.view().state, JobState::Clearing);
+    job.end(Ok(()));
+    let view = job.view();
+    assert_eq!(view.state, JobState::Done);
+    assert_eq!(view.kind, JobKind::Delete);
+    assert_eq!(view.project_id, Some(ProjectId::new("meals").unwrap()));
+    assert_eq!(view.source, "Meal planner", "the name labels the end line");
+    assert_eq!(job.interrupted(), "project_delete_interrupted");
+}
+
+/// A stop that comes before the delete commits wins: the commit is refused, nothing moves and
+/// the job ends cancelled while its agents were stopping.
+#[test]
+fn a_delete_stopped_before_it_commits_moves_nothing_and_ends_cancelled_while_stopping() {
+    let job = delete_job();
+    job.copying();
+    assert!(job.stop());
+    assert_eq!(
+        job.tally().commit_trash(1).unwrap_err().0,
+        "home_add_cancelled"
+    );
+    assert_eq!(job.tally().trashing(), None, "nothing was committed");
+    job.end(failure("home_add_cancelled"));
+    assert_eq!(
+        job.view().state,
+        JobState::Cancelled {
+            phase: Phase::Stopping
+        }
+    );
+}
+
+/// A delete's failure keeps the phase it reached: past the agent wait while stopping, a
+/// Trash move that failed while trashing.
+#[test]
+fn a_delete_failure_keeps_the_phase_it_reached() {
+    let waited = delete_job();
+    waited.copying();
+    waited.tally().wait_for(1);
+    waited.end(failure("delete_agents_running"));
+    assert_eq!(
+        waited.view().state,
+        JobState::Failed {
+            code: "delete_agents_running".into(),
+            phase: Phase::Stopping
+        }
+    );
+    let partial = delete_job();
+    partial.copying();
+    partial.tally().commit_trash(2).unwrap();
+    partial.tally().trashed_one();
+    partial.end(failure("delete_trash_partial"));
+    assert_eq!(
+        partial.view().state,
+        JobState::Failed {
+            code: "delete_trash_partial".into(),
+            phase: Phase::Trashing
+        }
+    );
+}
+
+/// A delete an engine stop cut short restores with how many of its folders reached the Trash.
+/// It starts again only from the remove ask, where the exact name is typed (DEC-177 add.1 Q1
+/// A), so its view offers no subject to restart from.
+#[test]
+fn a_delete_cut_short_reads_its_trash_count_and_offers_no_subject_to_restart() {
+    let job = IntakeJob::cut_short(
+        id_of("delete-7"),
+        ProjectId::new("meals").unwrap(),
+        "Meal planner".into(),
+        1,
+        2,
+    );
+    assert!(job.ended());
+    let view = job.view();
+    assert_eq!(
+        view.state,
+        JobState::CutShort {
+            trashed: 1,
+            total: 2
+        }
+    );
+    assert_eq!(view.kind, JobKind::Delete);
+    assert_eq!(view.subject(), None);
+    let text = serde_json::to_string(&view).unwrap();
+    assert!(text.contains(r#""kind":"delete""#), "{text}");
+    assert!(text.contains(r#""state":"cut_short""#), "{text}");
+    let started = JobSubject::Delete {
+        project_id: ProjectId::new("meals").unwrap(),
+        name: "Meal planner".into(),
+    };
+    assert_eq!(started.kind(), JobKind::Delete);
 }

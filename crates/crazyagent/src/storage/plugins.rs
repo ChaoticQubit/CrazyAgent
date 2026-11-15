@@ -626,14 +626,13 @@ pub(super) fn hooks_follow(tx: &Transaction<'_>, item: &str) -> Result<bool, Eng
         .any(|hook| hook.follows.as_deref() == Some(item)))
 }
 
-/// The hooks that follow one skill or MCP server as a new pin keeps them: each hook's
-/// name, whether it is on and the projects it is switched off in. Inputs: the transaction
-/// and the item id. Output: the hooks.
-#[cfg(unix)]
+/// The hooks that follow one skill or MCP server as a new pin or the item's removal keeps
+/// them: each hook's name, what it runs, whether it is on and the projects it is switched off
+/// in. Inputs: the transaction and the item id. Output: the hooks.
 pub(super) fn following_hooks(
     tx: &Transaction<'_>,
     item: &str,
-) -> Result<Vec<(String, bool, Vec<String>)>, EngineError> {
+) -> Result<Vec<super::setup::KeptHook>, EngineError> {
     let mut hooks = Vec::new();
     for hook in all::<HookRecord>(tx, "hook")?
         .into_iter()
@@ -647,7 +646,14 @@ pub(super) fn following_hooks(
             .map_err(error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(error)?;
-        hooks.push((hook.name, hook.enabled, projects));
+        hooks.push(super::setup::KeptHook {
+            name: hook.name,
+            enabled: hook.enabled,
+            projects,
+            event: hook.event,
+            matcher: hook.matcher,
+            command: hook.command,
+        });
     }
     Ok(hooks)
 }
@@ -1072,13 +1078,14 @@ fn add_hooks(
 
 /// Lists the hooks agents launched for a project run: each hook that is on, from global
 /// settings unless the project switched it off or from the project itself, whose followed
-/// skill or MCP server is on there too, with its stored folder copy. Inputs: the open
-/// transaction, the engine root and the project. Output: the hooks, ordered by event,
-/// plugin and name.
+/// skill or MCP server is on there too and, for a server, not one this launch left out
+/// (RV-DS241-156), with its stored folder copy. Inputs: the open transaction, the engine
+/// root, the project and the launch set's `left_out` names. Output: the ordered hooks.
 pub(crate) fn effective_hooks(
     tx: &Transaction<'_>,
     root: &Path,
     project: &ProjectId,
+    left_out: &[String],
 ) -> Result<Vec<EffectiveHook>, EngineError> {
     let off = switched_off(tx, project)?;
     let usable = |scope: &Scope, id: &str| match scope {
@@ -1096,6 +1103,7 @@ pub(crate) fn effective_hooks(
             .filter(|server| {
                 status(server) == ServerStatus::Approved && usable(&server.scope, &server.id)
             })
+            .filter(|server| !left_out.contains(&server.name))
             .map(|server| server.id),
     );
     let mut hooks: Vec<(String, EffectiveHook)> = all::<HookRecord>(tx, "hook")?
@@ -1462,6 +1470,36 @@ pub(crate) fn effective(
     Ok(plugins)
 }
 
+/// Names the skills and MCP servers the agents an instructions text is written for get, for
+/// Edit with AI's reference check (DEC-172): a project's own effective set, or for the app
+/// text the enabled global skills and approved global servers every project starts from.
+/// Inputs: the open transaction, the engine root and the project, none for the app text.
+/// Output: the skill names and the server names.
+pub(crate) fn check_names(
+    tx: &Transaction<'_>,
+    root: &Path,
+    project: Option<&ProjectId>,
+) -> Result<(Vec<String>, Vec<String>), EngineError> {
+    if let Some(project) = project {
+        let plugins = effective(tx, root, project)?;
+        let skills = plugins.skills.into_iter().map(|item| item.name).collect();
+        let servers = plugins.servers.into_iter().map(|item| item.name).collect();
+        return Ok((skills, servers));
+    }
+    let skills: Vec<String> = all::<SkillRecord>(tx, "skill")?
+        .into_iter()
+        .filter(|skill| skill.enabled && skill.scope == Scope::Global)
+        .map(|skill| skill.name)
+        .collect();
+    let servers: Vec<String> = all::<ServerRecord>(tx, "server")?
+        .into_iter()
+        .filter(|server| server.scope == Scope::Global)
+        .filter(|server| status(server) == ServerStatus::Approved)
+        .map(|server| server.name)
+        .collect();
+    Ok((skills, servers))
+}
+
 /// Reads the launch set of one project inside a caller's transaction, for launchers that
 /// hold their own engine database connection. Inputs: the transaction, the engine root and
 /// the project. Output: the effective set with secret values read, or `plugin_project_unknown`.
@@ -1495,6 +1533,7 @@ fn without_shared_install(
 fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, EngineError> {
     let mut servers = Vec::with_capacity(plugins.servers.len());
     let mut context_mode_off = None;
+    let mut left_out = Vec::new();
     for server in plugins.servers {
         #[cfg(unix)]
         let spec = crate::context_mode::for_launch(root, server.spec);
@@ -1504,6 +1543,7 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
             Ok(spec) => spec,
             Err(off) => {
                 context_mode_off = Some(off);
+                left_out.push(server.name);
                 continue;
             }
         };
@@ -1520,11 +1560,13 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
             secrets,
         });
     }
-    assert!(servers.len() <= 2 * SERVERS_PER_SCOPE_MAX);
+    assert!(servers.len() + left_out.len() <= 2 * SERVERS_PER_SCOPE_MAX);
+    assert_eq!(context_mode_off.is_some(), !left_out.is_empty());
     Ok(LaunchPlugins {
         skills: plugins.skills,
         servers,
         context_mode_off,
+        left_out,
     })
 }
 

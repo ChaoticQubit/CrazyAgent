@@ -239,7 +239,8 @@ pub(super) fn read(
 /// Plans an AddExistingFolder before the owner transport moves or copies it.
 /// Input: the connection, database path, owner admission, the revision the
 /// owner saw, source and mode. Output: the checked plan, or the refusal code
-/// (`stale_revision` when the engine moved on); nothing on disk changes.
+/// (`stale_revision` when the engine moved on, `move_project_in_progress` while
+/// a project move is pending); nothing on disk changes.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn add_plan(
     db: &mut Connection,
@@ -260,6 +261,9 @@ pub(super) fn add_plan(
     }
     if pending_move(&tx)?.is_some() {
         return Err(error("home_move_in_progress"));
+    }
+    if home::pending(&tx)?.is_some() {
+        return Err(error("move_project_in_progress"));
     }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
     let plan = home::plan_add(
@@ -425,12 +429,11 @@ fn restart_adds(tx: &Transaction<'_>) -> Result<usize, EngineError> {
     Ok(rows.len())
 }
 
-/// An add an engine stop cut short, as the engine start found it: its request, owner,
-/// source, mode and end code.
+/// An add an engine stop cut short, as the engine start found it: its request, source, mode
+/// and end code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AddEnded {
     pub request: RequestId,
-    pub owner: String,
     pub source: String,
     pub mode: AddMode,
     pub ended: String,
@@ -439,10 +442,135 @@ pub(crate) struct AddEnded {
 /// The newest add an engine stop cut short and the owner has not dismissed. Input: the
 /// connection. Output: it, or None.
 pub(super) fn add_ended(db: &Connection) -> Result<Option<AddEnded>, EngineError> {
+    let row: Option<(String, String, String, String)> = db
+        .query_row(
+            "SELECT request, source, mode, ended FROM projects_home_add
+             WHERE ended IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    row.map(|(request, source, mode, ended)| {
+        let mode = match mode.as_str() {
+            "move" => AddMode::Move,
+            _ => AddMode::Copy,
+        };
+        Ok(AddEnded {
+            request: RequestId::new(request).map_err(|_| error("home_add_row_invalid"))?,
+            source,
+            mode,
+            ended,
+        })
+    })
+    .transpose()
+}
+
+/// Forgets an ended job the owner dismissed or a new job replaced: an ended add or a project
+/// move an engine stop cut short. A delete cut short stays on its project's banner until the
+/// owner keeps the project ([`delete_keep`]) or deletes it again. Inputs: the connection and
+/// its request. Output: Ok.
+pub(super) fn job_forget(db: &Connection, request: &RequestId) -> Result<(), EngineError> {
+    db.execute(
+        "DELETE FROM projects_home_add WHERE request=?1 AND ended IS NOT NULL",
+        [request.as_str()],
+    )
+    .map_err(error)?;
+    db.execute(
+        "DELETE FROM projects_home_project_move_ended WHERE request=?1",
+        [request.as_str()],
+    )
+    .map_err(error)?;
+    Ok(())
+}
+
+/// Checks a Delete everything job before it starts, writing nothing: the owner's admission,
+/// the project, its exact name and what [`delete_check`] refuses, as the plan checks them
+/// before its mark. Inputs: the connection, the admission, the project and the name the owner
+/// typed. Output: the project's folder as text, or the refusal code.
+pub(super) fn delete_job_check(
+    db: &mut Connection,
+    a: &Admission,
+    project: &ProjectId,
+    name: &str,
+) -> Result<String, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    let Some(checked) = delete_check(&tx, project)? else {
+        return Err(error("invalid_project"));
+    };
+    if checked.name != name {
+        return Err(error("delete_name_mismatch"));
+    }
+    if let Err(refusal) = checked.planned {
+        return Err(error(refusal.code));
+    }
+    let folder = checked
+        .folders
+        .first()
+        .filter(|folder| folder.is_absolute())
+        .and_then(|folder| folder.to_str())
+        .ok_or_else(|| error("projects_home_path_invalid"))?
+        .to_owned();
+    tx.rollback().map_err(error)?;
+    assert!(!folder.is_empty());
+    Ok(folder)
+}
+
+/// The Delete everything job an engine stop cut short, for the engine start to show: the
+/// newest delete the owner is shown as cut short whose mark names its job, with how many of
+/// its folders reached the Trash, its count less the folders the project's records still
+/// name that are there. Input: the connection. Output: the delete and that count, or None.
+pub(super) fn delete_cut_short(
+    db: &Connection,
+) -> Result<Option<(delete_mark::CutShort, u64)>, EngineError> {
+    let tx = db.unchecked_transaction().map_err(error)?;
+    let Some(found) = delete_mark::cut_short(&tx)? else {
+        return Ok(None);
+    };
+    let home = home::load(&tx)?.and_then(|saved| std::fs::canonicalize(saved).ok());
+    let left = match (delete_check(&tx, &found.project)?, home) {
+        (Some(checked), Some(home)) => {
+            home::plan_delete(&home, &checked.folders).map_or(0, |moved| moved.len())
+        }
+        _ => 0,
+    };
+    tx.rollback().map_err(error)?;
+    let left = u64::try_from(left).map_err(error)?;
+    let trashed = found.total.saturating_sub(left);
+    assert!(trashed <= found.total);
+    Ok(Some((found, trashed)))
+}
+
+/// Keeps a project whose Delete everything was cut short, as its banner's Dismiss does: ends
+/// the mark naming the job's request, so neither Home nor the banner offers it again.
+/// Inputs: the connection and the request. Output: whether a mark ended.
+pub(super) fn delete_keep(db: &Connection, request: &RequestId) -> Result<bool, EngineError> {
+    let tx = db.unchecked_transaction().map_err(error)?;
+    let kept = delete_mark::keep(&tx, request)?;
+    tx.commit().map_err(error)?;
+    Ok(kept)
+}
+
+/// A project move an engine stop cut short, as the engine start found it: its request, the
+/// project, the folder it was in, its mode and its end code, `done` when the folder had
+/// landed and the move was recorded from disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MoveEnded {
+    pub request: RequestId,
+    pub project: ProjectId,
+    pub source: String,
+    pub mode: AddMode,
+    pub ended: String,
+}
+
+/// The project move an engine stop cut short that the owner has not dismissed. Input: the
+/// connection. Output: it, or None.
+pub(super) fn move_ended(db: &Connection) -> Result<Option<MoveEnded>, EngineError> {
     let row: Option<(String, String, String, String, String)> = db
         .query_row(
-            "SELECT request, owner, source, mode, ended FROM projects_home_add
-             WHERE ended IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+            "SELECT request, project, origin, mode, ended FROM projects_home_project_move_ended
+             WHERE singleton=1",
             [],
             |row| {
                 Ok((
@@ -456,31 +584,20 @@ pub(super) fn add_ended(db: &Connection) -> Result<Option<AddEnded>, EngineError
         )
         .optional()
         .map_err(error)?;
-    row.map(|(request, owner, source, mode, ended)| {
+    row.map(|(request, project, source, mode, ended)| {
         let mode = match mode.as_str() {
             "move" => AddMode::Move,
             _ => AddMode::Copy,
         };
-        Ok(AddEnded {
-            request: RequestId::new(request).map_err(|_| error("home_add_row_invalid"))?,
-            owner,
+        Ok(MoveEnded {
+            request: RequestId::new(request).map_err(|_| error("move_project_record_invalid"))?,
+            project: ProjectId::new(project).map_err(|_| error("move_project_record_invalid"))?,
             source,
             mode,
             ended,
         })
     })
     .transpose()
-}
-
-/// Forgets an ended add the owner dismissed or a new job replaced. Inputs: the connection
-/// and its request. Output: Ok.
-pub(super) fn add_forget(db: &Connection, request: &RequestId) -> Result<(), EngineError> {
-    db.execute(
-        "DELETE FROM projects_home_add WHERE request=?1 AND ended IS NOT NULL",
-        [request.as_str()],
-    )
-    .map_err(error)?;
-    Ok(())
 }
 
 /// A checked Delete everything: the plan with the project's research jobs, or the refusal code.
@@ -711,14 +828,17 @@ pub(super) fn forgotten_caches(
 }
 
 /// Records engine files in the caller's write, for the live and the start-time finish to
-/// remove. Inputs: the transaction and the records. Output: Ok, or any SQLite failure.
+/// remove; a name already recorded stays as it is, and one the record cannot hold fails the
+/// write instead of going unrecorded (RV-DS241-152). Inputs: the transaction and the
+/// records. Output: Ok, or any SQLite failure.
 pub(super) fn record_files(
     tx: &Transaction<'_>,
     files: &[home::RecordedFile],
 ) -> Result<(), EngineError> {
     for (name, inode) in files {
         tx.execute(
-            "INSERT OR IGNORE INTO projects_delete_files(name,inode) VALUES (?1,?2)",
+            "INSERT INTO projects_delete_files(name,inode) VALUES (?1,?2)
+             ON CONFLICT(name) DO NOTHING",
             params![name, inode],
         )
         .map_err(error)?;
@@ -847,10 +967,11 @@ pub(super) fn delete_plan(
     if &checked.name != name {
         return Ok(Err("delete_name_mismatch".into()));
     }
-    let home = match checked.planned {
-        Ok((home, _)) => home,
+    let (home, moved) = match checked.planned {
+        Ok(planned) => planned,
         Err(refusal) => return Ok(Err(refusal.code)),
     };
+    let total = u64::try_from(moved.len()).map_err(error)?;
     let ids = |sql: &str| -> Result<Vec<i64>, EngineError> {
         let mut statement = tx.prepare(sql).map_err(error)?;
         let rows = statement
@@ -862,7 +983,7 @@ pub(super) fn delete_plan(
     };
     let agents = ids("SELECT id FROM team_agents WHERE project=?1 ORDER BY id LIMIT ?2")?;
     let research = ids("SELECT id FROM research_jobs WHERE project=?1 ORDER BY id LIMIT ?2")?;
-    match delete_mark::begin(&tx, project_id, exchange) {
+    match delete_mark::begin(&tx, project_id, exchange, &request.request_id, name, total) {
         Ok(Ok(())) => {}
         Ok(Err(code)) => return Ok(Err(code.into())),
         Err(e) => {
@@ -956,8 +1077,8 @@ pub(super) fn move_plan(
 /// owner's overrides, the request and the transport exchange that will run the move.
 /// Output: the checked plan, or the refusal code (`stale_revision` when the engine moved
 /// on, `home_move_in_progress` or `home_move_delete_in_progress` while the projects home
-/// itself is being changed, else what `crate::projects_home::plan` names); nothing on disk
-/// changes.
+/// itself is being changed, `home_add_in_progress` while an add runs, else what
+/// `crate::projects_home::plan` names); nothing on disk changes.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn project_move_plan(
     db: &mut Connection,
@@ -984,6 +1105,9 @@ pub(super) fn project_move_plan(
     if delete_planned(&tx)? {
         return Err(error("home_move_delete_in_progress"));
     }
+    if adding(&tx)? {
+        return Err(error("home_add_in_progress"));
+    }
     let plan = home::plan(
         &tx,
         path,
@@ -1001,12 +1125,49 @@ pub(super) fn project_move_plan(
     Ok(plan)
 }
 
+/// Checks a project move job before it starts, as far as the move can be checked without
+/// reading inside the folder, writing nothing: the owner's admission, a projects home move
+/// or delete under way (`home_move_in_progress`, `home_move_delete_in_progress`), an add
+/// running (`home_add_in_progress`), then what `crate::projects_home::project_move_check`
+/// names. Inputs: the connection, the owner
+/// admission, the project and the mode. Output: the project's real folder as text, or the
+/// refusal code.
+pub(super) fn project_move_check(
+    db: &mut Connection,
+    a: &Admission,
+    project: &ProjectId,
+    mode: AddMode,
+) -> Result<String, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    if pending_move(&tx)?.is_some() {
+        return Err(error("home_move_in_progress"));
+    }
+    if delete_planned(&tx)? {
+        return Err(error("home_move_delete_in_progress"));
+    }
+    if adding(&tx)? {
+        return Err(error("home_add_in_progress"));
+    }
+    let real = home::project_move_check(&tx, &guarded(&tx)?, project, mode)?;
+    let source = real
+        .to_str()
+        .ok_or_else(|| error("projects_home_path_invalid"))?
+        .to_owned();
+    tx.rollback().map_err(error)?;
+    assert!(!source.is_empty());
+    Ok(source)
+}
+
 /// Finishes or forgets a pending project move in its own transaction. Input: the
 /// connection, the transport exchange the move must belong to (None at engine start,
 /// before any exchange, which finishes any pending move from disk) and whether that
 /// exchange ran its disk work. A move whose work never ran is forgotten; any other is
 /// finished as `crate::projects_home::finish` does, a Copy never from disk alone; a move
-/// another exchange planned is left alone. Output: Ok, or any SQLite failure.
+/// another exchange planned is left alone. A move finished at engine start is kept as the
+/// ended job the next status shows, `done` or `move_project_interrupted`, replacing an
+/// older one, until the owner dismisses it or a new job starts. Output: Ok, or any SQLite
+/// failure.
 pub(super) fn project_move_settle(
     db: &mut Connection,
     exchange: Option<u64>,
@@ -1016,7 +1177,14 @@ pub(super) fn project_move_settle(
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
     let finished = match exchange {
-        None => home::finish(&tx, |_| true, false)?,
+        None => {
+            let cut = home::pending(&tx)?;
+            let finished = home::finish(&tx, |_| true, false)?;
+            if let (Some(cut), Some(finished)) = (cut, finished) {
+                keep_move_ended(&tx, &cut, finished)?;
+            }
+            finished
+        }
         Some(exchange) => {
             let exchange = i64::try_from(exchange).map_err(error)?;
             if ran {
@@ -1031,6 +1199,34 @@ pub(super) fn project_move_settle(
     if let Some(home::Finished::Moved { repointed }) = finished {
         eprintln!("project_move_settled copies_repointed={repointed}");
     }
+    Ok(())
+}
+
+/// Keeps a project move an engine stop cut short as the ended job the next status shows.
+/// Inputs: the transaction, the pending move as the start found it and how finishing it
+/// from disk ended. Output: Ok, or any SQLite failure.
+fn keep_move_ended(
+    tx: &Transaction<'_>,
+    cut: &home::Pending,
+    finished: home::Finished,
+) -> Result<(), EngineError> {
+    let ended = match finished {
+        home::Finished::Moved { .. } => "done",
+        home::Finished::Left => "move_project_interrupted",
+    };
+    let origin = cut
+        .origin
+        .to_str()
+        .ok_or_else(|| error("move_project_record_invalid"))?;
+    let mode = match cut.mode {
+        AddMode::Move => "move",
+        AddMode::Copy => "copy",
+    };
+    tx.execute(
+        "INSERT OR REPLACE INTO projects_home_project_move_ended VALUES (1,?1,?2,?3,?4,?5)",
+        rusqlite::params![cut.request, cut.project.as_str(), origin, mode, ended],
+    )
+    .map_err(error)?;
     Ok(())
 }
 

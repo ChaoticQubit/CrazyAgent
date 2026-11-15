@@ -379,6 +379,21 @@ pub const AGENT_GIT_ENV: [(&str, &str); 7] = [
     ("GIT_CONFIG_VALUE_1", "explicit"),
 ];
 
+/// The settings every agent process gets, sandboxed or at Full access, that keep its tools
+/// from reading config an earlier run left in its home, which a launch resets
+/// (RV-DS241-137, sec r1 F1): no global git config, as the engine's own git runs, so a
+/// `.gitconfig` or `.config/git/config` there never runs its hooks or programs, no Python
+/// user site, so a `.pth` file or `usercustomize` module there never runs as Python starts,
+/// and no npm user config, so an `.npmrc` there never hands its `node-options` or
+/// `script-shell` to a script. They are set after the harness's own variables, so a harness
+/// cannot replace them, and never in the owner's IDE terminal, whose home is the owner's own
+/// and no launch resets ([`owner_terminal_env`], code r1 F3).
+pub const AGENT_HOME_ENV: [(&str, &str); 3] = [
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("PYTHONNOUSERSITE", "1"),
+    ("NPM_CONFIG_USERCONFIG", "/dev/null"),
+];
+
 /// The root certificates every sandboxed agent process trusts for TLS on macOS: the system
 /// bundle, named in `SSL_CERT_FILE`. A harness that reads its roots from the keychain, as
 /// Codex does through rustls-native-certs, finds none there because every agent sandbox
@@ -433,6 +448,7 @@ pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
     }
     if AGENT_GIT_ENV
         .iter()
+        .chain(AGENT_HOME_ENV.iter())
         .any(|(git, fixed)| name == *git && value == *fixed)
     {
         return true;
@@ -457,12 +473,36 @@ pub fn shell_tmp_prefix(tmp: &Path) -> PathBuf {
 /// harness's variables (a later value replaces an earlier one and None removes it, but
 /// `HOME`, `TMPDIR` and `TMPPREFIX`, and the tool cache's [`TOOL_CACHE_ENV`] when `base`
 /// sets them, always stay as `base` set them), then `TMPPREFIX` from
-/// [`shell_tmp_prefix`] when `TMPDIR` is set, then [`AGENT_GIT_ENV`] and [`AGENT_TLS_ENV`].
+/// [`shell_tmp_prefix`] when `TMPDIR` is set, then [`AGENT_GIT_ENV`], [`AGENT_TLS_ENV`] and
+/// [`AGENT_HOME_ENV`].
 /// Inputs: the base and harness variables. Output: the variables, or `Invalid` when any
 /// one fails [`agent_variable_allowed`].
 pub fn agent_env<'a>(
     base: &[(&str, &OsStr)],
     harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Vec<(OsString, OsString)>, SandboxError> {
+    built_env(base, harness, &AGENT_HOME_ENV)
+}
+
+/// Builds the environment of the owner's confined IDE terminal as [`agent_env`] does for an
+/// agent, but without [`AGENT_HOME_ENV`]: its home is the owner's own, kept across
+/// terminals, so the global git config, Python user site and npm config the owner sets up
+/// there stay in use (RV-DS241-137 code r1 F3). Inputs: the base and terminal variables.
+/// Output: the variables, or `Invalid` when any one fails [`agent_variable_allowed`].
+pub fn owner_terminal_env<'a>(
+    base: &[(&str, &OsStr)],
+    terminal: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Vec<(OsString, OsString)>, SandboxError> {
+    built_env(base, terminal, &[])
+}
+
+/// Builds the environment [`agent_env`] describes, setting `home` after the fixed git and
+/// TLS settings. Inputs: the base and harness variables and the home settings. Output: the
+/// variables, or `Invalid` when any one fails [`agent_variable_allowed`].
+fn built_env<'a>(
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+    home: &[(&'static str, &'static str)],
 ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
     let refused = || invalid("agent environment holds an owner secret");
     let mut env: Vec<(OsString, OsString)> = Vec::new();
@@ -501,7 +541,11 @@ pub fn agent_env<'a>(
     if let Some(prefix) = prefix {
         set(&mut env, OsStr::new("TMPPREFIX"), Some(prefix.as_os_str()));
     }
-    for (name, value) in AGENT_GIT_ENV.into_iter().chain(AGENT_TLS_ENV) {
+    let fixed = AGENT_GIT_ENV
+        .into_iter()
+        .chain(AGENT_TLS_ENV)
+        .chain(home.iter().copied());
+    for (name, value) in fixed {
         set(&mut env, OsStr::new(name), Some(OsStr::new(value)));
     }
     if env.len() > AGENT_ENV_MAX {
@@ -2887,6 +2931,8 @@ impl ProjectSandbox {
             .map(|rule| rule.seatbelt(&self.project_root))
             .unwrap_or_default();
         text.push_str(&agent_files);
+        let ignored = hfs_ignored_deny();
+        text.push_str(&ignored);
         assert_eq!(
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len() + self.granted.len()
@@ -2913,6 +2959,7 @@ impl ProjectSandbox {
         if !agent_files.is_empty() {
             last.push(agent_files);
         }
+        last.push(ignored);
         assert!(
             denies_follow_write_allows(&text, &last),
             "a read-only, root, fixed, shared or teammates' write deny must follow every write allow, since the last match wins"
@@ -3771,59 +3818,233 @@ fn teammates_clone_denies(clone: &Path, lead: Option<&str>) -> String {
     text
 }
 
-/// Spells plain text as a Seatbelt regex that matches it in any letter case, for names a
-/// case-insensitive volume finds however they are typed. APFS folds case by Unicode rules,
-/// so `k` also matches U+212A KELVIN SIGN and `s` U+017F LATIN SMALL LETTER LONG S, the
-/// only other letters that fold to ASCII; those two are spelled as groups, so each matches
-/// its whole UTF-8 sequence (LL2S-2). Input: text without a quote or backslash. Output: the
+/// Spells plain text as a Seatbelt regex that matches every name a case-insensitive volume
+/// finds under it: each letter in both cases with every code point that folds onto it or
+/// onto a run of two or three letters ([`spelled`]), so the rule never leans on how Seatbelt
+/// folds names itself (SA vid 202). A stretch with more than [`SPELLINGS_MAX`] spellings, a
+/// long run of `s` or `f` in path text, is spelled as the [`superset`], which matches more,
+/// so the result holds in a deny. Input: text without a quote or backslash. Output: the
 /// pattern text, without anchors.
 pub(crate) fn any_case(text: &str) -> String {
-    regex_escape(text)
-        .chars()
-        .map(|character| {
-            if character.eq_ignore_ascii_case(&'k') {
-                "(k|K|\u{212a})".to_owned()
-            } else if character.eq_ignore_ascii_case(&'s') {
-                "(s|S|\u{17f})".to_owned()
-            } else if character.is_ascii_alphabetic() {
-                format!(
-                    "[{}{}]",
-                    character.to_ascii_lowercase(),
-                    character.to_ascii_uppercase()
-                )
-            } else {
-                character.to_string()
-            }
-        })
-        .collect()
+    spelled(&regex_escape(text), false)
 }
 
-/// Escapes plain text for a Seatbelt regex, so every character matches itself. Input: text
-/// without a quote or backslash. Output: the pattern text, without anchors.
-/// A Seatbelt regex fragment matched in any letter case, as [`any_case`] does for plain
-/// text: each ASCII letter becomes both cases, `k` also the Kelvin sign and `s` the long s,
-/// which a case-insensitive volume folds the same; every other character, regex syntax
-/// included, stays as written. Input: a fragment with no bracket class. Output: the pattern.
+/// A Seatbelt regex fragment matched as [`any_case`] matches plain text, every character
+/// that is not a letter, regex syntax included, staying as written; a letter run next to a
+/// wildcard also takes a fold reaching into it ([`spelled_run`]). Every stretch is listed
+/// whole, so a rule that gives access back stays exact. Input: a fragment with no bracket
+/// class or quote. Output: the pattern.
 pub(crate) fn fold_case(pattern: &str) -> String {
     assert!(!pattern.contains('[') && !pattern.contains('"'));
+    spelled(pattern, true)
+}
+
+/// The most spellings one stretch of letters between two places no fold spans lists one by
+/// one; past it path text takes the [`superset`] (B5 r2).
+const SPELLINGS_MAX: usize = 8;
+
+/// Spells text run by run from [`crate::instruction_files::ASCII_FOLDS`]: each run of ASCII
+/// letters through [`spelled_run`], every other character through [`spelled_char`]. In a
+/// regex fragment a letter a quantifier follows stands alone, and no fold may join it to a
+/// letter beside it. Inputs: the text and whether it is a regex fragment. Output: the pattern.
+fn spelled(text: &str, regex: bool) -> String {
+    let characters: Vec<char> = text.chars().collect();
+    let letter = |at: usize| characters.get(at).is_some_and(char::is_ascii_alphabetic);
+    let quantified =
+        |at: usize| regex && matches!(characters.get(at + 1), Some('?' | '*' | '+' | '{'));
+    let mut pattern = String::with_capacity(text.len() * 8);
+    let mut at = 0;
+    while at < characters.len() {
+        if !letter(at) || quantified(at) {
+            assert!(!letter(at) || !joins_fold(&characters, at));
+            pattern.push_str(&spelled_char(characters[at]));
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while letter(at) && !quantified(at) {
+            at += 1;
+        }
+        let before = regex && start > 0 && matches!(characters[start - 1], '*' | '+');
+        let after = regex
+            && characters.get(at) == Some(&'.')
+            && matches!(characters.get(at + 1), Some('*' | '+'));
+        pattern.push_str(&spelled_run(&characters[start..at], before, after, regex));
+    }
     pattern
-        .chars()
-        .map(|character| {
-            if character.eq_ignore_ascii_case(&'k') {
-                "(k|K|\u{212a})".to_owned()
-            } else if character.eq_ignore_ascii_case(&'s') {
-                "(s|S|\u{17f})".to_owned()
-            } else if character.is_ascii_alphabetic() {
-                format!(
-                    "[{}{}]",
-                    character.to_ascii_lowercase(),
-                    character.to_ascii_uppercase()
-                )
-            } else {
-                character.to_string()
+}
+
+/// Tells whether a fold of two or three letters would join the letter at `at` to the letter
+/// before it or to the one after its quantifier. Inputs: the characters and the letter's
+/// place. Output: true when one would.
+fn joins_fold(characters: &[char], at: usize) -> bool {
+    let joined = |left: Option<&char>, right: Option<&char>| match (left, right) {
+        (Some(left), Some(right)) if left.is_ascii_alphabetic() && right.is_ascii_alphabetic() => {
+            let pair = format!("{left}{right}").to_ascii_lowercase();
+            crate::instruction_files::ASCII_FOLDS
+                .iter()
+                .any(|(_, folded)| folded.contains(pair.as_str()))
+        }
+        _ => false,
+    };
+    let previous = at.checked_sub(1).and_then(|before| characters.get(before));
+    joined(previous, characters.get(at)) || joined(characters.get(at), characters.get(at + 2))
+}
+
+/// Spells one character as a case-insensitive volume finds it: an ASCII letter in both
+/// cases, with every code point that folds onto it alone, the non-ASCII ones in a group so
+/// each matches its whole UTF-8 sequence (LL2S-2). Input: the character. Output: the pattern.
+fn spelled_char(character: char) -> String {
+    let lower = character.to_ascii_lowercase();
+    let mut alternatives = vec![lower.to_string()];
+    if character.is_ascii_alphabetic() {
+        alternatives.push(character.to_ascii_uppercase().to_string());
+    }
+    for (point, folded) in crate::instruction_files::ASCII_FOLDS {
+        if folded.len() == 1 && folded.starts_with(lower) {
+            alternatives.push(point.to_string());
+        }
+    }
+    if alternatives.len() == 1 {
+        character.to_string()
+    } else if alternatives.iter().all(|alternative| alternative.is_ascii()) {
+        format!("[{}]", alternatives.concat())
+    } else {
+        format!("({})", alternatives.join("|"))
+    }
+}
+
+/// Spells one run of ASCII letters with every fold of two or three letters inside it and,
+/// next to a wildcard, every fold reaching past its first or last letter into the wildcard.
+/// The run splits where no fold spans, each stretch listing all its spellings, or past
+/// [`SPELLINGS_MAX`] taking the [`superset`] unless it must stay exact. Inputs: the letters,
+/// whether a wildcard comes before and after them and whether every stretch must be listed
+/// whole. Output: the pattern text.
+fn spelled_run(run: &[char], before: bool, after: bool, exact: bool) -> String {
+    let lower: String = run.iter().map(char::to_ascii_lowercase).collect();
+    let count = run.len();
+    let mut folds: Vec<(usize, usize, char)> = Vec::new();
+    for (point, folded) in crate::instruction_files::ASCII_FOLDS {
+        let width = folded.len();
+        if width < 2 {
+            continue;
+        }
+        for at in (0..count).filter(|&at| lower[at..].starts_with(folded)) {
+            folds.push((at, at + width, point));
+        }
+        for split in 1..width {
+            if before && lower.starts_with(&folded[split..]) {
+                folds.push((0, width - split, point));
             }
-        })
-        .collect()
+            if after && lower.ends_with(&folded[..split]) {
+                folds.push((count - split, count, point));
+            }
+        }
+        for inner in 1..width.saturating_sub(count) {
+            if before && after && folded[inner..inner + count] == lower {
+                folds.push((0, count, point));
+            }
+        }
+    }
+    folds.sort_unstable();
+    folds.dedup();
+    let mut pieces: Vec<(usize, usize, String)> = (0..count)
+        .map(|at| (at, at + 1, spelled_char(run[at])))
+        .collect();
+    pieces.extend(
+        folds
+            .into_iter()
+            .map(|(start, end, point)| (start, end, point.to_string())),
+    );
+    let cuts: Vec<usize> = (0..=count)
+        .filter(|&cut| !pieces.iter().any(|(start, end, _)| *start < cut && cut < *end))
+        .collect();
+    let mut pattern = String::new();
+    for stretch in cuts.windows(2) {
+        let (at, to) = (stretch[0], stretch[1]);
+        let (count, fewest) = tally(&pieces, at, to);
+        assert!(count >= 1 && (1..=to - at).contains(&fewest));
+        if count > SPELLINGS_MAX {
+            assert!(!exact, "a pattern stretch lists every spelling");
+            pattern.push_str(&superset(&pieces, at, to, fewest));
+            continue;
+        }
+        let mut spellings = Vec::new();
+        spell_stretch(&pieces, at, to, String::new(), &mut spellings);
+        assert_eq!(spellings.len(), count);
+        if let [only] = spellings.as_slice() {
+            pattern.push_str(only);
+        } else {
+            pattern.push_str(&format!("({})", spellings.join("|")));
+        }
+    }
+    pattern
+}
+
+/// Counts the spellings of the letters from `at` to `to` that the pieces give, up to one
+/// past [`SPELLINGS_MAX`], and the fewest pieces one spelling takes, place by place from the
+/// end, so no long run is listed to be counted. Inputs: the pieces as start, end and
+/// pattern, and the stretch. Output: the count and the fewest pieces.
+fn tally(pieces: &[(usize, usize, String)], at: usize, to: usize) -> (usize, usize) {
+    assert!(at < to);
+    let mut counts = vec![0; to - at + 1];
+    let mut fewest = vec![0; to - at + 1];
+    counts[to - at] = 1;
+    for place in (at..to).rev() {
+        let ends: Vec<usize> = pieces
+            .iter()
+            .filter(|(start, end, _)| *start == place && *end <= to)
+            .map(|(_, end, _)| end - at)
+            .collect();
+        assert!(!ends.is_empty());
+        counts[place - at] = ends
+            .iter()
+            .fold(0, |sum, &end| (sum + counts[end]).min(SPELLINGS_MAX + 1));
+        fewest[place - at] = 1 + ends.iter().map(|&end| fewest[end]).min().unwrap_or(0);
+    }
+    (counts[0], fewest[0])
+}
+
+/// Spells the letters from `at` to `to` as one of the stretch's pieces at each place, at
+/// least `fewest` places and at most one per letter, the extra places optional, since
+/// Seatbelt reads no `{m,n}` count (probe 2026-11-15). It matches every spelling and more,
+/// so it holds only in a deny. Inputs: the pieces, the stretch and its fewest pieces.
+/// Output: the pattern.
+fn superset(pieces: &[(usize, usize, String)], at: usize, to: usize, fewest: usize) -> String {
+    let mut alternatives: Vec<&str> = Vec::new();
+    for (start, end, piece) in pieces {
+        if at <= *start && *end <= to && !alternatives.contains(&piece.as_str()) {
+            alternatives.push(piece);
+        }
+    }
+    let place = format!("({})", alternatives.join("|"));
+    let optional = format!("{place}?");
+    let pattern = place.repeat(fewest) + &optional.repeat(to - at - fewest);
+    assert!(fewest <= to - at && pattern.len() <= (to - at) * optional.len());
+    pattern
+}
+
+/// Lists every spelling of the letters from `at` to `to` that the pieces give, in order.
+/// Inputs: the pieces as start, end and pattern, the stretch, the spelling so far and the
+/// list it adds to. Output: none; the list grows.
+fn spell_stretch(
+    pieces: &[(usize, usize, String)],
+    at: usize,
+    to: usize,
+    so_far: String,
+    spellings: &mut Vec<String>,
+) {
+    if at == to {
+        spellings.push(so_far);
+        return;
+    }
+    assert!(at < to);
+    for (start, end, piece) in pieces {
+        if *start == at && *end <= to {
+            assert!(start < end);
+            spell_stretch(pieces, *end, to, format!("{so_far}{piece}"), spellings);
+        }
+    }
 }
 
 /// Whether `name` can be one top-level name [`ProjectSandbox::open_only_tops`] keeps open:
@@ -3883,6 +4104,8 @@ pub(crate) fn sbpl_overlong(profile: &str) -> Vec<&str> {
     overlong
 }
 
+/// Escapes plain text for a Seatbelt regex, so every character matches itself. Input: text
+/// without a quote or backslash. Output: the pattern text, without anchors.
 fn regex_escape(text: &str) -> String {
     assert!(!text.contains('"') && !text.contains('\\'));
     let mut pattern = String::with_capacity(text.len() * 2);
@@ -4112,12 +4335,22 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
 /// keychain and keychain settings, which the engine sets up with `security` calls before a
 /// launch, out of its reach (DEC-146): no write under `Library/Keychains` nor to
 /// `Library/Preferences/com.apple.security.plist`, and no move, removal, mode change or link
-/// in place of `Library` or `Library/Preferences`, so no link an agent plants leads one of
-/// those calls to another keychain or settings file. They must follow every write allow.
-/// Input: the home. Output: the rule text.
+/// in place of `Library`, `Library/Preferences` or any other folder a launch keeps only part
+/// of, nor of the cargo cache links the launch keeps, nor a link it makes at their names
+/// ([`crate::agent_home::pinned_entries`], DEC-173), as [`root_pin`] keeps the home itself,
+/// so no link an agent plants leads one of those calls, a launch's removal of what it does
+/// not keep or a later cargo outside the home. They deny writes to cargo's, git's, npm's
+/// and yarn's own config and cargo's subcommands in the home (`.cargo/config`,
+/// `.cargo/config.toml`, `.config/git`, `.npmrc`, `.yarnrc`, `.yarnrc.yml`, `.cargo/bin`)
+/// and any file flag or ACL in it, so a run, or a process of it still alive after the next
+/// launch's reset, neither plants config or programs its own tools run nor pins what the
+/// next launch removes or writes (RV-DS241-137, -138, sec r1 F1, F2). They deny writes to
+/// the launch lock too, so no run links, removes or replaces it, since a launch refuses a
+/// lock with a second link (r3). They must follow every write allow. Input: the home.
+/// Output: the rule text.
 fn launch_denies(home: &Path) -> String {
     use crate::agent_home::Harness;
-    use crate::launch_context::STATE;
+    use crate::launch_context::{LOCK, STATE};
     let home = seatbelt_pattern(home);
     let skills = format!("{home}/{}", any_case("skills"));
     let folders = [
@@ -4129,6 +4362,13 @@ fn launch_denies(home: &Path) -> String {
         "rules",
         ".agents",
         "Library/Keychains",
+        ".cargo/config",
+        ".cargo/config.toml",
+        ".cargo/bin",
+        ".config/git",
+        ".npmrc",
+        ".yarnrc",
+        ".yarnrc.yml",
     ];
     let files = [
         Harness::Claude.instruction_file(),
@@ -4137,6 +4377,7 @@ fn launch_denies(home: &Path) -> String {
         "config.toml",
         "settings.json",
         "Library/Preferences/com.apple.security.plist",
+        LOCK,
     ];
     let mut text = String::from("(deny file-write*\n");
     for folder in folders {
@@ -4155,11 +4396,24 @@ fn launch_denies(home: &Path) -> String {
         other_than(crate::launch_context::CODEX_SYSTEM_SKILLS)
     ));
     let library = format!("{home}/{}", any_case("Library"));
-    let preferences = format!("{library}/{}", any_case("Preferences"));
+    let walked: Vec<String> = crate::agent_home::pinned_entries()
+        .iter()
+        .map(|entry| format!("{home}/{}", any_case(entry)))
+        .collect();
+    assert!(walked.contains(&library));
+    assert!(walked.contains(&format!("{home}/{}", any_case(".cargo/registry"))));
+    let spelled = |indent: &str| {
+        walked
+            .iter()
+            .map(|folder| format!("\n{indent}(regex #\"^{folder}$\")"))
+            .collect::<String>()
+    };
     text.push_str(&format!(
-        "(deny {PINNED_WRITES}\n  (regex #\"^{library}$\")\n  (regex #\"^{preferences}$\"))\n(deny file-write-create\n  (require-all\n    (require-any\n      (regex #\"^{library}$\")\n      (regex #\"^{preferences}$\"))\n    (vnode-type SYMLINK)))\n"
+        "(deny {PINNED_WRITES}{})\n(deny file-write-create\n  (require-all\n    (require-any{})\n    (vnode-type SYMLINK)))\n(deny file-write-flags file-write-acl (regex #\"^{home}(/.*)?$\"))\n",
+        spelled("  "),
+        spelled("      "),
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 23);
+    assert_eq!(text.matches("(regex #\"^/").count(), 42);
     text
 }
 
@@ -4249,6 +4503,29 @@ pub(crate) fn regranted_denies(home: &Path, folders: &[&Path]) -> String {
     }
     text.push_str(&format!("(deny file-write*{nested})\n"));
     text
+}
+
+/// The Seatbelt rule that refuses reading, writing, linking or cloning any path with a part
+/// made of ASCII, [`crate::instruction_files::ASCII_FOLDS`] points and at least one code
+/// point HFS+ ignores in names, since such a volume opens `.g\u{200c}it/config` as
+/// `.git/config` past every name deny (SA vid 202). A part in another script keeps its
+/// joiners. Output: the rule, ending in a line break.
+pub(crate) fn hfs_ignored_deny() -> String {
+    let ignored: Vec<String> = crate::instruction_files::HFS_IGNORED
+        .iter()
+        .map(char::to_string)
+        .collect();
+    let folds: Vec<String> = crate::instruction_files::ASCII_FOLDS
+        .iter()
+        .map(|(point, _)| point.to_string())
+        .collect();
+    let ignored = ignored.join("|");
+    let part = format!("([ -.0-~]|{}|{ignored})", folds.join("|"));
+    let rule = format!(
+        "(deny file-read-data file-write* file-link file-clone\n  (regex #\"^(.*/)?{part}*({ignored}){part}*(/.*)?$\"))\n"
+    );
+    assert!(rule.len() <= SBPL_STRING_MAX && rule.matches('"').count() == 2);
+    rule
 }
 
 /// Whether every deny rule comes after the profile's last write allow, since Seatbelt applies
@@ -4856,6 +5133,73 @@ mod profile_string_tests {
         assert_eq!(sbpl_overlong(&text), vec![long.as_str(), longer.as_str()]);
         assert!(sbpl_overlong(&format!("(literal \"{fits}\")")).is_empty());
         assert_eq!(sbpl_overlong("(literal \"/open"), vec!["/open"]);
+    }
+
+    /// SA vid 202: a name is spelled with every code point the case-insensitive volume folds
+    /// onto its letters, also those for two or three letters (U+00DF and U+1E9E for `ss`,
+    /// U+FB00 to U+FB06 for `ff`, `fi`, `fl`, `ffi`, `ffl` and `st`), and the Greek question
+    /// mark and varia for `;` and the backtick, and U+0131 for `i` as NTFS maps it. In a
+    /// pattern a fold reaches into a wildcard
+    /// next to the letters, never into a literal or an alternation, so the env templates the
+    /// secret rule gives back stay exact.
+    #[test]
+    fn a_name_is_spelled_with_every_fold_of_the_volume_also_for_two_or_three_letters() {
+        let spelled = [
+            ("config", "[cC][oO][nN]([fF](i|I|\u{131})|\u{fb01})[gG]"),
+            (
+                "instructions.md",
+                concat!(
+                    "(i|I|\u{131})[nN]((s|S|\u{17f})[tT]|\u{fb05}|\u{fb06})",
+                    "[rR][uU][cC][tT](i|I|\u{131})[oO][nN](s|S|\u{17f})\\.[mM][dD]",
+                ),
+            ),
+            (
+                ".ssh",
+                "\\.((s|S|\u{17f})(s|S|\u{17f})|\u{df}|\u{1e9e})[hH]",
+            ),
+            (
+                "ffi",
+                "([fF][fF](i|I|\u{131})|[fF]\u{fb01}|\u{fb00}(i|I|\u{131})|\u{fb03})",
+            ),
+            (".git", "\\.[gG](i|I|\u{131})[tT]"),
+            ("k", "(k|K|\u{212a})"),
+            (";`", "(;|\u{37e})(`|\u{1fef})"),
+        ];
+        for (name, pattern) in spelled {
+            assert_eq!(any_case(name), pattern, "{name}");
+        }
+        assert_eq!(
+            fold_case(".*service"),
+            ".*((s|S|\u{17f})|\u{df}|\u{1e9e})[eE][rR][vV](i|I|\u{131})[cC][eE]"
+        );
+        assert_eq!(
+            fold_case("of.*"),
+            "[oO]([fF]|\u{fb00}|\u{fb01}|\u{fb02}|\u{fb03}|\u{fb04}).*"
+        );
+        assert_eq!(
+            fold_case("secrets?"),
+            "(s|S|\u{17f})[eE][cC][rR][eE][tT](s|S|\u{17f})?"
+        );
+        let templates = fold_case(shared_folders::SECRET_TEMPLATES);
+        assert!(!templates.contains(['\u{df}', '\u{1e9e}']));
+    }
+
+    /// B5 r2 (rv-sec3 F1, rv-code4 F1): path text with a long fold run, such as a project
+    /// folder named with 7 `s` or 10 `f` or a top-level folder with 60, is spelled with no
+    /// panic and no runaway list: a stretch past the spelling limit takes one of its pieces
+    /// at each place, its fewest pieces' worth of places and the rest up to one per letter
+    /// optional, since Seatbelt reads no `{m,n}` count. A pattern keeps every stretch exact.
+    #[test]
+    fn a_long_fold_run_in_path_text_is_spelled_in_bounded_length_never_a_panic() {
+        let s = "((s|S|\u{17f})|\u{df}|\u{1e9e})";
+        assert_eq!(any_case("ssss"), format!("{s}{s}{s}?{s}?"));
+        let f = "([fF]|\u{fb00})";
+        assert_eq!(any_case("ffffff"), format!("{f}{f}{f}{f}?{f}?{f}?"));
+        let root = format!("/Users/o/Glasssssss/{}/{}", "f".repeat(10), "s".repeat(60));
+        let spelled = any_case(&root);
+        assert!(spelled.len() <= 20 * root.len(), "{}", spelled.len());
+        assert!(!spelled.contains('{'), "{spelled}");
+        assert!(std::panic::catch_unwind(|| fold_case("sssss")).is_err());
     }
 
     /// The default secret rule and 64 long open top-level names give a profile with no string

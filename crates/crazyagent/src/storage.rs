@@ -179,7 +179,26 @@ pub(crate) enum Job {
     ),
     HomeAddSettle(RequestId, oneshot::Sender<Result<(), EngineError>>),
     HomeAddEnded(oneshot::Sender<Result<Option<projects_home::AddEnded>, EngineError>>),
-    HomeAddForget(RequestId, oneshot::Sender<Result<(), EngineError>>),
+    HomeProjectMoveEnded(oneshot::Sender<Result<Option<projects_home::MoveEnded>, EngineError>>),
+    HomeJobForget(RequestId, oneshot::Sender<Result<(), EngineError>>),
+    HomeDeleteCheck(
+        Admission,
+        ProjectId,
+        String,
+        oneshot::Sender<Result<String, EngineError>>,
+    ),
+    HomeDeleteCutShort(
+        oneshot::Sender<
+            Result<Option<(crate::projects_home::delete_mark::CutShort, u64)>, EngineError>,
+        >,
+    ),
+    HomeDeleteKeep(RequestId, oneshot::Sender<Result<bool, EngineError>>),
+    HomeProjectMoveCheck(
+        Admission,
+        ProjectId,
+        crate::projects_home::AddMode,
+        oneshot::Sender<Result<String, EngineError>>,
+    ),
     HomeMovePlan(
         Admission,
         Cursor,
@@ -662,11 +681,46 @@ impl Storage {
                         Job::HomeAddEnded(reply) => {
                             let _ = reply.send(projects_home::add_ended(&connection));
                         }
-                        Job::HomeAddForget(request, reply) => {
+                        Job::HomeProjectMoveEnded(reply) => {
+                            let _ = reply.send(projects_home::move_ended(&connection));
+                        }
+                        Job::HomeJobForget(request, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::add_forget(&connection, &request)
+                                projects_home::job_forget(&connection, &request)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeDeleteCheck(admission, project, name, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::delete_job_check(
+                                    &mut connection,
+                                    &admission,
+                                    &project,
+                                    &name,
+                                )
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeDeleteCutShort(reply) => {
+                            let _ = reply.send(projects_home::delete_cut_short(&connection));
+                        }
+                        Job::HomeDeleteKeep(request, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::delete_keep(&connection, &request)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeProjectMoveCheck(admission, project, mode, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::project_move_check(&mut connection, &admission, &project, mode)
                             };
                             let _ = reply.send(result);
                         }
@@ -1168,6 +1222,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
     crate::worktrees::reconcile(connection)?;
+    crate::project_setup::forget_removed(connection, &["repository_admissions"])?;
     worker_dispatch::initialize(connection)?;
     model_gateway::initialize(connection)?;
     master_session::initialize(connection)?;
@@ -2513,7 +2568,11 @@ fn owner_apply_with(
         (Some(Effect::NewProject(_)), _) => return Err(error("setup_record_invalid")),
         (Some(Effect::Delete(outcome)), Command::ProjectSetup { action }) => {
             crate::learning::latch(&tx);
-            crate::project_setup::record_delete(&tx, action, outcome, revision)?
+            let recorded = crate::project_setup::record_delete(&tx, action, outcome, revision)?;
+            if let (Outcome::Applied, Ok(files)) = (&recorded, outcome) {
+                projects_home::record_files(&tx, files)?;
+            }
+            recorded
         }
         (Some(Effect::Delete(_)), _) => return Err(error("delete_record_invalid")),
         (None, _) if request.expected_revision.value() != revision => Outcome::Rejected {

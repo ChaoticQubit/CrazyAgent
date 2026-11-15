@@ -295,7 +295,7 @@ pub(super) fn posix_shared(value: &[u8], me: u32, trusted: impl Fn(u32) -> bool)
         return None;
     }
     let mut shared = false;
-    for entry in entries.chunks_exact(POSIX_ACL_ENTRY_BYTES) {
+    for entry in entries.as_chunks::<POSIX_ACL_ENTRY_BYTES>().0 {
         let tag = u16::from_le_bytes([entry[0], entry[1]]);
         let rights = u16::from_le_bytes([entry[2], entry[3]]);
         let id = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);

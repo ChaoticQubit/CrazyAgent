@@ -134,9 +134,11 @@ pub struct Ctx {
     pub shift_arrows: crate::tui::keys::ShiftArrows,
     pub shift_enter: crate::tui::keys::ShiftEnter,
     pub project_step: Option<(crate::protocol::ProjectId, bool)>,
+    pub starts_engine: bool,
     requests: VecDeque<Request>,
     refused: Vec<Arrival>,
     reconnect: bool,
+    start: bool,
     message: Option<Message>,
     generation: u64,
     learned: Vec<MarkStep>,
@@ -177,9 +179,11 @@ impl Ctx {
             shift_arrows: crate::tui::keys::ShiftArrows::default(),
             shift_enter: crate::tui::keys::ShiftEnter::default(),
             project_step: None,
+            starts_engine: false,
             requests: VecDeque::new(),
             refused: Vec::new(),
             reconnect: false,
+            start: false,
             message: None,
             generation: 0,
             learned: Vec::new(),
@@ -328,6 +332,21 @@ impl Ctx {
     /// Input: none. Output: true once per ask.
     pub fn take_reconnect(&mut self) -> bool {
         std::mem::take(&mut self.reconnect)
+    }
+
+    /// Asks for the engine to be started, or its login service repaired, before the next
+    /// reconnect, which jumps the queue as a reconnect ask does (DS-118).
+    /// Input: none. Output: none.
+    pub fn start_engine(&mut self) {
+        self.start = true;
+        self.reconnect = true;
+    }
+
+    /// Takes a pending start ask, which always comes with its reconnect ask, so the
+    /// reconnect that follows starts the engine first.
+    /// Input: none. Output: true once per ask.
+    pub fn take_start(&mut self) -> bool {
+        std::mem::take(&mut self.start)
     }
 
     /// Number of queued requests.

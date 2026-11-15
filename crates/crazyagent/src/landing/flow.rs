@@ -8,6 +8,7 @@ use super::store::{self, Intent, Record};
 use super::{AgentKind, ChangeSetId, ChangeState, RESTORE_WINDOW_MS, TurnEnd, Workspace};
 use crate::agent_git::{self, Layout};
 use crate::engine::EngineError;
+use crate::instruction_files::ASCII_FOLDS;
 use crate::protocol::ProjectId;
 use crate::worktrees::TreeBounds;
 use rusqlite::Connection;
@@ -955,18 +956,22 @@ pub(super) fn reset_settling(agent: &Agent, from: &str, target: &str) -> Result<
 }
 
 /// Puts an agent worktree's index and files back after its reset did not hold, moving them
-/// from `target` to whatever HEAD now holds with the same two-tree read-tree, path by path:
+/// from `target` to whatever HEAD now holds, named by its id so the index the engine rebuilds
+/// after the step reads the same trees (SA vid 3), with the same two-tree read-tree, path by path:
 /// a path the agent committed meanwhile is at HEAD already and stays, so no reversal of
 /// that commit is staged, and the rest go back to the commit HEAD holds. An edit the agent
 /// made meanwhile is never overwritten: git refuses, writing nothing, and the refusal is
 /// logged. Inputs: the worktree and the reset's target. Output: none.
 fn files_back(agent: &Agent, target: &str) {
     assert!(is_object_id(target));
-    let back = agent
-        .repo
-        .confined(Writes::WorkTree)
-        .and_then(|repo| repo.exec(&["read-tree", "-u", "-m", target, "HEAD"], None, &[], 4096));
-    if !back.is_ok_and(|back| back.code == 0) {
+    let head = agent.repo.commit_of("HEAD").ok().flatten();
+    let back = head.as_deref().map(|head| {
+        agent
+            .repo
+            .confined(Writes::WorkTree)
+            .and_then(|repo| repo.exec(&["read-tree", "-u", "-m", target, head], None, &[], 4096))
+    });
+    if !back.is_some_and(|back| back.is_ok_and(|back| back.code == 0)) {
         eprintln!("landing_reset_files_back_refused");
     }
 }
@@ -1716,25 +1721,6 @@ fn fresh_link_inside(
     !entered(&walk, agents) && !walk.iter().any(|part| part.eq_ignore_ascii_case(".git"))
 }
 
-/// The code points outside ASCII that a case-insensitive APFS volume folds onto ASCII,
-/// with the ASCII they fold onto: the full case fold of their canonical decomposition,
-/// each checked on the volume (probe 2026-10-28). Every other code point stays outside ASCII.
-const ASCII_FOLDS: [(char, &str); 13] = [
-    ('\u{DF}', "ss"),
-    ('\u{17F}', "s"),
-    ('\u{37E}', ";"),
-    ('\u{1E9E}', "ss"),
-    ('\u{1FEF}', "`"),
-    ('\u{212A}', "k"),
-    ('\u{FB00}', "ff"),
-    ('\u{FB01}', "fi"),
-    ('\u{FB02}', "fl"),
-    ('\u{FB03}', "ffi"),
-    ('\u{FB04}', "ffl"),
-    ('\u{FB05}', "st"),
-    ('\u{FB06}', "st"),
-];
-
 /// Folds one path part the way the volume compares names, when the result is ASCII.
 /// Input: the part. Output: the part in ASCII lower case with [`ASCII_FOLDS`] applied and
 /// the code points HFS+ ignores in names left out
@@ -1896,6 +1882,63 @@ fn ignores_any(checkout: &Path, paths: &[&str]) -> Result<bool, EngineError> {
     }
 }
 
+/// The pathspecs a turn end's `add -A` reads from its input, each ending in a NUL: the whole
+/// tree but the teammates' folder ([`teammates_left_out`]), less each untracked path only the
+/// owner's ignore file excludes: what this unconfined git lists as ignored under the owner's
+/// file, an ignored folder once with a closing `/`, but not under the add's own rules (no
+/// excludes file, [`super::git::NO_EXCLUDES`]). The confined add on Linux may not read that file,
+/// since a link swapped in during the add would copy it into the object store (SA vid 2), so
+/// it gets the file's patterns as names, which tell it nothing the agent's own listing does
+/// not; it still applies the work tree's `.gitignore` and `info/exclude` itself, and git's add
+/// exits 1 when a pathspec names a path it ignores (rv-code2 F1). Elsewhere the add still
+/// applies the owner's file itself, so no listing runs there. Input: the agent's repository.
+/// Output: the pathspecs, `changes_too_large` past the listing bound or `changes_git_failed`.
+#[cfg(target_os = "linux")]
+fn add_pathspecs(repo: &Repo) -> Result<Vec<u8>, EngineError> {
+    let teammates = teammates_left_out();
+    let args = [
+        "-c",
+        super::git::NO_EXCLUDES,
+        "ls-files",
+        "-z",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+        "--",
+        ":(top)",
+        teammates.as_str(),
+    ];
+    let ignored = |args: &[&str]| -> Result<Vec<u8>, EngineError> {
+        let listed = repo.exec(args, None, &[], LISTING_BYTES_MAX)?;
+        if listed.code != 0 {
+            return Err(failure("changes_git_failed"));
+        }
+        if listed.overflow {
+            return Err(failure("changes_too_large"));
+        }
+        Ok(listed.stdout)
+    };
+    let owners = ignored(&args[2..])?;
+    let own_rules = ignored(&args[..])?;
+    let own: BTreeSet<&[u8]> = own_rules.split(|byte| *byte == 0).collect();
+    let mut pathspecs = format!(":(top)\0{teammates}\0").into_bytes();
+    let mut left_out = 0;
+    for path in owners.split(|byte| *byte == 0) {
+        if !path.is_empty() && !own.contains(path) {
+            pathspecs.extend_from_slice(b":(exclude,top,literal)");
+            pathspecs.extend_from_slice(path);
+            pathspecs.push(0);
+            left_out += 1;
+        }
+    }
+    assert_eq!(
+        pathspecs.iter().filter(|byte| **byte == 0).count(),
+        left_out + 2
+    );
+    Ok(pathspecs)
+}
+
 /// Stages everything in an agent worktree and makes it a commit object above `head`
 /// without moving any ref, or nothing when the tree equals `head`'s. The whole change
 /// set from `above` must stay within the bounds, staged files included, and its own work
@@ -1914,6 +1957,20 @@ fn commit_worktree(
     message: &str,
 ) -> Result<Option<String>, EngineError> {
     check_bounds(repo, worktree, bounds)?;
+    #[cfg(target_os = "linux")]
+    {
+        let pathspecs = add_pathspecs(repo)?;
+        let added = repo.confined(Writes::Objects)?.exec(
+            &["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+            Some(&pathspecs),
+            &[],
+            4096,
+        )?;
+        if added.code != 0 || added.overflow {
+            return Err(failure("changes_git_failed"));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
     repo.confined(Writes::Objects)?
         .run(&["add", "-A", "--", ":(top)", &teammates_left_out()])?;
     let tree = object_id(&repo.run(&["write-tree"])?)?;

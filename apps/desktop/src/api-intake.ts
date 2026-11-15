@@ -58,7 +58,7 @@ const COPY: Record<string, string> = {
   home_add_interrupted: "Adding the folder stopped part way. Check your projects folder before trying again.",
   home_add_cancelled: "Adding the folder stopped. Nothing was moved or copied.",
   home_add_in_progress: "A folder is being added to your projects folder. Try again when it finishes.",
-  intake_busy: "Another folder is being added. Wait for it to finish on Home.",
+  job_busy: "Another job is running. Wait for it to finish on Home.",
   intake_failed: "Adding the folder failed. Check your projects folder before trying again.",
   home_override_invalid: "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again.",
   home_record_invalid: "CrazyAgent's record of your projects folder can't be read.",
@@ -163,6 +163,11 @@ const COPY: Record<string, string> = {
   setup_winget_missing: "winget is needed to install uv and isn't installed. Install App Installer from the Microsoft Store, then run setup again.",
   setup_pin_invalid: "The pinned source isn't valid, so nothing was installed.",
   setup_tool_unsupported: "This tool can't be installed on this computer yet.",
+  setup_archive_unsafe: "The download held a file it shouldn't, so it wasn't installed.",
+  setup_pin_unlocked: "Setup has no locked list of this tool's files, so it wasn't installed.",
+  setup_local_app_data_missing: "Windows didn't say where your local app data folder is, so setup can't install here.",
+  setup_platform_unsupported: "Setup can't install this on this system yet. Install it yourself, then check again.",
+  agent_git_needs_tools: "Agent git needs the Command Line Tools: run xcode-select --install.",
   setup_request_bounds: "Setup couldn't take this request. Pick fewer entries and try again.",
   setup_request_invalid: "Setup couldn't read this request. Reload and try again.",
   setup_reply_bounds: "Setup's reply was too large to show. Reload and try again.",
@@ -197,12 +202,36 @@ export function measuredLine(bytes: number): string {
   return `It is about ${formatBytes(bytes)}.`;
 }
 
+const MOVE_COPY: Record<string, string> = {
+  move_project_busy: "The team is still stopping, or research or a change is still running. Move again in a few seconds.",
+  move_project_master_session: "The master is still working in its own copy of this project. Let it finish, then move.",
+  move_project_already_home: "This project is already in your CrazyAgent folder.",
+  move_project_copy_worktrees: "An agent works in a git worktree of this project, which a copy would leave behind. Move the project instead.",
+  move_project_folder_link: "This project's folder is reached through a link, so it can't be moved from here.",
+  move_project_in_progress: "A project is being moved. Try again when it is done.",
+  move_project_unavailable: "CrazyAgent couldn't check the team, so nothing was moved. Try again.",
+  move_project_interrupted: "The move stopped part way. Check the project folder before trying again.",
+  move_project_record_invalid: "CrazyAgent couldn't read the move it recorded. Check the project folder before trying again.",
+  move_project_old_folder_left: "The project moved, but part of its old folder couldn't be deleted. What's left there may be newer than the copy, so check it before you delete anything.",
+  home_move_project: "Another project uses this folder too, so it can't be moved or copied.",
+};
+
 /** Plain sentence for one intake, GitHub or setup failure.
  * Input: the code, or the failure with the engine cause behind it. Output: the intake copy, then
- * the project and app copy, then the fallback naming the code; a different cause is named after. */
+ * the project move copy, then the project and app copy, then the fallback naming the code; a
+ * different cause is named after. */
 export function intakeCopy(failure: string | { code: string; cause?: string }): string {
   const { code, cause } = typeof failure === "string" ? { code: failure, cause: undefined } : failure;
-  return Object.hasOwn(COPY, code) ? namedFailure(COPY[code], code, cause) : failureCopy({ code, cause });
+  if (Object.hasOwn(COPY, code)) return namedFailure(COPY[code], code, cause);
+  return Object.hasOwn(MOVE_COPY, code) ? namedFailure(MOVE_COPY[code], code, cause) : failureCopy({ code, cause });
+}
+
+/** Plain sentence for one refusal of a project move, the move's own words first. Input: the code,
+ * or the failure with the engine cause behind it. Output: the move copy, else the intake and app
+ * copy. */
+export function moveCopy(failure: string | { code: string; cause?: string }): string {
+  const code = typeof failure === "string" ? failure : failure.code;
+  return Object.hasOwn(MOVE_COPY, code) ? MOVE_COPY[code] : intakeCopy(failure);
 }
 
 function failure<T>(code: string): Result<T> {
@@ -278,7 +307,7 @@ export function cancelIcloudDownload(): Promise<Result<boolean>> {
  * adding that folder already. The native bridge checks the path by the host's own rule, so a
  * Windows drive or network share folder goes through (RV-DS241-1). Inputs: the absolute folder,
  * move or copy and the overrides. Output: the job, home_source_invalid for a path that is not
- * absolute there, or intake_busy while another folder is being added. */
+ * absolute there, or job_busy while another job runs. */
 export function startIntake(path: string, mode: AddFolderMode, overrides: AddOverride[]): Promise<Result<IntakeJob>> {
   return wrap(() => intakeStart(path, mode, overrides));
 }

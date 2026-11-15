@@ -179,18 +179,19 @@ fn process_state(pid: u32) -> Option<char> {
 fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
     let case = case();
     let started = case.tmp.join("started");
-    let parent = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(
-            "\"$0\" --die-with $$ --read / --write \"$1\" -- \
+    let parent = crazyagent::spawn_gate::status(
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(
+                "\"$0\" --die-with $$ --read / --write \"$1\" -- \
              /bin/sh -c 'echo $$ > \"$0\"; exec /bin/sleep 60' \"$2\" & /bin/sleep 2",
-        )
-        .arg(HELPER)
-        .arg(&case.tmp)
-        .arg(&started)
-        .stdin(Stdio::null())
-        .status()
-        .unwrap();
+            )
+            .arg(HELPER)
+            .arg(&case.tmp)
+            .arg(&started)
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
     assert!(parent.success());
     let pid: u32 = fs::read_to_string(&started)
         .expect("the helper started its program")
@@ -209,24 +210,32 @@ fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
     );
 
     let refused = case.tmp.join("refused");
-    let status = Command::new(HELPER)
-        .args(["--die-with", &i32::MAX.to_string(), "--read", "/", "--write"])
-        .arg(&case.tmp)
-        .args(["--", "/bin/sh", "-c", "echo ran > \"$0\""])
-        .arg(&refused)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .unwrap();
+    let status = crazyagent::spawn_gate::status(
+        Command::new(HELPER)
+            .args([
+                "--die-with",
+                &i32::MAX.to_string(),
+                "--read",
+                "/",
+                "--write",
+            ])
+            .arg(&case.tmp)
+            .args(["--", "/bin/sh", "-c", "echo ran > \"$0\""])
+            .arg(&refused)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
     assert_eq!(status.code(), Some(3), "a parent id that is not the parent");
     assert!(!refused.exists(), "nothing started for a wrong parent id");
-    let first = Command::new(HELPER)
-        .args(["--die-with", "1", "--read", "/", "--", "/bin/true"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .unwrap();
+    let first = crazyagent::spawn_gate::status(
+        Command::new(HELPER)
+            .args(["--die-with", "1", "--read", "/", "--", "/bin/true"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
     assert_eq!(first.code(), Some(2), "process 1 is refused as an argument");
 }
 
@@ -1075,9 +1084,20 @@ fn a_closed_bubblewrap_agent_opens_no_socket_its_network_namespace_does_not_hold
                     alg=refused\nudp=refused\naudit=refused\ntcp=ok\nroute=ok\n";
     let mut filtered = Command::new(HELPER);
     filtered
-        .args(["--filter-sockets", "--", "/usr/bin/python3", "-I", "-c", FAMILIES])
+        .args([
+            "--filter-sockets",
+            "--",
+            "/usr/bin/python3",
+            "-I",
+            "-c",
+            FAMILIES,
+        ])
         .current_dir(&case.project);
-    assert_eq!(families(filtered), expected, "the helper's socket filter alone");
+    assert_eq!(
+        families(filtered),
+        expected,
+        "the helper's socket filter alone"
+    );
     let bwrap = BWRAP_PATHS
         .iter()
         .map(Path::new)

@@ -4,7 +4,7 @@ import {
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntentReceipt, MasterInputs, MasterMessages, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntakeJob, IntentReceipt, MasterInputs, MasterMessages, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
   WakeRule, WakeRuleTarget,
 } from "./engine-client";
 
@@ -429,6 +429,7 @@ const copy: Record<string, string> = {
   home_trash_failed: "The folder couldn't be moved to the Trash. Nothing was deleted.",
   home_move_in_progress: "Your projects folder is still being moved. Try again when it finishes.",
   project_delete_interrupted: "Deleting the project stopped part way. Check the Trash and the project list before trying again.",
+  delete_cannot_stop: "It's moving its folders to the Trash, so it can't stop now. Wait for it to finish on Home.",
 };
 
 /** Plain sentence for one engine failure, never opaque.
@@ -796,12 +797,20 @@ export async function removeProject(id: string, generation: number, deleteName: 
   return result;
 }
 
-/** Moves or copies a project kept where it is into the projects folder. The engine waits for
- * its team to stop, moves the folder and points the project and its agents' copies at the new
- * place. Inputs: the project id, move or copy, the soft refusals the owner chose to go past and a
- * generation. Output: the receipt. */
-export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddOverride[], generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_move_project_home", { id, mode, overrides, generation });
+/** Starts the engine's job that moves or copies a project kept where it is into the projects
+ * folder, followed on Home: it downloads what is only in iCloud, waits for the project's agents
+ * to stop, moves the folder and points the project and its agents' copies at the new place
+ * (DEC-177). Inputs: the project id, move or copy and the soft refusals the owner chose to go
+ * past. Output: the started job, or the move's refusal. */
+export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddOverride[]): Promise<Result<IntakeJob>> {
+  return call<IntakeJob>("desktop_move_project_home", { id, mode, overrides });
+}
+
+/** Starts the engine's job that deletes a project, followed on Home: its agents stop, its
+ * folders go to the Trash and its records go (DEC-177 add.1). Inputs: the project id and its
+ * exact name as typed. Output: the started job, or the delete's refusal. */
+export function startDeleteJob(id: string, name: string): Promise<Result<IntakeJob>> {
+  return call<IntakeJob>("desktop_delete_project_job", { id, name });
 }
 
 export const PAGES_MAX = 50;

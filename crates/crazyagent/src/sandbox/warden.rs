@@ -40,7 +40,10 @@ pub struct Warden {
 }
 
 /// No warden exists off macOS: Bubblewrap's PID namespace and the Windows job end a run's
-/// processes themselves, and the Linux Landlock helper keeps none.
+/// processes themselves. Under the Linux Landlock helper a process that starts its own
+/// session leaves the process group that stopping the run signals and can outlive the run,
+/// so the engine trusts no path below a folder such a run could write: an agent home's reset
+/// walks it through handles (RV-DS241-137, sec F1 ds137-lock-linux).
 #[cfg(not(target_os = "macos"))]
 #[derive(Debug)]
 pub enum Warden {}
