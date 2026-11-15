@@ -1843,4 +1843,66 @@ fn an_acp_harness_starts_headless_with_its_manifest_arguments_and_its_tools_off_
             "--no-tools".into()
         ])
     );
+
+/// rv-secreview b6 r2 F1: a headless agent on pipes whose harness reaches its model through
+/// an engine key relay ends when that engine dies, a crash included, as a keyed pane does,
+/// so nothing is left to dial the relay's freed port. Closing the lifeline's pipe without
+/// `done` stands in for the engine's death.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut launch = team_launch("claude-code");
+    let base = launch.work.parent().unwrap().to_path_buf();
+    let (harness, pid) = (base.join("pid-harness"), base.join("harness-pid"));
+    std::fs::write(
+        &harness,
+        format!(
+            "#!/bin/sh\necho $$ > {}\nexec /bin/cat > /dev/null\n",
+            pid.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let token = format!(
+        "{}{}",
+        crate::model_gateway::relay::TOKEN_PREFIX,
+        "a".repeat(64)
+    );
+    launch.request.executable = harness;
+    launch.request.tools = false;
+    launch.request.account = AccountBinding::Url {
+        home: launch.request.account.home().to_path_buf(),
+        base_url: "http://127.0.0.1:9/v1".into(),
+        key: Some(super::Secret::new(token).unwrap()),
+    };
+    let mut session = super::Session::start(launch.request).unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let started = loop {
+        let text = std::fs::read_to_string(&pid).unwrap_or_default();
+        let read = text.trim().parse::<i32>().ok();
+        if let Some(started) = read.and_then(rustix::process::Pid::from_raw) {
+            break started;
+        }
+        assert!(std::time::Instant::now() < until, "the harness starts");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(session.child.try_wait().unwrap().is_none());
+    assert!(
+        session.lifeline.is_some(),
+        "a headless agent on an engine key relay has no lifeline"
+    );
+    if let Some(lifeline) = session.lifeline.as_mut() {
+        lifeline.sever();
+    }
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while session.child.try_wait().unwrap().is_none()
+        || rustix::process::test_kill_process(started).is_ok()
+    {
+        assert!(
+            std::time::Instant::now() < until,
+            "the keyed harness outlived the engine that held its relay"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }

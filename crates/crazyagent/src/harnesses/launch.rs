@@ -1685,6 +1685,8 @@ pub struct Session {
     _context: Option<Installed>,
     _relay: Option<Relay>,
     _key: Option<KeyFile>,
+    #[cfg(unix)]
+    lifeline: Option<crate::research::runner::Lifeline>,
 }
 
 impl Session {
@@ -1835,6 +1837,8 @@ impl Session {
             _context: context,
             _relay: relay,
             _key: key,
+            #[cfg(unix)]
+            lifeline: None,
         };
         for bytes in startup {
             session.write(&bytes)?;
