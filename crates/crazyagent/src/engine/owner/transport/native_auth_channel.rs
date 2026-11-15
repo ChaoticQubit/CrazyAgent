@@ -598,9 +598,10 @@ impl OwnerRuntimeHandle {
 
     /// Looks for Codex or Claude Code again, for Check again, Choose file, a sign-in retry
     /// and the install pin: the chosen file, else the first search hit, that passes
-    /// [`finding::check`](crate::harnesses::finding::check), captured as at engine start. It fills
-    /// an empty slot or one whose pinned file is gone; no other pin is replaced, and a disabled
-    /// registration refuses. Inputs: the id, chosen file, search and PATH. Output: [`Found`].
+    /// [`finding::check`](crate::harnesses::finding::check), captured as at engine start once
+    /// the real file pinned passes the same checks. It fills an empty slot or one whose pinned
+    /// file is gone; no other pin is replaced, and a disabled registration refuses. Inputs:
+    /// the id, chosen file, search and PATH. Output: [`Found`].
     pub(crate) fn find_harness(
         &self,
         harness: &str,
@@ -685,10 +686,14 @@ impl OwnerRuntimeHandle {
         if let Some(step) = between_check_and_capture(&entry) {
             step();
         }
-        let captured = RegisteredNativeAuthHost::capture_entry(&entry).and_then(|host| {
-            host.verified_path()?;
-            Ok(host)
-        });
+        let checked = |real: &Path| {
+            crate::harnesses::finding::check_file(real, &space, search.home()).map(|_| ())
+        };
+        let captured =
+            RegisteredNativeAuthHost::capture_entry_checked(&entry, checked).and_then(|host| {
+                host.verified_path()?;
+                Ok(host)
+            });
         let host = match captured {
             Ok(host) => host,
             Err(error) => {

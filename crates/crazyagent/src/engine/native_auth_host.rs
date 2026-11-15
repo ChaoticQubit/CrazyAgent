@@ -242,6 +242,20 @@ impl RegisteredNativeAuthHost {
         Self::captured_as(entry, &real)
     }
 
+    /// Captures a harness found through an entry as `capture_entry` does, once `check` passes
+    /// the real file pinned, and only while the entry still leads to that file after the
+    /// capture, so a link in the entry's chain moved after the entry was checked never gets
+    /// an unchecked file pinned. Inputs: the absolute entry and the check. Output: the host,
+    /// the check's refusal, `native_auth_host_executable_changed`, or as `capture_entry`.
+    pub(crate) fn capture_entry_checked(
+        entry: &Path,
+        check: impl Fn(&Path) -> Result<(), EngineError>,
+    ) -> Result<Self, EngineError> {
+        let real = crate::paths::launch_executable(entry, std::env::var_os("PATH").as_deref())
+            .map_err(|_| EngineError("native_auth_host_unavailable".into()))?;
+        Self::captured_checked(entry, &real, check)
+    }
+
     /// Captures the real file an entry leads to, pinned as `capture` pins it, with the entry
     /// kept for `current`. Inputs: the absolute entry and its real file. Output: the host, or
     /// the capture refusal.
@@ -252,16 +266,38 @@ impl RegisteredNativeAuthHost {
         Ok(host)
     }
 
+    /// Captures the real file an entry led to as `captured_as` does, once `check` passes
+    /// that very file, and refuses the pin when the entry no longer leads to the file pinned,
+    /// so the file checked, the file pinned and the file the entry leads to are one file
+    /// (RV-DS241-140). Inputs: the absolute entry, its real file and the check. Output: the
+    /// host, the check's or capture's refusal, or `native_auth_host_executable_changed`.
+    fn captured_checked(
+        entry: &Path,
+        real: &Path,
+        check: impl Fn(&Path) -> Result<(), EngineError>,
+    ) -> Result<Self, EngineError> {
+        assert!(real.is_absolute());
+        check(real)?;
+        let host = Self::captured_as(entry, real)?;
+        assert_eq!(host.path, real);
+        let now = crate::paths::launch_executable(entry, std::env::var_os("PATH").as_deref());
+        if now.ok().as_deref() != Some(real) {
+            return Err(EngineError("native_auth_host_executable_changed".into()));
+        }
+        Ok(host)
+    }
+
     /// The host while its entry, if any, still leads to the pinned file and that file
     /// verifies, a change of its ctime alone included; with an entry, a fresh capture when it
     /// leads to another path or inode, or when other metadata of the pinned inode changed and
     /// its bytes still hash to the pin, once `trusted` passes the entry the launch now goes
-    /// through, so a re-pin runs the checks of engine start. A rewrite in place stays refused.
-    /// Inputs: the shared host and the engine-start check. Output: the host to use, the
-    /// verify error, the check's refusal, or `native_auth_host_unavailable`.
+    /// through and the real file pinned, so a re-pin runs the checks of engine start on the
+    /// file it pins. A rewrite in place stays refused. Inputs: the shared host and the
+    /// engine-start check. Output: the host to use, the verify error, the check's refusal,
+    /// `native_auth_host_executable_changed`, or `native_auth_host_unavailable`.
     pub(crate) fn current(
         self: &Arc<Self>,
-        trusted: impl FnOnce(&Path) -> Result<(), EngineError>,
+        trusted: impl Fn(&Path) -> Result<(), EngineError>,
     ) -> Result<Arc<Self>, EngineError> {
         let Some(entry) = self.entry.as_deref() else {
             self.verified_path()?;
@@ -275,7 +311,7 @@ impl RegisteredNativeAuthHost {
             return Ok(self.clone());
         }
         trusted(&used)?;
-        let fresh = Self::captured_as(entry, &real)?;
+        let fresh = Self::captured_checked(entry, &real, &trusted)?;
         assert_eq!(fresh.entry.as_deref(), Some(entry));
         if fresh.path == self.path
             && (fresh.identity.device, fresh.identity.inode)
