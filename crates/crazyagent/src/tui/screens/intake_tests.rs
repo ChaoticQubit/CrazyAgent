@@ -3009,6 +3009,40 @@ fn a_failed_start_reads_the_job_and_goes_home_only_when_this_folder_is_being_add
     }
 }
 
+/// DEC-177 (QUESTION-13:08 Q2 B): a start refused `job_busy` names the job the read after
+/// it finds running, here another project's move, and the page stays for another try.
+#[test]
+fn a_busy_start_names_the_job_the_read_after_it_finds_running() {
+    let user = tempfile::tempdir().unwrap();
+    let (mut shell, _typed) = measured(user.path(), AddMode::Copy, 0, None);
+    let asks: Vec<_> = intake_jobs(&mut shell)
+        .iter()
+        .map(IntakeJob::query)
+        .filter(|query| matches!(query, IntakeQuery::JobStart { .. }))
+        .collect();
+    let [asked] = <[IntakeQuery; 1]>::try_from(asks).unwrap();
+    shell.arrive(intake(asked, Err("job_busy".into())));
+    assert_eq!(job_asks(&mut shell), [IntakeQuery::JobStatus]);
+    let running = reading_job(
+        "/Users/mira/Code/reading-list",
+        JobState::Stopping { agents_left: 1 },
+    );
+    shell.arrive(intake(
+        IntakeQuery::JobStatus,
+        Ok(IntakeView::Job(Some(running))),
+    ));
+    assert_eq!(shell.place(), Some(Place::AddFolder));
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(
+            &rows,
+            "Moving reading-list is running. Wait for it to finish on Home."
+        ),
+        "{rows:#?}"
+    );
+    assert!(job_asks(&mut shell).is_empty());
+}
+
 fn shop_job(state: JobState) -> JobView {
     JobView {
         id: RequestId::new("add-1").unwrap(),

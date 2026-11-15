@@ -204,3 +204,18 @@ test("a retry or an answer starts the same kind of job again: an add by its fold
   assert.deepEqual(calls, [["add", SOURCE, "move", ["too_large"]], ["move", "reading", "move", ["worktrees"]]]);
   assert.deepEqual(intake.sidebarFolders({ kind: "ok", value: [] }, moveJob(copying(4)), new Set()), [], "a project being moved is already in the sidebar as a project");
 });
+
+test("a start refused job_busy names the job that runs, read from the engine, or says another job runs (DEC-177)", async () => {
+  const fixed = "Another job is running. Wait for it to finish on Home.";
+  assert.equal(intake.busyLine(moveJob({ state: "stopping", agents_left: 1 })), "Moving reading-list is running. Wait for it to finish on Home.");
+  assert.equal(intake.busyLine(job(copying(4))), "Adding shop is running. Wait for it to finish on Home.");
+  assert.equal(intake.busyLine(moveJob({ state: "done" })), fixed, "an ended job is not the one that runs");
+  assert.equal(intake.busyLine(null), fixed);
+  const reads = [];
+  const read = (answer) => async () => { reads.push(answer.kind); return answer; };
+  assert.equal(await intake.refusalLine("job_busy", "raw", read({ kind: "ok", value: job(copying(2)) })), "Adding shop is running. Wait for it to finish on Home.");
+  assert.equal(await intake.refusalLine("job_busy", "raw", read({ kind: "ok", value: null })), fixed);
+  assert.equal(await intake.refusalLine("job_busy", "raw", read({ kind: "error", code: "owner_timeout", message: "timed out" })), fixed);
+  assert.equal(await intake.refusalLine("move_project_busy", "its own words", read({ kind: "ok", value: job(copying(2)) })), "its own words");
+  assert.deepEqual(reads, ["ok", "ok", "error"], "only a busy refusal reads the job");
+});

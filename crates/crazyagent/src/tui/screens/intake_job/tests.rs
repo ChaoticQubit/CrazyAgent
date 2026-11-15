@@ -270,6 +270,28 @@ fn moving(state: JobState) -> JobView {
     }
 }
 
+/// DEC-177 (QUESTION-13:08 Q2 B): a start refused `job_busy` names the job that runs, as
+/// the client last read it; with no running job read, an ended one or none, it says another
+/// job runs.
+#[test]
+fn a_busy_start_names_the_running_job_or_says_another_job_runs() {
+    assert_eq!(
+        busy(Some(&moving(JobState::Stopping { agents_left: 1 }))),
+        "Moving reading-list is running. Wait for it to finish on Home."
+    );
+    assert_eq!(
+        busy(Some(&job(copying(4, 0)))),
+        "Adding shop is running. Wait for it to finish on Home."
+    );
+    let fixed = "Another job is running. Wait for it to finish on Home.";
+    assert_eq!(busy(Some(&moving(JobState::Done))), fixed);
+    assert_eq!(
+        busy(Some(&job(failed("home_add_failed", Phase::Copying)))),
+        fixed
+    );
+    assert_eq!(busy(None), fixed);
+}
+
 /// DEC-177: a project move says it waits for the project's agents, moves, and ends in the
 /// move's words; Stop is offered while it waits, Retry only while nothing landed, and the
 /// card, the header and the end line name the move.

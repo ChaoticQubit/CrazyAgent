@@ -4478,7 +4478,7 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     );
     assert!(!screen.confirm_move);
 
-    screen.move_refused("move_project_busy");
+    screen.move_refused("move_project_busy", None);
     assert!(
         screen
             .problem
@@ -4487,17 +4487,36 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
         "{:?}",
         screen.problem
     );
-    screen.move_refused("move_project_already_home");
+    screen.move_refused("move_project_already_home", None);
     assert_eq!(
         screen.problem.as_deref(),
         Some("This project is already in your projects folder.")
     );
-    screen.move_refused("job_busy");
+    screen.move_refused("job_busy", None);
     assert_eq!(
         screen.problem.as_deref(),
         Some("Another job is running. Wait for it to finish on Home.")
     );
-    screen.move_refused("home_move_worktrees");
+    let adding = crate::projects_home::job::JobView {
+        id: crate::protocol::RequestId::new("add-1").unwrap(),
+        kind: crate::projects_home::job::JobKind::Add,
+        project_id: None,
+        source: "/Users/mira/Code/shop".into(),
+        mode: crate::projects_home::AddMode::Copy,
+        overrides: Vec::new(),
+        stopping: false,
+        state: crate::projects_home::job::JobState::Copying {
+            copied: 3,
+            checked: 0,
+        },
+    };
+    screen.move_refused("job_busy", Some(&adding));
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("Adding shop is running. Wait for it to finish on Home."),
+        "a busy refusal names the job that runs"
+    );
+    screen.move_refused("home_move_worktrees", None);
     assert!(
         screen
             .problem
