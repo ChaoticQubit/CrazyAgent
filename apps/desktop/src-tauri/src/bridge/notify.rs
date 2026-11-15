@@ -797,6 +797,48 @@ mod tests {
         );
     }
 
+    /// DEC-177 add.2: an ended New Project's notice names the project whole and says it is
+    /// set up, stopped or failed in New Project's words, never an add's, and a New Project
+    /// still building sends none.
+    #[test]
+    fn an_ended_setup_notice_names_the_project_and_speaks_of_setting_up() {
+        use crazyagent::projects_home::job::{JobKind, JobState, Phase};
+        let set_up = |state| {
+            let view = JobView {
+                kind: JobKind::Setup,
+                project_id: Some(crazyagent::protocol::ProjectId::new("notes").unwrap()),
+                source: "Notes/2026 plans".into(),
+                ..job(state)
+            };
+            intake_notice(&view).map(|notice| (notice.title, notice.body))
+        };
+        let pair = |title: &str, body: &str| Some((title.to_owned(), body.to_owned()));
+        assert_eq!(
+            set_up(JobState::Done),
+            pair(
+                "Notes/2026 plans is set up",
+                "It's in your projects folder."
+            )
+        );
+        assert_eq!(
+            set_up(JobState::Cancelled {
+                phase: Phase::Building
+            }),
+            pair("Setting up Notes/2026 plans stopped", "Nothing was kept.")
+        );
+        assert_eq!(
+            set_up(JobState::Failed {
+                code: "project_folder_unwritable".into(),
+                phase: Phase::Building
+            }),
+            pair(
+                "Setting up Notes/2026 plans failed",
+                "Open Home in CrazyAgent to see why."
+            )
+        );
+        assert_eq!(set_up(JobState::Building { done: 1, total: 2 }), None);
+    }
+
     /// A job's notification is claimed once, shares the bound with questions, and a click on
     /// it brings the window front without naming a project to open.
     #[test]

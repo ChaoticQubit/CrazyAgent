@@ -1259,6 +1259,63 @@ mod tests {
         assert_eq!(shown(view.clone()), view);
     }
 
+    /// DEC-177 add.2: every code a New Project job is refused or ends with reaches the window
+    /// as itself, so the wizard and Home say New Project's own sentence, and a New Project
+    /// that ends with a code the window has no sentence for reads as the folder not created,
+    /// never as a folder add that failed.
+    #[test]
+    fn a_setup_job_reaches_the_window_with_its_own_codes() {
+        for code in [
+            "setup_cannot_stop",
+            "home_new_project_interrupted",
+            "home_new_project_failed",
+            "home_add_cancelled",
+            "home_folder_name_invalid",
+            "home_destination_exists",
+            "projects_home_unset",
+            "project_exists",
+            "pool_missing",
+            "team_harness_unavailable",
+            "documents_too_many",
+            "document_name_duplicate",
+            "document_name_invalid",
+            "document_too_large",
+            "document_type_not_allowed",
+            "project_documents_too_large",
+            "project_folder_unwritable",
+            "project_folder_unavailable",
+        ] {
+            assert_eq!(intake_code(code), Some(code), "{code}");
+            assert_eq!(
+                intake_failure(EngineError(code.into())).code,
+                code,
+                "{code}"
+            );
+        }
+        let view = |state| JobView {
+            id: RequestId::new("setup-1").unwrap(),
+            kind: crazyagent::projects_home::job::JobKind::Setup,
+            project_id: Some(crazyagent::protocol::ProjectId::new("notes").unwrap()),
+            source: "Notes/2026 plans".into(),
+            mode: AddMode::Move,
+            overrides: Vec::new(),
+            stopping: false,
+            state,
+        };
+        let failed = |code: &str| JobState::Failed {
+            code: code.into(),
+            phase: crazyagent::projects_home::job::Phase::Building,
+        };
+        let kept = view(failed("document_too_large"));
+        assert_eq!(shown(kept.clone()), kept);
+        assert_eq!(
+            shown(view(failed("open /Users/mira/notes.pdf: denied"))),
+            view(failed("home_new_project_failed"))
+        );
+        let building = view(JobState::Building { done: 1, total: 2 });
+        assert_eq!(shown(building.clone()), building);
+    }
+
     #[test]
     fn a_refused_setup_or_pack_change_reaches_the_window_with_its_own_code() {
         let refused = |code: &str| {

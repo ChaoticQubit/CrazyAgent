@@ -4,7 +4,8 @@ import { useContext, useEffect, useState } from "react";
 import {
   failureCopy, loadAgentPolicy, loadPools, loadProjectCatalog, loadProjects, needsReconcile, pickDocuments, receiptState, saveAgentPolicy, settledReceipt, setProjectPool, setupProject,
 } from "../../api-projects";
-import type { PoolChoice, ProjectCatalog } from "../../api-projects";
+import type { PoolChoice, ProjectCatalog, ProjectSetup, ProjectSpec } from "../../api-projects";
+import type { IntakeJob } from "../../engine-client";
 import { SessionContext } from "../../state";
 import { Button, ConfirmDialog, Icon, Notice, PageHeader } from "../../ui";
 import { displayText } from "../conversation";
@@ -32,6 +33,18 @@ export function discardKeptDraft(): void {
 
 function valueOf<T>(result: Result<T> | undefined): T | null {
   return result?.kind === "ok" ? result.value : null;
+}
+
+/** What Create got from the engine: the started New Project job, or the note the page shows
+ * with the answers kept. */
+export type SetupStarted = { kind: "started"; job: IntakeJob } | { kind: "refused"; note: string };
+
+/** Starts the engine's New Project job (DEC-177 add.2). Inputs: the name spec, the setup, the
+ * start and the job read a busy refusal names the running job from. Output: the started job,
+ * or the note the page shows. */
+export async function setupStart(spec: ProjectSpec, setup: ProjectSetup, start: (spec: ProjectSpec, setup: ProjectSetup) => Promise<Result<IntakeJob>>): Promise<SetupStarted> {
+  const result = await start(spec, setup);
+  return result.kind === "ok" ? { kind: "started", job: result.value } : { kind: "refused", note: "" };
 }
 
 /** The five-step New Project flow: Basics, Documents, Work, Pool and Team, then Create project.

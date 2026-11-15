@@ -35,6 +35,7 @@ const COMMANDS: [&str; 23] = [
     "desktop_remove_project",
     "desktop_move_project_home",
     "desktop_delete_project_job",
+    "desktop_setup_project_job",
     "desktop_cancel_research",
     "desktop_retry_research",
     "desktop_plan_roadmap",

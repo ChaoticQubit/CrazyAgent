@@ -433,6 +433,18 @@ export function retryRoute(job: IntakeJob): string | null {
   return `/projects/${encodeURIComponent(job.project_id)}/settings?section=remove&ask=delete`;
 }
 
+/** What the New Project page does next with the job it started, as Home's read of the
+ * engine's job shows it: still running, done with its project, ended with New Project's
+ * words, or lost when the read names another job or none. */
+export type SetupFollow = { kind: "running"; job: IntakeJob } | { kind: "done"; project: string } | { kind: "ended"; words: string } | { kind: "lost" };
+
+/** Reads the New Project job the page started from Home's read of the engine's job (DEC-177
+ * add.2 Q1 A). Inputs: the job read, if any, and the started job's id. Output: what the page
+ * does next. */
+export function setupFollow(job: IntakeJob | null, id: string): SetupFollow {
+  return job === null || job.id !== id ? { kind: "lost" } : { kind: "running", job };
+}
+
 const ANSWER_ISSUES: Record<string, AnywayIssue> = {
   home_move_worktrees: "worktrees",
   home_copy_linked_checkout: "linked_checkout",

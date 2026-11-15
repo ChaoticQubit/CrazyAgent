@@ -234,6 +234,13 @@ export function moveCopy(failure: string | { code: string; cause?: string }): st
   return Object.hasOwn(MOVE_COPY, code) ? MOVE_COPY[code] : intakeCopy(failure);
 }
 
+/** Plain sentence for one refusal or end of a New Project job (DEC-177 add.2), New Project's
+ * own words first. Input: the code, or the failure with the engine cause behind it. Output: the
+ * New Project copy, else the intake and app copy. */
+export function newProjectCopy(failure: string | { code: string; cause?: string }): string {
+  return intakeCopy(failure);
+}
+
 function failure<T>(code: string): Result<T> {
   return { kind: "error", code, message: intakeCopy(code) };
 }
