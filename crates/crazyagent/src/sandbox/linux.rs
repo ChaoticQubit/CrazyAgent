@@ -1946,6 +1946,12 @@ mod tests {
         };
         let plain = moded("plain", 0o755);
         let marked = [moded("setuid", 0o4755), moded("setgid", 0o2755)];
+        let agreeing = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|folder| folder.join("true"))
+            .find(|path| path.is_file())
+            .unwrap();
+        let probe = [OsString::from(PROBE)];
+        assert!(nests(&plain, &agreeing, &probe), "the control");
         assert!(trusted(&plain));
         assert!(trusted(Path::new("/bin/sh")), "a program root owns");
         assert!(!trusted(&root.join("absent")));
@@ -1959,7 +1965,7 @@ mod tests {
             };
             let refused = LinuxSandbox::new(sandbox, backend).is_err();
             assert!(refused, "{}", bwrap.display());
-            assert!(!nests(bwrap, &plain, &[PROBE.into()]));
+            assert!(!nests(bwrap, &agreeing, &probe), "{}", bwrap.display());
         }
     }
 

@@ -93,9 +93,6 @@ pub(super) fn load_engine_catalog(wizard: &mut Wizard, signed_in: &[&str]) {
 /// Takes the wizard and the signed-in connection ids. Returns nothing.
 pub(super) fn load_catalog(wizard: &mut Wizard, signed_in: &[&str]) {
     let (pool, research, mut served) = engine_catalog(wizard, signed_in);
-    for level in &mut served.agent_access {
-        level.gaps.clear();
-    }
     let agents = u8::try_from(research.len().min(usize::from(HARNESS_AGENTS_MAX))).unwrap();
     if agents > 0 {
         let team = &mut served.default_team;
@@ -111,8 +108,9 @@ pub(super) fn load_catalog(wizard: &mut Wizard, signed_in: &[&str]) {
     wizard.apply_catalog(pool, research, Ok(served));
 }
 
-/// Reads the engine's catalog for the wizard's current request. Takes the wizard and the
-/// signed-in connection ids. Returns the pool, the research and the catalog.
+/// Reads the engine's catalog for the wizard's current request, with no Linux gap line, so
+/// a frame is the same on every computer. Takes the wizard and the signed-in connection
+/// ids. Returns the pool, the research and the catalog.
 fn engine_catalog(
     wizard: &mut Wizard,
     signed_in: &[&str],
@@ -127,7 +125,10 @@ fn engine_catalog(
         .map(|id| CredentialRef::new(*id).unwrap())
         .collect();
     let (pool, research) = wizard.catalog_request().expect("catalog request");
-    let served = catalog(&config, pool.as_ref(), &research, &signed).unwrap();
+    let mut served = catalog(&config, pool.as_ref(), &research, &signed).unwrap();
+    for level in &mut served.agent_access {
+        level.gaps.clear();
+    }
     (pool, research, served)
 }
 
