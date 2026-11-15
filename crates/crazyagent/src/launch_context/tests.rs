@@ -288,6 +288,49 @@ fn a_linux_launch_locks_a_home_whose_lock_has_a_second_name_in_the_home() {
     assert_eq!(locked, Ok(()));
 }
 
+/// A launch locks a home whose lock name an agent took for something that is no plain file
+/// (RV-DS241-137 lock, rv-code2 13:10 note): a folder with a file in it, a link to a file
+/// outside the home and a FIFO each go without being followed, a plain lock is made in their
+/// place and held, and the file the link named stays as it was. Before, each one refused
+/// every later launch of the home, since the open that follows no link never got a file.
+#[cfg(unix)]
+#[test]
+fn a_launch_replaces_a_lock_name_that_is_no_plain_file_and_locks_the_home() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let outside = root.join("owner.txt");
+    fs::write(&outside, "the owner's\n").unwrap();
+    for planted in ["folder", "link", "fifo"] {
+        let home = root.join(planted);
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        let lock = home.join(LOCK);
+        match planted {
+            "folder" => {
+                fs::create_dir(&lock).unwrap();
+                fs::write(lock.join("inside"), "x").unwrap();
+            }
+            "link" => std::os::unix::fs::symlink(&outside, &lock).unwrap(),
+            _ => {
+                let made = crate::spawn_gate::collected(
+                    std::process::Command::new("/usr/bin/mkfifo").arg(&lock),
+                )
+                .unwrap();
+                assert!(made.status.success(), "{made:?}");
+            }
+        }
+
+        let held = lock_only(&home, "claude-code").map_err(|error| error.0);
+        let second = lock_only(&home, "claude-code").err().map(|error| error.0);
+
+        assert_eq!(held.as_ref().err(), None, "{planted}");
+        assert_eq!(second.as_deref(), Some("launch_home_busy"), "{planted}");
+        let found = fs::symlink_metadata(&lock).unwrap();
+        assert!(found.file_type().is_file(), "{planted}");
+        assert_eq!(found.nlink(), 1, "{planted}");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "the owner's\n");
+    }
+}
+
 /// A launch locks a home an earlier run left with an ACL that denies listing and searching
 /// it (RV-DS241-137 code r2 F3): the retry clears the home's ACL by its path, which needs
 /// neither, where clearing it on the folder itself opens it and fails.
