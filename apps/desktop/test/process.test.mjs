@@ -590,7 +590,7 @@ const followRow = (markup, name) => {
 
 function following(extra = {}) {
   return renderToStaticMarkup(createElement(view.FollowingView, {
-    adoption: { kind: "ok", value: ADOPTION }, names: NAMES, finished: false, expanded: null,
+    adoption: { kind: "ok", value: ADOPTION }, names: NAMES, finished: false, expanded: null, harness: (id) => ({ "claude-code": "Claude Code", codex: "Codex", rcli: "RCLI" })[id] ?? id,
     onFinished: never("onFinished"), onExpand: never("onExpand"), onMetrics: never("onMetrics"), onRetry: never("onRetry"), ...extra,
   }));
 }
@@ -607,6 +607,8 @@ test("Are agents following it shows one row per agent with its graph, context to
   assert.match(words(followRow(markup, "Master")), /Master Claude Code Not yet Missed None 10\+ min without graphify or context-mode/);
   assert.match(markup, /2 older agents are not listed\./);
   assert.match(markup, /aria-expanded="false"/);
+  const renamed = words(following({ harness: (id) => id === "claude-code" ? "Claude Prime" : id }));
+  assert.match(renamed, /Wren Claude Prime Missed/, "each agent's harness is named as the catalog names it");
 });
 
 test("finished agents wait behind Show finished, and a clicked row shows the agent's counts", () => {

@@ -65,6 +65,7 @@ const adoption = {
 const names = {
   agents: new Map([["team-8", "Juniper · Codex"], ["master-alpha", "Master · Claude Code"]]),
   accounts: new Map([["acct-a", "Pool A, Claude 1"]]),
+  harness: (id) => ({ "claude-code": "Claude Code", codex: "Codex", rcli: "RCLI" })[id] ?? id,
 };
 const render = (patch = {}) => renderToStaticMarkup(createElement(view.MetricsPage, {
   projectId: "alpha", usage: { kind: "ok", value: usage() }, metrics: { kind: "ok", value: metrics() }, adoption: { kind: "ok", value: adoption },
@@ -185,6 +186,9 @@ test("By harness names each harness with its agents and runs", () => {
   assert.match(table, /^ Harness Tokens Input Cache write Output Cache read Agents Runs Share of tokens /);
   assert.match(table, /Codex 1\.4K 700 500 200 3K 1 1 61%/);
   assert.match(table, /Claude Code 900 500 300 100 1K 1 1 39%/);
+  const renamed = tableText(render({ by: "harness", names: { ...names, harness: (id) => id === "claude-code" ? "Claude Prime" : id } }));
+  assert.match(renamed, /Claude Prime 900 500 300 100 1K 1 1 39%/, "the harness is named as the catalog names it");
+  assert.match(renamed, /codex 1\.4K 700 500 200 3K 1 1 61%/, "a harness the catalog does not name shows its id");
 });
 
 test("the project page lists Metrics after Process, and its route opens it", () => {

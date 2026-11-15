@@ -37,7 +37,8 @@ const status = (extra = {}) => ({
   agents: [], tasks: [], messages: [], plan: [], ...extra,
 });
 const entryOf = (id, name, extra = {}) => ({ id, name, status: { kind: "ready" }, status_label: "Ready", executable: null, headless: "", tools: { kind: "switchable" }, model_selection: false, account_kinds: [], team: { kind: "available" }, aliases: [], ...extra });
-const HARNESSES = [entryOf("claude", "Claude Code", { aliases: ["claude-code"] }), entryOf("codex", "Codex")];
+const HARNESSES = [entryOf("claude", "Claude Code", { aliases: ["claude-code"] }), entryOf("codex", "Codex"), entryOf("rcli", "RCLI", { team: { kind: "master_only" } })];
+const NAMES = { "claude-code": "Claude Code", codex: "Codex", rcli: "RCLI" };
 const POOLS = [{ pool: { id: "pool-a", name: "Pool A", members: [] }, members: [] }, { pool: { id: "pool-b", name: "Pool B", members: [] }, members: [] }];
 const SETUP = {
   project_id: "chores", name: "Chores", about: "", tech_stack: [], platforms: [], research: [], pool: "pool-a", revision: 4,
@@ -141,9 +142,9 @@ test("Overlapping edits and Hooks say which harness and account kind each protec
 
 test("a harness's sub-agents read as the mockup words them, native first for every harness", async () => {
   const coord = await import("../src/screens/team/coordination.tsx");
-  assert.deepEqual(coord.modeOptions("claude-code", true), [{ value: "native", label: "Native agent teams" }, { value: "app_spawned", label: "CrazyAgent workers" }]);
-  assert.deepEqual(coord.modeOptions("codex", true), [{ value: "native", label: "Native Codex sub-agents" }, { value: "app_spawned", label: "CrazyAgent workers" }]);
-  assert.deepEqual(coord.modeOptions("rcli", false), [{ value: "native", label: "Native sub-agents", disabledReason: coord.NATIVE_UNAVAILABLE.rcli }, { value: "app_spawned", label: "CrazyAgent workers" }]);
+  assert.deepEqual(coord.modeOptions("claude-code", true, (harness) => NAMES[harness]), [{ value: "native", label: "Native agent teams" }, { value: "app_spawned", label: "CrazyAgent workers" }]);
+  assert.deepEqual(coord.modeOptions("codex", true, (harness) => NAMES[harness]), [{ value: "native", label: "Native Codex sub-agents" }, { value: "app_spawned", label: "CrazyAgent workers" }]);
+  assert.deepEqual(coord.modeOptions("rcli", false, (harness) => NAMES[harness]), [{ value: "native", label: "Native sub-agents", disabledReason: coord.NATIVE_UNAVAILABLE.rcli }, { value: "app_spawned", label: "CrazyAgent workers" }]);
   const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
   const sub = /(?:^|\n)\.set-sub \{([^}]*)\}/.exec(css)?.[1] ?? "";
   assert.ok(sub.length > 0, "the sub-heading has its rule");
@@ -302,4 +303,29 @@ test("Sub-agent rounds per message lists Until the goal is done first, then ever
   for (const max of controls.ROUND_CHOICES) assert.equal(controls.chosen(String(max), controls.ROUND_CHOICES), max);
   assert.equal(controls.chosen("off", controls.ROUND_CHOICES), null, "Until the goal is done saves as null");
   assert.equal(controls.chosen("4", controls.ROUND_CHOICES), undefined);
+});
+
+test("Agent settings and Master settings name each harness as the project's catalog names it, and by its id before the catalog arrives", () => {
+  const renamed = [entryOf("claude", "Claude Prime", { aliases: ["claude-code"] }), entryOf("codex", "Codex Prime"), entryOf("rcli", "Rocket", { team: { kind: "master_only" } })];
+  const named = project({ harnesses: { kind: "ok", value: renamed } });
+  const settings = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {}, data: named }));
+  for (const label of ["Claude Prime sub-agents", "Codex Prime sub-agents", "Rocket sub-agents", "Messages to Claude Prime agents", "Messages to Codex Prime agents", "Messages to Rocket agents"]) {
+    assert.ok(settings.includes(`data-setting="${attr(label)}"`), label);
+  }
+  assert.ok(!settings.includes('data-setting="RCLI sub-agents"'), "no name of the desktop's own is left");
+  const master = renderToStaticMarkup(createElement(conversation.MasterSettings, { data: named }));
+  assert.ok(master.includes(`data-setting="${attr("Messages to Rocket agents")}"`), "the Master settings name it as the catalog does");
+  const early = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {}, data: project({ harnesses: undefined }) }));
+  assert.ok(early.includes('data-setting="rcli sub-agents"'), "before the catalog arrives the harness shows its id");
+  assert.ok(early.includes('data-setting="Messages to rcli agents"'));
+});
+
+test("the harness-named rows the Agent settings Find box knows use the names the bundled manifests give", () => {
+  const manifestName = (harness) => readFileSync(new URL(`../../../crates/crazyagent/harness-manifests/${harness}.yaml`, import.meta.url), "utf8").match(/^name: "([^"\n]+)"$/mu)?.[1];
+  const coordRows = controls.SETTING_GROUPS.find((group) => group.id === "coord").rows;
+  for (const harness of ["claude-code", "codex", "rcli"]) {
+    const name = manifestName(harness);
+    assert.ok(name, `${harness}: its manifest names it`);
+    assert.ok(coordRows.includes(`${name} sub-agents`), `${name} sub-agents is a Coordination row`);
+  }
 });
