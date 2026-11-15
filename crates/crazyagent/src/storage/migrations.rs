@@ -78,24 +78,33 @@ pub(crate) const STEPS: &[Step] = &[
     },
 ];
 
+/// The widest engine file name step 11 lets `projects_delete_files` hold, kept as that step
+/// shipped: a wider record needs a step of its own, which the check below demands at build
+/// time once [`crate::projects_home::RECORDED_NAME_BYTES_MAX`] grows (G1 code r1 F1).
+const STEP_11_NAME_BYTES_MAX: usize = 96;
+const _: () = assert!(
+    crate::projects_home::RECORDED_NAME_BYTES_MAX == STEP_11_NAME_BYTES_MAX,
+    "a wider delete record needs a migration step that widens projects_delete_files"
+);
+
 /// Step 11 (RV-DS241-152): a delete records Overview and roadmap status run names of up to
-/// [`crate::projects_home::RECORDED_NAME_BYTES_MAX`] bytes, so `projects_delete_files` must
-/// hold them. An existing table is rebuilt with the wider check, keeping its rows; a missing
-/// one gets the current schema when the engine opens it. Input: the open upgrade
-/// transaction. Output: any SQLite failure.
+/// [`STEP_11_NAME_BYTES_MAX`] bytes, so `projects_delete_files` must hold them. An existing
+/// table is rebuilt with the wider check, keeping its rows; a missing one gets the current
+/// schema when the engine opens it. Input: the open upgrade transaction. Output: any SQLite
+/// failure.
 fn widen_delete_file_names(tx: &Transaction<'_>) -> Result<(), EngineError> {
     if !has_table(tx, "projects_delete_files")? {
         return Ok(());
     }
-    tx.execute_batch(
+    tx.execute_batch(&format!(
         "CREATE TABLE projects_delete_files_new (
-            name TEXT PRIMARY KEY CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 96),
+            name TEXT PRIMARY KEY CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND {STEP_11_NAME_BYTES_MAX}),
             inode INTEGER NOT NULL
          );
          INSERT INTO projects_delete_files_new SELECT name, inode FROM projects_delete_files;
          DROP TABLE projects_delete_files;
-         ALTER TABLE projects_delete_files_new RENAME TO projects_delete_files;",
-    )
+         ALTER TABLE projects_delete_files_new RENAME TO projects_delete_files;"
+    ))
     .map_err(error)
 }
 
