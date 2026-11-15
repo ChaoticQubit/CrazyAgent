@@ -795,3 +795,28 @@ fn a_chosen_or_found_codex_whose_chain_has_a_link_others_can_move_is_refused() {
         Some(Err((moved, PATH_AGENT_SPACE.into())))
     );
 }
+
+/// RV-DS241-140 r4: a chain whose link target passes through /private/var/run, the
+/// root:daemon 775 folder nix-darwin's /run link leads to, and leaves it by `..` passes, so
+/// a harness in /run/current-system/sw/bin is kept as before the hop walk.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_chain_through_the_system_run_folder_passes_as_a_nix_darwin_profile_does() {
+    use std::os::unix::fs::MetadataExt;
+    let run = Path::new("/private/var/run");
+    let premise = std::fs::metadata(run).unwrap();
+    assert_eq!(
+        (premise.uid(), premise.gid(), premise.mode() & 0o7777),
+        (0, 1, 0o775),
+        "/private/var/run is root:daemon 775"
+    );
+    let case = Case::new();
+    let real = case.file("tools/codex-0.167.1", 0o755);
+    let up = "../".repeat(run.components().count() - 1);
+    let target = run.join(up).join(real.strip_prefix("/").unwrap());
+    let entry = case.root.join("system/codex");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&target, &entry).unwrap();
+    assert_eq!(std::fs::canonicalize(&entry).unwrap(), real);
+    assert_eq!(case.check("codex", &entry), Ok(entry.clone()));
+}
