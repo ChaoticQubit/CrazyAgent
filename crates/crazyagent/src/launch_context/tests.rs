@@ -263,6 +263,34 @@ fn a_launch_never_locks_a_lock_file_with_a_second_link() {
     assert_eq!(fs::read_to_string(&owner).unwrap(), "the owner's\n");
 }
 
+/// A launch locks a home an earlier run left with an ACL that denies listing and searching
+/// it (RV-DS241-137 code r2 F3): the retry clears the home's ACL by its path, which needs
+/// neither, where clearing it on the folder itself opens it and fails.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_launch_locks_a_home_whose_acl_denies_listing_and_searching_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("claude");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let added = std::process::Command::new("/bin/chmod")
+        .args(["+a", "everyone deny list,search"])
+        .arg(&home)
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{added:?}");
+
+    let locked = lock_only(&home, "claude-code")
+        .map(|_| ())
+        .map_err(|error| error.0);
+
+    let _ = std::process::Command::new("/bin/chmod")
+        .arg("-N")
+        .arg(&home)
+        .output();
+    assert_eq!(locked, Ok(()));
+}
+
 /// A context-less launch's hold takes the same home lock as an install and leaves the home's
 /// files as they were (aabe420f): an install or a second hold on the held home is refused, the
 /// home keeps its own file and gains only the lock file, and the home is free once the hold

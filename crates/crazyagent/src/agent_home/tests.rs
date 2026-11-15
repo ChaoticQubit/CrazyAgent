@@ -1526,6 +1526,62 @@ fn a_home_folder_whose_acls_deny_listing_two_deep_still_goes() {
     );
 }
 
+/// A home an earlier run left with an ACL that denies listing it, or listing a folder the
+/// launch keeps only part of, still gets its reset (RV-DS241-137 code r2 F3): a listing that
+/// stops clears that folder's ACL by its path and lists it once more, so a Full run or an
+/// earlier version's run never refuses every later launch.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_or_kept_folder_whose_acl_denies_listing_never_refuses_the_launch() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let npm = home.join(".npm");
+    fs::create_dir_all(npm.join("_npx/0")).unwrap();
+    fs::write(home.join("note"), "planted\n").unwrap();
+    let _npm = Released(npm.clone());
+    let _home = Released(home.clone());
+    acl("everyone deny list", &npm);
+    acl("everyone deny list", &home);
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    assert_eq!(prepared, Ok(()));
+    assert!(
+        fs::symlink_metadata(home.join("note")).is_err(),
+        "a planted file stayed"
+    );
+    assert!(
+        fs::symlink_metadata(npm.join("_npx")).is_err(),
+        "npx's packages stayed"
+    );
+}
+
+/// A file a launch removes whose ACL denies reading and deleting it still goes
+/// (RV-DS241-137 code r2 F3): once the plain unlink stops, its ACL is cleared by its path,
+/// which needs no read, where clearing it on the entry itself opens it and fails.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_file_whose_acl_denies_reading_and_deleting_it_still_goes() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let planted = home.join("note");
+    fs::write(&planted, "planted\n").unwrap();
+    let _planted = Released(planted.clone());
+    acl("everyone deny read,delete", &planted);
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    assert_eq!(prepared, Ok(()));
+    assert!(
+        fs::symlink_metadata(&planted).is_err(),
+        "the denied file stayed"
+    );
+}
+
 /// A home an agent filled with more entries than one listing of it takes still launches,
 /// and every entry it planted goes while what the harness keeps stays (RV-DS241-137), so a
 /// run that makes a hundred thousand files in its home never refuses every later launch.
