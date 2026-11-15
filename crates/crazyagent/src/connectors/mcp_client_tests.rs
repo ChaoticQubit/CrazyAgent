@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const KEY: &str = "sk-test-key-0001";
-const USER: &str = "ada@example.com";
+pub(in crate::connectors) const KEY: &str = "sk-test-key-0001";
+pub(in crate::connectors) const USER: &str = "ada@example.com";
 
-const BOARD: &str = "schema: 1
+pub(in crate::connectors) const BOARD: &str = "schema: 1
 kind: connector
 name: board
 title: Board
@@ -27,7 +27,7 @@ key:
   scheme: Bearer
 ";
 
-const DESK: &str = "schema: 1
+pub(in crate::connectors) const DESK: &str = "schema: 1
 kind: connector
 name: desk
 title: Desk
@@ -44,44 +44,44 @@ key:
 
 /// One request the stand-in vendor got: its verb, path, headers and JSON body.
 #[derive(Debug, Clone)]
-struct Seen {
-    verb: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: Value,
+pub(in crate::connectors) struct Seen {
+    pub(in crate::connectors) verb: String,
+    pub(in crate::connectors) path: String,
+    pub(in crate::connectors) headers: Vec<(String, String)>,
+    pub(in crate::connectors) body: Value,
 }
 
 impl Seen {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(in crate::connectors) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(known, _)| known.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
     }
 
-    fn rpc(&self) -> &str {
+    pub(in crate::connectors) fn rpc(&self) -> &str {
         self.body["method"].as_str().unwrap_or("")
     }
 
-    fn id(&self) -> Value {
+    pub(in crate::connectors) fn id(&self) -> Value {
         self.body["id"].clone()
     }
 
-    fn tool(&self) -> &str {
+    pub(in crate::connectors) fn tool(&self) -> &str {
         self.body["params"]["name"].as_str().unwrap_or("")
     }
 }
 
 /// A real MCP server on loopback that stands in for a vendor: it reads each request,
 /// keeps it, and lets the row write the reply. It stops when dropped.
-struct Vendor {
-    port: u16,
+pub(in crate::connectors) struct Vendor {
+    pub(in crate::connectors) port: u16,
     seen: Arc<Mutex<Vec<Seen>>>,
     stop: Arc<AtomicBool>,
 }
 
 impl Vendor {
-    fn start(answer: impl Fn(&Seen, usize, &mut TcpStream) + Send + 'static) -> Self {
+    pub(in crate::connectors) fn start(answer: impl Fn(&Seen, usize, &mut TcpStream) + Send + 'static) -> Self {
         let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -107,15 +107,15 @@ impl Vendor {
         Self { port, seen, stop }
     }
 
-    fn endpoint(&self) -> McpEndpoint {
+    pub(in crate::connectors) fn endpoint(&self) -> McpEndpoint {
         McpEndpoint::loopback_for_rows(self.port)
     }
 
-    fn seen(&self) -> Vec<Seen> {
+    pub(in crate::connectors) fn seen(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
     }
 
-    fn calls(&self) -> Vec<String> {
+    pub(in crate::connectors) fn calls(&self) -> Vec<String> {
         self.seen()
             .iter()
             .map(|seen| seen.rpc().to_owned())
@@ -162,12 +162,12 @@ fn read_request(stream: &TcpStream) -> Seen {
     }
 }
 
-fn send(stream: &mut TcpStream, bytes: &[u8]) {
+pub(in crate::connectors) fn send(stream: &mut TcpStream, bytes: &[u8]) {
     let _ = stream.write_all(bytes);
     let _ = stream.flush();
 }
 
-fn http(status: &str, kind: &str, extra: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
+pub(in crate::connectors) fn http(status: &str, kind: &str, extra: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
     let mut head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
@@ -181,7 +181,7 @@ fn http(status: &str, kind: &str, extra: &[(&str, &str)], body: &[u8]) -> Vec<u8
     bytes
 }
 
-fn json_reply(status: &str, extra: &[(&str, &str)], body: &Value) -> Vec<u8> {
+pub(in crate::connectors) fn json_reply(status: &str, extra: &[(&str, &str)], body: &Value) -> Vec<u8> {
     http(
         status,
         "application/json",
@@ -190,7 +190,7 @@ fn json_reply(status: &str, extra: &[(&str, &str)], body: &Value) -> Vec<u8> {
     )
 }
 
-fn result(seen: &Seen, result: Value) -> Vec<u8> {
+pub(in crate::connectors) fn result(seen: &Seen, result: Value) -> Vec<u8> {
     json_reply(
         "200 OK",
         &[],
@@ -198,7 +198,7 @@ fn result(seen: &Seen, result: Value) -> Vec<u8> {
     )
 }
 
-fn rpc_error(status: &str, seen: &Seen, code: i64, message: &str) -> Vec<u8> {
+pub(in crate::connectors) fn rpc_error(status: &str, seen: &Seen, code: i64, message: &str) -> Vec<u8> {
     json_reply(
         status,
         &[],
@@ -206,7 +206,7 @@ fn rpc_error(status: &str, seen: &Seen, code: i64, message: &str) -> Vec<u8> {
     )
 }
 
-fn empty(status: &str, extra: &[(&str, &str)]) -> Vec<u8> {
+pub(in crate::connectors) fn empty(status: &str, extra: &[(&str, &str)]) -> Vec<u8> {
     let mut head = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n");
     for (name, value) in extra {
         head.push_str(&format!("{name}: {value}\r\n"));
@@ -230,7 +230,7 @@ fn sse(messages: &[Value]) -> Vec<u8> {
     bytes
 }
 
-fn tool(name: &str) -> Value {
+pub(in crate::connectors) fn tool(name: &str) -> Value {
     json!({
         "name": name,
         "description": format!("Does {name}."),
@@ -238,13 +238,13 @@ fn tool(name: &str) -> Value {
     })
 }
 
-fn text_result(text: &str) -> Value {
+pub(in crate::connectors) fn text_result(text: &str) -> Value {
     json!({"resultType": "complete", "content": [{"type": "text", "text": text}]})
 }
 
 /// The replies of a server of the per-request era to the opening probe. Output: the reply,
 /// none for any other request.
-fn modern(seen: &Seen) -> Option<Vec<u8>> {
+pub(in crate::connectors) fn modern(seen: &Seen) -> Option<Vec<u8>> {
     (seen.rpc() == "server/discover").then(|| {
         result(
             seen,
@@ -262,7 +262,7 @@ fn modern(seen: &Seen) -> Option<Vec<u8>> {
 /// The replies of a server of the handshake era to the opening requests: it refuses the
 /// probe, answers `initialize` in `version` with the session id given, and takes the
 /// `initialized` notice. Output: the reply, none for any other request.
-fn legacy(seen: &Seen, session: Option<&str>, version: &str) -> Option<Vec<u8>> {
+pub(in crate::connectors) fn legacy(seen: &Seen, session: Option<&str>, version: &str) -> Option<Vec<u8>> {
     match seen.rpc() {
         "server/discover" => Some(json_reply(
             "400 Bad Request",
@@ -333,7 +333,7 @@ fn desk() -> Desk {
     }
 }
 
-fn no_lookup() -> ProviderReach {
+pub(in crate::connectors) fn no_lookup() -> ProviderReach {
     ProviderReach::new(
         |name, _| panic!("a loopback row looks no name up: {name}"),
         |_| Ok(()),

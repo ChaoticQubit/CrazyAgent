@@ -10,9 +10,12 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub mod audit;
+pub mod gateway;
 pub mod grants;
 pub mod mcp_client;
 pub mod settings;
+pub mod shim;
 
 pub use grants::{Grant, GrantedConnector, Role, Who};
 pub use settings::{ConnectorSettings, KeepLog, NativeConnectors, SizeCap, Wait, WritePolicy};
