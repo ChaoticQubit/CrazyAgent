@@ -1231,6 +1231,15 @@ fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
     }
 }
 
+/// The caches choice of a row about the home reset walk, not the caches setting: Keep, so
+/// `.cache` and `.npm` stay in the kept list and the reset still walks into `.npm`, keeping
+/// only `_cacache` there, as it did before the setting (rv-code4 b2-caches F2).
+#[cfg(unix)]
+const KEEP_CACHES: Caches = Caches {
+    choice: HomeCaches::Keep,
+    level: None,
+};
+
 /// Writes a file into both download caches of an agent home, `.cache` and npm's `_cacache`.
 /// Input: the home.
 #[cfg(unix)]
@@ -1705,7 +1714,7 @@ fn a_kept_folder_swapped_for_a_link_mid_reset_never_leads_the_reset_outside() {
         });
         BEFORE_HOME_STEP.with(|hook| *hook.borrow_mut() = Some((home.join(step), swap)));
 
-        let prepared = prepare(&home, Harness::Claude, &project, &given, Caches::default());
+        let prepared = prepare(&home, Harness::Claude, &project, &given, KEEP_CACHES);
 
         let waiting = BEFORE_HOME_STEP.with(|hook| hook.borrow_mut().take());
         assert!(waiting.is_none(), "{step}: the swap never ran");
@@ -1748,7 +1757,7 @@ fn a_link_in_the_place_of_a_kept_folder_goes_at_any_depth_without_what_it_names(
         std::os::unix::fs::symlink(&outside, home.join(link)).unwrap();
     }
 
-    prepare(&home, Harness::Claude, &project, &given, Caches::default()).unwrap();
+    prepare(&home, Harness::Claude, &project, &given, KEEP_CACHES).unwrap();
 
     for link in links {
         assert!(
@@ -2222,7 +2231,7 @@ fn a_home_or_kept_folder_whose_acl_denies_listing_never_refuses_the_launch() {
     acl("everyone deny list", &npm);
     acl("everyone deny list", &home);
 
-    let prepared = prepare(&home, Harness::Claude, &project, &given, Caches::default());
+    let prepared = prepare(&home, Harness::Claude, &project, &given, KEEP_CACHES);
 
     assert_eq!(prepared, Ok(()));
     assert!(
@@ -2442,7 +2451,7 @@ fn a_kept_folder_left_readable_but_not_searchable_keeps_its_place() {
     fs::create_dir(&npm).unwrap();
     fs::set_permissions(&npm, fs::Permissions::from_mode(0o400)).unwrap();
 
-    let prepared = prepare(&home, Harness::Claude, &project, &given, Caches::default());
+    let prepared = prepare(&home, Harness::Claude, &project, &given, KEEP_CACHES);
 
     let _ = fs::set_permissions(&npm, fs::Permissions::from_mode(0o700));
     assert_eq!(prepared, Ok(()));
