@@ -15,6 +15,9 @@ pub const ROWS_PER_READ_MAX: usize = 4096;
 pub const ROW_TEXT_BYTES_MAX: usize = 64 * 1024;
 /// The most bytes of text one read gives; the row that would pass it waits for the next read.
 pub const READ_TEXT_BYTES_MAX: usize = 1024 * 1024;
+/// The longest value, text or bytes, SQLite builds for one read; a longer value refuses the
+/// read as [`UNREADABLE`].
+pub const VALUE_BYTES_MAX: usize = 8 * 1024 * 1024;
 /// The largest database the reader opens.
 pub const DATABASE_BYTES_MAX: u64 = 1024 * 1024 * 1024;
 /// The code of a record path that is a link, a folder or anything but a plain file.

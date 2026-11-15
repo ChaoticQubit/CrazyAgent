@@ -46,9 +46,9 @@ pub struct MarkdownHistory {
 impl MarkdownHistory {
     /// A reader that starts at `offset`. Inputs: the history file, the offset already read,
     /// 0 for none, and the time now. Output: the reader.
-    pub fn new(path: PathBuf, offset: u64, now: Instant) -> Self {
+    pub fn new(base: PathBuf, below: PathBuf, offset: u64, now: Instant) -> Self {
         Self {
-            path,
+            path: base.join(below),
             offset,
             position: offset,
             held: Vec::new(),
@@ -80,7 +80,7 @@ impl MarkdownHistory {
         let mut file = open_plain(&self.path).ok_or_else(|| failure(UNSAFE))?;
         let length = file.metadata().map_err(|_| failure(UNSAFE))?.len();
         if length < self.position {
-            *self = Self::new(std::mem::take(&mut self.path), 0, now);
+            *self = Self::new(std::mem::take(&mut self.path), PathBuf::new(), 0, now);
         }
         let mut events = Vec::new();
         if length > self.position {
