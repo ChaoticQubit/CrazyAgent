@@ -58,7 +58,9 @@ fn the_paste_end_marker_is_never_split_across_host_inputs() {
 mod own_turns {
     use super::super::{TerminalSession, TranscriptEvent};
     use crate::harnesses::interactive::claude_project_folder;
-    use crate::harnesses::launch::{AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest};
+    use crate::harnesses::launch::{
+        AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret, group_alive,
+    };
     use crate::terminal::tmux::{SOCKET, Tmux, installed};
     use crate::terminal::{AgentId, FOLDER, Host};
     use std::io::Write;
@@ -69,6 +71,7 @@ mod own_turns {
     use std::time::{Duration, Instant};
 
     const STAND_IN: &str = "#!/bin/sh\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
+    const PID_STAND_IN: &str = "#!/bin/sh\necho $$ > \"$HOME/pid\"\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
 
     /// One test's tmux server, ended when the test ends.
     struct Server {
@@ -120,6 +123,13 @@ mod own_turns {
     /// profile, or at Full access when `unconfined`. Takes the agent name, the access and
     /// the script. Returns the pane.
     fn start_with(name: &str, unconfined: bool, script: &str) -> Pane {
+        start_keyed(name, unconfined, script, None)
+    }
+
+    /// Starts a pane as [`start_with`] does, on an endpoint account whose key is `key`, such
+    /// as the relay token a team launch hands a keyed harness. Takes the agent name, the
+    /// access, the script and the key. Returns the pane.
+    fn start_keyed(name: &str, unconfined: bool, script: &str, key: Option<&str>) -> Pane {
         let root = tempfile::Builder::new()
             .prefix("ca-own-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -149,7 +159,7 @@ mod own_turns {
             account: AccountBinding::Url {
                 home: home.clone(),
                 base_url: "http://127.0.0.1:9/v1".into(),
-                key: None,
+                key: key.map(|key| Secret::new(key.to_owned()).unwrap()),
             },
             model: None,
             tools: true,
@@ -877,6 +887,67 @@ mod own_turns {
             "{last:?}"
         );
         assert!(!pane.session.held());
+    }
+
+    /// SA vid 9 crash route (rv-secreview B6 r1 F1): a pane whose harness reaches its model
+    /// through an engine key relay ends when that engine dies, a crash included, so nothing
+    /// is left to dial the relay's freed port. Closing the lifeline's pipe without `done`
+    /// stands in for the engine's death.
+    #[test]
+    fn a_keyed_pane_group_ends_when_the_engine_holding_its_relay_dies() {
+        let token = super::longest_key();
+        for (name, unconfined) in [("keyed-crash", false), ("keyed-crash-full", true)] {
+            let mut pane = start_keyed(name, unconfined, PID_STAND_IN, Some(&token));
+            let group = pane.session.process_group();
+            let harness = stand_in_pid(&pane.home);
+            assert!(group_alive(group) && running(harness));
+            assert!(
+                pane.session.lifeline.is_some(),
+                "a pane on an engine key relay has no lifeline"
+            );
+            if let Some(lifeline) = pane.session.lifeline.as_mut() {
+                lifeline.sever();
+            }
+            let until = Instant::now() + Duration::from_secs(10);
+            while group_alive(group) || running(harness) {
+                assert!(
+                    Instant::now() < until,
+                    "the keyed pane outlived the engine that held its relay"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    /// Reads the process id a [`PID_STAND_IN`] wrote to `pid` in its home, waiting up to
+    /// 10 s for it. Takes the home. Returns the id.
+    fn stand_in_pid(home: &Path) -> u32 {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let read = std::fs::read_to_string(home.join("pid")).unwrap_or_default();
+            if let Ok(pid) = read.trim().parse::<u32>() {
+                return pid;
+            }
+            assert!(Instant::now() < until, "the stand-in never wrote its pid");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Tells whether a process with this id still exists. Takes the id. Returns the answer.
+    fn running(pid: u32) -> bool {
+        i32::try_from(pid)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
+    }
+
+    /// A pane on the local placeholder key reaches no relay and gets no lifeline, so a later
+    /// engine can still take it over after a crash (DEC-141).
+    #[test]
+    fn a_pane_on_the_local_placeholder_key_gets_no_lifeline() {
+        let local = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+        let pane = start_keyed("local-key", false, STAND_IN, Some(local));
+        assert!(pane.session.lifeline.is_none());
     }
 }
 

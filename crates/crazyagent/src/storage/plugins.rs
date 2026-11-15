@@ -626,13 +626,13 @@ pub(super) fn hooks_follow(tx: &Transaction<'_>, item: &str) -> Result<bool, Eng
         .any(|hook| hook.follows.as_deref() == Some(item)))
 }
 
-/// The hooks that follow one skill or MCP server as a pack entry keeps them when the item
-/// goes: each hook's name, whether it is on and the projects it is switched off in. Inputs:
-/// the transaction and the item id. Output: the hooks.
+/// The hooks that follow one skill or MCP server as a new pin or the item's removal keeps
+/// them: each hook's name, what it runs, whether it is on and the projects it is switched off
+/// in. Inputs: the transaction and the item id. Output: the hooks.
 pub(super) fn following_hooks(
     tx: &Transaction<'_>,
     item: &str,
-) -> Result<Vec<(String, bool, Vec<String>)>, EngineError> {
+) -> Result<Vec<super::setup::KeptHook>, EngineError> {
     let mut hooks = Vec::new();
     for hook in all::<HookRecord>(tx, "hook")?
         .into_iter()
@@ -646,7 +646,14 @@ pub(super) fn following_hooks(
             .map_err(error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(error)?;
-        hooks.push((hook.name, hook.enabled, projects));
+        hooks.push(super::setup::KeptHook {
+            name: hook.name,
+            enabled: hook.enabled,
+            projects,
+            event: hook.event,
+            matcher: hook.matcher,
+            command: hook.command,
+        });
     }
     Ok(hooks)
 }

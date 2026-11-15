@@ -17448,6 +17448,7 @@ fn between_turns(
         narrowed: None,
         ran_before: Duration::ZERO,
         proxy: None,
+        keyed: false,
         told_finished: BTreeSet::new(),
         parent: None,
         ready: true,

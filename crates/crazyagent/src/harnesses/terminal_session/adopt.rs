@@ -483,6 +483,8 @@ impl TerminalSession {
             _key: record.key_file(),
             _context: context,
             _relay: None,
+            #[cfg(unix)]
+            lifeline: None,
         })
     }
 
@@ -493,12 +495,18 @@ impl TerminalSession {
     }
 
     /// Lets go of the pane without ending it, as the engine quits with this agent kept alive.
-    /// Generated context and key files stay for the harness that still runs.
+    /// Generated context and key files stay for the harness that still runs. A pane on an
+    /// engine key relay keeps its lifeline held until this engine exits, so it still ends
+    /// with the engine whose relay it reaches.
     /// Takes the session; a later engine adopts the pane from its record.
     pub fn leave(mut self) {
         self.stopped = true;
         if let Some(key) = self._key.take() {
             std::mem::forget(key);
+        }
+        #[cfg(unix)]
+        if let Some(lifeline) = self.lifeline.take() {
+            std::mem::forget(lifeline);
         }
         if let Some(context) = self._context.take() {
             context.keep();

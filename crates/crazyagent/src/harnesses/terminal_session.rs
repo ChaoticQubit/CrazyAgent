@@ -86,6 +86,8 @@ pub struct TerminalSession {
     _key: Option<KeyFile>,
     _context: Option<Installed>,
     _relay: Option<Relay>,
+    #[cfg(unix)]
+    lifeline: Option<crate::research::runner::Lifeline>,
 }
 
 /// The most bytes a key file the engine reads back may hold: the longest key it writes.
@@ -349,7 +351,7 @@ impl TerminalSession {
         let ready = LaunchEvent::Ready {
             native_session: claude.then_some(session_id),
         };
-        Ok(Self {
+        let session = Self {
             host,
             agent,
             pid: pane.pid,
@@ -400,7 +402,36 @@ impl TerminalSession {
             _key: key,
             _context: installed,
             _relay: relay,
-        })
+            #[cfg(unix)]
+            lifeline: None,
+        };
+        session.guarded(&request)
+    }
+
+    /// Gives a pane whose harness reaches its model through an engine key relay a lifeline,
+    /// so its process group ends when the engine dies, a crash included, and nothing dials
+    /// the relay's freed port (SA vid 9, B6 r1 F1). Other panes stay adoptable. Input: the
+    /// started session and its routed request. Output: the session, or `launch_spawn_failed`
+    /// when the lifeline did not start, which drops the session and so ends its pane.
+    #[cfg(unix)]
+    fn guarded(mut self, request: &LaunchRequest) -> Result<Self, LaunchError> {
+        let relayed = request
+            .account
+            .key()
+            .is_some_and(|key| crate::model_gateway::relay::is_relay_token(key.reveal()));
+        if relayed {
+            let lifeline = crate::research::runner::Lifeline::watch(self.pid)
+                .map_err(|_| failure("launch_spawn_failed"))?;
+            self.lifeline = Some(lifeline);
+        }
+        Ok(self)
+    }
+
+    /// Gives the session back as it is: off unix no agent pane starts at all (see
+    /// `agent_pane_unavailable`). Input: the session and its request. Output: the session.
+    #[cfg(not(unix))]
+    fn guarded(self, _request: &LaunchRequest) -> Result<Self, LaunchError> {
+        Ok(self)
     }
 
     /// Names the harness conversation this pane records, once its record exists: the id
@@ -961,6 +992,10 @@ impl TerminalSession {
         }
         let _ = self.host.kill(&self.agent);
         self.end_group(seen, held);
+        #[cfg(unix)]
+        if let Some(lifeline) = self.lifeline.as_mut() {
+            lifeline.release();
+        }
     }
 
     /// Kills what the harness left in the pane's process group once the pane is gone, as a
