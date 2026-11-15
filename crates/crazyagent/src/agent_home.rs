@@ -185,9 +185,11 @@ enum Kept {
     Lock,
     /// A real folder with all it holds.
     Folder,
-    /// A real folder with all it holds that no launch step writes, removes or reads in: a
-    /// download cache, where an agent's tools may set flags and ACLs on what they copy
-    /// (RV-DS241-187).
+    /// A real folder with all it holds that no launch keeping it writes, removes or reads in:
+    /// a download cache, where an agent's tools may set flags and ACLs on what they copy
+    /// (RV-DS241-187). A launch that clears the download caches ([`clears_caches`]) keeps
+    /// no such folder and removes it whole as any entry it does not keep, clearing those
+    /// flags and ACLs on the way.
     Cache,
     /// A link, never followed: a cache the engine links to the owner's read-only one
     /// ([`crate::sandbox::toolchains::prepare_cargo_home`]), which the agent's profile keeps
