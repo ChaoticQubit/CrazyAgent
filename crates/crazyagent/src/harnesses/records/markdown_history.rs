@@ -1,5 +1,5 @@
 use super::super::launch::{LaunchError, failure};
-use super::super::transcript::{TranscriptEvent, open_plain};
+use super::super::transcript::{EVENTS_PER_READ_MAX, TranscriptEvent};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -31,10 +31,12 @@ enum Turn {
 /// are the reply, one fact per line; a quoted line (`>`) is tool output; a session header
 /// line (`# aider chat started at`) interrupts an open turn. A turn ends at the next user
 /// heading, or once the file has stayed the same for [`QUIET`] after reply text. Holds the
-/// file, the offset of the last whole line read, the bytes read past it, the unfinished
-/// last line, whether a line past the bound is being passed over, and the turn.
+/// folder the engine holds and the file's path below it, the offset of the last whole line
+/// read, the bytes read past it, the unfinished last line, whether a line past the bound is
+/// being passed over, and the turn.
 pub struct MarkdownHistory {
-    path: PathBuf,
+    base: PathBuf,
+    below: PathBuf,
     offset: u64,
     position: u64,
     held: Vec<u8>,
@@ -44,11 +46,13 @@ pub struct MarkdownHistory {
 }
 
 impl MarkdownHistory {
-    /// A reader that starts at `offset`. Inputs: the history file, the offset already read,
-    /// 0 for none, and the time now. Output: the reader.
+    /// A reader that starts at `offset`. Inputs: the folder the engine holds, the history
+    /// file's path below it as plain names, the offset already read, 0 for none, and the time
+    /// now. Output: the reader.
     pub fn new(base: PathBuf, below: PathBuf, offset: u64, now: Instant) -> Self {
         Self {
-            path: base.join(below),
+            base,
+            below,
             offset,
             position: offset,
             held: Vec::new(),
@@ -63,24 +67,28 @@ impl MarkdownHistory {
         self.offset
     }
 
-    /// Reads the facts of the lines finished since the last read and ends a turn the file
-    /// has been quiet on for [`QUIET`]. Input: the time now. Output: the facts, none while
-    /// the file does not exist yet, or [`UNSAFE`].
+    /// Reads the facts of the lines finished since the last read, at most
+    /// [`EVENTS_PER_READ_MAX`], and ends a turn the file has been quiet on for [`QUIET`]. The
+    /// file opens one part at a time below the held folder, following no link. Input: the
+    /// time now. Output: the facts, none while the file does not exist yet, or [`UNSAFE`] for
+    /// a link in any part below the folder, a folder or anything but a plain file.
     pub fn read(&mut self, now: Instant) -> Result<Vec<TranscriptEvent>, LaunchError> {
-        let metadata = match std::fs::symlink_metadata(&self.path) {
-            Ok(metadata) => metadata,
+        let mut file = match crate::platform::open_plain_beneath(&self.base, &self.below) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Vec::new());
             }
             Err(_) => return Err(failure(UNSAFE)),
         };
+        let metadata = file.metadata().map_err(|_| failure(UNSAFE))?;
         if !metadata.file_type().is_file() {
             return Err(failure(UNSAFE));
         }
-        let mut file = open_plain(&self.path).ok_or_else(|| failure(UNSAFE))?;
-        let length = file.metadata().map_err(|_| failure(UNSAFE))?.len();
+        let length = metadata.len();
         if length < self.position {
-            *self = Self::new(std::mem::take(&mut self.path), PathBuf::new(), 0, now);
+            let base = std::mem::take(&mut self.base);
+            let below = std::mem::take(&mut self.below);
+            *self = Self::new(base, below, 0, now);
         }
         let mut events = Vec::new();
         if length > self.position {
@@ -102,11 +110,16 @@ impl MarkdownHistory {
             self.turn = Turn::Closed;
         }
         assert!(self.offset <= self.position && self.held.len() <= LINE_BYTES_MAX);
+        assert!(events.len() <= EVENTS_PER_READ_MAX);
         Ok(events)
     }
 
     fn take(&mut self, chunk: &[u8], events: &mut Vec<TranscriptEvent>) {
         for piece in chunk.split_inclusive(|byte| *byte == b'\n') {
+            if events.len() + 3 > EVENTS_PER_READ_MAX {
+                assert!(self.offset == self.position && self.held.is_empty());
+                break;
+            }
             self.position += u64::try_from(piece.len()).unwrap_or(u64::MAX);
             let (content, whole) = match piece.strip_suffix(b"\n") {
                 Some(content) => (content, true),

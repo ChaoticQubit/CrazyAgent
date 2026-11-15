@@ -44,7 +44,9 @@ pub struct Schema {
 
 /// Follows one harness session database by polling it read-only. Each read gives the facts
 /// of the rows past the last sequence read. Holds the database path, its query set, the last
-/// sequence read and how many reads in a row found it busy.
+/// sequence read and how many reads in a row found it busy. SQLite refuses a link in any part
+/// of the path, so the caller passes the path by its real name; a path through a link is
+/// refused as [`UNSAFE`].
 pub struct SqlitePoll {
     path: PathBuf,
     schema: &'static Schema,
@@ -53,8 +55,9 @@ pub struct SqlitePoll {
 }
 
 impl SqlitePoll {
-    /// A reader that starts past sequence `after`. Inputs: the database path, its query set
-    /// and the last sequence already read, 0 for none. Output: the reader.
+    /// A reader that starts past sequence `after`. Inputs: the database path, with no link in
+    /// any part, its query set and the last sequence already read, 0 for none. Output: the
+    /// reader.
     pub fn new(path: PathBuf, schema: &'static Schema, after: i64) -> Self {
         Self {
             path,
@@ -96,14 +99,25 @@ impl SqlitePoll {
         let sort = |error: rusqlite::Error| stop(&error, immutable);
         let connection = open(&self.path, mode).map_err(sort)?;
         for table in self.schema.tables {
-            let kind: String = connection
+            let (kind, made): (String, Option<String>) = connection
                 .query_row(
-                    "SELECT type FROM sqlite_master WHERE name = ?1",
+                    "SELECT type, sql FROM sqlite_master WHERE name = ?1",
+                    [table],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(sort)?;
+            let plain = made.is_some_and(|made| made.starts_with("CREATE TABLE "));
+            if kind != "table" || !plain {
+                return Err(Stop::Refused(VERSION_UNKNOWN));
+            }
+            let generated: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_xinfo(?1) WHERE hidden <> 0",
                     [table],
                     |row| row.get(0),
                 )
                 .map_err(sort)?;
-            if kind != "table" {
+            if generated != 0 {
                 return Err(Stop::Refused(VERSION_UNKNOWN));
             }
         }
@@ -170,9 +184,10 @@ enum Stop {
 }
 
 /// Checks the record path before SQLite opens it: a plain file, within the size bound, that
-/// starts with the SQLite header, and any WAL or index file beside it a plain file of its
-/// own. Input: the database path. Output: how to open it, none while nothing or an empty
-/// file is there, or a refusal code.
+/// starts with the SQLite header, and any WAL, index or rollback journal file beside it a
+/// plain file of its own, as SQLite opens each of those without a wait bound. Input: the
+/// database path. Output: how to open it, none while nothing or an empty file is there, or a
+/// refusal code.
 fn mode(path: &Path) -> Result<Option<Mode>, LaunchError> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -197,16 +212,17 @@ fn mode(path: &Path) -> Result<Option<Mode>, LaunchError> {
         return Err(failure(UNREADABLE));
     }
     let mut beside = 0;
-    for suffix in ["-wal", "-shm"] {
+    for suffix in ["-wal", "-shm", "-journal"] {
         let mut name = path.as_os_str().to_owned();
         name.push(suffix);
         match std::fs::symlink_metadata(&name) {
-            Ok(metadata) if plain(&metadata) => beside += 1,
+            Ok(metadata) if plain(&metadata) => beside += usize::from(suffix != "-journal"),
             Ok(_) => return Err(failure(UNSAFE)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(failure(UNREADABLE)),
         }
     }
+    assert!(beside <= 2);
     let wal = header[18] == 2 || header[19] == 2;
     Ok(Some(if wal && beside == 0 {
         Mode::Immutable
@@ -228,10 +244,12 @@ fn plain(metadata: &std::fs::Metadata) -> bool {
 
 /// Opens the database for one read with every write and schema code path off: read-only,
 /// no link followed, defensive, no busy wait, query only, no schema functions trusted, cell
-/// sizes checked and no memory map. Inputs: the path and the mode. Output: the connection.
+/// sizes checked, no memory map and no value longer than [`VALUE_BYTES_MAX`]. The path goes
+/// into the URI byte for byte, so SQLite opens the name [`mode`] checked. Inputs: the path
+/// and the mode. Output: the connection.
 fn open(path: &Path, mode: Mode) -> Result<Connection, rusqlite::Error> {
     let mut uri = String::from("file:");
-    for byte in path.to_string_lossy().bytes() {
+    for &byte in path.as_os_str().as_encoded_bytes() {
         if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
             uri.push(char::from(byte));
         } else {
@@ -249,6 +267,9 @@ fn open(path: &Path, mode: Mode) -> Result<Connection, rusqlite::Error> {
             | OpenFlags::SQLITE_OPEN_NOFOLLOW
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
+    let length = i32::try_from(VALUE_BYTES_MAX).unwrap_or(i32::MAX);
+    connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, length)?;
+    assert!(connection.limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH)? <= length);
     connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
     connection.busy_timeout(Duration::ZERO)?;
     connection.execute_batch(
@@ -258,10 +279,16 @@ fn open(path: &Path, mode: Mode) -> Result<Connection, rusqlite::Error> {
 }
 
 /// Sorts one SQLite failure: busy or locked, and under `immutable` a page a writer changed
-/// mid-read, is busy; a query the database's layout does not fit is an unknown version; the
-/// rest is unreadable. Inputs: the failure and the mode. Output: the stop.
+/// mid-read, is busy; a link in any part of the path is unsafe; a query the database's
+/// layout does not fit is an unknown version; the rest, a value past [`VALUE_BYTES_MAX`]
+/// included, is unreadable. Inputs: the failure and the mode. Output: the stop.
 fn stop(error: &rusqlite::Error, immutable: bool) -> Stop {
     match error {
+        rusqlite::Error::SqliteFailure(sqlite, _)
+            if sqlite.extended_code == rusqlite::ffi::SQLITE_CANTOPEN_SYMLINK =>
+        {
+            Stop::Refused(UNSAFE)
+        }
         rusqlite::Error::SqliteFailure(sqlite, _) => match sqlite.code {
             ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked => Stop::Busy,
             ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase if immutable => Stop::Busy,
