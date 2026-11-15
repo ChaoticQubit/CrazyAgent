@@ -84,7 +84,7 @@ pub enum ToolKind {
 /// marks it read-only and not destructive; anything else, a tool that says nothing
 /// included, is a write. Inputs: the connector and the tool. Output: its kind.
 pub fn classify(spec: &ConnectorSpec, tool: &VendorTool) -> ToolKind {
-    let listed = spec.read_tools.iter().any(|name| *name == tool.name);
+    let listed = spec.read_tools.contains(&tool.name);
     let marked = tool.read_only_hint == Some(true) && tool.destructive_hint != Some(true);
     if listed || marked {
         ToolKind::Read
