@@ -22,7 +22,7 @@ mod tests;
 pub use api::Endpoints;
 
 pub const CLIENT_ID: &str = "Ov23liHICPRkMyS5sNMV";
-pub const SCOPES: &str = "repo read:user";
+pub const SCOPES: &str = "repo read:user read:org workflow";
 pub const REPOS_PER_PAGE: u32 = 100;
 pub const REPO_PAGE_MAX: u32 = 100;
 
@@ -258,6 +258,11 @@ pub fn problem(code: &str) -> String {
         "github_reply_invalid" => "GitHub sent a reply the engine could not read. Try again.",
         "github_cli_missing" => "The GitHub CLI (gh) is not installed.",
         "github_cli_not_signed_in" => "The GitHub CLI is not signed in. Run gh auth login first.",
+        "github_scope_missing_read_org" => {
+            "Listing your GitHub organizations needs the read:org permission, which this \
+             sign-in lacks. Sign in to GitHub again, or run gh auth refresh -s read:org and \
+             use the GitHub CLI again."
+        }
         "credential_missing" => {
             "The saved GitHub token is gone from the credential store. Sign in again."
         }
@@ -555,18 +560,21 @@ impl GitHub {
     /// Lists the accounts a new repository can go under, the owner's own account first.
     /// Output: the accounts and a problem sentence, or `github_not_signed_in`.
     pub fn owners(&self) -> Result<GitHubOwners, EngineError> {
-        Err(failure("github_publish_unbuilt"))
+        let token = self.store.get(&self.saved()?.credential)?;
+        api::owners(&self.endpoints, &token)
     }
 
     /// Checks whether `owner/name` is still free on GitHub. Inputs: the account and the
     /// name. Output: true when free, or `github_repo_name_invalid`, `github_not_signed_in`.
-    pub fn name_free(&self, _owner: &str, _name: &str) -> Result<bool, EngineError> {
-        Err(failure("github_publish_unbuilt"))
+    pub fn name_free(&self, owner: &str, name: &str) -> Result<bool, EngineError> {
+        let token = self.store.get(&self.saved()?.credential)?;
+        api::name_free(&self.endpoints, &token, owner, name)
     }
 
     /// Makes an empty repository on GitHub with CrazyAgent's standard settings.
     /// Input: the repository to make. Output: what GitHub made, or the refusal code.
-    pub fn create_repo(&self, _repo: &GitHubNewRepo) -> Result<GitHubCreated, EngineError> {
-        Err(failure("github_publish_unbuilt"))
+    pub fn create_repo(&self, repo: &GitHubNewRepo) -> Result<GitHubCreated, EngineError> {
+        let token = self.store.get(&self.saved()?.credential)?;
+        api::create(&self.endpoints, &token, repo)
     }
 }

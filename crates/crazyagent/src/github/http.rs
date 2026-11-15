@@ -6,6 +6,9 @@ use std::time::{Duration, Instant};
 
 const CURL: &str = "/usr/bin/curl";
 const BODY_BYTES_MAX: usize = 4 << 20;
+const SCOPES_LINE_MAX: usize = 1024;
+const TRAILER_BYTES_MAX: usize = SCOPES_LINE_MAX + 16;
+const WRITE_OUT: &str = "\n%header{x-oauth-scopes}\n%{http_code}";
 const REQUEST_TIME: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = "CrazyAgent";
 
@@ -115,7 +118,7 @@ impl Request<'_> {
             .args(["--connect-timeout", "10"])
             .args(["--max-time", "30"])
             .args(["--max-filesize", &BODY_BYTES_MAX.to_string()])
-            .args(["--write-out", "\n%{http_code}"])
+            .args(["--write-out", WRITE_OUT])
             .args(["--config", "-"])
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -161,7 +164,7 @@ fn exchange(mut command: Command, mut config: Vec<u8>) -> Result<Reply, EngineEr
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         let read = stdout
-            .take(BODY_BYTES_MAX as u64 + 16)
+            .take((BODY_BYTES_MAX + TRAILER_BYTES_MAX) as u64)
             .read_to_end(&mut bytes);
         (read, bytes)
     });
@@ -188,9 +191,12 @@ fn exchange(mut command: Command, mut config: Vec<u8>) -> Result<Reply, EngineEr
     split(bytes)
 }
 
+/// Splits curl's output into the body, the `X-OAuth-Scopes` line and the status line
+/// that `WRITE_OUT` puts after it. Input: the output. Output: the reply, or
+/// `github_reply_invalid` for a body past 4 MiB or a missing or bad status.
 fn split(mut bytes: Vec<u8>) -> Result<Reply, EngineError> {
     let invalid = || failure("github_reply_invalid");
-    if bytes.len() > BODY_BYTES_MAX + 4 {
+    if bytes.len() > BODY_BYTES_MAX + TRAILER_BYTES_MAX {
         return Err(invalid());
     }
     let cut = bytes
@@ -203,9 +209,41 @@ fn split(mut bytes: Vec<u8>) -> Result<Reply, EngineError> {
         return Err(invalid());
     }
     bytes.truncate(cut);
+    let line = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .ok_or_else(invalid)?;
+    let scopes = scopes(&bytes[line + 1..]);
+    bytes.truncate(line);
+    if bytes.len() > BODY_BYTES_MAX {
+        return Err(invalid());
+    }
     Ok(Reply {
         status,
         body: bytes,
-        scopes: None,
+        scopes,
     })
+}
+
+/// Reads the `X-OAuth-Scopes` line: the comma-separated scopes of a classic token.
+/// Input: the line curl wrote. Output: the scopes, or None for an empty line (a token
+/// kind GitHub names no scopes for), a curl too old to print headers, which writes the
+/// variable as it is, or any line that is not a list of scope names.
+fn scopes(line: &[u8]) -> Option<Vec<String>> {
+    if line.is_empty() || line.len() > SCOPES_LINE_MAX {
+        return None;
+    }
+    let scopes: Vec<String> = std::str::from_utf8(line)
+        .ok()?
+        .split(',')
+        .map(str::trim)
+        .map(str::to_owned)
+        .collect();
+    let named = scopes.iter().all(|scope| {
+        !scope.is_empty()
+            && scope
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b':' || byte == b'_')
+    });
+    named.then_some(scopes)
 }
