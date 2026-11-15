@@ -347,11 +347,9 @@ fn an_approved_server_whose_stored_spec_fails_the_checks_never_launches() {
     else {
         panic!("server view required");
     };
+    let sentence = "This server's command or address holds hidden or control characters, so it can't start. Remove it, then add it again.";
     assert_eq!(view.status, ServerStatus::CantStart);
-    assert_eq!(
-        view.problem.as_deref(),
-        Some(crate::plugins::check_problem("server_command_invalid").as_str())
-    );
+    assert_eq!(view.problem.as_deref(), Some(sentence));
 }
 
 #[test]

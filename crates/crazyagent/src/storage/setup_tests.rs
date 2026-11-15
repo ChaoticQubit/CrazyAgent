@@ -2185,7 +2185,8 @@ fn an_added_hook_that_both_moved_and_replaced_takes_every_off() {
 /// RV-DS241-195: the per-project switches kept for a pack entry's hooks never outlive their
 /// project. Removing a project forgets its kept switches, so a new project that takes the
 /// same id starts with the hook on; a kept switch whose project is gone, as a removal before
-/// this fix left it, adds no switch row at the next seed.
+/// this fix left it, adds no switch row at the next seed. The second removal call stands for
+/// project creation, which runs it after the new row is written (storage.rs).
 #[test]
 fn kept_hook_switches_never_outlive_their_project() {
     let (dir, mut connection) = database();
@@ -2267,4 +2268,51 @@ fn kept_hook_switches_never_outlive_their_project() {
         )
         .unwrap();
     assert_eq!(left, 0, "no switch row names a project that is gone or new");
+}
+
+/// rv-code2 B3B-1: removing a project drops only its id from the kept hooks, so a hook kept
+/// on everywhere still matches the hook a new pin adds that runs the same thing, and that
+/// hook takes no switched-off sibling's off.
+#[test]
+fn removing_a_project_keeps_the_hooks_a_new_pin_matches_by_what_they_run() {
+    let (_dir, mut connection) = database();
+    let kept = |place: &str, enabled: bool, projects: &[&str], command: &str| KeptHook {
+        name: format!("caveman/SessionStart/{place}"),
+        enabled,
+        projects: projects.iter().copied().map(String::from).collect(),
+        event: "SessionStart".into(),
+        matcher: None,
+        command: command.into(),
+    };
+    let record = PackRecord {
+        id: "caveman".into(),
+        source: "https://example.invalid/caveman@1".into(),
+        skills: vec!["skill-1".into()],
+        server: None,
+        enabled: true,
+        hooks: vec![
+            kept("1", true, &[], "sh x.sh"),
+            kept("2", false, &[], "sh y.sh"),
+            kept("3", true, &["project-1"], "sh z.sh"),
+        ],
+    };
+    let project = crate::protocol::ProjectId::new("project-1").unwrap();
+    let tx = connection.transaction().unwrap();
+    save_pack(&tx, &record).unwrap();
+
+    forget_project(&tx, &project).unwrap();
+
+    let left = load_pack(&tx, "caveman").unwrap().unwrap().hooks;
+    let added = [added_hook("caveman", "SessionStart", 1, "sh x.sh")];
+    let taken: Vec<&str> = kept_for(&left, &added, &added[0])
+        .into_iter()
+        .map(|hook| hook.command.as_str())
+        .collect();
+    assert_eq!(
+        taken,
+        ["sh x.sh"],
+        "the added hook took a switched-off sibling's off"
+    );
+    assert_eq!(left.len(), 3);
+    assert!(left.iter().all(|hook| hook.projects.is_empty()));
 }
