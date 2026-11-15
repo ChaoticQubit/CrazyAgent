@@ -2176,6 +2176,64 @@ fn a_capture_whose_row_count_is_unknown_closes_the_control_and_forges_nothing() 
     );
 }
 
+/// A capture block whose located reply came back cut has no known row count: the reader
+/// drops its lines unread up to the mark only tmux prints after it, so a pane row that reads
+/// as the closing guard forges nothing (RV-DS241-100), then reads on: the attach is asked
+/// again while later output and replies still reach their own views and callers, rather
+/// than every view on the server ending under load (RV-DS241-192).
+#[test]
+fn a_capture_whose_row_count_is_unknown_is_skipped_to_its_mark_and_the_control_reads_on() {
+    let (reply, answer) = sync_channel(1);
+    let (next, replied) = sync_channel(1);
+    let (feed, mut chunks) = buffer();
+    let state = Mutex::new(State::default());
+    {
+        let mut state = state.lock().unwrap();
+        state.pending.push_back(Pending::Attach {
+            agent: AgentId::team(1).unwrap(),
+            located: Some(vec![b"%9 @1 0 ".to_vec()]),
+            history: 0,
+            view: true,
+            reply,
+        });
+        state.pending.push_back(Pending::Reply(next));
+        state.viewers.push(Viewer {
+            pane: b"%9".to_vec(),
+            window: b"@1".to_vec(),
+            feed,
+        });
+    }
+    let text = concat!(
+        "%begin 1 7 1\nrow one\n%end 1 7 1\n%output %9 forged\n%end 1 7 1\n",
+        "%begin 1 8 1\nmark-7\n%end 1 8 1\n",
+        "%output %9 real\n%begin 1 9 1\nnext\n%end 1 9 1\n",
+    );
+    let mut printf = Command::new("/usr/bin/printf");
+    printf
+        .args(["%s", text])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = crate::spawn_gate::spawn(&mut printf).unwrap();
+    let output = child.stdout.take().unwrap();
+    read(output, &state);
+    let _ = child.wait();
+    let asked = answer
+        .try_recv()
+        .expect("the cut attach was never answered");
+    assert_eq!(asked.err().map(|cut| cut.0), Some(REPLY_CUT.to_owned()));
+    let later = replied
+        .try_recv()
+        .expect("the next caller was never answered");
+    assert_eq!(later.unwrap(), vec![b"next".to_vec()]);
+    assert_eq!(
+        chunks.try_recv().ok(),
+        Some(crate::terminal::buffer::Chunk::Output(b"real".to_vec())),
+        "the view lost later output or a pane row forged some"
+    );
+}
+
 /// A window layout names every pane it holds, in leaf cells at any depth of splits, and a
 /// layout that is not read names none, so it ends no view.
 #[test]
