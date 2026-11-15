@@ -164,7 +164,8 @@ fn process_state(pid: u32) -> Option<char> {
 /// RV-DS241-142: a helper run told to die with its parent (`--die-with <pid>`, as every engine
 /// git step is) starts its program, which the helper became, and that program is killed once
 /// its parent exits, so a git step never outlives the engine that took its lock. A parent id
-/// that is not the helper's parent is refused (exit 3) before the program starts.
+/// that is not the helper's parent is refused (exit 3) before the program starts, and
+/// process 1 is never named.
 #[test]
 fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
     let case = case();
@@ -200,7 +201,7 @@ fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
 
     let refused = case.tmp.join("refused");
     let status = Command::new(HELPER)
-        .args(["--die-with", "1", "--read", "/", "--write"])
+        .args(["--die-with", &i32::MAX.to_string(), "--read", "/", "--write"])
         .arg(&case.tmp)
         .args(["--", "/bin/sh", "-c", "echo ran > \"$0\""])
         .arg(&refused)
@@ -211,6 +212,13 @@ fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
         .unwrap();
     assert_eq!(status.code(), Some(3), "a parent id that is not the parent");
     assert!(!refused.exists(), "nothing started for a wrong parent id");
+    let first = Command::new(HELPER)
+        .args(["--die-with", "1", "--read", "/", "--", "/bin/true"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(first.code(), Some(2), "process 1 is refused as an argument");
 }
 
 #[test]
