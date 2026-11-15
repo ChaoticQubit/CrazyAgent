@@ -217,33 +217,48 @@ pub fn prepare(
     harness: &str,
     account: &CredentialRef,
 ) -> Result<PathBuf, LaunchError> {
-    use rustix::fs::{Mode, OFlags};
     let id = super::registry::registry()
         .get(harness)
         .map(|found| found.id())
         .ok_or_else(|| failure("launch_harness_unsupported"))?;
     super::launch::validate_home(base)?;
+    private_folder(base, &[id, account.as_str()])?;
+    let home = base.join(id).join(account.as_str());
+    super::launch::validate_home(&home)?;
+    assert!(home.starts_with(base) && home != base);
+    Ok(home)
+}
+
+/// Opens a folder below `base` for writing into, making each missing folder on the way 0700
+/// through no-follow steps from the folder above, so a link planted at any of the names is
+/// refused, never followed. Inputs: the base folder and the plain folder names below it, in
+/// order. Output: the last folder, open, or `launch_account_home_unsafe` for a link, a file,
+/// another owner or a mode other than 0700.
+#[cfg(unix)]
+pub(crate) fn private_folder(
+    base: &Path,
+    names: &[&str],
+) -> Result<std::os::fd::OwnedFd, LaunchError> {
+    use rustix::fs::{Mode, OFlags};
     let unsafe_home = || failure("launch_account_home_unsafe");
     let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let owner = rustix::process::geteuid().as_raw();
     let mut parent = rustix::fs::open(base, folder, Mode::empty()).map_err(|_| unsafe_home())?;
-    for name in [id, account.as_str()] {
-        match rustix::fs::mkdirat(&parent, name, Mode::RWXU) {
+    for name in names {
+        assert!(!name.is_empty() && *name != "." && *name != ".." && !name.contains('/'));
+        match rustix::fs::mkdirat(&parent, *name, Mode::RWXU) {
             Ok(()) | Err(rustix::io::Errno::EXIST) => {}
             Err(_) => return Err(unsafe_home()),
         }
         let child =
-            rustix::fs::openat(&parent, name, folder, Mode::empty()).map_err(|_| unsafe_home())?;
+            rustix::fs::openat(&parent, *name, folder, Mode::empty()).map_err(|_| unsafe_home())?;
         let stat = rustix::fs::fstat(&child).map_err(|_| unsafe_home())?;
         if stat.st_uid != owner || u32::from(stat.st_mode) & 0o7777 != 0o700 {
             return Err(unsafe_home());
         }
         parent = child;
     }
-    let home = base.join(id).join(account.as_str());
-    super::launch::validate_home(&home)?;
-    assert!(home.starts_with(base) && home != base);
-    Ok(home)
+    Ok(parent)
 }
 
 /// Refuses a private home where its Unix owner and 0700 mode cannot be checked. Inputs:

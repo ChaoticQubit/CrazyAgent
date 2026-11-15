@@ -2213,7 +2213,11 @@ fn hook_command(root: &str, command: &str) -> String {
     )
 }
 
-fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
+/// The MCP servers of one launch as the JSON file Claude Code reads with `--mcp-config`: an
+/// `mcpServers` map, each secret an environment value or a header. It is also the
+/// `json-mcp-servers` render of a harness manifest ([`crate::harnesses::render`]). Input:
+/// the servers. Output: the text, or the refusal.
+pub(crate) fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
     let mut declared = serde_json::Map::new();
     for server in servers {
         let mut values = serde_json::Map::new();
