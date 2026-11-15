@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 /// starts a sandboxed process with that turn's arguments, its output lines become launch
 /// events by the manifest's rules, and its exit ends the turn. The harness session id a turn
 /// reports is passed to the next turn. Between turns no process runs, so the process group
-/// a caller can stop is the running turn's, if any. A run at Full access, an account with a
-/// key and a project context are refused until the tasks that hand them over land.
+/// a caller can stop is the running turn's, if any. With tools off, a turn whose harness
+/// reports a tool is stopped at once. A run at Full access, an account with a key and a
+/// project context are refused until the tasks that hand them over land.
 pub struct TurnSession {
     request: LaunchRequest,
     turns: JsonlTurn,
@@ -27,11 +28,13 @@ pub struct TurnSession {
     uncertain: bool,
 }
 
-/// The process of the running turn, its sandbox warden and its output lines.
+/// The process of the running turn, its sandbox warden, its output lines and whether its
+/// process group was already asked to stop.
 struct Running {
     child: Child,
     warden: Option<crate::sandbox::warden::Warden>,
     lines: Receiver<Line>,
+    stopping: bool,
 }
 
 impl TurnSession {
@@ -95,11 +98,14 @@ impl TurnSession {
         self.running.as_ref().map(|running| running.child.id())
     }
 
-    /// Starts a turn: one sandboxed process with the turn's arguments and no input. Input:
-    /// the prompt. Output: Ok once the process runs, the driver's refusals such as
+    /// Starts a turn: the launch is checked again, as its home, profile or folders may have
+    /// changed since the last turn, then one sandboxed process starts with the turn's
+    /// arguments and no input. Input: the prompt. Output: Ok once the process runs, the
+    /// launch's own refusals, which start nothing, the driver's refusals such as
     /// `launch_busy`, or `launch_spawn_failed` and the sandbox's refusals, after which the
     /// turn counts as ended and the next prompt may start one.
     pub fn send(&mut self, prompt: &str) -> Result<(), LaunchError> {
+        validate(&self.request)?;
         let argv = self.turns.start(prompt)?;
         assert!(self.running.is_none());
         let arguments: Vec<OsString> = argv.into_iter().map(OsString::from).collect();
@@ -119,14 +125,13 @@ impl TurnSession {
     /// `launch_not_running` with no turn or an interrupt already asked.
     pub fn interrupt(&mut self) -> Result<(), LaunchError> {
         self.turns.interrupt()?;
-        if let Some(running) = self.running.as_mut() {
-            terminate(&mut running.child);
-        }
+        self.stop_turn();
         Ok(())
     }
 
     /// Waits up to `wait` for the next event. A line too long to hold is passed over with one
-    /// note in the engine log. Output: Some(event), None on timeout or between turns, or an
+    /// note in the engine log, and a breach of tools off stops the turn's process group.
+    /// Output: Some(event), None on timeout or between turns, or an
     /// error once the session deadline passes or the driver refuses a line, which also stops
     /// the running turn.
     pub fn next_event(&mut self, wait: Duration) -> Result<Option<LaunchEvent>, LaunchError> {
@@ -149,7 +154,12 @@ impl TurnSession {
             };
             match running.lines.recv_timeout(until.min(self.deadline) - now) {
                 Ok(Line::Bytes(line)) => match self.turns.receive(&line) {
-                    Ok(events) => self.queue.extend(events),
+                    Ok(events) => {
+                        self.queue.extend(events);
+                        if self.turns.breached() {
+                            self.stop_turn();
+                        }
+                    }
                     Err(error) => {
                         self.end_turn(true);
                         return Err(error);
@@ -192,6 +202,7 @@ impl TurnSession {
             child,
             warden,
             lines,
+            stopping: false,
         });
         let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
             self.end_turn(true);
@@ -214,6 +225,17 @@ impl TurnSession {
             return Err(failure("launch_reader_unavailable"));
         }
         Ok(())
+    }
+
+    /// Asks the running turn's process group to stop, once; its turn ends when its output
+    /// closes.
+    fn stop_turn(&mut self) {
+        if let Some(running) = self.running.as_mut()
+            && !running.stopping
+        {
+            terminate(&mut running.child);
+            running.stopping = true;
+        }
     }
 
     /// Ends the running turn's process group: TERM first when it is stopped `at_once`, a
@@ -240,13 +262,19 @@ impl TurnSession {
 
     #[cfg(not(unix))]
     fn end_turn(&mut self, at_once: bool) -> Option<i32> {
-        let _ = at_once;
         let mut running = self.running.take()?;
         if let Some(warden) = running.warden.take() {
             match warden {}
         }
+        let wait = if at_once {
+            Duration::ZERO
+        } else {
+            self.request.limits.stop_grace
+        };
+        let code = reap(&mut running.child, wait);
         let _ = running.child.kill();
-        running.child.wait().ok().and_then(|status| status.code())
+        let status = running.child.wait().ok();
+        code.or_else(|| status.and_then(|status| status.code()))
     }
 }
 

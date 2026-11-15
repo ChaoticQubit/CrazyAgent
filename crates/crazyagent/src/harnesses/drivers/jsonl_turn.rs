@@ -100,6 +100,7 @@ struct Turn {
     success: Option<bool>,
     errored: bool,
     interrupted: bool,
+    breached: bool,
 }
 
 /// One conversation with a harness that runs one process per turn and writes JSON lines,
@@ -180,9 +181,9 @@ impl JsonlTurn {
     }
 
     /// Whether the running turn used a tool with tools off, so its caller must stop the
-    /// turn's process. Output: false until the breach check lands.
+    /// turn's process. Output: true from the breach until the turn ends.
     pub fn breached(&self) -> bool {
-        false
+        self.turn.breached
     }
 
     /// Starts a turn. Input: the prompt. Output: the turn's arguments, each placeholder
@@ -230,7 +231,10 @@ impl JsonlTurn {
     }
 
     /// Reads one line the turn's process wrote. A line over `LINE_BYTES_MAX`, a line that
-    /// is not one JSON object, a line no rule matches and a line outside a turn give nothing.
+    /// is not one JSON object, a line no rule matches, a line outside a turn and every line
+    /// after a breach give nothing. With tools off, a tool the harness reports using is a
+    /// breach: one `ApprovalDenied` instead of the tool use, and [`JsonlTurn::breached`]
+    /// tells the caller to stop the turn's process.
     /// Input: the line, with or without its newline. Output: the events it gives, or
     /// `launch_session_id_invalid` for a session id that is not 1 to `SESSION_BYTES_MAX`
     /// bytes without a control character or a leading `-`, which fails the conversation for
@@ -242,7 +246,7 @@ impl JsonlTurn {
         }
         let line = line.strip_suffix(b"\n").unwrap_or(line);
         let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if self.phase != Phase::Running || line.len() > LINE_BYTES_MAX {
+        if self.phase != Phase::Running || self.turn.breached || line.len() > LINE_BYTES_MAX {
             return Ok(Vec::new());
         }
         let Ok(object @ Value::Object(_)) = serde_json::from_slice::<Value>(line) else {
@@ -261,6 +265,10 @@ impl JsonlTurn {
         let mut events = Vec::new();
         match found.fact {
             Fact::Text => events.extend(found.text.map(|text| LaunchEvent::Text { text })),
+            Fact::ToolUse if !self.tools => {
+                self.turn.breached = true;
+                events.push(LaunchEvent::ApprovalDenied);
+            }
             Fact::ToolUse => events.extend(found.name.map(|name| LaunchEvent::ToolUse { name })),
             Fact::TurnFinished => {
                 self.turn.success = Some(found.success.unwrap_or(true));
@@ -281,10 +289,11 @@ impl JsonlTurn {
     }
 
     /// Marks the running turn as interrupted; the caller then stops the turn's process.
-    /// Output: Ok, or `launch_not_running` with no turn or an interrupt already asked.
+    /// Output: Ok, or `launch_not_running` with no turn, an interrupt already asked or a
+    /// breach, whose turn the caller already stops.
     pub fn interrupt(&mut self) -> Result<(), LaunchError> {
         self.assert_consistent();
-        if self.phase != Phase::Running || self.turn.interrupted {
+        if self.phase != Phase::Running || self.turn.interrupted || self.turn.breached {
             return Err(failure("launch_not_running"));
         }
         self.turn.interrupted = true;
@@ -292,8 +301,8 @@ impl JsonlTurn {
     }
 
     /// Ends the running turn when its process exits, with exactly one `TurnFinished`: after
-    /// an interrupt, `Interrupted` and an unsuccessful end; after a turn error, an
-    /// unsuccessful end; for an exit code other than 0 or a signal, a `TurnError` and an
+    /// an interrupt, `Interrupted` and an unsuccessful end; after a breach or a turn error,
+    /// an unsuccessful end; for an exit code other than 0 or a signal, a `TurnError` and an
     /// unsuccessful end; else the success a `turn_finished` rule read, true when none did.
     /// Input: the exit code, none when a signal ended the process. Output: the events, or
     /// `launch_not_running` with no turn.
@@ -305,7 +314,7 @@ impl JsonlTurn {
         let unsuccessful = LaunchEvent::TurnFinished { success: false };
         let events = if self.turn.interrupted {
             vec![LaunchEvent::Interrupted, unsuccessful]
-        } else if self.turn.errored {
+        } else if self.turn.breached || self.turn.errored {
             vec![unsuccessful]
         } else if code != Some(0) {
             vec![
@@ -372,6 +381,7 @@ impl JsonlTurn {
         assert!(self.session.as_deref().is_none_or(plain_session));
         assert!(!self.config.argv.is_empty() && !self.config.rules.is_empty());
         assert!(self.tools || self.config.tools_off.is_some());
+        assert!(!self.tools || !self.turn.breached);
         assert!(self.phase == Phase::Running || self.turn == Turn::default());
     }
 }
