@@ -828,6 +828,39 @@ async fn a_delete_whose_record_is_refused_after_the_trash_move_shows_it_was_cut_
     engine.stop().await;
 }
 
+/// RV-DS241-141 r2: Delete again of a project whose delete was cut short, when its first
+/// Trash move then fails, keeps "A delete was cut short" on the banner, since what the earlier
+/// delete moved can still be in the Trash, and keeps the records and the folder. Runs on
+/// macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_delete_again_that_moves_nothing_keeps_the_cut_short_notice() {
+    let mut engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    drop(owner);
+    cut_short(&engine, PROJECT, 7);
+    engine.restart().await;
+    let mut owner = engine.owner().await;
+    assert_eq!(delete_notices(&owner, &project).await.len(), 1);
+    let home = engine.home();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let response = owner
+        .delete_project(project.clone(), NAME.into(), 2)
+        .await
+        .unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(result(response), rejected("home_trash_failed"));
+    assert_eq!(kept(&engine), 2, "the records stay");
+    assert!(folder.is_dir(), "the failed move left the folder");
+    let shown = delete_notices(&owner, &project).await;
+    assert_eq!(shown.len(), 1, "the delete cut short is still shown");
+    assert_eq!(serde_json::to_value(shown[0].shown).unwrap(), "unknown");
+    assert_eq!(engine.rows(DELETES_PENDING), 1, "one mark, the notice");
+    drop(owner);
+    engine.stop().await;
+}
+
 /// Remove from dashboard of a project whose delete was cut short ends its mark with its
 /// records, so a project added again under the same id starts with no "A delete was cut
 /// short". Runs on macOS only, the one platform that offers Delete everything (DEC-118).
