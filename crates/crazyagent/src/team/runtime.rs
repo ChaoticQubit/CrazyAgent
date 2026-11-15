@@ -9747,7 +9747,7 @@ impl TeamRuntime {
     /// reading its live switch here, for the tests that look at a launch's context. Takes the
     /// project, the agent id, its role, tools switch and git layout. Returns the context, or
     /// the plain reason it could not be read.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn context(
         &self,
         project: &ProjectId,
