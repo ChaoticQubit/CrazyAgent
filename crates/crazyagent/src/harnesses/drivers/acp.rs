@@ -1,6 +1,7 @@
 use super::super::launch::{LaunchError, LaunchEvent, failure, rate_limited};
-use super::super::manifest::{Manifest, Refused};
+use super::super::manifest::{self, DriverKind, Manifest, Refused};
 use crate::adapters::{LINE_BYTES_MAX, clip_text};
+use crate::app_plugins::yaml::Value as Yaml;
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -50,6 +51,7 @@ pub struct Acp {
     held: Option<String>,
     cancel_held: bool,
     cancelled: bool,
+    breached: bool,
 }
 
 impl Acp {
@@ -81,6 +83,7 @@ impl Acp {
             held: None,
             cancel_held: false,
             cancelled: false,
+            breached: false,
         };
         let start = acp.request(
             Pending::Initialize,
@@ -160,6 +163,8 @@ impl Acp {
         let result = self.decode(line, &mut events, &mut writes);
         if result.is_err() {
             self.phase = Phase::Failed;
+            self.cancelled = false;
+            self.breached = false;
         }
         self.assert_consistent();
         result.map(|()| (events, writes))
@@ -191,7 +196,7 @@ impl Acp {
                 let id = echoed(id)?;
                 writes.push(self.answer(&id, method, params, events));
             }
-            (Some(method), None) => self.notice(method, params, events),
+            (Some(method), None) => self.notice(method, params, events, writes),
             (None, Some(id)) => self.response(id, &value, events, writes)?,
             (None, None) => return Err(failure("launch_protocol_failed")),
         }
@@ -228,7 +233,13 @@ impl Acp {
         frame(&json!({"jsonrpc": "2.0", "id": id, "result": {"outcome": outcome}}))
     }
 
-    fn notice(&self, method: &str, params: &Value, events: &mut Vec<LaunchEvent>) {
+    fn notice(
+        &mut self,
+        method: &str,
+        params: &Value,
+        events: &mut Vec<LaunchEvent>,
+        writes: &mut Vec<Vec<u8>>,
+    ) {
         if method != "session/update"
             || self.phase != Phase::Prompting
             || params.get("sessionId").and_then(Value::as_str) != self.session.as_deref()
@@ -245,11 +256,21 @@ impl Acp {
                     });
                 }
             }
-            Some("tool_call") => {
-                if let Some(title) = text("/title").filter(|title| !title.is_empty()) {
+            Some(kind @ ("tool_call" | "tool_call_update")) => {
+                if kind == "tool_call"
+                    && let Some(title) = text("/title").filter(|title| !title.is_empty())
+                {
                     events.push(LaunchEvent::ToolUse {
                         name: clip_text(title),
                     });
+                }
+                let ran = matches!(text("/status"), Some("in_progress" | "completed"));
+                if !self.tools && ran && !self.breached {
+                    self.breached = true;
+                    events.push(LaunchEvent::ApprovalDenied);
+                    if !self.cancelled {
+                        writes.push(self.send_cancel());
+                    }
                 }
             }
             _ => {}
@@ -335,6 +356,7 @@ impl Acp {
                 }
             }
             Pending::Prompt => {
+                let breached = std::mem::take(&mut self.breached);
                 self.phase = Phase::Idle;
                 self.cancelled = false;
                 if let Some(error) = error {
@@ -346,8 +368,10 @@ impl Acp {
                     return Ok(());
                 }
                 match result.get("stopReason").and_then(Value::as_str) {
-                    Some("end_turn") => events.push(LaunchEvent::TurnFinished { success: true }),
-                    Some("cancelled") => {
+                    Some("end_turn") if !breached => {
+                        events.push(LaunchEvent::TurnFinished { success: true })
+                    }
+                    Some("cancelled") if !breached => {
                         events.push(LaunchEvent::Interrupted);
                         events.push(LaunchEvent::TurnFinished { success: false });
                     }
@@ -364,6 +388,7 @@ impl Acp {
         let session = self.session.clone();
         self.phase = Phase::Prompting;
         self.cancelled = false;
+        self.breached = false;
         self.request(
             Pending::Prompt,
             "session/prompt",
@@ -396,7 +421,7 @@ impl Acp {
         assert!(self.session.as_deref().is_none_or(plain_id));
         assert!(self.pending.is_none_or(|(id, _)| id < self.next_id));
         assert!(self.held.is_some() || !self.cancel_held);
-        assert!(self.phase == Phase::Prompting || !self.cancelled);
+        assert!(self.phase == Phase::Prompting || (!self.cancelled && !self.breached));
         let pending = self.pending.map(|(_, pending)| pending);
         match self.phase {
             Phase::Initializing => {
@@ -423,11 +448,32 @@ impl Acp {
     }
 }
 
-/// Checks the tools-off switch of an ACP manifest. Input: a manifest. Output: Ok until the
-/// check lands.
+/// Checks the tools-off promise of an ACP manifest. An ACP agent asks permission only when
+/// it chooses to, so rejecting its permission requests never switches its tools off; a
+/// manifest that does not say `tools_limited` names the agent's own switch, the arguments
+/// `piped.tools_off` adds with tools off. Input: a manifest. Output: Ok for another driver,
+/// a limited harness or one with a switch, else a refusal that names the setting.
 pub fn check(manifest: &Manifest) -> Result<(), Refused> {
-    let _ = manifest;
-    Ok(())
+    if manifest.piped != Some(DriverKind::Acp) || manifest.tools_limited.is_some() {
+        return Ok(());
+    }
+    let switch = manifest
+        .block("piped")
+        .and_then(|piped| piped.get("tools_off"));
+    match switch {
+        Some(Yaml::List(items))
+            if !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| matches!(item, Yaml::Str(text) if !text.is_empty())) =>
+        {
+            Ok(())
+        }
+        _ => Err(Refused {
+            code: manifest::MISSING,
+            message: "piped.tools_off: an acp harness switches tools off only by a setting of its own; name it here, or say tools_limited.".into(),
+        }),
+    }
 }
 
 /// Picks the permission option the launch's tools switch allows: with tools on the

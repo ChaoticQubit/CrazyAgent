@@ -250,6 +250,10 @@ impl Registry {
                     ),
                 });
             }
+            super::drivers::acp::check(&manifest).map_err(|refused| Refused {
+                code: refused.code,
+                message: format!("{file}: {}", refused.message),
+            })?;
             for known in &harnesses {
                 if let Some(message) = clash(&manifest, &known.manifest) {
                     return Err(Refused {
