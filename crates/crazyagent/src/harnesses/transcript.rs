@@ -338,7 +338,7 @@ impl TranscriptReader {
                 Transcript::ClaudeSession { file } => {
                     open_plain(file).map(|opened| (opened, claude_id(file), file.clone()))
                 }
-                Transcript::Unavailable => None,
+                Transcript::Records(_) | Transcript::Unavailable => None,
             };
             if let Some((file, id, path)) = opened {
                 self.found = id.map(|id| (id, path));
@@ -387,7 +387,7 @@ impl TranscriptReader {
                     codex_facts(&value, exec)
                 }
                 Transcript::ClaudeSession { .. } => self.claude_line(&value),
-                Transcript::Unavailable => Vec::new(),
+                Transcript::Records(_) | Transcript::Unavailable => Vec::new(),
             };
             for fact in facts {
                 let works = matches!(
@@ -1493,3 +1493,7 @@ fn typed_line(reader: Option<Reader>, line: &[u8]) -> Option<String> {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "transcript/records_tests.rs"]
+mod records_tests;

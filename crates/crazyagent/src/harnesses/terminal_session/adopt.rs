@@ -118,7 +118,7 @@ impl PaneRecord {
             Transcript::ClaudeSession { file } => {
                 RecordSource::ClaudeSession { file: file.clone() }
             }
-            Transcript::Unavailable => return None,
+            Transcript::Records(_) | Transcript::Unavailable => return None,
         };
         let since_ms = since.duration_since(UNIX_EPOCH).ok()?.as_millis();
         Some(Self {

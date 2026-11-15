@@ -1,5 +1,5 @@
 use super::launch::{LaunchError, failure};
-use super::manifest::RecordKind;
+use super::manifest::{RecordKind, Rule};
 use super::registry::registry;
 
 pub mod json_files;
@@ -12,6 +12,19 @@ pub mod jsonl_append;
 pub enum Reader {
     CodexRollouts,
     ClaudeSession,
+}
+
+/// The record of one run of a manifest harness as a launch follows it: the harness, its
+/// record kind (jsonl-append or json-rewrite), the record path below the run's private
+/// home, the rules that turn the record's objects into facts, and the session id the path
+/// was filled with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Records {
+    pub harness: String,
+    pub kind: RecordKind,
+    pub pattern: json_files::Pattern,
+    pub rules: Vec<Rule>,
+    pub session: String,
 }
 
 /// The one dispatch point of live terminal records: the reader the engine runs for a record
