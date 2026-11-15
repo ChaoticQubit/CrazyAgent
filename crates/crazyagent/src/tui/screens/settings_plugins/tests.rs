@@ -354,6 +354,44 @@ fn local_checks_and_short_lines() {
     );
 }
 
+/// A stored server whose command, argument or address holds hidden characters shows each
+/// one as an escape in its list line, the line both plugin screens show, and in the Approve
+/// window, so the owner never approves text that reads differently from what runs
+/// (RV-DS241-151).
+#[test]
+fn a_server_with_hidden_characters_shows_them_escaped_in_its_line_and_its_approval() {
+    let (skills, mut servers) = lists();
+    servers[1] = server(
+        "postgres-local",
+        stdio("/usr/bin/tr\u{202e}ue", &["--st\u{200b}dio"]),
+        ServerStatus::WaitingForApproval,
+    );
+    servers[2] = server(
+        "figma",
+        ServerSpec::Http {
+            url: "https://mcp.figma.com/\u{202e}mcp".into(),
+        },
+        ServerStatus::CantStart,
+    );
+    let short: Vec<String> = servers.iter().map(short_runs).collect();
+    assert_eq!(short[1], "tr\\u202eue --st\\u200bdio");
+    assert_eq!(short[2], "https://mcp.figma.com/\\u202emcp");
+    let mut ctx = plugin_ctx(80, 24);
+    let mut screen = Plugins::with(skills, servers);
+    for _ in 0..5 {
+        screen.key(&Key::Down, &mut ctx);
+    }
+    screen.key(&Key::Enter, &mut ctx);
+    let (modal, _) = screen.modal(&ctx).unwrap();
+    assert_eq!(modal.title, "Approve MCP server");
+    let text = texts(&modal.body).join("\n");
+    assert!(
+        text.contains("/usr/bin/tr\\u202eue --st\\u200bdio"),
+        "{text}"
+    );
+    assert!(!crate::memory::hidden_text(&text), "{text}");
+}
+
 #[test]
 fn a_skill_folder_under_home_is_sent_as_a_full_path() {
     let mut ctx = plugin_ctx(80, 24);

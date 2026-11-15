@@ -157,6 +157,75 @@ fn launching_for_an_unknown_project_is_refused() {
     );
 }
 
+/// A server spec stored by 2.4.0, before hidden characters were refused, and still waiting
+/// is refused on Approve with the code its check names and stays waiting, unapproved: a
+/// command holding U+202E, an argument holding U+200B and a URL holding U+202E
+/// (RV-DS241-151).
+#[test]
+fn approving_a_stored_spec_with_hidden_characters_is_refused_and_it_stays_waiting() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let cases = [
+        (
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: Vec::new(),
+            },
+            ServerSpec::Stdio {
+                command: "/usr/bin/tr\u{202e}ue".into(),
+                args: Vec::new(),
+            },
+            "server_command_invalid",
+        ),
+        (
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: vec!["--stdio".into()],
+            },
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: vec!["--st\u{200b}dio".into()],
+            },
+            "server_args_invalid",
+        ),
+        (
+            ServerSpec::Http {
+                url: "https://mcp.example.invalid/mcp".into(),
+            },
+            ServerSpec::Http {
+                url: "https://mcp.example.invalid/\u{202e}mcp".into(),
+            },
+            "server_url_invalid",
+        ),
+    ];
+    for (index, (valid, stored, code)) in cases.into_iter().enumerate() {
+        let id = server(&mut connection, root, &format!("old{index}"), &valid);
+        {
+            let tx = connection.transaction().unwrap();
+            let mut record: ServerRecord = load(&tx, "server", &id).unwrap();
+            record.spec = stored.clone();
+            put_server(&tx, &record).unwrap();
+            tx.commit().unwrap();
+        }
+        let refused = execute(
+            &mut connection,
+            root,
+            Command::Approve {
+                id: id.clone(),
+                spec: stored,
+            },
+        );
+        assert_eq!(
+            refused.err().map(|problem| problem.0).as_deref(),
+            Some(code)
+        );
+        let tx = connection.transaction().unwrap();
+        let record: ServerRecord = load(&tx, "server", &id).unwrap();
+        assert!(record.approved.is_none(), "{code}");
+        assert_eq!(status(&record), ServerStatus::WaitingForApproval, "{code}");
+    }
+}
+
 #[test]
 fn a_stored_skill_description_or_source_with_hidden_characters_is_shown_escaped() {
     let record = SkillRecord {
