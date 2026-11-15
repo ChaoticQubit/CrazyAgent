@@ -3830,6 +3830,81 @@ fn on_path(name: &str) -> Option<PathBuf> {
     })
 }
 
+/// RV-DS241-156: a launch that leaves the context-mode server out, here with no npm beside
+/// npx so no shared install can run, leaves out the hooks that follow that server, from the
+/// same decision, so no agent gets context-mode's hooks without its server; a hook that
+/// follows no item still launches.
+#[test]
+fn a_launch_that_left_context_mode_out_leaves_out_the_hooks_that_follow_it() {
+    use crate::storage::plugins::{Command, execute};
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let root = private_folder(&base.join("engine"));
+    let bin = private_folder(&root.join("setup").join("bin"));
+    for program in ["npx", "node"] {
+        fs::write(bin.join(program), "").unwrap();
+        fs::set_permissions(bin.join(program), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut connection = store_context_mode(&root, &bin);
+    let server: String = connection
+        .query_row(
+            "SELECT id FROM plugin_items WHERE kind='server'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    for (name, follows) in [("context-mode", Some(server)), ("standalone", None)] {
+        let plugin = base.join(name);
+        fs::create_dir_all(plugin.join("hooks")).unwrap();
+        fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
+        fs::write(
+            plugin.join(".claude-plugin/plugin.json"),
+            format!(r#"{{"name":"{name}"}}"#),
+        )
+        .unwrap();
+        fs::write(
+            plugin.join("hooks/hooks.json"),
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/start.sh\""}]}]}}"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("hooks/start.sh"), "exit 0\n").unwrap();
+        execute(
+            &mut connection,
+            &root,
+            Command::AddHooks {
+                scope: crate::plugins::Scope::Global,
+                source: plugin.to_str().unwrap().to_owned(),
+                follows,
+            },
+        )
+        .unwrap();
+    }
+    let context = crate::launch_context::for_project(
+        &connection,
+        &ProjectId::new("app").unwrap(),
+        crate::agent_git::Layout::Linked,
+    )
+    .unwrap();
+    assert!(context.plugins.servers.is_empty(), "the server was left out");
+    assert_eq!(
+        context.plugins.context_mode_off,
+        Some(crate::plugins::ContextModeOff::Failed)
+    );
+    let launched: Vec<&str> = context
+        .process
+        .as_ref()
+        .unwrap()
+        .hooks
+        .iter()
+        .map(|hook| hook.plugin.as_str())
+        .collect();
+    assert_eq!(
+        launched,
+        ["standalone"],
+        "a hook that follows the left-out server never launches"
+    );
+}
+
 /// The engine's shared context-mode install under a test folder: an engine root whose
 /// `setup/npm` holds context-mode copied from the npm prefix `CRAZYAGENT_CONTEXT_MODE_INSTALL`
 /// names, approved for the project `app`. Input: the test folder. Output: the project's
