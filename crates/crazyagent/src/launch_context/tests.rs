@@ -242,11 +242,11 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
     );
 }
 
-/// A launch never locks a home whose lock file has a second link, which may be the owner's
-/// file an agent linked in (RV-DS241-137 r3, code r2 F2): the reset that follows removes a
-/// kept file with a second link, so the lock this launch held would go and let a second
-/// launch into the home. The launch is refused and the owner's file stays as it was.
-#[cfg(unix)]
+/// On macOS a launch never locks a home whose lock file has a second link, which may be the
+/// owner's file an agent linked in (RV-DS241-137 r3, code r2 F2): the reset that follows
+/// removes a kept file with a second link, so the lock this launch held would go and let a
+/// second launch into the home. The launch is refused and the owner's file stays as it was.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_launch_never_locks_a_lock_file_with_a_second_link() {
     let directory = tempfile::tempdir().unwrap();
@@ -261,6 +261,31 @@ fn a_launch_never_locks_a_lock_file_with_a_second_link() {
 
     assert_eq!(locked.as_deref(), Some("launch_context_unsafe"));
     assert_eq!(fs::read_to_string(&owner).unwrap(), "the owner's\n");
+}
+
+/// On Linux a launch locks a home whose lock an agent gave a second name inside its own
+/// write roots (RV-DS241-137 r3 code F2): Landlock and bubblewrap keep it from linking a file
+/// from outside them, and the reset keeps the lock whatever its links, so one `ln` of the
+/// lock never refuses every later launch of the home.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_launch_locks_a_home_whose_lock_has_a_second_name_in_the_home() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("claude");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let first = lock_only(&home, "claude-code")
+        .map(|_| ())
+        .map_err(|error| error.0);
+    assert_eq!(first, Ok(()));
+    fs::create_dir(home.join(".cache")).unwrap();
+    fs::hard_link(home.join(LOCK), home.join(".cache").join("x")).unwrap();
+
+    let locked = lock_only(&home, "claude-code")
+        .map(|_| ())
+        .map_err(|error| error.0);
+
+    assert_eq!(locked, Ok(()));
 }
 
 /// A launch locks a home an earlier run left with an ACL that denies listing and searching

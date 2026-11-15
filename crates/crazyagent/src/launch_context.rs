@@ -2244,11 +2244,9 @@ fn lock(_home: &Path) -> Result<File, LaunchError> {
 /// A flag or ACL an earlier run left on the home or on the lock, which would refuse the
 /// open, is cleared once, the ACL by path so one that denies listing or searching goes too,
 /// and the open tried again (RV-DS241-137 code r1 F1, r2 F3); a confined agent can set
-/// neither there. A lock with a second link, which may be the owner's file an agent linked
-/// in, is refused, since the reset removes a kept file with a second link and would take the
-/// lock this launch holds; a confined agent can neither link nor replace the lock (r3,
-/// `sandbox::launch_denies`). Input: the home. Output: the locked file,
-/// `launch_context_unsafe` or `launch_home_busy`.
+/// neither there. Only a lock [`lock_kept`] passes is held, the one the reset that follows
+/// keeps, so the reset never takes the lock this launch holds. Input: the home. Output: the
+/// locked file, `launch_context_unsafe` or `launch_home_busy`.
 #[cfg(unix)]
 fn lock(home: &Path) -> Result<File, LaunchError> {
     let path = home.join(LOCK);
@@ -2271,15 +2269,31 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
     let metadata = file
         .metadata()
         .map_err(|_| failure("launch_context_unsafe"))?;
-    if !metadata.is_file()
-        || metadata.nlink() != 1
-        || metadata.uid() != rustix::process::geteuid().as_raw()
-    {
+    if !lock_kept(&metadata) {
         return Err(failure("launch_context_unsafe"));
     }
     rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
         .map_err(|_| failure("launch_home_busy"))?;
     Ok(file)
+}
+
+/// Whether a home's launch lock is held and kept: this user's plain file, on macOS with no
+/// second link, which may be the owner's file an agent linked in and which the profile keeps
+/// a confined agent from making (r3, `sandbox::launch_denies`). On Linux Landlock and
+/// bubblewrap refuse a link from outside an agent's write roots and holding the lock changes
+/// no file, so a second name there stays harmless (code r3 F2). Input: its metadata.
+#[cfg(unix)]
+pub(crate) fn lock_kept(metadata: &fs::Metadata) -> bool {
+    metadata.is_file()
+        && metadata.uid() == rustix::process::geteuid().as_raw()
+        && (cfg!(not(target_os = "macos")) || metadata.nlink() == 1)
+}
+
+/// Keeps a home's launch lock where it is a plain file, on systems with no owner-only lock,
+/// whose launches [`lock`] refuses. Input: its metadata. Output: the answer.
+#[cfg(not(unix))]
+pub(crate) fn lock_kept(metadata: &fs::Metadata) -> bool {
+    metadata.is_file()
 }
 
 /// Takes a context-less launch's hold on an agent home: the same per-home lock a full
