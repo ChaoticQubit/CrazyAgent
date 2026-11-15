@@ -42,6 +42,8 @@ pub const CONTEXT_PATH_BYTES_MAX: usize = 512;
 pub const CONTEXT_LISTED_BYTES_MAX: usize = 48 * 1024;
 const _: () = assert!(CONTEXT_LISTED_BYTES_MAX + 4096 <= crate::protocol::FRAME_BYTES_MAX);
 pub const PROJECTS_DIRECTORY: &str = "projects";
+/// The code a New Project ends with when Stop on its job came before its record.
+const BUILD_CANCELLED: &str = "home_add_cancelled";
 #[cfg(unix)]
 const BRIEF_PARTIAL: &str = ".brief.partial";
 pub const RESEARCH_LOG_LINES_MAX: usize = 200;
@@ -1359,6 +1361,44 @@ pub fn copy_documents(
     Err("project_folder_unavailable")
 }
 
+/// Copies a New Project's documents into its document folder one by one, with the checks and
+/// codes of [`copy_documents`], counting each into its job's tally and stopping between them
+/// once Stop is asked. Takes the sources, the destination folder, the byte budget and the
+/// tally. Returns the stored names and sizes, or a plain code, `home_add_cancelled` after a
+/// stop; the documents copied before a failure stay for the build to remove with its folder.
+#[cfg(unix)]
+fn copy_counted(
+    sources: &[String],
+    destination: &Path,
+    budget: u64,
+    tally: &crate::projects_home::Tally,
+) -> Result<Vec<StoredDocument>, &'static str> {
+    let directory = rustix::fs::open(destination, open_flags() | OFlags::DIRECTORY, Mode::empty())
+        .map_err(|_| "project_folder_unwritable")?;
+    let count = u64::try_from(sources.len()).map_err(|_| "documents_too_many")?;
+    tally.documents(count).map_err(|_| BUILD_CANCELLED)?;
+    let mut stored: Vec<StoredDocument> = Vec::new();
+    for source in sources {
+        if tally.stopped() {
+            return Err(BUILD_CANCELLED);
+        }
+        let used: u64 = stored.iter().map(|document| document.bytes).sum();
+        assert!(used <= budget);
+        let copied = copy_into(
+            std::slice::from_ref(source),
+            &directory,
+            &stored,
+            budget - used,
+        )?;
+        assert_eq!(copied.len(), 1);
+        stored.extend(copied);
+        tally.document_copied();
+    }
+    assert_eq!(stored.len(), sources.len());
+    assert_eq!(tally.building(), (count, count));
+    Ok(stored)
+}
+
 #[cfg(not(unix))]
 fn copy_into(
     _sources: &[String],
@@ -1911,31 +1951,40 @@ fn write_brief(context: &Directory, stored: &StoredSetup) -> Result<(), &'static
 }
 
 /// Refuses to build a new project's folder where its private 0700 git home cannot
-/// be made. Takes the database path, staging folder and documents, all
+/// be made. Takes the database path, staging folder, documents and tally, all
 /// unused. Returns `project_folder_unavailable`.
 #[cfg(not(unix))]
 fn stage_in_home(
     _database: &Path,
     _staging: &Path,
     _documents: &[String],
+    _tally: &crate::projects_home::Tally,
 ) -> Result<Vec<StoredDocument>, &'static str> {
     Err("project_folder_unavailable")
 }
 
 /// Builds a new project's folder in a hidden staging folder of the projects
 /// home: a git repository with one empty start commit, the `.crazyagent/`
-/// layout with its git exclude lines, and the owner's documents.
-/// Takes the database path (for git's private home), the staging folder and
-/// the document paths. Returns the copied documents, or a plain code.
+/// layout with its git exclude lines, and the owner's documents, counted into
+/// the job's tally. A stop asked before the build, after its git work or
+/// between documents ends it. Takes the database path (for git's private
+/// home), the staging folder, the document paths and the tally. Returns the
+/// copied documents, or a plain code, `home_add_cancelled` after a stop.
 #[cfg(unix)]
 fn stage_in_home(
     database: &Path,
     staging: &Path,
     documents: &[String],
+    tally: &crate::projects_home::Tally,
 ) -> Result<Vec<StoredDocument>, &'static str> {
     const FAILED: &str = "home_new_project_failed";
     let failed = |_: EngineError| FAILED;
     let io_failed = |_: std::io::Error| FAILED;
+    let go_on = || match tally.stopped() {
+        true => Err(BUILD_CANCELLED),
+        false => Ok(()),
+    };
+    go_on()?;
     let git_home = projects_root(database).map_err(failed)?.join(".git-home");
     match std::fs::DirBuilder::new().mode(0o700).create(&git_home) {
         Ok(()) => {}
@@ -1947,6 +1996,7 @@ fn stage_in_home(
         .create(staging)
         .map_err(io_failed)?;
     crate::research::runner::ensure_repository(staging, &git_home).map_err(|_| FAILED)?;
+    go_on()?;
     let state = crate::projects_home::prepare_layout(staging).map_err(failed)?;
     if !crate::projects_home::exclude_from_git(staging).map_err(failed)? {
         return Err(FAILED);
@@ -1959,10 +2009,11 @@ fn stage_in_home(
             .map_err(io_failed)?;
     }
     assert!(state.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY));
-    copy_documents(
+    copy_counted(
         documents,
         &context.join("documents"),
         PROJECT_DOCUMENT_BYTES_MAX,
+        tally,
     )
 }
 
@@ -2992,6 +3043,27 @@ impl Staged {
     }
 }
 
+/// Checks a New Project before its job starts, as its plan checks it, writing
+/// nothing. Takes the transaction, configuration and the Create action. Returns
+/// the folder it would land in, or the refusal code the owner sees.
+pub(crate) fn check_job(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    action: &SetupAction,
+) -> Result<Result<PathBuf, String>, EngineError> {
+    action.validate()?;
+    let SetupAction::Create {
+        project_id,
+        spec,
+        setup,
+    } = action
+    else {
+        return Err(failure("setup_plan_invalid"));
+    };
+    let checked = check_new(tx, config, project_id, spec, setup)?;
+    Ok(checked.map(|checked| checked.folder))
+}
+
 /// Plans a New Project before the owner transport builds its folder.
 /// Takes the transaction, configuration, database path and the Create action.
 /// Returns the plan with a fresh staging folder name, or the refusal code the
@@ -3030,10 +3102,19 @@ pub(crate) fn plan_new(
 
 impl NewProjectPlan {
     /// Builds the project folder in its staging folder: a git repository with
-    /// one empty start commit, the `.crazyagent/` layout and the documents.
-    /// Output: the staged folder, or a plain code with the staging folder removed.
-    pub(crate) fn run(self) -> Result<Staged, String> {
-        match stage_in_home(&self.database, &self.staging, &self.documents) {
+    /// one empty start commit, the `.crazyagent/` layout and the documents,
+    /// reporting into and obeying its job's tally (a fresh one for a client's
+    /// New Project), then commits the tally to the record, so a stop after this
+    /// is refused. Input: the tally. Output: the staged folder, or a plain code
+    /// with the staging folder removed, `home_add_cancelled` after a stop.
+    pub(crate) fn run(self, tally: &crate::projects_home::Tally) -> Result<Staged, String> {
+        let staged = stage_in_home(&self.database, &self.staging, &self.documents, tally);
+        let built = staged.and_then(|documents| match tally.commit_record() {
+            Ok(()) => Ok(documents),
+            Err(_) => Err(BUILD_CANCELLED),
+        });
+        assert!(built.is_err() || tally.recording());
+        match built {
             Ok(documents) => Ok(Staged {
                 staging: self.staging,
                 folder: self.folder,

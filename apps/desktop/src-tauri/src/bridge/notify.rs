@@ -168,6 +168,7 @@ pub fn intake_notice(job: &JobView) -> Option<Notice> {
         | JobState::Copying { .. }
         | JobState::Trashing { .. }
         | JobState::Clearing
+        | JobState::Building { .. }
         | JobState::CutShort { .. } => {
             return None;
         }
@@ -206,6 +207,7 @@ fn delete_notice(job: &JobView) -> Option<Notice> {
         | JobState::Trashing { .. }
         | JobState::Clearing
         | JobState::NeedsAnswer { .. }
+        | JobState::Building { .. }
         | JobState::CutShort { .. } => return None,
     };
     assert!(title.chars().count() <= TITLE_CHARS_MAX);

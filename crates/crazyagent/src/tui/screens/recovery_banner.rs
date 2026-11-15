@@ -460,7 +460,9 @@ fn notice_subject(notice: &BannerNotice) -> String {
         ActionKind::WorktreeCreate => format!("{agent}'s worktree"),
         ActionKind::LandingAccept => format!("change set {set}"),
         ActionKind::ProjectDelete => "this project's delete".into(),
-        ActionKind::Message | ActionKind::Dispatch => "this notice".into(),
+        ActionKind::Message | ActionKind::Dispatch | ActionKind::ProjectSetup => {
+            "this notice".into()
+        }
     }
 }
 

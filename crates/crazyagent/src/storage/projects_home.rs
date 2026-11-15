@@ -552,6 +552,74 @@ pub(super) fn delete_keep(db: &Connection, request: &RequestId) -> Result<bool, 
     Ok(kept)
 }
 
+/// Checks a New Project job before it starts, writing nothing: the owner's admission and what
+/// its plan refuses before it builds anything, `project_exists` included. Inputs: the
+/// connection, the configuration, the admission and the Create action. Output: the folder it
+/// would land in as text, or the refusal code.
+pub(super) fn setup_job_check(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    a: &Admission,
+    action: &crate::project_setup::SetupAction,
+) -> Result<String, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    let folder =
+        crate::project_setup::check_job(&tx, config, action)?.map_err(|code| error(&code))?;
+    tx.rollback().map_err(error)?;
+    let folder = folder
+        .to_str()
+        .filter(|_| folder.is_absolute())
+        .ok_or_else(|| error("projects_home_path_invalid"))?
+        .to_owned();
+    assert!(!folder.is_empty());
+    Ok(folder)
+}
+
+/// Marks a New Project job in the action ledger before it plans anything, so an engine stop
+/// that cuts it short is shown on the next start (DEC-177 addendum 2, Q3 A). Inputs: the
+/// connection, the project, the job's request and the project's name. Output: Ok, or the
+/// ledger's failure.
+pub(super) fn setup_mark_begin(
+    db: &Connection,
+    project: &ProjectId,
+    request: &RequestId,
+    name: &str,
+) -> Result<(), EngineError> {
+    let tx = db.unchecked_transaction().map_err(error)?;
+    home::setup_mark::begin(&tx, project, request, name)?;
+    tx.commit().map_err(error)
+}
+
+/// Ends a New Project job's mark once its work ended, whatever the outcome: done when the
+/// project's records are there, else failed. Inputs: the connection and the project. Output:
+/// whether a mark ended.
+pub(super) fn setup_mark_end(db: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    let tx = db.unchecked_transaction().map_err(error)?;
+    let recorded: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    let ended = home::setup_mark::end(&tx, project, recorded)?;
+    tx.commit().map_err(error)?;
+    Ok(ended)
+}
+
+/// The New Project an engine stop cut short, for the engine start to show as the engine's
+/// job: ends every mark an earlier engine process left ([`setup_mark::start`]) and returns
+/// the newest that failed. Input: the connection. Output: the New Project, or None.
+pub(super) fn setup_cut_short(
+    db: &Connection,
+) -> Result<Option<home::setup_mark::Interrupted>, EngineError> {
+    let tx = db.unchecked_transaction().map_err(error)?;
+    let found = home::setup_mark::start(&tx)?;
+    tx.commit().map_err(error)?;
+    Ok(found)
+}
+
 /// A project move an engine stop cut short, as the engine start found it: its request, the
 /// project, the folder it was in, its mode and its end code, `done` when the folder had
 /// landed and the move was recorded from disk.

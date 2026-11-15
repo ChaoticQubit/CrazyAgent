@@ -193,6 +193,21 @@ pub(crate) enum Job {
         >,
     ),
     HomeDeleteKeep(RequestId, oneshot::Sender<Result<bool, EngineError>>),
+    HomeSetupCheck(
+        Admission,
+        Box<crate::project_setup::SetupAction>,
+        oneshot::Sender<Result<String, EngineError>>,
+    ),
+    HomeSetupCutShort(
+        oneshot::Sender<Result<Option<crate::projects_home::setup_mark::Interrupted>, EngineError>>,
+    ),
+    HomeSetupMark(
+        ProjectId,
+        RequestId,
+        String,
+        oneshot::Sender<Result<(), EngineError>>,
+    ),
+    HomeSetupMarkEnd(ProjectId, oneshot::Sender<Result<bool, EngineError>>),
     HomeProjectMoveCheck(
         Admission,
         ProjectId,
@@ -713,6 +728,38 @@ impl Storage {
                                 Err(error("projects_home_readonly"))
                             } else {
                                 projects_home::delete_keep(&connection, &request)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeSetupCheck(admission, action, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::setup_job_check(&mut connection, &config, &admission, &action)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeSetupCutShort(reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::setup_cut_short(&connection)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeSetupMark(project, request, name, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::setup_mark_begin(&connection, &project, &request, &name)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeSetupMarkEnd(project, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::setup_mark_end(&connection, &project)
                             };
                             let _ = reply.send(result);
                         }
