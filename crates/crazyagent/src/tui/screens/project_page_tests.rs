@@ -939,7 +939,7 @@ async fn job_until(
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut last = Vec::new();
     loop {
-        if let Some(job) = shell.ctx.store.intake.clone().filter(|job| check(job)) {
+        if let Some(job) = shell.ctx.store.intake.clone().filter(&check) {
             return (job, last);
         }
         assert!(
@@ -1198,7 +1198,10 @@ async fn another_project_s_move_is_refused_naming_the_running_move_and_a_new_ter
 async fn a_project_move_s_soft_refusal_is_answered_from_home_and_move_anyway_moves_it() {
     let mut engine = Engine::start().await;
     let (notes, origin) = made_in_first_home(&mut engine, "notes-cli", "Notes CLI", 1).await;
-    let side = engine.root.path().join("notes-side");
+    let outside = tempfile::tempdir().unwrap();
+    let side = std::fs::canonicalize(outside.path())
+        .unwrap()
+        .join("notes-side");
     super::intake_tests::repo_with_worktree(&origin, &side);
     let next = crate::tui::test_home::projects_home(&mut engine.controller, 2).await;
     let target = std::fs::canonicalize(next.path())
