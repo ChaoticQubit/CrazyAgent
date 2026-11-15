@@ -136,6 +136,7 @@ fn backend_name(backend: MasterBackend) -> String {
         MasterBackend::Rcli => "RCLI".to_owned(),
         MasterBackend::Codex => harness_name("codex", None),
         MasterBackend::Claude => harness_name("claude", None),
+        MasterBackend::Listed(id) => harness_name(id, None),
     }
 }
 

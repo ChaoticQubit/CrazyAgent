@@ -420,20 +420,12 @@ pub fn sub_agents_unavailable(kind: crate::coord::settings::HarnessKind) -> Opti
 /// Maps a team plan master harness to the backend that runs the project's master on it, by
 /// the harness registry: a harness whose manifest names the master role.
 /// Takes the harness identifier or a connection name for it. Returns Codex, Claude or
-/// RCLI, the harnesses the engine has a master host for, or none for any other harness:
-/// one without the master role, and a listed one until its master host exists.
+/// RCLI for the harnesses the engine hosts itself, a listed backend for any other harness
+/// with the master role, or none for a harness without it.
 pub fn master_backend(harness: &str) -> Option<crate::master_session::MasterBackend> {
-    use crate::coord::settings::HarnessKind;
-    use crate::master_session::MasterBackend;
-    let listed = crate::harnesses::registry::registry()
+    crate::harnesses::registry::registry()
         .get(harness)
-        .filter(|listed| listed.master())?;
-    match HarnessKind::from_harness(listed.id())? {
-        HarnessKind::Codex => Some(MasterBackend::Codex),
-        HarnessKind::ClaudeCode => Some(MasterBackend::Claude),
-        HarnessKind::Rcli => Some(MasterBackend::Rcli),
-        HarnessKind::Listed(_) => None,
-    }
+        .and_then(crate::master_session::MasterBackend::of)
 }
 
 /// Records how a master on this harness asks for sub-agents.

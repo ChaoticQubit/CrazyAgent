@@ -797,6 +797,7 @@ impl OwnerRuntimeHandle {
             MasterBackend::Codex => NativeHarness::Codex,
             MasterBackend::Claude => NativeHarness::Claude,
             MasterBackend::Rcli => return Err(failure("master_runtime_backend_unsupported")),
+            MasterBackend::Listed(_) => return Err(failure("launch_harness_unsupported")),
         };
         let profile_ref = match &prepared.profile.binding().connection.auth {
             ModelAuthentication::NativeManaged { profile_ref } => profile_ref.clone(),
@@ -959,6 +960,7 @@ impl OwnerRuntimeHandle {
             MasterBackend::Claude => (Some(Format::Claude), "claude-code"),
             MasterBackend::Codex => (Some(Format::Codex), "codex"),
             MasterBackend::Rcli => (None, "rcli"),
+            MasterBackend::Listed(id) => (None, id),
         };
         let attribution = Attribution {
             kind: RunKind::Master,
