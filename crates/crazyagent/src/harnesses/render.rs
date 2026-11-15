@@ -10,6 +10,13 @@ const PATH_PARTS_MAX: usize = 8;
 const TEMPLATE_BYTES_MAX: usize = 16 * 1024;
 /// The start of a render path: the private home, then a file inside it.
 const HOME_PREFIX: &str = "{home}/";
+/// Names CrazyAgent keeps at the top of a private home: the launch state, the home lock and
+/// the key file. A render path may not start with one, in any letter case.
+const ENGINE_NAMES: [&str; 3] = [
+    crate::launch_context::STATE,
+    crate::launch_context::LOCK,
+    super::interactive::KEY_FILE,
+];
 
 /// How a harness reads the MCP servers it is given. `json-mcp-servers` is one JSON file
 /// holding an `mcpServers` map, the shape Claude Code reads.
@@ -142,6 +149,16 @@ fn entry<K: Copy>(
             format!("{key}.path: this must be {{home}} followed by a file inside it."),
         );
     };
+    let first = path.split('/').next().unwrap_or_default();
+    if ENGINE_NAMES
+        .iter()
+        .any(|name| first.eq_ignore_ascii_case(name))
+    {
+        return refuse(
+            manifest::VALUE,
+            format!("{key}.path: CrazyAgent keeps its own files there, so a manifest cannot."),
+        );
+    }
     Ok(Render { kind, path })
 }
 
@@ -167,10 +184,10 @@ pub(crate) fn plain(path: &str) -> bool {
 /// refused, never written through. Inputs: the files, the private home, the MCP servers the
 /// launch gives and its instruction text. Output: the paths written, or the refusal.
 #[cfg(unix)]
-pub fn write(
+pub fn write<'a>(
     renders: &Renders,
     home: &Path,
-    servers: &[LaunchServer],
+    servers: impl IntoIterator<Item = &'a LaunchServer>,
     instructions: &str,
 ) -> Result<Vec<PathBuf>, LaunchError> {
     super::launch::validate_home(home)?;
@@ -198,13 +215,13 @@ pub fn write(
 /// Refuses render files where owner-only no-follow creation does not exist. Inputs: unused.
 /// Output: `launch_context_unavailable`.
 #[cfg(not(unix))]
-pub fn write(
+pub fn write<'a>(
     renders: &Renders,
     home: &Path,
-    servers: &[LaunchServer],
+    servers: impl IntoIterator<Item = &'a LaunchServer>,
     instructions: &str,
 ) -> Result<Vec<PathBuf>, LaunchError> {
-    let _ = (renders, home, servers, instructions);
+    let _ = (renders, home, servers.into_iter(), instructions);
     Err(failure("launch_context_unavailable"))
 }
 

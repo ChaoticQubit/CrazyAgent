@@ -1322,9 +1322,11 @@ impl AgentContext {
     /// manifest asks: the MCP servers and the instruction text into the files its `mcp` and
     /// `instructions` blocks name, and the environment its `home` block sets, on the guard.
     /// Inputs: the manifest, the private home ([`crate::harnesses::home::prepare`]) and the
-    /// tools switch; with tools off the MCP file holds no server. Output: the guard that
-    /// deletes those files, `launch_manifest_invalid` for blocks that do not read,
-    /// `launch_harness_unsupported` for a team agent's project files, or `launch_home_busy`.
+    /// tools switch; with tools off the MCP file holds no server, and a server with any tool
+    /// the owner switched off is left out whole, as the file cannot switch off one tool.
+    /// Output: the guard that deletes those files, `launch_manifest_invalid` for blocks that
+    /// do not read, `launch_harness_unsupported` for a team agent's project files, or
+    /// `launch_home_busy`.
     pub fn install_listed(
         &self,
         manifest: &crate::harnesses::manifest::Manifest,
@@ -1366,7 +1368,13 @@ impl AgentContext {
             environment: asked.environment(home),
             _lock: lock,
         };
-        let servers: &[LaunchServer] = if tools { &self.plugins.servers } else { &[] };
+        let servers = self.plugins.servers.iter().filter(|server| {
+            tools
+                && !self
+                    .off_tools
+                    .iter()
+                    .any(|(name, off)| *name == server.name && !off.is_empty())
+        });
         let written = crate::harnesses::render::write(&renders, home, servers, &self.instructions)?;
         assert_eq!(written.len(), count);
         Ok(installed)
@@ -2293,7 +2301,9 @@ fn hook_command(root: &str, command: &str) -> String {
 /// `mcpServers` map, each secret an environment value or a header. It is also the
 /// `json-mcp-servers` render of a harness manifest ([`crate::harnesses::render`]). Input:
 /// the servers. Output: the text, or the refusal.
-pub(crate) fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
+pub(crate) fn claude_config<'a>(
+    servers: impl IntoIterator<Item = &'a LaunchServer>,
+) -> Result<String, LaunchError> {
     let mut declared = serde_json::Map::new();
     for server in servers {
         let mut values = serde_json::Map::new();
