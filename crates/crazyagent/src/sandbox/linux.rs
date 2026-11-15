@@ -14,10 +14,11 @@ use seccompiler::{
     SeccompRule, TargetArch,
 };
 use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::{CString, OsStr, OsString};
 use std::fs;
 use std::io::Read;
 use std::ops::RangeInclusive;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -199,6 +200,9 @@ impl LandlockPolicy {
             args.push(DIE_WITH.into());
             args.push(parent.to_string().into());
         }
+        if self.nested {
+            args.push(NESTED.into());
+        }
         args
     }
 }
@@ -279,17 +283,21 @@ impl HelperRequest {
     /// Parses the helper arguments after its own name. Input: flags from
     /// [`LandlockPolicy::args`] then `--`, an absolute program and its arguments, or
     /// `--probe` with an optional `--limit-network`, `--open-sockets` and `--keep-free`
-    /// with a port, or `--filter-sockets` alone then `--` and the harness. `--open-sockets`
-    /// needs `--limit-network`. Output: the request, or the reason the arguments are refused.
+    /// with a port, or `--filter-sockets` alone then `--` and the harness, or `--nest`
+    /// alone then `--` and what [`nest_request`] takes. `--open-sockets` needs
+    /// `--limit-network`. Output: the request, or the reason the arguments are refused.
     pub fn parse(args: Vec<OsString>) -> Result<Self, String> {
         let mut policy = LandlockPolicy::default();
         let mut probe = false;
         let mut filter = false;
+        let mut nest = false;
         let mut rest = args.into_iter();
         while let Some(flag) = rest.next() {
             match flag.to_str() {
                 Some(PROBE) => probe = true,
                 Some(FILTER_SOCKETS) => filter = true,
+                Some(NEST) => nest = true,
+                Some(NESTED) => policy.nested = true,
                 Some(LIMIT_NETWORK) => policy.limit_network = true,
                 Some(OPEN_SOCKETS) => policy.open_sockets = true,
                 Some(READ) => policy.read.push(absolute(rest.next())?),
@@ -298,6 +306,10 @@ impl HelperRequest {
                 Some(KEEP_FREE) => policy.keep_free.push(port(rest.next())?),
                 Some(DIE_WITH) if policy.die_with.is_none() => {
                     policy.die_with = Some(parent(rest.next())?);
+                }
+                Some("--") if nest => {
+                    let alone = !probe && !filter && policy == LandlockPolicy::default();
+                    return nest_request(alone, rest);
                 }
                 Some("--") if !probe && filter => {
                     if policy != LandlockPolicy::default() {
@@ -312,6 +324,9 @@ impl HelperRequest {
                 Some("--") if !probe => {
                     open_needs_limit(&policy)?;
                     binds_fit(&policy)?;
+                    if policy.nested && policy.die_with.is_some() {
+                        return Err(format!("{NESTED} takes no {DIE_WITH}"));
+                    }
                     let program = absolute(rest.next())?;
                     if policy.read.len() + policy.write.len() > HELPER_PATHS_MAX {
                         return Err("too many path grants".into());
@@ -328,8 +343,9 @@ impl HelperRequest {
         let bare = policy.read.is_empty()
             && policy.write.is_empty()
             && policy.connect.is_empty()
-            && policy.die_with.is_none();
-        if probe && bare && !filter {
+            && policy.die_with.is_none()
+            && !policy.nested;
+        if probe && bare && !filter && !nest {
             open_needs_limit(&policy)?;
             binds_fit(&policy)?;
             return Ok(Self::Probe {
@@ -340,6 +356,32 @@ impl HelperRequest {
         }
         Err("missing the harness command after --".into())
     }
+}
+
+/// Reads what follows `--nest --`: bubblewrap at one of its fixed places, then exactly
+/// [`NEST_ARGS`], then at least the command bubblewrap starts, so the helper starts nothing
+/// else on a caller's word. Inputs: whether `--nest` was the only flag, and those
+/// arguments. Output: the request, or the reason they are refused.
+fn nest_request(
+    alone: bool,
+    mut rest: impl Iterator<Item = OsString>,
+) -> Result<HelperRequest, String> {
+    if !alone {
+        return Err(format!("{NEST} takes no other flag"));
+    }
+    let bwrap = absolute(rest.next())?;
+    if !BWRAP_PATHS.iter().any(|path| Path::new(path) == bwrap) {
+        return Err(format!("{NEST} starts only bubblewrap from its fixed places"));
+    }
+    let args: Vec<OsString> = rest.collect();
+    let fixed = args
+        .iter()
+        .zip(NEST_ARGS)
+        .all(|(arg, fixed)| arg.as_os_str() == OsStr::new(fixed));
+    if !fixed || args.len() <= NEST_ARGS.len() {
+        return Err(format!("{NEST} needs bubblewrap's fixed arguments and a command"));
+    }
+    Ok(HelperRequest::Nest { bwrap, args })
 }
 
 fn open_needs_limit(policy: &LandlockPolicy) -> Result<(), String> {
@@ -644,9 +686,10 @@ fn die_with_parent(parent: u32) -> Result<(), String> {
 /// A probe applies a ruleset with no rule, the scope layer and the socket filter to itself and
 /// exits 0 when this kernel holds them; a run applies the policy, the scope layer and the
 /// filter to itself, moves into a session of its own and then replaces itself with the
-/// harness. Output: the exit code, 2 for refused arguments, 3 when the kernel cannot hold
-/// the policy or the session or the process it dies with is gone, 126 when the harness
-/// cannot start.
+/// harness; a nest becomes bubblewrap, which starts a run inside its namespaces ([`nest`]).
+/// Output: the exit code, 2 for refused arguments, 3 when the kernel cannot hold the policy,
+/// the session or the signal mask, or the process it dies with is gone, 126 when the
+/// harness or bubblewrap cannot start.
 pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     let request = match HelperRequest::parse(args) {
         Ok(request) => request,
@@ -657,7 +700,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     };
     let (policy, launch) = match request {
         HelperRequest::Filter { program, args } => return filtered(&program, args),
-        HelperRequest::Nest { .. } => return ExitCode::from(2),
+        HelperRequest::Nest { bwrap, args } => return nest(&bwrap, &args),
         HelperRequest::Probe {
             limit_network,
             open_sockets,
@@ -715,7 +758,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     let Some((program, args)) = launch else {
         return ExitCode::SUCCESS;
     };
-    if let Err(reason) = own_session() {
+    if let Err(reason) = placed(policy.nested) {
         eprintln!("crazyagent-landlock: {reason}");
         return ExitCode::from(3);
     }
@@ -725,6 +768,58 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         program.display()
     );
     ExitCode::from(126)
+}
+
+/// Starts bubblewrap for a nested agent, from outside its namespaces. It takes the session
+/// as [`own_session`] does, where a pane's first process can still be told apart, then
+/// blocks every signal: bubblewrap's outer process and its first process inside inherit the
+/// mask, so they end only with the harness or by KILL, and a stop signal to the group is
+/// the harness's to handle. Output: 3 when either fails, 126 when bubblewrap cannot start.
+fn nest(bwrap: &Path, args: &[OsString]) -> ExitCode {
+    let held = own_session().and_then(|()| {
+        nix::sys::signal::SigSet::all()
+            .thread_block()
+            .map_err(|error| format!("signal mask: {error}"))
+    });
+    if let Err(reason) = held {
+        eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
+    }
+    let error = exec_keeping_mask(bwrap, args);
+    eprintln!(
+        "crazyagent-landlock: cannot start {}: {error}",
+        bwrap.display()
+    );
+    ExitCode::from(126)
+}
+
+/// Replaces this process with `program`, keeping its signal mask and its environment.
+/// `std`'s exec empties the mask first, which would undo [`nest`]. Inputs: the program and
+/// its arguments after its own name. Output: only the reason the exec failed.
+fn exec_keeping_mask(program: &Path, args: &[OsString]) -> String {
+    let words: Result<Vec<CString>, _> = std::iter::once(program.as_os_str())
+        .chain(args.iter().map(OsString::as_os_str))
+        .map(|word| CString::new(word.as_bytes()))
+        .collect();
+    let Ok(words) = words else {
+        return "an argument holds a NUL byte".into();
+    };
+    assert!(words.len() > NEST_ARGS.len());
+    let Err(errno) = nix::unistd::execv(&words[0], &words);
+    errno.to_string()
+}
+
+/// Places the helper for its harness. Inside bubblewrap it only unblocks every signal, as
+/// [`nest`] took the session outside and left it the full mask, so the harness takes its
+/// stop and terminal signals as a plain Landlock agent does; anywhere else it takes a
+/// session of its own. Input: whether it runs nested. Output: Ok, or the reason.
+fn placed(nested: bool) -> Result<(), String> {
+    if !nested {
+        return own_session();
+    }
+    nix::sys::signal::SigSet::empty()
+        .thread_set_mask()
+        .map_err(|error| format!("signal mask: {error}"))
 }
 
 /// Starts a harness bubblewrap launched, behind the socket filter alone, the one a Landlock
@@ -822,11 +917,12 @@ impl LinuxSandbox {
     }
 
     /// Picks the backend this machine holds: Landlock when the helper exists and its probe
-    /// passes for the policy's network needs, otherwise bubblewrap from a fixed path with the
-    /// helper started inside it, so no bubblewrap agent starts without the helper. An open
-    /// network probes the TCP bind rules that keep ports free and never falls back to
+    /// passes for the policy's network needs, nested in bubblewrap when the same probe also
+    /// passes inside its namespaces ([`nests`]), otherwise bubblewrap from a fixed path with
+    /// the helper started inside it, so no bubblewrap agent starts without the helper. An
+    /// open network probes the TCP bind rules that keep ports free and never falls back to
     /// bubblewrap. Input: the project policy and the helper executable. Output: the
-    /// sandbox, or `Unavailable` when neither backend can hold it.
+    /// sandbox, or `Unavailable` when no backend can hold it.
     pub fn detect(sandbox: ProjectSandbox, helper: &Path) -> Result<Self, SandboxError> {
         let bwraps: Vec<&Path> = BWRAP_PATHS.iter().map(Path::new).collect();
         Self::detect_among(sandbox, helper, &bwraps)
@@ -853,23 +949,22 @@ impl LinuxSandbox {
                 probe.arg(OPEN_SOCKETS);
             }
         }
-        let held = clean_absolute(helper)
-            && helper.is_file()
-            && crate::spawn_gate::status(
-                probe
-                    .env_clear()
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null()),
-            )
-            .is_ok_and(|status| status.success());
+        let flags: Vec<OsString> = probe.get_args().map(OsStr::to_os_string).collect();
+        let held = clean_absolute(helper) && helper.is_file() && passes(&mut probe);
         if held {
-            return Self::new(
-                sandbox,
-                LinuxBackend::Landlock {
-                    helper: helper.to_path_buf(),
+            let helper = helper.to_path_buf();
+            let nest = bwraps
+                .iter()
+                .find(|bwrap| bwrap.is_file())
+                .filter(|bwrap| nests(bwrap, &helper, &flags));
+            let backend = match nest {
+                Some(bwrap) => LinuxBackend::Nested {
+                    bwrap: bwrap.to_path_buf(),
+                    helper,
                 },
-            );
+                None => LinuxBackend::Landlock { helper },
+            };
+            return Self::new(sandbox, backend);
         }
         if open {
             return Err(SandboxError::Unavailable(
@@ -912,6 +1007,39 @@ impl LinuxSandbox {
             LinuxBackend::Bubblewrap { bwrap, .. } => bwrap,
         }
     }
+}
+
+/// Runs a probe with no environment and no input or output. Input: the probe command.
+/// Output: true only when it ran and exited 0.
+fn passes(probe: &mut Command) -> bool {
+    crate::spawn_gate::status(
+        probe
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .is_ok_and(|status| status.success())
+}
+
+/// Tells whether this machine starts the helper inside bubblewrap's namespaces and holds
+/// the same probe there, by running the exact nest: the helper, bubblewrap with
+/// [`NEST_ARGS`], then the helper's probe. A bubblewrap that only exists proves nothing:
+/// Ubuntu 24.04 refuses it the user namespace. Inputs: bubblewrap, the helper and the
+/// probe's arguments. Output: true only when the nested probe exits 0.
+fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
+    assert!(flags.first().is_some_and(|flag| flag == PROBE));
+    clean_absolute(bwrap)
+        && passes(
+            Command::new(helper)
+                .arg(NEST)
+                .arg("--")
+                .arg(bwrap)
+                .args(NEST_ARGS)
+                .arg("--")
+                .arg(helper)
+                .args(flags),
+        )
 }
 
 /// Refuses a policy neither Linux backend starts: one confined to its own worktree, or a
@@ -962,10 +1090,17 @@ impl Sandbox for LinuxSandbox {
         }
         let grants = Grants::of(&self.sandbox)?;
         let mut command = match &self.backend {
-            LinuxBackend::Landlock { helper } | LinuxBackend::Nested { helper, .. } => {
+            LinuxBackend::Landlock { helper } => {
                 let mut command = Command::new(helper);
                 command.args(landlock_policy(&grants, &self.sandbox).args());
                 command
+            }
+            LinuxBackend::Nested { bwrap, helper } => {
+                let policy = LandlockPolicy {
+                    nested: true,
+                    ..landlock_policy(&grants, &self.sandbox)
+                };
+                nest_command(bwrap, helper, &policy, cwd)
             }
             LinuxBackend::Bubblewrap { bwrap, helper } => {
                 bwrap_command(bwrap, helper, &grants, cwd, self.sandbox.network())
@@ -1160,6 +1295,28 @@ fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
     ports.sort_unstable();
     ports.dedup();
     ports
+}
+
+/// The command for a nested agent up to its harness: the helper asked to start bubblewrap
+/// ([`NEST`]) with [`NEST_ARGS`] in the working folder, and inside it the helper again with
+/// the policy. Inputs: bubblewrap, the helper, the policy, marked nested, and the working
+/// folder. Output: the command, which the harness follows after `--`.
+fn nest_command(bwrap: &Path, helper: &Path, policy: &LandlockPolicy, cwd: &Path) -> Command {
+    assert!(policy.nested);
+    assert!(policy.die_with.is_none());
+    let mut command = Command::new(helper);
+    command
+        .arg(NEST)
+        .arg("--")
+        .arg(bwrap)
+        .args(NEST_ARGS)
+        .arg("--chdir")
+        .arg(cwd)
+        .arg("--")
+        .arg(helper)
+        .args(policy.args());
+    assert_eq!(command.get_args().filter(|arg| *arg == NEST).count(), 1);
+    command
 }
 
 /// The bubblewrap command for a closed agent up to its harness: its own namespaces, the
