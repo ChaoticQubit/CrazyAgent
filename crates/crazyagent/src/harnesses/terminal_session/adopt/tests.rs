@@ -805,17 +805,18 @@ fn an_adoption_replay_cut_at_the_run_time_passes_over_the_rest_and_hands_the_ses
 
 /// RV-DS241-143: a live master is not bound by the launch's 24 h run time (the Master run
 /// time bounds it, F01), so a master pane that started 25 h ago, whose record takes more than
-/// one read, is still read to its record's end when a restarted engine adopts it: it is taken
-/// over idle with no turn dropped, and only the next turn typed in the pane reaches the session.
+/// three reads (all a cut adoption with an Escape could read), is still read to its record's
+/// end when a restarted engine adopts it: it is taken over idle with no turn dropped, and
+/// only the next turn typed in the pane reaches the session.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_live_master_older_than_the_launch_run_time_is_replayed_to_its_record_s_end() {
     let fixture = Fixture::new();
     let host = fixture.host();
     let agent = AgentId::team(8).unwrap();
-    let file = long_record(&fixture, 512);
+    let file = long_record(&fixture, 1_024);
     let length = std::fs::metadata(&file).unwrap().len();
-    assert!(length > 2 * READ_BYTES_MAX as u64);
+    assert!(length > 3 * READ_BYTES_MAX as u64);
     let record = fixture.spawn(&host, &agent, "exec cat", &file);
     let launched = PaneRecord {
         since_ms: record.since_ms - 25 * 3_600_000,
@@ -839,7 +840,7 @@ fn a_live_master_older_than_the_launch_run_time_is_replayed_to_its_record_s_end(
         session.ready && !session.turn && !session.took_none(),
         "an idle live master read to its record's end is taken over idle, no turn dropped"
     );
-    assert_eq!(lines(&file), 2 * 512, "nothing was typed into the pane");
+    assert_eq!(lines(&file), 2 * 1_024, "nothing was typed into the pane");
     session.clear_deadline();
     follows_a_typed_command(&mut session, &file);
     session.leave();

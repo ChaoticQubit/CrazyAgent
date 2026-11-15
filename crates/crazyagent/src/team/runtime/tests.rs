@@ -33575,7 +33575,7 @@ fn live_master_effects(fixture: &Fixture, id: i64) -> ((i64, bool), i64, i64, i6
 }
 
 /// RV-DS241-143: a restarted engine that adopts a live master older than the launch's 24 h
-/// run time, whose record holds more than one read of turns the engine never followed, takes
+/// run time, whose record holds more than three reads of turns the engine never followed, takes
 /// that backlog as already passed: no earlier turn is counted against the round budget,
 /// landed, written as the owner's reply or read for task blocks, and the master is taken
 /// over idle and stays live.
@@ -33596,7 +33596,7 @@ fn an_adopted_live_master_past_a_day_with_a_long_record_takes_no_earlier_turn_as
     assert_eq!(before.3, 0);
     let (_, rollout) = kept_conversation(&fixture.connection, "s-one").unwrap();
     let mut backlog = String::new();
-    for turn in 0..400 {
+    for turn in 0..1_024 {
         let reply = format!(
             "Earlier reply {turn}\n```crazyagent-task\n{{\"task\": \"Write earlier-{turn}.txt\"}}\n```\n{}",
             "x".repeat(4096)
@@ -33611,7 +33611,7 @@ fn an_adopted_live_master_past_a_day_with_a_long_record_takes_no_earlier_turn_as
         backlog.push_str(r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#);
         backlog.push('\n');
     }
-    assert!(backlog.len() > 2 * crate::harnesses::transcript::READ_BYTES_MAX);
+    assert!(backlog.len() > 3 * crate::harnesses::transcript::READ_BYTES_MAX);
     {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
