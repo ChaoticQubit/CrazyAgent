@@ -627,13 +627,13 @@ pub(super) fn hooks_follow(tx: &Transaction<'_>, item: &str) -> Result<bool, Eng
 }
 
 /// The hooks that follow one skill or MCP server as a new pin keeps them: each hook's
-/// name, whether it is on and the projects it is switched off in. Inputs: the transaction
-/// and the item id. Output: the hooks.
+/// name, what it runs, whether it is on and the projects it is switched off in. Inputs:
+/// the transaction and the item id. Output: the hooks.
 #[cfg(unix)]
 pub(super) fn following_hooks(
     tx: &Transaction<'_>,
     item: &str,
-) -> Result<Vec<(String, bool, Vec<String>)>, EngineError> {
+) -> Result<Vec<super::setup::KeptHook>, EngineError> {
     let mut hooks = Vec::new();
     for hook in all::<HookRecord>(tx, "hook")?
         .into_iter()
@@ -647,7 +647,14 @@ pub(super) fn following_hooks(
             .map_err(error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(error)?;
-        hooks.push((hook.name, hook.enabled, projects));
+        hooks.push(super::setup::KeptHook {
+            name: hook.name,
+            enabled: hook.enabled,
+            projects,
+            event: hook.event,
+            matcher: hook.matcher,
+            command: hook.command,
+        });
     }
     Ok(hooks)
 }

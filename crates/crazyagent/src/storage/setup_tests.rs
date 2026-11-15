@@ -1826,3 +1826,95 @@ fn a_new_pin_with_its_hooks_reordered_keeps_each_switch_on_the_same_hook() {
     assert!(!enabled("other.sh"), "the hook switched off stays off");
     assert!(enabled("start.sh"), "the hook left on stays on");
 }
+
+/// RV-DS241-155: a new pin that changes what a hook the owner switched off runs keeps the
+/// changed hook off, since nothing says which new hook took its place, and leaves the hook
+/// that still runs what it ran before on.
+#[test]
+fn a_new_pin_that_changes_a_switched_off_hook_keeps_the_changed_hook_off() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let first = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@1",
+        vec![skill(first.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let plugin = ordered_hook_plugin(work.path(), &["start.sh", "other.sh"]);
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    let other = hook_views(&mut connection, root, None)
+        .into_iter()
+        .find(|view| view.command.contains("other.sh"))
+        .unwrap()
+        .id;
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetHook {
+            id: other,
+            enabled: false,
+        },
+    )
+    .unwrap();
+
+    let second = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@2",
+        vec![skill(second.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    let changed = tempfile::tempdir().unwrap();
+    let renamed = ordered_hook_plugin(changed.path(), &["start.sh", "renamed.sh"]);
+    seed(&mut connection, root, "caveman", &renamed).unwrap();
+    let views = hook_views(&mut connection, root, None);
+    let enabled = |script: &str| {
+        views
+            .iter()
+            .find(|view| view.command.contains(script))
+            .unwrap()
+            .enabled
+    };
+    assert!(!enabled("renamed.sh"), "the changed hook stays off");
+    assert!(enabled("start.sh"), "the unchanged hook stays on");
+}
+
+/// RV-DS241-155: a kept hook saved before what hooks run was kept, as 2.4.1 wrote it, still
+/// loads and still gives its switches to the added hook of its name, as before, and to no
+/// other added hook.
+#[test]
+fn a_kept_hook_saved_without_what_it_runs_loads_and_matches_by_name() {
+    let old = r#"{"name":"caveman/SessionStart/2","enabled":false,"projects":["project-1"]}"#;
+    let kept: KeptHook = serde_json::from_str(old).unwrap();
+    assert!(kept.event.is_empty() && kept.matcher.is_none() && kept.command.is_empty());
+    let view = |name: &str, command: &str| crate::plugins::HookView {
+        id: format!("id-{name}"),
+        name: name.into(),
+        plugin: "caveman".into(),
+        event: "SessionStart".into(),
+        matcher: None,
+        command: command.into(),
+        scope: Scope::Global,
+        scope_label: "All projects".into(),
+        enabled: true,
+        on_here: None,
+        follows: Some("caveman".into()),
+        source: "/private/tmp/caveman".into(),
+        version: 1,
+    };
+    let added = [
+        view("caveman/SessionStart/1", "sh other.sh"),
+        view("caveman/SessionStart/2", "sh start.sh"),
+    ];
+    let kept = [kept];
+    assert_eq!(kept_for(&kept, &added, &added[1]), [&kept[0]]);
+    assert!(kept_for(&kept, &added, &added[0]).is_empty());
+}

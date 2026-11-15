@@ -52,14 +52,21 @@ struct PackRecord {
     hooks: Vec<KeptHook>,
 }
 
-/// A hook the owner switched off, everywhere or in some projects, on a pin a new one
-/// replaced, kept by name until setup adds the new pin's hooks ([`keep_hooks`]).
+/// A hook of a pin a new one replaced, with what it runs (event, matcher and command) and
+/// how the owner switched it, everywhere or in some projects, kept until setup adds the new
+/// pin's hooks ([`keep_hooks`]). A row saved before what it runs was kept has none of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct KeptHook {
-    name: String,
-    enabled: bool,
-    projects: Vec<String>,
+pub(super) struct KeptHook {
+    pub(super) name: String,
+    pub(super) enabled: bool,
+    pub(super) projects: Vec<String>,
+    #[serde(default)]
+    pub(super) event: String,
+    #[serde(default)]
+    pub(super) matcher: Option<String>,
+    #[serde(default)]
+    pub(super) command: String,
 }
 
 /// Creates the installed default-pack tables when the engine database opens.
@@ -294,12 +301,11 @@ struct Kept {
     hooks: Vec<KeptHook>,
 }
 
-/// Reads what the owner set on an older pin, then removes its skills, and its server
-/// unless the new pin names the same server, which is then reused so its secrets,
-/// switches and on/off state stay. Hooks the owner switched off are read from the live
-/// hooks, or kept from the old row when none were seeded while the entry was off. Inputs:
-/// the transaction, engine root, old row, new server and the moved-aside folders. Output:
-/// what the new pin keeps.
+/// Reads what the owner set on an older pin, then removes its skills, and its server unless
+/// the new pin names the same server, which is reused so its secrets, switches and on/off
+/// state stay. Every live hook is kept with what it runs and its switches, or the old row's
+/// when none were seeded while the entry was off. Inputs: the transaction, engine root, old
+/// row, new server and the moved-aside folders. Output: what the new pin keeps.
 #[cfg(unix)]
 fn carry(
     tx: &Transaction<'_>,
@@ -354,15 +360,7 @@ fn carry(
     }
     let mut hooks = Vec::new();
     for item in dropped.skills.iter().chain(dropped.server.iter()) {
-        for (name, enabled, projects) in plugins::following_hooks(tx, item)? {
-            if !enabled || !projects.is_empty() {
-                hooks.push(KeptHook {
-                    name,
-                    enabled,
-                    projects,
-                });
-            }
-        }
+        hooks.extend(plugins::following_hooks(tx, item)?);
     }
     if hooks.is_empty() {
         hooks = std::mem::take(&mut dropped.hooks);
@@ -866,9 +864,9 @@ fn seed_hooks(
 }
 
 /// Switches the hooks setup just added off as the owner had them on the pin they replace
-/// ([`KeptHook`]), matched by name, everywhere or in the same projects, then forgets what
-/// was kept. Inputs: the transaction, engine root, the entry's row and the added hooks.
-/// Output: any failure.
+/// ([`KeptHook`]), each by the kept hooks [`kept_for`] gives it, everywhere or in the same
+/// projects, then forgets what was kept. Inputs: the transaction, engine root, the entry's
+/// row and the added hooks. Output: any failure.
 #[cfg(unix)]
 fn keep_hooks(
     tx: &Transaction<'_>,
@@ -880,10 +878,8 @@ fn keep_hooks(
         return Ok(());
     }
     for hook in added {
-        let Some(kept) = record.hooks.iter().find(|kept| kept.name == hook.name) else {
-            continue;
-        };
-        if !kept.enabled {
+        let kept = kept_for(&record.hooks, added, hook);
+        if kept.iter().any(|kept| !kept.enabled) {
             plugins::run(
                 tx,
                 root,
@@ -893,7 +889,7 @@ fn keep_hooks(
                 },
             )?;
         }
-        for project in &kept.projects {
+        for project in kept.iter().flat_map(|kept| &kept.projects) {
             tx.execute(
                 "INSERT OR IGNORE INTO plugin_switches(project,item) VALUES(?1,?2)",
                 [project, &hook.id],
@@ -904,6 +900,35 @@ fn keep_hooks(
     let mut record = record.clone();
     record.hooks.clear();
     save_pack(tx, &record)
+}
+
+/// The kept hooks whose switches one added hook takes (RV-DS241-155): those that run what it
+/// runs, else, for a hook the old pin did not run, the switched hooks of its event that no
+/// added hook runs any more, so a changed hook the owner turned off stays off; a row saved
+/// before what hooks run was kept matches by name. Inputs: the kept hooks, every added hook
+/// and the one added hook. Output: the kept hooks it takes.
+#[cfg(unix)]
+fn kept_for<'a>(
+    kept: &'a [KeptHook],
+    added: &[crate::plugins::HookView],
+    hook: &crate::plugins::HookView,
+) -> Vec<&'a KeptHook> {
+    let runs = |kept: &KeptHook, hook: &crate::plugins::HookView| {
+        kept.event == hook.event && kept.matcher == hook.matcher && kept.command == hook.command
+    };
+    let same: Vec<&KeptHook> = kept.iter().filter(|kept| runs(kept, hook)).collect();
+    if !same.is_empty() {
+        return same;
+    }
+    let replaced = |kept: &&KeptHook| {
+        if kept.event.is_empty() {
+            return kept.name == hook.name;
+        }
+        let switched = !kept.enabled || !kept.projects.is_empty();
+        let gone = !added.iter().any(|other| runs(kept, other));
+        switched && gone && kept.event == hook.event
+    };
+    kept.iter().filter(replaced).collect()
 }
 
 /// Runs one default-pack job for the engine: install an entry's skills and its approved
