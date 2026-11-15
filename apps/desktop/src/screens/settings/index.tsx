@@ -6,6 +6,7 @@ import { AppPluginsSettings } from "./app-plugins";
 import { ChecksSettings } from "./checks";
 import { FinishedAgentsSettings } from "./finished-agents";
 import { Harnesses } from "./harnesses";
+import { KeepAwakeSettings } from "./keep-awake";
 import { MasterSettings } from "./master";
 import { MemorySettings } from "./memory";
 import { NotificationSettings } from "./notifications";
@@ -39,7 +40,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
   ] },
   { title: "App", items: [
     { id: "sandbox", label: "Sandbox" }, { id: "alerts", label: "Team alerts" }, { id: "notifications", label: "Notifications" },
-    { id: "app-plugins", label: "App plugins" }, { id: "search", label: "Search" },
+    { id: "keep-awake", label: "Keep awake" }, { id: "app-plugins", label: "App plugins" }, { id: "search", label: "Search" },
   ] },
 ];
 
@@ -99,6 +100,7 @@ export function Settings({ tab, action, account, skill, harness }: { tab: Listed
       : tab === "quit" ? <QuittingSettings />
       : tab === "master" ? <MasterSettings />
       : tab === "notifications" ? <NotificationSettings />
+      : tab === "keep-awake" ? <KeepAwakeSettings />
       : tab === "app-plugins" ? <AppPluginsSettings />
       : tab === "search" ? <SearchSettings />
       : <TeamAlertsSettings />}

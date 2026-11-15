@@ -34,6 +34,7 @@ mod ide_extensions;
 mod ide_reveal;
 mod ide_run;
 pub mod intake;
+mod keep_awake;
 pub mod master;
 pub mod memory;
 mod model_access;

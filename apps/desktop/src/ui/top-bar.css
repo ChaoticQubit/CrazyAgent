@@ -1,0 +1,6 @@
+:root { --top-bar-h: 56px; }
+.main-column { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
+.main-column > .main, .main-column > .welcome { flex: 1 1 0; min-height: 0; height: auto; }
+.top-bar { position: relative; z-index: calc(var(--z-sticky) + 1); display: flex; align-items: center; gap: var(--space-3); flex: none; height: var(--top-bar-h); padding: 0 var(--space-6); border-bottom: 1px solid var(--border); background: var(--bg); }
+.top-bar-title { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 600; color: var(--text); }
+.top-bar-tools { display: flex; align-items: center; gap: var(--space-3); flex: none; }

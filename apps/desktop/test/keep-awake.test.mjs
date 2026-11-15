@@ -20,6 +20,7 @@ const ENGINE_SETTINGS = source("../../../crates/crazyagent/src/keep_awake/settin
 const ENGINE_STATE = source("../../../crates/crazyagent/src/keep_awake/state.rs");
 const ENGINE = source("../../../crates/crazyagent/src/keep_awake.rs");
 const LIB = source("../src-tauri/src/lib.rs");
+const API = source("../src/api-keep-awake.ts");
 const SHELL = source("../src/ui/shell.tsx");
 const APP = source("../src/app.tsx");
 const NOTICE_CSS = source("../src/screens/notifications/notifications.css");
@@ -470,10 +471,13 @@ test("the window reads and changes Keep awake through two commands the app regis
     assert.match(registered, new RegExp(`\\b${command},`), `${command} is registered`);
   }
   assert.equal(api.KEEP_AWAKE_POLL_MS, 5000);
-  const sent = (action) => api.keepAwakeCall(action, 7);
-  assert.deepEqual(sent({ start: { minutes: 60 } }), ["desktop_keep_awake_act", { action: { start: { minutes: 60 } }, generation: 7 }]);
-  assert.deepEqual(sent("end"), ["desktop_keep_awake_act", { action: "end", generation: 7 }]);
-  assert.deepEqual(sent({ set: { settings: api.KEEP_AWAKE_DEFAULTS } })[1].action.set.settings, api.KEEP_AWAKE_DEFAULTS);
-  assert.throws(() => api.keepAwakeCall({ start: { minutes: 0 } }, 7), /minutes/);
-  assert.throws(() => api.keepAwakeCall({ extend: { minutes: 1441 } }, 7), /minutes/);
+  const sent = (action) => api.keepAwakeArgs(action, 7);
+  assert.deepEqual(sent({ start: { minutes: 60 } }), { action: { start: { minutes: 60 } }, generation: 7 });
+  assert.deepEqual(sent("end"), { action: "end", generation: 7 });
+  assert.deepEqual(sent({ set: { settings: api.KEEP_AWAKE_DEFAULTS } }).action.set.settings, api.KEEP_AWAKE_DEFAULTS);
+  assert.throws(() => api.keepAwakeArgs({ start: { minutes: 0 } }, 7), /minutes/);
+  assert.throws(() => api.keepAwakeArgs({ extend: { minutes: 1441 } }, 7), /minutes/);
+  assert.throws(() => api.keepAwakeArgs("end", 0), /generation/);
+  assert.match(API, /call<KeepAwakeView>\("desktop_keep_awake_read"\)/);
+  assert.match(API, /call<IntentReceipt>\("desktop_keep_awake_act", keepAwakeArgs\(/);
 });

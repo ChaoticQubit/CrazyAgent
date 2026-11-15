@@ -5,6 +5,7 @@ import { ideFocus, type IdeFocus } from "./engine-client";
 import { loadTeamEvents, teamAttention } from "./api-projects";
 import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPendingQuestions } from "./api-questions";
 import { engineLostStep, noticeWatch, reportNotice, type EngineWatch } from "./notify";
+import { KeepAwakeControl } from "./screens/keep-awake/control";
 import { NoticeBell } from "./screens/notifications/panel";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
@@ -24,7 +25,7 @@ import { UserDialogLayer, closeUserDialog, openUserDialog, useUserDialog } from 
 import { alertRoute, freshAlerts, unseenByProject, workingByProject } from "./screens/team/wake";
 import { RestartEngine, UpdatesSettings, useEngineRestart, useUpdateWatch, type EngineRestart } from "./screens/settings/updates";
 import { blocking, updateStore } from "./screens/settings/updates-state";
-import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, formatRoute, isUserMenuTab, navigate, parseRoute, shortcutKey, useRoute, type Route, type SidebarProject } from "./ui";
+import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, TopBar, formatRoute, isUserMenuTab, navigate, pageName, parseRoute, shortcutKey, useRoute, type Route, type SidebarProject } from "./ui";
 import { GoToLayer } from "./ui/go-to";
 import type { EngineState } from "./ui/shell";
 
@@ -185,10 +186,16 @@ export function AppView({ session, route, alerts, working, under, back }: { sess
   const profile = session.profile.kind === "ok" ? session.profile.value : undefined;
   const firstRun = session.profile.kind === "ok" && (session.profile.value === null || !session.profile.value.name.trim());
   if (firstRun && updates) return <UpdatesAlone session={session} />;
+  const listed = session.projects.kind === "ok" ? session.projects.value : [];
+  const atWork = [...(working?.values() ?? [])].reduce((sum, count) => sum + count, 0);
+  const bar = (shown: Route) => <TopBar title={displayText(pageName(shown, listed))} keepAwake={<KeepAwakeControl work={atWork} />} bell={<NoticeBell projects={listed} />} />;
   if (firstRun || route.name === "welcome") {
     return <SessionContext.Provider value={session}>
-      <Welcome profile={profile} onSaved={(_, next, note) => { if (note) session.showToast(note); void session.refreshProfile().then(() => navigate(next ?? { name: "home" }, true)); }}
-        onSkip={(next, note) => { if (note) session.showToast(note); navigate(next ?? { name: "home" }, true); }} />
+      <div className="main-column">
+        {bar({ name: "welcome" })}
+        <Welcome profile={profile} onSaved={(_, next, note) => { if (note) session.showToast(note); void session.refreshProfile().then(() => navigate(next ?? { name: "home" }, true)); }}
+          onSkip={(next, note) => { if (note) session.showToast(note); navigate(next ?? { name: "home" }, true); }} />
+      </div>
     </SessionContext.Provider>;
   }
   const asked = route.name === "settings" && isUserMenuTab(route.tab) ? route.tab : null;
@@ -201,7 +208,7 @@ export function AppView({ session, route, alerts, working, under, back }: { sess
     .map((folder) => ({ ...folder, name: displayText(folder.name) }))] : undefined;
   return <SessionContext.Provider value={session}>
     <AppShell toast={<Toast message={session.toast} onOpen={toastOpen ? () => navigate(toastOpen) : undefined} />}
-      corner={<NoticeBell projects={session.projects.kind === "ok" ? session.projects.value : []} />}
+      top={bar(page)}
       sidebar={<ShellSidebar route={page} projects={projects} profileName={profile?.name} session={session} />}>
       {session.unconfirmed && <Banner action={<span className="row">
         <Button size="small" pending={session.unconfirmed.busy} pendingLabel="Checking..." onClick={() => void session.checkUnconfirmed()}>Check again</Button>

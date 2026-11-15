@@ -8,6 +8,7 @@ export { PageHeader, Tabs, Panel, type TabLink } from "./layout";
 export { SettingLine, SettingSection } from "./setting";
 export { WindowedList, windowRange } from "./windowed-list";
 export { AppShell, Sidebar, agentsWorking, type EngineRestartControl, type EngineState, type SidebarProject, type UserMenuControl } from "./shell";
+export { TopBar, pageName } from "./top-bar";
 export { BrandMark } from "./brand";
 export { Icon, ProviderMark, ICON_NAMES, type IconName } from "./icon";
 export { parseRoute, formatRoute, navigate, useRoute, isUserMenuTab, type Route, type SettingsTab, type ProjectTab, type NewProjectStep } from "./router";

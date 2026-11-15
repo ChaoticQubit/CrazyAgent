@@ -185,12 +185,12 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-mark { display: inline-flex; line-height: 0; }
 .pj-mark .brand-name { display: none; }
 
-.pj-convo { display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 200px); min-height: 420px; }
+.pj-convo { display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 200px - var(--top-bar-h, 0px)); min-height: 420px; }
 .pj-convo-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 .pj-convo > .cs { flex: 1; height: auto; min-height: 240px; }
 
 .pj-ctx { display: grid; grid-template-columns: 260px minmax(0, 1fr); border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); min-height: 480px; }
-.pj-tree { border-right: 1px solid var(--border); padding: 12px 8px; overflow: auto; max-height: calc(100vh - 220px); }
+.pj-tree { border-right: 1px solid var(--border); padding: 12px 8px; overflow: auto; max-height: calc(100vh - 220px - var(--top-bar-h, 0px)); }
 .pj-tree ul { list-style: none; margin: 0; padding: 0 0 0 12px; }
 .pj-tree > ul { padding: 0; }
 .pj-tree-root { padding: 0 8px 8px; }
@@ -199,7 +199,7 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-titem:hover { background: var(--surface-2); }
 .pj-titem[aria-current="true"] { background: var(--accent-soft); color: var(--accent-text); }
 .pj-titem.pin { font-family: inherit; font-weight: 600; }
-.pj-reader { padding: 16px 24px 24px; overflow: auto; max-height: calc(100vh - 220px); min-width: 0; display: grid; gap: 12px; align-content: start; }
+.pj-reader { padding: 16px 24px 24px; overflow: auto; max-height: calc(100vh - 220px - var(--top-bar-h, 0px)); min-width: 0; display: grid; gap: 12px; align-content: start; }
 .pj-reader-tb { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 .pj-reader-tb h2.pj-mono { font-size: 13px; }
 .pj-sources { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); display: grid; gap: 8px; }
@@ -258,7 +258,7 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-live-conversation { display: grid; gap: 6px; padding: 0 var(--space-4); justify-items: start; }
 .pj-live-conversation > .pj-messages { width: 100%; max-height: 30vh; }
 
-.pj-master-live { display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 200px); min-height: 420px; min-width: 0; }
+.pj-master-live { display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 200px - var(--top-bar-h, 0px)); min-height: 420px; min-width: 0; }
 .pj-master-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 .pj-master-live > .tg-terminal { flex: 1; min-height: 0; }
 .pj-master-live .tg-terminal-screen { min-height: 160px; }

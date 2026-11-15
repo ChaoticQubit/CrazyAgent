@@ -13,6 +13,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::engine::owner::ModelAccessCollection;
     use crazyagent::engine::owner::NativeAuthMethod;
     use crazyagent::ide::bridge::run_command::RunMode;
+    use crazyagent::keep_awake::KeepAwakeAction;
     use crazyagent::learning::MarkStep;
     use crazyagent::master_frame_limit::MasterFrameSettings;
     use crazyagent::master_step_limit::MasterStepSettings;
@@ -2518,6 +2519,24 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { lock(state) .await? .notification_action(action, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_keep_awake_read" => {
+            let result: Result<_, BridgeError> = async { read(state).await?.keep_awake_read().await }.await;
+            routed(result)
+        }
+        "desktop_keep_awake_act" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                action: KeepAwakeAction,
+                generation: u64,
+            }
+            let Args { action, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.keep_awake_act(action, generation).await }.await;
             routed(result)
         }
         "desktop_master_step_settings" => {
