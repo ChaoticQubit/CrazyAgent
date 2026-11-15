@@ -31,7 +31,7 @@ const WORDS = { one: "1 at a time", two: "2 at a time", three: "3 at a time", fo
 const LANE_CODEX = String.raw`#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/11/05"
-/bin/mkdir -p "$d" || exit 1
+/bin/mkdir -p "$d" "$CODEX_HOME/.cache" || exit 1
 id=$(printf '%08x-0000-4000-8000-%012x' $$ $$)
 f="$d/rollout-2026-11-05T00-00-00-$id.jsonl"
 printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$(/bin/pwd -P)" > "$f"
@@ -50,10 +50,10 @@ while IFS= read -r line; do
     ran=1
     lane=$(/usr/bin/grep -o "'[^']*' lane --folder '[^']*'" "$CODEX_HOME/config.toml" | /usr/bin/head -n 1)
     uses=$(/usr/bin/grep -o "such as --uses [a-z0-9._-]*" "$CODEX_HOME/config.toml" | /usr/bin/head -n 1 | /usr/bin/sed 's/^such as //; s/[.]$//')
-    printf '%s\n' "$lane" > "$CODEX_HOME/lane-line"
+    printf '%s\n' "$lane" > "$CODEX_HOME/.cache/lane-line"
     if [ -n "$lane" ]; then
       for n in 1 2 3 4 5; do
-        eval "$lane $uses --label heavy-$n -- /bin/sh -c 'echo start >> \"\$0\"; /bin/sleep 6; echo end >> \"\$0\"' \"\$CODEX_HOME/lane-log\" &"
+        eval "$lane $uses --label heavy-$n -- /bin/sh -c 'echo start >> \"\$0\"; /bin/sleep 6; echo end >> \"\$0\"' \"\$CODEX_HOME/.cache/lane-log\" &"
       done
       wait
     fi
@@ -105,7 +105,7 @@ function engineRows(runtime, project) {
     const task = store.prepare("SELECT status, agent FROM team_tasks WHERE project=? AND prompt=?").get(project, TASK);
     if (!task) return null;
     const agent = task.agent === null ? null : store.prepare("SELECT tools FROM team_agents WHERE id=?").get(task.agent) ?? null;
-    const home = join(runtime, "team", "agents", `agent-${task.agent}`, "home");
+    const home = join(runtime, "team", "agents", `agent-${task.agent}`, "home", ".cache");
     const read = (name) => existsSync(join(home, name)) ? readFileSync(join(home, name), "utf8") : "";
     const lane = store.prepare("SELECT COUNT(*) AS held FROM coord_lane WHERE project=?").get(project);
     return { task: task.status, agent: task.agent, tools: agent === null ? null : agent.tools === 1, line: read("lane-line").trim(), log: read("lane-log"), held: lane.held };

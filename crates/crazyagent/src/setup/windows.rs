@@ -96,7 +96,10 @@ impl WindowsInstaller {
             }
             command
                 .args(args)
-                .env("PATH", self.search_path(std::env::var_os("PATH").as_deref()))
+                .env(
+                    "PATH",
+                    self.search_path(std::env::var_os("PATH").as_deref()),
+                )
                 .env("UV_CACHE_DIR", data.join("cache"))
                 .env("UV_PYTHON_INSTALL_DIR", data.join("python"))
                 .env("UV_NO_PROGRESS", "1");
@@ -217,7 +220,11 @@ impl WindowsInstaller {
             .join("WindowsApps")
             .join("winget.exe");
         std::iter::once(alias)
-            .chain(self.kept(path).into_iter().map(|dir| dir.join("winget.exe")))
+            .chain(
+                self.kept(path)
+                    .into_iter()
+                    .map(|dir| dir.join("winget.exe")),
+            )
             .find(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| !meta.is_dir()))
     }
 

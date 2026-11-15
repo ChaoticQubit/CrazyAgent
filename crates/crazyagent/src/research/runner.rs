@@ -4567,7 +4567,6 @@ mod tests {
     /// Records `id` as a project of the engine database with `folder` as its folder, so a
     /// research run reads the project's launch context. Inputs: the database, the project
     /// id and its folder.
-    #[cfg(target_os = "macos")]
     fn register_project(database: &Path, id: &str, folder: &Path) {
         let connection = rusqlite::Connection::open(database).unwrap();
         crate::storage::initialize_authority_schemas(&connection).unwrap();
@@ -6843,11 +6842,8 @@ mod tests {
     fn engine_setup_git_runs_no_hook_a_config_in_its_home_names() {
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
-        let (project, tmp, markers) = (
-            base.join("project"),
-            base.join("tmp"),
-            base.join("markers"),
-        );
+        let (project, tmp, markers) =
+            (base.join("project"), base.join("tmp"), base.join("markers"));
         for folder in [&project, &tmp, &markers] {
             fs::create_dir_all(folder).unwrap();
         }

@@ -626,10 +626,9 @@ pub(super) fn hooks_follow(tx: &Transaction<'_>, item: &str) -> Result<bool, Eng
         .any(|hook| hook.follows.as_deref() == Some(item)))
 }
 
-/// The hooks that follow one skill or MCP server as a new pin keeps them: each hook's
-/// name, whether it is on and the projects it is switched off in. Inputs: the transaction
-/// and the item id. Output: the hooks.
-#[cfg(unix)]
+/// The hooks that follow one skill or MCP server as a pack entry keeps them when the item
+/// goes: each hook's name, whether it is on and the projects it is switched off in. Inputs:
+/// the transaction and the item id. Output: the hooks.
 pub(super) fn following_hooks(
     tx: &Transaction<'_>,
     item: &str,
@@ -1072,13 +1071,14 @@ fn add_hooks(
 
 /// Lists the hooks agents launched for a project run: each hook that is on, from global
 /// settings unless the project switched it off or from the project itself, whose followed
-/// skill or MCP server is on there too, with its stored folder copy. Inputs: the open
-/// transaction, the engine root and the project. Output: the hooks, ordered by event,
-/// plugin and name.
+/// skill or MCP server is on there too and, for a server, not one this launch left out
+/// (RV-DS241-156), with its stored folder copy. Inputs: the open transaction, the engine
+/// root, the project and the launch set's `left_out` names. Output: the ordered hooks.
 pub(crate) fn effective_hooks(
     tx: &Transaction<'_>,
     root: &Path,
     project: &ProjectId,
+    left_out: &[String],
 ) -> Result<Vec<EffectiveHook>, EngineError> {
     let off = switched_off(tx, project)?;
     let usable = |scope: &Scope, id: &str| match scope {
@@ -1096,6 +1096,7 @@ pub(crate) fn effective_hooks(
             .filter(|server| {
                 status(server) == ServerStatus::Approved && usable(&server.scope, &server.id)
             })
+            .filter(|server| !left_out.contains(&server.name))
             .map(|server| server.id),
     );
     let mut hooks: Vec<(String, EffectiveHook)> = all::<HookRecord>(tx, "hook")?
@@ -1525,6 +1526,7 @@ fn without_shared_install(
 fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, EngineError> {
     let mut servers = Vec::with_capacity(plugins.servers.len());
     let mut context_mode_off = None;
+    let mut left_out = Vec::new();
     for server in plugins.servers {
         #[cfg(unix)]
         let spec = crate::context_mode::for_launch(root, server.spec);
@@ -1534,6 +1536,7 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
             Ok(spec) => spec,
             Err(off) => {
                 context_mode_off = Some(off);
+                left_out.push(server.name);
                 continue;
             }
         };
@@ -1550,11 +1553,13 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
             secrets,
         });
     }
-    assert!(servers.len() <= 2 * SERVERS_PER_SCOPE_MAX);
+    assert!(servers.len() + left_out.len() <= 2 * SERVERS_PER_SCOPE_MAX);
+    assert_eq!(context_mode_off.is_some(), !left_out.is_empty());
     Ok(LaunchPlugins {
         skills: plugins.skills,
         servers,
         context_mode_off,
+        left_out,
     })
 }
 

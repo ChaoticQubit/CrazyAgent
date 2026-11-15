@@ -15,6 +15,12 @@ const EXCLUDES_PATH_BYTES_MAX: usize = 1024;
 const EXCLUDES_LOOKUP_TIME: Duration = Duration::from_secs(10);
 const CHECK_LINE_BYTES_MAX: usize = 80;
 
+/// The excludes setting a confined Linux step's git takes in place of the owner's ignore
+/// file, which that step may not read (SA vid 2): an empty file, so git applies no
+/// excludes file at all and never warns about one it cannot open.
+#[cfg(target_os = "linux")]
+pub(super) const NO_EXCLUDES: &str = "core.excludesFile=/dev/null";
+
 #[cfg(test)]
 thread_local! {
     /// The owner home a landing test stands in for the process's HOME, so engine git in
@@ -349,6 +355,10 @@ pub(super) struct Repo {
     excludes: Option<String>,
     index: Option<PathBuf>,
     confinement: Vec<std::ffi::OsString>,
+    /// Whether this is a confined Linux step that may write the work tree, so the copy of
+    /// the index it leaves in the step folder is never taken ([`Self::swapped`]).
+    #[cfg(target_os = "linux")]
+    fills_work_tree: bool,
 }
 
 /// The Seatbelt profile of one engine git step on an agent's work tree (SECAUDIT
@@ -399,6 +409,8 @@ impl Repo {
             excludes,
             index: None,
             confinement: Vec::new(),
+            #[cfg(target_os = "linux")]
+            fills_work_tree: false,
         };
         repo.check_version()?;
         let listing = repo.capture(&crate::research::runner::FILTER_KEYS, LISTING_BYTES_MAX)?;
@@ -440,6 +452,8 @@ impl Repo {
             excludes: None,
             index: None,
             confinement: Vec::new(),
+            #[cfg(target_os = "linux")]
+            fills_work_tree: false,
         }
     }
 
@@ -531,10 +545,17 @@ impl Repo {
     /// This repository with its git calls started by the Landlock helper under
     /// [`crate::sandbox::linux::git_step_policy`], for a step on a linked agent worktree whose
     /// agent may still be changing it, as `WORK_TREE_PROFILE` holds it on macOS. The step
-    /// reads the system, the work tree, the repository's git folder, git and the owner's
-    /// ignore file. It writes only what it names and the engine's step folder in the
+    /// reads the system, the work tree, the repository's git folder and git, never the owner's
+    /// ignore file, which a link swapped in during a turn-end add would otherwise copy into
+    /// the object store (SA vid 2): its git takes no excludes file ([`NO_EXCLUDES`]), and a
+    /// turn end applies that file's patterns as names instead (`flow::add_pathspecs`). So a
+    /// `read-tree -u` counts an untracked file only that file names as the agent's and refuses
+    /// to write over it, failing closed where macOS writes over it (rv-sec3 F1). It
+    /// writes only what it names and the engine's step folder in the
     /// worktree's git folder, where it works on a copy of the index ([`Self::swapped`]), so a
-    /// link swapped in during the step reaches nothing else. Input: what the step may write.
+    /// link swapped in during the step reaches nothing else, and a step that may write the work
+    /// tree, which such a link can point into that folder, never has its copy taken (SA vid 3).
+    /// Input: what the step may write.
     /// Output: the repository, `changes_workspace_invalid` for one that is not a linked
     /// worktree's, or `changes_git_unsupported` where git, the helper or this kernel's
     /// Landlock file rules are missing: the step fails closed and never runs unconfined.
@@ -570,13 +591,7 @@ impl Repo {
         if !std::fs::symlink_metadata(&step).is_ok_and(|meta| meta.is_dir()) {
             return Err(invalid());
         }
-        let mut read = vec![work.clone(), common.clone(), git.clone()];
-        read.extend(
-            self.excludes
-                .as_deref()
-                .and_then(|setting| setting.strip_prefix("core.excludesFile="))
-                .and_then(|path| std::fs::canonicalize(path).ok()),
-        );
+        let read = [work.clone(), common.clone(), git.clone()];
         let target = match writes {
             Writes::Objects => common.join("objects"),
             Writes::WorkTree => work,
@@ -588,7 +603,9 @@ impl Repo {
         assert!(confinement.len() > 4);
         Ok(Self {
             index: Some(step.join("index")),
+            excludes: Some(NO_EXCLUDES.to_owned()),
             confinement,
+            fills_work_tree: matches!(writes, Writes::WorkTree),
             ..self.clone()
         })
     }
@@ -663,9 +680,11 @@ impl Repo {
 
     /// Runs one git command within `STEP_TIME`, feeding it `input` and keeping at most
     /// `limit` bytes of its output; a confined Linux step runs on a copy of the worktree's
-    /// index ([`Self::swapped`]). Inputs: the arguments, the input, extra environment and
-    /// the bound. Output: the exit code, the output and whether it ran over; an error when
-    /// git cannot start, is stopped by a signal or runs past the time.
+    /// index ([`Self::swapped`]), and a `read-tree -u` there names its index-only form, the
+    /// same command with `-i` for `-u`, to rebuild the index with. Inputs: the arguments, the
+    /// input, extra environment and the bound. Output: the exit code, the output and whether
+    /// it ran over; an error when git cannot start, is stopped by a signal or runs past the
+    /// time.
     pub(super) fn exec(
         &self,
         args: &[&str],
@@ -675,7 +694,14 @@ impl Repo {
     ) -> Result<Output, EngineError> {
         #[cfg(target_os = "linux")]
         if !self.confinement.is_empty() {
-            return self.swapped(|| self.spawned(args, input, env, limit));
+            let index_only: Vec<&str> = args
+                .iter()
+                .map(|&arg| if arg == "-u" { "-i" } else { arg })
+                .collect();
+            let rebuilds = args.first() == Some(&"read-tree") && args.contains(&"-u");
+            return self.swapped(rebuilds.then_some(index_only.as_slice()), || {
+                self.spawned(args, input, env, limit)
+            });
         }
         self.spawned(args, input, env, limit)
     }
@@ -696,12 +722,18 @@ impl Repo {
     /// git exits 0 having rewritten the copy, the copy takes the index's place only when it too is
     /// a plain file with one link, so whatever a raced step leaves there is never taken, and a step
     /// that only reads leaves the index as it was; the step itself never writes the git folder
-    /// ([`Self::confined`]). Input: the step. Output: its output, git's [`INDEX_LOCKED`] exit when
-    /// the lock is already held, or `changes_git_failed` when the index cannot be locked, copied or
-    /// put back.
+    /// ([`Self::confined`]). A step that may write the work tree, where a link raced in can make
+    /// git's own rename leave any file as the copy, never has its copy taken (SA vid 3): the folder
+    /// is emptied, the index copied afresh, and the step's index-only form then a quiet refresh
+    /// rebuild it there, in the same confinement but by gits that write no work-tree path, so no
+    /// link can turn their writes into that folder; they check the work tree's files, so an entry
+    /// racy against the index stays in view and the files the step wrote keep their stat data.
+    /// With no such form the step refuses. Input: the index-only form and the step. Output: its output, git's [`INDEX_LOCKED`] exit when the lock is already
+    /// held, or `changes_git_failed` when the index cannot be locked, copied, rebuilt or put back.
     #[cfg(target_os = "linux")]
     pub(super) fn swapped(
         &self,
+        index_only: Option<&[&str]>,
         step: impl FnOnce() -> Result<Output, EngineError>,
     ) -> Result<Output, EngineError> {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -761,28 +793,41 @@ impl Repo {
             });
         }
         let plain = |meta: &std::fs::Metadata| meta.file_type().is_file() && meta.nlink() == 1;
-        let renewed = std::fs::remove_dir_all(folder)
-            .err()
-            .is_none_or(|error| error.kind() == std::io::ErrorKind::NotFound)
-            && std::fs::create_dir(folder).is_ok();
-        let copied = renewed
-            && match std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                .open(&index)
-            {
-                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-                Ok(mut real) => match real.metadata() {
-                    Ok(meta) if plain(&meta) => std::fs::File::create_new(copy)
-                        .and_then(|mut written| {
-                            std::io::copy(&mut real, &mut written)?;
-                            let modified = std::fs::FileTimes::new().set_modified(meta.modified()?);
-                            written.set_times(modified)
-                        })
-                        .is_ok(),
-                    _ => false,
-                },
-            };
+        let fresh = || {
+            let renewed = std::fs::remove_dir_all(folder)
+                .err()
+                .is_none_or(|error| error.kind() == std::io::ErrorKind::NotFound)
+                && std::fs::create_dir(folder).is_ok();
+            renewed
+                && match std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                    .open(&index)
+                {
+                    Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                    Ok(mut real) => match real.metadata() {
+                        Ok(meta) if plain(&meta) => std::fs::File::create_new(copy)
+                            .and_then(|mut written| {
+                                std::io::copy(&mut real, &mut written)?;
+                                let modified =
+                                    std::fs::FileTimes::new().set_modified(meta.modified()?);
+                                written.set_times(modified)
+                            })
+                            .is_ok(),
+                        _ => false,
+                    },
+                }
+        };
+        let rebuilt = |index_only: &[&str]| {
+            fresh()
+                && [index_only, ["update-index", "-q", "--refresh"].as_slice()]
+                    .into_iter()
+                    .all(|run| {
+                        self.spawned(run, None, &[], 4096)
+                            .is_ok_and(|output| output.code == 0 && !output.overflow)
+                    })
+        };
+        let copied = fresh();
         let identity = |meta: &std::fs::Metadata| (meta.dev(), meta.ino());
         let ran = if copied {
             let before = std::fs::symlink_metadata(copy)
@@ -795,8 +840,9 @@ impl Repo {
         let left = std::fs::symlink_metadata(copy).ok();
         let rewritten = matches!(&ran, Ok((before, output))
             if output.code == 0 && left.as_ref().is_some_and(|meta| Some(identity(meta)) != *before));
-        let kept = rewritten
-            && left.as_ref().is_some_and(plain)
+        let taken = rewritten && (!self.fills_work_tree || index_only.is_some_and(rebuilt));
+        let kept = taken
+            && std::fs::symlink_metadata(copy).is_ok_and(|meta| plain(&meta))
             && std::fs::rename(copy, &lock).is_ok()
             && std::fs::rename(&lock, &index).is_ok();
         let _ = std::fs::remove_dir_all(folder);
