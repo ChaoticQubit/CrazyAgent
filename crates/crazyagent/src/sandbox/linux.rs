@@ -41,6 +41,25 @@ const KEEP_FREE: &str = "--keep-free";
 const PROBE: &str = "--probe";
 const FILTER_SOCKETS: &str = "--filter-sockets";
 const DIE_WITH: &str = "--die-with";
+const NEST: &str = "--nest";
+const NESTED: &str = "--nested";
+/// The bubblewrap arguments a nested agent starts under, before its working folder: user,
+/// process, IPC and host-name namespaces of its own and a fresh `/proc`, with the whole
+/// root bound through, devices too, so the helper's Landlock rules stay the only file
+/// policy. `--die-with-parent` ties the namespace to bubblewrap's outer process, never to
+/// the engine. The network stays shared.
+pub const NEST_ARGS: [&str; 10] = [
+    "--die-with-parent",
+    "--unshare-user",
+    "--unshare-pid",
+    "--unshare-ipc",
+    "--unshare-uts",
+    "--dev-bind",
+    "/",
+    "/",
+    "--proc",
+    "/proc",
+];
 const RESOLVER_ROOT: &str = "/run/systemd/resolve";
 const HELPER_MISSING: &str = "this Linux cannot fully enforce Landlock file rules (Linux 6.2 \
      or newer), and CrazyAgent's sandbox helper, which keeps a bubblewrap agent off Unix \
@@ -135,7 +154,8 @@ const LANDLOCK_DEVICES: &[&str] = &[
 /// with no bind still takes a port Linux picks, on either network, so both name
 /// `keep_free`: the helper starts no agent while Linux could hand one of them out by
 /// itself, and an open-network agent binds any TCP port but those. `die_with` names the
-/// process the helper and the program it becomes are killed with (an engine git step). The
+/// process the helper and the program it becomes are killed with (an engine git step).
+/// `nested` tells the helper it runs inside bubblewrap's namespaces ([`NEST_ARGS`]). The
 /// engine renders it as helper arguments and the helper parses it back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LandlockPolicy {
@@ -146,6 +166,7 @@ pub struct LandlockPolicy {
     pub open_sockets: bool,
     pub keep_free: Vec<u16>,
     pub die_with: Option<u32>,
+    pub nested: bool,
 }
 
 impl LandlockPolicy {
@@ -229,8 +250,9 @@ pub(crate) fn holds_file_rules(helper: &Path) -> bool {
 }
 
 /// What the `crazyagent-landlock` helper was asked to do: probe whether this kernel holds a
-/// Landlock ruleset, apply a policy and start a harness, or, inside bubblewrap, install only
-/// the socket filter and start a harness.
+/// Landlock ruleset, apply a policy and start a harness, inside bubblewrap install only
+/// the socket filter and start a harness, or start bubblewrap from a fixed place with
+/// [`NEST_ARGS`], which then starts the helper again inside its namespaces.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HelperRequest {
     Probe {
@@ -245,6 +267,10 @@ pub enum HelperRequest {
     },
     Filter {
         program: PathBuf,
+        args: Vec<OsString>,
+    },
+    Nest {
+        bwrap: PathBuf,
         args: Vec<OsString>,
     },
 }
@@ -631,6 +657,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     };
     let (policy, launch) = match request {
         HelperRequest::Filter { program, args } => return filtered(&program, args),
+        HelperRequest::Nest { .. } => return ExitCode::from(2),
         HelperRequest::Probe {
             limit_network,
             open_sockets,
@@ -722,11 +749,13 @@ fn filtered(program: &Path, args: Vec<OsString>) -> ExitCode {
 }
 
 /// The Linux mechanism holding a project agent's boundary: the `crazyagent-landlock` helper,
-/// or bubblewrap where the kernel cannot fully enforce its Landlock rules, with that helper
-/// started inside it to install the socket filter.
+/// that helper inside bubblewrap's user and process namespaces where this machine makes
+/// them (`Nested`), or bubblewrap where the kernel cannot fully enforce its Landlock rules,
+/// with the helper started inside it to install the socket filter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinuxBackend {
     Landlock { helper: PathBuf },
+    Nested { bwrap: PathBuf, helper: PathBuf },
     Bubblewrap { bwrap: PathBuf, helper: PathBuf },
 }
 
@@ -760,6 +789,7 @@ impl LinuxSandbox {
         admitted(&sandbox)?;
         let (launcher, inside) = match &backend {
             LinuxBackend::Landlock { helper } => (helper, None),
+            LinuxBackend::Nested { bwrap, helper } => (helper, Some(bwrap)),
             LinuxBackend::Bubblewrap { bwrap, helper } => (bwrap, Some(helper)),
         };
         if std::iter::once(launcher)
@@ -798,6 +828,19 @@ impl LinuxSandbox {
     /// bubblewrap. Input: the project policy and the helper executable. Output: the
     /// sandbox, or `Unavailable` when neither backend can hold it.
     pub fn detect(sandbox: ProjectSandbox, helper: &Path) -> Result<Self, SandboxError> {
+        let bwraps: Vec<&Path> = BWRAP_PATHS.iter().map(Path::new).collect();
+        Self::detect_among(sandbox, helper, &bwraps)
+    }
+
+    /// Picks the backend as [`LinuxSandbox::detect`] does, with bubblewrap looked for only
+    /// at `bwraps`, so a caller with none pins the plain Landlock backend. Inputs: the
+    /// project policy, the helper executable and the bubblewrap places, in order. Output:
+    /// the sandbox, or `Unavailable` when no backend can hold it.
+    pub fn detect_among(
+        sandbox: ProjectSandbox,
+        helper: &Path,
+        bwraps: &[&Path],
+    ) -> Result<Self, SandboxError> {
         admitted(&sandbox)?;
         let mut probe = Command::new(helper);
         probe.arg(PROBE);
@@ -836,11 +879,7 @@ impl LinuxSandbox {
         if !clean_absolute(helper) || !helper.is_file() {
             return Err(SandboxError::Unavailable(HELPER_MISSING.into()));
         }
-        match BWRAP_PATHS
-            .iter()
-            .map(Path::new)
-            .find(|path| path.is_file())
-        {
+        match bwraps.iter().find(|path| path.is_file()) {
             Some(bwrap) => Self::new(
                 sandbox,
                 LinuxBackend::Bubblewrap {
@@ -869,7 +908,7 @@ impl LinuxSandbox {
     /// The program every wrapped command starts: the Landlock helper or bwrap.
     pub fn launcher(&self) -> &Path {
         match &self.backend {
-            LinuxBackend::Landlock { helper } => helper,
+            LinuxBackend::Landlock { helper } | LinuxBackend::Nested { helper, .. } => helper,
             LinuxBackend::Bubblewrap { bwrap, .. } => bwrap,
         }
     }
@@ -923,7 +962,7 @@ impl Sandbox for LinuxSandbox {
         }
         let grants = Grants::of(&self.sandbox)?;
         let mut command = match &self.backend {
-            LinuxBackend::Landlock { helper } => {
+            LinuxBackend::Landlock { helper } | LinuxBackend::Nested { helper, .. } => {
                 let mut command = Command::new(helper);
                 command.args(landlock_policy(&grants, &self.sandbox).args());
                 command
@@ -1088,6 +1127,7 @@ fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy 
         open_sockets,
         keep_free,
         die_with: None,
+        nested: false,
     }
 }
 
@@ -1532,6 +1572,143 @@ mod tests {
         assert!(parse(&[FILTER_SOCKETS, READ, "/usr", "--", "/bin/true"]).is_err());
         assert!(parse(&[FILTER_SOCKETS, "--", "bin/true"]).is_err());
         assert!(parse(&[PROBE, FILTER_SOCKETS]).is_err());
+    }
+
+    #[test]
+    fn a_nested_agent_starts_through_the_helper_then_bubblewrap_then_the_helper_again() {
+        let (_temp, sandbox) = project(SandboxNetwork::Open);
+        let cwd = sandbox.project_root().to_path_buf();
+        let helper = std::env::current_exe().unwrap();
+        let nested = LinuxSandbox::new(
+            sandbox,
+            LinuxBackend::Nested {
+                bwrap: helper.clone(),
+                helper: helper.clone(),
+            },
+        )
+        .unwrap();
+        let mut harness = Command::new("/bin/sh");
+        harness.args(["-c", "true"]).current_dir(&cwd);
+        let command = nested.wrap(&harness).unwrap();
+        assert_eq!(command.get_program(), helper.as_os_str());
+        let args: Vec<&OsStr> = command.get_args().collect();
+        let mut head = vec![OsStr::new(NEST), OsStr::new("--"), helper.as_os_str()];
+        head.extend(NEST_ARGS.map(OsStr::new));
+        head.extend([
+            OsStr::new("--chdir"),
+            cwd.as_os_str(),
+            OsStr::new("--"),
+            helper.as_os_str(),
+        ]);
+        assert_eq!(args.get(..head.len()), Some(&head[..]), "{args:?}");
+        let [policy @ .., split, program, flag, script] = &args[head.len()..] else {
+            panic!("{args:?}");
+        };
+        assert_eq!(*split, "--", "{args:?}");
+        assert_eq!(*program, "/bin/sh", "{args:?}");
+        assert_eq!(*flag, "-c", "{args:?}");
+        assert_eq!(*script, "true", "{args:?}");
+        let grants = Grants::of(nested.sandbox()).unwrap();
+        let mut expected = landlock_policy(&grants, nested.sandbox());
+        expected.nested = true;
+        let written: Vec<OsString> = policy.iter().map(|arg| arg.to_os_string()).collect();
+        assert_eq!(written, expected.args(), "{args:?}");
+        assert!(written.contains(&OsString::from(NESTED)), "{args:?}");
+        for absent in ["--new-session", "--unshare-net"] {
+            assert!(!args.contains(&OsStr::new(absent)), "{absent}: {args:?}");
+        }
+        assert_eq!(args.iter().filter(|arg| **arg == NEST).count(), 1);
+    }
+
+    #[test]
+    fn a_nested_agent_may_have_an_open_network_and_keeps_the_kept_port_check() {
+        let picked = read_picked_ports().expect("Linux test machines show their port range");
+        let inside = (*picked.start()).max(1);
+        let helper = std::env::current_exe().unwrap();
+        let nested = || LinuxBackend::Nested {
+            bwrap: helper.clone(),
+            helper: helper.clone(),
+        };
+        let (_open, sandbox) = project(SandboxNetwork::Open);
+        assert!(
+            LinuxSandbox::new(sandbox, nested()).is_ok(),
+            "a nested agent is a Landlock agent, which keeps ports free on an open network"
+        );
+        let (_kept, sandbox) = project(SandboxNetwork::Open);
+        match LinuxSandbox::new(sandbox.keep_ports(&[inside]).unwrap(), nested()) {
+            Err(SandboxError::Unavailable(reason)) => {
+                assert!(reason.contains(&format!("port {inside} ")), "{reason}");
+            }
+            other => panic!("a kept port Linux could pick must refuse the nest: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_helper_starts_only_a_fixed_bubblewrap_for_a_nest_and_takes_no_policy_with_it() {
+        let parse =
+            |words: &[&str]| HelperRequest::parse(words.iter().map(OsString::from).collect());
+        let nest = |bwrap: &str, tail: &[&str]| {
+            let mut words = vec![NEST, "--", bwrap];
+            words.extend(NEST_ARGS);
+            words.extend(tail);
+            parse(&words)
+        };
+        let tail = [
+            "--chdir",
+            "/work",
+            "--",
+            "/opt/helper",
+            NESTED,
+            "--",
+            "/bin/true",
+        ];
+        let passed: Vec<OsString> = NEST_ARGS.iter().chain(&tail).map(OsString::from).collect();
+        for bwrap in BWRAP_PATHS {
+            assert_eq!(
+                nest(bwrap, &tail),
+                Ok(HelperRequest::Nest {
+                    bwrap: PathBuf::from(bwrap),
+                    args: passed.clone(),
+                })
+            );
+        }
+        assert!(nest("/tmp/bwrap", &tail).is_err());
+        assert!(nest("usr/bin/bwrap", &tail).is_err());
+        assert!(
+            nest(BWRAP_PATHS[0], &[]).is_err(),
+            "nothing to start inside"
+        );
+        let own = [NEST, "--", BWRAP_PATHS[0], "--bind", "/", "/", "--", "/x"];
+        assert!(parse(&own).is_err(), "only the fixed arguments");
+        assert!(parse(&[NEST, READ, "/usr", "--", BWRAP_PATHS[0]]).is_err());
+        assert!(parse(&[NEST, PROBE]).is_err());
+        assert!(parse(&[PROBE, NEST]).is_err());
+        assert!(parse(&[NEST]).is_err());
+    }
+
+    #[test]
+    fn a_nested_policy_reads_back_from_its_own_arguments() {
+        let policy = LandlockPolicy {
+            read: vec![PathBuf::from("/usr")],
+            nested: true,
+            ..LandlockPolicy::default()
+        };
+        let mut words = policy.args();
+        assert_eq!(words.last(), Some(&OsString::from(NESTED)));
+        words.extend(["--".into(), "/bin/true".into()]);
+        assert_eq!(
+            HelperRequest::parse(words),
+            Ok(HelperRequest::Run {
+                policy,
+                program: PathBuf::from("/bin/true"),
+                args: Vec::new(),
+            })
+        );
+        let parse =
+            |words: &[&str]| HelperRequest::parse(words.iter().map(OsString::from).collect());
+        assert!(parse(&[NESTED, DIE_WITH, "4242", "--", "/bin/true"]).is_err());
+        assert!(parse(&[PROBE, NESTED]).is_err());
+        assert!(parse(&[FILTER_SOCKETS, NESTED, "--", "/bin/true"]).is_err());
     }
 
     #[test]
