@@ -875,7 +875,9 @@ pub fn with_agent(mut text: String, agent: &str) -> String {
 /// is empty, so a stale copy never outlives a cleared page; the engine's own record of the
 /// instruction files it found, kept outside the home, replaces the last launch's; nothing
 /// an earlier run left in the home but what its harness keeps stays for this one
-/// ([`keep_only`] with [`kept_in`]).
+/// ([`keep_only`] with [`kept_in`]). The instruction file is written in the engine's record
+/// folder, which no agent writes, and only then moved into the home, so a process an earlier
+/// run left never swaps the text before the move (RV-DS241-184).
 /// Input: the agent's 0700 home (its CLAUDE_CONFIG_DIR or CODEX_HOME), the harness, the
 /// project and what `text` built. Output: unit, or a plain code.
 pub fn prepare(
@@ -901,7 +903,8 @@ pub fn prepare(
         return remove_entry(&home.join(name));
     }
     remove_folder(&home.join(name))?;
-    write_whole(home, name, given.text.as_bytes())
+    let (staging, _) = record_place(&project.data, GIVEN_FOLDER, home)?;
+    write_staged(&staging, home, name, given.text.as_bytes())
 }
 
 /// Records the instruction files one launch found, one `state<TAB>bytes<TAB>name` line
