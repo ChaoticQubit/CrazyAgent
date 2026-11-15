@@ -253,10 +253,14 @@ impl ProfileForm {
         items
     }
 
-    /// Validates the form and builds the profile.
+    /// Validates the form and builds the profile, first clearing the refusals an earlier
+    /// save left under the role, bio and stack, so only this save's refusal shows.
     /// Input: none. Output: the profile, or the slot to focus with its error
     /// shown under the field.
     pub fn profile(&mut self) -> Result<OwnerProfile, Slot> {
+        self.role.error = None;
+        self.bio.error = None;
+        self.stack.error = None;
         self.check(Slot::Name);
         if self.name.error.is_some() {
             return Err(Slot::Name);
