@@ -283,7 +283,7 @@ impl Registry {
 
     /// Finds a harness. Input: its id or one of its aliases. Output: the harness, or none
     /// for a name no manifest has; a test build also finds the stand-in harnesses
-    /// ([`standins`]), which no registry lists.
+    /// (`registry_standins.rs`), which no registry lists.
     pub fn get(&self, name: &str) -> Option<&Harness> {
         let found = self.position(name).map(|index| &self.harnesses[index]);
         #[cfg(test)]
