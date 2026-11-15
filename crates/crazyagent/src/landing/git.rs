@@ -17,7 +17,7 @@ const CHECK_LINE_BYTES_MAX: usize = 80;
 /// file, which that step may not read (SA vid 2): an empty file, so git applies no
 /// excludes file at all and never warns about one it cannot open.
 #[cfg(target_os = "linux")]
-const NO_EXCLUDES: &str = "core.excludesFile=/dev/null";
+pub(super) const NO_EXCLUDES: &str = "core.excludesFile=/dev/null";
 
 #[cfg(test)]
 thread_local! {

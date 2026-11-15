@@ -1896,43 +1896,49 @@ fn ignores_any(checkout: &Path, paths: &[&str]) -> Result<bool, EngineError> {
 }
 
 /// The pathspecs a turn end's `add -A` reads from its input, each ending in a NUL: the whole
-/// tree but the teammates' folder ([`teammates_left_out`]), less each untracked path the
-/// worktree's ignore rules exclude, the owner's ignore file included, as this unconfined git
-/// lists them, an ignored folder once with a closing `/`. The confined add on Linux may not
-/// read that file, since a link swapped in during the add would copy it into the object
-/// store (SA vid 2), so it gets the file's patterns as names, which tell it nothing the
-/// agent's own listing does not; elsewhere the add still applies that file itself, so no
-/// second listing runs there. Input: the agent's repository. Output: the pathspecs,
-/// `changes_too_large` past the listing bound or `changes_git_failed`.
+/// tree but the teammates' folder ([`teammates_left_out`]), less each untracked path only the
+/// owner's ignore file excludes: what this unconfined git lists as ignored under the owner's
+/// file, an ignored folder once with a closing `/`, but not under the add's own rules (no
+/// excludes file, [`super::git::NO_EXCLUDES`]). The confined add on Linux may not read that file,
+/// since a link swapped in during the add would copy it into the object store (SA vid 2), so
+/// it gets the file's patterns as names, which tell it nothing the agent's own listing does
+/// not; it still applies the work tree's `.gitignore` and `info/exclude` itself, and git's add
+/// exits 1 when a pathspec names a path it ignores (rv-code2 F1). Elsewhere the add still
+/// applies the owner's file itself, so no listing runs there. Input: the agent's repository.
+/// Output: the pathspecs, `changes_too_large` past the listing bound or `changes_git_failed`.
 #[cfg(target_os = "linux")]
 fn add_pathspecs(repo: &Repo) -> Result<Vec<u8>, EngineError> {
     let teammates = teammates_left_out();
-    let ignored = repo.exec(
-        &[
-            "ls-files",
-            "-z",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--directory",
-            "--",
-            ":(top)",
-            &teammates,
-        ],
-        None,
-        &[],
-        LISTING_BYTES_MAX,
-    )?;
-    if ignored.code != 0 {
-        return Err(failure("changes_git_failed"));
-    }
-    if ignored.overflow {
-        return Err(failure("changes_too_large"));
-    }
+    let args = [
+        "-c",
+        super::git::NO_EXCLUDES,
+        "ls-files",
+        "-z",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+        "--",
+        ":(top)",
+        teammates.as_str(),
+    ];
+    let ignored = |args: &[&str]| -> Result<Vec<u8>, EngineError> {
+        let listed = repo.exec(args, None, &[], LISTING_BYTES_MAX)?;
+        if listed.code != 0 {
+            return Err(failure("changes_git_failed"));
+        }
+        if listed.overflow {
+            return Err(failure("changes_too_large"));
+        }
+        Ok(listed.stdout)
+    };
+    let owners = ignored(&args[2..])?;
+    let own_rules = ignored(&args[..])?;
+    let own: BTreeSet<&[u8]> = own_rules.split(|byte| *byte == 0).collect();
     let mut pathspecs = format!(":(top)\0{teammates}\0").into_bytes();
     let mut left_out = 0;
-    for path in ignored.stdout.split(|byte| *byte == 0) {
-        if !path.is_empty() {
+    for path in owners.split(|byte| *byte == 0) {
+        if !path.is_empty() && !own.contains(path) {
             pathspecs.extend_from_slice(b":(exclude,top,literal)");
             pathspecs.extend_from_slice(path);
             pathspecs.push(0);
