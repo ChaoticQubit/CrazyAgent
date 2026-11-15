@@ -990,12 +990,263 @@ pub(crate) fn remove_agent_tree(folder: &Path) -> Result<(), EngineError> {
     remove_pinned_tree(folder, Flags::Cleared)
 }
 
-/// Deletes a folder in an agent home as [`remove_agent_tree`] does, also clearing the flags
-/// of an entry that will not open, such as one at mode 000, by its path
-/// ([`unpin_home_entry`]), so a launch's reset of the home never stops on one
-/// (RV-DS241-137 code r1 F2). Input: the folder. Output: Ok once nothing has its name.
-pub(crate) fn remove_home_tree(folder: &Path) -> Result<(), EngineError> {
-    remove_pinned_tree(folder, Flags::ClearedInHome)
+/// The deepest folder below an entry of an agent home that a launch's reset removes. Past
+/// it the removal stops and the launch is refused, so the walk holds at most this many
+/// folder handles at once.
+#[cfg(unix)]
+const HOME_DEPTH_MAX: usize = 64;
+
+/// The most names one listing of an agent home folder holds ([`home_names`]): a folder
+/// holding more is emptied a listing at a time, so what a removal keeps in memory stays
+/// bounded whatever the folder holds (RV-DS241-137 code r1 F1 ds137-reset-walk).
+#[cfg(unix)]
+const HOME_NAMES_CHUNK: usize = 4096;
+
+/// How many listings' worth of entries past those a folder held when its emptying began
+/// [`empty_home_folder`] removes before it refuses, as only a process still adding entries
+/// keeps a folder from listing empty by then.
+#[cfg(unix)]
+const HOME_ADDED_CHUNKS_MAX: usize = 8;
+
+/// Removes the entry `name` of an open agent home folder with all it holds, each step
+/// relative to an open folder handle and none following a link, so a folder a process an
+/// agent left swaps for a link meanwhile goes as that link, what the link names stays, and
+/// a folder moved away is emptied where it went (RV-DS241-137, sec F1 ds137-lock-linux). A
+/// step that stops on a flag, mode or ACL an agent set clears it and tries once more
+/// ([`open_home_folder`], [`unlink_home_entry`]), so a reset never stops on one (code r1
+/// F2, r2 F3), and no count of entries stops it (code r1 F1 ds137-reset-walk). Inputs: the
+/// parent handle and the name, one plain name. Output: Ok once nothing has the name, or
+/// `cleanup_folder_failed`, also past [`HOME_DEPTH_MAX`] folders deep or for a folder that
+/// keeps gaining entries while it is emptied ([`empty_home_folder`]).
+#[cfg(unix)]
+pub(crate) fn remove_home_entry<P: rustix::path::Arg>(
+    parent: impl std::os::fd::AsFd,
+    name: P,
+) -> Result<(), EngineError> {
+    let name = name.into_c_str().map_err(|_| folder_failed())?;
+    remove_home_below(parent.as_fd(), &name, 0)
+}
+
+/// Removes one entry as [`remove_home_entry`] does, `depth` folders below the entry it was
+/// given. Inputs: the parent handle, the name and the depth. Output: as
+/// [`remove_home_entry`].
+#[cfg(unix)]
+fn remove_home_below(
+    parent: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::CStr,
+    depth: usize,
+) -> Result<(), EngineError> {
+    use rustix::fs::{AtFlags, FileType};
+    assert!(plain_name(name));
+    if depth > HOME_DEPTH_MAX {
+        return Err(folder_failed());
+    }
+    let found = match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(_) => return Err(folder_failed()),
+        Ok(found) => found,
+    };
+    if FileType::from_raw_mode(found.st_mode) == FileType::Directory
+        && let Some(folder) = open_home_folder(parent, name).map_err(|_| folder_failed())?
+    {
+        empty_home_folder(&folder, depth)?;
+    }
+    unlink_home_entry(parent, name)
+}
+
+/// Opens the folder `name` of an open agent home folder without following a link, as a
+/// folder this user can list: one that opens but will not list, as reopening it as `.` the
+/// way [`rustix::fs::Dir::read_from`] does needs search on it, counts as one that stopped
+/// (code r1 F2 ds137-reset-walk). An open that stops on an entry that is still a folder
+/// clears its immutable and append-only flags ([`unpin_home_entry`]), gives this user rwx on
+/// it ([`open_up`]) and clears its ACL by its path ([`release_home_acls`]), each through
+/// the parent by name, then opens it once more. Inputs: the parent handle and the name.
+/// Output: the folder, None once the name is gone or names no folder, or the error.
+#[cfg(unix)]
+pub(crate) fn open_home_folder(
+    parent: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::CStr,
+) -> rustix::io::Result<Option<std::os::fd::OwnedFd>> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    let flags =
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    let listing = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let open = || -> rustix::io::Result<std::os::fd::OwnedFd> {
+        let opened = rustix::fs::openat(parent, name, flags, Mode::empty())?;
+        rustix::fs::openat(&opened, c".", listing, Mode::empty())?;
+        Ok(opened)
+    };
+    let folder = || match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(rustix::io::Errno::NOENT) => Ok(false),
+        Err(problem) => Err(problem),
+        Ok(found) => Ok(FileType::from_raw_mode(found.st_mode) == FileType::Directory),
+    };
+    if let Ok(opened) = open() {
+        return Ok(Some(opened));
+    }
+    if !folder()? {
+        return Ok(None);
+    }
+    unpin_home_entry(parent, name);
+    let _ = open_up(parent, name);
+    release_home_acls(parent, &[name]);
+    let reopened = open();
+    if reopened.is_err() && !folder()? {
+        return Ok(None);
+    }
+    reopened.map(Some)
+}
+
+/// Removes all an open agent home folder holds as [`remove_home_below`] does, once its own
+/// flags are cleared and this user has rwx on it: it counts what the folder holds, then
+/// lists at most [`HOME_NAMES_CHUNK`] names at a time from a fresh listing and removes them
+/// until a listing comes back empty, so no folder's size stops it (code r1 F1
+/// ds137-reset-walk). Removing more than the count plus [`HOME_ADDED_CHUNKS_MAX`] listings'
+/// worth means a process is still adding entries, and the removal stops. Inputs: the folder
+/// and its depth. Output: Ok once a listing finds it empty, or `cleanup_folder_failed`.
+#[cfg(unix)]
+fn empty_home_folder(folder: &std::os::fd::OwnedFd, depth: usize) -> Result<(), EngineError> {
+    use std::os::fd::AsFd;
+    unpin_home_entry(folder, c".");
+    let _ = rustix::fs::fchmod(folder, rustix::fs::Mode::RWXU);
+    let added = HOME_NAMES_CHUNK * HOME_ADDED_CHUNKS_MAX;
+    let allowed = home_count(folder.as_fd())?.saturating_add(added);
+    let mut removed: usize = 0;
+    loop {
+        let names = home_names(folder.as_fd())?;
+        if names.is_empty() {
+            return Ok(());
+        }
+        removed = removed.saturating_add(names.len());
+        if removed > allowed {
+            return Err(folder_failed());
+        }
+        for name in &names {
+            remove_home_below(folder.as_fd(), name, depth + 1)?;
+        }
+    }
+}
+
+/// Lists an open agent home folder from its start, clearing its ACL by its path and listing
+/// once more when a listing stops. Input: the folder. Output: the listing, or
+/// `cleanup_folder_failed` for a folder that will not list.
+#[cfg(unix)]
+fn home_listing(folder: std::os::fd::BorrowedFd<'_>) -> Result<rustix::fs::Dir, EngineError> {
+    rustix::fs::Dir::read_from(folder)
+        .or_else(|_| {
+            release_home_acls(folder, &[c"."]);
+            rustix::fs::Dir::read_from(folder)
+        })
+        .map_err(|_| folder_failed())
+}
+
+/// Counts the names an open agent home folder holds but `.` and `..`, keeping none of them
+/// ([`home_listing`]). Input: the folder. Output: the count, or `cleanup_folder_failed`.
+#[cfg(unix)]
+fn home_count(folder: std::os::fd::BorrowedFd<'_>) -> Result<usize, EngineError> {
+    let mut count: usize = 0;
+    for entry in home_listing(folder)? {
+        let entry = entry.map_err(|_| folder_failed())?;
+        let dots = matches!(entry.file_name().to_bytes(), b"." | b"..");
+        count = count.saturating_add(usize::from(!dots));
+    }
+    Ok(count)
+}
+
+/// Lists the first [`HOME_NAMES_CHUNK`] names an open agent home folder holds but `.` and
+/// `..` ([`home_listing`]). Input: the folder. Output: the names, none for an empty folder,
+/// or `cleanup_folder_failed`.
+#[cfg(unix)]
+fn home_names(folder: std::os::fd::BorrowedFd<'_>) -> Result<Vec<std::ffi::CString>, EngineError> {
+    let mut names = Vec::new();
+    for entry in home_listing(folder)? {
+        let entry = entry.map_err(|_| folder_failed())?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        names.push(name.to_owned());
+        if names.len() == HOME_NAMES_CHUNK {
+            break;
+        }
+    }
+    assert!(names.len() <= HOME_NAMES_CHUNK);
+    Ok(names)
+}
+
+/// Unlinks the entry `name` of an open agent home folder, a folder as an empty folder, never
+/// following a link. An unlink that stops clears the immutable and append-only flags of the
+/// folder and the entry ([`unpin_home_entry`]) and both their ACLs by path
+/// ([`release_home_acls`]), then unlinks once more. Inputs: the parent handle and the name.
+/// Output: Ok once nothing has the name, or `cleanup_folder_failed`.
+#[cfg(unix)]
+fn unlink_home_entry(
+    parent: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::CStr,
+) -> Result<(), EngineError> {
+    use rustix::fs::{AtFlags, FileType};
+    let unlink = || -> rustix::io::Result<()> {
+        let found = match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Err(rustix::io::Errno::NOENT) => return Ok(()),
+            found => found?,
+        };
+        let how = if FileType::from_raw_mode(found.st_mode) == FileType::Directory {
+            AtFlags::REMOVEDIR
+        } else {
+            AtFlags::empty()
+        };
+        match rustix::fs::unlinkat(parent, name, how) {
+            Err(rustix::io::Errno::NOENT) => Ok(()),
+            done => done,
+        }
+    };
+    if unlink().is_ok() {
+        return Ok(());
+    }
+    unpin_home_entry(parent, c".");
+    unpin_home_entry(parent, name);
+    release_home_acls(parent, &[c".", name]);
+    unlink().map_err(|_| folder_failed())
+}
+
+/// Clears the ACLs of entries of an open agent home folder by their paths for a step that
+/// stopped on them ([`release_acls`]), `.` naming the folder, whose path is read from its
+/// handle. Inputs: the folder and the names.
+#[cfg(target_os = "macos")]
+fn release_home_acls(folder: std::os::fd::BorrowedFd<'_>, names: &[&std::ffi::CStr]) {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(at) = rustix::fs::getpath(folder) else {
+        return;
+    };
+    let at = Path::new(OsStr::from_bytes(at.to_bytes()));
+    let paths: Vec<PathBuf> = names
+        .iter()
+        .map(|name| match name.to_bytes() {
+            b"." => at.to_path_buf(),
+            name => at.join(OsStr::from_bytes(name)),
+        })
+        .collect();
+    release_acls(paths.iter().map(PathBuf::as_path));
+}
+
+/// Leaves ACLs alone where no deny entry an agent may set keeps an entry from going. Inputs:
+/// unused.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn release_home_acls(_: std::os::fd::BorrowedFd<'_>, _: &[&std::ffi::CStr]) {}
+
+/// Whether a name is one plain entry name: not empty, `.` or `..`, and holding no `/`.
+/// Input: the name. Output: the answer.
+#[cfg(unix)]
+fn plain_name(name: &std::ffi::CStr) -> bool {
+    let bytes = name.to_bytes();
+    !bytes.is_empty() && !bytes.contains(&b'/') && !matches!(bytes, b"." | b"..")
+}
+
+/// The code a removal of an agent home entry that left it in place reports.
+#[cfg(unix)]
+fn folder_failed() -> EngineError {
+    EngineError("cleanup_folder_failed".into())
 }
 
 /// Deletes a folder, clearing flags as `flags` says and then every ACL in it when a plain
@@ -1022,8 +1273,6 @@ enum Flags {
     Kept,
     /// Clears them through each entry's own handle ([`unpin`]).
     Cleared,
-    /// Clears them as [`unpin_home_entry`] does, by path where an entry will not open.
-    ClearedInHome,
 }
 
 /// Clears the flags of one entry as `flags` says. Inputs: what to do, the entry's open
@@ -1033,7 +1282,6 @@ fn clear_flags<P: rustix::path::Arg + Copy>(flags: Flags, parent: impl std::os::
     match flags {
         Flags::Kept => {}
         Flags::Cleared => unpin(parent, name),
-        Flags::ClearedInHome => unpin_home_entry(parent, name),
     }
 }
 

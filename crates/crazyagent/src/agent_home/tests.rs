@@ -1178,6 +1178,106 @@ fn a_launch_removes_a_link_in_the_place_of_a_kept_entry_without_what_it_names() 
     );
 }
 
+/// A folder a launch keeps only part of, which a process an agent left swaps for a link to
+/// a folder outside the home while the reset walks it, never leads the reset outside
+/// (RV-DS241-137, sec F1 ds137-lock-linux): `.npm` swapped after the reset found it and
+/// before it lists it, `Library` swapped while the reset is in it and about to walk
+/// `Library/Preferences`, and `.npm` swapped while the reset is about to remove `.npm/_npx`.
+/// Every file in the folder the link names stays and the link goes as a link. It runs on
+/// plain folders, without the macOS profile's pin, so it holds where nothing pins them.
+#[cfg(unix)]
+#[test]
+fn a_kept_folder_swapped_for_a_link_mid_reset_never_leads_the_reset_outside() {
+    let legs = [
+        (".npm", ".npm", ".npm/junk"),
+        ("Library/Preferences", "Library", "Library/Preferences/junk"),
+        (".npm/_npx", ".npm", ".npm/_npx/0"),
+    ];
+    let owned = [
+        "owner.txt",
+        "junk/owner.txt",
+        "Preferences/owner.plist",
+        "_npx/owner.js",
+    ];
+    for (step, swapped, planted) in legs {
+        let (_directory, root) = folder();
+        let project = project(&root);
+        let given = text(&project).unwrap();
+        let home = home(&root, "claude");
+        fs::create_dir_all(home.join(planted)).unwrap();
+        let outside = root.join("outside");
+        for file in owned {
+            let path = outside.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "the owner's\n").unwrap();
+        }
+        let (link, moved, named) = (home.join(swapped), root.join("moved"), outside.clone());
+        let swap: Box<dyn FnOnce()> = Box::new(move || {
+            fs::rename(&link, &moved).unwrap();
+            std::os::unix::fs::symlink(&named, &link).unwrap();
+        });
+        BEFORE_HOME_STEP.with(|hook| *hook.borrow_mut() = Some((home.join(step), swap)));
+
+        let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+        let waiting = BEFORE_HOME_STEP.with(|hook| hook.borrow_mut().take());
+        assert!(waiting.is_none(), "{step}: the swap never ran");
+        let lost: Vec<&str> = owned
+            .into_iter()
+            .filter(|file| {
+                fs::read_to_string(outside.join(file)).ok().as_deref() != Some("the owner's\n")
+            })
+            .collect();
+        assert!(
+            lost.is_empty(),
+            "{step}: the reset removed {lost:?} outside the home"
+        );
+        assert_eq!(prepared, Ok(()), "{step}");
+        assert!(
+            fs::symlink_metadata(home.join(swapped)).is_err(),
+            "{step}: {swapped} kept as a link"
+        );
+    }
+}
+
+/// A link an agent left in the place of a folder a launch keeps only part of goes as a
+/// link, at the home and one folder below it, and the reset never walks through it, so
+/// every file in the folder outside the home it names stays (RV-DS241-137, sec F1
+/// ds137-lock-linux). Passes at the base too; it guards the handle walk.
+#[cfg(unix)]
+#[test]
+fn a_link_in_the_place_of_a_kept_folder_goes_at_any_depth_without_what_it_names() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let outside = root.join("outside");
+    fs::create_dir_all(outside.join("sub")).unwrap();
+    fs::write(outside.join("owner.plist"), "the owner's\n").unwrap();
+    fs::write(outside.join("sub/owner.txt"), "the owner's\n").unwrap();
+    let home = home(&root, "claude");
+    fs::create_dir(home.join("Library")).unwrap();
+    let links = [".npm", "Library/Preferences"];
+    for link in links {
+        std::os::unix::fs::symlink(&outside, home.join(link)).unwrap();
+    }
+
+    prepare(&home, Harness::Claude, &project, &given).unwrap();
+
+    for link in links {
+        assert!(
+            fs::symlink_metadata(home.join(link)).is_err(),
+            "{link} kept as a link"
+        );
+    }
+    for file in ["owner.plist", "sub/owner.txt"] {
+        assert_eq!(
+            fs::read_to_string(outside.join(file)).ok().as_deref(),
+            Some("the owner's\n"),
+            "{file}"
+        );
+    }
+}
+
 /// Cargo's `registry` and `git` caches stay in an agent home only as the links the engine
 /// makes to the owner's read-only crates (DEC-173): a cache folder an agent made itself,
 /// which a later run's cargo would build from without checking it again, goes at each
@@ -1565,6 +1665,45 @@ fn a_home_folder_whose_acls_deny_listing_two_deep_still_goes() {
     );
 }
 
+/// A home folder an agent left readable but not searchable still goes at the next launch
+/// (RV-DS241-137 code r1 F2 ds137-reset-walk addendum): one whose ACL denies searching it,
+/// and an immutable one at mode 0600, each holding a file. The reset opens such a folder,
+/// finds it will not list and clears its flags, mode and ACL through its parent by name
+/// before it lists it, as a base reset by path removed both.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_folder_that_reads_but_will_not_search_still_goes() {
+    use nix::sys::stat::FileFlag;
+    use std::os::unix::fs::PermissionsExt;
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let (denied, pinned) = (home.join("denied"), home.join("pinned"));
+    for at in [&denied, &pinned] {
+        fs::create_dir(at).unwrap();
+        fs::write(at.join("file"), "planted\n").unwrap();
+    }
+    let _denied = Released(denied.clone());
+    acl("everyone deny search", &denied);
+    fs::set_permissions(&pinned, fs::Permissions::from_mode(0o600)).unwrap();
+    nix::unistd::chflags(pinned.as_path(), FileFlag::UF_IMMUTABLE).unwrap();
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    let left: Vec<&Path> = [denied.as_path(), pinned.as_path()]
+        .into_iter()
+        .filter(|path| fs::symlink_metadata(path).is_ok())
+        .collect();
+    let _ = nix::unistd::chflags(pinned.as_path(), FileFlag::empty());
+    let _ = fs::set_permissions(&pinned, fs::Permissions::from_mode(0o700));
+    assert_eq!(prepared, Ok(()));
+    assert!(
+        left.is_empty(),
+        "a folder that reads but will not search kept {left:?} from the launch"
+    );
+}
+
 /// A home an earlier run left with an ACL that denies listing it, or listing a folder the
 /// launch keeps only part of, still gets its reset (RV-DS241-137 code r2 F3): a listing that
 /// stops clears that folder's ACL by its path and lists it once more, so a Full run or an
@@ -1644,6 +1783,87 @@ fn a_launch_clears_a_home_an_agent_filled_with_entries() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(left, [".claude.json"]);
+}
+
+/// A run that leaves more than 200,000 files in one folder of its home never refuses the
+/// next launch (RV-DS241-137 code r1 F1 ds137-reset-walk): the reset lists that folder a
+/// chunk at a time and removes each chunk through its handle until the folder lists empty,
+/// so no folder's size stops it and only the kept names stay.
+#[cfg(unix)]
+#[test]
+fn a_launch_clears_a_home_folder_holding_more_than_two_hundred_thousand_files() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    fs::write(home.join(".claude.json"), "{}\n").unwrap();
+    let junk = home.join("junk");
+    fs::create_dir(&junk).unwrap();
+    for index in 0..200_001 {
+        File::create(junk.join(format!("n-{index}"))).unwrap();
+    }
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    assert_eq!(prepared, Ok(()));
+    let left: Vec<String> = fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, [".claude.json"]);
+}
+
+/// A run that leaves a tree of more than 200,000 entries below one folder of its home, as a
+/// Go module or build cache, Gradle, Maven or Bun can, never refuses the next launch
+/// (RV-DS241-137 code r1 F1 ds137-reset-walk): no count of what one removal reaches stops
+/// it, so the launch after it starts and only the kept names stay.
+#[cfg(unix)]
+#[test]
+fn a_launch_clears_a_tree_of_more_than_two_hundred_thousand_entries_below_one_home_folder() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    fs::write(home.join(".claude.json"), "{}\n").unwrap();
+    for part in ["a", "b"] {
+        let at = home.join("cache").join(part);
+        fs::create_dir_all(&at).unwrap();
+        for index in 0..100_001 {
+            File::create(at.join(format!("n-{index}"))).unwrap();
+        }
+    }
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    assert_eq!(prepared, Ok(()));
+    let left: Vec<String> = fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, [".claude.json"]);
+}
+
+/// A kept folder an agent left empty at mode 0400, which reads but will not search, keeps
+/// its place and never refuses the next launch (RV-DS241-137 code r1 note 2): the reset
+/// opens it, finds it will not list and gives this user rwx on it through its parent by
+/// name before it lists it.
+#[cfg(unix)]
+#[test]
+fn a_kept_folder_left_readable_but_not_searchable_keeps_its_place() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let npm = home.join(".npm");
+    fs::create_dir(&npm).unwrap();
+    fs::set_permissions(&npm, fs::Permissions::from_mode(0o400)).unwrap();
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    let _ = fs::set_permissions(&npm, fs::Permissions::from_mode(0o700));
+    assert_eq!(prepared, Ok(()));
+    assert!(fs::symlink_metadata(&npm).is_ok_and(|found| found.is_dir()));
 }
 
 /// What an agent's own run leaves in its home runs nothing in a git, Python, cargo or npm
