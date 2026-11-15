@@ -195,7 +195,7 @@ fn start_trusted(
     Ok(())
 }
 
-/// A step a row runs once inside [`OwnerRuntimeHandle::find_harness`].
+/// A step a row runs once between the check of an entry and the capture of its file.
 #[cfg(test)]
 type Step = Box<dyn FnOnce() + Send>;
 
@@ -203,10 +203,11 @@ type Step = Box<dyn FnOnce() + Send>;
 static BETWEEN_CHECK_AND_CAPTURE: std::sync::Mutex<Vec<(PathBuf, Step)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Takes the step a row set to run in [`OwnerRuntimeHandle::find_harness`] after the found
-/// entry passed its checks and before its file is captured, so a row can move a link in
-/// the entry's chain in that gap. Input: the entry. Output: the step, none for every other
-/// entry.
+/// Takes the step a row set to run between the check of an entry and the capture of its
+/// file: in [`OwnerRuntimeHandle::find_harness`] once the found entry passed its checks,
+/// and in [`OwnerRuntimeHandle::capture_found`] once the entry's file is resolved and before
+/// that file is checked, so a row can move a link in the entry's chain in that gap. Input:
+/// the entry. Output: the step, none for every other entry.
 #[cfg(test)]
 fn between_check_and_capture(entry: &Path) -> Option<Step> {
     let mut steps = BETWEEN_CHECK_AND_CAPTURE
@@ -549,6 +550,10 @@ impl OwnerRuntimeHandle {
         assert!(entry.is_absolute());
         let search = crate::harnesses::Search::from_environment();
         RegisteredNativeAuthHost::capture_entry_checked(entry, |real| {
+            #[cfg(test)]
+            if let Some(step) = between_check_and_capture(entry) {
+                step();
+            }
             start_trusted(&self.authority, real, search.home())
         })
     }

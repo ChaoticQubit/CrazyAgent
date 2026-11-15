@@ -721,3 +721,56 @@ fn a_chosen_file_in_the_shared_temp_folder_is_refused_as_changeable() {
         Err(finding::PATH_CHANGEABLE.to_owned())
     );
 }
+
+/// RV-DS241-140 r2: a chain is judged by every link in it, each where it sits, so a link an
+/// agent can move, a folder link placed where agents write, or a link in a folder other
+/// users can change refuses the entry while both ends of the chain pass. A chain of links
+/// the owner alone can move passes.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_chosen_or_found_codex_whose_chain_has_a_link_others_can_move_is_refused() {
+    let case = Case::new();
+    let real = case.file("tools/codex-0.167.1", 0o755);
+    let agent = case
+        .root
+        .join("projects/harbor/.crazyagent/worktrees/agent-3/bin");
+    let owned = case.root.join("tools/links");
+    let shared = case.root.join("shared");
+    for folder in [&agent, &owned, &shared] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let chain = |entry: &str, middle: &Path, target: &Path| {
+        std::os::unix::fs::symlink(target, middle).unwrap();
+        let entry = case.root.join(entry);
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(middle, &entry).unwrap();
+        entry
+    };
+    let kept = chain("kept/codex", &owned.join("codex"), &real);
+    assert_eq!(case.check("codex", &kept), Ok(kept.clone()));
+    let moved = chain("moved/codex", &agent.join("codex"), &real);
+    assert_eq!(case.check("codex", &moved), Err(PATH_AGENT_SPACE.into()));
+    let folder = agent.join("tools");
+    std::os::unix::fs::symlink(case.root.join("tools"), &folder).unwrap();
+    let through = case.root.join("through/codex");
+    std::fs::create_dir_all(through.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(folder.join("codex-0.167.1"), &through).unwrap();
+    assert_eq!(case.check("codex", &through), Err(PATH_AGENT_SPACE.into()));
+    let open = chain("open/codex", &shared.join("codex"), &real);
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(
+        case.check("codex", &open),
+        Err(finding::PATH_CHANGEABLE.into())
+    );
+    let space = finding::AgentSpace::open(&case.engine).unwrap();
+    let found = Search::new(
+        vec![moved.parent().unwrap().to_path_buf()],
+        Some(case.home.clone()),
+        Vec::new(),
+    );
+    assert_eq!(
+        finding::pick("codex", &found, None, &space)
+            .map(|picked| picked.map_err(|(path, error)| (path, error.0))),
+        Some(Err((moved, PATH_AGENT_SPACE.into())))
+    );
+}
