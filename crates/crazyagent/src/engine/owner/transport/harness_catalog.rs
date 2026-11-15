@@ -202,8 +202,14 @@ pub(super) async fn serve(
         if let Ok(executable) = executable
             && let Ok(pinned) = executable.verified_path()
         {
-            let listed = executable.entry().unwrap_or(pinned);
-            search = search.with_registered(id, listed.to_path_buf());
+            let listed = executable
+                .entry()
+                .and_then(|entry| {
+                    crate::paths::launch_entry(entry, std::env::var_os("PATH").as_deref()).ok()
+                })
+                .filter(|used| std::fs::canonicalize(used).ok().as_deref() == Some(pinned))
+                .unwrap_or_else(|| pinned.to_path_buf());
+            search = search.with_registered(id, listed);
         }
     }
     if !matches!(action, Action::List | Action::Check) {
