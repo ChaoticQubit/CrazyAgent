@@ -1044,15 +1044,21 @@ fn clear_flags<P: rustix::path::Arg + Copy>(
 /// Clears the extended ACL of each entry without following a link in its last part, through
 /// `/bin/chmod -f -h -N`, as no call this crate makes without `unsafe` sets an ACL. A deny
 /// entry an agent set binds the owner too, so it would keep an entry from going or being
-/// written (RV-DS241-137 sec r1 F2). Input: the entries. An entry that is gone, a pinned
-/// one or a spawn that fails leaves things as they were, and the step that needs the entry
-/// then reports it.
+/// written (RV-DS241-137 sec r1 F2). Only a folder or an entry with one link is cleared, so
+/// a file with a second link, which may be the owner's file an agent linked in, never
+/// changes (V231-ACL, sec r2 F1). Input: the entries. An entry that is gone or skipped, a
+/// pinned one or a spawn that fails leaves things as they were, and the step that needs the
+/// entry then reports it.
 #[cfg(target_os = "macos")]
 pub(crate) fn clear_acls<'a>(entries: impl IntoIterator<Item = &'a Path>) {
+    use std::os::unix::fs::MetadataExt;
     let mut command = std::process::Command::new("/bin/chmod");
     command.args(["-f", "-h", "-N", "--"]);
     let before = command.get_args().len();
-    command.args(entries);
+    let cleared = |entry: &&Path| {
+        std::fs::symlink_metadata(entry).is_ok_and(|found| found.is_dir() || found.nlink() == 1)
+    };
+    command.args(entries.into_iter().filter(cleared));
     if command.get_args().len() == before {
         return;
     }
@@ -1069,19 +1075,51 @@ pub(crate) fn clear_acls<'a>(entries: impl IntoIterator<Item = &'a Path>) {
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn clear_acls<'a>(_entries: impl IntoIterator<Item = &'a Path>) {}
 
-/// Clears the extended ACL of a folder and of all it holds, following no link, through
-/// `/bin/chmod -f -R -P -N`, as [`clear_acls`] does for single entries. Input: the folder.
-/// What a pinned or unreadable folder keeps the walk out of keeps its ACLs.
+/// The `find -P` expression an agent tree's ACL clear runs first: each folder's ACL by its
+/// path and then the owner's read, write and search on it, before `find` reads it, so a
+/// folder whose ACL denies listing opens too. Flags stay with [`writable`].
+#[cfg(target_os = "macos")]
+const TREE_FOLDERS: [&str; 17] = [
+    "-type",
+    "d",
+    "(",
+    "-exec",
+    "/bin/chmod",
+    "-N",
+    "{}",
+    ";",
+    "-o",
+    "-true",
+    ")",
+    "-exec",
+    "/bin/chmod",
+    "-h",
+    "u+rwx",
+    "{}",
+    ";",
+];
+
+/// Clears the extended ACL of a folder and of all it holds as a launch context's release
+/// does, through `find -P`: each folder by its path before it is read ([`TREE_FOLDERS`]),
+/// then what the folders hold ([`crate::launch_context::RELEASED_ACLS`]), never following a
+/// link and never changing a file with a second link, which may be the owner's file an
+/// agent linked in (V231-ACL, RV-DS241-137 sec r2 F1). Input: the folder. What a pinned
+/// folder keeps the walk out of keeps its ACLs.
 #[cfg(target_os = "macos")]
 fn clear_tree_acls(folder: &Path) {
-    let _ = crate::spawn_gate::status(
-        std::process::Command::new("/bin/chmod")
-            .args(["-f", "-R", "-P", "-N", "--"])
-            .arg(folder)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()),
-    );
+    use std::process::{Command, Stdio};
+    let passes = std::iter::once(&TREE_FOLDERS[..]).chain(crate::launch_context::RELEASED_ACLS);
+    for expression in passes {
+        let _ = crate::spawn_gate::status(
+            Command::new("/usr/bin/find")
+                .arg("-P")
+                .arg(folder)
+                .args(expression)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
+    }
 }
 
 /// Leaves ACLs alone where no deny entry an agent may set keeps a folder from going. Input:
@@ -1210,8 +1248,10 @@ thread_local! {
 /// through `/dev/fd/<n>` of that open entry, so no path an agent can change is resolved and
 /// a folder or link it swaps in meanwhile is never followed (T8 r2 L1). An entry that will
 /// not open, such as one at mode 000, keeps its flags; the removal then stops on it and its
-/// caller reports what is left. A launch clears its Shared tool cache folders the same way
-/// (T8-R2-N1). Inputs: the entry's open parent and its name there.
+/// caller reports what is left. A file with a second link keeps its flags too, since it may
+/// be the owner's file an agent linked in (V231-ACL, RV-DS241-137 code r2 F2). A launch
+/// clears its Shared tool cache folders the same way (T8-R2-N1). Inputs: the entry's open
+/// parent and its name there.
 #[cfg(target_os = "macos")]
 pub(crate) fn unpin<P: rustix::path::Arg>(parent: impl std::os::fd::AsFd, name: P) {
     use nix::sys::stat::FileFlag;
@@ -1230,8 +1270,12 @@ pub(crate) fn unpin<P: rustix::path::Arg>(parent: impl std::os::fd::AsFd, name: 
         FileType::Symlink,
         "an entry opened without following a link is never one"
     );
+    let file = FileType::from_raw_mode(found.st_mode) != FileType::Directory;
     let flags = FileFlag::from_bits_retain(found.st_flags);
-    if !flags.intersects(pinning) || found.st_uid != rustix::process::geteuid().as_raw() {
+    if !flags.intersects(pinning)
+        || (file && found.st_nlink != 1)
+        || found.st_uid != rustix::process::geteuid().as_raw()
+    {
         return;
     }
     #[cfg(test)]
@@ -1250,23 +1294,27 @@ pub(crate) fn unpin<P: rustix::path::Arg>(parent: impl std::os::fd::AsFd, name: 
 /// names. That path is resolved again, so a folder above it that a process swaps meanwhile
 /// is followed, which is why only an agent home's removal uses it: there a confined agent
 /// can set no flag (the profile denies it) and a Full one has the owner's rights already,
-/// while a Shared tool cache keeps [`unpin`] alone (T8-R2-F1). Inputs: the entry's parent
-/// and its name there, absolute when the parent is the working folder.
+/// while a Shared tool cache keeps [`unpin`] alone (T8-R2-F1). A file with a second link
+/// keeps its flags, as with [`unpin`]. Inputs: the entry's parent and its name there,
+/// absolute when the parent is the working folder.
 #[cfg(target_os = "macos")]
 pub(crate) fn unpin_home_entry<P: rustix::path::Arg + Copy>(
     parent: impl std::os::fd::AsFd,
     name: P,
 ) {
     use nix::sys::stat::FileFlag;
-    use rustix::fs::AtFlags;
+    use rustix::fs::{AtFlags, FileType};
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
     let parent = parent.as_fd();
     let pinning = FileFlag::UF_IMMUTABLE | FileFlag::UF_APPEND;
     let pinned = || {
         rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(|found| {
+            let file = FileType::from_raw_mode(found.st_mode) != FileType::Directory;
             let flags = FileFlag::from_bits_retain(found.st_flags);
-            flags.intersects(pinning) && found.st_uid == rustix::process::geteuid().as_raw()
+            flags.intersects(pinning)
+                && !(file && found.st_nlink != 1)
+                && found.st_uid == rustix::process::geteuid().as_raw()
         })
     };
     if !pinned() {

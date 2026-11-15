@@ -2240,7 +2240,9 @@ fn lock(_home: &Path) -> Result<File, LaunchError> {
 /// Opens and locks the agent home's launch lock, made owner-only and never through a link.
 /// A flag or ACL an earlier run left on the home or on the lock, which would refuse the
 /// open, is cleared once and the open tried again (RV-DS241-137 code r1 F1); a confined
-/// agent can set neither there. Input: the home. Output: the locked file,
+/// agent can set neither there. A lock with a second link, which may be the owner's file
+/// an agent linked in, is refused, since the reset removes a kept file with a second link
+/// and would take the lock this launch holds (r3). Input: the home. Output: the locked file,
 /// `launch_context_unsafe` or `launch_home_busy`.
 #[cfg(unix)]
 fn lock(home: &Path) -> Result<File, LaunchError> {
@@ -2264,7 +2266,10 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
     let metadata = file
         .metadata()
         .map_err(|_| failure("launch_context_unsafe"))?;
-    if !metadata.is_file() || metadata.uid() != rustix::process::geteuid().as_raw() {
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+    {
         return Err(failure("launch_context_unsafe"));
     }
     rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
@@ -2502,10 +2507,46 @@ fn clear(parked: &Path) {
     }
 }
 
+/// The `find -P` expressions that clear the ACLs of what a tree's folders hold: of each
+/// one-link entry that is neither a folder nor a link by its path, and of each one-link link
+/// on the link itself, so a file with a second link, which may be the owner's file an agent
+/// linked in, never changes (V231-ACL). [`RELEASED_TREE`] runs them after its folder and flag
+/// passes, and an agent tree's removal after its own folder pass (RV-DS241-137 sec r2 F1).
+#[cfg(target_os = "macos")]
+pub(crate) const RELEASED_ACLS: [&[&str]; 2] = [
+    &[
+        "!",
+        "-type",
+        "d",
+        "!",
+        "-type",
+        "l",
+        "-links",
+        "1",
+        "-exec",
+        "/bin/chmod",
+        "-N",
+        "{}",
+        "+",
+    ],
+    &[
+        "-type",
+        "l",
+        "-links",
+        "1",
+        "-exec",
+        "/bin/chmod",
+        "-h",
+        "-N",
+        "{}",
+        "+",
+    ],
+];
+
 /// The `find -P` expressions [`release`] runs in order on a tree. First, folders one at a
 /// time, so a folder with no search or a list-denying ACL opens before `find` reads it. Then
-/// one-link entries that are not folders: their flags, the ACL of each that is not a link by
-/// path, and the ACL of each link on the link itself. A file with a second link is never matched.
+/// one-link entries that are not folders: their flags, and their ACLs ([`RELEASED_ACLS`]).
+/// A file with a second link is never matched.
 #[cfg(target_os = "macos")]
 const RELEASED_TREE: [&[&str]; 4] = [
     &[
@@ -2550,33 +2591,8 @@ const RELEASED_TREE: [&[&str]; 4] = [
         "{}",
         "+",
     ],
-    &[
-        "!",
-        "-type",
-        "d",
-        "!",
-        "-type",
-        "l",
-        "-links",
-        "1",
-        "-exec",
-        "/bin/chmod",
-        "-N",
-        "{}",
-        "+",
-    ],
-    &[
-        "-type",
-        "l",
-        "-links",
-        "1",
-        "-exec",
-        "/bin/chmod",
-        "-h",
-        "-N",
-        "{}",
-        "+",
-    ],
+    RELEASED_ACLS[0],
+    RELEASED_ACLS[1],
 ];
 
 /// Clears the immutable and append only flags and every ACL entry of one folder and adds the

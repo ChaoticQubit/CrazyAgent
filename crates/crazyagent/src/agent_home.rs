@@ -1131,7 +1131,9 @@ pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
 
 /// Removes from one real folder of an agent home every entry `kept` does not name with its
 /// kind, and does the same in each kept folder that has its own list, never following a
-/// link (RV-DS241-137). Flags an agent set on the folder or on an entry it keeps are cleared
+/// link (RV-DS241-137). A kept file stays only as this user's file with one link, so a name
+/// an agent linked to the owner's file goes as a plain unlink and that file never changes
+/// (V231-ACL, r3). Flags an agent set on the folder or on an entry it keeps are cleared
 /// (RV-DS241-138), and the folder and every entry it keeps are added to `held`, whose ACLs
 /// the caller clears in one step (sec r1 F2). The folder is listed as it goes, in passes
 /// until one removes nothing. Inputs: the folder, what stays in it and the entries held so
@@ -1166,7 +1168,7 @@ fn keep_only(
                 .find(|(known, _)| name == *known)
                 .map(|(_, kind)| *kind);
             match wanted {
-                Some(Kept::File) if metadata.is_file() => unpin(&path),
+                Some(Kept::File) if metadata.is_file() && sole_own_link(&metadata) => unpin(&path),
                 Some(Kept::Folder) if metadata.is_dir() => unpin(&path),
                 Some(Kept::Link) if link => unpin(&path),
                 Some(Kept::Only(inner)) if metadata.is_dir() => {
@@ -1186,6 +1188,33 @@ fn keep_only(
         }
     }
     Err(failure("agent_home_unwritable"))
+}
+
+/// Resets a native lead's teammates' home as [`prepare`] resets an agent home: only what
+/// [`HOME_KEPT`] names stays, with the folders [`crate::sandbox::CLAUDE_TEAM_SHARED`] names
+/// kept only as links, since there they lead to the lead's own folders (RV-DS241-137 code
+/// r2 F1). Input: the teammates' 0700 home. Output: unit, or a plain code when it is not a
+/// real folder or an entry stays.
+#[cfg(unix)]
+pub(crate) fn reset_mates_home(mates: &Path) -> Result<(), AgentHomeError> {
+    if !mates.is_absolute() {
+        return Err(failure("agent_home_invalid"));
+    }
+    real_folder(mates)?;
+    let kept: Vec<(&str, Kept)> = HOME_KEPT
+        .iter()
+        .map(|&(name, kind)| {
+            if crate::sandbox::CLAUDE_TEAM_SHARED.contains(&name) {
+                (name, Kept::Link)
+            } else {
+                (name, kind)
+            }
+        })
+        .collect();
+    let mut held = Vec::new();
+    keep_only(mates, &kept, &mut held)?;
+    crate::team::cleanup::clear_acls(held.iter().map(PathBuf::as_path));
+    Ok(())
 }
 
 /// Names, as paths below the home, the folders of an agent home a launch keeps only part
