@@ -15844,7 +15844,7 @@ fn a_confined_step_on_linux_never_takes_a_link_or_a_special_file_as_the_index() 
     let placed = std::fs::symlink_metadata(&index).unwrap().ino();
     for (name, plant) in index_plants(&outside) {
         let repo = confined_agent(&case, git::Writes::WorkTree);
-        let left = repo.swapped(None, || {
+        let left = repo.swapped(false, || {
             std::fs::remove_file(&copy).unwrap();
             plant(&copy);
             Ok(git::Output {
@@ -15887,7 +15887,7 @@ fn a_confined_step_on_linux_never_takes_a_link_or_a_special_file_as_the_index() 
 /// SA vid 3: the copy of the index a confined Linux step that fills the work tree leaves in the
 /// step folder is never taken as the worktree's index, not even a plain file with one link put
 /// there by a rename, as git's own rename of a lock a link raced in during `read-tree -u` could
-/// leave it. With no index-only form of the step to rebuild the index from, the step refuses
+/// leave it. A step not run as a split move never has its copy taken, so the step refuses
 /// with `changes_git_failed`; the index stays as it was, and no lock or step folder is left.
 #[cfg(target_os = "linux")]
 #[test]
@@ -15899,7 +15899,7 @@ fn a_confined_work_tree_step_on_linux_never_takes_the_index_copy_it_leaves() {
     let copy = step.join("index");
     let before = std::fs::read(&index).unwrap();
     let repo = confined_agent(&case, git::Writes::WorkTree);
-    let left = repo.swapped(None, || {
+    let left = repo.swapped(false, || {
         let planted = step.join("index.lock");
         write(&planted, "forged index\n");
         std::fs::rename(&planted, &copy).unwrap();
@@ -15918,36 +15918,25 @@ fn a_confined_work_tree_step_on_linux_never_takes_the_index_copy_it_leaves() {
     assert!(std::fs::symlink_metadata(&step).is_err());
 }
 
-/// SA vid 3: a confined Linux step that fills the work tree and names its index-only form takes
-/// the index the engine rebuilds from the worktree's own index with that form, whatever the step
-/// left as its copy: a plain file put there by a rename is passed over, the index holds the
-/// target's tree, and no lock or step folder is left.
+/// SA vid 3 option A: a confined Linux `read-tree -u -m` that may write the work tree takes
+/// the copy of the index its index-only gits wrote: the move lands, the work tree and the
+/// index hold the target's tree with clean stat data, and no lock or step folder is left.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_confined_work_tree_step_on_linux_takes_the_index_the_engine_rebuilds() {
+fn a_confined_work_tree_step_on_linux_takes_the_index_its_index_only_gits_wrote() {
     let case = Case::new();
     let worktree = case.workspace.worktree.clone();
-    let index = case.workspace.git_dir.join("index");
     let lock = case.workspace.git_dir.join("index.lock");
     let step = case.workspace.git_dir.join("crazyagent-step");
-    let copy = step.join("index");
     let target = case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
-    let index_only = ["read-tree", "-i", "-m", "HEAD", target.as_str()];
-    let repo = confined_agent(&case, git::Writes::WorkTree);
-    let moved = repo
-        .swapped(Some(index_only.as_slice()), || {
-            let planted = step.join("index.lock");
-            write(&planted, "forged index\n");
-            std::fs::rename(&planted, &copy).unwrap();
-            Ok(git::Output {
-                code: 0,
-                stdout: Vec::new(),
-                overflow: false,
-            })
-        })
+    let moved = confined_agent(&case, git::Writes::WorkTree)
+        .exec(&["read-tree", "-u", "-m", "HEAD", &target], None, &[], 4096)
         .unwrap();
     assert_eq!(moved.code, 0);
-    assert_ne!(std::fs::read(&index).unwrap(), b"forged index\n");
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("README")).unwrap(),
+        "one\ntwo\nTHREE\n"
+    );
     assert_eq!(
         git_in(
             &case.home,
@@ -15956,12 +15945,49 @@ fn a_confined_work_tree_step_on_linux_takes_the_index_the_engine_rebuilds() {
         ),
         ""
     );
+    assert_eq!(
+        git_in(&case.home, &worktree, &["diff-files", "--name-only"]),
+        ""
+    );
     assert!(std::fs::symlink_metadata(&lock).is_err());
     assert!(std::fs::symlink_metadata(&step).is_err());
 }
 
-/// SA vid 3: the index a confined Linux `read-tree -u -m` ends with is the one the engine
-/// rebuilds with the step's index-only form, whose git checks the work tree's files as it writes,
+/// SA vid 3 option A: a split Linux move removes a path it drops only through leading folders
+/// opened with no link followed, so a folder the agent swapped for a link to a folder outside
+/// is never removed through: the move refuses and the file outside stays.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_split_move_on_linux_never_removes_a_dropped_path_through_a_link() {
+    let case = Case::new();
+    let worktree = case.workspace.worktree.clone();
+    let head = git_in(&case.home, &worktree, &["rev-parse", "HEAD"]);
+    let head = head.trim().to_owned();
+    let kept = case.owner_commit("docs/notes", "Notes\n", "Docs");
+    case.owner(&["rm", "-q", "docs/notes"]);
+    case.owner(&["commit", "-q", "-m", "Drop docs"]);
+    let dropped = case.tip();
+    let moved = |from: &str, to: &str| {
+        confined_agent(&case, git::Writes::WorkTree)
+            .exec(&["read-tree", "-u", "-m", from, to], None, &[], 4096)
+            .unwrap()
+            .code
+    };
+    assert_eq!(moved(&head, &kept), 0);
+    let outside = case.home.join("outside-docs");
+    write(&outside.join("notes"), "Notes\n");
+    std::fs::remove_dir_all(worktree.join("docs")).unwrap();
+    std::os::unix::fs::symlink(&outside, worktree.join("docs")).unwrap();
+    let refused = moved(&kept, &dropped);
+    assert_ne!(refused, 0, "the move removed through the link");
+    assert_eq!(
+        std::fs::read_to_string(outside.join("notes")).unwrap(),
+        "Notes\n"
+    );
+}
+
+/// SA vid 3: the index a confined Linux `read-tree -u -m` ends with is the one its split move's
+/// index-only gits write, which check the work tree's files as they write,
 /// so an entry racy against the worktree's index stays in view: the move lands, the index holds
 /// the target's tree, and an edit of the same size in the index's own second to a path the move
 /// leaves alone is still seen, while the file the move wrote is not. `core.checkStat=minimal`
@@ -16400,7 +16426,7 @@ fn a_confined_step_on_linux_names_its_engine_process_in_the_lock_it_takes() {
         .unwrap()
         .unwrap();
     let mut seen = String::new();
-    repo.swapped(None, || {
+    repo.swapped(false, || {
         seen = std::fs::read_to_string(&lock).unwrap();
         Ok(git::Output {
             code: 0,
@@ -16450,7 +16476,7 @@ fn a_confined_step_on_linux_never_copies_an_index_that_is_a_link_or_a_special_fi
         gone(&index);
         plant(&index);
         let ran = std::cell::Cell::new(false);
-        let refused = repo.swapped(None, || {
+        let refused = repo.swapped(false, || {
             ran.set(true);
             Ok(git::Output {
                 code: 0,
