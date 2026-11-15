@@ -118,10 +118,6 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     sent.push("create");
                     connection.creation(*job).unwrap();
                 }
-                Request::Intake(job) => {
-                    sent.push("intake");
-                    connection.intake(*job).unwrap();
-                }
                 Request::Master(job) => {
                     sent.push("master");
                     connection.master(*job).unwrap();
