@@ -2101,6 +2101,55 @@ fn a_harness_the_resolver_refuses_as_agent_writable_is_never_asked_its_version()
     }
 }
 
+/// security-audit vid 1, the sign-in shape: an agent-written link in a project folder that
+/// leads to the owner's npm-built Codex, with a `node` planted beside the link, is never run
+/// for its version. The resolver refuses the link as one agents can write before it reads
+/// the first line, so neither the Codex nor the planted node starts and the row names that
+/// refusal. Without the project marker the same link only lacks a vetted node.
+#[test]
+fn an_agent_written_link_to_an_owner_harness_never_starts_a_node_planted_beside_it() {
+    let machine = Machine::new();
+    std::fs::create_dir_all(machine.roots().home).unwrap();
+    let work = machine.root.path().join("proj");
+    let marker = work.join(".crazyagent");
+    std::fs::create_dir_all(&marker).unwrap();
+    let ran = machine.root.path().join("ran");
+    let real = machine
+        .root
+        .path()
+        .join("node/lib/node_modules/@openai/codex/bin/codex.js");
+    executable(&real, "#!/usr/bin/env node\n");
+    let link = work.join("node_modules/.bin/codex");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    executable(
+        &work.join("node_modules/.bin/node"),
+        &format!(
+            "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+            ran.display()
+        ),
+    );
+    let refused = crate::tools::resolve_entry(&link, &machine.roots().places).unwrap_err();
+    assert_eq!(refused.reason, crate::tools::Reason::Refused);
+    assert_eq!(
+        refused.refused.as_ref().map(|refused| refused.why.clone()),
+        Some(crate::tools::Refusal::AgentsCanWrite)
+    );
+    std::fs::remove_dir(&marker).unwrap();
+    let bare = crate::tools::resolve_entry(&link, &machine.roots().places).unwrap_err();
+    assert_eq!(bare.reason, crate::tools::Reason::NeedsInterpreter);
+    assert_eq!(bare.needs.as_deref(), Some("node"));
+    std::fs::create_dir_all(&marker).unwrap();
+    let case = Case::new(machine, entry("codex", Some(link)), None);
+    let versions = case.versions(false);
+    assert_eq!(versions.installed, None);
+    assert_eq!(
+        versions.needs.as_ref().map(|needs| needs.line.clone()),
+        Some(refused.line())
+    );
+    assert!(!ran.exists(), "a node planted beside a refused link is never run");
+}
+
 fn listed(ids: &[&str]) -> Vec<String> {
     ids.iter().map(|id| (*id).to_owned()).collect()
 }

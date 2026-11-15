@@ -161,3 +161,80 @@ async fn a_harness_registered_through_its_link_is_listed_by_the_link_its_updater
         "still listed by the entry once it leads to versions/2.1.300"
     );
 }
+
+/// security-audit vid 1 with rv-sa241 f-10: when the registered Codex cannot be used, here
+/// because its pinned file was rewritten in place, the Versions route lists what the engine
+/// search finds instead. A Codex an agent planted in a project's `node_modules/.bin` that the
+/// search finds there is still never run for its version: the row names the resolver's
+/// refusal, and neither the planted file nor the owner's changed one starts.
+#[tokio::test]
+async fn a_versions_read_that_falls_back_from_a_broken_pin_never_runs_a_planted_codex() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-hc-fallback-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.path().join("g.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root.path(),
+        "e.sock",
+        &global,
+        &root.path().join("p.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let outside = crate::harnesses::finding::owner_folder("hc-fallback-");
+    std::fs::set_permissions(outside.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let host = root.path().join("crazyagent-pin-only");
+    let owner_ran = outside.path().join("owner-ran");
+    let planted_ran = outside.path().join("planted-ran");
+    let owned = outside.path().join("owner/codex-0.167.1");
+    let work = outside.path().join("proj");
+    let planted = work.join("node_modules/@openai/codex/bin/codex.js");
+    let link = work.join("node_modules/.bin/codex");
+    let version = |ran: &Path| {
+        format!(
+            "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+            ran.display()
+        )
+    };
+    program(&host, "host", 0o700);
+    program(&owned, &version(&owner_ran), 0o700);
+    program(&planted, &version(&planted_ran), 0o755);
+    std::fs::create_dir_all(work.join(".crazyagent")).unwrap();
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&planted, &link).unwrap();
+    service.register_native_auth_host(&host).unwrap();
+    service.register_codex_executable(&owned).unwrap();
+    service
+        .set_harness_search(crate::harnesses::Search::new(
+            vec![link.parent().unwrap().to_path_buf()],
+            None,
+            Vec::new(),
+        ))
+        .unwrap();
+    service.ensure_ready(&stopped).unwrap();
+    let client = OwnerClient::discover(root.path(), OwnerClientKind::Tui, Duration::from_secs(20))
+        .await
+        .unwrap()
+        .0;
+
+    std::fs::write(&owned, version(&owner_ran).replace("0.167.1", "0.167.2")).unwrap();
+    let versions = client.harness_versions("codex", false).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(versions.installed, None);
+    assert!(
+        versions.needs.is_some(),
+        "the fallback lists the planted Codex and names the resolver's refusal"
+    );
+    assert!(!planted_ran.exists(), "a planted Codex is never run");
+    assert!(!owner_ran.exists(), "a pinned file rewritten in place is never run");
+}
