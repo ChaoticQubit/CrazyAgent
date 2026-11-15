@@ -251,12 +251,10 @@ fn a_linked_folder_below_the_held_folder_is_refused() {
     append(&project.join("real").join("history.md"), "#### hi\n");
 
     let read = |below: &str| {
-        MarkdownHistory::new(project.clone(), PathBuf::from(below), 0, start)
-            .read(start)
-            .map_err(|error| error.0)
+        MarkdownHistory::new(project.clone(), PathBuf::from(below), 0, start).read(start)
     };
 
-    assert_eq!(read("sub/history.md"), Err(UNSAFE));
+    assert_eq!(read("sub/history.md"), Err(failure(UNSAFE)));
     assert_eq!(
         read("real/history.md"),
         Ok(vec![TranscriptEvent::TurnStarted])

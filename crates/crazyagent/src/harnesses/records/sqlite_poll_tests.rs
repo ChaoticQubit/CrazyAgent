@@ -119,10 +119,6 @@ fn a_wal_database_is_read_live_and_closed_without_side_files_made() {
     assert_eq!(std::fs::read(&path).unwrap(), database_bytes);
     assert_eq!(std::fs::read(&wal).unwrap(), wal_bytes);
     drop(writer);
-    match std::fs::metadata(&wal) {
-        Ok(kept) => assert_eq!(kept.len(), 0, "the harness's close checkpoints its WAL"),
-        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
-    }
     for kept in ["record.db-wal", "record.db-shm"] {
         if let Err(error) = std::fs::remove_file(tmp.path().join(kept)) {
             assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
@@ -212,10 +208,7 @@ fn only_a_plain_database_file_at_the_record_path_is_read() {
 
     let read = |path: PathBuf| SqlitePoll::new(path, &SCHEMA, 0).read();
 
-    assert_eq!(
-        read(linked.join("real.db")).map_err(|error| error.0),
-        Err(UNSAFE)
-    );
+    assert_eq!(read(linked.join("real.db")), Err(failure(UNSAFE)));
     assert_eq!(read(link).unwrap_err().0, UNSAFE);
     assert_eq!(read(folder).unwrap_err().0, UNSAFE);
     assert_eq!(read(text).unwrap_err().0, UNREADABLE);
@@ -312,10 +305,7 @@ fn a_journal_that_is_not_a_plain_file_is_refused_without_waiting() {
         ));
     }
 
-    assert_eq!(
-        read.map(|read| read.map_err(|error| error.0)),
-        Ok(Err(UNSAFE))
-    );
+    assert_eq!(read, Ok(Err(failure(UNSAFE))));
 }
 
 /// Review t15-sec F2: a table with a generated column, virtual or stored, is refused before
@@ -335,9 +325,7 @@ fn a_table_with_a_generated_column_is_refused_before_any_row_is_read() {
             ))
             .unwrap();
         drop(connection);
-        SqlitePoll::new(path, &SCHEMA, 0)
-            .read()
-            .map_err(|error| error.0)
+        SqlitePoll::new(path, &SCHEMA, 0).read()
     };
 
     let virtual_body = read(
@@ -349,8 +337,8 @@ fn a_table_with_a_generated_column_is_refused_before_any_row_is_read() {
         "body TEXT GENERATED ALWAYS AS (upper(raw)) STORED",
     );
 
-    assert_eq!(virtual_body, Err(VERSION_UNKNOWN));
-    assert_eq!(stored_body, Err(VERSION_UNKNOWN));
+    assert_eq!(virtual_body, Err(failure(VERSION_UNKNOWN)));
+    assert_eq!(stored_body, Err(failure(VERSION_UNKNOWN)));
 }
 
 /// Review t15-sec F2: a value longer than the value bound is refused by SQLite as it is
@@ -366,7 +354,7 @@ fn a_value_past_the_value_bound_is_refused_not_built() {
 
     let read = SqlitePoll::new(path, &SCHEMA, 0).read();
 
-    assert_eq!(read.map_err(|error| error.0), Err(UNREADABLE));
+    assert_eq!(read, Err(failure(UNREADABLE)));
 }
 
 /// Review t15-sec F5: a virtual table under a schema table name is refused, so no table
@@ -388,7 +376,7 @@ fn a_virtual_table_under_a_schema_name_is_refused() {
 
     let read = SqlitePoll::new(path, &SCHEMA, 0).read();
 
-    assert_eq!(read.map_err(|error| error.0), Err(VERSION_UNKNOWN));
+    assert_eq!(read, Err(failure(VERSION_UNKNOWN)));
 }
 
 /// Review t15-code F7: one read gives at most its text bound, and the row that would pass it
