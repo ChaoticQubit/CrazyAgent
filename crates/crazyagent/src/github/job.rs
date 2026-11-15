@@ -317,6 +317,14 @@ impl GitHub {
         })
     }
 
+    /// Forgets a project's publish short of Done, so Start runs fresh. Input: the project
+    /// folder. Output: the name of the empty repository the job left on GitHub, if it made
+    /// one, or `github_publish_not_started`, `github_publish_step_invalid`.
+    pub fn publish_discard(&self, project: &Path) -> Result<Option<String>, EngineError> {
+        let _ = project;
+        Err(failure("github_publish_unbuilt"))
+    }
+
     /// Reads a project's publish record, which a run in progress keeps up to date step by
     /// step. Input: the project folder. Output: the job, or None when the project has none.
     pub fn publish_status(&self, project: &Path) -> Result<Option<GitHubPublishJob>, EngineError> {

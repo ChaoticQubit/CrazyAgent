@@ -2,6 +2,21 @@ use super::*;
 use crate::engine::owner::AccountSecret;
 use crate::github::GitHubMethod;
 
+#[test]
+fn a_publish_start_has_time_for_the_agent_that_drafts_its_gitignore() {
+    let start = crate::engine::owner::transport::github::Action::PublishStart {
+        project: crate::protocol::ProjectId::new("alpha").unwrap(),
+        plan: crate::github::GitHubPublishPlan {
+            owner: "octo-cat".into(),
+            name: "tool".into(),
+            description: String::new(),
+            private: true,
+            docs: false,
+        },
+    };
+    assert!(start.time() > crate::instruction_cleanup::WALL_TIME + Duration::from_secs(120));
+}
+
 #[tokio::test]
 async fn github_selector_reports_signed_out_and_refuses_work_before_sign_in() {
     run_case(false, |context| async move {
@@ -636,6 +651,17 @@ mod slow_remote {
                 .filter(|seen| seen.method == "POST" && seen.path == "/user/repos")
                 .count();
             assert_eq!(creates, 2);
+            assert_eq!(
+                client
+                    .github_publish_discard(alpha.clone())
+                    .await
+                    .map_err(|error| error.0),
+                Ok(None)
+            );
+            assert_eq!(
+                client.github_publish_status(alpha.clone()).await.unwrap(),
+                None
+            );
             assert!(!holds(&root, token.as_bytes()));
             assert!(!holds(&project, token.as_bytes()));
         })

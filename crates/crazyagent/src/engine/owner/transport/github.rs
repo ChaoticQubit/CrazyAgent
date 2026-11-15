@@ -16,7 +16,7 @@ const DRAFT_AGENT: &str = "gitignore-draft";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum Action {
+pub(super) enum Action {
     Status,
     SignIn,
     Token,
@@ -50,10 +50,13 @@ enum Action {
     PublishStatus {
         project: ProjectId,
     },
+    PublishDiscard {
+        project: ProjectId,
+    },
 }
 
 impl Action {
-    fn time(&self) -> Duration {
+    pub(super) fn time(&self) -> Duration {
         match self {
             Self::Clone { .. } => CLONE_TIME,
             Self::PublishApprove { .. }
@@ -82,6 +85,7 @@ enum Reply {
     Owners { owners: GitHubOwners },
     Publish { job: GitHubPublishJob },
     PublishStatus { job: Option<GitHubPublishJob> },
+    Discarded { left: Option<String> },
     Rejected { code: String },
 }
 
@@ -224,6 +228,21 @@ impl OwnerClient {
             .await?
         {
             Reply::PublishStatus { job } => Ok(job),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Forgets a project's publish short of Done, so Start runs fresh. Input: the project.
+    /// Output: the name of the empty repository the job left on GitHub, if it made one.
+    pub async fn github_publish_discard(
+        &self,
+        project: ProjectId,
+    ) -> Result<Option<String>, EngineError> {
+        match self
+            .github_exchange(Action::PublishDiscard { project }, None)
+            .await?
+        {
+            Reply::Discarded { left } => Ok(left),
             _ => Err(unknown()),
         }
     }
@@ -459,6 +478,9 @@ async fn handle(
             },
             Action::PublishStatus { project } => Reply::PublishStatus {
                 job: account.publish_status(&project_folder(&root, &project)?)?,
+            },
+            Action::PublishDiscard { project } => Reply::Discarded {
+                left: account.publish_discard(&project_folder(&root, &project)?)?,
             },
         })
     })
