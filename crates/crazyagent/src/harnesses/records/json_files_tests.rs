@@ -95,7 +95,7 @@ fn a_link_below_the_home_is_never_followed_to_a_record() {
     symlink(away.path().join("records"), folder_link).unwrap();
     let file_link = format!("agent/sessions/7_{SESSION_ID}.jsonl");
     let file_link = home.path().join(file_link);
-    symlink(&target, file_link).unwrap();
+    symlink(target, file_link).unwrap();
     symlink(away.path(), home.path().join("standin")).unwrap();
     let deep = pattern(&home, DEEP_PATH).expect("the deep record path reads");
     assert!(deep.found().is_empty());

@@ -160,6 +160,6 @@ fn a_record_swapped_for_a_link_is_never_read_through_it() {
     assert_eq!(reader.read().unwrap().len(), 1);
     let planted = away.write("planted.json", "[{\"turn\":1},{\"planted\":1}]", NEW);
     std::fs::remove_file(&record).unwrap();
-    std::os::unix::fs::symlink(&planted, &record).unwrap();
+    std::os::unix::fs::symlink(planted, record).unwrap();
     assert_eq!(reader.read().unwrap(), nothing());
 }

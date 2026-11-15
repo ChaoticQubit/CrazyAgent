@@ -178,7 +178,7 @@ fn a_record_swapped_for_a_link_is_never_followed_out_of_the_home() {
     assert_eq!(reader.read().unwrap().len(), 1);
     let planted = away.write("planted.jsonl", "{\"planted\":1}\n", NEW);
     std::fs::remove_file(&record).unwrap();
-    std::os::unix::fs::symlink(&planted, &record).unwrap();
+    std::os::unix::fs::symlink(planted, record).unwrap();
     assert_eq!(reader.read().unwrap(), nothing());
     let pattern = pattern(&home, STANDIN_PATH).unwrap();
     let mut later = JsonlAppend::resumed(pattern, 0);
