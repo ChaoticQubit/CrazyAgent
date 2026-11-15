@@ -1,7 +1,7 @@
 //! The engine as an MCP client to a vendor's remote server (Streamable HTTP through the app
 //! plugins curl runner). It speaks both protocol eras: per-request metadata (2026-07-28) and
-//! the older `initialize` handshake with its session id. The key is read for one request,
-//! goes only to curl's stdin and is never part of a result, an error or a log.
+//! the older `initialize` handshake with its session id. The key is read for one request
+//! and goes only to curl's stdin; this module writes it nowhere else.
 
 use crate::app_plugins::connector::{KeyAuth, McpEndpoint, Scheme};
 use crate::app_plugins::store::Bound;
