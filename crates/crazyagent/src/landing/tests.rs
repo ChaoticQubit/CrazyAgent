@@ -15628,11 +15628,11 @@ fn a_confined_work_tree_step_on_linux_takes_the_index_the_engine_rebuilds() {
 }
 
 /// SA vid 3: the index a confined Linux `read-tree -u -m` ends with is the one the engine
-/// rebuilds with no work tree, and it keeps the worktree index's modified time, so an entry racy
-/// against that index stays racy: the move lands, the index holds the target's tree, and an edit
-/// of the same size in the index's own second to a path the move leaves alone is still seen, as
-/// the step's own copy, where git checked the file, would show it. `core.checkStat=minimal` and
-/// set times keep the second fixed.
+/// rebuilds with the step's index-only form, whose git checks the work tree's files as it writes,
+/// so an entry racy against the worktree's index stays in view: the move lands, the index holds
+/// the target's tree, and an edit of the same size in the index's own second to a path the move
+/// leaves alone is still seen, while the file the move wrote is not. `core.checkStat=minimal`
+/// and set times keep the second fixed.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_confined_read_tree_on_linux_keeps_a_racy_edit_to_a_path_it_leaves_alone_in_view() {

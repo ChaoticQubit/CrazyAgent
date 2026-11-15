@@ -672,10 +672,11 @@ impl Repo {
     /// that only reads leaves the index as it was; the step itself never writes the git folder
     /// ([`Self::confined`]). A step that may write the work tree, where a link raced in can make
     /// git's own rename leave any file as the copy, never has its copy taken (SA vid 3): the folder
-    /// is emptied, the index copied afresh, and the step's index-only form, run by the engine's git
-    /// with no work tree, rebuilds it there, keeping the index's modified time so an entry racy
-    /// against the index stays racy; with no such form the step refuses. Input: the index-only
-    /// form and the step. Output: its output, git's [`INDEX_LOCKED`] exit when the lock is already
+    /// is emptied, the index copied afresh, and the step's index-only form then a quiet refresh
+    /// rebuild it there, in the same confinement but by gits that write no work-tree path, so no
+    /// link can turn their writes into that folder; they check the work tree's files, so an entry
+    /// racy against the index stays in view and the files the step wrote keep their stat data.
+    /// With no such form the step refuses. Input: the index-only form and the step. Output: its output, git's [`INDEX_LOCKED`] exit when the lock is already
     /// held, or `changes_git_failed` when the index cannot be locked, copied, rebuilt or put back.
     #[cfg(target_os = "linux")]
     pub(super) fn swapped(
@@ -740,56 +741,41 @@ impl Repo {
             });
         }
         let plain = |meta: &std::fs::Metadata| meta.file_type().is_file() && meta.nlink() == 1;
-        let fresh = || -> Option<Option<std::time::SystemTime>> {
+        let fresh = || {
             let renewed = std::fs::remove_dir_all(folder)
                 .err()
                 .is_none_or(|error| error.kind() == std::io::ErrorKind::NotFound)
                 && std::fs::create_dir(folder).is_ok();
-            if !renewed {
-                return None;
-            }
-            match std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                .open(&index)
-            {
-                Err(error) => (error.kind() == std::io::ErrorKind::NotFound).then_some(None),
-                Ok(mut real) => {
-                    let modified = real.metadata().ok().filter(plain)?.modified().ok()?;
-                    std::fs::File::create_new(copy)
-                        .and_then(|mut written| {
-                            std::io::copy(&mut real, &mut written)?;
-                            written.set_times(std::fs::FileTimes::new().set_modified(modified))
-                        })
-                        .ok()?;
-                    Some(Some(modified))
+            renewed
+                && match std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                    .open(&index)
+                {
+                    Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                    Ok(mut real) => match real.metadata() {
+                        Ok(meta) if plain(&meta) => std::fs::File::create_new(copy)
+                            .and_then(|mut written| {
+                                std::io::copy(&mut real, &mut written)?;
+                                let modified =
+                                    std::fs::FileTimes::new().set_modified(meta.modified()?);
+                                written.set_times(modified)
+                            })
+                            .is_ok(),
+                        _ => false,
+                    },
                 }
-            }
         };
-        let rebuilt = |args: &[&str]| {
-            let Some(modified) = fresh() else {
-                return false;
-            };
-            let alone = Self {
-                work_tree: None,
-                confinement: Vec::new(),
-                ..self.clone()
-            };
-            alone
-                .spawned(args, None, &[], 4096)
-                .is_ok_and(|output| output.code == 0 && !output.overflow)
-                && modified.is_none_or(|modified| {
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                        .open(copy)
-                        .and_then(|file| {
-                            file.set_times(std::fs::FileTimes::new().set_modified(modified))
-                        })
-                        .is_ok()
-                })
+        let rebuilt = |index_only: &[&str]| {
+            fresh()
+                && [index_only, ["update-index", "-q", "--refresh"].as_slice()]
+                    .into_iter()
+                    .all(|run| {
+                        self.spawned(run, None, &[], 4096)
+                            .is_ok_and(|output| output.code == 0 && !output.overflow)
+                    })
         };
-        let copied = fresh().is_some();
+        let copied = fresh();
         let identity = |meta: &std::fs::Metadata| (meta.dev(), meta.ino());
         let ran = if copied {
             let before = std::fs::symlink_metadata(copy)
