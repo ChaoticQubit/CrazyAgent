@@ -1049,7 +1049,7 @@ fn seed(
 fn effective_events(connection: &mut Connection, root: &Path, project: &str) -> Vec<String> {
     let project = crate::protocol::ProjectId::new(project).unwrap();
     let tx = connection.transaction().unwrap();
-    let hooks = plugins::effective_hooks(&tx, root, &project).unwrap();
+    let hooks = plugins::effective_hooks(&tx, root, &project, &[]).unwrap();
     for hook in &hooks {
         assert!(hook.folder.join("hooks/start.sh").is_file(), "{hook:?}");
     }
@@ -1166,7 +1166,7 @@ fn seeded_hooks_follow_their_entry_and_turn_off_per_hook_per_project_or_with_the
     let folders: Vec<PathBuf> = {
         let tx = connection.transaction().unwrap();
         let project = crate::protocol::ProjectId::new("project-2").unwrap();
-        plugins::effective_hooks(&tx, root, &project)
+        plugins::effective_hooks(&tx, root, &project, &[])
             .unwrap()
             .into_iter()
             .map(|hook| hook.folder)
