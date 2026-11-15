@@ -143,7 +143,7 @@ impl Bridge {
             fd,
             &[IoSlice::new(&text)],
             &[ControlMessage::ScmRights(&fds)],
-            MsgFlags::empty(),
+            MsgFlags::MSG_NOSIGNAL,
             None,
         );
         let mut answer = [0u8; 1];
