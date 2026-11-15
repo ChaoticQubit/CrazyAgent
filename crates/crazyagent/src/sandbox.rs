@@ -4490,14 +4490,20 @@ fn any_depth_git(root: &Path) -> String {
 
 /// The base write denies a profile gives again after it grants writes once more to the agent
 /// home and other folders, as the IDE profile does for its server's data folders: each one
-/// pinned ([`root_pin`]), no `.git` at any depth in any of them ([`any_depth_git`]), and the
-/// home's launch files ([`launch_denies`]), never [`agent_config_denies`], since that home
-/// is one the owner keeps ([`ProjectSandbox::keep_owner_config`], RV-DS241-188). They must
-/// follow that grant, since the last match wins. Inputs: the home and the other folders.
-/// Output: the rule text.
+/// pinned ([`root_pin`]), no `.git` at any depth in any of them ([`any_depth_git`]), the
+/// home's launch files ([`launch_denies`]) and no flag or ACL on anything in the home, which
+/// the engine walks and rewrites before each start, so none keeps the owner's IDE from
+/// starting (rv-sa241 b8 L1); never [`agent_config_denies`], since that home is one the
+/// owner keeps ([`ProjectSandbox::keep_owner_config`], RV-DS241-188). They must follow that
+/// grant, since the last match wins. Inputs: the home and the other folders. Output: the
+/// rule text.
 #[cfg(unix)]
 pub(crate) fn regranted_denies(home: &Path, folders: &[&Path]) -> String {
     let mut text = launch_denies(home);
+    text.push_str(&format!(
+        "(deny file-write-flags file-write-acl (regex #\"^{}(/.*)?$\"))\n",
+        seatbelt_pattern(home)
+    ));
     let mut nested = String::new();
     for root in std::iter::once(home).chain(folders.iter().copied()) {
         text.push_str(&root_pin(root));
