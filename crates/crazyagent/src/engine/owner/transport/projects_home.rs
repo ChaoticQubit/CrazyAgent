@@ -279,14 +279,17 @@ pub(super) fn regranted(
     }
 }
 
-/// Whether a Delete everything's folders reached the Trash, so a project whose records
-/// stay keeps its mark as "A delete was cut short" instead of Failed. Inputs: the delete's
-/// disk outcome, Ok when every folder moved or the refusal code, None when it gave none,
-/// and whether its disk work ran. Output: the answer, which [`settle_delete`] and
-/// [`disk_changed`] read.
+/// Whether any of a Delete everything's folders may be in the Trash, so a project whose
+/// records stay keeps its mark as "A delete was cut short" instead of Failed: every folder
+/// moved, some moved before a later one failed (`delete_trash_partial`), or its admitted disk
+/// work gave no outcome, its blocking task panicked or cancelled (RV-DS241-141). Inputs: the
+/// disk outcome or None, and whether the disk work ran. Output: the answer.
 pub(super) fn reached_trash(outcome: Option<Result<(), &str>>, ran: bool) -> bool {
-    let _ = ran;
-    matches!(outcome, Some(Ok(())))
+    match outcome {
+        Some(Ok(())) => true,
+        Some(Err(code)) => code == "delete_trash_partial",
+        None => ran,
+    }
 }
 
 /// Whether the disk changed before the first grant check of an answer: a Delete whose
