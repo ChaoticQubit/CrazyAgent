@@ -119,10 +119,15 @@ fn a_wal_database_is_read_live_and_closed_without_side_files_made() {
     assert_eq!(std::fs::read(&path).unwrap(), database_bytes);
     assert_eq!(std::fs::read(&wal).unwrap(), wal_bytes);
     drop(writer);
-    assert!(
-        !wal.exists(),
-        "the harness's close checkpoints and removes its WAL"
-    );
+    match std::fs::metadata(&wal) {
+        Ok(kept) => assert_eq!(kept.len(), 0, "the harness's close checkpoints its WAL"),
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+    }
+    for kept in ["record.db-wal", "record.db-shm"] {
+        if let Err(error) = std::fs::remove_file(tmp.path().join(kept)) {
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        }
+    }
     let before = folder(tmp.path());
     let mut closed = SqlitePoll::new(path.clone(), &SCHEMA, 0);
     assert_eq!(closed.read().unwrap(), turn_events());
@@ -384,4 +389,27 @@ fn a_virtual_table_under_a_schema_name_is_refused() {
     let read = SqlitePoll::new(path, &SCHEMA, 0).read();
 
     assert_eq!(read.map_err(|error| error.0), Err(VERSION_UNKNOWN));
+}
+
+/// Review t15-code F7: one read gives at most its text bound, and the row that would pass it
+/// is not passed over: the next read starts with it.
+#[test]
+fn the_row_past_the_read_text_bound_waits_for_the_next_read() {
+    let tmp = root();
+    let path = tmp.path().join("record.db");
+    let writer = database(&path, 3);
+    let long = "x".repeat(ROW_TEXT_BYTES_MAX);
+    let rows = vec![("text", Some(long.as_str())); READ_TEXT_BYTES_MAX / ROW_TEXT_BYTES_MAX + 1];
+    add(&writer, &rows);
+    drop(writer);
+    let mut reader = SqlitePoll::new(path, &SCHEMA, 0);
+
+    let first = reader.read().unwrap();
+    let after_first = reader.after();
+    let second = reader.read().unwrap();
+
+    assert_eq!(first.len(), READ_TEXT_BYTES_MAX / ROW_TEXT_BYTES_MAX);
+    assert_eq!(after_first, i64::try_from(first.len()).unwrap());
+    assert_eq!(second, vec![TranscriptEvent::Text { text: long }]);
+    assert_eq!(reader.after(), after_first + 1);
 }

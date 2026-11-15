@@ -13,7 +13,7 @@ fn ended(reply: &str) -> Vec<TranscriptEvent> {
 #[test]
 fn a_turn_ends_once_the_screen_is_quiet_on_the_prompt_mark() {
     let start = Instant::now();
-    let mut screen = ScreenReader::new("> ");
+    let mut screen = ScreenReader::new("> ").unwrap();
     let done = b"> earlier\nold\n> hello\nHi there.\nBye.\n>\n\n\n";
 
     let idle = screen.observe(b"> earlier\nold\n> \n", start);
@@ -38,7 +38,7 @@ fn a_turn_ends_once_the_screen_is_quiet_on_the_prompt_mark() {
 #[test]
 fn a_quiet_screen_without_an_empty_prompt_mark_keeps_the_turn_open() {
     let start = Instant::now();
-    let mut screen = ScreenReader::new("> ");
+    let mut screen = ScreenReader::new("> ").unwrap();
     let started = screen.turn_started(start);
 
     screen.observe(b"> \n", start);
@@ -59,7 +59,7 @@ fn a_quiet_screen_without_an_empty_prompt_mark_keeps_the_turn_open() {
 #[test]
 fn the_turn_does_not_end_before_the_screen_changes() {
     let start = Instant::now();
-    let mut screen = ScreenReader::new("> ");
+    let mut screen = ScreenReader::new("> ").unwrap();
     let before = b"> one\nold reply\n> \n";
     let after = b"> one\nold reply\n> two\nnew reply\n> \n";
 
@@ -78,11 +78,12 @@ fn the_turn_does_not_end_before_the_screen_changes() {
 #[test]
 fn the_reply_keeps_to_its_text_bound() {
     let start = Instant::now();
-    let mut screen = ScreenReader::new("> ");
+    let mut screen = ScreenReader::new("> ").unwrap();
     let line = format!("{}\n", "é".repeat(40));
     let lines = line.repeat(SCREEN_TEXT_BYTES_MAX / line.len() + 8);
     let full = format!("> go\n{lines}> \n");
 
+    screen.observe(b"> \n", start);
     screen.turn_started(start);
     screen.observe(full.as_bytes(), start);
     let events = screen.observe(full.as_bytes(), start + QUIET);
@@ -102,9 +103,10 @@ fn the_reply_keeps_to_its_text_bound() {
 #[test]
 fn a_screen_past_its_byte_bound_is_read_from_its_end() {
     let start = Instant::now();
-    let mut screen = ScreenReader::new("> ");
+    let mut screen = ScreenReader::new("> ").unwrap();
     let full = format!("{}> go\nreply\n> \n", "x\n".repeat(SCREEN_BYTES_MAX));
 
+    screen.observe(b"> \n", start);
     screen.turn_started(start);
     screen.observe(full.as_bytes(), start);
     let events = screen.observe(full.as_bytes(), start + QUIET);
@@ -116,11 +118,44 @@ fn a_screen_past_its_byte_bound_is_read_from_its_end() {
 #[test]
 fn no_open_turn_gives_no_facts() {
     let start = Instant::now();
-    let mut screen = ScreenReader::new("> ");
+    let mut screen = ScreenReader::new("> ").unwrap();
 
     let first = screen.observe(b"> hi\nreply\n> \n", start);
     let quiet = screen.observe(b"> hi\nreply\n> \n", start + QUIET * 2);
 
     assert_eq!(first, Vec::new());
     assert_eq!(quiet, Vec::new());
+}
+
+/// Review t15-code F5: the first capture after a fresh reader opens a turn is the screen the
+/// turn is measured from, so an idle screen that never changes never ends that turn.
+#[test]
+fn a_fresh_readers_first_capture_is_its_baseline() {
+    let start = Instant::now();
+    let mut screen = ScreenReader::new("> ").unwrap();
+
+    screen.turn_started(start);
+    let first = screen.observe(b"> \n", start);
+    let quiet = screen.observe(b"> \n", start + QUIET * 4);
+    let changed = screen.observe(b"> hi\nHello.\n> \n", start + QUIET * 5);
+    let ended_turn = screen.observe(b"> hi\nHello.\n> \n", start + QUIET * 6);
+
+    assert_eq!(first, Vec::new());
+    assert_eq!(quiet, Vec::new());
+    assert_eq!(changed, Vec::new());
+    assert_eq!(ended_turn, ended("Hello."));
+}
+
+/// Review t15-code F6: a prompt mark that is blank or past its bound gives no reader, so a
+/// manifest value never trips an assertion.
+#[test]
+fn a_blank_or_long_prompt_mark_gives_no_reader() {
+    let longest = "m".repeat(MARK_BYTES_MAX);
+    let long = "m".repeat(MARK_BYTES_MAX + 1);
+
+    let refused = ["", "   ", long.as_str()].map(|mark| ScreenReader::new(mark).is_none());
+
+    assert_eq!(refused, [true, true, true]);
+    assert!(ScreenReader::new(&longest).is_some());
+    assert!(ScreenReader::new("> ").is_some());
 }

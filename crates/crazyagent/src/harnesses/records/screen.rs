@@ -28,14 +28,14 @@ impl ScreenReader {
     /// A reader for one prompt mark. Input: the manifest's `prompt_mark`, 1 to
     /// [`MARK_BYTES_MAX`] bytes and not only spaces, which the caller checks. Output: the
     /// reader.
-    pub fn new(mark: &str) -> Self {
+    pub fn new(mark: &str) -> Option<Self> {
         assert!(!mark.trim_end().is_empty() && mark.len() <= MARK_BYTES_MAX);
-        Self {
+        Some(Self {
             mark: mark.to_owned(),
             last: Vec::new(),
             changed: None,
             turn: None,
-        }
+        })
     }
 
     /// Opens a turn once the session has typed a prompt. Input: the time now. Output: the
