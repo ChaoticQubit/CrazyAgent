@@ -1,0 +1,36 @@
+ [◆▪◆▪] CrazyAgent  /  Keep awake                                                                         Awake, lid OK 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  State               Awake, lid OK                                                                                     
+  Lid closed          Hold on AC power only                                                                             
+                                                                                                                        
+  1  Start 1 h          e  Extend 1 h                                                                                   
+  4  Start 4 h          x  End now                                                                                      
+  c  Custom time                                                                                                        
+                                                                                                                        
+  m  Mode             [Auto]  Manual   Off                                                                              
+  l  Lid closed       Hold on AC power only                                                                             
+     Ends by itself   At 10% battery, critical heat, or 24 h                                                            
+                                                                                                                        
+  s  All Keep awake settings                                                                                            
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ Esc Back                                                                                                        ? Help 

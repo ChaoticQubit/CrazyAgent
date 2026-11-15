@@ -2375,6 +2375,612 @@ fn the_tui_saves_the_days_done_items_stay() {
     );
 }
 
+/// The Keep awake rows (DEC-167 Task 6): the header segment, the Keep awake screen's keys
+/// and one row per option of every setting, each on a real engine and read back from it.
+/// A timer row takes the engine's real hold for a moment and ends it before the engine
+/// stops; no row changes a power setting of this computer. The timer rows need AC power,
+/// since a hold on a low battery ends by itself.
+mod keep_awake {
+    use super::*;
+    use crazyagent::keep_awake::{
+        BatteryFloor, Cap, DisplayAwake, Grace, HeatEnd, HeatNotice, KeepAwakeAction,
+        KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, Mode, Reason, Want,
+    };
+
+    const KEEP_AWAKE_PROJECT: &str = "e2e-keep-awake";
+    const MINUTE_MS: i64 = 60_000;
+    const SLACK_MS: i64 = 120_000;
+    const SETTLE: Duration = Duration::from_secs(20);
+    const RESTING: &str = "Keep awake: auto, nothing running";
+
+    fn now_ms() -> i64 {
+        let elapsed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        i64::try_from(elapsed.as_millis()).unwrap()
+    }
+
+    /// Sends one Keep awake change as the owner, the way another client does while the TUI
+    /// runs, and expects it applied. Inputs: the runtime, the engine and the change.
+    /// Output: none; panics when the engine refuses it.
+    fn change(runtime: &tokio::runtime::Runtime, engine: &Engine, action: KeepAwakeAction) {
+        runtime.block_on(async {
+            let mut owner = Owner::attach(engine).await;
+            let generation = owner.next();
+            let response = owner
+                .controller
+                .keep_awake_action(action, generation)
+                .await
+                .unwrap();
+            owner.controller.detach();
+            assert_eq!(result(response), OwnerResult::Applied);
+        });
+    }
+
+    /// Reads Keep awake from the engine as the owner. Inputs: the runtime and the engine.
+    /// Output: the view the engine holds now.
+    fn view(runtime: &tokio::runtime::Runtime, engine: &Engine) -> KeepAwakeView {
+        runtime.block_on(async {
+            let mut owner = Owner::attach(engine).await;
+            let view = owner.controller.keep_awake().await.unwrap();
+            owner.controller.detach();
+            view
+        })
+    }
+
+    /// Waits until the engine's Keep awake view passes a check, reading every 100 ms for at
+    /// most 20 s. Inputs: the runtime, the engine, what is waited for and the check.
+    /// Output: the first view that passes; panics with the last view otherwise.
+    fn settled(
+        runtime: &tokio::runtime::Runtime,
+        engine: &Engine,
+        what: &str,
+        check: impl Fn(&KeepAwakeView) -> bool,
+    ) -> KeepAwakeView {
+        let deadline = Instant::now() + SETTLE;
+        loop {
+            let seen = view(runtime, engine);
+            if check(&seen) {
+                return seen;
+            }
+            assert!(Instant::now() < deadline, "{what} never came: {seen:?}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Starts an engine with a profile, a home and one idle project, applies `seed` as
+    /// another client, opens the TUI on the Keep awake screen with W and lets `drive` use
+    /// it. Inputs: the changes made first and what to do on the screen. Output: the view
+    /// the engine holds after `drive`; a hold still running then is ended before the
+    /// engine stops.
+    fn on_screen(
+        seed: &[KeepAwakeAction],
+        drive: impl FnOnce(&Pty, &tokio::runtime::Runtime, &Engine),
+    ) -> KeepAwakeView {
+        let mut engine = Engine::start("ca-e2e-keep-awake-");
+        let tmux = installed(engine.path()).expect(TMUX);
+        let disk = scratch("ca-e2e-keep-awake-home-");
+        let home = disk.path().join("Projects");
+        std::fs::create_dir(&home).unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+            assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+            assert_eq!(
+                owner.create_project(KEEP_AWAKE_PROJECT, PROJECT).await,
+                OwnerResult::Applied
+            );
+            owner.controller.detach();
+        });
+        for action in seed {
+            change(&runtime, &engine, *action);
+        }
+        let pty = Pty::launch(tmux, &engine.socket());
+        reach_home(&pty, |screen| at_home(screen, PROJECT));
+        pty.keys(&["W"]);
+        pty.until("W opens the Keep awake screen", |screen| {
+            header_row(screen).contains("/  Keep awake")
+                && screen.contains("All Keep awake settings")
+        });
+        drive(&pty, &runtime, &engine);
+        let after = view(&runtime, &engine);
+        if after.state.want != Want::Nothing {
+            change(&runtime, &engine, KeepAwakeAction::End);
+        }
+        drop(pty);
+        engine.stop();
+        after
+    }
+
+    /// Checks that a manual timer runs and ends about `minutes` from now. Inputs: the view
+    /// and the minutes. Output: none; panics otherwise.
+    fn assert_timer(view: &KeepAwakeView, minutes: i64) {
+        assert_eq!(view.state.reason, Reason::Timer, "{view:?}");
+        assert_ne!(view.state.want, Want::Nothing, "{view:?}");
+        let left = view.state.ends_at_ms.expect("a timer has an end") - now_ms();
+        assert!(
+            left <= minutes * MINUTE_MS && left > minutes * MINUTE_MS - SLACK_MS,
+            "{left} ms left of {minutes} minutes"
+        );
+    }
+
+    fn timer_runs(view: &KeepAwakeView) -> bool {
+        view.state.reason == Reason::Timer && view.state.want != Want::Nothing
+    }
+
+    /// Stores `seed`, opens Settings / Keep awake with s, moves down `row` settings, picks
+    /// the next option with Right, saves with Enter and reads back what the engine holds.
+    /// Inputs: the settings stored first and the setting's place on the page. Output: the
+    /// settings after the save; panics when the page or the save never shows.
+    fn saved_after(seed: KeepAwakeSettings, row: usize) -> KeepAwakeSettings {
+        assert!(row < 9);
+        let after = on_screen(&[KeepAwakeAction::Set { settings: seed }], |pty, _, _| {
+            pty.keys(&["s"]);
+            pty.until("s opens Settings / Keep awake", |screen| {
+                header_row(screen).contains("Settings  /  Keep awake")
+                    && screen.contains("When it holds")
+            });
+            for _ in 0..row {
+                pty.keys(&["Down"]);
+            }
+            pty.keys(&["Right"]);
+            pty.until("the pick waits for Enter", |screen| {
+                screen.contains("Save changes")
+            });
+            pty.keys(&["Enter"]);
+            pty.until("the save is confirmed", |screen| {
+                screen.contains("Keep awake settings saved.")
+            });
+        });
+        after.settings
+    }
+
+    /// One option row: with the option before it stored, Right on its setting picks it and
+    /// Enter saves it, every other setting left at its default. Inputs: the setting's place
+    /// on the page, the stored option and the option the row proves. Output: none.
+    fn option_row(
+        row: usize,
+        seed: impl FnOnce(&mut KeepAwakeSettings),
+        want: impl FnOnce(&mut KeepAwakeSettings),
+    ) {
+        let mut seeded = KeepAwakeSettings::DEFAULT;
+        seed(&mut seeded);
+        let mut wanted = KeepAwakeSettings::DEFAULT;
+        want(&mut wanted);
+        assert_ne!(seeded, wanted, "the row starts away from its option");
+        assert_eq!(saved_after(seeded, row), wanted);
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_mode_auto() {
+        option_row(
+            0,
+            |settings| settings.mode = Mode::Off,
+            |settings| settings.mode = Mode::Auto,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_mode_manual() {
+        option_row(
+            0,
+            |settings| settings.mode = Mode::Auto,
+            |settings| settings.mode = Mode::Manual,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_mode_off() {
+        option_row(
+            0,
+            |settings| settings.mode = Mode::Manual,
+            |settings| settings.mode = Mode::Off,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_grace_none() {
+        option_row(
+            1,
+            |settings| settings.grace = Grace::Min30,
+            |settings| settings.grace = Grace::Min0,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_grace_five_minutes() {
+        option_row(
+            1,
+            |settings| settings.grace = Grace::Min0,
+            |settings| settings.grace = Grace::Min5,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_grace_ten_minutes() {
+        option_row(
+            1,
+            |settings| settings.grace = Grace::Min5,
+            |settings| settings.grace = Grace::Min10,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_grace_thirty_minutes() {
+        option_row(
+            1,
+            |settings| settings.grace = Grace::Min10,
+            |settings| settings.grace = Grace::Min30,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_cap_four_hours() {
+        option_row(
+            2,
+            |settings| settings.cap = Cap::None,
+            |settings| settings.cap = Cap::H4,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_cap_eight_hours() {
+        option_row(
+            2,
+            |settings| settings.cap = Cap::H4,
+            |settings| settings.cap = Cap::H8,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_cap_a_day() {
+        option_row(
+            2,
+            |settings| settings.cap = Cap::H8,
+            |settings| settings.cap = Cap::H24,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_cap_no_limit() {
+        option_row(
+            2,
+            |settings| settings.cap = Cap::H24,
+            |settings| settings.cap = Cap::None,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_lid_on_ac_power_only() {
+        option_row(
+            3,
+            |settings| settings.lid = LidRule::Off,
+            |settings| settings.lid = LidRule::AcOnly,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_lid_always() {
+        option_row(
+            3,
+            |settings| settings.lid = LidRule::AcOnly,
+            |settings| settings.lid = LidRule::Always,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_lid_off() {
+        option_row(
+            3,
+            |settings| settings.lid = LidRule::Always,
+            |settings| settings.lid = LidRule::Off,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_lid_display_sleep() {
+        option_row(
+            4,
+            |settings| settings.lid_display = LidDisplay::LeaveOn,
+            |settings| settings.lid_display = LidDisplay::Sleep,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_lid_display_leave_on() {
+        option_row(
+            4,
+            |settings| settings.lid_display = LidDisplay::Sleep,
+            |settings| settings.lid_display = LidDisplay::LeaveOn,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_battery_floor_off() {
+        option_row(
+            5,
+            |settings| settings.battery_floor = BatteryFloor::Pct20,
+            |settings| settings.battery_floor = BatteryFloor::Off,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_battery_floor_five_percent() {
+        option_row(
+            5,
+            |settings| settings.battery_floor = BatteryFloor::Off,
+            |settings| settings.battery_floor = BatteryFloor::Pct5,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_battery_floor_ten_percent() {
+        option_row(
+            5,
+            |settings| settings.battery_floor = BatteryFloor::Pct5,
+            |settings| settings.battery_floor = BatteryFloor::Pct10,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_battery_floor_twenty_percent() {
+        option_row(
+            5,
+            |settings| settings.battery_floor = BatteryFloor::Pct10,
+            |settings| settings.battery_floor = BatteryFloor::Pct20,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_heat_end_critical() {
+        option_row(
+            6,
+            |settings| settings.heat_end = HeatEnd::Never,
+            |settings| settings.heat_end = HeatEnd::Critical,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_heat_end_serious() {
+        option_row(
+            6,
+            |settings| settings.heat_end = HeatEnd::Critical,
+            |settings| settings.heat_end = HeatEnd::Serious,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_heat_end_never() {
+        option_row(
+            6,
+            |settings| settings.heat_end = HeatEnd::Serious,
+            |settings| settings.heat_end = HeatEnd::Never,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_heat_notice_at_serious_heat() {
+        option_row(
+            7,
+            |settings| settings.heat_notice = HeatNotice::Off,
+            |settings| settings.heat_notice = HeatNotice::Serious,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_heat_notice_off() {
+        option_row(
+            7,
+            |settings| settings.heat_notice = HeatNotice::Serious,
+            |settings| settings.heat_notice = HeatNotice::Off,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_display_awake_off() {
+        option_row(
+            8,
+            |settings| settings.display_awake = DisplayAwake::WhileHolding,
+            |settings| settings.display_awake = DisplayAwake::Off,
+        );
+    }
+
+    #[test]
+    fn the_tui_saves_keep_awake_display_awake_while_holding() {
+        option_row(
+            8,
+            |settings| settings.display_awake = DisplayAwake::Off,
+            |settings| settings.display_awake = DisplayAwake::WhileHolding,
+        );
+    }
+
+    #[test]
+    fn the_tui_header_shows_keep_awake_before_the_counts_and_follows_a_timer() {
+        let before_counts = |header: &str, label: &str| {
+            let Some(at) = header.find(label) else {
+                return false;
+            };
+            ["unread", "pending"]
+                .iter()
+                .filter_map(|word| header.find(word))
+                .all(|count| count > at)
+        };
+        on_screen(&[], |pty, _, _| {
+            pty.until("the header names the resting state", |screen| {
+                before_counts(header_row(screen), RESTING)
+            });
+            pty.keys(&["1"]);
+            pty.until("the header follows the timer", |screen| {
+                let header = header_row(screen);
+                before_counts(header, "Awake, 1h left") || before_counts(header, "Awake, 59m left")
+            });
+            pty.keys(&["Escape"]);
+            pty.until(
+                "Esc returns to Home with the timer in the header",
+                |screen| at_home(screen, PROJECT) && header_row(screen).contains("Awake, "),
+            );
+            pty.keys(&["W"]);
+            pty.until("W opens the screen again", |screen| {
+                screen.contains("All Keep awake settings")
+            });
+            pty.keys(&["x"]);
+            pty.until("the header rests again after End", |screen| {
+                before_counts(header_row(screen), RESTING)
+            });
+        });
+    }
+
+    #[test]
+    fn the_tui_keep_awake_screen_starts_a_one_hour_timer() {
+        let after = on_screen(&[], |pty, runtime, engine| {
+            pty.keys(&["1"]);
+            settled(runtime, engine, "a timer", timer_runs);
+        });
+        assert_timer(&after, 60);
+    }
+
+    #[test]
+    fn the_tui_keep_awake_screen_starts_a_four_hour_timer() {
+        let after = on_screen(&[], |pty, runtime, engine| {
+            pty.keys(&["4"]);
+            settled(runtime, engine, "a timer", timer_runs);
+        });
+        assert_timer(&after, 240);
+    }
+
+    #[test]
+    fn the_tui_keep_awake_screen_starts_a_custom_timer() {
+        let after = on_screen(&[], |pty, runtime, engine| {
+            pty.keys(&["c"]);
+            pty.until("c opens the minutes field", |screen| {
+                screen.contains("Type minutes")
+            });
+            pty.text("90");
+            pty.keys(&["Enter"]);
+            settled(runtime, engine, "a timer", timer_runs);
+        });
+        assert_timer(&after, 90);
+    }
+
+    #[test]
+    fn the_tui_keep_awake_screen_refuses_custom_minutes_out_of_bounds() {
+        let after = on_screen(&[], |pty, _, _| {
+            pty.keys(&["c"]);
+            pty.until("c opens the minutes field", |screen| {
+                screen.contains("Type minutes")
+            });
+            pty.text("1441");
+            pty.keys(&["Enter"]);
+            pty.until("the bounds are named", |screen| {
+                screen.contains("Enter whole minutes from 1 to 1440.")
+            });
+        });
+        assert_eq!(after.state.want, Want::Nothing, "{after:?}");
+    }
+
+    #[test]
+    fn the_tui_keep_awake_screen_extends_a_running_timer_by_an_hour() {
+        let seed = [KeepAwakeAction::Start { minutes: 60 }];
+        let after = on_screen(&seed, |pty, runtime, engine| {
+            pty.keys(&["e"]);
+            settled(runtime, engine, "the later end", |view| {
+                view.state
+                    .ends_at_ms
+                    .is_some_and(|end| end - now_ms() > 61 * MINUTE_MS)
+            });
+        });
+        assert_timer(&after, 120);
+    }
+
+    #[test]
+    fn the_tui_keep_awake_screen_says_extend_needs_a_timer() {
+        let after = on_screen(&[], |pty, _, _| {
+            pty.keys(&["e"]);
+            pty.until("Extend names what it needs", |screen| {
+                screen.contains("Extend works while a timer runs. Start one first.")
+            });
+        });
+        assert_eq!(after.state.want, Want::Nothing, "{after:?}");
+    }
+
+    #[test]
+    fn the_tui_keep_awake_screen_ends_a_hold() {
+        let seed = [KeepAwakeAction::Start { minutes: 60 }];
+        let after = on_screen(&seed, |pty, runtime, engine| {
+            settled(runtime, engine, "the seeded timer", timer_runs);
+            pty.keys(&["x"]);
+            settled(runtime, engine, "the end", |view| {
+                view.state.want == Want::Nothing
+            });
+        });
+        assert_eq!(after.state.want, Want::Nothing, "{after:?}");
+        assert_ne!(after.state.reason, Reason::Timer, "{after:?}");
+    }
+
+    #[test]
+    fn the_tui_keep_awake_screen_saves_the_next_mode_at_once() {
+        let after = on_screen(&[], |pty, runtime, engine| {
+            pty.keys(&["m"]);
+            settled(runtime, engine, "mode Manual", |view| {
+                view.settings.mode == Mode::Manual
+            });
+        });
+        let want = KeepAwakeSettings {
+            mode: Mode::Manual,
+            ..KeepAwakeSettings::DEFAULT
+        };
+        assert_eq!(after.settings, want);
+    }
+
+    #[test]
+    fn the_tui_keep_awake_screen_saves_the_next_lid_rule_at_once() {
+        let after = on_screen(&[], |pty, runtime, engine| {
+            pty.keys(&["l"]);
+            settled(runtime, engine, "lid rule Always", |view| {
+                view.settings.lid == LidRule::Always
+            });
+        });
+        let want = KeepAwakeSettings {
+            lid: LidRule::Always,
+            ..KeepAwakeSettings::DEFAULT
+        };
+        assert_eq!(after.settings, want);
+    }
+
+    #[test]
+    fn the_tui_keep_awake_save_keeps_a_change_another_client_made_meanwhile() {
+        let theirs = KeepAwakeSettings {
+            cap: Cap::H4,
+            ..KeepAwakeSettings::DEFAULT
+        };
+        let after = on_screen(&[], |pty, runtime, engine| {
+            pty.keys(&["s"]);
+            pty.until("s opens Settings / Keep awake", |screen| {
+                header_row(screen).contains("Settings  /  Keep awake")
+                    && screen.contains("When it holds")
+            });
+            pty.keys(&["Down", "Right"]);
+            pty.until("the pick waits for Enter", |screen| {
+                screen.contains("Save changes")
+            });
+            change(runtime, engine, KeepAwakeAction::Set { settings: theirs });
+            pty.keys(&["Enter"]);
+            pty.until("the save is confirmed", |screen| {
+                screen.contains("Keep awake settings saved.")
+            });
+        });
+        let want = KeepAwakeSettings {
+            grace: Grace::Min30,
+            ..theirs
+        };
+        assert_eq!(after.settings, want);
+    }
+}
+
 /// The Models page rows (DEC-150): each model choice option the TUI offers, on a real engine
 /// whose PATH starts with stand-in `claude`, `opencode` and `crazyagent-rcli` files and whose
 /// HOME is scratch, checked on screen and in the engine.
