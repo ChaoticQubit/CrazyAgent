@@ -2400,6 +2400,47 @@ fn publish_job_started_again_keeps_the_paths_publish_wrote_for_its_commit() {
 }
 
 #[test]
+fn publish_job_checks_the_files_publish_wrote_on_a_project_with_history() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    git(&["init", "--quiet", "--initial-branch=main"], &project);
+    git(&["add", "main.rs"], &project);
+    git(&["commit", "--quiet", "-m", "first"], &project);
+    git(&["config", "hook.mark.event", "pre-commit"], &project);
+    git(&["config", "hook.mark.command", "/usr/bin/true"], &project);
+    account.publish_start(&project, &plan("tool")).unwrap();
+    let stopped = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert_eq!(stopped.step, GitHubPublishStep::Checked);
+    assert_eq!(stopped.written, [".gitignore"]);
+    git(&["config", "--remove-section", "hook.mark"], &project);
+    let ignore = project.join(".gitignore");
+    let mut text = std::fs::read_to_string(&ignore).unwrap();
+    text.push_str(&format!("token {LEAKED}\n"));
+    std::fs::write(&ignore, text).unwrap();
+    let continued = account
+        .publish_continue(&project, owner_home.path())
+        .unwrap();
+    assert!(
+        matches!(
+            &continued.step,
+            GitHubPublishStep::Blocked { scan }
+                if scan.findings.len() == 1
+                    && scan.findings[0].path == ".gitignore"
+                    && scan.findings[0].kind == GitHubSecretKind::Token
+        ),
+        "{continued:?}"
+    );
+    assert!(creates(&server).is_empty());
+}
+
+#[test]
 fn publish_job_stopped_at_create_goes_on_and_knows_the_repository_it_made() {
     let scratch = Scratch::new();
     let secret_text = token();
