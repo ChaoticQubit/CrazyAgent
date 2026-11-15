@@ -109,15 +109,15 @@ pub enum Reason {
 }
 
 /// What ended a hold: the battery floor with the percent read, a battery that could not be
-/// read, heat, the cap, the timer or the owner's End, mode Off, or a hold the platform
-/// dropped.
+/// read, heat, the cap with the hours the hold ran under, the timer or the owner's End, mode
+/// Off, or a hold the platform dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EndReason {
     Battery { pct: u8 },
     BatteryUnread,
     Heat,
-    Cap,
+    Cap { hours: u8 },
     Manual,
     Off,
     HoldLost,
@@ -209,7 +209,9 @@ pub fn decide(settings: &KeepAwakeSettings, inputs: &Inputs) -> Decision {
 fn floor(settings: &KeepAwakeSettings, inputs: &Inputs, cap_end: Option<i64>) -> Option<EndReason> {
     let sensors = &inputs.sensors;
     if cap_end.is_some_and(|end| inputs.now_ms >= end) {
-        return Some(EndReason::Cap);
+        let hours = settings.cap.hours().expect("a cap end comes from a cap");
+        assert!((1..=24).contains(&hours));
+        return Some(EndReason::Cap { hours });
     }
     let too_hot = match settings.heat_end {
         HeatEnd::Critical => sensors.heat == Heat::Critical,

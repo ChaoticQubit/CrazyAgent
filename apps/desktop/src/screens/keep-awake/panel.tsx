@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { MINUTES_MAX, MINUTES_MIN, sendKeepAwake, type KeepAwakeAction, type KeepAwakeMode, type KeepAwakeView } from "../../api-keep-awake";
 import type { Loaded } from "../../state";
 import { Button, LoadError, NotReady, Skeleton, formatRoute } from "../../ui";
-import { canEnd, canExtend, customMinutes, endsByItself, lidClosedLine, lidReason, panelLine } from "./model";
+import { canEnd, canExtend, canStart, customMinutes, endsByItself, lidClosedLine, lidReason, panelLine } from "./model";
 import "../notifications/notifications.css";
 import "./keep-awake.css";
 
@@ -56,7 +56,7 @@ function PanelFacts({ view, busy, onMode }: { view: KeepAwakeView; busy: boolean
 
 /** The panel the Keep awake control opens, as a view of its state: what holds, Start 1 h,
  * Start 4 h, Custom, Extend 1 h and End now, the mode, the lid and end lines, and the link to
- * the settings (DEC-167 addendum 5). Inputs: the view read, now in milliseconds, whether the
+ * the settings (DEC-167 addendum 5). In mode Off the Starts are off and one line says why. Inputs: the view read, now in milliseconds, whether the
  * custom field is open, its text, a lock flag, the last problem and the handlers. Output:
  * the dialog. */
 export function KeepAwakePanelView({ view, now, custom, typed, busy, problem, onStart, onCustom, onType, onExtend, onEnd, onMode, onRetry, onClose }: {
@@ -76,6 +76,7 @@ export function KeepAwakePanelView({ view, now, custom, typed, busy, problem, on
   onClose?: () => void;
 }) {
   const loaded = view.kind === "ok" ? view.value : null;
+  const startable = loaded !== null && canStart(loaded);
   return <section className="keep-awake-panel" role="dialog" aria-label="Keep awake">
     <div>
       <h2>Keep awake</h2>
@@ -86,16 +87,17 @@ export function KeepAwakePanelView({ view, now, custom, typed, busy, problem, on
     {view.kind === "error" && <LoadError message={`Couldn't load Keep awake. ${view.message}`} onRetry={onRetry} />}
     {loaded && <>
       <div className="keep-awake-row">
-        <Button disabled={busy} onClick={() => onStart(HOUR_MINUTES)}>Start 1 h</Button>
-        <Button disabled={busy} onClick={() => onStart(4 * HOUR_MINUTES)}>Start 4 h</Button>
-        <Button disabled={busy} aria-expanded={custom} onClick={onCustom}>Custom...</Button>
+        <Button disabled={busy || !startable} onClick={() => onStart(HOUR_MINUTES)}>Start 1 h</Button>
+        <Button disabled={busy || !startable} onClick={() => onStart(4 * HOUR_MINUTES)}>Start 4 h</Button>
+        <Button disabled={busy || !startable} aria-expanded={custom} onClick={onCustom}>Custom...</Button>
       </div>
-      {custom && <CustomTimer typed={typed} busy={busy} onType={onType} onStart={onStart} />}
+      {custom && <CustomTimer typed={typed} busy={busy || !startable} onType={onType} onStart={onStart} />}
       <div className="keep-awake-row">
         <Button disabled={busy || !canExtend(loaded)} onClick={onExtend}>Extend 1 h</Button>
         <Button className="keep-awake-end" disabled={busy || !canEnd(loaded)} onClick={onEnd}>End now</Button>
       </div>
-      {!canExtend(loaded) && <p className="keep-awake-hint">Extend works while a timer runs. Start one first.</p>}
+      {!startable && <p className="keep-awake-hint">Keep awake is Off. Pick Auto or Manual to start a timer.</p>}
+      {startable && !canExtend(loaded) && <p className="keep-awake-hint">Extend works while a timer runs. Start one first.</p>}
       {problem && <p className="notice-problem" role="alert">{problem}</p>}
       <hr className="keep-awake-rule" />
       <PanelFacts view={loaded} busy={busy} onMode={onMode} />

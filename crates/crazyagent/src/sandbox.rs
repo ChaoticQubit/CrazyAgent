@@ -232,11 +232,13 @@ const METADATA_LITERALS: &[&str] = &[
     "/Library/Developer",
 ];
 
+/// The system services a confined process may look up by name. The power assertion service
+/// is left out on purpose: only the owner's Keep awake control holds the computer awake, so
+/// no confined agent, IDE or research job can take an assertion of its own.
 const MACH_SERVICES: &[&str] = &[
     "com.apple.system.opendirectoryd.libinfo",
     "com.apple.system.opendirectoryd.membership",
     "com.apple.system.DirectoryService.libinfo_v1",
-    "com.apple.PowerManagement.control",
     "com.apple.bsd.dirhelper",
     "com.apple.system.logger",
     "com.apple.logd",
@@ -2674,7 +2676,6 @@ impl ProjectSandbox {
         text.push_str("(allow process-info* (target same-sandbox))\n");
         text.push_str("(allow process-info-listpids)\n");
         text.push_str("(allow process-info-pidinfo (process-path \"/usr/bin/nohup\"))\n");
-        text.push_str("(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))\n");
         text.push_str("(allow ipc-posix-sem)\n");
         text.push_str(
             "(allow ipc-posix-shm-read* (ipc-posix-name \"apple.shm.notification_center\"))\n",

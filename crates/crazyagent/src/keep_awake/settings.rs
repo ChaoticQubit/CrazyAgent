@@ -61,8 +61,8 @@ impl Cap {
     /// Every choice, in the order the settings show them.
     pub const ALL: [Self; 4] = [Self::H4, Self::H8, Self::H24, Self::None];
 
-    /// The cap in milliseconds. Input: the choice. Output: the time, or none for no limit.
-    pub fn ms(self) -> Option<i64> {
+    /// The cap in whole hours. Input: the choice. Output: 4, 8 or 24, or none for no limit.
+    pub fn hours(self) -> Option<u8> {
         let hours = match self {
             Self::H4 => Some(4),
             Self::H8 => Some(8),
@@ -71,7 +71,14 @@ impl Cap {
         };
         assert!(hours.is_none_or(|hours| (1..=24).contains(&hours)));
         assert_eq!(hours.is_none(), self == Self::None);
-        hours.map(|hours| hours * HOUR_MS)
+        hours
+    }
+
+    /// The cap in milliseconds. Input: the choice. Output: the time, or none for no limit.
+    pub fn ms(self) -> Option<i64> {
+        let ms = self.hours().map(|hours| i64::from(hours) * HOUR_MS);
+        assert!(ms.is_none_or(|ms| ms >= HOUR_MS));
+        ms
     }
 }
 

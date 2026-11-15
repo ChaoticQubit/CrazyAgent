@@ -31,10 +31,12 @@ export type KeepAwakeWant = { kind: "nothing" } | { kind: "idle"; display: boole
 
 export type KeepAwakeReason = "work" | "timer" | "grace" | "idle" | "off";
 
-/** Why a hold ended or was refused on the engine's last evaluation. */
+/** Why a hold ended or was refused on the engine's last evaluation; a cap end carries the
+ * hours of the cap the hold ran under. */
 export type KeepAwakeEnd =
   | { kind: "battery"; pct: number }
-  | { kind: "battery_unread" | "heat" | "cap" | "manual" | "off" | "hold_lost" };
+  | { kind: "cap"; hours: number }
+  | { kind: "battery_unread" | "heat" | "manual" | "off" | "hold_lost" };
 
 /** Whether a hold covers the closed lid, or the reason it does not. */
 export type LidSupport =

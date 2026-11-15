@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { KEEP_AWAKE_DEFAULTS, KEEP_AWAKE_SETTINGS, loadKeepAwake, sendKeepAwake, type KeepAwakeSettingId, type KeepAwakeSettings as Stored, type KeepAwakeView } from "../../api-keep-awake";
+import { KEEP_AWAKE_CHANGED, KEEP_AWAKE_DEFAULTS, KEEP_AWAKE_SETTINGS, loadKeepAwake, sendKeepAwake, type KeepAwakeSettingId, type KeepAwakeSettings as Stored, type KeepAwakeView } from "../../api-keep-awake";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, LoadError, NotReady, Notice, SettingLine, SettingSection, Skeleton } from "../../ui";
 import { unavailable } from "../keep-awake/model";
@@ -99,25 +99,38 @@ export function KeepAwakeSettingsView({ view, picks, saving, problem, onPick, on
   </>;
 }
 
-/** Settings, Keep awake: reads the owner's Keep awake settings and saves the picked options
- * in the engine, all settings in one change. */
+const NOT_READY = "The engine is not ready yet. Try again.";
+
+/** Settings, Keep awake: reads the owner's Keep awake settings, reads them again whenever
+ * Keep awake changes in this window, and saves the picked options over the settings the
+ * engine holds at that moment, so a change made in the panel or by another client while
+ * the page was open is kept. The picks stay until a save took them. */
 export function KeepAwakeSettings() {
   const session = useAppSession();
   const [view, reload] = useLoad(loadKeepAwake);
   const [picks, setPicks] = useState<KeepAwakePicks>({});
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState("");
-  useEffect(() => { setPicks({}); }, [view]);
+  useEffect(() => {
+    window.addEventListener(KEEP_AWAKE_CHANGED, reload);
+    return () => window.removeEventListener(KEEP_AWAKE_CHANGED, reload);
+  }, [reload]);
   async function save() {
-    if (view.kind !== "ok") return;
+    if (view.kind !== "ok" || saving) return;
     setSaving(true);
     setProblem("");
-    const result = await sendKeepAwake({ set: { settings: savedKeepAwake(view.value.settings, picks) } });
+    const fresh = await loadKeepAwake();
+    if (fresh.kind !== "ok") {
+      setSaving(false);
+      setProblem(fresh.kind === "error" ? fresh.message : NOT_READY);
+      return;
+    }
+    const result = await sendKeepAwake({ set: { settings: savedKeepAwake(fresh.value.settings, picks) } });
     setSaving(false);
     if (result.kind === "error") { setProblem(result.message); return; }
-    if (result.kind === "not_ready") { setProblem("The engine is not ready yet. Try again."); return; }
+    if (result.kind === "not_ready") { setProblem(NOT_READY); return; }
+    setPicks({});
     session.showToast("Keep awake settings saved.");
-    reload();
   }
   return <div className="stack">
     <KeepAwakeSettingsView view={view} picks={picks} saving={saving} problem={problem}

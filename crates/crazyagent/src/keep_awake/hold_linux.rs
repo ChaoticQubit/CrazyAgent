@@ -1,10 +1,12 @@
 use super::hold::{Held, Hold, HoldError, REASON, wanted};
 use super::state::Want;
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
-use std::os::fd::OwnedFd;
+use rustix::io::{FdFlags, fcntl_getfd, fcntl_setfd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::time::Duration;
 
 const BUS_WAIT: Duration = Duration::from_secs(2);
+const REPLY_FDS_MAX: usize = 16;
 const SERVICE: &str = "org.freedesktop.login1";
 const OBJECT: &str = "/org/freedesktop/login1";
 const MANAGER: &str = "org.freedesktop.login1.Manager";
@@ -17,15 +19,26 @@ pub(super) struct LinuxHold {
     lock: Option<OwnedFd>,
 }
 
-/// Asks logind for the lock over the system bus, waiting at most `BUS_WAIT` for the
-/// answer, and drops the bus connection again. Output: the lock descriptor, or
-/// `Unavailable` with the step that failed.
-fn take() -> Result<OwnedFd, HoldError> {
-    let bus = zbus::blocking::connection::Builder::system()
-        .map_err(|problem| HoldError::unavailable("system bus", problem))?
-        .method_timeout(BUS_WAIT)
-        .build()
-        .map_err(|problem| HoldError::unavailable("system bus", problem))?;
+/// Marks one open descriptor close-on-exec and checks that the mark is set. Input: the
+/// descriptor. Output: none, or `Unavailable` when the system refuses the flag.
+pub(super) fn close_on_exec(descriptor: impl AsFd) -> Result<(), HoldError> {
+    let descriptor = descriptor.as_fd();
+    let flags = fcntl_getfd(descriptor)
+        .map_err(|problem| HoldError::unavailable("lock descriptor", problem))?;
+    fcntl_setfd(descriptor, flags | FdFlags::CLOEXEC)
+        .map_err(|problem| HoldError::unavailable("lock descriptor", problem))?;
+    let marked = fcntl_getfd(descriptor)
+        .map_err(|problem| HoldError::unavailable("lock descriptor", problem))?;
+    assert!(marked.contains(FdFlags::CLOEXEC));
+    Ok(())
+}
+
+/// Asks logind for the lock on an open bus connection and drops the connection. The bus
+/// hands the descriptor over without close-on-exec, so this runs inside the spawn gate:
+/// every descriptor of the reply is marked before the gate opens and a child can start.
+/// Input: the connection, whose calls wait at most `BUS_WAIT`. Output: the lock
+/// descriptor, or `Unavailable` with the step that failed.
+fn inhibit(bus: zbus::blocking::Connection) -> Result<OwnedFd, HoldError> {
     let reply = bus
         .call_method(
             Some(SERVICE),
@@ -35,11 +48,37 @@ fn take() -> Result<OwnedFd, HoldError> {
             &("idle:sleep", "CrazyAgent", REASON, "block"),
         )
         .map_err(|problem| HoldError::unavailable("logind inhibit", problem))?;
+    let handed = reply.data().fds();
+    let mut marked = Ok(());
+    for descriptor in handed.iter().take(REPLY_FDS_MAX) {
+        marked = marked.and(close_on_exec(descriptor));
+    }
+    marked?;
+    if handed.len() != 1 {
+        let count = format!("{} descriptors in the reply", handed.len());
+        return Err(HoldError::unavailable("logind inhibit", count));
+    }
     let lock: zbus::zvariant::OwnedFd = reply
         .body()
         .deserialize()
         .map_err(|problem| HoldError::unavailable("logind inhibit", problem))?;
-    Ok(lock.into())
+    let lock: OwnedFd = lock.into();
+    close_on_exec(&lock)?;
+    drop(reply);
+    drop(bus);
+    Ok(lock)
+}
+
+/// Takes the lock: connects to the system bus outside the spawn gate, since the connect
+/// has no time limit of its own, then asks logind inside the gate, where the call waits at
+/// most `BUS_WAIT`. Output: the lock descriptor, or `Unavailable` with the step that failed.
+fn take() -> Result<OwnedFd, HoldError> {
+    let bus = zbus::blocking::connection::Builder::system()
+        .map_err(|problem| HoldError::unavailable("system bus", problem))?
+        .method_timeout(BUS_WAIT)
+        .build()
+        .map_err(|problem| HoldError::unavailable("system bus", problem))?;
+    crate::spawn_gate::guarded(move || inhibit(bus))
 }
 
 /// Tells whether logind let go of the lock: its end of the descriptor hung up or failed.

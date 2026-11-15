@@ -355,7 +355,10 @@ fn a_cap_end_names_the_cap_the_hold_ran_with_after_the_setting_changes() {
         };
         set(&connection, ran_with);
         agent(&connection, "working");
-        assert_eq!(evaluate(&connection, NOW_MS, None).unwrap().state.want, IDLE);
+        assert_eq!(
+            evaluate(&connection, NOW_MS, None).unwrap().state.want,
+            IDLE
+        );
         let end_ms = NOW_MS + i64::from(hours) * HOUR_MS;
         let capped = evaluate(&connection, end_ms, None).unwrap();
         assert_eq!(capped.state.ended, Some(EndReason::Cap { hours }));
@@ -823,7 +826,7 @@ fn the_keeper_looks_each_second_and_evaluates_on_a_change_or_every_five_seconds(
 
 #[cfg(target_os = "linux")]
 mod on_linux {
-    use super::hold_linux::close_on_exec;
+    use crate::keep_awake::hold_linux::close_on_exec;
     use rustix::io::{FdFlags, fcntl_getfd, fcntl_setfd};
 
     /// rv-sec2 KA F1: the descriptor logind hands out arrives without close-on-exec; the

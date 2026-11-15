@@ -1,5 +1,5 @@
 use super::{MACH_SERVICES, ProjectSandbox, SandboxNetwork, priming_profile};
-use crate::keep_awake::{Hold, Want, platform_hold};
+use crate::keep_awake::{Want, platform_hold};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

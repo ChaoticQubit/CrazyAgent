@@ -13,6 +13,7 @@ const MINUTES_SHOWN_MAX = 999 * 60 + 59;
 const REASON_MAX = 200;
 const GRACE_MINUTES = { min0: 0, min5: 5, min10: 10, min30: 30 } as const;
 const CAP_WORDS = { h4: "4 h", h8: "8 h", h24: "24 h", none: null } as const;
+const CAP_HOURS_MAX = 24;
 const BATTERY_WORDS = { off: null, pct5: "5% battery", pct10: "10% battery", pct20: "20% battery" } as const;
 const HEAT_WORDS = { critical: "critical heat", serious: "serious heat", never: null } as const;
 const LID_WORDS = { ac_only: "Hold on AC power only", always: "Hold always", off: "Sleep as usual" } as const;
@@ -45,7 +46,8 @@ export function timeLeft(endsAtMs: number | null, now: number): string {
 }
 
 /** The label of a hold that ended by itself, or null when nothing ended or the owner ended
- * it (the timer ran out, End, or mode Off). Input: the view. Output: the label or null. */
+ * it (the timer ran out, End, or mode Off). A cap end names the cap the hold ran under, not
+ * the setting of now. Input: the view. Output: the label or null. */
 function endedLabel(view: KeepAwakeView): string | null {
   const ended = view.state.ended;
   if (ended === null) return null;
@@ -53,7 +55,7 @@ function endedLabel(view: KeepAwakeView): string | null {
     case "battery": return `Ended: battery ${Math.min(100, Math.max(0, Math.trunc(ended.pct)))}%`;
     case "battery_unread": return "Ended: battery unreadable";
     case "heat": return "Ended: heat";
-    case "cap": return `Ended: ${CAP_WORDS[view.settings.cap] ?? "time"} limit`;
+    case "cap": return `Ended: ${Math.min(CAP_HOURS_MAX, Math.max(1, Math.trunc(ended.hours)))} h limit`;
     case "hold_lost": return "Ended: hold lost";
     case "manual":
     case "off": return null;
@@ -186,6 +188,12 @@ export function customMinutes(typed: string): number | null {
   if (!/^[0-9]{1,4}$/.test(text)) return null;
   const minutes = Number(text);
   return minutes >= MINUTES_MIN && minutes <= MINUTES_MAX ? minutes : null;
+}
+
+/** Whether a timer can start: every mode but Off, where the engine refuses one. Input: the
+ * view. Output: the answer. */
+export function canStart(view: KeepAwakeView): boolean {
+  return view.settings.mode !== "off";
 }
 
 /** Whether Extend has a timer to move: something is held and the timer is the reason.

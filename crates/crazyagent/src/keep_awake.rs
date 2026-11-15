@@ -75,6 +75,18 @@ impl KeepAwakeAction {
     }
 }
 
+/// The owner's sentence for a refused Keep awake change, the same words in the window and in
+/// the TUI. Input: the refusal code. Output: the sentence, or none for any other code.
+pub fn refusal_words(code: &str) -> Option<&'static str> {
+    match code {
+        "keep_awake_off" => Some("Keep awake is Off. Pick Auto or Manual first."),
+        "keep_awake_no_timer" => Some("The timer already ended. Start a new one."),
+        "keep_awake_not_holding" => Some("Nothing is held right now."),
+        "keep_awake_minutes_invalid" => Some("Enter whole minutes from 1 to 1440."),
+        _ => None,
+    }
+}
+
 /// What the owner sees of Keep awake: the settings, the last decision (with the reason the
 /// last hold ended until a new one starts), whether the lid is covered, the platform and
 /// the running work count.
@@ -221,7 +233,7 @@ fn advance(settings: &KeepAwakeSettings, stored: &mut Stored, work: u32, now_ms:
     if stored.manual_until_ms.is_some_and(|until| now_ms >= until) {
         stored.manual_until_ms = None;
     }
-    if decision.ended == Some(EndReason::Cap) {
+    if matches!(decision.ended, Some(EndReason::Cap { .. })) {
         stored.manual_until_ms = None;
         stored.work_last_ms = None;
         stored.stood_down = work > 0;
