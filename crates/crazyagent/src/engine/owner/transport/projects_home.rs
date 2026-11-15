@@ -306,8 +306,9 @@ pub(super) fn disk_changed(trashed: bool, moving: bool, moving_project: bool, ra
 /// and FolderSize for one owner. A client's change claims its request id first: a resend of
 /// one this engine still runs answers `InProgress` and plans nothing (DEC-159); the intake
 /// job holds its own claim. A client's AddExistingFolder or MoveProjectHome then holds the
-/// job slot until it ends, answering `job_busy` while a job runs, so no job starts beside
-/// it. Input: the sink (the client's stream, or the intake job, which
+/// job slot until it ends, so no job starts beside it; while a job runs it answers its record
+/// when the request was already recorded, else `job_busy`, and plans nothing. Input: the sink
+/// (the client's stream, or the intake job, which
 /// keeps the reply and lends its tally to the copy), engine, authority, owner packet and
 /// admission, the validated request and the exchange deadline. Output: the
 /// reply written under the owner egress barrier. The exchange deadline bounds
@@ -370,16 +371,28 @@ pub(super) async fn serve(
                 | OwnerMutation::MoveProjectHome { .. }
         }
     );
-    let _direct = match client && folder {
+    let (_direct, recorded) = match client && folder {
         true => match authority.intake.direct() {
-            Ok(direct) => Some(direct),
-            Err(busy) => return sink.reply(Err(busy), id, mutation).await,
+            Ok(direct) => (Some(direct), None),
+            Err(busy) => {
+                let replay = tokio::time::timeout_at(deadline, replayed(engine, a, &request))
+                    .await
+                    .unwrap_or_else(|_| Err(failure(UNKNOWN)));
+                match replay {
+                    Ok(Some(step)) => (None, Some(step)),
+                    Ok(None) => return sink.reply(Err(busy), id, mutation).await,
+                    Err(e) => return sink.reply(Err(e), id, mutation).await,
+                }
+            }
         },
-        false => None,
+        false => (None, None),
     };
-    let planned = tokio::time::timeout_at(deadline, plan(engine, a, &request, deadline, exchange))
-        .await
-        .unwrap_or_else(|_| Err(failure(UNKNOWN)));
+    let planned = match recorded {
+        Some(step) => Ok(Planned::Step(step)),
+        None => tokio::time::timeout_at(deadline, plan(engine, a, &request, deadline, exchange))
+            .await
+            .unwrap_or_else(|_| Err(failure(UNKNOWN))),
+    };
     let moving = matches!(
         &request.operation,
         OwnerOperation::Apply {
