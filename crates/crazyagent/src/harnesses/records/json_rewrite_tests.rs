@@ -138,3 +138,28 @@ fn a_resumed_reader_reads_on_from_its_position_and_a_skipped_one_from_the_end() 
     rewrite(&home, &json!([{"turn": 1}, {"turn": 2}, {"turn": 3}]));
     assert_eq!(adopted.read().unwrap(), vec![json!({"turn": 3})]);
 }
+
+#[test]
+fn a_record_over_the_document_bound_is_not_read_and_a_smaller_rewrite_is() {
+    let home = Home::new();
+    let mut reader = JsonRewrite::new(standin_pattern(&home));
+    let text = "x".repeat(DOCUMENT_BYTES_MAX);
+    rewrite(&home, &json!([{"text": text}]));
+    assert_eq!(reader.read().unwrap(), nothing());
+    assert_eq!(reader.position(), 0);
+    rewrite(&home, &json!([{"turn": 1}]));
+    assert_eq!(reader.read().unwrap(), vec![json!({"turn": 1})]);
+}
+
+#[test]
+fn a_record_swapped_for_a_link_is_never_read_through_it() {
+    let home = Home::new();
+    let away = Home::new();
+    let mut reader = JsonRewrite::new(standin_pattern(&home));
+    let record = rewrite(&home, &json!([{"turn": 1}]));
+    assert_eq!(reader.read().unwrap().len(), 1);
+    let planted = away.write("planted.json", "[{\"turn\":1},{\"planted\":1}]", NEW);
+    std::fs::remove_file(&record).unwrap();
+    std::os::unix::fs::symlink(&planted, &record).unwrap();
+    assert_eq!(reader.read().unwrap(), nothing());
+}
