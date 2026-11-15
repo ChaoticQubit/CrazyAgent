@@ -21,7 +21,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 
 pub mod pins;
@@ -59,6 +60,10 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS connector_launches (
 );";
 
 const LAUNCHES_MAX: i64 = 1024;
+const LAUNCH_PRUNE_MAX: i64 = 64;
+const CONNECTOR_WAIT: Duration = Duration::from_secs(30);
+const LOCK_POLL: Duration = Duration::from_millis(10);
+const CLOSING_MAX: usize = 64;
 const CALLS_PER_LAUNCH_MAX: usize = 8;
 const AGENT_BYTES_MAX: usize = 128;
 const DESCRIPTION_BYTES_MAX: usize = 4096;
@@ -72,6 +77,7 @@ const SEPARATOR: &str = "__";
 const _: () = assert!(LIST_CONNECTOR_BYTES_MAX <= LIST_BYTES_MAX);
 const _: () = assert!(LIST_BYTES_MAX + 64 * 1024 < shim::ANSWER_BYTES_MAX as usize);
 const _: () = assert!(4 * 1024 * 1024 < shim::ANSWER_BYTES_MAX as usize);
+const _: () = assert!(CONNECTOR_WAIT.as_secs() < shim::REPLY_WAIT.as_secs());
 
 /// Whether a vendor tool only reads or may change something at the vendor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +140,24 @@ fn sqlite(_: rusqlite::Error) -> EngineError {
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Takes a connector's lock, waiting at most `wait`, so a worker stuck behind a slow
+/// vendor is freed to answer its launch. Inputs: the lock and the wait. Output: the
+/// guard, or none when the wait ran out.
+fn wait_lock(mutex: &Mutex<()>, wait: Duration) -> Option<MutexGuard<'_, ()>> {
+    let deadline = Instant::now() + wait;
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => {}
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(LOCK_POLL);
+    }
 }
 
 fn role_name(role: Role) -> Option<&'static str> {
@@ -233,6 +257,7 @@ pub fn prepare(
         return Err(problem);
     }
     assert!(folder.starts_with(&launches));
+    end_leftovers(db, root);
     Ok(Some(GatewayLaunch {
         folder,
         snapshot: GrantSnapshot {
@@ -262,12 +287,39 @@ pub fn end(db: &Connection, root: &Path, launch: &str) -> Result<(), EngineError
     }
 }
 
+/// Ends the oldest launch records past `LAUNCHES_MAX`, at most `LAUNCH_PRUNE_MAX` at a
+/// time: records a crash or a kill left behind never pile up. A record whose id names no
+/// launch folder is deleted without touching a folder. A failure here leaves the records
+/// for the next launch. Inputs: the engine database and root.
+fn end_leftovers(db: &Connection, root: &Path) {
+    let leftovers: Result<Vec<String>, rusqlite::Error> = db
+        .prepare(
+            "SELECT id FROM connector_launches ORDER BY created_ms DESC, id DESC
+             LIMIT ?1 OFFSET ?2",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map(params![LAUNCH_PRUNE_MAX, LAUNCHES_MAX], |row| row.get(0))?
+                .collect()
+        });
+    for id in leftovers.unwrap_or_default() {
+        if call_id_valid(&id) {
+            let _ = end(db, root, &id);
+        } else {
+            let _ = db.execute("DELETE FROM connector_launches WHERE id=?1", [&id]);
+        }
+    }
+}
+
+/// Reads the newest `LAUNCHES_MAX` launch records, so a pile of old ones can never hide
+/// a new launch. Input: the engine database. Output: the launches, a record that does not
+/// read left out, or `connectors_unavailable`.
 fn launches(db: &Connection) -> Result<Vec<Launch>, EngineError> {
     db.execute_batch(SCHEMA).map_err(sqlite)?;
     let rows: Vec<(String, String, String, String, String)> = db
         .prepare(
             "SELECT id, project, role, agent, connectors FROM connector_launches
-             ORDER BY created_ms, id LIMIT ?1",
+             ORDER BY created_ms DESC, id DESC LIMIT ?1",
         )
         .map_err(sqlite)?
         .query_map([LAUNCHES_MAX], |row| {
@@ -447,12 +499,15 @@ struct Shown {
 }
 
 /// The engine half for one engine root: the vendor sessions of its launches, held
-/// between calls, and one lock per connector so its vendor is called one at a time.
+/// between calls, one lock per connector so its vendor is called one at a time, how long
+/// a call waits for that lock, and the thread that closes sessions no longer needed.
 pub struct Gateway {
     root: PathBuf,
     reach: ProviderReach,
     held: Mutex<BTreeMap<(String, String), Held>>,
     locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+    lock_wait: Duration,
+    closer: Mutex<Option<SyncSender<McpSession>>>,
     #[cfg(test)]
     stand_ins: Mutex<BTreeMap<String, McpEndpoint>>,
     #[cfg(test)]
@@ -473,6 +528,8 @@ impl Gateway {
             reach,
             held: Mutex::new(BTreeMap::new()),
             locks: Mutex::new(BTreeMap::new()),
+            lock_wait: CONNECTOR_WAIT,
+            closer: Mutex::new(None),
             #[cfg(test)]
             stand_ins: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
@@ -502,6 +559,30 @@ impl Gateway {
         spec.mcp.clone()
     }
 
+    /// Hands a session to the closing thread, so its close (a name lookup and a request to
+    /// the vendor) never holds up the dispatch loop or a connector's lock. The thread
+    /// starts with the first close. A session that finds the queue full, or no thread, is
+    /// dropped without telling the vendor, which ends it on its own. Input: the session.
+    fn close_later(&self, session: McpSession) {
+        let mut closer = locked(&self.closer);
+        if closer.is_none() {
+            let (queue, closing) = sync_channel::<McpSession>(CLOSING_MAX);
+            let started = std::thread::Builder::new()
+                .name("connector-close".into())
+                .spawn(move || {
+                    for session in closing {
+                        session.close();
+                    }
+                });
+            if started.is_ok() {
+                *closer = Some(queue);
+            }
+        }
+        if let Some(queue) = closer.as_ref() {
+            let _ = queue.try_send(session);
+        }
+    }
+
     fn lock_for(&self, connector: &str) -> Arc<Mutex<()>> {
         locked(&self.locks)
             .entry(connector.to_owned())
@@ -510,8 +591,8 @@ impl Gateway {
     }
 
     /// Answers the calls waiting in every launch folder, in this thread; each may take as
-    /// long as its vendor does. Sessions of launches that ended are closed first.
-    /// Output: how many calls were answered.
+    /// long as its vendor does. Sessions of launches that ended go to the closing thread
+    /// first. Output: how many calls were answered.
     pub fn answer_pending(&self) -> usize {
         let Ok(db) = crate::questions::open(&self.root) else {
             return 0;
@@ -538,7 +619,7 @@ impl Gateway {
             gone.iter().filter_map(|key| held.remove(key)).collect()
         };
         for held in ended {
-            held.session.close();
+            self.close_later(held.session);
         }
     }
 
@@ -628,9 +709,11 @@ impl Gateway {
 
     fn row(launch: &Launch, connector: &str, started_ms: i64) -> CallRow {
         CallRow {
+            launch: launch.id.clone(),
             connector: connector.to_owned(),
             tool: String::new(),
             kind: CallKind::Unknown,
+            sent: false,
             project: launch.snapshot.project.clone(),
             agent: launch.snapshot.agent.clone(),
             started_ms,
@@ -693,7 +776,7 @@ impl Gateway {
             if same {
                 return Ok(held);
             }
-            held.session.close();
+            self.close_later(held.session);
         }
         let auth = spec
             .key
@@ -724,7 +807,7 @@ impl Gateway {
         if keep {
             locked(&self.held).insert((launch.id.clone(), connector.to_owned()), held);
         } else {
-            held.session.close();
+            self.close_later(held.session);
         }
     }
 
@@ -742,7 +825,7 @@ impl Gateway {
             .connector()
             .ok_or("connectors_unavailable")?;
         let lock = self.lock_for(&connector.name);
-        let _one = locked(&lock);
+        let _one = wait_lock(&lock, self.lock_wait).ok_or("connector_busy")?;
         let mut held = self.checkout(launch, connector, spec, settings)?;
         let listed = self.relist(db, connector, spec, &mut held, room);
         let keep = match &listed {
@@ -875,7 +958,7 @@ impl Gateway {
             .connector()
             .ok_or("connectors_unavailable")?;
         let lock = self.lock_for(name);
-        let _one = locked(&lock);
+        let _one = wait_lock(&lock, self.lock_wait).ok_or("connector_busy")?;
         let mut held = self.checkout(launch, &connector, spec, settings)?;
         let result = self.call_held(db, &connector, spec, &mut held, shown, args, row);
         let keep = match &result {
@@ -914,6 +997,7 @@ impl Gateway {
             return Err("connector_writes_not_yet");
         }
         let line = third_party_line(&title_of(connector));
+        row.sent = true;
         let (text, error, outcome) = match held.session.call(&vendor, args) {
             Ok(result) => {
                 let outcome = if result.is_error { "tool_error" } else { "ok" };
@@ -989,42 +1073,59 @@ fn waiting(root: &Path, launch: &str) -> bool {
         .is_ok_and(|mailbox| !mailbox.entries(shim::CALL_SUFFIX).is_empty())
 }
 
+/// A launch a worker is answering: its id leaves the busy set when the worker ends,
+/// also when it panics or never starts, so no launch is left unanswered.
+struct Busy {
+    taken: Arc<Mutex<BTreeSet<String>>>,
+    id: String,
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        locked(&self.taken).remove(&self.id);
+    }
+}
+
 /// Runs the gateway until told to stop: every `TICK` it looks for launches with waiting
 /// calls and answers each in a thread of its own, at most `WORKERS_MAX` at once and one
-/// per launch, so a slow vendor holds up only its own launch and connector. Inputs: the
-/// engine root and the stop flag.
+/// per launch. A call waits at most `CONNECTOR_WAIT` for its connector and sessions close
+/// on their own thread, so a slow vendor holds up only its own calls. A round whose launch
+/// read fails is skipped and closes nothing. Inputs: the engine root and the stop flag.
 pub fn serve(root: &Path, stop: &AtomicBool) {
     let gateway = Arc::new(Gateway::new(root));
     let busy: Arc<Mutex<BTreeSet<String>>> = Arc::default();
     while !stop.load(Ordering::SeqCst) {
         let found = crate::questions::open(root)
             .ok()
-            .and_then(|db| launches(&db).ok())
-            .unwrap_or_default();
+            .and_then(|db| launches(&db).ok());
+        let Some(found) = found else {
+            std::thread::sleep(TICK);
+            continue;
+        };
         gateway.forget_ended(&found);
         for launch in found {
             if !waiting(root, &launch.id) {
                 continue;
             }
-            {
+            let guard = {
                 let mut taken = locked(&busy);
                 if taken.len() >= WORKERS_MAX || !taken.insert(launch.id.clone()) {
                     continue;
                 }
-            }
-            let id = launch.id.clone();
-            let (worker, held) = (gateway.clone(), busy.clone());
-            let started = std::thread::Builder::new()
+                Busy {
+                    taken: busy.clone(),
+                    id: launch.id.clone(),
+                }
+            };
+            let worker = gateway.clone();
+            let _ = std::thread::Builder::new()
                 .name("connector-gateway".into())
                 .spawn(move || {
+                    let _guard = guard;
                     if let Ok(db) = crate::questions::open(&worker.root) {
                         worker.answer_launch(&db, &launch);
                     }
-                    locked(&held).remove(&launch.id);
                 });
-            if started.is_err() {
-                locked(&busy).remove(&id);
-            }
         }
         std::thread::sleep(TICK);
     }

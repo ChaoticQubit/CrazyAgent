@@ -1408,7 +1408,10 @@ fn an_ended_launchs_sessions_close_off_the_answering_thread() {
     );
     let deadline = Instant::now() + WAIT;
     while !vendor.seen().iter().any(|seen| seen.verb == "DELETE") {
-        assert!(Instant::now() < deadline, "the ended session was never closed");
+        assert!(
+            Instant::now() < deadline,
+            "the ended session was never closed"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -1425,7 +1428,10 @@ fn a_call_that_waits_past_its_connectors_lock_is_refused_as_busy() {
     let (text, error) = called(&bench, &launch, "board__list_issues", json!({}));
     assert!(error, "{text}");
     assert!(text.starts_with("connector_busy"), "{text}");
-    assert!(clock.elapsed() < WAIT, "the worker was freed at the lock wait");
+    assert!(
+        clock.elapsed() < WAIT,
+        "the worker was freed at the lock wait"
+    );
     assert!(vendor_calls(&vendor).is_empty());
     drop(held);
     let (text, error) = called(&bench, &launch, "board__list_issues", json!({}));
@@ -1445,8 +1451,16 @@ fn one_launchs_flood_of_refused_calls_leaves_every_call_that_reached_a_vendor_in
     let row = |launch: &str, sent: bool, started_ms: i64| CallRow {
         launch: launch.into(),
         connector: "board".into(),
-        tool: if sent { "list_issues".into() } else { String::new() },
-        kind: if sent { CallKind::Read } else { CallKind::Unknown },
+        tool: if sent {
+            "list_issues".into()
+        } else {
+            String::new()
+        },
+        kind: if sent {
+            CallKind::Read
+        } else {
+            CallKind::Unknown
+        },
         sent,
         project: PROJECT.into(),
         agent: AGENT.into(),
@@ -1476,7 +1490,10 @@ fn one_launchs_flood_of_refused_calls_leaves_every_call_that_reached_a_vendor_in
     assert_eq!(count("launch='a' AND sent=1"), 1);
     assert_eq!(count("launch='b'"), 2, "another launch keeps every row");
     assert_eq!(
-        count(&format!("launch='a' AND sent=0 AND started_ms < {}", now + 50)),
+        count(&format!(
+            "launch='a' AND sent=0 AND started_ms < {}",
+            now + 50
+        )),
         0,
         "the oldest refused calls go first"
     );
