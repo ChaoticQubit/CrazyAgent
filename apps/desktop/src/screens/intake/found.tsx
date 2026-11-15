@@ -7,11 +7,12 @@ import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, ConfirmDialog, Dialog, Icon, RadioCard, StatusBadge, formatRoute, navigate, type IconName, type Tone } from "../../ui";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
+import { go } from "../project/flash";
 import { folderLabel } from "../project/overview";
 import { NotReady } from "../project/shared";
 import { AnywayDialog } from "./add-folder";
 import { HomeFolderPicker } from "./home-folder";
-import { folderName, foundRow, homeLine, jobActions, jobLine, jobQuestion, pendingFolders, refusalLine, restartJob, startedProject, type FoundAction } from "./intake";
+import { foundRow, homeLine, jobActions, jobLine, jobName, jobQuestion, pendingFolders, refusalLine, restartJob, retryRoute, startedProject, type FoundAction } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -25,18 +26,25 @@ const ACTION_ICONS: Record<Exclude<FoundAction, null>, IconName> = {
 
 const JOB_BADGES: Record<IntakeJobState["state"], { word: string; tone: Tone }> = {
   downloading: { word: "Downloading", tone: "info" }, stopping: { word: "Waiting", tone: "info" }, copying: { word: "Adding", tone: "info" },
-  clearing: { word: "Finishing", tone: "info" }, done: { word: "Added", tone: "ok" }, failed: { word: "Failed", tone: "danger" },
-  cancelled: { word: "Stopped", tone: "neutral" }, needs_answer: { word: "Needs answer", tone: "warn" },
+  clearing: { word: "Finishing", tone: "info" }, trashing: { word: "Deleting", tone: "info" }, done: { word: "Added", tone: "ok" },
+  failed: { word: "Failed", tone: "danger" }, cancelled: { word: "Stopped", tone: "neutral" }, needs_answer: { word: "Needs answer", tone: "warn" },
+  cut_short: { word: "Cut short", tone: "warn" },
 };
 
-/** The badge words a project move shows in place of an add's. */
-const MOVE_BADGES: Partial<Record<IntakeJobState["state"], string>> = { copying: "Moving", done: "Moved" };
+/** The badge words a project move or a delete shows in place of an add's. */
+const KIND_BADGES: Record<IntakeJob["kind"], Partial<Record<IntakeJobState["state"], string>>> = {
+  add: {}, move_project: { copying: "Moving", done: "Moved" }, delete: { copying: "Deleting", done: "Deleted" },
+};
 
 const JOB_LABELS: Record<ReturnType<typeof jobActions>[number], string> = { stop: "Stop", retry: "Try again", answer: "Answer", dismiss: "Dismiss" };
 
-/** Home's row for the engine's intake job: the folder, a badge for its state, its line with the
- * counts as files land, and only the actions its state allows. Inputs: the job, a busy flag and
- * the four action handlers. Output: the row. */
+/** The button words a delete cut short shows in place of Try again and Dismiss (DEC-177 add.1). */
+const CUT_SHORT_LABELS: Partial<Record<ReturnType<typeof jobActions>[number], string>> = { retry: "Finish delete", dismiss: "Keep the project" };
+
+/** Home's row for the engine's intake job: the folder, or a delete's project name whole, a badge
+ * for its state, its line with the counts as files land, and only the actions its state allows,
+ * with Can't stop now, disabled, while a delete moves folders to the Trash. Inputs: the job, a
+ * busy flag and the four action handlers. Output: the row. */
 export function IntakeJobView({ job, busy, onStop, onRetry, onAnswer, onDismiss }: {
   job: IntakeJob;
   busy: boolean;
@@ -46,16 +54,18 @@ export function IntakeJobView({ job, busy, onStop, onRetry, onAnswer, onDismiss 
   onDismiss: () => void;
 }) {
   const shown = JOB_BADGES[job.state.state];
-  const moved = job.kind === "move_project" ? MOVE_BADGES[job.state.state] : undefined;
-  const badge = moved === undefined ? shown : { word: moved, tone: shown.tone };
+  const word = KIND_BADGES[job.kind][job.state.state];
+  const badge = word === undefined ? shown : { word, tone: shown.tone };
   const handlers = { stop: onStop, retry: onRetry, answer: onAnswer, dismiss: onDismiss };
+  const labels = job.state.state === "cut_short" ? { ...JOB_LABELS, ...CUT_SHORT_LABELS } : JOB_LABELS;
   return <div className="in-row">
     <span className="in-row-main">
-      <span className="pj-row"><Icon name="folder" size={14} /><strong>{displayText(folderName(job.source))}</strong><StatusBadge word={badge.word} tone={badge.tone} /></span>
+      <span className="pj-row"><Icon name="folder" size={14} /><strong>{displayText(jobName(job))}</strong><StatusBadge word={badge.word} tone={badge.tone} /></span>
       <span className="pj-small pj-secondary" role="status">{displayText(jobLine(job))}</span>
     </span>
-    <span className="pj-row">{jobActions(job).map((action) => <Button key={action} size="small" variant={action === "answer" ? "primary" : "secondary"}
-      disabled={busy} onClick={handlers[action]}>{JOB_LABELS[action]}</Button>)}</span>
+    <span className="pj-row">{job.state.state === "trashing" && <Button size="small" variant="secondary" disabled>{"Can't stop now"}</Button>}
+      {jobActions(job).map((action) => <Button key={action} size="small" variant={action === "answer" ? "primary" : "secondary"}
+        disabled={busy} onClick={handlers[action]}>{labels[action]}</Button>)}</span>
   </div>;
 }
 
@@ -207,6 +217,8 @@ function IntakeJobPanel({ onSetUp }: { onSetUp: (folder: SetUpFolder) => void })
   };
   const restart = (overrides: AddOverride[]) => {
     setAnswering(null);
+    const route = retryRoute(job);
+    if (route !== null) return go(route);
     void run(() => restartJob(job, overrides, { add: startIntake, move: moveProjectHome }), (view) => view);
   };
   const answer = async () => {
@@ -218,7 +230,7 @@ function IntakeJobPanel({ onSetUp }: { onSetUp: (folder: SetUpFolder) => void })
   };
   const read = answering !== null && answering.id === job.id ? answering.size : null;
   const question = job.state.state === "needs_answer" && read !== null ? jobQuestion(job, read) : null;
-  const name = folderName(job.source);
+  const name = jobName(job);
   return <>
     <IntakeJobView job={job} busy={busy} onStop={() => void run(() => stopIntake(job.id))} onRetry={() => restart(job.overrides)}
       onAnswer={() => void answer()} onDismiss={() => void run(() => dismissIntake(job.id))} />

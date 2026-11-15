@@ -2201,10 +2201,8 @@ fn remove_preselects_the_dashboard_choice_and_deletes_only_after_the_exact_name(
     screen.key(key(KeyCode::Backspace));
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
-        ProjectReply::Change(Box::new(SetupAction::Delete {
-            project_id: project.clone(),
-            name: "Gone app".into(),
-        }))
+        ProjectReply::DeleteEverything("Gone app".into()),
+        "Delete everything starts the engine's job (DEC-177 add.1)"
     );
     assert!(!screen.confirm_remove);
 
@@ -4491,7 +4489,7 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     );
     assert!(!screen.confirm_move);
 
-    screen.move_refused("move_project_busy", None);
+    screen.job_refused("move_project_busy", None);
     assert!(
         screen
             .problem
@@ -4500,12 +4498,12 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
         "{:?}",
         screen.problem
     );
-    screen.move_refused("move_project_already_home", None);
+    screen.job_refused("move_project_already_home", None);
     assert_eq!(
         screen.problem.as_deref(),
         Some("This project is already in your projects folder.")
     );
-    screen.move_refused("job_busy", None);
+    screen.job_refused("job_busy", None);
     assert_eq!(
         screen.problem.as_deref(),
         Some("Another job is running. Wait for it to finish on Home.")
@@ -4523,19 +4521,19 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
             checked: 0,
         },
     };
-    screen.move_refused("job_busy", Some(&adding));
+    screen.job_refused("job_busy", Some(&adding));
     assert_eq!(
         screen.problem.as_deref(),
         Some("Adding shop is running. Wait for it to finish on Home."),
         "a busy refusal names the job that runs"
     );
-    screen.move_refused("home_add_in_progress", None);
+    screen.job_refused("home_add_in_progress", None);
     assert_eq!(
         screen.problem.as_deref(),
         Some("A folder is being added to your projects folder. Try again when it finishes."),
         "a move while an add runs says so in plain words"
     );
-    screen.move_refused("home_move_worktrees", None);
+    screen.job_refused("home_move_worktrees", None);
     assert!(
         screen
             .problem

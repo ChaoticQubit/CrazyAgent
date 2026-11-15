@@ -519,14 +519,28 @@ impl Home {
     }
 
     /// Does what Enter or d asks of the engine's job: stop it, start it again as the same kind
-    /// of job (an add of its folder, a move of its project) with its mode and overrides,
-    /// answer its soft refusal in Add folder, or forget it. The request is kept so a failure
-    /// is said.
+    /// of job (an add of its folder, a move of its project) with its mode and overrides, open
+    /// the project's remove ask for a delete, where the exact name is typed again (DEC-177
+    /// add.1), answer its soft refusal in Add folder, or forget it. The request is kept so a
+    /// failure is said.
     /// Inputs: the job, an action it offers and the context. Output: the flow.
     fn job_action(&mut self, job: &JobView, action: JobAction, ctx: &mut Ctx) -> Flow {
         assert!(intake_job::actions(job).contains(&action));
         let query = match action {
             JobAction::Stop => IntakeQuery::JobStop { id: job.id.clone() },
+            JobAction::Retry if job.kind == JobKind::Delete => {
+                let Some(id) = job.project_id.clone() else {
+                    ctx.say(Message::error(
+                        retry_failed(job.kind),
+                        &copy("intake_failed"),
+                    ));
+                    return Flow::Handled;
+                };
+                return Flow::Open(Place::DeleteAsk {
+                    id,
+                    name: job.source.clone(),
+                });
+            }
             JobAction::Retry => match (start_id(), job.subject()) {
                 (Ok(id), Some(subject)) => IntakeQuery::JobStart {
                     id,
@@ -1386,13 +1400,14 @@ impl Screen for Home {
             return hints;
         }
         let mut hints = vec![hint("n", "New project"), hint("a", "Add project")];
-        match self.picked_job(ctx).map(intake_job::actions) {
-            Some(offered) => {
+        match self.picked_job(ctx) {
+            Some(job) => {
+                let offered = intake_job::actions(job);
                 if let Some(&first) = offered.first() {
-                    hints.push(hint("Enter", intake_job::label(first)));
+                    hints.push(hint("Enter", intake_job::label(job, first)));
                 }
                 if offered.len() > 1 && offered.contains(&JobAction::Dismiss) {
-                    hints.push(hint("d", "Dismiss"));
+                    hints.push(hint("d", intake_job::label(job, JobAction::Dismiss)));
                 }
             }
             None => hints.push(hint("Enter", "Open")),
@@ -1589,6 +1604,7 @@ fn retry_failed(kind: JobKind) -> &'static str {
     match kind {
         JobKind::Add => "Adding the folder did not start again.",
         JobKind::MoveProject => "Moving the project did not start again.",
+        JobKind::Delete => "Deleting the project did not start again.",
     }
 }
 

@@ -1,6 +1,6 @@
 import { ADD_WARNINGS, intakeCopy, loadIntakeJob, measuredLine, moveCopy } from "../../api-intake";
 import type { Result } from "../../api";
-import { receiptState, type KeptFile, type StoredSetup } from "../../api-projects";
+import { failureCopy, receiptState, type KeptFile, type StoredSetup } from "../../api-projects";
 import type {
   AddFolderMode, AddOverride, Dependency, DependencyName, DependencyState, FolderSize, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IcloudProgress, IntakeJob, IntentReceipt,
   MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, RefusedTool, ResearchKind, SetupStatus, ToolFix,
@@ -215,20 +215,27 @@ export function icloudProgressLine(progress: IcloudProgress | null): string {
 /** How often the app reads the engine's intake job while one runs. */
 export const INTAKE_POLL_MS = 1000;
 
-/** Whether the job is still at work: downloading, waiting for agents to stop, copying or
- * clearing. Input: the job, if any. Output: true while it runs. */
+/** Whether the job is still at work: downloading, waiting for agents to stop, copying, moving
+ * folders to the Trash or clearing. Input: the job, if any. Output: true while it runs. */
 export function jobRunning(job: IntakeJob | null): boolean {
   const state = job?.state.state;
-  return state === "downloading" || state === "stopping" || state === "copying" || state === "clearing";
+  return state === "downloading" || state === "stopping" || state === "copying" || state === "trashing" || state === "clearing";
 }
+
+/** The name a job's row and lines show: a delete's project name whole, else the folder's own
+ * name. Input: the job. Output: the name. */
+export function jobName(job: IntakeJob): string {
+  return job.kind === "delete" ? job.source : folderName(job.source);
+}
+
+const JOB_VERBS: Record<IntakeJob["kind"], string> = { add: "Adding", move_project: "Moving", delete: "Deleting" };
 
 /** The words for a start the engine refused job_busy: names the job that runs, as the app last
  * read it, or says another job runs when that read found none running. Input: the job read.
  * Output: the words. */
 export function busyLine(held: IntakeJob | null): string {
   if (held === null || !jobRunning(held)) return intakeCopy("job_busy");
-  const verb = held.kind === "move_project" ? "Moving" : "Adding";
-  return `${verb} ${folderName(held.source)} is running. Wait for it to finish on Home.`;
+  return `${JOB_VERBS[held.kind]} ${jobName(held)} is running. Wait for it to finish on Home.`;
 }
 
 /** The words for a refused job request: a busy refusal reads the engine's job and names it, any
@@ -266,10 +273,11 @@ export function intakePollMs(job: IntakeJob | null): number {
 /** What the job does now or how it ended, with the folder's name and the counts as files land,
  * in the words of an add or of a project move. Input: the job. Output: one sentence. */
 export function jobLine(job: IntakeJob): string {
-  const name = folderName(job.source);
+  const name = jobName(job);
   const now = job.state;
   const moving = job.kind === "move_project";
   if (jobRunning(job) && job.stopping) return `Stopping ${name}...`;
+  if (job.kind === "delete") return deleteLine(name, now);
   switch (now.state) {
     case "downloading": {
       const { done, total } = now.progress;
@@ -298,12 +306,48 @@ export function jobLine(job: IntakeJob): string {
       return `${name}: ${moving ? moveCopy(now.code) : intakeCopy(now.code)}`;
     case "needs_answer":
       return `${name} needs your answer before it is ${job.mode === "move" ? "moved" : "copied"}.`;
+    case "trashing":
+    case "cut_short":
+      return deleteLine(name, now);
+  }
+}
+
+/** The words for a count of folders out of a total. Inputs: the count and the total. Output:
+ * the words. */
+function folderCount(count: number, total: number): string {
+  if (count > total) throw new Error(`delete trashed ${count} is past total ${total}`);
+  return `${count} of ${total} folder${total === 1 ? "" : "s"}`;
+}
+
+/** What a delete does now or how it ended, with the project's name and how many of its folders
+ * reached the Trash. Inputs: the name and the state. Output: one sentence. */
+function deleteLine(name: string, now: IntakeJob["state"]): string {
+  switch (now.state) {
+    case "stopping":
+      return `Waiting for ${agentCount(now.agents_left)} of ${name} to stop...`;
+    case "trashing":
+      return `Moving ${name} to the Trash: ${folderCount(now.done, now.total)}`;
+    case "clearing":
+      return `Removing ${name} from CrazyAgent...`;
+    case "done":
+      return `${name} is deleted. Its files are in the Trash.`;
+    case "cancelled":
+      return `Deleting ${name} stopped. Nothing was moved to the Trash.`;
+    case "failed":
+      return `${name}: ${failureCopy(now.code)}`;
+    case "cut_short":
+      return `Deleting ${name} was cut short with ${folderCount(now.trashed, now.total)} in the Trash. Finish delete or keep the project.`;
+    case "downloading":
+    case "copying":
+    case "needs_answer":
+      return `Deleting ${name}...`;
   }
 }
 
 /** What Home offers for the job. Stop while it downloads, waits for agents or copies; nothing
- * while it clears, since that never stops; Retry only when the folder did not land, since a failure while
- * clearing means it is already in the projects folder; an answer for a soft refusal; Dismiss
+ * while it clears or a delete moves folders to the Trash, since neither stops; Retry only when
+ * the folder did not land, since a failure while clearing means it is already in the projects
+ * folder, and Finish delete for a delete cut short; an answer for a soft refusal; Dismiss
  * once it ended. Input: the job. Output: the actions in button order. */
 export function jobActions(job: IntakeJob): ("stop" | "retry" | "answer" | "dismiss")[] {
   const now = job.state;
@@ -313,12 +357,14 @@ export function jobActions(job: IntakeJob): ("stop" | "retry" | "answer" | "dism
     case "copying":
       return job.stopping ? [] : ["stop"];
     case "clearing":
+    case "trashing":
       return [];
     case "done":
       return ["dismiss"];
     case "failed":
       return now.phase === "clearing" ? ["dismiss"] : ["retry", "dismiss"];
     case "cancelled":
+    case "cut_short":
       return ["retry", "dismiss"];
     case "needs_answer":
       return ["answer", "dismiss"];
@@ -368,12 +414,23 @@ export interface RestartSteps {
 }
 
 /** Starts a job again for a retry or an answer to its soft refusal, as the same kind of job: an
- * add of its folder, or a move of its project, never an add of a project's folder. Inputs: the
- * job, the overrides to start with and the two starts. Output: the start's result. */
+ * add of its folder, or a move of its project, never an add of a project's folder. A delete is
+ * never started again in one click: [`retryRoute`] opens its remove ask. Inputs: the job, the
+ * overrides to start with and the two starts. Output: the start's result. */
 export function restartJob(job: IntakeJob, overrides: AddOverride[], steps: RestartSteps): Promise<Result<IntakeJob>> {
+  if (job.kind === "delete") throw new Error(`delete job ${job.id} starts again only from the remove ask`);
   if (job.kind === "add") return steps.add(job.source, job.mode, overrides);
   if (job.project_id === null) throw new Error(`move job ${job.id} names no project`);
   return steps.move(job.project_id, job.mode, overrides);
+}
+
+/** Where Home's Finish delete or Try again of a delete goes: the project's Remove section with
+ * the remove ask open on Delete everything, where the exact name is typed again (DEC-177
+ * add.1). Input: the job. Output: the route, or null for a job that is not a delete. */
+export function retryRoute(job: IntakeJob): string | null {
+  if (job.kind !== "delete") return null;
+  if (job.project_id === null) throw new Error(`delete job ${job.id} names no project`);
+  return `/projects/${encodeURIComponent(job.project_id)}/settings?section=remove&ask=delete`;
 }
 
 const ANSWER_ISSUES: Record<string, AnywayIssue> = {

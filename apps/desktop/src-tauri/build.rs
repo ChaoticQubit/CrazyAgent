@@ -108,6 +108,7 @@ fn main() {
         "desktop_project_demo",
         "desktop_create_demo",
         "desktop_move_project_home",
+        "desktop_delete_project_job",
         "desktop_cancel_research",
         "desktop_retry_research",
         "desktop_plan_roadmap",
