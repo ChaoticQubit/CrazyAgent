@@ -757,13 +757,11 @@ pub struct NetworkView {
     pub gap: Option<String>,
 }
 
-/// What a network choice cannot hold on this Linux, for the project's Agent access page:
-/// that a port agents may reach on this computer is open to them on every host. Only None
-/// drops the line, where this Linux nests agents and the sockets setting is `TcpOnly`, so
-/// an agent's loopback ports are bridged; an allowed port below the bridge's lowest then
-/// brings it back with the port named. Inputs: the choice, what this Linux holds, none on
-/// another system, the sockets setting, none when it cannot be read, which keeps the line,
-/// and the project's grants. Output: the line, or none.
+/// What a network choice cannot hold on this Linux, for the Agent access page: a port agents
+/// may reach on this computer is open on every host. Only None drops the line, where this
+/// Linux nests agents and the sockets setting is `TcpOnly`; an allowed port below the
+/// bridge's lowest brings it back, named. Inputs: the choice, what this Linux holds, the
+/// sockets setting, none when unreadable, and the grants. Output: the line, or none.
 pub fn linux_network_gap(
     network: AgentNetwork,
     host: Option<crate::sandbox::LinuxHost>,

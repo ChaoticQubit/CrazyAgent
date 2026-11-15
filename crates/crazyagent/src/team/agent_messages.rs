@@ -489,7 +489,11 @@ pub(crate) fn note_once(
     now: i64,
 ) -> Result<bool, EngineError> {
     assert!(agent > 0);
+    if said_before(tx, project, agent, Said::Notice, text)? {
+        return Ok(false);
+    }
     record(tx, project, agent, Said::Notice, text, now)?;
+    assert!(said_before(tx, project, agent, Said::Notice, text)?);
     Ok(true)
 }
 

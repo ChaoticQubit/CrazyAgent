@@ -873,12 +873,11 @@ pub fn linux_unbridged_line(port: u16) -> String {
     )
 }
 
-/// What an agent's launch tells the owner, in the agent's messages, when it may reach a port
-/// on this computer and a Linux that nests agents still leaves it on this computer's
-/// network: [`linux_unbridged_line`] when a port below [`BRIDGE_PORT_MIN`] alone does, and
-/// [`LINUX_PORTS_ANY_HOST_LINE`] for any other reason under None, the one choice whose page
-/// drops that line. Inputs: what this Linux holds, the project's network choice and the
-/// agent's sandbox as launched. Output: the sentences, or none.
+/// What a launch tells the owner in the agent's messages when a Linux that nests agents
+/// still leaves it, with a port on this computer, on this computer's network:
+/// [`linux_unbridged_line`] for a port below [`BRIDGE_PORT_MIN`], else under None, whose
+/// page drops it, [`LINUX_PORTS_ANY_HOST_LINE`]. Inputs: what this Linux holds, the
+/// project's network choice, the sandbox as launched. Output: the sentences, or none.
 pub fn linux_unbridged_notice_on(
     host: Option<LinuxHost>,
     choice: policy::AgentNetwork,
