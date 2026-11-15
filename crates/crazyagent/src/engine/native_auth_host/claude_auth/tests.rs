@@ -205,7 +205,8 @@ fn a_claude_status_without_its_config_directory_reads_as_too_old_to_sign_in() {
 
 /// v2.4.0 owner update: an account check's `claude auth status` ended
 /// `native_auth_claude_deadline` while the machine was under build load, at a 2 s bound inside
-/// the check's own 9 s. A status may now use the whole check bound; logout keeps its short one.
+/// the check's own 9 s. A status may now use the whole check bound, and so may a logout, which
+/// starts the same cold `claude` and was cut at 2 s partway through (RV-DS241-55).
 #[test]
 fn a_status_command_may_use_the_whole_account_check_bound() {
     assert_eq!(
@@ -215,7 +216,7 @@ fn a_status_command_may_use_the_whole_account_check_bound() {
     assert!(process::command_bound(ClaudeAuthCommand::Status) > Duration::from_secs(2));
     assert_eq!(
         process::command_bound(ClaudeAuthCommand::Logout),
-        Duration::from_secs(2)
+        CHECK_TIME
     );
     assert_eq!(
         process::command_bound(ClaudeAuthCommand::Renew),
@@ -225,4 +226,19 @@ fn a_status_command_may_use_the_whole_account_check_bound() {
         process::command_bound(ClaudeAuthCommand::Login),
         Duration::from_secs(575)
     );
+}
+
+/// RV-DS241-54: a token that expires just past Claude Code's refresh window when the
+/// custodian looks is inside it by the time `claude auth status` decides, so it counts as
+/// lapsing for as long as that check may run, and a token well past it does not.
+#[test]
+fn a_token_the_window_reaches_before_the_status_check_decides_counts_as_lapsing() {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    assert!(lapsing(now + REFRESH_WINDOW + Duration::from_secs(5)));
+    assert!(lapsing(
+        now + REFRESH_WINDOW + CHECK_TIME - Duration::from_secs(1)
+    ));
+    assert!(!lapsing(
+        now + REFRESH_WINDOW + CHECK_TIME + Duration::from_secs(60)
+    ));
 }

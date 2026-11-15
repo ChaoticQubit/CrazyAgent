@@ -785,6 +785,7 @@ mod launch {
         let (app, own) = (format!("{APP_RULE}\n"), format!("{PROJECT_RULE}\n"));
         crate::agent_home::save_app(&case.data, &app).unwrap();
         crate::agent_home::save_project(&case.checkout, &own).unwrap();
+        crate::agent_home::mark_written(&case.data, &case.checkout, &own).unwrap();
         let options = [
             (
                 Mode::ProjectOnly,
@@ -1716,6 +1717,52 @@ mod import {
         );
     }
 
+    /// RV-DS241-202: project instructions a folder arrived with that cannot be read, over the
+    /// size limit, not UTF-8 or a link, refuse the label with their own plain code and stay as
+    /// they are, rather than pass unlabelled and become the owner's text once made readable.
+    #[test]
+    fn arrived_project_instructions_that_cannot_be_read_refuse_the_label_and_stay() {
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("rules.md");
+        write(&target, "LINKED-RULE-202\n");
+        let shapes: [(&str, Vec<u8>); 3] = [
+            (
+                "over the limit",
+                "d".repeat(crate::agent_home::TEXT_BYTES_MAX + 1)
+                    .into_bytes(),
+            ),
+            ("not UTF-8", b"ARRIVED-RULE-202 \xff\xfe\n".to_vec()),
+            ("a link", Vec::new()),
+        ];
+        for (shape, bytes) in shapes {
+            let plain = tempfile::tempdir().unwrap();
+            let folder = fs::canonicalize(plain.path()).unwrap();
+            let file = folder.join(".crazyagent/instructions.md");
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            if bytes.is_empty() {
+                std::os::unix::fs::symlink(&target, &file).unwrap();
+            } else {
+                fs::write(&file, &bytes).unwrap();
+            }
+            assert!(crate::agent_home::read_project(&folder).is_err(), "{shape}");
+            assert_eq!(
+                label_arrived(&folder).unwrap_err().0,
+                "onboarding_instructions_unreadable",
+                "{shape}"
+            );
+            if bytes.is_empty() {
+                assert_eq!(fs::read_link(&file).unwrap(), target, "{shape}");
+            } else {
+                assert_eq!(fs::read(&file).unwrap(), bytes, "{shape}");
+            }
+            assert!(
+                fs::symlink_metadata(folder.join(".crazyagent/imported/.crazyagent")).is_err(),
+                "{shape}"
+            );
+        }
+        assert_eq!(fs::read_to_string(&target).unwrap(), "LINKED-RULE-202\n");
+    }
+
     /// SA vid 7: the Imported heading lands on its own, when the folder arrives with only its
     /// project instructions, when the instruction files imported after them do not fit, and
     /// when the heading leaves no room for the last bytes, which are cut only after the whole
@@ -2181,5 +2228,32 @@ fn names_a_case_insensitive_volume_opens_as_instruction_files_are_marked() {
             !instruction_file(path),
             "{path:?} is not an instruction file"
         );
+    }
+
+    /// SA vid 7 residual (leader 14:22 A): an import with the engine data root records what it
+    /// wrote as the app's own text only after text the app wrote, so text from outside keeps
+    /// reaching agents under the Imported heading after any import.
+    #[test]
+    fn an_import_records_its_text_only_after_text_the_app_wrote() {
+        let checkout = Checkout::new();
+        let folder = &checkout.folder;
+        let data = checkout.root.join("data");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+        crate::agent_home::save_project(folder, "OWNER-RULE\n").unwrap();
+        crate::agent_home::mark_written(&data, folder, "OWNER-RULE\n").unwrap();
+        write(&folder.join("CLAUDE.local.md"), "NEW-RULE\n");
+        import_marked(&data, folder).unwrap();
+        let after = crate::agent_home::read_project(folder).unwrap();
+        let head = "OWNER-RULE\n\n### Imported from ";
+        assert!(after.starts_with(head), "{after}");
+        assert!(after.contains("NEW-RULE"), "{after}");
+        assert!(!crate::agent_home::outside(&data, folder, &after));
+
+        write(&folder.join(".crazyagent/instructions.md"), "PULLED-RULE\n");
+        import_marked(&data, folder).unwrap();
+        let pulled = crate::agent_home::read_project(folder).unwrap();
+        assert!(pulled.starts_with("PULLED-RULE\n"), "{pulled}");
+        assert!(crate::agent_home::outside(&data, folder, &pulled));
     }
 }

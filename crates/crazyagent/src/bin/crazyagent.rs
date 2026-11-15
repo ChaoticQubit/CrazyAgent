@@ -96,7 +96,7 @@ fn main() -> ExitCode {
         .first()
         .is_some_and(|arg| arg == "native-auth-custodian")
     {
-        return match run_native_auth_custodian(&args) {
+        return match run_native_auth_custodian() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 let _ = writeln!(io::stderr(), "{error}");
@@ -308,9 +308,21 @@ fn run_git_credential(args: &[OsString]) -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
+/// Runs the native sign-in custodian from the process's own command line, read up to
+/// [`crazyagent::engine::CUSTODIAN_ARGUMENTS_MAX`] entries, which the longest launch the
+/// engine hands fits, rather than the general bound (RV-DS241-52). No input. Output: Ok,
+/// `native_auth_host_launch_too_long` past the bound, or the custodian's failure.
 #[cfg(unix)]
-fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
+fn run_native_auth_custodian() -> Result<(), String> {
     let usage = "usage: crazyagent native-auth-custodian RUNTIME_DIR";
+    let args: Vec<OsString> = std::env::args_os()
+        .skip(1)
+        .take(crazyagent::engine::CUSTODIAN_ARGUMENTS_MAX + 1)
+        .collect();
+    if args.len() > crazyagent::engine::CUSTODIAN_ARGUMENTS_MAX {
+        return Err("native_auth_host_launch_too_long".into());
+    }
+    let args = args.as_slice();
     let codex = match args.len() {
         2 => None,
         count
@@ -382,9 +394,9 @@ fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
 }
 
 /// Refuses the native sign-in custodian, which needs Unix fd handoff and process groups.
-/// Takes the command arguments, unused. Returns `native_auth_host_unavailable`.
+/// No input. Returns `native_auth_host_unavailable`.
 #[cfg(not(unix))]
-fn run_native_auth_custodian(_args: &[OsString]) -> Result<(), String> {
+fn run_native_auth_custodian() -> Result<(), String> {
     Err("native_auth_host_unavailable".into())
 }
 
@@ -681,7 +693,7 @@ fn register_harnesses(
             crazyagent::paths::RCLI_EXECUTABLE,
             &mut harnesses.rcli,
             EngineService::register_rcli_executable,
-            EngineService::register_rcli_executable,
+            EngineService::register_found_rcli_executable,
             found_on_path[2],
         ),
     ];
@@ -1474,6 +1486,53 @@ mod tests {
         register_harnesses(&mut service, &mut harnesses, [false, true, true]).unwrap();
         assert_eq!(harnesses.codex.as_deref(), Some(entries[0].as_path()));
         assert_eq!(harnesses.claude, None);
+        service.shutdown().await.unwrap();
+    }
+
+    /// DeepSec -191 at engine start: the RCLI host found beside the engine or by the tool
+    /// resolver is checked well before it is pinned, as a found harness is (RV-DS241-140), so
+    /// it is pinned only once its real file passes the start checks. A found host whose link
+    /// leads into an agent's folder is dropped, and the engine runs without it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn engine_start_pins_a_found_rcli_host_only_when_its_real_file_passes() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let made = tempfile::Builder::new()
+            .prefix("ca-start-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = made.path();
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.join("global.toml");
+        std::fs::write(&global, b"version = 1\ntimeout_ms = 2000\n").unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service =
+            crazyagent::engine::bootstrap::EngineService::start_with_settings_sources(
+                root,
+                "e.sock",
+                &global,
+                &root.join("project.toml"),
+                &stopped,
+            )
+            .await
+            .unwrap();
+        let owner = root.join("owner");
+        let planted = root.join("work/.crazyagent/agents/a1/bin");
+        std::fs::create_dir_all(&owner).unwrap();
+        std::fs::create_dir_all(&planted).unwrap();
+        let real = planted.join(crazyagent::paths::RCLI_EXECUTABLE);
+        std::fs::write(&real, b"agent-rcli").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let entry = owner.join(crazyagent::paths::RCLI_EXECUTABLE);
+        symlink(&real, &entry).unwrap();
+        let mut harnesses = crazyagent::paths::Harnesses {
+            codex: None,
+            claude: None,
+            rcli: Some(entry),
+        };
+        register_harnesses(&mut service, &mut harnesses, [true, true, true]).unwrap();
+        assert_eq!(harnesses.rcli, None);
         service.shutdown().await.unwrap();
     }
 }

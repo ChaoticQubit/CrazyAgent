@@ -748,6 +748,52 @@ async fn repeated_preparation_retains_the_exact_unstarted_registration() {
     .await;
 }
 
+/// RV-DS241-77: a runner folder an earlier engine left beside the engine's root never costs
+/// a runner slot: the first registration after a restart takes slot 0 in a fresh folder and
+/// nothing the old folder held stays.
+#[tokio::test]
+async fn a_runner_folder_an_earlier_engine_left_never_costs_a_runner_slot() {
+    run_case(|context| async move {
+        let (attempt, _client) = context.reserve().await;
+        let stale = context.root.join("r00");
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join("left"), "an earlier engine's runner\n").unwrap();
+
+        let prepared = context.service.lock().await.prepare_runner(&attempt).await;
+
+        assert!(
+            matches!(prepared, Ok(ref runner) if runner.slot() == 0),
+            "{prepared:?}"
+        );
+        assert!(!stale.join("left").exists(), "the old folder's file stayed");
+    })
+    .await;
+}
+
+/// RV-DS241-77: a runner registration that fails gives its slot back, so failures never
+/// use up `RUNNERS_MAX`: after a refusal the same attempt registers in slot 0.
+#[tokio::test]
+async fn a_failed_runner_registration_gives_its_slot_back() {
+    run_case(|context| async move {
+        let (attempt, _client) = context.reserve().await;
+        let stale = context.root.join("r00");
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join("held"), "").unwrap();
+        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let refused = context.service.lock().await.prepare_runner(&attempt).await;
+        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let prepared = context.service.lock().await.prepare_runner(&attempt).await;
+
+        assert!(refused.is_err(), "{refused:?}");
+        assert!(
+            matches!(prepared, Ok(ref runner) if runner.slot() == 0),
+            "{prepared:?}"
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn ready_rejects_a_different_boot_or_registration_without_poisoning_the_actual_identity() {
     run_case(|context| async move {

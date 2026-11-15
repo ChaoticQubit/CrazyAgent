@@ -506,7 +506,7 @@ fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
     assert!(held.contains("home_add_in_progress"), "{held}");
     let add_1 = RequestId::new("add-1").unwrap();
     assert_eq!(
-        projects_home::add_settle(&mut connection, Some(&add_1)).unwrap(),
+        projects_home::add_settle(&mut connection, Some((&add_1, false))).unwrap(),
         1
     );
     assert_eq!(projects_home::add_ended(&connection).unwrap(), None);
@@ -542,6 +542,114 @@ fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
     let add_3 = RequestId::new("add-3").unwrap();
     projects_home::job_forget(&connection, &add_3).unwrap();
     assert_eq!(projects_home::add_ended(&connection).unwrap(), None);
+}
+
+/// RV-DS241-198: an add whose folder landed in the projects home but whose record never
+/// came, as when its grant was found stale after the disk changed, is not forgotten by its
+/// exchange's settle: its running row ends with what its disk shows, as after an engine stop,
+/// so the owner reads where the folder went and nothing is deleted. An add that landed
+/// nothing is forgotten as before, and so is one that placed nothing because another folder
+/// took its destination after the plan (rv-sec2 b9 F1), while a settle after a record leaves
+/// the kept end alone.
+#[test]
+fn an_add_whose_folder_landed_before_a_record_that_never_came_is_kept_as_ended() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let home = base.join("home");
+    let (source, landed) = (base.join("source"), home.join("source"));
+    std::fs::create_dir_all(source.join("lib")).unwrap();
+    std::fs::write(source.join("lib/a.txt"), "a\n").unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let mut connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    crate::projects_home::save(&connection, &home).unwrap();
+    let insert = |connection: &Connection, request: &str, mode: &str| {
+        connection
+            .execute(
+                "INSERT INTO projects_home_add(request, owner, source, destination, mode)
+                 VALUES (?1, 'owner', ?2, ?3, ?4)",
+                params![
+                    request,
+                    source.to_str().unwrap(),
+                    landed.to_str().unwrap(),
+                    mode
+                ],
+            )
+            .unwrap();
+    };
+    let settle = |connection: &mut Connection, request: &str, placed: bool| {
+        let request = RequestId::new(request).unwrap();
+        projects_home::add_settle(connection, Some((&request, placed))).unwrap()
+    };
+
+    insert(&connection, "add-unlanded", "move");
+    assert_eq!(settle(&mut connection, "add-unlanded", true), 1);
+    assert_eq!(
+        projects_home::add_ended(&connection).unwrap(),
+        None,
+        "an add that landed nothing is forgotten"
+    );
+
+    std::fs::create_dir_all(landed.join("lib")).unwrap();
+    insert(&connection, "add-copied", "copy");
+    assert_eq!(settle(&mut connection, "add-copied", true), 1);
+    let ended = projects_home::add_ended(&connection)
+        .unwrap()
+        .expect("a landed add whose record never came was forgotten");
+    assert_eq!(
+        (ended.request.as_str(), ended.mode, ended.ended.as_str()),
+        ("add-copied", crate::projects_home::AddMode::Copy, "done")
+    );
+
+    insert(&connection, "add-moved", "move");
+    assert_eq!(settle(&mut connection, "add-moved", true), 1);
+    let ended = projects_home::add_ended(&connection).unwrap().unwrap();
+    assert_eq!(
+        (ended.request.as_str(), ended.mode, ended.ended.as_str()),
+        (
+            "add-moved",
+            crate::projects_home::AddMode::Move,
+            "home_move_source_left"
+        )
+    );
+    let rows: i64 = connection
+        .query_row("SELECT count(*) FROM projects_home_add", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 1, "only the newest end is kept");
+    assert_eq!(
+        std::fs::read_to_string(source.join("lib/a.txt")).unwrap(),
+        "a\n",
+        "a settle deletes nothing of the old folder"
+    );
+    assert!(landed.join("lib").is_dir(), "nor of the landed folder");
+
+    assert_eq!(
+        settle(&mut connection, "add-moved", true),
+        0,
+        "a recorded or settled add has no running row"
+    );
+    let kept = projects_home::add_ended(&connection).unwrap().unwrap();
+    assert_eq!(kept.request.as_str(), "add-moved");
+
+    insert(&connection, "add-taken", "copy");
+    assert_eq!(settle(&mut connection, "add-taken", false), 1);
+    let kept = projects_home::add_ended(&connection).unwrap().unwrap();
+    assert_eq!(
+        kept.request.as_str(),
+        "add-moved",
+        "an add that placed nothing is not told as landed in a folder another took"
+    );
+    let running: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM projects_home_add WHERE ended IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(running, 0, "the add that placed nothing is forgotten");
+    assert!(landed.join("lib").is_dir(), "the other folder stays");
 }
 
 /// A delete's mark outlives a settle that only shares its exchange number, since a new engine

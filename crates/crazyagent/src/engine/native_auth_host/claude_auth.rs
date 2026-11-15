@@ -7,7 +7,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-mod process;
+pub(in crate::engine) mod process;
 mod transcript;
 pub(crate) mod types;
 
@@ -25,7 +25,7 @@ const CHECK_TIME: Duration = Duration::from_secs(9);
 const RENEWAL_TIME: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ClaudeAuthCommand {
+pub(in crate::engine) enum ClaudeAuthCommand {
     Login,
     Status,
     Logout,
@@ -197,12 +197,13 @@ pub(in crate::engine) async fn finish_failure(
 }
 
 /// Whether a Claude Code access token is inside Claude Code's refresh window, where an
-/// account status check would start a refresh it does not wait for. Input: the expiry since
-/// the epoch. Output: true inside the window, and when the clock reads before the epoch.
+/// account status check would start a refresh it does not wait for, or reaches it before a
+/// status check started now can decide, within [`CHECK_TIME`] (RV-DS241-54). Input: the
+/// expiry since the epoch. Output: true then, and when the clock reads before the epoch.
 fn lapsing(expires: Duration) -> bool {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(true, |now| expires <= now + REFRESH_WINDOW)
+        .map_or(true, |now| expires <= now + REFRESH_WINDOW + CHECK_TIME)
 }
 
 /// Renews an existing sign-in whose access token is inside Claude Code's refresh window
@@ -258,7 +259,7 @@ pub(in crate::engine) async fn run(
         + match first {
             Some(ClaudeAuthCommand::Login) => Duration::from_secs(590),
             None => CHECK_TIME + RENEWAL_TIME,
-            _ => CHECK_TIME,
+            _ => CHECK_TIME + CHECK_TIME,
         };
     if matches!(
         session.check(channel).await?,

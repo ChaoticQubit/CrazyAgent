@@ -265,9 +265,10 @@ impl<H: Host> Host for LastScreenHost<H> {
         &self,
         agent: &AgentId,
         command: &InteractiveCommand,
+        relayed: bool,
     ) -> Result<PaneRef, HostError> {
         let _turn = self.turns.take(agent);
-        let pane = self.inner.spawn_own_server(agent, command)?;
+        let pane = self.inner.spawn_own_server(agent, command, relayed)?;
         self.screens().forget(agent);
         Ok(pane)
     }
@@ -285,6 +286,11 @@ impl<H: Host> Host for LastScreenHost<H> {
 
     fn server_keepers(&self, agent: &AgentId) -> Vec<(u32, bool)> {
         self.inner.server_keepers(agent)
+    }
+
+    #[cfg(test)]
+    fn sever_lifelines(&self, agent: &AgentId) {
+        self.inner.sever_lifelines(agent);
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {

@@ -280,13 +280,28 @@ fn checked_profile_config(
     {
         return Err(error(code));
     }
+    checked_configured_config(&bytes, connection)?;
+    assert!(bytes.len() as u64 <= CONFIG_BYTES_MAX);
+    Ok(digest)
+}
+
+/// Checks SDK config bytes against a configured connection the way a written config is
+/// checked, so the engine can judge the config it generates before it writes any of it
+/// (RV-DS241-50). Inputs: the bytes and the connection. Output: Ok, or the mismatch a
+/// written config with those bytes would give.
+pub(crate) fn checked_configured_config(
+    bytes: &[u8],
+    connection: &ModelConnection,
+) -> Result<(), ProtocolError> {
+    if bytes.len() as u64 > CONFIG_BYTES_MAX {
+        return Err(error("rcli_master_profile_changed"));
+    }
     let profile: ProfileConfig =
-        serde_json::from_slice(&bytes).map_err(|_| error("rcli_master_profile_mismatch"))?;
+        serde_json::from_slice(bytes).map_err(|_| error("rcli_master_profile_mismatch"))?;
     let selection = configured_sdk_connection(connection)?;
     validate_selection(&profile, &selection)?;
-    assert!(bytes.len() as u64 <= CONFIG_BYTES_MAX);
     assert_eq!(profile.model.model, connection.model.id);
-    Ok(digest)
+    Ok(())
 }
 
 /// Refuses an rcli private folder where its Unix owner and mode cannot be checked.

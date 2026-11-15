@@ -942,3 +942,12 @@ test("Edit with AI is a project setting, On unless the owner turned it off, and 
   assert.ok(markup.indexOf(">Lines the project file repeats<") < markup.indexOf("<strong>Edit with AI</strong>"), "after the repeated lines row");
   assert.ok(markup.indexOf("<strong>Edit with AI</strong>") < markup.indexOf("<strong>Keep transcripts</strong>"), "before transcripts");
 });
+
+test("Process names project text changed outside CrazyAgent in the engine's own words (SA vid 7 residual, DEC-141)", () => {
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/instruction_files.rs", import.meta.url), "utf8");
+  const words = /pub const OUTSIDE_NOTICE: &str = "([^"]+)";/.exec(engine)?.[1];
+  assert.ok(words, "the engine keeps the notice");
+  assert.equal(view.OUTSIDE_NOTICE, words);
+  const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
+  assert.match(source, /loaded\.value\.outside === true && <Notice tone="warn">\{OUTSIDE_NOTICE\}<\/Notice>/);
+});

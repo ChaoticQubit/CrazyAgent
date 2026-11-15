@@ -1680,14 +1680,14 @@ export type IntakeJobState =
 /** What a job does: adds a folder, moves a project kept elsewhere into the projects folder,
  * deletes a project, its folders to the Trash (DEC-177 add.1), or sets up a New Project, its
  * name in place of the folder (add.2). */
-export type JobKind = "add" | "move_project" | "delete" | "setup";
+export type ProjectJobKind = "add" | "move_project" | "delete" | "setup";
 
 /** The engine's one job, which adds a folder or moves a project into the projects folder apart
  * from the window: its id, its kind, the project a move takes, the folder, move or copy, the
  * soft refusals it goes past, whether a stop was asked and its state. */
 export interface IntakeJob {
   id: string;
-  kind: JobKind;
+  kind: ProjectJobKind;
   project_id: string | null;
   source: string;
   mode: AddFolderMode;

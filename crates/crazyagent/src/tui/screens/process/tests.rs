@@ -11,6 +11,7 @@ fn reply(query: ProcessQuery, result: Result<&str, &str>) -> Arrival {
             ProcessQuery::Read { .. } => ProcessReply::Current(ProcessText {
                 text: text.to_owned(),
                 version: READ_VERSION,
+                outside: false,
             }),
             ProcessQuery::Save { version, .. } => ProcessReply::Saved(SavedText::Saved {
                 version: version + 1,
@@ -573,6 +574,7 @@ fn a_stale_save_keeps_the_draft_and_never_adopts_the_newer_version() {
         current: ProcessText {
             text: "Desktop rule.".into(),
             version: READ_VERSION + 1,
+            outside: false,
         },
         writer: crate::storage::versioned::LastWriter::Owner,
     };
@@ -622,6 +624,7 @@ fn a_refused_save_over_a_four_line_text_keeps_the_problem_in_view_at_80_by_24() 
         current: ProcessText {
             text: "One.\nTwo.\nThree.\nFour.".into(),
             version: READ_VERSION + 1,
+            outside: false,
         },
         writer: crate::storage::versioned::LastWriter::Owner,
     };
@@ -673,6 +676,7 @@ fn a_refused_save_over_a_long_newer_text_keeps_the_problem_and_both_editor_rows_
             current: ProcessText {
                 text: names[..count].join("\n"),
                 version: READ_VERSION + 1,
+                outside: false,
             },
             writer: crate::storage::versioned::LastWriter::Owner,
         };
@@ -714,6 +718,7 @@ fn stale_save_shows_the_conflict_choices() {
             current: ProcessText {
                 text: text.into(),
                 version: named + 1,
+                outside: false,
             },
             writer: crate::storage::versioned::LastWriter::Agent(
                 crate::terminal::AgentId::team(3).unwrap(),
@@ -2276,6 +2281,7 @@ fn accepting_a_proposal_after_a_newer_save_shows_the_conflict_and_keeps_the_newe
         current: ProcessText {
             text: "Desktop rule.".into(),
             version: READ_VERSION + 1,
+            outside: false,
         },
         writer: crate::storage::versioned::LastWriter::Owner,
     };
@@ -2382,4 +2388,50 @@ fn a_skill_written_with_an_engine_namespace_is_tagged_whole_and_an_unknown_one_s
         vec![(0, chars.len(), review)],
         "a qualified name that starts left of the drawn range is found whole"
     );
+}
+
+/// SA vid 7 residual (leader 14:22 A): a project page whose file holds text CrazyAgent did
+/// not save there last names that in the engine's words, as a stale save reports it, and a
+/// save that lands takes the notice away.
+#[cfg(unix)]
+#[test]
+fn a_project_page_names_text_changed_outside_until_a_save_lands() {
+    let project = ProjectId::new("harbor-notes").unwrap();
+    let scope = Scope::Project {
+        id: project.clone(),
+        name: "Harbor Notes".into(),
+    };
+    let mut shell = opened(scope, "Pulled.");
+    let tall = |shell: &mut Shell| render(shell, 120, 60).join("\n");
+    let notice = crate::instruction_files::OUTSIDE_NOTICE;
+    assert!(notice.starts_with("This file changed outside CrazyAgent."));
+    let first = notice.split(". ").next().unwrap();
+    assert!(!tall(&mut shell).contains(first));
+    typed(&mut shell, "Mine. ");
+    shell.key(Key::Ctrl('s'));
+    let save = ProcessQuery::Save {
+        project: Some(project.clone()),
+        text: "Mine. Pulled.".into(),
+        version: READ_VERSION,
+        opened: None,
+    };
+    assert_eq!(requests(&mut shell), vec![save.clone()]);
+    let stale = SavedText::Stale {
+        version: READ_VERSION,
+        current: ProcessText {
+            text: "Pulled again.".into(),
+            version: READ_VERSION + 1,
+            outside: true,
+        },
+        writer: crate::storage::versioned::LastWriter::Owner,
+    };
+    shell.arrive(answered(save, Ok(ProcessReply::Saved(stale))));
+    let shown = tall(&mut shell);
+    assert!(shown.contains(first), "{shown}");
+    shell.key(Key::Ctrl('y'));
+    let kept = requests(&mut shell).pop().expect("Keep mine saves");
+    assert!(matches!(kept, ProcessQuery::Save { .. }), "{kept:?}");
+    shell.arrive(saved(kept, 10));
+    let shown = tall(&mut shell);
+    assert!(!shown.contains(first), "{shown}");
 }

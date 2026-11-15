@@ -87,6 +87,7 @@ const COPY: Record<string, string> = {
   onboarding_folder_missing: "This folder isn't there anymore. Choose it again.",
   onboarding_folder_unsafe: "This folder can't be set up. Choose a project's own folder, not your home folder or the app's data.",
   onboarding_instructions_unwritable: "This folder came with a .crazyagent/instructions.md that CrazyAgent can't label as Imported. Make that file and its .crazyagent folder writable, then start again.",
+  onboarding_instructions_unreadable: "This folder came with a .crazyagent/instructions.md that CrazyAgent can't read: it is a link, too large or not plain text. Move or fix that file, then start again.",
   onboarding_layout_incomplete: "Setup didn't finish preparing this project. Try again.",
   onboarding_path_invalid: "This folder can't be set up. Choose it again with Choose folder.",
   onboarding_path_not_canonical: "This folder can't be set up from this path. Choose it again with Choose folder.",

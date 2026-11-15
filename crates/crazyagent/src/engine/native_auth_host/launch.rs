@@ -8,6 +8,10 @@ use std::time::{Duration, Instant};
 /// The most words one handed launch holds: the interpreters, their first-line words and the
 /// harness file.
 pub(crate) const LAUNCH_WORDS_MAX: usize = 12;
+/// The most command-line entries a sign-in custodian takes: its six-entry prefix (the
+/// command, the runtime folder, and the harness executable with its hash) and
+/// [`LAUNCH_WORDS_MAX`] words of at most four entries each (RV-DS241-52).
+pub const CUSTODIAN_ARGUMENTS_MAX: usize = 6 + 4 * LAUNCH_WORDS_MAX;
 /// The longest first-line word a handed launch carries.
 const ARGUMENT_BYTES_MAX: usize = 256;
 /// How often a sign-in waiting for the engine's first probe run checks whether it ended.
@@ -120,6 +124,7 @@ pub(super) fn hand_over(
             LaunchWord::Argument(argument) => command.arg("--launch-argument").arg(argument),
         };
     }
+    assert!(command.get_args().len() <= CUSTODIAN_ARGUMENTS_MAX);
     Ok(())
 }
 

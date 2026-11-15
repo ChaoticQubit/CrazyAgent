@@ -115,7 +115,7 @@ test("the delete command is wired from the Remove dialog to the engine's job, an
   assert.equal((lib.match(/desktop_delete_project_job/g) ?? []).length, 2, "the command's body and its handler entry");
   assert.match(read("src-tauri/src/bridge/intake.rs"), /JobSubject::Delete \{ project_id, name \}/);
   assert.match(read("src/state.ts"), /kind === "delete"[^;]*refreshProjects\(\)/, "a delete that ended reads the projects again");
-  assert.match(read("src/engine-client.ts"), /export type JobKind = "add" \| "move_project" \| "delete" \| "setup";/);
+  assert.match(read("src/engine-client.ts"), /export type ProjectJobKind = "add" \| "move_project" \| "delete" \| "setup";/);
 });
 
 test("Delete everything has one way in, the engine's job: Remove project sends no name and the bridge's remove takes none, so nothing deletes outside the job (rv-code2 N3)", () => {

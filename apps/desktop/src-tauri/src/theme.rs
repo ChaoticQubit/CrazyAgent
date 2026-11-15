@@ -282,7 +282,10 @@ mod tests {
         assert_eq!((dark.width(), dark.height()), (256, 256));
         let (top_light, top_dark) = (tile_top(&light), tile_top(&dark));
         assert!(top_light.iter().all(|&value| value > 200), "{top_light:?}");
-        assert!(top_dark[..3].iter().all(|&value| value < 64), "{top_dark:?}");
+        assert!(
+            top_dark[..3].iter().all(|&value| value < 64),
+            "{top_dark:?}"
+        );
         assert_eq!(top_dark[3], 255, "{top_dark:?}");
         assert_eq!((light.rgba()[3], dark.rgba()[3]), (0, 0), "clear corners");
         assert_eq!(png_width(dock_picture(Theme::Light)), 1024);

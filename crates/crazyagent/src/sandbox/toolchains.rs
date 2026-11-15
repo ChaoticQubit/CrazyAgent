@@ -1165,9 +1165,10 @@ impl Drop for ScopedTmp {
 /// (DEC-173): where the owner has the cache, whatever else is there, a folder or a link
 /// elsewhere, gives way to it; where the owner has none, a link there goes, and a folder an
 /// agent made goes at its launch's reset ([`crate::agent_home::prepare`]), while a folder in
-/// the owner's IDE terminal home stays. Inputs: the agent home and the owner's tool homes.
-/// Output: the cargo home, or a refusal when `.cargo` is not a plain folder or a name will
-/// not give way.
+/// the owner's IDE terminal home stays. A launch that finds the exact link another launch
+/// of the same home made at a name it saw free takes it (RV-DS241-199). Inputs: the agent
+/// home and the owner's tool homes. Output: the cargo home, or a refusal when `.cargo` is
+/// not a plain folder or a name will not give way.
 #[cfg(unix)]
 pub fn prepare_cargo_home(home: &Path, homes: &ToolHomes) -> io::Result<PathBuf> {
     use rustix::fs::{CWD, Mode, OFlags};
@@ -1187,6 +1188,10 @@ pub fn prepare_cargo_home(home: &Path, homes: &ToolHomes) -> io::Result<PathBuf>
         crate::team::cleanup::remove_home_entry(&folder, name)
             .map_err(|_| io::Error::other("cargo cache name will not give way"))
     };
+    let linked = |name: &str, shared: &Path| {
+        rustix::fs::readlinkat(&folder, name, Vec::new())
+            .is_ok_and(|target| target.as_bytes() == shared.as_os_str().as_bytes())
+    };
     for name in CARGO_SHARED {
         let found = rustix::fs::readlinkat(&folder, *name, Vec::new());
         let Some(shared) = existing(&homes.cargo.join(name), true) else {
@@ -1200,7 +1205,10 @@ pub fn prepare_cargo_home(home: &Path, homes: &ToolHomes) -> io::Result<PathBuf>
             Err(rustix::io::Errno::NOENT) => {}
             _ => remove(name)?,
         }
-        rustix::fs::symlinkat(&shared, &folder, *name)?;
+        match rustix::fs::symlinkat(&shared, &folder, *name) {
+            Err(rustix::io::Errno::EXIST) if linked(name, &shared) => {}
+            made => made?,
+        }
     }
     Ok(cargo)
 }

@@ -177,7 +177,7 @@ pub(crate) enum Job {
         Vec<crate::projects_home::AddOverride>,
         oneshot::Sender<Result<(), EngineError>>,
     ),
-    HomeAddSettle(RequestId, oneshot::Sender<Result<(), EngineError>>),
+    HomeAddSettle(RequestId, bool, oneshot::Sender<Result<(), EngineError>>),
     HomeAddEnded(oneshot::Sender<Result<Option<projects_home::AddEnded>, EngineError>>),
     HomeProjectMoveEnded(oneshot::Sender<Result<Option<projects_home::MoveEnded>, EngineError>>),
     HomeJobForget(RequestId, oneshot::Sender<Result<(), EngineError>>),
@@ -685,11 +685,12 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
-                        Job::HomeAddSettle(request, reply) => {
+                        Job::HomeAddSettle(request, placed, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::add_settle(&mut connection, Some(&request)).map(drop)
+                                projects_home::add_settle(&mut connection, Some((&request, placed)))
+                                    .map(drop)
                             };
                             let _ = reply.send(result);
                         }
