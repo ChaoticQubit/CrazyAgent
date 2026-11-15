@@ -366,3 +366,29 @@ fn a_gemini_api_key_is_an_account_kind_on_googles_address_in_its_own_wire_format
         serde_json::json!("gemini")
     );
 }
+
+/// Task 17: a Gemini API key is stored for Gemini CLI, not for RCLI, so neither the RCLI
+/// master, which takes any HTTP account stored for RCLI, nor the RCLI home takes an account
+/// RCLI cannot run.
+#[test]
+fn a_gemini_api_key_is_stored_for_gemini_cli_so_the_rcli_master_never_takes_it() {
+    use crate::master_session::MasterBackend;
+    let gemini: Provider =
+        serde_json::from_value(serde_json::json!("gemini")).expect("the pool has a Gemini kind");
+    let mut value = draft(gemini, SignInMethod::ApiKey);
+    value.model = Some("gemini-2.5-pro".into());
+    let (connection, _) = value.build(true, "0123456789abcdef0123").unwrap();
+    assert_eq!(connection.harness.as_str(), "gemini-cli");
+    for backend in [
+        MasterBackend::Rcli,
+        MasterBackend::Codex,
+        MasterBackend::Claude,
+    ] {
+        assert!(
+            !crate::master_session::backend_member(backend, &connection),
+            "{backend:?}"
+        );
+    }
+    assert_eq!(crate::config::connection_destination(&connection), None);
+    assert!(!crate::harnesses::account_fits("rcli", &connection));
+}
