@@ -3063,7 +3063,9 @@ fn a_team_agent_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
 
 /// RV-DS241-127: a native lead is refused with `team_delegate_writable` when the delegate
 /// engine sits in its teammates' home. Only the teammates write that folder, so the lead's
-/// own sandbox passes and the refusal proves the teammates' sandbox is checked as well.
+/// own sandbox passes and the refusal proves the teammates' sandbox is checked as well. The
+/// engine sits in the teammates' `.cache`, which their home's reset at each launch keeps
+/// (RV-DS241-137 r3).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_native_lead_is_refused_when_its_teammates_can_write_the_delegate_engine() {
@@ -3087,7 +3089,7 @@ fn a_native_lead_is_refused_when_its_teammates_can_write_the_delegate_engine() {
     let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
     let home = agent_home(&runtime.state, id);
     let mates = crate::launch_context::mates_home(&home);
-    let bin = mates.join("engine-bin");
+    let bin = mates.join(".cache/engine-bin");
     std::fs::create_dir_all(&bin).unwrap();
     for folder in [home.parent().unwrap(), mates.as_path()] {
         std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
