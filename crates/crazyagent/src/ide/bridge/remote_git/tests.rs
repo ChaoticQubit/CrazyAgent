@@ -957,11 +957,11 @@ fn git_config_planted_inside_the_project_folder_is_refused() {
 
 /// An include whose file is placed in the project folder, where the IDE can write it after
 /// the check, is refused while that file is missing or empty and git lists none of its
-/// entries: a relative include of `.git/config`, a global include by absolute path, by `~/`
-/// and, on a volume that folds case, by another spelling of the folder, and a global
-/// include of a dangling link into the folder. A global include of a missing
-/// `~/.gitconfig.local` and of an existing file outside the folder still lands
-/// (RV-DS241-144b).
+/// entries, and once the IDE has written `core.gitProxy` into it, which never runs: a
+/// relative include of `.git/config`, a global include by absolute path, by `~/` and, on a
+/// volume that folds case, by another spelling of the folder, and a global include of a
+/// dangling link into the folder. A global include of a missing `~/.gitconfig.local` and of
+/// an existing file outside the folder still lands (RV-DS241-144b).
 #[test]
 fn an_include_of_a_file_placed_in_the_project_is_refused_while_it_is_missing_or_empty() {
     let project = Project::new();
@@ -988,10 +988,12 @@ fn an_include_of_a_file_placed_in_the_project_is_refused_while_it_is_missing_or_
         let spelled = folded.join("shared.gitconfig");
         cases.push((global.clone(), spelled.to_str().unwrap().to_owned()));
     }
-    for written in [false, true] {
-        if written {
+    let marker = project.root.join("proxy-ran");
+    let proxy = format!("[core]\n\tgitProxy = touch {}\n", marker.display());
+    for content in [None, Some(String::new()), Some(proxy)] {
+        if let Some(content) = &content {
             for file in [&shared, &planted] {
-                std::fs::write(file, "").unwrap();
+                std::fs::write(file, content).unwrap();
             }
         }
         for (file, value) in &cases {
@@ -1004,6 +1006,7 @@ fn an_include_of_a_file_placed_in_the_project_is_refused_while_it_is_missing_or_
             set(file.as_path(), &["--unset-all", "include.path"]);
         }
     }
+    assert!(!marker.exists());
     assert_ne!(project.served("main"), Some(commit.clone()));
 
     let extra = project.root.join("extra.gitconfig");
