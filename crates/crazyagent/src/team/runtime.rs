@@ -9653,6 +9653,7 @@ impl TeamRuntime {
                 )
             })?
             .terminal_display;
+        let relayed = relay.is_some();
         let plan = Plan {
             harness: launch.into(),
             entry: executable.clone(),
@@ -9673,7 +9674,7 @@ impl TeamRuntime {
                 .clone()
                 .map(|host| {
                     if native {
-                        crate::terminal::own_server(host)
+                        crate::terminal::own_server(host, relayed)
                     } else {
                         host
                     }

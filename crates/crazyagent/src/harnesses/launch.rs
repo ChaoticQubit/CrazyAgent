@@ -1431,11 +1431,11 @@ impl Driver {
     }
 }
 
-/// A running harness process driven through its headless interface.
-/// The process leads its own process group, and a harness on pipes has a warden in its
-/// sandbox, so stop reaches every descendant, those in their own sessions included.
+/// A running harness process driven through its headless interface, leading its own process
+/// group with a warden in its sandbox, so stop reaches every descendant, sessions included.
 /// `uncertain` is set once its warden did not confirm that sandbox empty; `follower` follows a
-/// Full access run's processes, which no warden reaches, from its start to its stop.
+/// Full access run's processes, which no warden reaches. One on an engine key relay holds the
+/// engine's lifeline, so its group ends with the engine (b6 r2 F1), released once stopped.
 pub struct Session {
     child: Child,
     warden: Option<crate::sandbox::warden::Warden>,
@@ -1452,6 +1452,8 @@ pub struct Session {
     _context: Option<Installed>,
     _relay: Option<Relay>,
     _key: Option<KeyFile>,
+    #[cfg(unix)]
+    lifeline: Option<crate::research::runner::Lifeline>,
 }
 
 impl Session {
@@ -1480,10 +1482,10 @@ impl Session {
         Self::spawn(request, command, Some(installed), None, (relay, key))
     }
 
-    /// Spawns a harness that outlives the engine: its input is a FIFO it holds open for
-    /// reading and writing, so it never sees end of input when the engine dies, and its
-    /// output goes to a private log whose lock it holds for as long as any process of its
-    /// group lives. Input: the request, the project context for a project agent and the
+    /// Spawns a harness that outlives the engine, unless it is on an engine key relay it needs
+    /// (b6 r2 F1): its input is a FIFO it holds open, so it never sees end of input when the
+    /// engine dies, and its output goes to a private log whose lock it holds while any process
+    /// of its group lives. Input: the request, the project context for a project agent and the
     /// agent's empty 0700 state directory. Output: a running session, or a plain refusal.
     pub fn start_durable(
         request: LaunchRequest,
@@ -1584,7 +1586,19 @@ impl Session {
             _context: context,
             _relay: relay,
             _key: key,
+            #[cfg(unix)]
+            lifeline: None,
         };
+        #[cfg(unix)]
+        if request
+            .account
+            .key()
+            .is_some_and(|key| crate::model_gateway::relay::is_relay_token(key.reveal()))
+        {
+            let lifeline = crate::research::runner::Lifeline::watch(session.child.id())
+                .map_err(|_| failure("launch_spawn_failed"))?;
+            session.lifeline = Some(lifeline);
+        }
         for bytes in startup {
             session.write(&bytes)?;
         }
@@ -1746,6 +1760,9 @@ impl Session {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         let _ = self.child.kill();
         let status = self.child.wait().ok();
+        if let Some(mut lifeline) = self.lifeline.take() {
+            lifeline.release();
+        }
         self.uncertain =
             crate::sandbox::warden::fire_reported(self.warden.take(), "harness").is_err();
         assert!(self.stdin.is_none());
