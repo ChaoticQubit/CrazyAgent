@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod ide;
+pub mod theme;
 mod updates;
 
 #[cfg(feature = "native-webdriver")]

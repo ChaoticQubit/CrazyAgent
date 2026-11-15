@@ -1,7 +1,8 @@
 import "./load-source.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
+import { inflateSync } from "node:zlib";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -28,6 +29,61 @@ function pngSize(path) {
   assert.equal(png.toString("latin1", 12, 16), "IHDR", path);
   return [png.readUInt32BE(16), png.readUInt32BE(20)];
 }
+
+/** Reads one pixel of an 8-bit RGBA PNG. Inputs: the PNG bytes and the pixel's column and row.
+ * Output: its red, green, blue and alpha. */
+function pixel(png, x, y) {
+  assert.equal(png.toString("latin1", 1, 4), "PNG");
+  const [width, depth, kind] = [png.readUInt32BE(16), png[24], png[25]];
+  assert.deepEqual([depth, kind, png[28]], [8, 6, 0], "8-bit RGBA, not interlaced");
+  const chunks = [];
+  for (let at = 8; at < png.length; at += 12 + png.readUInt32BE(at)) {
+    if (png.toString("latin1", at + 4, at + 8) === "IDAT") chunks.push(png.subarray(at + 8, at + 8 + png.readUInt32BE(at)));
+  }
+  const raw = inflateSync(Buffer.concat(chunks));
+  const stride = width * 4;
+  let previous = new Uint8Array(stride);
+  for (let row = 0; row <= y; row += 1) {
+    const filter = raw[row * (stride + 1)];
+    const line = Uint8Array.from(raw.subarray(row * (stride + 1) + 1, (row + 1) * (stride + 1)));
+    for (let i = 0; i < stride; i += 1) {
+      const [a, b, c] = [i >= 4 ? line[i - 4] : 0, previous[i], i >= 4 ? previous[i - 4] : 0];
+      const guess = a + b - c;
+      const [pa, pb, pc] = [Math.abs(guess - a), Math.abs(guess - b), Math.abs(guess - c)];
+      const add = [0, a, b, (a + b) >> 1, pa <= pb && pa <= pc ? a : pb <= pc ? b : c][filter];
+      assert.notEqual(add, undefined, `filter ${filter}`);
+      line[i] = (line[i] + add) & 255;
+    }
+    previous = line;
+  }
+  return [...previous.subarray(x * 4, x * 4 + 4)];
+}
+
+/** Reads the tile's top band and a corner of a square app icon PNG, where the brand tile and
+ * not the mark is drawn (150 and 2 of 1024). Input: the PNG bytes. Output: both pixels. */
+function tile(png) {
+  const size = png.readUInt32BE(16);
+  return { top: pixel(png, size >> 1, Math.round((150 * size) / 1024)), corner: pixel(png, 0, 0) };
+}
+
+/** Returns the embedded image of one icon in an .ico or .icns file. Inputs: the file bytes and
+ * the .ico width or the .icns type. Output: the PNG bytes. */
+function embedded(file, key) {
+  if (file.toString("latin1", 0, 4) === "icns") {
+    for (let at = 8; at < file.length; at += file.readUInt32BE(at + 4)) {
+      if (file.toString("latin1", at, at + 4) === key) return file.subarray(at + 8, at + file.readUInt32BE(at + 4));
+    }
+    assert.fail(`no ${key} in the icns`);
+  }
+  for (let entry = 0; entry < file.readUInt16LE(4); entry += 1) {
+    const head = 6 + entry * 16;
+    if ((file[head] || 256) === key) return file.subarray(file.readUInt32LE(head + 12), file.readUInt32LE(head + 12) + file.readUInt32LE(head + 8));
+  }
+  return assert.fail(`no ${key} px entry in the ico`);
+}
+
+const NIGHT = (rgba, what) => assert.ok(rgba.slice(0, 3).every((value) => value < 64) && rgba[3] === 255, `${what} is the night tile: ${rgba}`);
+const BONE = (rgba, what) => assert.ok(rgba.slice(0, 3).every((value) => value > 200) && rgba[3] === 255, `${what} is the bone tile: ${rgba}`);
 
 test("BrandMark draws the Ember 4 mark from the brand assets and is named CrazyAgent", () => {
   const markup = renderToStaticMarkup(createElement(BrandMark));
@@ -72,19 +128,58 @@ test("index.html links the brand favicon as SVG with a 32 px PNG fallback", () =
   assert.doesNotMatch(favicon, /<script|href=|on[a-z]+=/i);
 });
 
-test("tauri bundles the brand icon set with the 1024 icon first, so the dock uses it", () => {
+test("tauri bundles the dark night tile as the fixed icon and the Icon Composer file for macOS 26 (DEC-181)", () => {
   const conf = JSON.parse(read("../src-tauri/tauri.conf.json").toString("utf8"));
   assert.deepEqual(conf.bundle.icon, [
-    "icons/icon.png", "icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico",
+    "icons/icon.png", "icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico", "icons/AppIcon.icon",
   ]);
   for (const [file, size] of [["icon.png", 1024], ["32x32.png", 32], ["128x128.png", 128], ["128x128@2x.png", 256]]) {
     assert.deepEqual(pngSize(`../src-tauri/icons/${file}`), [size, size], file);
+    const { top, corner } = tile(read(`../src-tauri/icons/${file}`));
+    NIGHT(top, file);
+    assert.equal(corner[3], 0, `${file} corner is clear`);
   }
   const icns = read("../src-tauri/icons/icon.icns");
   assert.equal(icns.toString("latin1", 0, 4), "icns");
   assert.equal(icns.readUInt32BE(4), icns.length);
+  for (const key of ["ic10", "ic08", "ic07"]) NIGHT(tile(embedded(icns, key)).top, `icns ${key}`);
   const ico = read("../src-tauri/icons/icon.ico");
   assert.deepEqual([ico.readUInt16LE(0), ico.readUInt16LE(2)], [0, 1]);
   const sizes = Array.from({ length: ico.readUInt16LE(4) }, (_, index) => ico[6 + index * 16] || 256);
   assert.deepEqual(sizes, [16, 24, 32, 48, 64, 256]);
+  for (const size of sizes) NIGHT(tile(embedded(ico, size)).top, `ico ${size}`);
+});
+
+test("the light tile stays beside it for the running Dock and window icon of the Light theme", () => {
+  for (const [file, size] of [["icon.png", 1024], ["128x128@2x.png", 256]]) {
+    assert.ok(existsSync(new URL(`../src-tauri/icons/light/${file}`, import.meta.url)), `light/${file}`);
+    assert.deepEqual(pngSize(`../src-tauri/icons/light/${file}`), [size, size], file);
+    const { top, corner } = tile(read(`../src-tauri/icons/light/${file}`));
+    BONE(top, `light/${file}`);
+    assert.equal(corner[3], 0, `light/${file} corner is clear`);
+  }
+});
+
+test("the Icon Composer file gives the fill and the mark a dark look the Mac picks with its icon style", () => {
+  const folder = "../src-tauri/icons/AppIcon.icon";
+  assert.ok(existsSync(new URL(`${folder}/icon.json`, import.meta.url)), "AppIcon.icon/icon.json");
+  const icon = JSON.parse(read(`${folder}/icon.json`).toString("utf8"));
+  assert.deepEqual(icon["supported-platforms"], { squares: ["macOS"] });
+  const dark = (list) => list?.find((entry) => entry.appearance === "dark");
+  assert.ok(icon.fill?.["linear-gradient"], "the default fill is the bone gradient");
+  assert.ok(dark(icon["fill-specializations"])?.value?.["linear-gradient"], "a dark night gradient fill");
+  const layers = icon.groups.flatMap((group) => group.layers);
+  assert.equal(layers.length, 1, "one layer: the mark");
+  const [mark] = layers;
+  const night = dark(mark["image-name-specializations"])?.value;
+  assert.ok(night && night !== mark["image-name"], "the mark has its own dark drawing");
+  const coil = shapes(asset("mark.svg")).coil;
+  for (const [name, colors] of [[mark["image-name"], ["#1B1A17", "#E5482D"]], [night, ["#F2EEE6", "#FF6A45"]]]) {
+    assert.ok(existsSync(new URL(`${folder}/Assets/${name}`, import.meta.url)), name);
+    const svg = read(`${folder}/Assets/${name}`).toString("utf8");
+    assert.equal(shapes(svg).coil, coil, `${name} draws the brand coil`);
+    assert.deepEqual(shapes(svg).squares, shapes(asset("mark.svg")).squares, `${name} draws the four squares`);
+    for (const color of colors) assert.ok(svg.includes(color), `${name} uses ${color}`);
+    assert.doesNotMatch(svg, /<script|href=|on[a-z]+=/i);
+  }
 });
