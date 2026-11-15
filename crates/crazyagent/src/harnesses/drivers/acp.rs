@@ -1,4 +1,5 @@
 use super::super::launch::{LaunchError, LaunchEvent, failure, rate_limited};
+use super::super::manifest::{Manifest, Refused};
 use crate::adapters::{LINE_BYTES_MAX, clip_text};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -420,6 +421,13 @@ impl Acp {
             Phase::Failed => {}
         }
     }
+}
+
+/// Checks the tools-off switch of an ACP manifest. Input: a manifest. Output: Ok until the
+/// check lands.
+pub fn check(manifest: &Manifest) -> Result<(), Refused> {
+    let _ = manifest;
+    Ok(())
 }
 
 /// Picks the permission option the launch's tools switch allows: with tools on the

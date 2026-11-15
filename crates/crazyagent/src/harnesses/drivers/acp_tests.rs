@@ -610,3 +610,134 @@ fn the_client_offers_no_service_and_reads_only_its_own_session() {
         "launch_protocol_failed"
     );
 }
+
+/// rv-code2 HT10-1: a line the client refuses after it asked the agent to cancel fails the
+/// launch with `launch_protocol_failed` and stays failed, never an assertion.
+#[test]
+fn a_refused_line_after_a_cancel_fails_the_launch_and_stays_failed() {
+    let lines: [Vec<u8>; 2] = [b"not json\n".to_vec(), reply(99, json!({}))];
+    for line in lines {
+        let mut acp = prompting(true);
+        assert!(acp.cancel().unwrap().is_some());
+        assert_eq!(code(acp.receive(&line)), "launch_protocol_failed");
+        assert_eq!(acp.phase(), Phase::Failed);
+        assert_eq!(code(acp.receive(&line)), "launch_protocol_failed");
+        assert_eq!(code(acp.cancel()), "launch_not_running");
+        assert_eq!(acp.phase(), Phase::Failed);
+    }
+}
+
+/// rv-sec3 F1: an ACP agent asks permission only when it chooses to, so with tools off a
+/// tool call the agent runs without asking is a breach: one `ApprovalDenied`, one
+/// `session/cancel`, and the turn ends unsuccessful without counting as the owner's
+/// interrupt. A tool call still pending, or the same calls with tools on, is no breach.
+#[test]
+fn with_tools_off_a_tool_the_agent_runs_without_asking_cancels_the_turn() {
+    let running = update(
+        SESSION,
+        json!({"sessionUpdate": "tool_call", "toolCallId": "c1", "title": "Read", "status": "in_progress"}),
+    );
+    let done = update(
+        SESSION,
+        json!({"sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "completed"}),
+    );
+    let pending = update(
+        SESSION,
+        json!({"sessionUpdate": "tool_call", "toolCallId": "c2", "title": "Edit", "status": "pending"}),
+    );
+
+    let mut acp = prompting(false);
+    assert_eq!(
+        events_of(&mut acp, &pending),
+        [LaunchEvent::ToolUse {
+            name: "Edit".into()
+        }]
+    );
+    let (events, writes) = acp.receive(&running).unwrap();
+    assert_eq!(
+        events,
+        [
+            LaunchEvent::ToolUse {
+                name: "Read".into()
+            },
+            LaunchEvent::ApprovalDenied,
+        ]
+    );
+    assert_eq!(writes.len(), 1);
+    assert_eq!(parsed(&writes[0])["method"], "session/cancel");
+    assert_eq!(parsed(&writes[0])["params"]["sessionId"], SESSION);
+    none(events_of(&mut acp, &done));
+    assert_eq!(code(acp.cancel()), "launch_not_running");
+    assert_eq!(
+        events_of(&mut acp, &reply(2, json!({"stopReason": "cancelled"}))),
+        [LaunchEvent::TurnFinished { success: false }]
+    );
+    assert_eq!(acp.phase(), Phase::Idle);
+
+    let mut acp = prompting(false);
+    let (_, writes) = acp.receive(&done).unwrap();
+    assert_eq!(writes.len(), 1, "a completed update alone is a breach");
+    assert_eq!(
+        events_of(&mut acp, &reply(2, json!({"stopReason": "end_turn"}))),
+        [LaunchEvent::TurnFinished { success: false }]
+    );
+
+    let mut acp = prompting(false);
+    assert!(acp.cancel().unwrap().is_some());
+    let (events, writes) = acp.receive(&running).unwrap();
+    assert_eq!(events.last(), Some(&LaunchEvent::ApprovalDenied));
+    assert!(
+        writes.is_empty(),
+        "a cancel already asked is not asked twice"
+    );
+
+    let mut acp = prompting(true);
+    assert_eq!(
+        events_of(&mut acp, &running),
+        [LaunchEvent::ToolUse {
+            name: "Read".into()
+        }]
+    );
+    none(events_of(&mut acp, &done));
+    assert_eq!(
+        events_of(&mut acp, &reply(2, json!({"stopReason": "end_turn"}))),
+        [LaunchEvent::TurnFinished { success: true }]
+    );
+}
+
+/// rv-sec3 F1: an ACP manifest that does not say `tools_limited` names the agent's own
+/// tools-off switch in `piped.tools_off`, since permission answers never switch tools off;
+/// the registry refuses one that names neither, with the file in front.
+#[test]
+fn an_acp_manifest_names_its_own_tools_off_switch_or_says_tools_are_limited() {
+    const STANDIN: &str = include_str!("../../../tests/fixtures/harness/standin-acp.yaml");
+    let switch = "  tools_off:\n    - \"--no-tools\"\n";
+    assert!(STANDIN.contains(switch));
+    let parse = |text: &str| crate::harnesses::manifest::parse(text.as_bytes()).unwrap();
+    assert_eq!(check(&parse(STANDIN)), Ok(()));
+    let bare = STANDIN.replace(switch, "");
+    let refused = check(&parse(&bare)).unwrap_err();
+    assert_eq!(refused.code, crate::harnesses::manifest::MISSING);
+    assert_eq!(
+        refused.message,
+        "piped.tools_off: an acp harness switches tools off only by a setting of its own; name it here, or say tools_limited."
+    );
+    let limited = bare.replace(
+        "sub_agents: \"app\"\n",
+        "sub_agents: \"app\"\ntools_limited: \"Tools cannot be switched off.\"\n",
+    );
+    assert_ne!(limited, bare);
+    assert_eq!(check(&parse(&limited)), Ok(()));
+    let other = bare.replace("driver: \"acp\"", "driver: \"jsonl-turn\"");
+    assert_eq!(check(&parse(&other)), Ok(()));
+    let built = crate::harnesses::registry::Registry::build(&[("standin-acp", bare.as_str())]);
+    let refused = built.err().expect("the registry refuses it");
+    assert_eq!(refused.code, crate::harnesses::manifest::MISSING);
+    assert!(
+        refused
+            .message
+            .starts_with("standin-acp: piped.tools_off: "),
+        "{}",
+        refused.message
+    );
+}
