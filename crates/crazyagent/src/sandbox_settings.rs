@@ -3,13 +3,17 @@ use crate::engine::owner::OwnerData;
 use crate::protocol::Outcome;
 use crate::sandbox::{LinuxSockets, LinuxSupervisor};
 use rusqlite::{Connection, OptionalExtension};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(unix, test))]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS sandbox_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-    linux_sockets TEXT NOT NULL CHECK(linux_sockets IN ('tcp_only', 'refuse', 'tcp_ports'))
+    linux_sockets TEXT NOT NULL CHECK(linux_sockets IN ('tcp_only', 'refuse', 'tcp_ports')),
+    linux_supervisor TEXT NOT NULL DEFAULT 'on' CHECK(linux_supervisor IN ('on', 'off'))
 )";
+#[cfg(any(unix, test))]
+const SUPERVISOR_COLUMN: &str = "ALTER TABLE sandbox_settings ADD COLUMN linux_supervisor TEXT NOT NULL DEFAULT 'on' CHECK(linux_supervisor IN ('on', 'off'))";
 
 /// The owner's app-wide sandbox settings: how a limited-network agent's sockets are held
 /// on Linux ("Linux limited-network sockets") and whether Linux agents run under the call
@@ -27,11 +31,40 @@ fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
 }
 
-/// Creates the settings table when it is missing. Input: the engine database. Output: Ok,
-/// or the database error.
+/// The stored word of one setting value, as its serde name. Input: the value. Output: the
+/// word, or `sandbox_settings_invalid` for a value that is not one word.
+fn word(value: impl Serialize) -> Result<String, EngineError> {
+    match serde_json::to_value(value).map_err(error)? {
+        serde_json::Value::String(word) => Ok(word),
+        _ => Err(error("sandbox_settings_invalid")),
+    }
+}
+
+/// The setting value a stored word names. Input: the word. Output: the value, or
+/// `sandbox_settings_invalid` for a word this engine does not know.
+fn value<T: DeserializeOwned>(word: String) -> Result<T, EngineError> {
+    serde_json::from_value(serde_json::Value::String(word))
+        .map_err(|_| error("sandbox_settings_invalid"))
+}
+
+/// Creates the settings table when it is missing and adds the call supervisor column to a
+/// table made before it, holding `on` for a row already saved, so the owner's sockets
+/// choice stays. Input: the engine database. Output: Ok, or the database error.
 #[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
-    connection.execute_batch(TABLE).map_err(error)
+    connection.execute_batch(TABLE).map_err(error)?;
+    let columns: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('sandbox_settings') WHERE name='linux_supervisor'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    assert!((0..=1).contains(&columns));
+    if columns == 0 {
+        connection.execute_batch(SUPERVISOR_COLUMN).map_err(error)?;
+    }
+    Ok(())
 }
 
 /// Saves the owner's sandbox settings over the stored ones. Inputs: the open transaction
@@ -40,17 +73,14 @@ pub(crate) fn save(
     connection: &Connection,
     settings: &SandboxSettings,
 ) -> Result<Outcome, EngineError> {
-    let serde_json::Value::String(sockets) =
-        serde_json::to_value(settings.linux_sockets).map_err(error)?
-    else {
-        return Err(error("sandbox_settings_invalid"));
-    };
-    connection
+    let words = [word(settings.linux_sockets)?, word(settings.linux_supervisor)?];
+    let changed = connection
         .execute(
-            "INSERT INTO sandbox_settings(singleton,linux_sockets) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET linux_sockets=excluded.linux_sockets",
-            [&sockets],
+            "INSERT INTO sandbox_settings(singleton,linux_sockets,linux_supervisor) VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET linux_sockets=excluded.linux_sockets, linux_supervisor=excluded.linux_supervisor",
+            words,
         )
         .map_err(error)?;
+    assert_eq!(changed, 1);
     Ok(Outcome::Applied)
 }
 
@@ -59,22 +89,20 @@ pub(crate) fn save(
 /// `sandbox_settings_invalid` for a stored value this engine does not know, so a launch
 /// that needs the setting fails closed.
 pub fn load(connection: &Connection) -> Result<SandboxSettings, EngineError> {
-    let sockets: Option<String> = connection
+    let words: Option<(String, String)> = connection
         .query_row(
-            "SELECT linux_sockets FROM sandbox_settings WHERE singleton=1",
+            "SELECT linux_sockets, linux_supervisor FROM sandbox_settings WHERE singleton=1",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(error)?;
-    let Some(sockets) = sockets else {
+    let Some((sockets, supervisor)) = words else {
         return Ok(SandboxSettings::default());
     };
-    let linux_sockets = serde_json::from_value(serde_json::Value::String(sockets))
-        .map_err(|_| error("sandbox_settings_invalid"))?;
     Ok(SandboxSettings {
-        linux_sockets,
-        linux_supervisor: LinuxSupervisor::default(),
+        linux_sockets: value(sockets)?,
+        linux_supervisor: value(supervisor)?,
     })
 }
 
