@@ -13,6 +13,7 @@ use std::path::Path;
 pub mod audit;
 pub mod gateway;
 pub mod grants;
+pub mod launch;
 pub mod mcp_client;
 pub mod settings;
 pub mod shim;

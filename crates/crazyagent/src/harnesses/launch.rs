@@ -947,7 +947,7 @@ pub(super) fn codex_configuration(
 /// whose locked values it must hold. Setting sources stay off, so no other hook loads.
 /// Inputs: the key file of a keyed account and the installed context. Output: the settings
 /// JSON.
-fn claude_settings(key_file: Option<&str>, installed: Option<&Installed>) -> String {
+pub(crate) fn claude_settings(key_file: Option<&str>, installed: Option<&Installed>) -> String {
     let hooks = installed.is_some_and(Installed::runs_hooks);
     let owner = installed.map(Installed::harness_settings);
     if key_file.is_none() && !hooks && owner.is_none() {

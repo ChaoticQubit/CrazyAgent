@@ -1530,6 +1530,7 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
         servers,
         context_mode_off,
         left_out,
+        native_connectors: None,
     })
 }
 

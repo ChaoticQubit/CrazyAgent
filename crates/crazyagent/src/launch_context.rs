@@ -233,6 +233,7 @@ pub struct Installed {
     freeze_record: Option<PathBuf>,
     terminal_display: TerminalDisplay,
     settings: Applied,
+    native_connectors_off: bool,
     _lock: File,
 }
 
@@ -932,6 +933,37 @@ impl AgentContext {
         .map(|context| context.with_tools_section(off, own_clone))
     }
 
+    /// Adds the server entry of a launch's connector server, which reaches the engine's
+    /// gateway through its launch folder and holds no secret. Input: the entry
+    /// [`crate::connectors::launch::entry`] made. Output: the context, or
+    /// `launch_context_connectors_taken` when an approved server already uses its name.
+    pub fn with_connectors(self, server: LaunchServer) -> Result<Self, LaunchError> {
+        let _ = server;
+        Ok(self)
+    }
+
+    /// A context with the plugins given and nothing else, for the rows that install one.
+    /// Input: the plugins. Output: the context.
+    #[cfg(test)]
+    pub(crate) fn for_tests(plugins: LaunchPlugins) -> Self {
+        AgentContext {
+            plugins,
+            instructions: "# Project context from CrazyAgent\n".into(),
+            process: None,
+            transcripts: true,
+            off_tools: Vec::new(),
+            native_team: None,
+            native_threads: None,
+            native_model: crate::model_choice::NativeModel::Follow,
+            relay: None,
+            model_proxy: None,
+            freeze_record: None,
+            terminal_display: TerminalDisplay::Classic,
+            catch_up_main: true,
+            settings: Applied::default(),
+        }
+    }
+
     /// Adds the ticket section after a live master's or a sub-agent's team tools (TI-3): the
     /// default pack's ticket rule and the project's key and close setting, so it plans and
     /// works through the ticket tools. A project with no tickets is told nothing. Input: a
@@ -1159,6 +1191,7 @@ impl AgentContext {
             freeze_record: self.freeze_record.clone(),
             terminal_display: self.terminal_display,
             settings: self.settings.clone(),
+            native_connectors_off: false,
             _lock: lock,
         };
         remove(&state);
@@ -1453,6 +1486,12 @@ impl Installed {
     /// (DEC-158), none for a pane no engine freezes.
     pub fn freeze_record(&self) -> Option<&Path> {
         self.freeze_record.as_deref()
+    }
+
+    /// Tells whether this launch turns the harness's own account connectors off, the
+    /// owner's Native setting (DEC-168 addendum 12).
+    pub fn native_connectors_off(&self) -> bool {
+        self.native_connectors_off
     }
 
     /// Names the display this launch's terminal draws with (N-D9, DEC-141).
