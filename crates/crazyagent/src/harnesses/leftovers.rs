@@ -205,7 +205,7 @@ pub struct HeldView {
 /// One hold of a Full access stop: the account it keeps, if any, the report naming what
 /// still runs, what the stop holds, such as the agent's account lease, until the
 /// hold ends or the owner keeps the processes running, who left it, the names it shows, where
-/// it stands and when it began.
+/// it stands, when it began and whether a sandboxed run left it ([`confined_left_by`]).
 struct Held {
     account: Option<CredentialRef>,
     report: String,
@@ -215,6 +215,7 @@ struct Held {
     names: String,
     state: HoldState,
     since_ms: i64,
+    sandboxed: bool,
 }
 
 /// Every account a Full access stop keeps now, by the order they were kept in, so a refused
@@ -279,7 +280,13 @@ pub fn held_in(project: &str) -> Vec<HeldView> {
 /// commands hold the owner's rights already. Input: who would start. Output: the answer.
 pub fn confined_left_by(by: &HoldBy) -> bool {
     assert!(!by.who.is_empty());
-    false
+    let who: String = by.who.chars().take(WHO_CHARS_MAX).collect();
+    held().values().any(|hold| {
+        hold.sandboxed
+            && matches!(hold.state, HoldState::Held | HoldState::Kept)
+            && hold.by.project == by.project
+            && hold.by.who == who
+    })
 }
 
 /// Has one hold of a project end its processes, the owner's End: SIGTERM, then SIGKILL after
@@ -591,6 +598,7 @@ impl Leftovers {
         mode: LeftoverMode,
     ) {
         let key = NEXT_HELD.fetch_add(1, Ordering::Relaxed);
+        let sandboxed = self.0.sandboxed;
         let report = self.plain();
         let names = self.names();
         let by = HoldBy {
@@ -616,6 +624,7 @@ impl Leftovers {
                 names,
                 state,
                 since_ms: now_ms(),
+                sandboxed,
             },
         );
         assert!(previous.is_none());
