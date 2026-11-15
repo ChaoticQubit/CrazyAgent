@@ -149,7 +149,7 @@ impl Protection {
 pub const BARE_NO_HOOKS: &str = "Claude Code on an API key or URL account starts without hooks, so it runs none of your hooks and Block and Wait cannot hold its edits.";
 /// Why an rcli master runs no hooks: rcli has none.
 pub const RCLI_NO_HOOKS: &str =
-    "rcli has no hooks, so it runs none of yours and Block and Wait cannot hold its edits.";
+    "RCLI has no hooks, so it runs none of yours and Block and Wait cannot hold its edits.";
 /// Which owner hooks a Codex agent runs: those on an event Codex has (PA-12).
 pub const CODEX_HOOK_EVENTS_ONLY: &str = "Codex agents run your hooks on the events Codex has.";
 /// What a Codex agent's Messages timeline shows when its app-server lists a hook the launch
@@ -160,7 +160,7 @@ pub const CODEX_HOOKS_UNTRUSTED: &str = "Codex does not trust CrazyAgent's hooks
 pub const CODEX_HOOKS_UNCHECKED: &str = "CrazyAgent could not confirm that Codex trusts its hooks for this agent, so Block and Wait may not hold its edits and your hooks may not run for it.";
 /// The short form of BARE_NO_HOOKS and RCLI_NO_HOOKS a terminal Hooks heading has room
 /// for: which agents run none of the owner's hooks.
-pub const HOOKS_NONE_SHORT: &str = "Claude Code on a key or URL and rcli run none";
+pub const HOOKS_NONE_SHORT: &str = "Claude Code on a key or URL and RCLI run none";
 
 impl HarnessKind {
     /// Says why this harness's agents miss one protection on one account kind, or None

@@ -115,7 +115,29 @@ test("the delete command is wired from the Remove dialog to the engine's job, an
   assert.equal((lib.match(/desktop_delete_project_job/g) ?? []).length, 2, "the command's body and its handler entry");
   assert.match(read("src-tauri/src/bridge/intake.rs"), /JobSubject::Delete \{ project_id, name \}/);
   assert.match(read("src/state.ts"), /kind === "delete"[^;]*refreshProjects\(\)/, "a delete that ended reads the projects again");
-  assert.match(read("src/engine-client.ts"), /export type JobKind = "add" \| "move_project" \| "delete";/);
+  assert.match(read("src/engine-client.ts"), /export type ProjectJobKind = "add" \| "move_project" \| "delete";/);
+});
+
+test("Delete everything has one way in, the engine's job: Remove project sends no name and the bridge's remove takes none, so nothing deletes outside the job (rv-code2 N3)", () => {
+  const projectsApi = read("src/api-projects.ts");
+  assert.match(projectsApi, /export async function removeProject\(id: string, generation: number\): Promise<Result<IntentReceipt>> \{/);
+  assert.match(projectsApi, /call<IntentReceipt>\("desktop_remove_project", \{ id, generation \}\)/);
+  assert.doesNotMatch(projectsApi, /deleteName/);
+  const lib = read("src-tauri/src/lib.rs");
+  const at = lib.indexOf("async fn desktop_remove_project(");
+  assert.ok(at >= 0);
+  assert.doesNotMatch(lib.slice(at, lib.indexOf("\n}\n", at)), /delete_name/, "the command takes no typed name");
+  const bridge = read("src-tauri/src/bridge/project_setup.rs");
+  const from = bridge.indexOf("pub async fn remove_project(");
+  assert.ok(from >= 0);
+  const remove = bridge.slice(from, bridge.indexOf("\n    }\n", from));
+  assert.doesNotMatch(remove, /delete_name|DeleteProject/, "the bridge's remove sends no delete");
+  assert.match(remove, /OwnerMutation::RemoveProject \{ project_id \}/);
+  const routes = read("src-tauri/e2e_bridge/routes.rs");
+  const route = routes.indexOf("\"desktop_remove_project\" => {");
+  assert.ok(route >= 0);
+  assert.doesNotMatch(routes.slice(route, routes.indexOf("\"desktop_", route + 1)), /delete_name/, "the e2e route matches the command");
+  for (const path of ["test/native/terminal-wall.e2e.mjs", "test/native/ide-window.e2e.mjs"]) assert.doesNotMatch(read(path), /deleteName/, path);
 });
 
 test("a stop refused once the delete moves folders to the Trash, and each code a delete ends with, reads as a plain sentence", () => {

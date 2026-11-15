@@ -41,14 +41,18 @@ function page() {
   return document.getElementById("panel");
 }
 
-/** Builds one ready harness catalog entry. Inputs: the id, the name and its aliases.
- * Output: the entry as the engine lists it. */
-const entry = (id, name, aliases = []) => ({ id, name, status: { kind: "ready" }, status_label: "Ready", executable: null, headless: "", tools: { kind: "switchable" },
-  model_selection: false, account_kinds: [], team: { kind: "available" }, aliases });
+/** Builds one ready harness catalog entry. Inputs: the id, the name, its aliases and what
+ * its manifest lets it be. Output: the entry as the engine lists it. */
+const entry = (id, name, aliases = [], can = {}) => ({ id, name, status: { kind: "ready" }, status_label: "Ready", executable: null, headless: "", tools: { kind: "switchable" },
+  model_selection: false, account_kinds: [], team: { kind: "available" }, aliases, terminal: false, master: false, research: false, sub_agents: "app", account_protocols: [], ...can });
+
+const LIVE = { terminal: true, master: true, research: true };
 
 /** The engine's harness catalog as the project page reads it: Claude Code answers to its
- * alias "claude", as plans saved by older builds store it. */
-const CATALOG = [entry("codex", "Codex"), entry("claude-code", "Claude Code", ["claude"]), entry("rcli", "RCLI")];
+ * alias "claude", as plans saved by older builds store it, and Codex and Claude Code are the
+ * two the engine reads back from a live terminal. */
+const CATALOG = [entry("codex", "Codex", [], { ...LIVE, sub_agents: "threads" }), entry("claude-code", "Claude Code", ["claude"], { ...LIVE, sub_agents: "teams" }),
+  entry("rcli", "RCLI", [], { master: true })];
 
 function data(master, on, team = undefined, catalog = undefined) {
   const setup = master === undefined ? undefined : {
@@ -57,7 +61,7 @@ function data(master, on, team = undefined, catalog = undefined) {
       team: { master, master_tools: true, sub_harnesses: [] } },
   };
   return {
-    id: "alpha", name: "Alpha", setup, research: undefined, context: undefined, pools: undefined, harnesses: catalog === undefined ? undefined : { kind: "ok", value: catalog },
+    id: "alpha", name: "Alpha", setup, research: undefined, context: undefined, pools: undefined, harnesses: catalog === undefined ? undefined : Array.isArray(catalog) ? { kind: "ok", value: catalog } : catalog,
     assigned: null, now: 0, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
     team: team !== undefined ? { result: team, at: 0 } : on === undefined ? { result: undefined, at: 0 } : { result: { kind: "ok", value: status(on) }, at: 1 },
     reloadTeam: () => { reloads += 1; },
@@ -73,11 +77,13 @@ const node = { id: "team-1", kind: "master", parent: null, label: "Master", harn
 /** Mounts the project's master area for a team plan whose master is the given harness, or
  * whose setup is still loading when it is undefined, with the engine's live switch read as
  * `on` (true, false or null for never set), or the team not read yet when it is undefined,
- * and the harness catalog read unless `catalog` is false. */
+ * and the harness catalog read unless `catalog` is false, or its read failed when it is
+ * "failed". */
 export function mountArea(master, on, catalog = true) {
   const panel = page();
   root = createRoot(panel);
-  flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, undefined, catalog ? CATALOG : undefined) })));
+  const read = catalog === "failed" ? { kind: "error", code: "engine_failed", message: "" } : catalog ? CATALOG : undefined;
+  flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, undefined, read) })));
 }
 
 /** Mounts the project's master area with no master known yet, the plan not read. Output:

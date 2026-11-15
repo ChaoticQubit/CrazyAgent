@@ -590,7 +590,7 @@ const followRow = (markup, name) => {
 
 function following(extra = {}) {
   return renderToStaticMarkup(createElement(view.FollowingView, {
-    adoption: { kind: "ok", value: ADOPTION }, names: NAMES, finished: false, expanded: null,
+    adoption: { kind: "ok", value: ADOPTION }, names: NAMES, finished: false, expanded: null, harness: (id) => ({ "claude-code": "Claude Code", codex: "Codex", rcli: "RCLI" })[id] ?? id,
     onFinished: never("onFinished"), onExpand: never("onExpand"), onMetrics: never("onMetrics"), onRetry: never("onRetry"), ...extra,
   }));
 }
@@ -607,6 +607,8 @@ test("Are agents following it shows one row per agent with its graph, context to
   assert.match(words(followRow(markup, "Master")), /Master Claude Code Not yet Missed None 10\+ min without graphify or context-mode/);
   assert.match(markup, /2 older agents are not listed\./);
   assert.match(markup, /aria-expanded="false"/);
+  const renamed = words(following({ harness: (id) => id === "claude-code" ? "Claude Prime" : id }));
+  assert.match(renamed, /Wren Claude Prime Missed/, "each agent's harness is named as the catalog names it");
 });
 
 test("finished agents wait behind Show finished, and a clicked row shows the agent's counts", () => {
@@ -941,4 +943,13 @@ test("Edit with AI is a project setting, On unless the owner turned it off, and 
   assert.equal((markup.match(/<div class="pr-del-row[ "]/g) ?? []).length, 5, "five rows");
   assert.ok(markup.indexOf(">Lines the project file repeats<") < markup.indexOf("<strong>Edit with AI</strong>"), "after the repeated lines row");
   assert.ok(markup.indexOf("<strong>Edit with AI</strong>") < markup.indexOf("<strong>Keep transcripts</strong>"), "before transcripts");
+});
+
+test("Process names project text changed outside CrazyAgent in the engine's own words (SA vid 7 residual, DEC-141)", () => {
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/instruction_files.rs", import.meta.url), "utf8");
+  const words = /pub const OUTSIDE_NOTICE: &str = "([^"]+)";/.exec(engine)?.[1];
+  assert.ok(words, "the engine keeps the notice");
+  assert.equal(view.OUTSIDE_NOTICE, words);
+  const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
+  assert.match(source, /loaded\.value\.outside === true && <Notice tone="warn">\{OUTSIDE_NOTICE\}<\/Notice>/);
 });

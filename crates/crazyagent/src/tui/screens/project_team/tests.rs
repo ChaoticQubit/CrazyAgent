@@ -3422,7 +3422,7 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
 
     let (lines, _) = view.rows(116, 40, &accounts(), &Look::plain());
     let shown: Vec<String> = lines.iter().map(Row::text).collect();
-    for label in ["rcli sub-agents", "Messages to rcli agents"] {
+    for label in ["RCLI sub-agents", "Messages to RCLI agents"] {
         let line = shown
             .iter()
             .find(|line| line.contains(label))
@@ -3433,7 +3433,7 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
         );
     }
     let before = harness_row(&view, HarnessKind::Rcli);
-    for (row, label) in [(4, "rcli sub-agents"), (5, "Messages to rcli agents")] {
+    for (row, label) in [(4, "RCLI sub-agents"), (5, "Messages to RCLI agents")] {
         view.key(press(KeyCode::Down));
         assert_eq!(view.coord.as_ref().unwrap().row, row);
         assert_eq!(view.key(press(KeyCode::Right)), TeamReply::Handled);
@@ -3775,7 +3775,7 @@ fn the_terminal_display_shows_classic_by_default_and_space_flips_it() {
     for (next, words) in [
         (
             TerminalDisplay::Fullscreen,
-            "Fullscreen. rcli stays Classic",
+            "Fullscreen. RCLI stays Classic",
         ),
         (TerminalDisplay::Classic, "Classic"),
     ] {
@@ -3811,12 +3811,12 @@ fn the_terminal_display_row_names_only_the_kinds_that_stay_classic() {
     assert_eq!(display_kept(&view, TerminalDisplay::Classic), "");
     assert_eq!(
         display_kept(&view, TerminalDisplay::Fullscreen),
-        " rcli stays Classic."
+        " RCLI stays Classic."
     );
     view.harnesses[1].displays = vec![TerminalDisplay::Classic];
     assert_eq!(
         display_kept(&view, TerminalDisplay::Fullscreen),
-        " Codex and rcli stay Classic."
+        " Codex and RCLI stay Classic."
     );
     for row in &mut view.harnesses {
         row.displays.clear();
@@ -4111,7 +4111,7 @@ fn f_moves_the_new_folder_limit_through_every_choice() {
 #[test]
 fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
     use crate::team::BackgroundAtEnd;
-    const SCOPE: &str = "Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an rcli agent has no tools, so it starts none.";
+    const SCOPE: &str = "Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an RCLI agent has no tools, so it starts none.";
     let mut view = TeamView::new(project());
     for key in ['B', 'G'] {
         assert_eq!(view.key(press(KeyCode::Char(key))), TeamReply::Handled);
@@ -4820,7 +4820,7 @@ fn every_harness_kind_says_what_its_delivery_choices_do() {
             HarnessKind::Codex => {
                 "Native only never types: with tools off, a Codex agent gets its messages as a task of their own once it is idle."
             }
-            HarnessKind::Rcli => "rcli runs no team agents, so no message goes to one here.",
+            HarnessKind::Rcli => "RCLI runs no team agents, so no message goes to one here.",
             HarnessKind::Listed(id) => unreachable!("{id} is not a native kind"),
         };
         assert!(said.contains(native), "{kind:?}: {said}");

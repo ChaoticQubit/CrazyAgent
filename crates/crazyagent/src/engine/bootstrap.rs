@@ -723,6 +723,25 @@ impl EngineService {
             .set_harness_search(search)
     }
 
+    /// Registers the RCLI host engine start found beside it or through the tool resolver
+    /// rather than was given by flag, both identities pinned only once the real file pinned
+    /// passes the start checks and the entry still leads to it, as a found harness is
+    /// (RV-DS241-140, DeepSec -191). Input: the absolute entry. Output: Ok, or the refusal code.
+    pub fn register_found_rcli_executable(&mut self, entry: &Path) -> Result<(), EngineError> {
+        if self.closed {
+            return Err(fail("engine_service_closed"));
+        }
+        self.live()?;
+        let runtime = self
+            .owner_runtime
+            .as_ref()
+            .ok_or_else(|| fail("owner_runtime_missing"))?;
+        let master = runtime.capture_found(entry)?;
+        let writer = runtime.capture_found(entry)?;
+        runtime.register_rcli_master_executable(master)?;
+        runtime.register_rcli_private_key_executable(writer)
+    }
+
     /// Registers the native RCLI host for master turns and API-key writes.
     /// Input: absolute path to the bundled `crazyagent-rcli` executable.
     /// Output: Ok once both identities are captured before the runtime freezes.

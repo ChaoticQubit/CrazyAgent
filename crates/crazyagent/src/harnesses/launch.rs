@@ -1,3 +1,4 @@
+use super::drivers::acp::Acp;
 use super::drivers::{self, Piped};
 use super::interactive::KEY_FILE;
 use super::leftovers::{Follower, LINEAGE_VARIABLE, LineageToken, Unstopped};
@@ -579,7 +580,9 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
     let default = match drivers::piped(&request.harness) {
         Ok(Piped::Codex) => CODEX_DEFAULT_BASE_URL,
         Ok(Piped::Claude) => CLAUDE_DEFAULT_BASE_URL,
-        Ok(Piped::JsonlTurn) | Err(_) => return Err(failure("launch_key_relay_unsupported")),
+        Ok(Piped::Acp | Piped::JsonlTurn) | Err(_) => {
+            return Err(failure("launch_key_relay_unsupported"));
+        }
     };
     let upstream = request.account.base_url().unwrap_or(default).to_owned();
     let secret = SecretString::new(key.reveal().as_bytes().to_vec())
@@ -646,7 +649,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     let (arguments, environment) = match drivers::piped(&request.harness)? {
         Piped::Codex => codex_invocation(request, installed, key_file.as_deref())?,
         Piped::Claude => claude_invocation(request, installed, key_file.as_deref()),
-        Piped::JsonlTurn => return Err(failure("launch_harness_unsupported")),
+        Piped::Acp | Piped::JsonlTurn => return Err(failure("launch_harness_unsupported")),
     };
     sandboxed(request, installed, &arguments, &environment)
 }
@@ -1128,6 +1131,9 @@ enum Driver {
         interrupt: Option<String>,
         late: u64,
     },
+    Acp {
+        protocol: Box<Acp>,
+    },
 }
 
 impl Driver {
@@ -1183,6 +1189,13 @@ impl Driver {
                     Vec::new(),
                 ))
             }
+            Piped::Acp => {
+                let (protocol, start) = Acp::new(&request.working_dir, request.tools, None)?;
+                let driver = Self::Acp {
+                    protocol: Box::new(protocol),
+                };
+                Ok((driver, vec![start]))
+            }
             Piped::JsonlTurn => Err(failure("launch_harness_unsupported")),
         }
     }
@@ -1228,6 +1241,7 @@ impl Driver {
                     .map(Some)
                     .map_err(|_| failure("launch_busy"))
             }
+            Self::Acp { protocol } => protocol.prompt(text),
         }
     }
 
@@ -1267,6 +1281,7 @@ impl Driver {
                 *interrupt = Some(id);
                 Ok(Some(bytes))
             }
+            Self::Acp { protocol } => protocol.cancel(),
         }
     }
 
@@ -1443,6 +1458,11 @@ impl Driver {
                         }
                     }
                 }
+            }
+            Self::Acp { protocol } => {
+                let (decoded, answers) = protocol.receive(line)?;
+                events.extend(decoded);
+                writes.extend(answers);
             }
         }
         Ok((events, writes))

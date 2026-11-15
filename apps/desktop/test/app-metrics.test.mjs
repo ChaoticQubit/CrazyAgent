@@ -48,7 +48,7 @@ const metrics = {
     { key: "claude-code", tokens: BETA, agents: 1, runs: 1, projects: ["beta"] },
   ],
 };
-const names = { agents: new Map([["team-8", "Juniper"]]), accounts: new Map([["acct-a", "Pool A, Claude 1"]]) };
+const names = { agents: new Map([["team-8", "Juniper"]]), accounts: new Map([["acct-a", "Pool A, Claude 1"]]), harness: (id) => ({ "claude-code": "Claude Code", codex: "Codex", rcli: "RCLI" })[id] ?? id };
 const LIMITS = { pools: new Map(), failure: "", busy: null, next: null, revision: 0, onRefresh: forbidden, onSetReset: forbidden };
 const FILTER = { projects: PROJECTS, onProject: forbidden, limits: LIMITS };
 const SESSION = { projects: { kind: "loading" }, noteResult: (result) => result, showToast() {} };
@@ -108,6 +108,9 @@ test("By account and By harness name the projects that used each one", () => {
   assert.match(harnesses, /^ Harness Tokens Input Cache write Output Cache read Agents Projects Share of tokens /);
   assert.match(harnesses, /Codex 1\.4K 700 500 200 3K 1 Alpha 61%/);
   assert.match(harnesses, /Claude Code 900 500 300 100 1K 1 Beta 39%/);
+  const renamed = tableText(render({ names: { ...names, harness: (id) => id === "codex" ? "Codex Prime" : id } }), "harness");
+  assert.match(renamed, /Codex Prime 1\.4K 700 500 200 3K 1 Alpha 61%/, "the harness is named as the catalog names it");
+  assert.match(renamed, /claude-code 900 500 300 100 1K 1 Beta 39%/, "a harness the catalog does not name shows its id");
 });
 
 test("a picked project shows its name, stays picked and drops the Project column", () => {
@@ -159,7 +162,7 @@ test("the app page names agents from the metrics read and reads no team status p
     runs: metrics.runs.map((run) => ({ ...run, label: label(run.agent) })),
     agents: metrics.agents.map((row) => ({ ...row, label: label(row.agent) })),
   };
-  const shown = (by) => tableText(render({ names: { agents: new Map(), accounts: names.accounts }, metrics: { kind: "ok", value: labelled } }), by);
+  const shown = (by) => tableText(render({ names: { ...names, agents: new Map() }, metrics: { kind: "ok", value: labelled } }), by);
   assert.match(shown("agent"), /Ada \(@calendar\) Alpha 1\.4K/);
   assert.match(shown("agent"), /Master Beta 900/);
   assert.match(shown("run"), /#142 Calendar API endpoints Alpha 1\.4K 700 500 200 3K Ada \(@calendar\) /);
