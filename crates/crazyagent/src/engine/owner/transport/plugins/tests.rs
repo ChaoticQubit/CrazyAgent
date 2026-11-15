@@ -197,6 +197,55 @@ fn the_context_mode_check_on_a_node_older_than_22_5_says_so_and_never_starts_npx
     assert!(!root.join(CHECK_FOLDER).exists());
 }
 
+/// RV-DS241-150 r2: the Settings check of a spec shaped like the default pack's pinned
+/// context-mode launch whose npx the tool resolver does not find, as a repository's own
+/// tools folder shipping `node` and `npm`, records its own code once the background folder
+/// probes ended, so the row says why, and no file of that folder starts and no check home is
+/// made.
+#[cfg(unix)]
+#[test]
+fn the_context_mode_check_of_an_npx_the_resolver_does_not_find_says_so_and_never_starts_it() {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let root = base.join("engine");
+    let tools = base.join("repo").join("tools");
+    for folder in [&root, &tools] {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(folder)
+            .unwrap();
+    }
+    let ran = base.join("ran");
+    for name in ["npx", "node", "npm"] {
+        std::fs::write(
+            tools.join(name),
+            format!("#!/bin/sh\n/usr/bin/touch '{}'\necho v24.0.0\n", ran.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(tools.join(name), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+    let refused = boundary_check(
+        &root,
+        "mcp-0123456789abcdef01234567",
+        tools.join("npx").to_str().unwrap(),
+        &["-y".to_owned(), "context-mode@1.0.169".to_owned()],
+        &[],
+        &[],
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap_err();
+    assert_eq!(refused, "server_npx_not_found");
+    assert_eq!(
+        crate::plugins::check_problem(&refused),
+        "CrazyAgent did not find the npx this context-mode server runs on this computer, so it did not start it."
+    );
+    assert!(!ran.exists(), "a file of that folder started");
+    assert!(!root.join(CHECK_FOLDER).exists());
+}
+
 /// The Settings check of the default pack's pinned context-mode server runs what an agent
 /// launch runs, the engine's shared install with the `node` beside npx, and never npx, so
 /// it lists the context-mode tools with no network even where npx cannot start the server

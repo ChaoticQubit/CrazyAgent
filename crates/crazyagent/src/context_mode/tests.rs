@@ -535,12 +535,13 @@ fn a_check_while_the_install_runs_says_it_is_being_set_up() {
     assert!(!registered(&case.folder()));
 }
 
-/// RV-DS241-150: a spec shaped like the default pack's pinned context-mode launch whose npx
-/// lies in a folder the engine's tool resolver never looks in, as a repository's own tools
-/// folder shipping `node` and `npm`, is not that launch: a check and an agent launch hand it
-/// back as approved, to run inside their boundary, and no file of that folder runs here.
+/// RV-DS241-150 r2: a spec shaped like the default pack's pinned context-mode launch whose
+/// npx lies in a folder the engine's tool resolver never looks in, as a repository's own
+/// tools folder shipping `node` and `npm`, never runs once the background folder probes
+/// ended: a check refuses it with its own code, an agent launch leaves it out with its own
+/// reason, and no file of that folder runs, inside a boundary or outside it.
 #[test]
-fn a_pinned_shaped_npx_the_resolver_does_not_find_runs_as_approved_and_its_node_never_runs() {
+fn a_pinned_shaped_npx_the_resolver_does_not_find_is_left_out_and_nothing_of_its_folder_runs() {
     let case = case("/usr/bin/false");
     let tools = case.root.parent().unwrap().join("repo").join("tools");
     fs::create_dir_all(&tools).unwrap();
@@ -558,12 +559,19 @@ fn a_pinned_shaped_npx_the_resolver_does_not_find_runs_as_approved_and_its_node_
         args: vec!["-y".into(), format!("context-mode@{VERSION}")],
     };
     assert!(pinned(&spec).is_some(), "shaped like the pinned launch");
+    assert!(
+        !crate::tools::probe::mark().first_run_pending,
+        "unit tests never start a real folder run, so the probes count as ended"
+    );
     assert_eq!(
         for_check(&case.root, spec.clone()),
-        ForCheck::Run(spec.clone())
+        ForCheck::Refused("context_mode_npx_not_found")
     );
-    assert_eq!(for_launch(&case.root, spec.clone()), Ok(spec));
-    assert!(!ran.exists(), "a file of that folder ran outside a boundary");
+    assert_eq!(
+        for_launch(&case.root, spec).map_err(|off| format!("{off:?}")),
+        Err::<ServerSpec, String>("NpxNotFound".to_owned())
+    );
+    assert!(!ran.exists(), "a file of that folder ran");
     assert!(!registered(&case.folder()));
     assert!(!case.npm().join(PROFILE).exists(), "npm never started");
 }

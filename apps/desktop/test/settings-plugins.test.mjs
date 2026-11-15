@@ -46,6 +46,10 @@ test("a context-mode check on a Node.js older than 22.5 reads the version it nee
   assert.equal(api.plainError("server_node_too_old"), "context-mode needs Node.js 22.5 or newer. Update Node.js, then check again.");
 });
 
+test("a context-mode check of an npx the engine's tool resolver does not find reads the engine's one sentence", () => {
+  assert.equal(api.plainError("server_npx_not_found"), "CrazyAgent did not find the npx this context-mode server runs on this computer, so it did not start it.");
+});
+
 test("the skills list shows each skill from the engine with its folder, switch and remove action", () => {
   const markup = renderToStaticMarkup(createElement(SkillsView, skillsProps({ kind: "ok", value: [skill(), skill({ id: "skill-2", name: "pdf", enabled: false })] })));
   assert.match(markup, /frontend-design/);

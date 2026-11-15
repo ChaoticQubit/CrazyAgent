@@ -985,4 +985,17 @@ mod tests {
         assert_eq!(check_problem("server_node_too_old"), words);
         assert_eq!(plain_problem("server_node_too_old"), Some(words));
     }
+
+    /// RV-DS241-150 r2: a check of a pinned-shaped context-mode spec whose npx the tool
+    /// resolver does not find reads one sentence of its own, a code the desktop knows.
+    #[test]
+    fn a_check_of_a_context_mode_npx_the_resolver_does_not_find_says_so_in_one_sentence() {
+        let words = "CrazyAgent did not find the npx this context-mode server runs on this computer, so it did not start it.";
+        assert_eq!(check_problem("server_npx_not_found"), words);
+        assert_eq!(plain_problem("server_npx_not_found"), Some(words));
+        assert_eq!(
+            known_code("server_npx_not_found"),
+            Some("server_npx_not_found")
+        );
+    }
 }
