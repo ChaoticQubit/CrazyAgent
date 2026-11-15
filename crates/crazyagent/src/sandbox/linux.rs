@@ -1117,6 +1117,12 @@ fn passes(probe: &mut Command) -> bool {
     .is_ok_and(|status| status.success())
 }
 
+/// Opens the bubblewrap a nest starts. Input: its path. Output: the open file, none when
+/// it cannot be opened.
+fn trusted_file(bwrap: &Path) -> Option<fs::File> {
+    fs::File::open(bwrap).ok()
+}
+
 /// Tells whether a bubblewrap is one the helper may nest an agent under: a file that root
 /// or this user owns, with neither [`SET_ID_BITS`] bit, so it runs with this user's
 /// privileges and was put there by root or by this user. A host whose bubblewrap fails
@@ -2018,6 +2024,39 @@ mod tests {
             assert!(refused, "{}", bwrap.display());
             assert!(!nests(bwrap, &agreeing, &probe), "{}", bwrap.display());
         }
+    }
+
+    #[test]
+    fn the_bubblewrap_a_nest_starts_is_checked_as_the_file_it_opened() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let moded = |name: &str, mode: u32| {
+            let path = root.join(name);
+            fs::write(&path, b"").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let plain = moded("plain", 0o755);
+        let unread = moded("unread", 0o711);
+        let setuid = moded("setuid", 0o4755);
+        let linked = root.join("linked");
+        std::os::unix::fs::symlink(&setuid, &linked).unwrap();
+        for held in [&plain, &unread] {
+            let file = trusted_file(held).unwrap_or_else(|| panic!("{}", held.display()));
+            let opened = file.metadata().unwrap();
+            let named = fs::metadata(held).unwrap();
+            assert_eq!((opened.dev(), opened.ino()), (named.dev(), named.ino()));
+        }
+        for refused in [&setuid, &moded("setgid", 0o2755), &linked, &root] {
+            assert!(trusted_file(refused).is_none(), "{}", refused.display());
+            assert!(!trusted(refused), "{}", refused.display());
+        }
+        assert!(trusted_file(&root.join("absent")).is_none());
+        let file = trusted_file(&plain).unwrap();
+        fs::set_permissions(&plain, fs::Permissions::from_mode(0o4755)).unwrap();
+        let mode = file.metadata().unwrap().mode();
+        assert_ne!(mode & SET_ID_BITS, 0, "the open file is the one a swap changes");
     }
 
     fn nested_words(network: SandboxNetwork) -> (PathBuf, PathBuf, Vec<OsString>) {
