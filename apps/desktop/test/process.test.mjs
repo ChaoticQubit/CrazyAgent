@@ -850,8 +850,47 @@ test("a proposal that changes nothing says so and offers no Accept; one too long
   assert.match(sides, />Accept<\/button>/);
 });
 
+test("a proposal lists each finding of the check with its kind and lines, above the diff", () => {
+  const findings = [
+    { kind: "over_budget", lines: [], note: "Agents get 30.0 KB of app and project instructions; a Claude master takes at most 25.0 KB." },
+    { kind: "broken_reference", lines: [2], note: "`docs/missing.md` is not a file or folder in this project." },
+    { kind: "duplicate", lines: [1, 3], note: "Line 3 repeats line 1." },
+    { kind: "contradiction", lines: [4, 5], note: "<b>Always</b> and never disagree." },
+  ];
+  const saved = "- a\n- b\n- a\n- c\n- d\n";
+  for (const scope of [{ kind: "app" }, { kind: "project", id: "alpha", name: "Alpha" }]) {
+    const markup = page({ scope, saved: { kind: "ok", value: saved }, draft: saved,
+      cleanup: { kind: "proposed", proposal: { text: "- a\n- b\n- c\n", base_version: 3, findings } } });
+    assert.match(markup, /<h3>4 findings<\/h3>/);
+    assert.match(markup, /<li class="pr-finding"><strong>Over budget<\/strong><span class="secondary">Whole file<\/span><span>Agents get 30\.0 KB of app and project instructions; a Claude master takes at most 25\.0 KB\.<\/span><\/li>/);
+    assert.match(markup, /<li class="pr-finding"><strong>Broken reference<\/strong><span class="secondary">Line 2<\/span><span>`docs\/missing\.md` is not a file or folder in this project\.<\/span><\/li>/);
+    assert.match(markup, /<li class="pr-finding"><strong>Duplicate<\/strong><span class="secondary">Lines 1, 3<\/span><span>Line 3 repeats line 1\.<\/span><\/li>/);
+    assert.match(markup, /<li class="pr-finding"><strong>Contradiction<\/strong><span class="secondary">Lines 4, 5<\/span><span>&lt;b&gt;Always&lt;\/b&gt; and never disagree\.<\/span><\/li>/, "a model's note is text, never markup");
+    assert.ok(markup.indexOf("pr-findings") < markup.indexOf("Proposed changes"), "the findings come before the diff");
+    assert.match(markup, />Accept<\/button>/);
+  }
+});
+
+test("a proposal with no findings says the check found nothing; findings still show when the text stays the same", () => {
+  const clean = page({ cleanup: { kind: "proposed", proposal: { text: "- Keep.\n", base_version: 1, findings: [] } } });
+  assert.match(clean, /The check found nothing to fix\./);
+  assert.doesNotMatch(clean, /pr-finding/);
+  const same = page({ cleanup: { kind: "proposed", proposal: { text: "Use tdd.\n", base_version: 1,
+    findings: [{ kind: "contradiction", lines: [1], note: "This rule disagrees with itself." }] } } });
+  assert.match(same, /The model found nothing to change\./);
+  assert.match(same, /<h3>1 finding<\/h3>/);
+  assert.match(same, /<li class="pr-finding"><strong>Contradiction<\/strong><span class="secondary">Line 1<\/span><span>This rule disagrees with itself\.<\/span><\/li>/);
+});
+
+test("a finding names the whole file, one line or each line it covers", () => {
+  assert.equal(client.findingLines([]), "Whole file");
+  assert.equal(client.findingLines([7]), "Line 7");
+  assert.equal(client.findingLines([2, 9, 14]), "Lines 2, 9, 14");
+  assert.deepEqual(Object.keys(client.FINDING_KINDS).sort(), ["broken_reference", "contradiction", "duplicate", "over_budget"]);
+});
+
 test("every Edit with AI refusal reads as a plain sentence that says nothing changed or what to do", () => {
-  const codes = ["instructions_cleanup_pool_needed", "instructions_cleanup_pool_not_asked", "instructions_cleanup_pool_unknown", "instructions_cleanup_project_pool_missing",
+  const codes = ["instructions_cleanup_master_harness", "instructions_cleanup_pool_needed", "instructions_cleanup_pool_not_asked", "instructions_cleanup_pool_unknown", "instructions_cleanup_project_pool_missing",
     "instructions_cleanup_no_account", "instructions_cleanup_paused", "instructions_cleanup_busy", "instructions_cleanup_empty", "instructions_cleanup_failed",
     "instructions_cleanup_timed_out", "instructions_cleanup_no_proposal", "instructions_cleanup_too_large", "instructions_cleanup_off", "instructions_cleanup_unavailable",
     "instructions_cleanup_provider_unreachable", "instructions_cleanup_remote_provider_unreachable", "instructions_cleanup_no_network"];

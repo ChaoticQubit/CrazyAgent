@@ -2019,6 +2019,249 @@ fn accepting_a_proposal_made_before_a_newer_save_answers_stale_and_keeps_the_new
     );
 }
 
+fn check_prompt(root: &Path, project: Option<&ProjectId>) -> String {
+    let pool = CredentialRef::new("pool-a").unwrap();
+    let picked = project.is_none().then_some(&pool);
+    let mut seen = String::new();
+    propose(root, project, picked, |prompt| {
+        seen = prompt.to_owned();
+        Ok("~~~\n- Kept.\n~~~\n".to_owned())
+    })
+    .unwrap();
+    assert!(!seen.is_empty());
+    seen
+}
+
+fn set_master(root: &Path, project: &ProjectId, master: &str) {
+    let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let mut setup = crate::project_setup::load_setup(&connection, project)
+        .unwrap()
+        .unwrap();
+    setup.team.master = master.into();
+    let body = serde_json::to_string(&setup).unwrap();
+    let changed = connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            [project.as_str(), body.as_str()],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+}
+
+fn with_plugins(root: &Path, skill: &str, server: &str) -> tempfile::TempDir {
+    use crate::plugins::{Scope, ServerSpec};
+    use crate::storage::plugins::{Command, ResultValue, execute, initialize};
+    let mut connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    initialize(&connection).unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let folder = picked.path().join(skill);
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(
+        folder.join("SKILL.md"),
+        format!("---\nname: {skill}\ndescription: The {skill} skill.\n---\n"),
+    )
+    .unwrap();
+    execute(
+        &mut connection,
+        root,
+        Command::AddSkill {
+            scope: Scope::Global,
+            source: folder.display().to_string(),
+        },
+    )
+    .unwrap();
+    let spec = ServerSpec::Stdio {
+        command: "/usr/bin/true".into(),
+        args: vec!["--stdio".into()],
+    };
+    let ResultValue::Server(view) = execute(
+        &mut connection,
+        root,
+        Command::AddServer {
+            scope: Scope::Global,
+            name: server.into(),
+            spec: spec.clone(),
+            secrets: Vec::new(),
+        },
+    )
+    .unwrap() else {
+        panic!("server view required");
+    };
+    execute(
+        &mut connection,
+        root,
+        Command::Approve { id: view.id, spec },
+    )
+    .unwrap();
+    picked
+}
+
+#[test]
+fn the_edit_names_a_text_over_what_a_claude_master_takes_as_over_budget() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    save(&root, Some(project.clone()), "- Run make check.\n", 0).unwrap();
+    let short = check_prompt(&root, Some(&project));
+    assert!(!short.contains("- over_budget"), "a short text fits");
+    let mut long = String::new();
+    let mut rule = 0;
+    while long.len() <= super::super::master_host_launch::CLAUDE_PROCESS_BYTES_MAX {
+        rule += 1;
+        long.push_str(&format!("- Rule {rule} keeps the build green.\n"));
+    }
+    assert!(long.len() <= TEXT_BYTES_MAX);
+    let version = current_text(&root, Some(&project)).unwrap().version;
+    save(&root, Some(project.clone()), &long, version).unwrap();
+    let seen = check_prompt(&root, Some(&project));
+    assert!(seen.contains("- over_budget, whole file: Agents get "));
+    assert!(seen.contains("; a Claude master takes at most "));
+    assert!(!seen.contains("- duplicate"), "numbered rules repeat nothing");
+}
+
+#[test]
+fn the_edit_names_a_file_reference_the_project_folder_does_not_have() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    fs::create_dir_all(root.join("project/docs")).unwrap();
+    fs::write(root.join("project/docs/kept.md"), "kept\n").unwrap();
+    let own = "- Read `docs/kept.md` first.\n- Read `docs/missing.md` too.\n\
+               - Never read `../outside.md`.\n- See `docs/kept.md:12` for the rule.\n";
+    save(&root, Some(project.clone()), own, 0).unwrap();
+    let seen = check_prompt(&root, Some(&project));
+    assert!(seen.contains(
+        "- broken_reference, line 2: `docs/missing.md` is not a file or folder in this project.\n"
+    ));
+    assert!(!seen.contains("`docs/kept.md` is not"), "{seen}");
+    assert!(!seen.contains("`docs/kept.md:12` is not"), "{seen}");
+    assert!(!seen.contains("`../outside.md` is not"), "{seen}");
+    save(&root, None, "- Read `docs/missing.md` too.\n", 0).unwrap();
+    let app = check_prompt(&root, None);
+    assert!(
+        !app.contains("- broken_reference"),
+        "the app text has no project folder to check files in: {app}"
+    );
+}
+
+#[test]
+fn the_edit_names_a_skill_its_agents_do_not_get() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    let _picked = with_plugins(&root, "grill-me", "docs");
+    let own = "- Use the `grill-me` skill first.\n- Use the `ghost-skill` skill after.\n\
+               - Name `plain-word` in prose.\n- Use the `superpowers:grill-me` skill.\n";
+    save(&root, Some(project.clone()), own, 0).unwrap();
+    let seen = check_prompt(&root, Some(&project));
+    assert!(seen.contains(
+        "- broken_reference, line 2: `ghost-skill` is not a skill these agents get.\n"
+    ));
+    assert!(!seen.contains("`grill-me` is not"), "{seen}");
+    assert!(!seen.contains("`superpowers:grill-me` is not"), "{seen}");
+    assert!(!seen.contains("`plain-word`"), "{seen}");
+    save(&root, None, own, 0).unwrap();
+    let app = check_prompt(&root, None);
+    assert!(app.contains(
+        "- broken_reference, line 2: `ghost-skill` is not a skill these agents get.\n"
+    ));
+    assert!(!app.contains("`grill-me` is not"), "{app}");
+}
+
+#[test]
+fn the_edit_names_a_tool_whose_mcp_server_its_agents_do_not_get() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    let _picked = with_plugins(&root, "grill-me", "docs");
+    let own = "- Search with `mcp__docs__search` first.\n\
+               - Search with `mcp__ghost__search` after.\n\
+               - Claim work with `mcp__crazyagent-team__start_work`.\n";
+    save(&root, Some(project.clone()), own, 0).unwrap();
+    let seen = check_prompt(&root, Some(&project));
+    assert!(seen.contains(
+        "- broken_reference, line 2: `mcp__ghost__search` names the MCP server ghost, which these \
+         agents do not get.\n"
+    ));
+    assert!(!seen.contains("`mcp__docs__search` names"), "{seen}");
+    assert!(!seen.contains("`mcp__crazyagent-team__start_work` names"), "{seen}");
+}
+
+#[test]
+fn the_edit_names_a_command_this_computer_does_not_have() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    let own = "- Run `sh -c true` before you commit.\n- Run `no-such-tool-dec172 --check` after.\n\
+               - Run `cd docs` to start.\n- Run `nosuchtool` alone.\n";
+    save(&root, Some(project.clone()), own, 0).unwrap();
+    let seen = check_prompt(&root, Some(&project));
+    assert!(seen.contains(
+        "- broken_reference, line 2: `no-such-tool-dec172` is not a command on this computer.\n"
+    ));
+    assert!(!seen.contains("`sh` is not"), "{seen}");
+    assert!(!seen.contains("`cd` is not"), "a shell builtin is no program: {seen}");
+    assert!(
+        !seen.contains("`nosuchtool` is not"),
+        "one word alone may name anything: {seen}"
+    );
+}
+
+#[test]
+fn the_edit_names_repeated_lines_and_lines_the_app_text_has_only_when_it_may_send_it() {
+    use crate::instruction_files::Mode;
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    save(&root, None, "- Run make check.\n", 0).unwrap();
+    let own = "- Keep commits small.\n- Run make check.\n- Keep commits small.\n";
+    save(&root, Some(project.clone()), own, 0).unwrap();
+    let seen = check_prompt(&root, Some(&project));
+    assert!(seen.contains("- duplicate, lines 1, 3: Line 3 repeats line 1.\n"), "{seen}");
+    assert!(
+        seen.contains("- duplicate, line 2: The app instructions already have this line.\n"),
+        "{seen}"
+    );
+    let fresh = instruction_settings(&root, &project, None).unwrap();
+    let alone = InstructionSettings {
+        mode: Mode::ProjectOnly,
+        ..fresh.settings
+    };
+    instruction_settings(&root, &project, Some((alone, Some(fresh.version)))).unwrap();
+    let alone = check_prompt(&root, Some(&project));
+    assert!(alone.contains("- duplicate, lines 1, 3: Line 3 repeats line 1.\n"));
+    assert!(
+        !alone.contains("The app instructions already have"),
+        "no app line is named in a run that may not see the app text: {alone}"
+    );
+}
+
+#[test]
+fn the_edit_asks_the_model_for_contradictions_and_rules_said_twice_as_finding_lines() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    save(&root, Some(project.clone()), "- Always run tests.\n- Never run tests.\n", 0).unwrap();
+    let seen = check_prompt(&root, Some(&project));
+    assert!(seen.contains("rules that contradict each other"), "{seen}");
+    assert!(seen.contains("FINDING {\"kind\":\"contradiction\",\"lines\":["), "{seen}");
+    assert!(seen.contains("the kind \"duplicate\""), "{seen}");
+}
+
+#[test]
+fn a_project_edit_runs_only_on_a_master_harness_that_can_run_it() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    save(&root, Some(project.clone()), "- Run make check.\n", 0).unwrap();
+    let reply = |_: &str| Ok("~~~\n- Run make check.\n~~~\n".to_owned());
+    for master in ["codex", "claude", "claude-code"] {
+        set_master(&root, &project, master);
+        assert!(
+            propose(&root, Some(&project), None, reply).is_ok(),
+            "{master} runs it"
+        );
+    }
+    set_master(&root, &project, "pi");
+    assert_eq!(
+        propose(&root, Some(&project), None, reply).unwrap_err().0,
+        "instructions_cleanup_master_harness"
+    );
+    assert!(PROCESS_CODES.contains(&"instructions_cleanup_master_harness"));
+}
+
 #[test]
 fn only_a_proposal_request_is_served_past_the_owner_exchange() {
     let body = |action: Action| {
