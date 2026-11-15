@@ -24,6 +24,7 @@ const LOGIN_BYTES_MAX: usize = 39;
 const REPO_NAME_SHOWN_MAX: usize = 201;
 const BRANCH_SHOWN_MAX: usize = 255;
 const ORGS_PER_PAGE: usize = 100;
+const ORG_PAGES_MAX: usize = 10;
 const DESCRIPTION_CHARS_MAX: usize = 350;
 const NODE_ID_BYTES_MAX: usize = 100;
 const READ_ORG: [&str; 3] = ["read:org", "write:org", "admin:org"];
@@ -331,9 +332,10 @@ fn grants(scopes: &[String], covering: &[&str]) -> bool {
 }
 
 /// Lists the accounts a new repository can go under: the own account first, then each
-/// active admin or member organization from one page of at most 100. When the scopes
-/// lack `read:org`, or GitHub refuses the list, only the own account comes back with the
-/// sentence that says which. Inputs: endpoints and token. Output: the accounts.
+/// active admin or member organization from up to 10 pages of 100, with a sentence when
+/// that cap left some out. When the scopes lack `read:org`, or GitHub refuses a page,
+/// the accounts read so far come back with the sentence that says which.
+/// Inputs: endpoints and token. Output: the accounts.
 pub fn owners(endpoints: &Endpoints, token: &SecretString) -> Result<GitHubOwners, EngineError> {
     #[derive(Deserialize)]
     struct Membership {
@@ -360,46 +362,53 @@ pub fn owners(endpoints: &Endpoints, token: &SecretString) -> Result<GitHubOwner
     {
         return Ok(without_orgs(owners, "github_scope_missing_read_org"));
     }
-    let mut url = endpoints.api("user/memberships/orgs")?;
-    url.query_pairs_mut()
-        .append_pair("state", "active")
-        .append_pair("per_page", &ORGS_PER_PAGE.to_string());
-    let reply = endpoints.request(url, API_JSON, Some(token), None).send()?;
-    match reply.status {
-        200 => {}
-        403 if scopes.is_none() => {
-            return Ok(without_orgs(owners, "github_scope_missing_read_org"));
+    let mut seen = std::collections::BTreeSet::from([owners[0].login.to_ascii_lowercase()]);
+    let mut cut = false;
+    for page in 1..=ORG_PAGES_MAX {
+        let mut url = endpoints.api("user/memberships/orgs")?;
+        url.query_pairs_mut()
+            .append_pair("state", "active")
+            .append_pair("per_page", &ORGS_PER_PAGE.to_string())
+            .append_pair("page", &page.to_string());
+        let reply = endpoints.request(url, API_JSON, Some(token), None).send()?;
+        match reply.status {
+            200 => {}
+            403 if scopes.is_none() => {
+                return Ok(without_orgs(owners, "github_scope_missing_read_org"));
+            }
+            403 => return Ok(without_orgs(owners, "github_orgs_refused")),
+            401 => return Err(failure("github_token_refused")),
+            _ => return Err(failure("github_unreachable")),
         }
-        403 => return Ok(without_orgs(owners, "github_orgs_refused")),
-        401 => return Err(failure("github_token_refused")),
-        _ => return Err(failure("github_unreachable")),
-    }
-    let listed: Vec<Membership> = json(&reply)?;
-    if listed.len() > ORGS_PER_PAGE {
-        return Err(failure("github_reply_invalid"));
-    }
-    for membership in listed {
-        let member =
-            membership.state == "active" && matches!(membership.role.as_str(), "admin" | "member");
-        let Ok(org) = account_name(&membership.organization.login) else {
-            continue;
-        };
-        if member
-            && !owners
-                .iter()
-                .any(|owner| owner.login.eq_ignore_ascii_case(&org))
-        {
-            owners.push(GitHubOwner {
-                login: org,
-                personal: false,
-            });
+        let listed: Vec<Membership> = json(&reply)?;
+        if listed.len() > ORGS_PER_PAGE {
+            return Err(failure("github_reply_invalid"));
         }
+        let full = listed.len() == ORGS_PER_PAGE;
+        for membership in listed {
+            let member = membership.state == "active"
+                && matches!(membership.role.as_str(), "admin" | "member");
+            let Ok(org) = account_name(&membership.organization.login) else {
+                continue;
+            };
+            if member && seen.insert(org.to_ascii_lowercase()) {
+                owners.push(GitHubOwner {
+                    login: org,
+                    personal: false,
+                });
+            }
+        }
+        if !full {
+            break;
+        }
+        cut = page == ORG_PAGES_MAX;
     }
     assert!(owners[0].personal && owners[1..].iter().all(|owner| !owner.personal));
-    assert!(owners.len() <= ORGS_PER_PAGE + 1);
+    assert!(owners.len() <= ORGS_PER_PAGE * ORG_PAGES_MAX + 1);
+    assert_eq!(owners.len(), seen.len());
     Ok(GitHubOwners {
         owners,
-        problem: None,
+        problem: cut.then(|| super::problem("github_orgs_cut")),
     })
 }
 
