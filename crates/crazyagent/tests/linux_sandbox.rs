@@ -2381,3 +2381,14 @@ fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
     let absent = crazyagent::sandbox::linux::read_host(Path::new("/nonexistent/helper"));
     assert!(!absent.scoped && !absent.nested, "{absent:?}");
 }
+
+#[test]
+fn a_host_whose_landlock_does_not_hold_reports_the_process_namespace_bubblewrap_gives() {
+    let refusing = Path::new("/bin/false");
+    assert!(refusing.is_file(), "the row needs /bin/false as a helper that holds nothing");
+    let bwrap = BWRAP_PATHS.iter().any(|path| Path::new(path).is_file());
+    assert!(bwrap, "Linux test machines need bubblewrap installed");
+    let host = crazyagent::sandbox::linux::read_host(refusing);
+    assert!(!host.scoped, "{host:?}");
+    assert!(host.nested, "{host:?}");
+}
