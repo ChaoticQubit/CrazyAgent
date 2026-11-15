@@ -1184,7 +1184,7 @@ pub fn prepare_cargo_home(home: &Path, homes: &ToolHomes) -> io::Result<PathBuf>
         Mode::empty(),
     )?;
     let remove = |name: &str| {
-        crate::agent_home::remove_entry(&cargo.join(name))
+        crate::team::cleanup::remove_home_entry(&folder, name)
             .map_err(|_| io::Error::other("cargo cache name will not give way"))
     };
     for name in CARGO_SHARED {
