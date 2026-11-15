@@ -336,9 +336,12 @@ fn run(root: &Path, action: Action) -> Result<(Reply, Option<String>), EngineErr
             ledger::dismiss(&db, action_kind, id)?;
             Ok((Reply::Dismissed, kept))
         }
-        Action::List { project } => Ok(Reply::Listed {
-            banner: banner(root, &project)?,
-        }),
+        Action::List { project } => Ok((
+            Reply::Listed {
+                banner: banner(root, &project)?,
+            },
+            None,
+        )),
         Action::Retry { agent } => {
             if agent <= 0 {
                 return Err(failure("recovery_request_invalid"));
@@ -346,7 +349,7 @@ fn run(root: &Path, action: Action) -> Result<(Reply, Option<String>), EngineErr
             if !recovery::retry(root, agent)? {
                 return Err(failure("recovery_not_failed"));
             }
-            Ok(Reply::Retried)
+            Ok((Reply::Retried, None))
         }
     }
 }
