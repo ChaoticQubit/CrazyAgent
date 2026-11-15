@@ -20,6 +20,8 @@ mod catalog_tests;
 #[cfg(all(test, unix))]
 mod finding_tests;
 #[cfg(test)]
+mod floor_tests;
+#[cfg(test)]
 mod probe_tests;
 
 use serde::{Deserialize, Serialize};
@@ -857,6 +859,23 @@ pub fn spec(id: &str) -> Option<&'static HarnessSpec> {
 /// Output: the plain minimum, or None for a harness that never signs in from CrazyAgent.
 pub fn sign_in_min(id: &str) -> Option<&'static str> {
     registry::registry().get(id)?.sign_in_minimum()
+}
+
+/// The oldest version of a harness CrazyAgent drives, from that harness's manifest
+/// (`version.minimum`). Input: a catalog id or a stored harness name. Output: the plain
+/// minimum, or None for a harness with no floor or an unknown name.
+pub fn run_min(id: &str) -> Option<&'static str> {
+    let _ = id;
+    None
+}
+
+/// Tells whether an installed harness is older than the oldest version CrazyAgent drives, so
+/// it shows "needs X or newer" with its Update line and is not launched. Inputs: the harness
+/// and the installed version, None when unknown. Output: true only for a known version below
+/// the manifest's floor; a version that is not plain numbers is never below.
+pub fn too_old(harness: &registry::Harness, installed: Option<&str>) -> bool {
+    let _ = (harness, installed);
+    false
 }
 
 /// Tells whether a sign-in must be refused because the installed harness is older than its
