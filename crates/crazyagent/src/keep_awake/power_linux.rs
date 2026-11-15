@@ -1,12 +1,19 @@
 use super::power::PowerReading;
-use super::state::{Heat, PowerSource};
+use super::state::{Heat, LidSupport, PowerSource};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const ENTRIES_MAX: usize = 64;
+const SCAN_MAX: usize = 4096;
 const TRIPS_MAX: usize = 16;
 const VALUE_BYTES_MAX: u64 = 64;
 const PERCENT_MAX: u32 = 100;
+const SUPPLIES: &str = "sys/class/power_supply";
+const THERMAL: &str = "sys/class/thermal";
+const LIDS: &str = "proc/acpi/button/lid";
+const SEATS: &str = "run/systemd/seats";
+const ZONE_PREFIX: &str = "thermal_zone";
+const STATE_PREFIX: &str = "state:";
 
 /// Reads one small sysfs value. Input: the file. Output: its text without the line end,
 /// or none when it is missing, unreadable, not text, or longer than a sysfs value is.
@@ -23,32 +30,44 @@ fn value(path: &Path) -> Option<String> {
     Some(text.trim().to_owned())
 }
 
-/// Lists the entries of one sysfs folder by name, at most `ENTRIES_MAX`. Input: the
-/// folder. Output: the entry paths in name order, empty when the folder cannot be read.
-fn entries(folder: &Path) -> Vec<PathBuf> {
+/// Lists the entries of one folder whose name starts with `prefix`: the first
+/// `ENTRIES_MAX` of them in name order, out of at most `SCAN_MAX` entries looked at.
+/// Inputs: the folder and the name start, empty for every name. Output: the entry paths,
+/// empty when the folder cannot be read; a name that is not text is left out.
+fn entries(folder: &Path, prefix: &str) -> Vec<PathBuf> {
     let Ok(listing) = std::fs::read_dir(folder) else {
         return Vec::new();
     };
     let mut found: Vec<PathBuf> = listing
-        .take(ENTRIES_MAX)
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .take(SCAN_MAX)
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(prefix))
+        })
+        .map(|entry| entry.path())
         .collect();
+    assert!(found.len() <= SCAN_MAX);
     found.sort();
+    found.truncate(ENTRIES_MAX);
     assert!(found.len() <= ENTRIES_MAX);
     found
 }
 
 /// Reads the power supplies below a `/sys/class/power_supply` shaped folder. A system
-/// battery (not one of a mouse or keyboard) that discharges means battery, whatever else
-/// is attached. Otherwise a mains or USB supply that is online, or a battery that charges
-/// or is full, means AC. The charge is the mean of the system batteries. Input: the
-/// folder. Output: the source and the percent, unknown and none where nothing says.
+/// battery (not a mouse's or keyboard's) that discharges means battery, whatever else is
+/// attached. Else a supply online, a battery charging or full, or no system battery at
+/// all means AC; a system battery that says nothing stays unknown. Input: the folder.
+/// Output: the source and the mean charge of the system batteries, none where unread.
 pub fn supplies(root: &Path) -> (PowerSource, Option<u8>) {
     let mut online = false;
+    let mut battery = false;
     let mut discharging = false;
     let mut charging = false;
     let mut charges: Vec<u32> = Vec::new();
-    for supply in entries(root) {
+    for supply in entries(root, "") {
         let kind = value(&supply.join("type")).unwrap_or_default();
         if kind != "Battery" {
             online |= value(&supply.join("online")).as_deref() == Some("1");
@@ -57,6 +76,7 @@ pub fn supplies(root: &Path) -> (PowerSource, Option<u8>) {
         if value(&supply.join("scope")).as_deref() == Some("Device") {
             continue;
         }
+        battery = true;
         match value(&supply.join("status")).as_deref() {
             Some("Discharging") => discharging = true,
             Some("Charging" | "Full" | "Not charging") => charging = true,
@@ -65,10 +85,15 @@ pub fn supplies(root: &Path) -> (PowerSource, Option<u8>) {
         let charge = value(&supply.join("capacity")).and_then(|text| text.parse::<u32>().ok());
         charges.extend(charge.filter(|charge| *charge <= PERCENT_MAX));
     }
-    let source = match (discharging, online || charging) {
-        (true, _) => PowerSource::Battery,
-        (false, true) => PowerSource::Ac,
-        (false, false) => PowerSource::Unknown,
+    assert!(battery || !discharging);
+    assert!(battery || !charging);
+    assert!(battery || charges.is_empty());
+    let source = if discharging {
+        PowerSource::Battery
+    } else if online || charging || !battery {
+        PowerSource::Ac
+    } else {
+        PowerSource::Unknown
     };
     assert!(charges.len() <= ENTRIES_MAX);
     let percent = (!charges.is_empty())
@@ -76,18 +101,6 @@ pub fn supplies(root: &Path) -> (PowerSource, Option<u8>) {
         .and_then(|mean| u8::try_from(mean).ok());
     assert!(percent.is_none_or(|percent| u32::from(percent) <= PERCENT_MAX));
     (source, percent)
-}
-
-/// Settles the power source where the supply files say nothing (a desktop or a virtual
-/// machine has none): logind's own answer decides. Inputs: the source from the supply
-/// files and logind's `OnExternalPower`, none when logind did not answer. Output: the
-/// source; one the supply files gave is kept.
-pub fn source(sysfs: PowerSource, external: Option<bool>) -> PowerSource {
-    match (sysfs, external) {
-        (PowerSource::Unknown, Some(true)) => PowerSource::Ac,
-        (PowerSource::Unknown, Some(false)) => PowerSource::Battery,
-        (known, _) => known,
-    }
 }
 
 /// Reads one thermal zone: its temperature against its own trip points, which the
@@ -118,16 +131,12 @@ fn zone(folder: &Path) -> Option<Heat> {
 }
 
 /// Reads the heat below a `/sys/class/thermal` shaped folder: the hottest state any
-/// thermal zone reports against its own trip points (DEC-167 addendum 2). Input: the
+/// thermal zone reports against its own trip points (DEC-167 addendum 2). Other entries
+/// of the folder, cooling devices among them, never take a zone's place. Input: the
 /// folder. Output: critical, serious or nominal, or unknown with no readable zone.
 pub fn heat(root: &Path) -> Heat {
-    let zones: Vec<Heat> = entries(root)
+    let zones: Vec<Heat> = entries(root, ZONE_PREFIX)
         .iter()
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("thermal_zone"))
-        })
         .filter_map(|path| zone(path.as_path()))
         .collect();
     assert!(zones.len() <= ENTRIES_MAX);
@@ -142,92 +151,53 @@ pub fn heat(root: &Path) -> Heat {
     }
 }
 
-/// Reads the lid below a `/proc/acpi/button/lid` shaped folder. Not written yet: says
-/// nothing. Input: the folder. Output: none.
-pub fn lid(_root: &Path) -> Option<bool> {
-    None
-}
-
-/// Reads a Linux computer from files below `root`. Not written yet: knows nothing.
-/// Input: the file system root, or a stand shaped like it. Output: an unknown reading.
-pub fn read_under(_root: &Path) -> PowerReading {
-    PowerReading::unknown()
-}
-
-#[cfg(target_os = "linux")]
-mod live {
-    use super::super::power::PowerReading;
-    use super::super::state::{LidSupport, PowerSource};
-    use std::path::Path;
-    use std::time::Duration;
-
-    const BUS_WAIT: Duration = Duration::from_secs(2);
-    const SERVICE: &str = "org.freedesktop.login1";
-    const OBJECT: &str = "/org/freedesktop/login1";
-    const MANAGER: &str = "org.freedesktop.login1.Manager";
-    const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
-    const SUPPLIES: &str = "/sys/class/power_supply";
-    const THERMAL: &str = "/sys/class/thermal";
-
-    /// The reader's connection to logind on the system bus: opened at the first use, kept
-    /// between readings, and opened again after a call failed.
-    #[derive(Debug, Default)]
-    pub(crate) struct Logind {
-        bus: Option<zbus::blocking::Connection>,
-    }
-
-    impl Logind {
-        /// Reads one true or false property of the logind manager, waiting at most
-        /// `BUS_WAIT` for the answer. Input: the property name. Output: the value, or
-        /// none when the bus or logind does not answer; the connection is then dropped.
-        fn flag(&mut self, name: &str) -> Option<bool> {
-            assert!(!name.is_empty());
-            if self.bus.is_none() {
-                self.bus = zbus::blocking::connection::Builder::system()
-                    .and_then(|builder| builder.method_timeout(BUS_WAIT).build())
-                    .ok();
-            }
-            let reply = self.bus.as_ref()?.call_method(
-                Some(SERVICE),
-                OBJECT,
-                Some(PROPERTIES),
-                "Get",
-                &(MANAGER, name),
-            );
-            let Ok(reply) = reply else {
-                self.bus = None;
-                return None;
-            };
-            let value: zbus::zvariant::OwnedValue = reply.body().deserialize().ok()?;
-            bool::try_from(value).ok()
+/// Reads the lid below a `/proc/acpi/button/lid` shaped folder: one folder per lid, each
+/// with a `state` file that says open or closed. Input: the folder. Output: closed when
+/// any lid is closed, else open when any lid is open, else none (a computer without an
+/// ACPI lid, or a state that cannot be read).
+pub fn lid(root: &Path) -> Option<bool> {
+    let lids = entries(root, "");
+    assert!(lids.len() <= ENTRIES_MAX);
+    let mut open = false;
+    for folder in &lids {
+        let state = value(&folder.join("state"));
+        let state = state
+            .as_deref()
+            .and_then(|text| text.strip_prefix(STATE_PREFIX))
+            .map(str::trim);
+        match state {
+            Some("closed") => return Some(true),
+            Some("open") => open = true,
+            _ => {}
         }
     }
+    open.then_some(false)
+}
 
-    /// Reads this computer's power source, charge and heat from sysfs and the lid from
-    /// logind, which also settles the source where sysfs says nothing. The platform can
-    /// hold the closed lid whenever logind answers. Input: the logind connection. Output:
-    /// the reading, unknown where a source gave nothing.
-    pub(crate) fn read(logind: &mut Logind) -> PowerReading {
-        let (sysfs, battery_pct) = super::supplies(Path::new(SUPPLIES));
-        let lid_closed = logind.flag("LidClosed");
-        let external = match sysfs {
-            PowerSource::Unknown => logind.flag("OnExternalPower"),
-            PowerSource::Ac | PowerSource::Battery => None,
-        };
-        let unknown = PowerReading::unknown();
-        assert_ne!(unknown.lid_support, LidSupport::Held);
-        PowerReading {
-            source: super::source(sysfs, external),
-            battery_pct,
-            heat: super::heat(Path::new(THERMAL)),
-            lid_closed,
-            lid_support: match lid_closed {
-                Some(_) => LidSupport::Held,
-                None => unknown.lid_support,
-            },
-        }
+/// Reads the power source, charge, heat and lid of a Linux computer from files below
+/// `root`, with no bus connection. The platform can hold the closed lid where logind
+/// left its `run/systemd/seats` folder. Input: the file system root, or a stand shaped
+/// like it. Output: the reading, unknown where the files say nothing.
+pub fn read_under(root: &Path) -> PowerReading {
+    assert!(root.is_absolute());
+    let (source, battery_pct) = supplies(&root.join(SUPPLIES));
+    let unknown = PowerReading::unknown();
+    assert_ne!(unknown.lid_support, LidSupport::Held);
+    PowerReading {
+        source,
+        battery_pct,
+        heat: heat(&root.join(THERMAL)),
+        lid_closed: lid(&root.join(LIDS)),
+        lid_support: if root.join(SEATS).is_dir() {
+            LidSupport::Held
+        } else {
+            unknown.lid_support
+        },
     }
 }
 
+/// Reads this computer. Output: the reading of the real file system root.
 #[cfg(target_os = "linux")]
-pub(crate) use live::{Logind, read};
+pub(crate) fn read() -> PowerReading {
+    read_under(Path::new("/"))
+}

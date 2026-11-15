@@ -44,17 +44,14 @@ impl PowerReading {
 /// is unknown in the reading it returns.
 pub type Reader = Box<dyn FnMut() -> PowerReading + Send>;
 
-/// Builds this platform's reader: system tools on macOS, sysfs and logind on Linux (one
-/// bus connection kept between readings), the system power status on Windows. Output: the
+/// Builds this platform's reader: system tools on macOS, files below `/sys`, `/proc` and
+/// `/run` on Linux (no bus connection), the system power status on Windows. Output: the
 /// reader.
 pub fn platform_reader() -> Reader {
     #[cfg(target_os = "macos")]
     let reader: Reader = Box::new(super::power_macos::read);
     #[cfg(target_os = "linux")]
-    let reader: Reader = {
-        let mut logind = super::power_linux::Logind::default();
-        Box::new(move || super::power_linux::read(&mut logind))
-    };
+    let reader: Reader = Box::new(super::power_linux::read);
     #[cfg(windows)]
     let reader: Reader = Box::new(super::power_windows::read);
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]

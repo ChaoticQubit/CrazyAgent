@@ -228,22 +228,6 @@ fn a_silent_system_battery_with_nothing_online_stays_unknown() {
     assert_eq!(power_linux::supplies(root), (PowerSource::Ac, Some(40)));
 }
 
-#[test]
-fn where_the_supply_files_say_nothing_logind_decides_the_source() {
-    use PowerSource::{Ac, Battery, Unknown};
-    assert_eq!(power_linux::source(Unknown, Some(true)), Ac);
-    assert_eq!(power_linux::source(Unknown, Some(false)), Battery);
-    assert_eq!(power_linux::source(Unknown, None), Unknown);
-    for external in [Some(true), Some(false), None] {
-        assert_eq!(power_linux::source(Ac, external), Ac);
-        assert_eq!(
-            power_linux::source(Battery, external),
-            Battery,
-            "a battery seen draining is on battery whatever logind says"
-        );
-    }
-}
-
 fn zone(root: &Path, name: &str, temp: &str, trips: &[(&str, &str)]) {
     let folder = root.join(name);
     put(&folder, "temp", temp);
@@ -524,10 +508,12 @@ mod linux {
     }
 
     #[test]
-    fn this_computers_logind_answers_the_lid_and_the_reading_says_held() {
-        let reading = read_power();
-        assert!(reading.lid_closed.is_some(), "logind answers LidClosed");
-        assert_eq!(reading.lid_support, LidSupport::Held);
+    fn this_computers_logind_folder_makes_the_reading_say_held() {
+        assert!(
+            std::path::Path::new("/run/systemd/seats").is_dir(),
+            "this row needs a computer with logind"
+        );
+        assert_eq!(read_power().lid_support, LidSupport::Held);
     }
 
     #[test]
