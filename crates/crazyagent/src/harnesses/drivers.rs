@@ -5,8 +5,10 @@ use super::registry::{Harness, registry};
 pub mod jsonl_turn;
 pub mod rules;
 
-/// The piped drivers the engine runs today: its own adapters for Codex and Claude Code.
-/// Each shared driver kind a manifest names joins this list when its task lands.
+/// The piped drivers the engine runs today: its own adapters for Codex and Claude Code,
+/// which run in a [`super::launch::Session`], and the shared `jsonl-turn` driver, which runs
+/// one process per turn in a [`super::launch::TurnSession`]. Each shared driver kind a
+/// manifest names joins this list when its task lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Piped {
     Codex,
@@ -24,7 +26,7 @@ pub fn of(kind: DriverKind) -> Result<Piped, LaunchError> {
         DriverKind::ClaudeStreamJson => Ok(Piped::Claude),
         DriverKind::Rcli => Err(failure("launch_harness_unsupported")),
         DriverKind::Acp => Err(failure("launch_harness_unsupported")),
-        DriverKind::JsonlTurn => Err(failure("launch_harness_unsupported")),
+        DriverKind::JsonlTurn => Ok(Piped::JsonlTurn),
         DriverKind::JsonlRpc => Err(failure("launch_harness_unsupported")),
         DriverKind::TextTurn => Err(failure("launch_harness_unsupported")),
     }
