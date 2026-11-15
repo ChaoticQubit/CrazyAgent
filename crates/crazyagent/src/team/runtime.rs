@@ -1341,16 +1341,16 @@ impl TeamRuntime {
                 thawed.adopted(id);
                 continue;
             };
-            match end_left_pane(host.as_ref(), &agent, "team") {
-                Ok(_) => {}
-                Err(problem) if problem.0 == "terminal_agent_unknown" => {}
+            let confirmed = match end_left_pane(host.as_ref(), &agent, "team") {
+                Ok(confirmed) => confirmed,
+                Err(problem) if problem.0 == "terminal_agent_unknown" => true,
                 Err(problem) => return Err(problem.into()),
-            }
+            };
             thawed.end(id);
             if let Some(record) = records.get(&id) {
                 record.remove_context_files();
             }
-            self.closed_note(id, &reason)?;
+            self.closed_note(id, &uncertain_unless(confirmed, reason))?;
         }
         for id in thawed.ids() {
             thawed.end(id);
@@ -1654,14 +1654,13 @@ impl TeamRuntime {
             && !(host.pane_pid(&agent).ok().flatten() == Some(record.pid)
                 && hold_keeper(record.pid, &agent_pane_state(&self.state, id), Hold::Thaw))
         {
-            let ended = end_left_pane(host.as_ref(), &agent, "team");
+            let confirmed = match end_left_pane(host.as_ref(), &agent, "team") {
+                Ok(confirmed) => confirmed,
+                Err(problem) => problem.0 == "terminal_agent_unknown",
+            };
             drop(proxy);
             let reason = "it could not be continued after its freeze";
-            return Ok(Err(match ended {
-                Ok(true) => reason.into(),
-                Err(problem) if problem.0 == "terminal_agent_unknown" => reason.into(),
-                _ => format!("{reason}. {}", crate::sandbox::warden::CLEANUP_UNCERTAIN),
-            }));
+            return Ok(Err(uncertain_unless(confirmed, reason.into())));
         }
         let record = &match (record.frozen_ms, u64::try_from(now_ms())) {
             (Some(at), Ok(now)) => PaneRecord {
@@ -3043,15 +3042,31 @@ impl TeamRuntime {
             let _ = worker.orders.send(Order::Stop);
             worker.stop_for("engine_stop:shutdown");
         }
+        let uncertain = with_code(
+            crate::sandbox::warden::CLEANUP_UNCERTAIN,
+            Some(crate::harnesses::leftovers::UNCERTAIN),
+        );
+        let mut unconfirmed = BTreeSet::new();
         let deadline = Instant::now() + JOIN_WAIT;
-        for worker in self.workers.values_mut() {
-            if let Some(thread) = worker.thread.take() {
+        for (id, worker) in &mut self.workers {
+            let finished = worker.thread.take().is_none_or(|thread| {
                 while !thread.is_finished() && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                if thread.is_finished() {
+                let finished = thread.is_finished();
+                if finished {
                     let _ = thread.join();
                 }
+                finished
+            });
+            let ended_uncertain = worker.reports.try_iter().any(|report| match report {
+                Report::Ended {
+                    problem: Some(problem),
+                } => problem.contains(uncertain.as_str()),
+                _ => false,
+            });
+            if (ended_uncertain || !finished) && !kept.contains(id) {
+                unconfirmed.insert(*id);
             }
         }
         let mut frozen = BTreeSet::new();
@@ -3064,7 +3079,6 @@ impl TeamRuntime {
                     .is_some_and(|worker| worker.proxy.is_some())
             })
             .collect();
-        let mut unconfirmed = BTreeSet::new();
         let mut failed = None;
         for id in proxied {
             let (left, problem) = self.freeze_or_end(id);
@@ -3080,10 +3094,6 @@ impl TeamRuntime {
                 failed = problem;
             }
         }
-        let uncertain = with_code(
-            crate::sandbox::warden::CLEANUP_UNCERTAIN,
-            Some(crate::harnesses::leftovers::UNCERTAIN),
-        );
         let now = now_ms();
         let ids: Vec<i64> = self.workers.keys().copied().collect();
         self.workers.clear();
@@ -13273,6 +13283,19 @@ fn start_problem(problem: &LaunchError) -> String {
             with_code(SKILLS_KEPT_PROBLEM, Some(&problem.0))
         }
         None => with_code("The agent could not start", Some(&problem.0)),
+    }
+}
+
+/// The reason a left pane was closed for, naming once that its sandbox could not be
+/// confirmed empty when its end was not confirmed; a reason that names it already stays as
+/// it is (SA vid 10). Inputs: whether the end was confirmed and the reason. Output: the
+/// reason to note.
+fn uncertain_unless(confirmed: bool, reason: String) -> String {
+    let named = reason.ends_with(crate::sandbox::warden::CLEANUP_UNCERTAIN);
+    if confirmed || named {
+        reason
+    } else {
+        format!("{reason}. {}", crate::sandbox::warden::CLEANUP_UNCERTAIN)
     }
 }
 

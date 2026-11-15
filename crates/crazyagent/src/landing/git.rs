@@ -355,10 +355,11 @@ pub(super) struct Repo {
     excludes: Option<String>,
     index: Option<PathBuf>,
     confinement: Vec<std::ffi::OsString>,
-    /// Whether this is a confined Linux step that may write the work tree, so the copy of
-    /// the index it leaves in the step folder is never taken ([`Self::swapped`]).
+    /// For a confined Linux step that may write the work tree, the confinement of its
+    /// index-only gits, which write only the engine's step folder ([`Self::moved`]); empty for
+    /// every other repository.
     #[cfg(target_os = "linux")]
-    fills_work_tree: bool,
+    index_steps: Vec<std::ffi::OsString>,
 }
 
 /// The Seatbelt profile of one engine git step on an agent's work tree (SECAUDIT
@@ -410,7 +411,7 @@ impl Repo {
             index: None,
             confinement: Vec::new(),
             #[cfg(target_os = "linux")]
-            fills_work_tree: false,
+            index_steps: Vec::new(),
         };
         repo.check_version()?;
         let listing = repo.capture(&crate::research::runner::FILTER_KEYS, LISTING_BYTES_MAX)?;
@@ -453,7 +454,7 @@ impl Repo {
             index: None,
             confinement: Vec::new(),
             #[cfg(target_os = "linux")]
-            fills_work_tree: false,
+            index_steps: Vec::new(),
         }
     }
 
@@ -550,11 +551,12 @@ impl Repo {
     /// the object store (SA vid 2): its git takes no excludes file ([`NO_EXCLUDES`]), and a
     /// turn end applies that file's patterns as names instead (`flow::add_pathspecs`). So a
     /// `read-tree -u` counts an untracked file only that file names as the agent's and refuses
-    /// to write over it, failing closed where macOS writes over it (rv-sec3 F1). It
-    /// writes only what it names and the engine's step folder in the
-    /// worktree's git folder, where it works on a copy of the index ([`Self::swapped`]), so a
-    /// link swapped in during the step reaches nothing else, and a step that may write the work
-    /// tree, which such a link can point into that folder, never has its copy taken (SA vid 3).
+    /// to write over it, failing closed where macOS writes over it (rv-sec3 F1). A step that
+    /// reads the work tree writes the object store and the engine's step folder in the
+    /// worktree's git folder, where it works on a copy of the index ([`Self::swapped`]). A
+    /// step that may write the work tree writes only the work tree, and its index-only gits
+    /// only that folder ([`Self::moved`]), so no git that writes a work-tree path, which a link
+    /// swapped in during the step can point anywhere, can write anything else (SA vid 3 A).
     /// Input: what the step may write.
     /// Output: the repository, `changes_workspace_invalid` for one that is not a linked
     /// worktree's, or `changes_git_unsupported` where git, the helper or this kernel's
@@ -592,20 +594,23 @@ impl Repo {
             return Err(invalid());
         }
         let read = [work.clone(), common.clone(), git.clone()];
-        let target = match writes {
-            Writes::Objects => common.join("objects"),
-            Writes::WorkTree => work,
+        let wrapped = |write: &[PathBuf]| {
+            let policy = crate::sandbox::linux::git_step_policy(&read, write);
+            let mut confinement = vec![helper.clone().into_os_string()];
+            confinement.extend(policy.args());
+            confinement.extend([OsString::from("--"), git.clone().into_os_string()]);
+            assert!(confinement.len() > 4);
+            confinement
         };
-        let policy = crate::sandbox::linux::git_step_policy(&read, &[target, step.clone()]);
-        let mut confinement = vec![helper.into_os_string()];
-        confinement.extend(policy.args());
-        confinement.extend([OsString::from("--"), git.into_os_string()]);
-        assert!(confinement.len() > 4);
+        let (confinement, index_steps) = match writes {
+            Writes::Objects => (wrapped(&[common.join("objects"), step.clone()]), Vec::new()),
+            Writes::WorkTree => (wrapped(&[work]), wrapped(&[step.clone()])),
+        };
         Ok(Self {
             index: Some(step.join("index")),
             excludes: Some(NO_EXCLUDES.to_owned()),
             confinement,
-            fills_work_tree: matches!(writes, Writes::WorkTree),
+            index_steps,
             ..self.clone()
         })
     }
@@ -680,11 +685,10 @@ impl Repo {
 
     /// Runs one git command within `STEP_TIME`, feeding it `input` and keeping at most
     /// `limit` bytes of its output; a confined Linux step runs on a copy of the worktree's
-    /// index ([`Self::swapped`]), and a `read-tree -u` there names its index-only form, the
-    /// same command with `-i` for `-u`, to rebuild the index with. Inputs: the arguments, the
-    /// input, extra environment and the bound. Output: the exit code, the output and whether
-    /// it ran over; an error when git cannot start, is stopped by a signal or runs past the
-    /// time.
+    /// index ([`Self::swapped`]), and a two-tree `read-tree -u -m` there that may write the work
+    /// tree runs split ([`Self::moved`]). Inputs: the arguments, the input, extra environment
+    /// and the bound. Output: the exit code, the output and whether it ran over; an error when
+    /// git cannot start, is stopped by a signal or runs past the time.
     pub(super) fn exec(
         &self,
         args: &[&str],
@@ -694,14 +698,13 @@ impl Repo {
     ) -> Result<Output, EngineError> {
         #[cfg(target_os = "linux")]
         if !self.confinement.is_empty() {
-            let index_only: Vec<&str> = args
-                .iter()
-                .map(|&arg| if arg == "-u" { "-i" } else { arg })
-                .collect();
-            let rebuilds = args.first() == Some(&"read-tree") && args.contains(&"-u");
-            return self.swapped(rebuilds.then_some(index_only.as_slice()), || {
-                self.spawned(args, input, env, limit)
-            });
+            let fills = !self.index_steps.is_empty();
+            if let ["read-tree", "-u", "-m", from, to] = *args
+                && fills
+            {
+                return self.swapped(true, || self.moved(from, to));
+            }
+            return self.swapped(!fills, || self.spawned(args, input, env, limit));
         }
         self.spawned(args, input, env, limit)
     }
@@ -722,18 +725,16 @@ impl Repo {
     /// git exits 0 having rewritten the copy, the copy takes the index's place only when it too is
     /// a plain file with one link, so whatever a raced step leaves there is never taken, and a step
     /// that only reads leaves the index as it was; the step itself never writes the git folder
-    /// ([`Self::confined`]). A step that may write the work tree, where a link raced in can make
-    /// git's own rename leave any file as the copy, never has its copy taken (SA vid 3): the folder
-    /// is emptied, the index copied afresh, and the step's index-only form then a quiet refresh
-    /// rebuild it there, in the same confinement but by gits that write no work-tree path, so no
-    /// link can turn their writes into that folder; they check the work tree's files, so an entry
-    /// racy against the index stays in view and the files the step wrote keep their stat data.
-    /// With no such form the step refuses. Input: the index-only form and the step. Output: its output, git's [`INDEX_LOCKED`] exit when the lock is already
-    /// held, or `changes_git_failed` when the index cannot be locked, copied, rebuilt or put back.
+    /// ([`Self::confined`]). The copy is taken only when `adopts` says gits that write no
+    /// work-tree path wrote it: any step that reads the work tree, and the index-only gits of a
+    /// split move ([`Self::moved`]); any other step that may write the work tree never has its
+    /// copy taken (SA vid 3). Input: whether the copy may be taken and the step. Output: its
+    /// output, git's [`INDEX_LOCKED`] exit when the lock is already held, or
+    /// `changes_git_failed` when the index cannot be locked, copied or put back.
     #[cfg(target_os = "linux")]
     pub(super) fn swapped(
         &self,
-        index_only: Option<&[&str]>,
+        adopts: bool,
         step: impl FnOnce() -> Result<Output, EngineError>,
     ) -> Result<Output, EngineError> {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -818,15 +819,6 @@ impl Repo {
                     },
                 }
         };
-        let rebuilt = |index_only: &[&str]| {
-            fresh()
-                && [index_only, ["update-index", "-q", "--refresh"].as_slice()]
-                    .into_iter()
-                    .all(|run| {
-                        self.spawned(run, None, &[], 4096)
-                            .is_ok_and(|output| output.code == 0 && !output.overflow)
-                    })
-        };
         let copied = fresh();
         let identity = |meta: &std::fs::Metadata| (meta.dev(), meta.ino());
         let ran = if copied {
@@ -840,7 +832,7 @@ impl Repo {
         let left = std::fs::symlink_metadata(copy).ok();
         let rewritten = matches!(&ran, Ok((before, output))
             if output.code == 0 && left.as_ref().is_some_and(|meta| Some(identity(meta)) != *before));
-        let taken = rewritten && (!self.fills_work_tree || index_only.is_some_and(rebuilt));
+        let taken = rewritten && adopts;
         let kept = taken
             && std::fs::symlink_metadata(copy).is_ok_and(|meta| plain(&meta))
             && std::fs::rename(copy, &lock).is_ok()
@@ -853,6 +845,97 @@ impl Repo {
             Ok(_) if rewritten && !kept => Err(failed()),
             ran => ran.map(|(_, output)| output),
         }
+    }
+
+    /// The two-tree `read-tree -u -m` of a confined Linux step that may write the work tree,
+    /// split so no git writing a work-tree path writes anywhere else (SA vid 3 A): index-only
+    /// gits in the step folder move the copy and refuse a local edit, the engine checks and
+    /// removes paths with no link followed, and `checkout-index` alone writes the work tree.
+    /// Runs inside [`Self::swapped`]. Inputs: both commits. Output: a refusal, or the refresh's.
+    #[cfg(target_os = "linux")]
+    fn moved(&self, from: &str, to: &str) -> Result<Output, EngineError> {
+        let failed = || failure("changes_git_failed");
+        let index = Self {
+            confinement: self.index_steps.clone(),
+            ..self.clone()
+        };
+        assert!(!index.confinement.is_empty() && index.confinement != self.confinement);
+        let work = std::fs::canonicalize(self.work_tree.as_deref().ok_or_else(failed)?)
+            .map_err(|_| failed())?;
+        let before = index.entries()?;
+        let merged = index.spawned(&["read-tree", "-m", from, to], None, &[], 4096)?;
+        if merged.code != 0 || merged.overflow {
+            return Ok(merged);
+        }
+        let after = index.entries()?;
+        let gone: BTreeSet<&[u8]> = before
+            .keys()
+            .filter(|path| !after.contains_key(*path))
+            .map(Vec::as_slice)
+            .collect();
+        let written: Vec<&[u8]> = after
+            .iter()
+            .filter(|&(path, entry)| before.get(path) != Some(entry))
+            .map(|(path, _)| path.as_slice())
+            .collect();
+        let refused = Output {
+            code: 1,
+            stdout: Vec::new(),
+            overflow: false,
+        };
+        let blocked = written
+            .iter()
+            .filter(|path| !before.contains_key(**path))
+            .any(|path| in_the_way(&work, path, &gone));
+        if blocked {
+            return Ok(refused);
+        }
+        if gone.iter().any(|path| remove_tracked(&work, path).is_err()) {
+            return Ok(refused);
+        }
+        if !written.is_empty() {
+            let mut listed = Vec::new();
+            for path in &written {
+                listed.extend_from_slice(path);
+                listed.push(0);
+            }
+            let checkout = ["checkout-index", "-f", "-z", "--stdin"];
+            let filled = self.spawned(&checkout, Some(listed.as_slice()), &[], 4096)?;
+            if filled.code != 0 || filled.overflow {
+                return Ok(filled);
+            }
+        }
+        index.spawned(&["update-index", "-q", "--refresh"], None, &[], 4096)
+    }
+
+    /// The stage-0 entries of the copy of the index a confined Linux step works on, from
+    /// `ls-files -s -z`: each path with its mode, object id and stage as listed. Output: the
+    /// entries, or `changes_git_failed` for a listing past `OUTPUT_BYTES_MAX`, an unmerged
+    /// entry or a path with an empty, `.` or `..` part.
+    #[cfg(target_os = "linux")]
+    fn entries(&self) -> Result<std::collections::BTreeMap<Vec<u8>, Vec<u8>>, EngineError> {
+        let failed = || failure("changes_git_failed");
+        let listing = self.spawned(&["ls-files", "-s", "-z"], None, &[], OUTPUT_BYTES_MAX)?;
+        if listing.code != 0 || listing.overflow {
+            return Err(failed());
+        }
+        let mut entries = std::collections::BTreeMap::new();
+        for record in listing.stdout.split(|&byte| byte == 0) {
+            if record.is_empty() {
+                continue;
+            }
+            let tab = record
+                .iter()
+                .position(|&byte| byte == b'\t')
+                .ok_or_else(failed)?;
+            let (entry, path) = (&record[..tab], &record[tab + 1..]);
+            let odd = |part: &[u8]| part.is_empty() || part == b"." || part == b"..";
+            if !entry.ends_with(b" 0") || path.split(|&byte| byte == b'/').any(odd) {
+                return Err(failed());
+            }
+            entries.insert(path.to_vec(), entry.to_vec());
+        }
+        Ok(entries)
     }
 
     /// Starts one git command and collects what [`Self::exec`] answers. Inputs and output:
@@ -1050,4 +1133,78 @@ pub(super) fn is_object_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Whether something in the work tree stands where a move would write a new tracked path:
+/// the path itself, or a leading part that is not a plain folder, unless that part is a
+/// tracked file the move removes, as `read-tree -u` refuses to write over an untracked file.
+/// Each part is read with no link followed. Inputs: the work tree, the path and the paths
+/// the move removes. Output: true when the move must refuse, also when a part cannot be read.
+#[cfg(target_os = "linux")]
+fn in_the_way(work: &Path, path: &[u8], gone: &BTreeSet<&[u8]>) -> bool {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    use std::os::unix::ffi::OsStrExt;
+    let flags = OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::RDONLY;
+    let Ok(mut folder) = rustix::fs::open(work, flags, Mode::empty()) else {
+        return true;
+    };
+    let mut end = 0;
+    for part in path.split(|&byte| byte == b'/') {
+        end += part.len();
+        if gone.contains(&path[..end]) {
+            return false;
+        }
+        let name = std::ffi::OsStr::from_bytes(part);
+        let stat = match rustix::fs::statat(&folder, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(error) => return error != rustix::io::Errno::NOENT,
+        };
+        if end == path.len() || FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
+            return true;
+        }
+        folder = match rustix::fs::openat(&folder, name, flags, Mode::empty()) {
+            Ok(next) => next,
+            Err(_) => return true,
+        };
+        end += 1;
+    }
+    true
+}
+
+/// Removes one tracked path a move drops from the work tree, then each folder it leaves
+/// empty, as `read-tree -u` does, opening every leading folder with no link followed, so a
+/// link swapped in for one is never removed through (SA vid 3 A). A path already gone counts
+/// as removed. Inputs: the work tree and the path. Output: unit, or the error that stopped it.
+#[cfg(target_os = "linux")]
+fn remove_tracked(work: &Path, path: &[u8]) -> rustix::io::Result<()> {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    use std::os::unix::ffi::OsStrExt;
+    let flags = OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::RDONLY;
+    let parts: Vec<&std::ffi::OsStr> = path
+        .split(|&byte| byte == b'/')
+        .map(std::ffi::OsStr::from_bytes)
+        .collect();
+    let (name, leading) = parts.split_last().expect("a tracked path has a name");
+    let mut folders = vec![rustix::fs::open(work, flags, Mode::empty())?];
+    for part in leading {
+        let folder = folders.last().expect("the work tree is open");
+        match rustix::fs::openat(folder, *part, flags, Mode::empty()) {
+            Ok(next) => folders.push(next),
+            Err(error) if error == rustix::io::Errno::NOENT => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+    assert_eq!(folders.len(), leading.len() + 1);
+    let last = folders.last().expect("the work tree is open");
+    if let Err(error) = rustix::fs::unlinkat(last, *name, AtFlags::empty())
+        && error != rustix::io::Errno::NOENT
+    {
+        return Err(error);
+    }
+    for (at, part) in leading.iter().enumerate().rev() {
+        if rustix::fs::unlinkat(&folders[at], *part, AtFlags::REMOVEDIR).is_err() {
+            break;
+        }
+    }
+    Ok(())
 }

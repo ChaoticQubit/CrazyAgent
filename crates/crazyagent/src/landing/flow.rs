@@ -956,8 +956,8 @@ pub(super) fn reset_settling(agent: &Agent, from: &str, target: &str) -> Result<
 }
 
 /// Puts an agent worktree's index and files back after its reset did not hold, moving them
-/// from `target` to whatever HEAD now holds, named by its id so the index the engine rebuilds
-/// after the step reads the same trees (SA vid 3), with the same two-tree read-tree, path by path:
+/// from `target` to whatever HEAD now holds, named by its id so every git of the split move
+/// reads the same trees (SA vid 3 A), with the same two-tree read-tree, path by path:
 /// a path the agent committed meanwhile is at HEAD already and stays, so no reversal of
 /// that commit is staged, and the rest go back to the commit HEAD holds. An edit the agent
 /// made meanwhile is never overwritten: git refuses, writing nothing, and the refusal is

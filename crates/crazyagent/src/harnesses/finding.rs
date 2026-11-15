@@ -38,7 +38,10 @@ const LINK_HOPS_MAX: usize = 40;
 pub const AGENT_ROWS_MAX: usize = 1024;
 pub const PROJECT_REPOSITORIES_MAX: usize = 64;
 const AGENT_FOLDERS_MAX: usize = 2 * (AGENT_ROWS_MAX * (PROJECT_REPOSITORIES_MAX + 3) + 1);
-const AGENT_TABLES: [(&str, Names, &str); 4] = [
+/// The engine tables that name folders agents can write, how each names them and the query
+/// that reads them, bounded by its one parameter: engine start's [`AgentSpace`] and the tool
+/// resolver's places ([`crate::tools::Places`]) read this one list.
+pub(crate) const AGENT_TABLES: [(&str, Names, &str); 4] = [
     (
         "project_setups",
         Names::Setup,
@@ -78,7 +81,7 @@ fn owner_temp() -> Vec<PathBuf> {
 /// worktree inside its repository or a `.crazyagent` folder is covered already and not read,
 /// so kept agents never fill [`AGENT_ROWS_MAX`].
 #[derive(Debug, Clone, Copy)]
-enum Names {
+pub(crate) enum Names {
     Setup,
     Project,
     Path,
@@ -214,7 +217,7 @@ impl AgentSpace {
 /// Output: a setup's project folder, the repositories a project declares, or the stored
 /// path; `harness_path_unreadable` for a body that is not JSON or declares more than
 /// [`PROJECT_REPOSITORIES_MAX`] repositories.
-fn folders_in(names: Names, text: &str) -> Result<Vec<PathBuf>, EngineError> {
+pub(crate) fn folders_in(names: Names, text: &str) -> Result<Vec<PathBuf>, EngineError> {
     let body = || -> Result<serde_json::Value, EngineError> {
         serde_json::from_str(text).map_err(|_| failure(PATH_UNREADABLE))
     };
