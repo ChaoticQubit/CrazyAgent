@@ -125,7 +125,7 @@ fn engine_catalog(
         .map(|id| CredentialRef::new(*id).unwrap())
         .collect();
     let (pool, research) = wizard.catalog_request().expect("catalog request");
-    let mut served = catalog(&config, pool.as_ref(), &research, &signed).unwrap();
+    let mut served = catalog(&config, pool.as_ref(), &research, &signed, None).unwrap();
     for level in &mut served.agent_access {
         level.gaps.clear();
     }
@@ -1291,7 +1291,7 @@ fn a_catalog_reply_that_replaces_the_team_closes_an_open_harness_picker() {
     );
 
     let signed = BTreeSet::from([CredentialRef::new("c-codex").unwrap()]);
-    let served = catalog(&config(), pool.as_ref(), &research, &signed).unwrap();
+    let served = catalog(&config(), pool.as_ref(), &research, &signed, None).unwrap();
     assert!(served.default_team.sub_harnesses.is_empty());
     wizard.apply_catalog(pool, research, Ok(served));
 

@@ -622,13 +622,11 @@ fn the_box_shows_the_ports_line_the_engine_sends_for_the_chosen_network() {
         choice.gap = (choice.network == AgentNetwork::None).then(|| told.to_owned());
     }
     let mut edit = AccessEdit::of(&view);
-    assert_eq!(edit.linux, cfg!(target_os = "linux"));
-    edit.linux = true;
     edit.network = AgentNetwork::None;
     let words = shown_words(&edit);
     assert!(words.contains(told), "{words}");
     assert!(!words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
-    assert!(words.contains(LINUX_NESTED_GIT_LINE), "{words}");
+    assert!(!words.contains(LINUX_NESTED_GIT_LINE), "only the engine names it: {words}");
     edit.network = AgentNetwork::Open;
     let words = shown_words(&edit);
     assert!(!words.contains(told), "{words}");
@@ -637,12 +635,18 @@ fn the_box_shows_the_ports_line_the_engine_sends_for_the_chosen_network() {
     edit.access = AgentAccess::Full;
     let words = shown_words(&edit);
     assert!(!words.contains(told), "{words}");
-    assert!(!words.contains(LINUX_NESTED_GIT_LINE), "{words}");
-    edit.access = AgentAccess::Sandboxed;
-    edit.linux = false;
-    let words = shown_words(&edit);
-    assert!(words.contains(told), "the engine decides: {words}");
-    assert!(!words.contains(LINUX_NESTED_GIT_LINE), "{words}");
+}
+
+#[test]
+fn the_box_names_nested_git_once_and_only_as_the_engine_sends_it_for_the_level() {
+    let mut told = view();
+    assert_eq!(told.levels[0].access, AgentAccess::Sandboxed);
+    told.levels[0].gaps.clear();
+    let quiet = shown_words(&AccessEdit::of(&told));
+    assert!(!quiet.contains(LINUX_NESTED_GIT_LINE), "{quiet}");
+    told.levels[0].gaps = vec![LINUX_NESTED_GIT_LINE.to_owned()];
+    let words = shown_words(&AccessEdit::of(&told));
+    assert_eq!(words.matches(LINUX_NESTED_GIT_LINE).count(), 1, "{words}");
 }
 
 #[test]

@@ -2400,6 +2400,7 @@ fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
     assert_eq!(host.scoped, scoped);
     assert_eq!(host.nested, nesting_bwrap().is_some());
     assert!(host.supervised, "the call supervisor probe row needs the same of this machine");
+    assert!(!host.root, "the gate runs as its own user, where the supervisor starts");
     let absent = crazyagent::sandbox::linux::read_host(Path::new("/nonexistent/helper"));
     assert!(!absent.scoped && !absent.nested, "{absent:?}");
     assert!(!absent.supervised, "{absent:?}");

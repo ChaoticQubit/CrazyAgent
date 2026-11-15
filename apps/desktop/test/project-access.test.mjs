@@ -419,20 +419,24 @@ test("every shared folders refusal has its own sentence in both UIs", () => {
   }
 });
 
-test("only on Linux do the network and access choices say ports hold no host and nested git is not blocked (RV-DS241-83, -85)", () => {
+test("only on Linux does the network choice say ports hold no host, and the access level names nested git once, only as the engine sends it (RV-DS241-83, -85, DEC-179 T4c)", () => {
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
   assert.ok(engine.includes(`pub const LINUX_PORTS_ANY_HOST_LINE: &str = "${access.LINUX_PORTS_ANY_HOST}";`), "the port gap reads as the engine states it");
-  assert.ok(engine.includes(`pub const LINUX_NESTED_GIT_LINE: &str = "${access.LINUX_NESTED_GIT}";`), "the nested git gap reads as the engine states it");
+  assert.ok(!("LINUX_NESTED_GIT" in access), "the engine's level lines carry the nested git line");
+  const nested = engine.match(/pub const LINUX_NESTED_GIT_LINE: &str = "([^"]+)";/)[1];
   const none = () => {};
-  const shown = (platform, chosen) => renderToStaticMarkup(createElement(access.NetworkChoices, { name: "n", value: "none", access: chosen, onChange: none, platform }))
-    + renderToStaticMarkup(createElement(access.AccessLevels, { name: "a", value: chosen, unavailable: () => null, onChange: none, platform }));
   const escaped = (text) => text.replaceAll("'", "&#x27;");
-  const linux = shown("linux", "sandboxed");
-  assert.ok(linux.includes(escaped(access.LINUX_PORTS_ANY_HOST)), linux);
-  assert.ok(linux.includes(escaped(access.LINUX_NESTED_GIT)), linux);
-  for (const page of [shown("macos", "sandboxed"), shown("windows", "sandboxed"), shown("linux", "full")]) {
+  const network = (platform, chosen) => renderToStaticMarkup(createElement(access.NetworkChoices, { name: "n", value: "none", access: chosen, onChange: none, platform }));
+  const levels = (platform, gaps) => renderToStaticMarkup(createElement(access.AccessLevels, { name: "a", value: "sandboxed", unavailable: () => null, gaps: () => gaps, onChange: none, platform }));
+  assert.ok(network("linux", "sandboxed").includes(escaped(access.LINUX_PORTS_ANY_HOST)));
+  for (const page of [network("macos", "sandboxed"), network("windows", "sandboxed"), network("linux", "full")]) {
     assert.ok(!page.includes(escaped(access.LINUX_PORTS_ANY_HOST)), page);
-    assert.ok(!page.includes(escaped(access.LINUX_NESTED_GIT)), page);
+  }
+  for (const platform of ["linux", "macos"]) {
+    const quiet = levels(platform, []);
+    assert.ok(!quiet.includes(escaped(nested)), quiet);
+    const named = levels(platform, [nested]);
+    assert.equal(named.split(escaped(nested)).length - 1, 1, named);
   }
 });
 

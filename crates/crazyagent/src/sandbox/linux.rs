@@ -1588,8 +1588,21 @@ pub fn read_host(helper: &Path) -> super::LinuxHost {
         nested,
         scoped,
         supervised,
+        root: false,
     }
 }
+
+/// Tells whether a project may hold a git repository other than its own top-level `.git`:
+/// an entry of any kind that is `.git` to some filesystem below the top, or one at the top
+/// not spelled `.git`. A folder it cannot read, or more entries than it reads, answers yes.
+/// Links are not followed. Input: the project folder. Output: true when one may be there.
+pub(crate) fn holds_other_git(_project: &Path) -> bool {
+    false
+}
+
+/// The most entries [`holds_other_git`] reads in a project before it answers yes: a read
+/// runs inside the engine's read of the project's Agent access page.
+const GIT_SEARCH_ENTRIES_MAX: usize = 4096;
 
 /// [`read_host`] for the helper beside this executable, read again once what is kept is
 /// older than `age_max`, or with no age only when nothing is kept. The lock is not held
@@ -2529,6 +2542,61 @@ mod tests {
     }
 
     #[test]
+    fn a_project_may_hold_another_git_repository_below_its_top_or_where_none_is_ruled_out() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir_all(project.join(".git/hooks")).unwrap();
+        fs::write(project.join(".git/config"), "").unwrap();
+        fs::create_dir_all(project.join("src/deep")).unwrap();
+        fs::write(project.join("src/deep/.gitignore"), "").unwrap();
+        fs::write(project.join("a.git"), "").unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(outside.join(".git")).unwrap();
+        symlink(&outside, project.join("linked")).unwrap();
+        assert!(!holds_other_git(&project), "its own .git, and a link is not followed");
+        let found = |make: &dyn Fn(&Path), undo: &dyn Fn(&Path)| {
+            make(&project);
+            let held = holds_other_git(&project);
+            undo(&project);
+            assert!(!holds_other_git(&project));
+            held
+        };
+        for name in ["vendor/lib/.git", "vendor/.GIT", "vendor/.git.", ".Git"] {
+            let folder = |project: &Path| fs::create_dir_all(project.join(name)).unwrap();
+            let gone = |project: &Path| fs::remove_dir(project.join(name)).unwrap();
+            assert!(found(&folder, &gone), "{name}");
+        }
+        fs::create_dir_all(project.join("vendor/lib")).unwrap();
+        let link = |project: &Path| {
+            fs::write(project.join("vendor/lib/.git"), "gitdir: x").unwrap();
+        };
+        let unlink = |project: &Path| fs::remove_file(project.join("vendor/lib/.git")).unwrap();
+        assert!(found(&link, &unlink), "a .git file is rewritten without a create");
+        let pointer = |project: &Path| symlink(&outside, project.join("vendor/.git")).unwrap();
+        let unpoint = |project: &Path| fs::remove_file(project.join("vendor/.git")).unwrap();
+        assert!(found(&pointer, &unpoint), "a link named .git counts");
+        let mode = |project: &Path, bits| {
+            let permissions = fs::Permissions::from_mode(bits);
+            fs::set_permissions(project.join("src/deep"), permissions).unwrap();
+        };
+        let locked = |project: &Path| mode(project, 0o000);
+        let unlocked = |project: &Path| mode(project, 0o755);
+        if !rustix::process::geteuid().is_root() {
+            assert!(found(&locked, &unlocked), "a folder it cannot read");
+        }
+        let many = |project: &Path| {
+            fs::create_dir(project.join("many")).unwrap();
+            for index in 0..GIT_SEARCH_ENTRIES_MAX {
+                fs::write(project.join("many").join(index.to_string()), "").unwrap();
+            }
+        };
+        let few = |project: &Path| fs::remove_dir_all(project.join("many")).unwrap();
+        assert!(found(&many, &few), "more entries than it reads");
+        assert!(holds_other_git(&temp.path().join("missing")), "no folder to read");
+    }
+
+    #[test]
     fn a_launch_left_on_this_network_by_a_low_port_says_so_with_the_port() {
         use super::super::policy::AgentNetwork;
         use super::super::{LinuxHost, linux_unbridged_line, linux_unbridged_notice_on};
@@ -2538,6 +2606,7 @@ mod tests {
                 nested,
                 scoped: false,
                 supervised: false,
+                root: false,
             })
         };
         let launched = |remotes: &[SandboxRemote]| {

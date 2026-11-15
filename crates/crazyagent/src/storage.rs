@@ -2821,6 +2821,9 @@ fn owner_read(
                     pool.as_ref(),
                     research,
                     &crate::project_setup::signed_in_connections(&tx, config, pool.as_ref())?,
+                    crate::sandbox_settings::load(&tx)
+                        .ok()
+                        .map(|settings| settings.linux_supervisor),
                 )
                 .map_err(error)?,
             ),
@@ -2859,9 +2862,7 @@ fn owner_read(
                     &setup.project_folder(),
                     &homes,
                     versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,
-                    crate::sandbox_settings::load(&tx)
-                        .ok()
-                        .map(|settings| settings.linux_sockets),
+                    crate::sandbox_settings::load(&tx).ok(),
                 );
             policy.grant_log =
                 crate::sandbox::grants::history(&tx, project_id.as_str()).map_err(error)?;

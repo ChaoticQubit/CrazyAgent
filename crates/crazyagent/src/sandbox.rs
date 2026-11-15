@@ -984,15 +984,48 @@ pub const LINUX_SIGNALS_LINE: &str = "On this Linux, agents can see which progra
 /// the desktop and the TUI (RV-DS241-86).
 pub const LINUX_PROCESS_LIST_LINE: &str = "On this Linux, agents can see which programs you run and how they were started.";
 
+/// What a writable project folder still cannot hold where the call supervisor runs: it
+/// refuses every new `.git` entry but the agent's own, yet an agent may change a git
+/// repository already in the project. Shown under the access level when the project may
+/// hold one ([`linux_other_git`]) and in the New Project catalog (DEC-179 T4c).
+pub const LINUX_KEPT_GIT_LINE: &str = "On Linux, agents can change a git repository already inside a project folder they may change, and your own git or IDE runs its settings when you open that folder. Check folders with a .git inside the project before you open them.";
+
+/// What the call supervisor changes for agents where it runs (DEC-179 T4c): it makes the
+/// calls it guards for them, so a program's own Landlock limits do not hold for those
+/// (QUESTION-16:21), and it refuses a create, even of a file already there, under a `.git`
+/// the agent did not make (rv-sec3 N3).
+pub const LINUX_SUPERVISED_LINE: &str = "On this Linux, CrazyAgent makes some calls for agents, such as making a file or folder or connecting, so a program an agent starts can't narrow those with limits of its own. In a .git folder CrazyAgent didn't make, agents can't create files and some writes to files already there are refused, so git commands that write fail in a repository nested in the project.";
+
+/// Why no call supervisor runs where CrazyAgent runs as root (rv-sec3 N1): dumpability does
+/// not keep a root agent away from it, so none starts and the lines after this one hold.
+pub const LINUX_ROOT_LINE: &str = "CrazyAgent runs as root on this Linux, so it starts no call supervisor and agents can do what the lines below say. Run CrazyAgent as your own user to turn it on.";
+
+/// What a limited network that reaches websites still cannot hold where the call supervisor
+/// keeps ports on this computer to it (DEC-179 T4c): agents look up names over TCP, so port
+/// 53 is open to them on every host.
+pub const LINUX_DNS_ANY_HOST_LINE: &str = "On this Linux, agents can also reach port 53, used to look up names, on every host.";
+
 /// What this Linux holds for an agent beyond its Landlock file and network rules: `nested`
 /// when it starts agents in a process namespace of their own, `scoped` when the kernel
-/// keeps their signals inside their own Landlock domain (Linux 6.12 or newer), and
-/// `supervised` when the call supervisor holds every guard here, as launches start it.
+/// keeps their signals inside their own Landlock domain (Linux 6.12 or newer),
+/// `supervised` when the call supervisor holds every guard here, as launches start it, and
+/// `root` when CrazyAgent runs as root, where it starts no supervisor (rv-sec3 N1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinuxHost {
     pub nested: bool,
     pub scoped: bool,
     pub supervised: bool,
+    pub root: bool,
+}
+
+impl LinuxHost {
+    /// What this Linux holds under the owner's Linux call supervisor setting: supervised
+    /// only while it is On, and run as root only while it is not Off, so the root line says
+    /// why no supervisor runs. Input: the setting, none when it cannot be read, which shows
+    /// every line. Output: the facts the access lines read; what is kept is never changed.
+    pub fn under(self, _calls: Option<LinuxSupervisor>) -> Self {
+        self
+    }
 }
 
 /// What this computer holds as [`LinuxHost`] says, read through the sandbox helper beside
@@ -1021,6 +1054,22 @@ pub fn linux_host_kept() -> Option<LinuxHost> {
     #[cfg(not(target_os = "linux"))]
     {
         None
+    }
+}
+
+/// Tells whether a project may hold a git repository besides its own top-level `.git`,
+/// which an agent may still change under the call supervisor: on Linux what a bounded read
+/// of the folder finds; elsewhere yes, where no Linux line shows. Input: the project
+/// folder. Output: true when one may be there.
+pub fn linux_other_git(project: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::holds_other_git(project)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = project;
+        true
     }
 }
 
