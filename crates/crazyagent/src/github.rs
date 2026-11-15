@@ -2,7 +2,7 @@ use crate::credentials::{SecretString, Store};
 use crate::engine::EngineError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 mod api;
 mod clone;
 pub(crate) mod http;
+mod rules;
 mod state;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "github/test_server.rs"]
@@ -20,6 +21,7 @@ pub(crate) mod test_server;
 mod tests;
 
 pub use api::Endpoints;
+pub use rules::{GitHubCi, GitHubRepoFacts, GitHubRule, GitHubRuleOutcome, GitHubRuleState};
 
 pub const CLIENT_ID: &str = "Ov23liHICPRkMyS5sNMV";
 pub const SCOPES: &str = "repo read:user read:org workflow";
@@ -580,5 +582,31 @@ impl GitHub {
     pub fn create_repo(&self, repo: &GitHubNewRepo) -> Result<GitHubCreated, EngineError> {
         let token = self.store.get(&self.saved()?.credential)?;
         api::create(&self.endpoints, &token, repo)
+    }
+
+    /// Sets CrazyAgent's rules on a repository with the owner's sign-in: each rule in `on`
+    /// is turned on and every other one off. Inputs: `owner/name`, the rules on and the
+    /// facts. Output: one outcome per rule GitHub holds, or `github_not_signed_in`.
+    pub fn apply_rules(
+        &self,
+        full_name: &str,
+        on: &BTreeSet<GitHubRule>,
+        facts: &GitHubRepoFacts,
+    ) -> Result<Vec<GitHubRuleOutcome>, EngineError> {
+        let token = self.store.get(&self.saved()?.credential)?;
+        rules::apply(&self.endpoints, &token, full_name, on, facts)
+    }
+
+    /// Sets one rule on a repository, as `apply_rules` does for each. Inputs:
+    /// `owner/name`, the rule, the rules on and the facts. Output: the rule's outcome.
+    pub fn set_rule(
+        &self,
+        full_name: &str,
+        rule: GitHubRule,
+        on: &BTreeSet<GitHubRule>,
+        facts: &GitHubRepoFacts,
+    ) -> Result<GitHubRuleOutcome, EngineError> {
+        let token = self.store.get(&self.saved()?.credential)?;
+        rules::set(&self.endpoints, &token, full_name, rule, on, facts)
     }
 }

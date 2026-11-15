@@ -25,6 +25,15 @@ pub(crate) struct Request<'a> {
     pub(crate) allow_http: bool,
 }
 
+/// The method of a request that changes something on GitHub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verb {
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
 /// What came back: the HTTP status, at most 4 MiB of body, and the scopes a classic
 /// GitHub token holds when GitHub named them in `X-OAuth-Scopes`.
 pub(crate) struct Reply {
@@ -141,6 +150,12 @@ impl Request<'_> {
     pub(crate) fn send_json(&self, json: &str) -> Result<Reply, EngineError> {
         let (command, config) = self.json_command(json)?;
         exchange(command, config)
+    }
+
+    /// Sends a request with a method and an optional JSON body. Inputs: the method and
+    /// the body. Output: the reply.
+    pub(crate) fn send_body(&self, _verb: Verb, _json: Option<&str>) -> Result<Reply, EngineError> {
+        Err(failure("github_publish_unbuilt"))
     }
 }
 
