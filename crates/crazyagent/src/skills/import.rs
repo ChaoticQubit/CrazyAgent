@@ -942,6 +942,61 @@ mod tests {
     }
 
     #[test]
+    fn a_manifest_import_block_names_its_instruction_file_inside_its_own_owner_folders() {
+        use crate::harnesses::manifest;
+        let refused = |import: &str| -> Option<(&'static str, String)> {
+            let text = listed("standin-skills", "Stand-in skills", ".standin", import);
+            Registry::build(&[("standin-skills", text.as_str())])
+                .err()
+                .map(|refused| (refused.code, refused.message))
+        };
+        let file = |path: &str| refused(&format!("import:\n  instructions: \"{path}\"\n"));
+        for kept in [".standin/AGENTS.md", ".standin/agent/AGENTS.md"] {
+            assert_eq!(file(kept), None, "{kept}");
+        }
+        assert_eq!(
+            refused(
+                "import:\n  skills: \".standin/skills\"\n  instructions: \".standin/AGENTS.md\"\n"
+            ),
+            None
+        );
+        let outside = Some((
+            manifest::VALUE,
+            "standin-skills: import.instructions: this must be inside one of home.owner_folders."
+                .to_owned(),
+        ));
+        for path in [
+            ".other/AGENTS.md",
+            ".standin-old/AGENTS.md",
+            ".claude/CLAUDE.md",
+        ] {
+            assert_eq!(file(path), outside, "{path}");
+        }
+        let not_under_home = Some((
+            manifest::VALUE,
+            "standin-skills: import.instructions: this must be a file under the home folder, \
+             written without ~, . or .. parts or a leading /."
+                .to_owned(),
+        ));
+        for path in [
+            "",
+            "/home/mira/.standin/AGENTS.md",
+            "~/.standin/AGENTS.md",
+            ".standin/../.ssh/config",
+            ".standin/AGENTS.md/",
+        ] {
+            assert_eq!(file(path), not_under_home, "{path}");
+        }
+        assert_eq!(
+            refused("import:\n  instructions:\n    - \".standin/AGENTS.md\"\n"),
+            Some((
+                manifest::TYPE,
+                "standin-skills: import.instructions: this must be text in quotes.".to_owned()
+            ))
+        );
+    }
+
+    #[test]
     fn every_import_source_keeps_its_wire_name_both_ways() {
         let built = leaked(&[(
             "standin-skills",
