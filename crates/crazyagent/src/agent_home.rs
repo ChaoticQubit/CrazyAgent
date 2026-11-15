@@ -1181,13 +1181,19 @@ fn real_folder(folder: &Path) -> Result<(), AgentHomeError> {
 
 /// Removes from a home the startup files zsh, bash and sh read there ahead of a command,
 /// with zsh's compiled forms of its own, for a home kept from one launch to the next that
-/// gets no reset by allowlist ([`prepare`]): an rcli master's, which is its account's
-/// profile (SA vid 12). Each goes without following a link ([`remove_entry`]). Inputs: the
-/// home and the engine's data root, both canonical. Output: unit, or `agent_home_unwritable`
-/// when one stays, refusing the launch.
+/// gets no reset by allowlist ([`prepare`]): an rcli master's account profile and the
+/// confined IDE terminal's home (SA vid 12). Only a home the engine made, strictly below its
+/// data root, loses them: an rcli SDK home the owner chose may be the owner's own HOME, whose
+/// startup files are the owner's (rv-sec3 B2 r1 F1), and it is left as it is. Each goes
+/// without following a link ([`remove_entry`]). Inputs: the home and the engine's data root,
+/// both canonical. Output: unit, or `agent_home_unwritable` when one stays, refusing the
+/// launch.
 pub(crate) fn remove_shell_startup(home: &Path, engine_root: &Path) -> Result<(), AgentHomeError> {
     assert!(home.is_absolute());
     assert!(engine_root.is_absolute());
+    if home == engine_root || !home.starts_with(engine_root) {
+        return Ok(());
+    }
     for name in ZSH_STARTUP {
         remove_entry(&home.join(name))?;
         remove_entry(&home.join(format!("{name}{ZSH_COMPILED}")))?;
