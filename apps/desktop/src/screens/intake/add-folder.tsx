@@ -8,7 +8,7 @@ import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
 import { SetUpDialog } from "./found";
 import {
-  addWay, anywayIssues, anywayOverrides, anywayWarnings, folderName, icloudCountLine, icloudMoveLine,
+  addWay, anywayIssues, anywayOverrides, anywayWarnings, busyLine, folderName, icloudCountLine, icloudMoveLine,
   icloudPlaceholders, icloudProgressLine, joinPath, pickedFolderProblem, sizeLine, startReached, waysOffered, waysWithheld, worktreesLine, type AddWay, type AnywayIssue, type AnywayWarning,
 } from "./intake";
 import "../project/projects.css";
@@ -242,7 +242,7 @@ export function AddFolder() {
     if (result.kind === "not_ready") { setProblem("Adding a folder isn't in this build."); return; }
     const same = running?.kind === "ok" ? running.value : null;
     const attached = startReached(source, same, before);
-    if (result.kind === "error" && !attached) { setProblem(result.message); return; }
+    if (result.kind === "error" && !attached) { setProblem(result.code === "job_busy" ? busyLine(same) : result.message); return; }
     session.refreshIntake(result.kind === "ok" ? result.value : undefined);
     session.showToast(`Adding ${folderName(source)}. Follow it on Home; you can keep working.`, { name: "home" });
     navigate({ name: "home" });

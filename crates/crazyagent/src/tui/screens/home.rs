@@ -1453,7 +1453,8 @@ impl Screen for Home {
             if self.sent.as_ref() == Some(&reply.query) {
                 self.sent = None;
                 if let Err(code) = &reply.result {
-                    ctx.say(Message::error(job_failed(&reply.query), &copy(code)));
+                    let line = intake_job::refusal(code, ctx.store.intake.as_ref());
+                    ctx.say(Message::error(job_failed(&reply.query), &line));
                 }
             }
             match (&reply.query, &reply.result) {

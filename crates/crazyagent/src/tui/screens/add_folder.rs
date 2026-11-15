@@ -563,8 +563,8 @@ impl AddFolder {
 
     /// Decides a failed start from the read after it: a job for the same subject that runs,
     /// or ended done carrying this start's id, is the started one whose reply was lost; an
-    /// older ended add of that folder and anything else show the start's refusal. Takes the
-    /// read and the context. Returns the flow.
+    /// older ended add of that folder and anything else show the start's refusal, a busy one
+    /// naming the job the read found running. Takes the read and the context. Returns the flow.
     fn checked(&mut self, result: &Result<IntakeView, String>, ctx: &mut Ctx) -> Flow {
         let (Some(subject), Some(code)) = (self.sent.take(), self.refused.take()) else {
             return Flow::Handled;
@@ -582,7 +582,11 @@ impl AddFolder {
         if let Some(job) = attached {
             return self.started(job, ctx);
         }
-        self.problem = Some(copy(&code));
+        let held = match result {
+            Ok(IntakeView::Job(job)) => job.as_ref(),
+            _ => None,
+        };
+        self.problem = Some(intake_job::refusal(&code, held));
         assert!(self.sent.is_none());
         Flow::Handled
     }

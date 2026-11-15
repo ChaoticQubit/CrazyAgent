@@ -2515,10 +2515,14 @@ impl ProjectScreen {
     }
 
     /// Shows why the engine refused to start the job that moves this project into the projects
-    /// home, as a plain line. Takes the refusal code. Returns nothing.
-    pub fn move_refused(&mut self, code: &str) {
+    /// home, as a plain line; a busy refusal names the job that runs, as last read. Takes the
+    /// refusal code and the job read. Returns nothing.
+    pub fn move_refused(&mut self, code: &str, held: Option<&crate::projects_home::job::JobView>) {
         assert!(!code.is_empty());
-        self.problem = Some(plain_problem(code));
+        self.problem = Some(match code {
+            "job_busy" => super::intake_job::busy(held),
+            code => plain_problem(code),
+        });
         assert!(self.problem.is_some());
     }
 
@@ -3235,7 +3239,6 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "move_project_busy" => {
             "Stop the team first (Stop all on the Team tab), then move the project. If its agents are still stopping, try again in a few seconds."
         }
-        "job_busy" => "Another job is running. Wait for it to finish on Home.",
         code if code.starts_with("move_project_")
             || code.starts_with("home_")
             || code.starts_with("delete_") =>

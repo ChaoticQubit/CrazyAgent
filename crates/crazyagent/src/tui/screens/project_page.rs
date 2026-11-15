@@ -998,7 +998,7 @@ impl ProjectPage {
         let id = match start_id() {
             Ok(id) => id,
             Err(code) => {
-                self.screen.move_refused(&code);
+                self.screen.move_refused(&code, ctx.store.intake.as_ref());
                 return;
             }
         };
@@ -1030,8 +1030,10 @@ impl ProjectPage {
                         "Follow it on Home; you can keep working.",
                     ));
                 }
-                Ok(_) => self.screen.move_refused("intake_change_outcome_unknown"),
-                Err(code) => self.screen.move_refused(code),
+                Ok(_) => self
+                    .screen
+                    .move_refused("intake_change_outcome_unknown", ctx.store.intake.as_ref()),
+                Err(code) => self.screen.move_refused(code, ctx.store.intake.as_ref()),
             }
         }
         let ended = self.moving.as_ref().is_some_and(|id| {

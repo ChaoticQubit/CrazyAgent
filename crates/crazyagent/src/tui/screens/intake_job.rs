@@ -39,6 +39,37 @@ fn agents(left: u64) -> String {
     }
 }
 
+/// The line for a start the engine refused `job_busy`: names the job that runs, as the client
+/// last read it, or says another job runs when that read found none running. Takes the job
+/// read. Returns the line.
+pub(in crate::tui) fn busy(held: Option<&JobView>) -> String {
+    let line = match held.filter(|job| running(job)) {
+        Some(job) => {
+            let verb = match job.kind {
+                JobKind::Add => "Adding",
+                JobKind::MoveProject => "Moving",
+            };
+            format!(
+                "{verb} {} is running. Wait for it to finish on Home.",
+                name(job)
+            )
+        }
+        None => copy("job_busy"),
+    };
+    assert!(line.ends_with("Wait for it to finish on Home."));
+    line
+}
+
+/// The line for a refused job request: a busy refusal names the job that runs, any other
+/// refusal says its own sentence. Takes the code and the job read. Returns the line.
+pub(in crate::tui) fn refusal(code: &str, held: Option<&JobView>) -> String {
+    assert!(!code.is_empty());
+    match code {
+        "job_busy" => busy(held),
+        code => copy(code),
+    }
+}
+
 /// The folder's own name, or the whole path when it has none.
 pub(in crate::tui) fn name(job: &JobView) -> String {
     let path = std::path::Path::new(&job.source);

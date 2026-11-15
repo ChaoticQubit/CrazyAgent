@@ -1,4 +1,4 @@
-import { ADD_WARNINGS, intakeCopy, measuredLine, moveCopy } from "../../api-intake";
+import { ADD_WARNINGS, intakeCopy, loadIntakeJob, measuredLine, moveCopy } from "../../api-intake";
 import type { Result } from "../../api";
 import { receiptState, type KeptFile, type StoredSetup } from "../../api-projects";
 import type {
@@ -220,6 +220,24 @@ export const INTAKE_POLL_MS = 1000;
 export function jobRunning(job: IntakeJob | null): boolean {
   const state = job?.state.state;
   return state === "downloading" || state === "stopping" || state === "copying" || state === "clearing";
+}
+
+/** The words for a start the engine refused job_busy: names the job that runs, as the app last
+ * read it, or says another job runs when that read found none running. Input: the job read.
+ * Output: the words. */
+export function busyLine(held: IntakeJob | null): string {
+  if (held === null || !jobRunning(held)) return intakeCopy("job_busy");
+  const verb = held.kind === "move_project" ? "Moving" : "Adding";
+  return `${verb} ${folderName(held.source)} is running. Wait for it to finish on Home.`;
+}
+
+/** The words for a refused job request: a busy refusal reads the engine's job and names it, any
+ * other refusal keeps its own words. Inputs: the code, its words and the job read, the engine's
+ * by default. Output: the words. */
+export async function refusalLine(code: string, words: string, read: () => Promise<Result<IntakeJob | null>> = loadIntakeJob): Promise<string> {
+  if (code !== "job_busy") return words;
+  const held = await read();
+  return busyLine(held.kind === "ok" ? held.value : null);
 }
 
 /** The few words for a count of agents still stopping. Input: the count. Output: the words. */

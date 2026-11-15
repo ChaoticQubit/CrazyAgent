@@ -11,7 +11,7 @@ import { folderLabel } from "../project/overview";
 import { NotReady } from "../project/shared";
 import { AnywayDialog } from "./add-folder";
 import { HomeFolderPicker } from "./home-folder";
-import { folderName, foundRow, homeLine, jobActions, jobLine, jobQuestion, pendingFolders, restartJob, startedProject, type FoundAction } from "./intake";
+import { folderName, foundRow, homeLine, jobActions, jobLine, jobQuestion, pendingFolders, refusalLine, restartJob, startedProject, type FoundAction } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -201,7 +201,7 @@ function IntakeJobPanel({ onSetUp }: { onSetUp: (folder: SetUpFolder) => void })
     setBusy(true);
     const result = await call();
     setBusy(false);
-    if (result.kind === "error") session.showToast(result.message);
+    if (result.kind === "error") session.showToast(await refusalLine(result.code, result.message));
     if (result.kind === "not_ready") session.showToast("Adding a folder isn't in this build.");
     session.refreshIntake(result.kind === "ok" ? started(result.value) : undefined);
   };

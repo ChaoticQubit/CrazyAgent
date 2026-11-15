@@ -9,7 +9,7 @@ import { SessionContext, useLoad, type Loaded } from "../../state";
 import { Button, Dialog, Notice, Segmented } from "../../ui";
 import { displayText } from "../conversation";
 import { AnywayDialog } from "../intake/add-folder";
-import { anywayIssues, anywayOverrides, asksAgain, folderName, joinPath, jobRunning, receiptRefusal, sizeLine, worktreesLine } from "../intake/intake";
+import { anywayIssues, anywayOverrides, asksAgain, folderName, joinPath, jobRunning, receiptRefusal, refusalLine, sizeLine, worktreesLine } from "../intake/intake";
 import { folderLabel, projectFolder } from "./overview";
 import type { ProjectData } from "./shared";
 
@@ -155,7 +155,7 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
     if (result.kind === "not_ready") { setProblem("Moving a project isn't in this build."); return; }
     if (result.kind === "error") {
       if (stopped && asksAgain(result.code, overrides)) { setRefused(result.code); setAsking(true); return; }
-      setProblem(`${moveCopy(result)}${after}`);
+      setProblem(`${await refusalLine(result.code, moveCopy(result))}${after}`);
       return;
     }
     close();
