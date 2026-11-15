@@ -61,6 +61,7 @@ const RESEARCH_FILES_MAX: usize = 8;
 const IGNORE_CHECK_TIME: Duration = Duration::from_secs(20);
 const IGNORE_POLL: Duration = Duration::from_millis(5);
 const IGNORE_OUTPUT_BYTES_MAX: usize = 8 * 1024 * 1024;
+const PRUNED_BYTES_MAX: usize = 256 * 1024;
 const WALKED_ENTRIES_MAX: usize = 100_000;
 const WALKED_DEPTH_MAX: usize = 64;
 const GITLINK_MODE: &str = "160000 ";
@@ -461,7 +462,7 @@ fn ignored(repo: &Path, paths: &[&str]) -> Option<Vec<bool>> {
         .flat_map(|path| path.bytes().chain([0]))
         .collect();
     let mut ignored = vec![false; paths.len()];
-    let (settings, global) = excludes(repo);
+    let (settings, files) = excludes(repo);
     for setting in settings {
         let args = ["check-ignore", "-z", "--stdin", "--no-index"];
         let mut command = git(repo, setting.as_deref(), &args);
@@ -481,48 +482,103 @@ fn ignored(repo: &Path, paths: &[&str]) -> Option<Vec<bool>> {
             next = at + 1;
         }
     }
-    if let Some(global) = global {
-        let named: BTreeSet<String> = owner_ignored(repo, &global)?.into_iter().collect();
-        for (path, flag) in paths.iter().zip(&mut ignored) {
-            let mut folders = path.match_indices('/').map(|(at, _)| &path[..=at]);
-            *flag |= named.contains(*path)
-                || named.contains(&format!("{path}/"))
-                || folders.any(|folder| named.contains(folder));
-        }
+    let named: BTreeSet<String> = owner_ignored(repo, &files)?.into_iter().collect();
+    for (path, flag) in paths.iter().zip(&mut ignored) {
+        let mut folders = path.match_indices('/').map(|(at, _)| &path[..=at]);
+        *flag |= named.contains(*path)
+            || named.contains(&format!("{path}/"))
+            || folders.any(|folder| named.contains(folder));
     }
     Some(ignored)
 }
 
-/// The paths below `repo` the owner's global ignore file names by itself (RV-DS241-145/146
-/// sec r2 F1): git reads that file alone and no repository ignore file, whose `!` lines
-/// outrank it in every run that reads both, tracked or not, an ignored folder once with a
-/// closing `/`. Takes the folder and the file. Returns the paths, or `None` as [`listed`].
-fn owner_ignored(repo: &Path, global: &str) -> Option<Vec<String>> {
-    let from = format!("--exclude-from={global}");
-    listed(repo, None, &["-c", "-o", "-i", "--directory", &from])
+/// The paths below `repo` each of the owner's ignore `files` names by itself (RV-DS241-145/146
+/// sec r2 F1, G6 r2): git reads one file alone per run and no repository ignore file, whose
+/// `!` lines outrank it in every run that reads both, tracked or not, an ignored folder once
+/// with a closing `/`. A file that cannot be opened is skipped, as the owner's own git warns
+/// and goes on. Each run steps over the folders the repository already keeps out whole
+/// ([`pruned`]), which come back as ignored folders, so a large ignored tree is never walked.
+/// Takes the folder and the files. Returns the paths, or `None` as [`listed`].
+fn owner_ignored(repo: &Path, files: &[String]) -> Option<Vec<String>> {
+    let readable: Vec<&String> = files
+        .iter()
+        .filter(|file| crate::platform::open_plain(Path::new(file)).is_ok())
+        .collect();
+    if readable.is_empty() {
+        return Some(Vec::new());
+    }
+    let pruned = pruned(repo)?;
+    let mut named = Vec::new();
+    for file in readable {
+        let from = format!("--exclude-from={file}");
+        let mut args = vec!["-c", "-o", "-i", "--directory", from.as_str()];
+        args.extend(pruned.iter().map(String::as_str));
+        named.extend(listed(repo, None, &args)?);
+    }
+    Some(named)
+}
+
+/// The folders below `repo` the repository's own ignores keep out whole, as `--exclude`
+/// arguments that match each one alone (G6 r2): folder names only, never what an ignore file
+/// holds, the first ones up to [`PRUNED_BYTES_MAX`] bytes, the rest left to the walk within
+/// the bounds of [`answer`]. Every run of [`kept_out`] and [`ignored`] keeps these folders out
+/// already. Takes the folder. Returns the arguments, or `None` as [`listed`].
+fn pruned(repo: &Path) -> Option<Vec<String>> {
+    let args = ["-o", "-i", "--directory", "--exclude-standard"];
+    let mut bytes = 0;
+    let pruned: Vec<String> = listed(repo, None, &args)?
+        .into_iter()
+        .filter(|path| path.ends_with('/'))
+        .map(|folder| format!("--exclude=/{}", glob_escaped(&folder)))
+        .take_while(|argument| {
+            bytes += argument.len() + 1;
+            bytes <= PRUNED_BYTES_MAX
+        })
+        .collect();
+    let total: usize = pruned.iter().map(|argument| argument.len() + 1).sum();
+    assert!(total <= PRUNED_BYTES_MAX);
+    Some(pruned)
+}
+
+/// `path` as git ignore pattern text that matches only that path: a `\` before each `\`,
+/// `*`, `?` and `[`, which git's pattern matching would otherwise read as wildcards. Takes
+/// the path. Returns the pattern text.
+fn glob_escaped(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for character in path.chars() {
+        if matches!(character, '\\' | '*' | '?' | '[') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    assert!(escaped.len() >= path.len() && escaped.len() <= 2 * path.len());
+    escaped
 }
 
 /// The ignore files the onboarding's git honours, one git run each, a path counting as
 /// ignored when any run says so (RV-DS241-145 r2): the one the owner's git applies in `repo`,
-/// the repository's own first, and the owner's global one, found as from no repository,
-/// which a repository's own `core.excludesFile` never switches off for what is read and
-/// sent to the model provider. Takes the folder. Returns one or two `-c` settings, `None`
-/// for a run that leaves the choice to the repository's git, and the owner's global file
-/// itself, which [`owner_ignored`] also reads alone (RV-DS241-145/146 sec r2 F1).
-fn excludes(repo: &Path) -> (Vec<Option<String>>, Option<String>) {
+/// the repository's own first, which an `includeIf` in the owner's config can pick, and the
+/// owner's global one, found as from no repository, which a repository's own
+/// `core.excludesFile` never switches off for what is read and sent to the model provider.
+/// Takes the folder. Returns one or two `-c` settings, `None` for a run that leaves the
+/// choice to the repository's git, and the file of each setting, which [`owner_ignored`] also
+/// reads alone (RV-DS241-145/146 sec r2 F1, G6 r2).
+fn excludes(repo: &Path) -> (Vec<Option<String>>, Vec<String>) {
     use crate::landing::{Within, owner_excludes_setting};
     let mut settings = vec![owner_excludes_setting(Within::Folder(repo))];
     let global = owner_excludes_setting(Within::Folder(Path::new("/")));
     if global.is_some() && !settings.contains(&global) {
-        settings.push(global.clone());
+        settings.push(global);
     }
     assert!(!settings.is_empty() && settings.len() <= 2);
-    let file = global
-        .as_deref()
-        .and_then(|setting| setting.strip_prefix("core.excludesFile="))
-        .map(str::to_owned);
-    assert_eq!(file.is_some(), global.is_some());
-    (settings, file)
+    let files: Vec<String> = settings
+        .iter()
+        .flatten()
+        .filter_map(|setting| setting.strip_prefix("core.excludesFile="))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(files.len(), settings.iter().flatten().count());
+    (settings, files)
 }
 
 /// The project's own git run in `repo` with `args`: the real git with no system or global
@@ -572,23 +628,21 @@ pub(crate) fn outside_git(repo: &Path) -> bool {
 /// own ignores are not the project's, and the outermost file or folder of each other path
 /// whose name is secret-like, but for a programming source file, which a word in its name
 /// alone does not keep out. Asks git for the ignored paths once per ignore file
-/// ([`excludes`]), once for the owner's global file alone ([`owner_ignored`]), then twice
-/// more, bounded as [`ignored`]; a folder outside git is walked
-/// instead. Takes the folder. Returns the paths, or `None` when git could not answer, the
-/// walk could not finish or a name is not UTF-8, so no graph is built.
+/// ([`excludes`]), once more per owner ignore file alone after one run for the folders the
+/// repository ignores ([`owner_ignored`]), then twice more, bounded as [`ignored`]; a folder
+/// outside git is walked instead. Takes the folder. Returns the paths, or `None` when git
+/// could not answer, the walk could not finish or a name is not UTF-8, so no graph is built.
 pub(crate) fn kept_out(repo: &Path) -> Option<Vec<String>> {
     if outside_git(repo) {
         return walked(repo);
     }
-    let (settings, global) = excludes(repo);
+    let (settings, files) = excludes(repo);
     let mut kept = BTreeSet::new();
     for setting in &settings {
         let args = ["-c", "-o", "-i", "--exclude-standard", "--directory"];
         kept.extend(listed(repo, setting.as_deref(), &args)?);
     }
-    if let Some(global) = &global {
-        kept.extend(owner_ignored(repo, global)?);
-    }
+    kept.extend(owner_ignored(repo, &files)?);
     let mut visible = listed(repo, settings[0].as_deref(), &["-o", "--exclude-standard"])?;
     for record in listed(repo, None, &["-s"])? {
         let (mode, path) = record.split_once('\t')?;
