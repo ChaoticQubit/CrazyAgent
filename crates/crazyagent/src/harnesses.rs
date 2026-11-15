@@ -865,8 +865,7 @@ pub fn sign_in_min(id: &str) -> Option<&'static str> {
 /// (`version.minimum`). Input: a catalog id or a stored harness name. Output: the plain
 /// minimum, or None for a harness with no floor or an unknown name.
 pub fn run_min(id: &str) -> Option<&'static str> {
-    let _ = id;
-    None
+    registry::registry().get(id)?.minimum_version()
 }
 
 /// Tells whether an installed harness is older than the oldest version CrazyAgent drives, so
@@ -874,8 +873,10 @@ pub fn run_min(id: &str) -> Option<&'static str> {
 /// and the installed version, None when unknown. Output: true only for a known version below
 /// the manifest's floor; a version that is not plain numbers is never below.
 pub fn too_old(harness: &registry::Harness, installed: Option<&str>) -> bool {
-    let _ = (harness, installed);
-    false
+    match (harness.minimum_version(), installed) {
+        (Some(minimum), Some(installed)) => update::below(installed, minimum),
+        _ => false,
+    }
 }
 
 /// Tells whether a sign-in must be refused because the installed harness is older than its
