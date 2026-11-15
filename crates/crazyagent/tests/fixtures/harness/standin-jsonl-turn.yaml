@@ -22,8 +22,63 @@ piped:
     - "{home}"
     - "--model"
     - "{model}"
-    - "--prompt"
-    - "{prompt}"
+    - "--prompt={prompt}"
   resume:
     - "--resume"
     - "{session}"
+  tools_off:
+    - "--no-tools"
+  rules: "standin-events"
+rules:
+  standin-events:
+    session:
+      when:
+        type: "session"
+      emit: "ready"
+      session: "id"
+    started:
+      when:
+        type: "started"
+      emit: "turn_started"
+    text:
+      when:
+        type: "text"
+      emit: "text"
+      text: "delta"
+    tool:
+      when:
+        type: "tool"
+      emit: "tool_use"
+      name: "name"
+    waiting:
+      when:
+        type: "waiting"
+      emit: "waiting"
+    stopped:
+      when:
+        type: "stopped"
+      emit: "interrupted"
+    usage:
+      when:
+        type: "usage"
+      emit: "usage"
+      tokens:
+        - "usage.input"
+        - "usage.output"
+    done:
+      when:
+        type: "done"
+      emit: "turn_finished"
+      success: "ok"
+      tokens:
+        - "usage.input"
+        - "usage.output"
+    error:
+      when:
+        type: "error"
+      emit: "turn_error"
+      rate_limited: "message"
+    exit:
+      when:
+        type: "exit"
+      emit: "exited"
