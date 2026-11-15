@@ -1398,12 +1398,17 @@ fn current_uid() -> u32 {
 #[cfg(target_os = "macos")]
 const ADMIN_GROUP: u32 = 80;
 
+/// The macOS daemon group, whose only member is root; it owns /private/var/run, where
+/// nix-darwin's /run link leads (RV-DS241-140 r4).
+#[cfg(target_os = "macos")]
+const DAEMON_GROUP: u32 = 1;
+
 /// Whether a group that can write a folder holds only users who may already act as root:
-/// wheel and admin. Every macOS user is in staff, so a staff folder is not trusted.
+/// wheel, daemon and admin. Every macOS user is in staff, so a staff folder is not trusted.
 /// Input: the group id. Output: the answer.
 #[cfg(target_os = "macos")]
 fn trusted_group(group: u32) -> bool {
-    group == 0 || group == ADMIN_GROUP
+    group == 0 || group == DAEMON_GROUP || group == ADMIN_GROUP
 }
 
 /// Whether a group that can write a folder holds only root or this user: root's group, or
