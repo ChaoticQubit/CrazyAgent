@@ -213,7 +213,10 @@ impl Format {
     /// harness id or an alias. Output: the format, None for a harness whose records the
     /// engine cannot read.
     pub fn of(harness: &str) -> Option<Format> {
-        match crate::harnesses::registry::registry().get(harness)?.record() {
+        match crate::harnesses::registry::registry()
+            .get(harness)?
+            .record()
+        {
             RecordKind::ClaudeSession => Some(Format::Claude),
             RecordKind::CodexRollouts => Some(Format::Codex),
             RecordKind::JsonlAppend
