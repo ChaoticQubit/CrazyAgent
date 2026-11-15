@@ -29,6 +29,9 @@ const INSTRUCTION_VIEWS: { value: InstructionsView; label: string }[] = [
 ];
 
 const FOLD_LINES = 12;
+/** What Process tells the owner when the project instructions file holds text CrazyAgent did
+ * not save there last, word for word as the TUI says it (DEC-141, SA vid 7 residual). */
+export const OUTSIDE_NOTICE = "This file changed outside CrazyAgent. Agents get it under the heading Imported from .crazyagent/instructions.md until you save it here.";
 const TRANSCRIPTS_OFF = "Off: Claude Code keeps no transcript. Codex keeps its own session record, which CrazyAgent reads to count its usage.";
 
 const MODE_SUBTITLES: Record<InstructionMode, string> = {
@@ -768,6 +771,7 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
   if (scope.kind === "app") return editor;
   return <div className="pr">
     <div className="stack">
+      {loaded.kind === "ok" && loaded.value.outside === true && <Notice tone="warn">{OUTSIDE_NOTICE}</Notice>}
       {editor}
       <ProjectFollowing projectId={scope.id} />
     </div>

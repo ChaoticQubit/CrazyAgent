@@ -103,6 +103,11 @@ const TOO_LARGE: &str = "agent_instructions_too_large_";
 const SKILLS_FOLDER: &str = "agent-skills";
 const FILES_FOLDER: &str = "agent-instruction-files";
 const GIVEN_FOLDER: &str = "agent-instructions-given";
+/// The folder in the engine data root keeping, for each project folder, the SHA-256 of the
+/// project instructions text the engine last wrote there, which launches give as it is
+/// (SA vid 7 residual, leader 14:22 A).
+const WRITTEN_FOLDER: &str = "project-instructions-written";
+const WRITTEN_RECORD_BYTES: usize = 64;
 const FILES_RECORD_BYTES_MAX: usize =
     crate::instruction_files::FILES_MAX * ("unreadable\t18446744073709551615\t\n".len() + 32);
 pub const SKILLS_RECORD_MAX: usize = 2 * crate::plugins::SKILLS_PER_SCOPE_MAX;
@@ -345,6 +350,50 @@ pub(crate) fn project_staging(state: &Path) -> PathBuf {
     state.join(crate::project_setup::CONTEXT_DIRECTORY)
 }
 
+/// Records the project instructions text the engine just wrote into a project folder, so
+/// launches give exactly that text as the owner's and any other text there as arrived
+/// ([`text`]). Inputs: the engine data root, the project folder and the text written.
+/// Output: unit, or a plain code; the text is then given as arrived until the next save.
+pub(crate) fn mark_written(data: &Path, folder: &Path, text: &str) -> Result<(), AgentHomeError> {
+    write_record(data, WRITTEN_FOLDER, folder, &written_digest(text))
+}
+
+/// Whether project instructions text reaches agents as arrived: text more than blank that
+/// is not what the engine last wrote into the folder, as a missing, unreadable or other
+/// record says (SA vid 7 residual). Inputs: the engine data root, the project folder and
+/// its text. Output: the answer.
+pub(crate) fn outside(data: &Path, folder: &Path, text: &str) -> bool {
+    if text.trim().is_empty() {
+        return false;
+    }
+    let record = read_record(data, WRITTEN_FOLDER, folder, WRITTEN_RECORD_BYTES);
+    !record.is_ok_and(|record| record == written_digest(text))
+}
+
+/// The SHA-256 of one project instructions text in lowercase hex, the record
+/// [`mark_written`] keeps and [`outside`] compares.
+/// Input: the text. Output: 64 hex characters.
+fn written_digest(text: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+    assert_eq!(digest.len(), WRITTEN_RECORD_BYTES);
+    digest
+}
+
+/// The project instructions agents get: the text the engine last wrote into the folder as
+/// it is, and any other text, as a project onboarded before labels, a pull or another editor
+/// leaves it, under the Imported heading with its headings demoted (SA vid 7 residual).
+/// Inputs: the engine data root and the project folder. Output: the text, or a plain code.
+fn given_project(data: &Path, folder: &Path) -> Result<String, AgentHomeError> {
+    let own = read_project(folder)?;
+    if !outside(data, folder, &own) {
+        return Ok(own);
+    }
+    let (labelled, _) = crate::instruction_files::carried(&own);
+    let heading = crate::instruction_files::CARRIED_HEADING;
+    assert!(labelled == own || labelled.starts_with(heading));
+    Ok(labelled)
+}
+
 /// Builds what every agent of the project receives from the owner's two instruction texts
 /// by the project's mode: the app-wide instructions, the project instructions, or the app
 /// text with the project text appended, each under its heading; empty when the given texts
@@ -359,7 +408,7 @@ pub fn text(project: &AgentProject) -> Result<Given, AgentHomeError> {
         false => String::new(),
     };
     let own = match (&project.folder, project.mode.project()) {
-        (Some(folder), true) => read_project(folder)?,
+        (Some(folder), true) => given_project(&project.data, folder)?,
         _ => String::new(),
     };
     let text = render(&app, &own, project.repeated);
@@ -908,13 +957,18 @@ fn record_files(
     write_record(data, FILES_FOLDER, home, &record)
 }
 
-/// Names where the engine keeps one kind of launch record for one agent home: a file
-/// named by the SHA-256 of the home's real path in the folder `kind` of the engine data
-/// root's real path, outside every folder an agent may write. Inputs: the engine data
-/// root, the record's folder name and the agent's home. Output: the folder and the file
-/// name, or `agent_instructions_unreadable`.
+/// Names where the engine keeps one kind of record for one agent home or project folder: a
+/// file named by the SHA-256 of that folder's real path in the folder `kind` of the engine
+/// data root's real path, outside every folder an agent may write. Inputs: the engine data
+/// root, the record's folder name and the agent's home or the project folder. Output: the
+/// folder and the file name, or `agent_instructions_unreadable`.
 fn record_place(data: &Path, kind: &str, home: &Path) -> Result<(PathBuf, String), AgentHomeError> {
-    assert!(kind == FILES_FOLDER || kind == SKILLS_FOLDER || kind == GIVEN_FOLDER);
+    assert!(
+        kind == FILES_FOLDER
+            || kind == SKILLS_FOLDER
+            || kind == GIVEN_FOLDER
+            || kind == WRITTEN_FOLDER
+    );
     let real =
         |path: &Path| fs::canonicalize(path).map_err(|_| failure("agent_instructions_unreadable"));
     let home = real(home)?;
