@@ -545,10 +545,12 @@ impl AgentPolicy {
         let calls = settings.map(|settings| settings.linux_supervisor);
         let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
         let sockets = settings.map(|settings| settings.linux_sockets);
+        let supervised = host.is_some_and(|host| host.supervised);
+        let other_git = supervised && crate::sandbox::linux_other_git(project);
         PolicyView {
             access: self.access,
             network: self.network,
-            levels: LevelView::on(host, Some(project)),
+            levels: LevelView::on(host, other_git),
             networks: AgentNetwork::ALL
                 .into_iter()
                 .map(|network| NetworkView {
@@ -864,18 +866,15 @@ pub struct LevelView {
 }
 
 impl LevelView {
-    /// Every access level, from the most to the least confined, each with the reason it
-    /// cannot run agents on this computer, from what [`LevelView::refresh`] last read of
-    /// it under the owner's call supervisor setting. Inputs: the setting, none when
-    /// unreadable, and the project, none for the New Project catalog. Output: one view for
-    /// each level.
-    pub fn all(
-        calls: Option<crate::sandbox::LinuxSupervisor>,
-        project: Option<&Path>,
-    ) -> Vec<Self> {
+    /// Every access level for the New Project catalog, from the most to the least
+    /// confined, each with the reason it cannot run agents on this computer, from what
+    /// [`LevelView::refresh`] last read of it under the owner's call supervisor setting; a
+    /// repository may be anywhere in a project not made yet. Input: the setting, none when
+    /// unreadable. Output: one view for each level.
+    pub fn all(calls: Option<crate::sandbox::LinuxSupervisor>) -> Vec<Self> {
         Self::on(
             crate::sandbox::linux_host_kept().map(|host| host.under(calls)),
-            project,
+            true,
         )
     }
 
@@ -889,11 +888,9 @@ impl LevelView {
 
     /// Every access level as [`LevelView::all`] gives them, for a computer that holds
     /// `host`. Inputs: what a Linux holds under the setting, none on another system, and
-    /// the project, none for the catalog, where a repository may be anywhere. Output: one
-    /// view for each level, with the lines [`linux_gaps`] gives it.
-    pub fn on(host: Option<crate::sandbox::LinuxHost>, project: Option<&Path>) -> Vec<Self> {
-        let other_git = host.is_some_and(|host| host.supervised)
-            && project.is_none_or(crate::sandbox::linux_other_git);
+    /// whether the project may hold another git repository ([`LevelView::other_git`]), read
+    /// before any transaction. Output: one view for each level, with its [`linux_gaps`].
+    pub fn on(host: Option<crate::sandbox::LinuxHost>, other_git: bool) -> Vec<Self> {
         let levels: Vec<Self> = AgentAccess::ALL
             .into_iter()
             .map(|access| Self {
@@ -908,6 +905,15 @@ impl LevelView {
             .collect();
         assert_eq!(levels.len(), AgentAccess::ALL.len());
         levels
+    }
+
+    /// Tells whether a project may hold a git repository besides its own, as its Agent
+    /// access lines need where the call supervisor runs: a bounded read of its folder
+    /// ([`crate::sandbox::linux_other_git`]), made only for a supervised host. A reader
+    /// calls it before its database transaction, so that read never holds one. Inputs:
+    /// what this Linux holds under the setting, none elsewhere, and the folder.
+    pub fn other_git(_host: Option<crate::sandbox::LinuxHost>, _project: &Path) -> bool {
+        true
     }
 }
 
@@ -1792,13 +1798,13 @@ mod tests {
             assert_eq!(found, gaps(access, false, false), "unsupervised, a repository adds none");
         }
         assert!(gaps(AgentAccess::Full, false, false).is_empty());
-        let levels = LevelView::on(host(false, false), Some(Path::new("/nonexistent")));
+        let levels = LevelView::on(host(false, false), true);
         assert_eq!(levels.len(), AgentAccess::ALL.len());
         for level in &levels {
             let told: Vec<&str> = level.gaps.iter().map(String::as_str).collect();
             assert_eq!(told, gaps(level.access, false, false), "{:?}", level.access);
         }
-        assert!(LevelView::on(None, None).iter().all(|level| level.gaps.is_empty()));
+        assert!(LevelView::on(None, true).iter().all(|level| level.gaps.is_empty()));
         let stored = r#"{"access":"sandboxed","label":"Sandboxed","unavailable":null}"#;
         let old: LevelView = serde_json::from_str(stored).unwrap();
         assert!(old.gaps.is_empty(), "a view an older engine stored");
@@ -1843,12 +1849,41 @@ mod tests {
         assert_eq!(root.under(on), root);
         assert_eq!(root.under(None), root);
         assert!(!root.under(off).root, "with the supervisor Off, root changes nothing");
-        let catalog = LevelView::on(Some(held(true, false)), None);
+        let catalog = LevelView::on(Some(held(true, false)), true);
         assert_eq!(catalog[0].access, AgentAccess::Sandboxed);
         let told: Vec<&str> = catalog[0].gaps.iter().map(String::as_str).collect();
         assert_eq!(told, [kept, said], "the catalog has no project to rule one out");
-        let missing = LevelView::on(Some(held(true, false)), Some(Path::new("/nonexistent")));
-        let told: Vec<&str> = missing[0].gaps.iter().map(String::as_str).collect();
-        assert_eq!(told, [kept, said], "a folder that cannot be read rules out none");
+        let unread = LevelView::other_git(Some(held(true, false)), Path::new("/nonexistent"));
+        assert!(unread, "a folder that cannot be read rules out none");
+        let quiet = LevelView::on(Some(held(true, false)), false);
+        let told: Vec<&str> = quiet[0].gaps.iter().map(String::as_str).collect();
+        assert_eq!(told, [said], "a project with no other repository");
+    }
+
+    /// The Agent access page reads the project folder for another git repository before its
+    /// database transaction, and only where the call supervisor runs; the view takes that
+    /// answer (rv-secreview linux-t4c note 1, rv-code4 linux-t4c N2, DEC-179 T4d).
+    #[test]
+    fn only_a_supervised_host_reads_the_project_for_another_repository_and_the_view_takes_it() {
+        use crate::sandbox::{LINUX_KEPT_GIT_LINE, LinuxHost};
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join("vendor/.git")).unwrap();
+        let missing = temp.path().join("missing");
+        let host = |supervised| LinuxHost {
+            nested: true,
+            scoped: true,
+            supervised,
+            root: false,
+        };
+        assert!(LevelView::other_git(Some(host(true)), &project));
+        assert!(LevelView::other_git(Some(host(true)), &missing));
+        for unread in [Some(host(false)), None] {
+            assert!(!LevelView::other_git(unread, &project), "{unread:?}");
+            assert!(!LevelView::other_git(unread, &missing), "{unread:?}");
+        }
+        let lines = |other_git| LevelView::on(Some(host(true)), other_git).remove(0).gaps;
+        assert!(lines(true).contains(&LINUX_KEPT_GIT_LINE.to_owned()));
+        assert!(!lines(false).contains(&LINUX_KEPT_GIT_LINE.to_owned()));
     }
 }

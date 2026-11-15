@@ -226,7 +226,7 @@ fn read_only_folder_lists_are_bounded_before_the_engine_checks_them() {
 fn catalog_names_every_access_level_with_why_it_cannot_run_here() {
     use crate::sandbox::policy::{AgentAccess, LevelView};
     let catalog = catalog(&config(), None, &[], &BTreeSet::new(), None).unwrap();
-    assert_eq!(catalog.agent_access, LevelView::all(None, None));
+    assert_eq!(catalog.agent_access, LevelView::all(None));
     let runs: Vec<(AgentAccess, bool)> = catalog
         .agent_access
         .iter()
