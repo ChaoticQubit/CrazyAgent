@@ -14,11 +14,16 @@ pub const OAUTH_NOT_YET: &str = "app_plugin_connector_oauth_not_yet";
 const SCOPE_BYTES_MAX: usize = 128;
 const TOOL_BYTES_MAX: usize = 128;
 const WORD_BYTES_MAX: usize = 128;
-const OWN_HEADERS: [&str; 8] = [
+/// The start of every header the MCP client mirrors a tool argument into; no manifest
+/// header may begin with it.
+pub const MIRROR_PREFIX: &str = "mcp-param-";
+const OWN_HEADERS: [&str; 10] = [
     "authorization",
     "accept",
     "mcp-session-id",
     "mcp-protocol-version",
+    "mcp-method",
+    "mcp-name",
     "last-event-id",
     "cookie",
     "origin",
@@ -323,6 +328,13 @@ fn declared(url: &url::Url, hosts: &[String], field: &str) -> Result<(), Problem
 }
 
 fn reserved_header(name: &str, key_header: bool) -> bool {
+    let mirrored = name
+        .as_bytes()
+        .get(..MIRROR_PREFIX.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(MIRROR_PREFIX.as_bytes()));
+    if mirrored {
+        return true;
+    }
     RESERVED_HEADERS
         .iter()
         .chain(&OWN_HEADERS)

@@ -70,6 +70,13 @@ impl ProviderReach {
         }
     }
 
+    /// Looks a name up through this reach's lookup, for a caller that vets every address
+    /// itself before anything dials one. Inputs: the name and port. Output: the addresses,
+    /// or the lookup's error, TimedOut when its bound ran out.
+    pub(crate) fn addresses(&self, name: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+        (self.lookup)(name, port)
+    }
+
     /// Tells whether every one of a loopback provider's addresses refuses a connect, so
     /// nothing listens there. Input: the addresses, at least one and at most
     /// [`ADDRESSES_MAX`]. Output: true only when each one refused.

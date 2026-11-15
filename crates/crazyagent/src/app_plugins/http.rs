@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 #[cfg(unix)]
-const CURL: &str = "/usr/bin/curl";
+pub(crate) const CURL: &str = "/usr/bin/curl";
 #[cfg(unix)]
 const CONNECT_SECS: &str = "10";
 #[cfg(unix)]
@@ -90,15 +90,15 @@ pub fn embed(
 /// in freed memory by a resize, and zeroed when dropped, so a key in it is wiped on every
 /// exit: a send, an early error or an unwind (rv-v3sec PLUGINS-2).
 #[cfg(unix)]
-struct Config(Vec<u8>);
+pub(crate) struct Config(Vec<u8>);
 
 #[cfg(unix)]
 impl Config {
-    fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self(Vec::with_capacity(capacity))
     }
 
-    fn push(&mut self, text: &str) {
+    pub(crate) fn push(&mut self, text: &str) {
         assert!(
             self.0.len() + text.len() <= self.0.capacity(),
             "the config buffer never grows"
@@ -118,8 +118,11 @@ impl Drop for Config {
     }
 }
 
+/// Appends a text inside a quoted curl config value, quotes and backslashes escaped.
+/// Inputs: the config and the text. Output: Ok, or `app_plugin_call_failed` for a control
+/// byte or a text the buffer has no room for; at least `CONFIG_MARGIN` bytes stay free.
 #[cfg(unix)]
-fn push_quoted(config: &mut Config, text: &str) -> Result<(), EngineError> {
+pub(crate) fn push_quoted(config: &mut Config, text: &str) -> Result<(), EngineError> {
     if text.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
         || config.0.len() + 2 * text.len() + CONFIG_MARGIN > config.0.capacity()
     {
@@ -134,13 +137,102 @@ fn push_quoted(config: &mut Config, text: &str) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Appends one `key = "value"` line to a curl config, the value quoted. Inputs: the
+/// config, curl's long option name and its value. Output: Ok, or `app_plugin_call_failed`.
 #[cfg(unix)]
-fn push_line(config: &mut Config, key: &str, value: &str) -> Result<(), EngineError> {
+pub(crate) fn push_line(config: &mut Config, key: &str, value: &str) -> Result<(), EngineError> {
     config.push(key);
     config.push(" = \"");
     push_quoted(config, value)?;
     config.push("\"\n");
     Ok(())
+}
+
+/// Appends the `base64(user:key)` of a Basic header to a curl config. The joined pair and
+/// its encoding live in two buffers that never grow and are wiped when dropped. Inputs:
+/// the config, the user name and the key. Output: Ok, or `app_plugin_call_failed` for a
+/// user name with a colon or a value the buffer has no room for.
+#[cfg(unix)]
+pub(crate) fn push_basic(config: &mut Config, user: &str, key: &str) -> Result<(), EngineError> {
+    use base64::Engine;
+    if user.contains(':') {
+        return Err(failed());
+    }
+    let mut joined = Config::with_capacity(user.len() + 1 + key.len());
+    joined.push(user);
+    joined.push(":");
+    joined.push(key);
+    let size = joined.0.len().div_ceil(3) * 4;
+    let mut encoded = Config::with_capacity(size);
+    encoded.0.resize(size, 0);
+    let written = base64::engine::general_purpose::STANDARD
+        .encode_slice(&joined.0, &mut encoded.0)
+        .map_err(|_| failed())?;
+    assert_eq!(written, size, "padded base64 fills its buffer");
+    assert_eq!(encoded.0.capacity(), size, "the encoding buffer never grows");
+    let text = std::str::from_utf8(&encoded.0).map_err(|_| failed())?;
+    push_quoted(config, text)
+}
+
+/// How a streamed curl run ended: on its own with its exit code, none when a signal
+/// ended it, or stopped by the reader.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ended {
+    Exit(Option<i32>),
+    Stopped,
+}
+
+/// Runs a curl command with its config on stdin and hands the reply to a reader as it
+/// arrives, so a caller can stop at the part it waits for or at its own size bound.
+/// Blocking. Inputs: the command, the config and the reader, which answers false to stop;
+/// curl is then killed. Output: how the run ended, or `app_plugin_call_failed` when curl
+/// did not start or its pipes failed.
+#[cfg(unix)]
+pub(crate) fn stream(
+    command: &mut Command,
+    config: &Config,
+    more: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<Ended, EngineError> {
+    use std::io::{Read, Write};
+    let mut child = crate::spawn_gate::spawn(command).map_err(|_| failed())?;
+    let written = child
+        .stdin
+        .take()
+        .map(|mut input| input.write_all(&config.0));
+    let mut stopped = false;
+    let mut read = child.stdout.is_some();
+    if let Some(mut output) = child.stdout.take() {
+        let mut chunk = [0_u8; 16 * 1024];
+        loop {
+            match output.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => {
+                    assert!(count <= chunk.len());
+                    if !more(&chunk[..count]) {
+                        stopped = true;
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => {
+                    read = false;
+                    break;
+                }
+            }
+        }
+    }
+    if stopped || !read {
+        let _ = child.kill();
+    }
+    let status = child.wait();
+    if stopped {
+        return Ok(Ended::Stopped);
+    }
+    match (written, read, status) {
+        (Some(Ok(())), true, Ok(status)) => Ok(Ended::Exit(status.code())),
+        _ => Err(failed()),
+    }
 }
 
 #[cfg(unix)]
@@ -334,11 +426,11 @@ fn vectors(reply: &[u8], spec: &HttpSpec, count: usize) -> Result<Vec<Vec<f32>>,
 /// A private folder for one request body inside the engine root's guarded `SCRATCH`
 /// folder, readable only by the engine user and removed when dropped.
 #[cfg(unix)]
-struct Scratch(PathBuf);
+pub(crate) struct Scratch(PathBuf);
 
 #[cfg(unix)]
 impl Scratch {
-    fn new(root: &Path) -> Result<Self, EngineError> {
+    pub(crate) fn new(root: &Path) -> Result<Self, EngineError> {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt};
         let folder = root.join(SCRATCH);
         match std::fs::DirBuilder::new().mode(0o700).create(&folder) {
@@ -361,7 +453,7 @@ impl Scratch {
         Ok(Self(path))
     }
 
-    fn write(&self, body: &[u8]) -> Result<PathBuf, EngineError> {
+    pub(crate) fn write(&self, body: &[u8]) -> Result<PathBuf, EngineError> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let path = self.0.join("request");
