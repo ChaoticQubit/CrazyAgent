@@ -3555,43 +3555,47 @@ fn the_owners_ignore_file_is_the_global_setting_else_the_default_and_only_a_real
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let (home, xdg) = (root.join("home"), root.join("xdg"));
     std::fs::create_dir(&home).unwrap();
-    assert_eq!(git::owner_excludes(&home, None), None);
+    let nowhere = Within::Folder(Path::new("/"));
+    assert_eq!(git::owner_excludes(&home, None, nowhere), None);
     write(&home.join(".config/git/ignore"), "secret.env\n");
     assert_eq!(
-        git::owner_excludes(&home, None),
+        git::owner_excludes(&home, None, nowhere),
         Some(home.join(".config/git/ignore"))
     );
-    assert_eq!(git::owner_excludes(&home, Some(xdg.as_path())), None);
+    assert_eq!(
+        git::owner_excludes(&home, Some(xdg.as_path()), nowhere),
+        None
+    );
     write(&xdg.join("git/ignore"), "secret.env\n");
     assert_eq!(
-        git::owner_excludes(&home, Some(xdg.as_path())),
+        git::owner_excludes(&home, Some(xdg.as_path()), nowhere),
         Some(xdg.join("git/ignore"))
     );
     assert_eq!(
-        git::owner_excludes(&home, Some(Path::new("xdg"))),
+        git::owner_excludes(&home, Some(Path::new("xdg")), nowhere),
         Some(home.join(".config/git/ignore"))
     );
-    assert_eq!(git::owner_excludes(Path::new("home"), None), None);
+    assert_eq!(git::owner_excludes(Path::new("home"), None, nowhere), None);
     write(
         &home.join(".gitconfig"),
         "[core]\n\texcludesFile = ~/ignores/global\n",
     );
-    assert_eq!(git::owner_excludes(&home, None), None);
+    assert_eq!(git::owner_excludes(&home, None, nowhere), None);
     write(&home.join("ignores/real"), "secret.env\n");
     std::os::unix::fs::symlink(home.join("ignores/real"), home.join("ignores/global")).unwrap();
     assert_eq!(
-        git::owner_excludes(&home, None),
+        git::owner_excludes(&home, None, nowhere),
         Some(home.join("ignores/real"))
     );
     std::fs::remove_file(home.join("ignores/global")).unwrap();
     std::fs::create_dir(home.join("ignores/global")).unwrap();
-    assert_eq!(git::owner_excludes(&home, None), None);
+    assert_eq!(git::owner_excludes(&home, None, nowhere), None);
     write(
         &home.join(".gitconfig"),
         "[core]\n\texcludesFile = relative/ignore\n",
     );
     write(&home.join("relative/ignore"), "secret.env\n");
-    assert_eq!(git::owner_excludes(&home, None), None);
+    assert_eq!(git::owner_excludes(&home, None, nowhere), None);
 }
 
 #[test]
