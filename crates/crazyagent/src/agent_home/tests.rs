@@ -1782,6 +1782,49 @@ fn a_file_whose_acl_denies_reading_and_deleting_it_still_goes() {
     );
 }
 
+/// A home kept from one launch to the next with no reset by allowlist, an rcli master's
+/// account profile, loses every shell startup file at a launch (SA vid 12): a zsh, bash or
+/// sh startup name goes whether it is a file, a compiled zsh form, a folder with a file in
+/// it or a link, what a link names outside the home stays, and every other entry of the
+/// home stays as it was.
+#[cfg(unix)]
+#[test]
+fn a_kept_home_loses_every_shell_startup_file_and_nothing_else() {
+    let (_directory, root) = folder();
+    let home = root.join("profile");
+    fs::create_dir(&home).unwrap();
+    let outside = root.join("owner.txt");
+    fs::write(&outside, "the owner's\n").unwrap();
+    for name in ZSH_STARTUP {
+        fs::write(home.join(name), "echo planted\n").unwrap();
+        fs::write(home.join(format!("{name}{ZSH_COMPILED}")), "planted").unwrap();
+    }
+    fs::write(home.join(".bashrc"), "echo planted\n").unwrap();
+    fs::write(home.join(".bash_profile"), "echo planted\n").unwrap();
+    fs::write(home.join(".bash_logout"), "echo planted\n").unwrap();
+    fs::create_dir(home.join(".bash_login")).unwrap();
+    fs::write(home.join(".bash_login").join("inside"), "x").unwrap();
+    std::os::unix::fs::symlink(&outside, home.join(".profile")).unwrap();
+    fs::write(home.join("config.json"), "{}").unwrap();
+    fs::create_dir(home.join("sessions")).unwrap();
+    fs::write(home.join("sessions").join(".zshrc"), "kept\n").unwrap();
+
+    let removed = remove_shell_startup(&home).map_err(|error| error.0);
+
+    assert_eq!(removed, Ok(()));
+    let mut left: Vec<_> = fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["config.json", "sessions"]);
+    assert_eq!(
+        fs::read_to_string(home.join("sessions").join(".zshrc")).unwrap(),
+        "kept\n"
+    );
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "the owner's\n");
+}
+
 /// A home an agent filled with more entries than one listing of it takes still launches,
 /// and every entry it planted goes while what the harness keeps stays (RV-DS241-137), so a
 /// run that makes a hundred thousand files in its home never refuses every later launch.

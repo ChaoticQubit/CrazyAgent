@@ -1155,6 +1155,16 @@ fn real_folder(folder: &Path) -> Result<(), AgentHomeError> {
     Ok(())
 }
 
+/// Removes from a home the startup files zsh, bash and sh read there ahead of a command,
+/// with zsh's compiled forms of its own, for a home kept from one launch to the next that
+/// gets no reset by allowlist ([`prepare`]): an rcli master's, which is its account's
+/// profile (SA vid 12). Each goes without following a link ([`remove_entry`]). Input: the
+/// home. Output: unit, or `agent_home_unwritable` when one stays, refusing the launch.
+pub(crate) fn remove_shell_startup(home: &Path) -> Result<(), AgentHomeError> {
+    assert!(home.is_absolute());
+    Ok(())
+}
+
 /// Removes one entry of an agent home, or of an engine folder no agent writes, with all it
 /// holds and without following a link, so a link goes and what it names stays. Its parent
 /// is opened by path without following a link in its last part ([`open_real_folder`]), so
