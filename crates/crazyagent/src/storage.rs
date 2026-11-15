@@ -2718,6 +2718,12 @@ fn owner_read(
     a: &Admission,
     query: &OwnerRead,
 ) -> Result<OwnerReadReply, EngineError> {
+    if matches!(
+        query,
+        OwnerRead::ProjectCatalog { .. } | OwnerRead::ProjectAgentPolicy { .. }
+    ) {
+        crate::sandbox::policy::LevelView::refresh();
+    }
     let tx = db.transaction().map_err(error)?;
     check_owner_admission(&tx, a)?;
     let revision = owner_revision(&tx)?;

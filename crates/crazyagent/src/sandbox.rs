@@ -894,12 +894,27 @@ pub struct LinuxHost {
 }
 
 /// What this computer holds as [`LinuxHost`] says, read through the sandbox helper beside
-/// this executable. No input. Output: none on another system; on Linux the facts, each
-/// false when it cannot be read, so its gap line is shown.
+/// this executable, again once what is kept is a minute old. No input. Output: none on
+/// another system; on Linux the facts, each false when it cannot be read, so its gap line
+/// is shown.
 pub fn linux_host() -> Option<LinuxHost> {
     #[cfg(target_os = "linux")]
     {
         Some(linux::host_now())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// What this computer holds as [`linux_host`] last read it, however long ago, so a caller
+/// inside a database transaction starts no helper; it reads only when nothing was read
+/// yet. No input. Output: as [`linux_host`].
+pub fn linux_host_kept() -> Option<LinuxHost> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(linux::host_kept())
     }
     #[cfg(not(target_os = "linux"))]
     {

@@ -7,7 +7,7 @@ use super::project_access::FULL_ACCESS_WARNING;
 use super::project_markdown::sanitize;
 use crate::project_setup::ResearchKind;
 use crate::sandbox::LINUX_NESTED_GIT_LINE;
-use crate::sandbox::policy::{AgentAccess, linux_gaps};
+use crate::sandbox::policy::AgentAccess;
 #[cfg(all(test, unix))]
 use ratatui::style::Modifier;
 use ratatui::style::Style;
@@ -1413,7 +1413,7 @@ fn review_summary(draw: &mut Draw) {
         } else if wizard.linux {
             draw.note(LINUX_NESTED_GIT_LINE, look.warning);
         }
-        for gap in linux_gaps(wizard.access, wizard.host) {
+        for gap in wizard.gaps() {
             draw.note(gap, look.warning);
         }
     }

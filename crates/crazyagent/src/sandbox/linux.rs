@@ -19,6 +19,7 @@ use std::fs;
 use std::io::Read;
 use std::ops::RangeInclusive;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -54,6 +55,9 @@ const SCOPED: &str = "--scoped";
 /// How long [`host_now`] keeps what it read: a policy view asks on every read, and each
 /// answer starts the helper twice.
 const HOST_AGE_MAX: Duration = Duration::from_secs(60);
+/// The set-user-ID and set-group-ID mode bits: a bubblewrap with either runs as someone
+/// other than the engine's user, so [`trusted`] refuses it.
+const SET_ID_BITS: u32 = 0o6000;
 /// The bubblewrap arguments a nested agent starts under, before its working folder: user,
 /// process, IPC and host-name namespaces of its own and a fresh `/proc`, with the whole
 /// root bound through, devices too, so the helper's Landlock rules stay the only file
@@ -816,17 +820,25 @@ fn scoped() -> ExitCode {
 /// as [`own_session`] does, where a pane's first process can still be told apart, then
 /// blocks every signal: bubblewrap's outer process and its first process inside inherit the
 /// mask, so they end only with the harness or by KILL, and a stop signal to the group is
-/// the harness's to handle. Output: 3 when either fails, 126 when bubblewrap cannot start.
+/// the harness's to handle. Last it gives up new privileges, so a bubblewrap swapped for a
+/// set-user-ID one after [`trusted`] looked still runs as this user. Output: 3 when any of
+/// the three fails, 126 when bubblewrap cannot start.
 fn nest(bwrap: &Path, args: &[OsString]) -> ExitCode {
-    let held = own_session().and_then(|()| {
-        nix::sys::signal::SigSet::all()
-            .thread_block()
-            .map_err(|error| format!("signal mask: {error}"))
-    });
+    let held = own_session()
+        .and_then(|()| {
+            nix::sys::signal::SigSet::all()
+                .thread_block()
+                .map_err(|error| format!("signal mask: {error}"))
+        })
+        .and_then(|()| {
+            nix::sys::prctl::set_no_new_privs()
+                .map_err(|error| format!("no new privileges: {error}"))
+        });
     if let Err(reason) = held {
         eprintln!("crazyagent-landlock: {reason}");
         return ExitCode::from(3);
     }
+    assert_eq!(nix::sys::prctl::get_no_new_privs(), Ok(true));
     let error = exec_keeping_mask(bwrap, args);
     eprintln!(
         "crazyagent-landlock: cannot start {}: {error}",
@@ -934,6 +946,13 @@ impl LinuxSandbox {
             .any(|executable| !clean_absolute(executable) || !executable.is_file())
         {
             return Err(invalid("sandbox executable must be an absolute file"));
+        }
+        if let LinuxBackend::Nested { bwrap, .. } = &backend
+            && !trusted(bwrap)
+        {
+            return Err(invalid(
+                "bubblewrap must have no set-ID bit and belong to root or this user",
+            ));
         }
         if matches!(backend, LinuxBackend::Bubblewrap { .. }) {
             match sandbox.network() {
@@ -1064,20 +1083,27 @@ fn passes(probe: &mut Command) -> bool {
     .is_ok_and(|status| status.success())
 }
 
-/// Tells whether a bubblewrap is one the helper may nest an agent under. Input: its path.
-/// Output: true for a file.
+/// Tells whether a bubblewrap is one the helper may nest an agent under: a file that root
+/// or this user owns, with neither [`SET_ID_BITS`] bit, so it runs with this user's
+/// privileges and no one else could have written it. A host whose bubblewrap fails this
+/// stays on plain Landlock with its gap lines. Input: its path. Output: true when it may.
 fn trusted(bwrap: &Path) -> bool {
-    bwrap.is_file()
+    let own = rustix::process::geteuid().as_raw();
+    fs::metadata(bwrap).is_ok_and(|file| {
+        file.is_file() && file.mode() & SET_ID_BITS == 0 && [0, own].contains(&file.uid())
+    })
 }
 
 /// Tells whether this machine starts the helper inside bubblewrap's namespaces and holds
 /// the same probe there, by running the exact nest: the helper, bubblewrap with
 /// [`NEST_ARGS`], then the helper's probe. A bubblewrap that only exists proves nothing:
-/// Ubuntu 24.04 refuses it the user namespace. Inputs: bubblewrap, the helper and the
-/// probe's arguments. Output: true only when the nested probe exits 0.
+/// Ubuntu 24.04 refuses it the user namespace. A bubblewrap [`trusted`] refuses is never
+/// started. Inputs: bubblewrap, the helper and the probe's arguments. Output: true only
+/// when the nested probe exits 0.
 fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
     assert!(flags.first().is_some_and(|flag| flag == PROBE));
     clean_absolute(bwrap)
+        && trusted(bwrap)
         && passes(
             Command::new(helper)
                 .arg(NEST)
@@ -1108,21 +1134,36 @@ pub fn read_host(helper: &Path) -> super::LinuxHost {
     super::LinuxHost { nested, scoped }
 }
 
-/// [`read_host`] for the helper beside this executable, read again once what it holds is
-/// older than [`HOST_AGE_MAX`]. No input. Output: the facts, each false when this
-/// executable's path cannot be read.
-pub(crate) fn host_now() -> super::LinuxHost {
+/// [`read_host`] for the helper beside this executable, read again once what is kept is
+/// older than `age_max`, or with no age only when nothing is kept. The lock is not held
+/// while the helper runs, so a reader of what is kept never waits on it. Input: the age.
+/// Output: the facts, each false when this executable's path cannot be read.
+fn host_within(age_max: Option<Duration>) -> super::LinuxHost {
     static READ: Mutex<Option<(Instant, super::LinuxHost)>> = Mutex::new(None);
-    let mut read = READ.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((at, host)) = *read
-        && at.elapsed() < HOST_AGE_MAX
+    let kept = *READ.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((at, host)) = kept
+        && age_max.is_none_or(|age_max| at.elapsed() < age_max)
     {
         return host;
     }
     let helper = std::env::current_exe().map(|engine| engine.with_file_name(HELPER_NAME));
     let host = read_host(&helper.unwrap_or_default());
-    *read = Some((Instant::now(), host));
+    *READ.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), host));
     host
+}
+
+/// What this machine holds, read again once what is kept is older than [`HOST_AGE_MAX`]:
+/// it may start the helper and bubblewrap, so it is not for a database transaction. No
+/// input. Output: the facts as [`read_host`] gives them.
+pub(crate) fn host_now() -> super::LinuxHost {
+    host_within(Some(HOST_AGE_MAX))
+}
+
+/// What this machine holds as it was last read, however long ago, read now only when it
+/// never was: after [`host_now`] it starts nothing. No input. Output: the facts as
+/// [`read_host`] gives them.
+pub(crate) fn host_kept() -> super::LinuxHost {
+    host_within(None)
 }
 
 /// Refuses a policy neither Linux backend starts: one confined to its own worktree, or a

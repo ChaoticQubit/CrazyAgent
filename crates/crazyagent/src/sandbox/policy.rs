@@ -759,10 +759,19 @@ pub struct LevelView {
 
 impl LevelView {
     /// Every access level, from the most to the least confined, each with the reason it
-    /// cannot run agents on this computer. Takes nothing. Returns one view for each level,
-    /// as a project's policy and the New Project catalog both show them.
+    /// cannot run agents on this computer, from what [`LevelView::refresh`] last read of
+    /// it. Takes nothing. Returns one view for each level, as a project's policy and the
+    /// New Project catalog both show them.
     pub fn all() -> Vec<Self> {
-        Self::on(crate::sandbox::linux_host())
+        Self::on(crate::sandbox::linux_host_kept())
+    }
+
+    /// Reads again what this computer holds once it is a minute old, which on Linux may
+    /// start the sandbox helper and bubblewrap. A reader calls it before it opens its
+    /// database transaction, so [`LevelView::all`] inside never waits on a program.
+    /// Takes nothing. Returns nothing.
+    pub fn refresh() {
+        crate::sandbox::linux_host();
     }
 
     /// Every access level as [`LevelView::all`] gives them, for a computer that holds

@@ -314,7 +314,8 @@ type CatalogKey = (Option<CredentialRef>, Vec<ResearchKind>);
 /// The New project wizard: every field, the focused control and the creation phase.
 /// Takes keys and engine results; produces a validated project request on Create.
 /// The draft lives here until the project exists, so Esc keeps it. `linux` is whether
-/// Review shows what the Linux sandbox cannot hold, `host` what this Linux holds for it.
+/// Review shows what the Linux sandbox cannot hold; what this Linux holds for the chosen
+/// level comes with the engine's catalog.
 pub(in crate::tui) struct Wizard {
     pub step: Step,
     pub done: [bool; 7],
@@ -354,7 +355,6 @@ pub(in crate::tui) struct Wizard {
     pub phase: Phase,
     pub access: AgentAccess,
     pub linux: bool,
-    pub host: Option<crate::sandbox::LinuxHost>,
 }
 
 impl Wizard {
@@ -404,7 +404,6 @@ impl Wizard {
                 .filter(|level| level.unavailable().is_none())
                 .unwrap_or_default(),
             linux: cfg!(target_os = "linux"),
-            host: crate::sandbox::linux_host(),
         };
         wizard.assert_consistent();
         wizard
@@ -520,6 +519,18 @@ impl Wizard {
     pub fn focused(&self) -> Control {
         let controls = self.controls();
         controls[self.focus.min(controls.len() - 1)]
+    }
+
+    /// Gives the lines the engine's catalog sends for the chosen access level: what this
+    /// Linux cannot hold for it, as the desktop shows them.
+    /// Takes the wizard.
+    /// Returns the lines, none before the catalog arrives.
+    pub fn gaps(&self) -> impl Iterator<Item = &String> {
+        self.catalog
+            .iter()
+            .flat_map(|catalog| &catalog.agent_access)
+            .filter(|level| level.access == self.access)
+            .flat_map(|level| &level.gaps)
     }
 
     /// Moves focus to one control of the current step.
