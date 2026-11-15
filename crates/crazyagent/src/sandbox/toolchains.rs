@@ -1191,14 +1191,14 @@ pub fn prepare_cargo_home(home: &Path, homes: &ToolHomes) -> io::Result<PathBuf>
         let found = rustix::fs::readlinkat(&folder, *name, Vec::new());
         let Some(shared) = existing(&homes.cargo.join(name), true) else {
             if found.is_ok() {
-                remove(*name)?;
+                remove(name)?;
             }
             continue;
         };
         match found {
             Ok(target) if target.as_bytes() == shared.as_os_str().as_bytes() => continue,
             Err(rustix::io::Errno::NOENT) => {}
-            _ => remove(*name)?,
+            _ => remove(name)?,
         }
         rustix::fs::symlinkat(&shared, &folder, *name)?;
     }
