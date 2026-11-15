@@ -381,9 +381,10 @@ fn a_save_the_custody_refuses_leaves_the_account_on_its_old_connection() {
     }
 }
 
-/// RV-DS241-50: a save of a changed connection stopped at any one of its steps, the way a
-/// full disk or a crash stops it, leaves an account the old connection still saves on and
-/// opens for a turn. Output: the row also shows some steps stop it and a later one ends it.
+/// RV-DS241-50: a save of a changed connection stopped at any one of its steps by a failed
+/// write, the way a full disk stops it, leaves an account the old connection still saves on
+/// and opens for a turn. An engine killed between the swap and its settle is not covered.
+/// Output: the row also shows some steps stop it and a later one ends it.
 #[test]
 fn a_save_stopped_at_any_step_never_strands_the_account_on_a_config_it_does_not_pin() {
     let mut stopped = 0;

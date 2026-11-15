@@ -125,9 +125,10 @@ struct Swapped {
 }
 
 impl Swapped {
-    /// Puts the replaced config back, the same file, so the slot's pin on it still holds;
-    /// with nothing replaced, takes the new config out again. No input. Output: Ok once
-    /// the SDK directory names what it named before the swap.
+    /// Puts the replaced config back, the same file with the same bytes, though its change
+    /// time moves, so a registration re-pins it as a times-only change and a use needs that
+    /// registration first; with nothing replaced, takes the new config out again. No input.
+    /// Output: Ok once the SDK directory names what it named before the swap.
     fn undo(&self) -> Result<(), EngineError> {
         let staged = &self.staged.directory.file;
         let (from, to, flags) = if self.replaced {
