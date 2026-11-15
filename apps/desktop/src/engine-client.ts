@@ -1331,6 +1331,13 @@ export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddO
   return invoke<IntakeJob>("desktop_move_project_home", { id, mode, overrides });
 }
 
+/** Starts the engine's job that deletes a project: its agents stop, its folders go to the
+ * Trash and its records go (DEC-177 add.1). Inputs: the project id and its exact name as typed.
+ * Output: the started job. */
+export function deleteProjectJob(id: string, name: string): Promise<IntakeJob> {
+  return invoke<IntakeJob>("desktop_delete_project_job", { id, name });
+}
+
 /** Stops one research job; a running agent's whole process group stops.
  * Inputs: project id, job id and a generation. Output: the engine receipt. */
 export function cancelResearch(id: string, job: number, generation: number): Promise<IntentReceipt> {
@@ -1642,24 +1649,29 @@ export function icloudCancel(): Promise<boolean> {
 }
 
 /** The part of a job that was running when it ended. */
-export type IntakePhase = "downloading" | "stopping" | "copying" | "clearing";
+export type IntakePhase = "downloading" | "stopping" | "copying" | "clearing" | "trashing";
 
-/** What the engine's job is doing, or how it ended. A project move waits for its agents to
- * stop first; copying counts the files copied, then the files checked; clearing removes a
- * moved folder's old place and never stops. */
+/** What the engine's job is doing, or how it ended. A project move or a delete waits for its
+ * agents to stop first; copying counts the files copied, then the files checked; clearing
+ * removes a moved folder's old place, or a deleted project's records, and never stops; a delete
+ * moves its folders to the Trash in trashing, with no stop once the first one moves, and
+ * cut_short is a delete an engine stop cut short, with how many of its folders reached the
+ * Trash. */
 export type IntakeJobState =
   | { state: "downloading"; progress: IcloudProgress }
   | { state: "stopping"; agents_left: number }
   | { state: "copying"; copied: number; checked: number }
   | { state: "clearing" }
+  | { state: "trashing"; done: number; total: number }
   | { state: "done" }
   | { state: "failed"; code: string; phase: IntakePhase }
   | { state: "cancelled"; phase: IntakePhase }
-  | { state: "needs_answer"; code: string };
+  | { state: "needs_answer"; code: string }
+  | { state: "cut_short"; trashed: number; total: number };
 
-/** What a job does: adds a folder, or moves a project kept elsewhere into the projects
- * folder. */
-export type JobKind = "add" | "move_project";
+/** What a job does: adds a folder, moves a project kept elsewhere into the projects folder, or
+ * deletes a project, its folders to the Trash (DEC-177 add.1). */
+export type JobKind = "add" | "move_project" | "delete";
 
 /** The engine's one job, which adds a folder or moves a project into the projects folder apart
  * from the window: its id, its kind, the project a move takes, the folder, move or copy, the

@@ -22,7 +22,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 86] = [
+pub const INTAKE_CODES: [&str; 99] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -109,6 +109,19 @@ pub const INTAKE_CODES: [&str; 86] = [
     "move_project_unavailable",
     "move_project_interrupted",
     "move_project_old_folder_left",
+    "delete_cannot_stop",
+    "delete_name_mismatch",
+    "delete_agents_running",
+    "delete_trash_partial",
+    "home_trash_failed",
+    "project_delete_interrupted",
+    "delete_in_progress",
+    "delete_not_recorded",
+    "delete_unavailable",
+    "delete_shared_folder",
+    "delete_research_running",
+    "delete_platform_unqualified",
+    "delete_outside_home",
 ];
 
 const GITHUB_CODES: [&str; 35] = [
@@ -638,6 +651,28 @@ impl NativeBridge {
         Ok(Box::pin(async move {
             let subject = JobSubject::MoveProject { project_id };
             let view = client.job_start(request_id, subject, mode, overrides).await;
+            bounded(shown(view.map_err(intake_failure)?))
+        }))
+    }
+
+    /// Starts the engine's job that deletes a project apart from the window: the engine checks
+    /// the exact name and what a delete refuses at once, waits for the project's agents to
+    /// stop, moves its folders to the Trash and removes its records (DEC-177 add.1). Inputs:
+    /// the project id and the name the owner typed. Output: the job's view, `job_busy` while
+    /// another job runs, or the delete's refusal.
+    pub fn delete_project_job(
+        &mut self,
+        id: &str,
+        name: String,
+    ) -> Result<Unlocked<JobView>, BridgeError> {
+        let project_id = project(id)?;
+        let request_id = intake_id(&native_random_id()?)?;
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            let subject = JobSubject::Delete { project_id, name };
+            let view = client
+                .job_start(request_id, subject, AddMode::Move, Vec::new())
+                .await;
             bounded(shown(view.map_err(intake_failure)?))
         }))
     }
@@ -1178,6 +1213,50 @@ mod tests {
         for code in ["job_busy", "home_add_in_progress", "home_add_interrupted"] {
             assert_eq!(intake_code(code), Some(code));
         }
+    }
+
+    /// DEC-177 add.1: every code a delete job is refused or ends with reaches the window as
+    /// itself, so the window says its own sentence, and a stop refused once the delete moves
+    /// folders to the Trash is not read as a failed read.
+    #[test]
+    fn a_delete_job_reaches_the_window_with_its_own_codes() {
+        for code in [
+            "delete_cannot_stop",
+            "delete_name_mismatch",
+            "delete_agents_running",
+            "delete_trash_partial",
+            "home_trash_failed",
+            "project_delete_interrupted",
+            "delete_in_progress",
+            "delete_not_recorded",
+            "delete_unavailable",
+            "delete_shared_folder",
+            "delete_research_running",
+            "delete_platform_unqualified",
+            "delete_outside_home",
+            "invalid_project",
+        ] {
+            assert_eq!(intake_code(code), Some(code), "{code}");
+            assert_eq!(
+                intake_failure(EngineError(code.into())).code,
+                code,
+                "{code}"
+            );
+        }
+        let view = JobView {
+            id: RequestId::new("delete-1").unwrap(),
+            kind: crazyagent::projects_home::job::JobKind::Delete,
+            project_id: Some(crazyagent::protocol::ProjectId::new("notes").unwrap()),
+            source: "Notes".into(),
+            mode: AddMode::Move,
+            overrides: Vec::new(),
+            stopping: false,
+            state: JobState::Failed {
+                code: "delete_trash_partial".into(),
+                phase: crazyagent::projects_home::job::Phase::Trashing,
+            },
+        };
+        assert_eq!(shown(view.clone()), view);
     }
 
     #[test]

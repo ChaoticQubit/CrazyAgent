@@ -41,10 +41,12 @@ const STAMP_SETTLE: Duration = Duration::from_secs(4);
 const DEADLINE_EVERY: u64 = 1024;
 const GITDIR_FILE_BYTES_MAX: u64 = 4096;
 
-/// What one add or project move reports while it works and the stop it obeys: whether a
-/// project move still waits for its agents to stop and how many are left, the entries
-/// copied and checked so far, whether the checked copy is in place and the old folder being
-/// cleared, and a stop asked between entries, which ends the work before clearing starts.
+/// What one add, project move or delete reports while it works and the stop it obeys:
+/// whether a project move or a delete still waits for its agents to stop and how many are
+/// left, the entries copied and checked so far, whether the checked copy is in place and the
+/// old folder being cleared, a delete's Trash moves once it committed to them, and a stop
+/// asked between entries, which ends the work before clearing starts. The gate makes a stop
+/// and a delete's commit exclusive: whichever comes first wins.
 #[derive(Debug, Default)]
 pub struct Tally {
     waiting: AtomicBool,
@@ -53,6 +55,10 @@ pub struct Tally {
     checked: AtomicU64,
     clearing: AtomicBool,
     stop: AtomicBool,
+    trashing: AtomicBool,
+    trash_total: AtomicU64,
+    trashed: AtomicU64,
+    gate: std::sync::Mutex<()>,
 }
 
 impl Tally {
@@ -120,9 +126,55 @@ impl Tally {
     }
 
     /// Asks the copy to stop at its next entry. Clearing the old folder never stops, since
-    /// the copy it follows is complete and checked.
-    pub fn stop(&self) {
+    /// the copy it follows is complete and checked, and a delete that committed to its Trash
+    /// moves refuses the stop. Output: whether the stop was taken.
+    pub fn stop(&self) -> bool {
+        let _gate = self.gate();
+        if self.trashing.load(Ordering::SeqCst) {
+            assert!(!self.stopped());
+            return false;
+        }
         self.stop.store(true, Ordering::SeqCst);
+        true
+    }
+
+    /// The folders a delete moved to the Trash so far and how many it moves, once it
+    /// committed to them; None before. Output: (done, total).
+    pub fn trashing(&self) -> Option<(u64, u64)> {
+        if !self.trashing.load(Ordering::SeqCst) {
+            return None;
+        }
+        let total = self.trash_total.load(Ordering::SeqCst);
+        let done = self.trashed.load(Ordering::SeqCst);
+        assert!(done <= total);
+        Some((done, total))
+    }
+
+    /// Commits a delete to its Trash moves, just before the first: from here a stop is
+    /// refused. A stop asked first wins and the delete moves nothing. Input: how many folders
+    /// it moves. Output: Ok, or `home_add_cancelled` when a stop came first.
+    pub(crate) fn commit_trash(&self, total: u64) -> Result<(), EngineError> {
+        let _gate = self.gate();
+        self.go_on()?;
+        let before = self.trashing.load(Ordering::SeqCst);
+        assert!(!before, "a delete commits once");
+        self.trash_total.store(total, Ordering::SeqCst);
+        self.trashing.store(true, Ordering::SeqCst);
+        assert_eq!(self.trashing(), Some((0, total)));
+        Ok(())
+    }
+
+    /// Counts one folder a committed delete moved to the Trash.
+    pub(crate) fn trashed_one(&self) {
+        assert!(self.trashing.load(Ordering::SeqCst));
+        let before = self.trashed.fetch_add(1, Ordering::SeqCst);
+        assert!(before < self.trash_total.load(Ordering::SeqCst));
+    }
+
+    fn gate(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Ok while no stop was asked, else `home_add_cancelled`, logged without a path.

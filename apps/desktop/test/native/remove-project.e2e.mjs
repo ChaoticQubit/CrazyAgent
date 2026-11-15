@@ -240,7 +240,7 @@ test("Delete everything lists the loss, waits for the typed name, then moves the
       `at the app's smallest window the dialog fits its frame and the top choice and Delete are in view: ${JSON.stringify(fit)}`);
     await me.capture("delete-ready");
     await me.click(DELETE, "dialog[open] button");
-    await me.waitFor("Home after the delete", (text) => text.includes(`${name} was deleted`), 90000);
+    await me.waitFor("Home's delete job after the delete", (text) => text.includes(`${name} is deleted. Its files are in the Trash.`), 90000);
     await page.send("Page.navigate", { url: `http://127.0.0.1:${run.site.port}/#/metrics` });
     for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS * 10)) {
       const rows = await page.evaluate(`[...document.querySelectorAll(".mx-table tbody tr")].map((row) => row.children[0]?.textContent.trim())`).catch(() => []);
@@ -273,7 +273,7 @@ test("a repository that cannot move leaves the project folder in the volume's Tr
         assert.ok(Date.now() < deadline, "Delete never enabled after the exact name");
       }
       await me.click(DELETE, "dialog[open] button");
-      await me.waitFor("the partial move's refusal", (text) => text.includes("Some of its folders are in the Trash and the rest couldn't be moved."), 90000);
+      await me.waitFor("Home's delete job ending on the partial move", (text) => text.includes(`${name}: Some of its folders are in the Trash and the rest couldn't be moved.`), 90000);
       await me.capture("delete-partial");
     });
   } finally {

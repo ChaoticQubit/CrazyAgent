@@ -19,7 +19,7 @@ use crate::ide::bridge::reveal::RevealTarget;
 use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
 use crate::projects_home::AddMode;
-use crate::projects_home::job::JobSubject;
+use crate::projects_home::job::{JobKind, JobSubject};
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::sandbox::policy::{AgentAccess, AgentPolicy};
 use crate::tui::app::UiEvent;
@@ -236,7 +236,7 @@ pub(in crate::tui) struct ProjectPage {
     uncommitted: Vec<String>,
     uncommitted_branch: Option<String>,
     uncommitted_asked: bool,
-    move_sent: Option<IntakeQuery>,
+    job_sent: Option<IntakeQuery>,
     moving: Option<RequestId>,
 }
 
@@ -290,6 +290,16 @@ pub(in crate::tui) fn move_banner(
 }
 
 impl ProjectPage {
+    /// Opens the project's Settings with its remove ask on Delete everything, as Home's Finish
+    /// delete or Try again for a delete job does; the exact name is typed again (DEC-177
+    /// add.1). Takes the project, its name and the context. Returns the page.
+    pub fn deleting(project: ProjectId, name: String, ctx: &Ctx) -> Self {
+        let mut page = Self::new(project, name, ProjectTab::Settings, ctx);
+        page.screen.ask_delete_again();
+        assert!(page.screen.confirm_remove);
+        page
+    }
+
     /// Opens a project on one tab.
     /// Takes the project id and name from Home, the tab and the shell context.
     /// Returns the screen; engine reads start when it is shown.
@@ -328,7 +338,7 @@ impl ProjectPage {
             uncommitted: Vec::new(),
             uncommitted_branch: None,
             uncommitted_asked: false,
-            move_sent: None,
+            job_sent: None,
             moving: None,
         };
         page.refresh_pool(ctx);
@@ -991,38 +1001,45 @@ impl ProjectPage {
         }
     }
 
-    /// Starts the engine's job that moves this project into the projects folder; Home follows
-    /// it and the reply says it started or why not. Takes the way and the context. Returns
-    /// nothing; the reply arrives later.
-    fn start_move(&mut self, mode: AddMode, ctx: &mut Ctx) {
+    /// Starts the engine's job that moves this project into the projects folder or deletes it
+    /// with the exact name typed (DEC-177 add.1); Home follows it and the reply says it started
+    /// or why not. Takes the subject, the way and the context. Returns nothing; the reply
+    /// arrives later.
+    fn start_job(&mut self, subject: JobSubject, mode: AddMode, ctx: &mut Ctx) {
         let id = match start_id() {
             Ok(id) => id,
             Err(code) => {
-                self.screen.move_refused(&code, ctx.store.intake.as_ref());
+                self.screen.job_refused(&code, ctx.store.intake.as_ref());
                 return;
             }
         };
         let query = IntakeQuery::JobStart {
             id,
-            subject: JobSubject::MoveProject {
-                project_id: self.screen.project.clone(),
-            },
+            subject,
             mode,
             overrides: Vec::new(),
         };
-        self.move_sent = Some(query.clone());
+        self.job_sent = Some(query.clone());
         super::intake::ask(ctx, query);
-        assert!(self.move_sent.is_some());
+        assert!(self.job_sent.is_some());
     }
 
-    /// Takes the reply to this page's move start, then follows the started move in the job
-    /// the shell keeps until it ends or is gone, when the project's setup is read again for its
-    /// new folder. Takes the reply and the context. Returns whether the page changed.
+    /// Takes the reply to this page's move or delete start, then follows the started move in
+    /// the job the shell keeps until it ends or is gone, when the project's setup is read again
+    /// for its new folder; a started delete is followed on Home, where the page goes. Takes the
+    /// reply and the context. Returns whether the page changed.
     fn intake_arrived(&mut self, event: &IntakeEvent, ctx: &mut Ctx) -> bool {
-        let answered = self.move_sent.as_ref() == Some(&event.query);
+        let answered = self.job_sent.as_ref() == Some(&event.query);
         if answered {
-            self.move_sent = None;
+            self.job_sent = None;
             match &event.result {
+                Ok(IntakeView::Job(Some(job))) if job.kind == JobKind::Delete => {
+                    ctx.say(Message::success(
+                        &format!("Deleting {}.", self.screen.name),
+                        "Follow it on Home; you can keep working.",
+                    ));
+                    self.screen.removed = true;
+                }
                 Ok(IntakeView::Job(Some(job))) => {
                     self.moving = Some(job.id.clone());
                     ctx.say(Message::success(
@@ -1032,8 +1049,8 @@ impl ProjectPage {
                 }
                 Ok(_) => self
                     .screen
-                    .move_refused("intake_change_outcome_unknown", ctx.store.intake.as_ref()),
-                Err(code) => self.screen.move_refused(code, ctx.store.intake.as_ref()),
+                    .job_refused("intake_change_outcome_unknown", ctx.store.intake.as_ref()),
+                Err(code) => self.screen.job_refused(code, ctx.store.intake.as_ref()),
             }
         }
         let ended = self.moving.as_ref().is_some_and(|id| {
@@ -1514,7 +1531,14 @@ impl ProjectPage {
                 Flow::Handled
             }
             ProjectReply::MoveHome(mode) => {
-                self.start_move(mode, ctx);
+                let project_id = self.screen.project.clone();
+                self.start_job(JobSubject::MoveProject { project_id }, mode, ctx);
+                Flow::Handled
+            }
+            ProjectReply::DeleteEverything(name) => {
+                let project_id = self.screen.project.clone();
+                let subject = JobSubject::Delete { project_id, name };
+                self.start_job(subject, AddMode::Move, ctx);
                 Flow::Handled
             }
         };
@@ -1830,7 +1854,7 @@ impl Screen for ProjectPage {
                     self.import_asked = false;
                 }
                 self.uncommitted_asked = false;
-                self.move_sent = None;
+                self.job_sent = None;
                 self.sent.clear();
                 self.screen.schedule = None;
                 self.schedule_asked = false;
@@ -1848,7 +1872,7 @@ impl Screen for ProjectPage {
             _ => return Flow::Handled,
         }
         if self.screen.removed {
-            return Flow::Back;
+            return Flow::Go(Place::Home);
         }
         self.refresh_pool(ctx);
         self.sync_master(ctx);

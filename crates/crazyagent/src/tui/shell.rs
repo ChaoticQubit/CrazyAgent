@@ -349,7 +349,8 @@ impl Shell {
             Message::warning(&text, "")
         });
         intake::ask(&mut self.ctx, IntakeQuery::Found);
-        if view.as_ref().map(|job| job.kind) == Some(JobKind::MoveProject) {
+        let kind = view.as_ref().map(|job| job.kind);
+        if matches!(kind, Some(JobKind::MoveProject | JobKind::Delete)) {
             self.ctx.request(Request::Projects);
         }
         assert!(self.ctx.store.intake.is_some());
