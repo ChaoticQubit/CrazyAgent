@@ -1452,10 +1452,12 @@ mod tests {
             );
         }
         drop(outside);
-        let below = master_in_generation(&base);
+        let second = private_root();
+        let below_base = owner_generation(&second);
+        let below = master_in_generation(&below_base);
         assert!(below.is_ok(), "the turn below the data root was refused");
         for name in [".config", ".cargo"] {
-            let made = std::fs::symlink_metadata(base.join("profile-home").join(name));
+            let made = std::fs::symlink_metadata(below_base.join("profile-home").join(name));
             assert!(made.is_ok_and(|made| made.is_dir()), "{name}");
         }
     }
