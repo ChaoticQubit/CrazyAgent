@@ -5586,6 +5586,7 @@ mod tests {
             account: &account,
             wall_time: Duration::from_secs(5),
             output_tokens: None,
+            stream: false,
         };
         let _ = runner.run_read_only(&run, &|| false);
         let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-6.sb"))
@@ -5770,6 +5771,7 @@ mod tests {
             account: &account,
             wall_time: Duration::from_secs(5),
             output_tokens: None,
+            stream: false,
         };
         let _ = runner.run_read_only(&run, &|| false);
         let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-3.sb"))
@@ -5820,6 +5822,7 @@ mod tests {
                 account: &account,
                 wall_time: Duration::from_secs(5),
                 output_tokens: None,
+                stream: false,
             };
             let ending = runner.run_read_only(&run, &|| false);
             assert!(

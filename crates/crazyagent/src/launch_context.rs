@@ -1075,6 +1075,7 @@ impl AgentContext {
             native_model: crate::model_choice::NativeModel::Follow,
             relay: None,
             model_proxy: None,
+            freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: false,
             settings: Applied::default(),

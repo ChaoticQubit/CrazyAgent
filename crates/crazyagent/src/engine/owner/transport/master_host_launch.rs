@@ -3413,6 +3413,7 @@ mod tests {
                 Path::new("/leased/worktree"),
                 "admitted-model",
                 tools,
+                crate::provider_retry::ProviderRetry::RetryBriefly,
             )
             .unwrap();
             let args: Vec<&str> = command

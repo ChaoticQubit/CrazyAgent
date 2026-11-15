@@ -43,6 +43,7 @@ fn a_master_turn_runs_the_owner_s_master_model_over_the_account_s() {
         Path::new("/leased/worktree"),
         &chosen.model.id,
         None,
+        crate::provider_retry::ProviderRetry::RetryBriefly,
     )
     .unwrap();
     let args = command

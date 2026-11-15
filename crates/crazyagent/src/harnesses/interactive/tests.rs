@@ -2420,6 +2420,7 @@ fn a_claude_terminal_launch_takes_the_owner_retry_cap() {
                 &request,
                 "/tmp/ca-retry-home",
                 None,
+                false,
                 TerminalDisplay::default(),
             );
             let cap: Vec<&str> = environment

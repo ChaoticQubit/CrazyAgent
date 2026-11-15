@@ -1503,6 +1503,7 @@ fn the_host_runs_a_master_under_each_retry_choice_and_no_other_variable() {
                 "native-default",
                 None,
                 tools,
+                &crate::harness_settings::apply::Applied::default(),
             )
             .unwrap()
         } else {
@@ -1512,6 +1513,7 @@ fn the_host_runs_a_master_under_each_retry_choice_and_no_other_variable() {
                 &home,
                 "native-default",
                 None,
+                &crate::harness_settings::apply::Applied::default(),
             )
             .unwrap()
         }

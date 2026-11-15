@@ -96,7 +96,6 @@ fn a_keyed_research_claude_gets_its_relay_token_from_an_api_key_helper() {
         Path::new("/home/agent/tmp"),
         false,
         None,
-        false,
         &relayed,
         crate::provider_retry::ProviderRetry::HarnessDefault,
     )

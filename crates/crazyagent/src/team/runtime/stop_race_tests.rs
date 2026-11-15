@@ -25,6 +25,8 @@ fn lead_spawn_answer(fixture: &Fixture, lead: i64, task: &str) -> (String, bool)
             harness: None,
             role: None,
             mode: None,
+            ticket: None,
+            model: None,
         },
     )
     .unwrap()

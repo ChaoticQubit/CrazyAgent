@@ -402,7 +402,7 @@ fn a_master_start_that_finds_the_switch_off_is_refused_not_asserted() {
     let project = fixture.setup.project_id.clone();
     let harness = fixture.setup.team.master.clone();
     let account = team
-        .account_for(&fixture.access, &project, &harness, &BTreeSet::new())
+        .account_for(&fixture.access, &project, &harness, &BTreeSet::new(), None)
         .unwrap()
         .expect("an account runs the master");
     let started = team

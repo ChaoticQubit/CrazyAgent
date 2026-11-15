@@ -749,7 +749,15 @@ fn a_codex_master_home_gets_the_owner_settings_its_command_does_not_set() {
         &catalog,
         crate::harness_settings::resolve(&catalog, Some("0.50.0"), &app, None),
     );
-    let command = master_command(&codex, &home, &worktree, "unit-model", None).unwrap();
+    let command = master_command(
+        &codex,
+        &home,
+        &worktree,
+        "unit-model",
+        None,
+        crate::provider_retry::ProviderRetry::RetryBriefly,
+    )
+    .unwrap();
     assert!(settings(&command).contains(&PROJECT_DOCS_OFF.to_owned()));
     write_master_settings(&home, &command, &owner).unwrap();
     let file = home.join("config.toml");

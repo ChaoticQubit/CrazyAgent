@@ -1433,6 +1433,7 @@ fn retry_request(
         tools: false,
         sandbox_profile: None,
         unconfined: false,
+        trust: crate::trust::Trust::Reviewed,
         git_identity: None,
         limits: LaunchLimits {
             provider_retry: retry,
