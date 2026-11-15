@@ -1070,8 +1070,9 @@ fn probe_supervisor() -> ExitCode {
 
 /// The call supervisor's check, run as its harness: the guarded port is reached on this
 /// machine and refused on another address, a new file is made and written, a `.git` is
-/// refused, and so is a signal to the supervisor, a process the agent did not start.
-/// Inputs: the guarded port and an empty folder. Output: 0 when all five hold, else 1.
+/// refused, and so are a signal to the supervisor, an open of its memory for writing and a
+/// take of its descriptor (rv-sec3 linux-t4b F1). Inputs: the guarded port and an empty
+/// folder. Output: 0 when all seven hold, else 1.
 fn probe_supervised(port: u16, folder: &Path) -> ExitCode {
     let refused = |error: std::io::Error| error.kind() == std::io::ErrorKind::PermissionDenied;
     let elsewhere = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), port));
@@ -1082,14 +1083,26 @@ fn probe_supervised(port: u16, folder: &Path) -> ExitCode {
     let git = fs::create_dir(folder.join(".git"));
     let supervisor = rustix::process::getppid();
     let signal = supervisor.map(rustix::process::test_kill_process);
+    let memory = supervisor.map(|pid| {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(format!("/proc/{}/mem", pid.as_raw_nonzero()))
+    });
+    let taken = supervisor.map(|pid| {
+        let handle = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())?;
+        rustix::process::pidfd_getfd(&handle, 0, rustix::process::PidfdGetfdFlags::empty())
+    });
     let held = [
         here.is_ok(),
         there.is_err_and(refused),
         written.is_ok_and(|read| read == b"made"),
         git.is_err_and(refused),
         signal == Some(Err(rustix::io::Errno::PERM)),
+        memory.is_some_and(|opened| opened.is_err_and(refused)),
+        taken.is_some_and(|took| took.err() == Some(rustix::io::Errno::PERM)),
     ];
-    if held == [true; 5] {
+    if held == [true; 7] {
         return ExitCode::SUCCESS;
     }
     ExitCode::from(1)

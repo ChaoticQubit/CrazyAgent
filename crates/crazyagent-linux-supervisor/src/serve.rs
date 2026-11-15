@@ -7,7 +7,7 @@ use rustix::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
 use rustix::net::SocketAddrUnix;
-use rustix::process::{Pid, PidfdFlags, PidfdGetfdFlags, Signal, WaitOptions};
+use rustix::process::{DumpableBehavior, Pid, PidfdFlags, PidfdGetfdFlags, Signal, WaitOptions};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
@@ -49,9 +49,9 @@ impl Supervised {
     }
 }
 
-/// Starts the harness with its guarded calls trapped and answers them until it ends. The
-/// calling thread must be the one that waits here: the harness is killed when it ends. A
-/// worker that stops ends the supervisor, so no trapped call is left without an answer.
+/// Starts the harness with its guarded calls trapped and answers them until it ends, on the
+/// thread that waits here. It first makes itself not dumpable, so no program of the agent
+/// can trace it or take its listener; a worker that stops ends it with no call unanswered.
 /// Inputs: what to hold and the harness command. Output: the harness's exit code, 128
 /// plus the signal that ended it, or the reason no harness was supervised.
 pub fn run(config: Supervised, command: &mut Command) -> io::Result<i32> {
@@ -62,6 +62,11 @@ pub fn run(config: Supervised, command: &mut Command) -> io::Result<i32> {
     let program = sys::Program::new(&filter::program(&calls, guards));
     let own = rustix::process::getpid();
     rustix::process::set_child_subreaper(Some(own))?;
+    rustix::process::set_dumpable_behavior(DumpableBehavior::NotDumpable)?;
+    assert_eq!(
+        rustix::process::dumpable_behavior(),
+        Ok(DumpableBehavior::NotDumpable)
+    );
     let (ours, theirs) = UnixStream::pair()?;
     let harness = sys::spawn_trapped(command, program, theirs.into())?.id();
     let listener = sys::take_listener(ours.as_fd())?;
