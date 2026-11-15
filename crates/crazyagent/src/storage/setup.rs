@@ -921,9 +921,9 @@ fn keep_hooks(
 }
 
 /// The kept hooks whose switches one added hook takes (RV-DS241-155): those running what it
-/// runs, else its command under another event or matcher, else the switched hooks of its
-/// event whose command no added hook runs any more, so a changed off hook stays off; a row
-/// 2.4.1 saved without what it runs goes to every added hook of its plugin and event.
+/// runs, else both its command under another event or matcher that no added hook runs as
+/// kept, and the switched hooks of its event no added hook runs any more, so any off wins
+/// (b3b4 r3); a row 2.4.1 saved without what it runs goes to every hook of its plugin event.
 /// Inputs: the kept hooks, every added hook and the one added hook. Output: those it takes.
 #[cfg(unix)]
 fn kept_for<'a>(
@@ -938,13 +938,11 @@ fn kept_for<'a>(
     if !same.is_empty() {
         return same;
     }
-    let moved: Vec<&KeptHook> = kept
-        .iter()
-        .filter(|kept| !kept.event.is_empty() && kept.command == hook.command)
-        .collect();
-    if !moved.is_empty() {
-        return moved;
-    }
+    let moved = kept.iter().filter(|kept| {
+        !kept.event.is_empty()
+            && kept.command == hook.command
+            && !added.iter().any(|other| runs(kept, other))
+    });
     let place = format!("{}/{}", hook.plugin, hook.event);
     let replaced = |kept: &&KeptHook| {
         if kept.event.is_empty() {
@@ -954,7 +952,7 @@ fn kept_for<'a>(
         let gone = !added.iter().any(|other| other.command == kept.command);
         switched && gone && kept.event == hook.event
     };
-    kept.iter().filter(replaced).collect()
+    moved.chain(kept.iter().filter(replaced)).collect()
 }
 
 /// Runs one default-pack job for the engine: install an entry's skills and its approved
