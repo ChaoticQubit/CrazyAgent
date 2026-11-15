@@ -991,6 +991,7 @@ pub struct ProjectSandbox {
     open_tops: Option<Vec<String>>,
     node_bin: Option<PathBuf>,
     owner_config: bool,
+    #[cfg(unix)]
     engine_home: Option<bool>,
 }
 
@@ -1080,6 +1081,7 @@ impl ProjectSandbox {
             open_tops: None,
             node_bin: None,
             owner_config: false,
+            #[cfg(unix)]
             engine_home: None,
         })
     }
@@ -2196,6 +2198,7 @@ impl ProjectSandbox {
     /// made there stays, and clears what holds a config folder's name in one that is
     /// (rv-code2 b8 F1). The profile keeps every deny either way. Input: the canonical data
     /// root. Output: the sandbox.
+    #[cfg(unix)]
     pub fn anchor_home(mut self, engine_root: &Path) -> Self {
         assert!(engine_root.is_absolute());
         let below = self.agent_home != engine_root && self.agent_home.starts_with(engine_root);
