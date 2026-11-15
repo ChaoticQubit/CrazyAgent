@@ -352,6 +352,31 @@ fn the_engine_down_screen_asks_to_start_the_engine_and_names_no_command() {
     }
 }
 
+/// DS-118: on a TUI with the default engine the engine-down screen says `r` starts it, and
+/// `r` asks for the start with its reconnect, as the desktop's Try again starts it; with no
+/// engine of its own `r` only reconnects.
+#[test]
+fn r_on_the_engine_down_screen_starts_the_default_engine_and_only_reconnects_without_one() {
+    for (width, height) in [(120, 36), (80, 24)] {
+        let mut shell = Shell::new(ctx(width, height));
+        shell.ctx.link = Link::Down("engine_unavailable".into());
+        shell.ctx.starts_engine = true;
+        let text = render(&mut shell, width, height).join("\n");
+        assert!(
+            text.contains("Press r to start it and try again."),
+            "{text}"
+        );
+        shell.key(Key::Char('r'));
+        assert_eq!(shell.ctx.link, Link::Connecting);
+        assert!(shell.ctx.take_start() && shell.ctx.take_reconnect());
+    }
+    let mut shell = Shell::new(ctx(80, 24));
+    shell.ctx.link = Link::Down("engine_unavailable".into());
+    shell.key(Key::Char('r'));
+    assert!(!shell.ctx.take_start());
+    assert!(shell.ctx.take_reconnect(), "a plain reconnect");
+}
+
 #[test]
 fn welcome_frames_match_the_design() {
     for (width, height) in [(120, 36), (80, 24)] {

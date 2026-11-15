@@ -981,9 +981,16 @@ fn run_tui_command(args: &[OsString]) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     runtime.block_on(prepare_engine(&root, layout.as_ref()))?;
     drop(runtime);
+    let engine = match layout {
+        Some(layout) => {
+            let service = default_service(&layout)?;
+            Some((layout, service))
+        }
+        None => None,
+    };
     crazyagent::engine::Client::new(socket, Duration::from_secs(1))
         .map_err(|e| e.to_string())
-        .and_then(|client| crazyagent::tui::run_tui(client).map_err(|e| e.to_string()))
+        .and_then(|client| crazyagent::tui::run_tui(client, engine).map_err(|e| e.to_string()))
 }
 
 fn default_service(
