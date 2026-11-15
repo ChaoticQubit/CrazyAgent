@@ -980,6 +980,9 @@ mod tests {
         assert_eq!(tool_lock("headroom-ai", "0.41.1"), None);
     }
 
+    /// A locked tool installs with required hashes and no source builds, into a virtual
+    /// environment on a Python uv manages itself, never one a lookup finds on the PATH, where
+    /// another account may have planted one (RV-DS241-200).
     #[test]
     fn a_locked_tool_installs_with_required_hashes_and_no_source_builds() {
         let [venv, install] = locked_tool_args(
@@ -992,6 +995,7 @@ mod tests {
             "venv",
             "--no-project",
             "--no-config",
+            "--managed-python",
             "--python",
             "3.12",
             "/e/venv"
