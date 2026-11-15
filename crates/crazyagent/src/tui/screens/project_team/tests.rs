@@ -3422,7 +3422,7 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
 
     let (lines, _) = view.rows(116, 40, &accounts(), &Look::plain());
     let shown: Vec<String> = lines.iter().map(Row::text).collect();
-    for label in ["rcli sub-agents", "Messages to rcli agents"] {
+    for label in ["RCLI sub-agents", "Messages to RCLI agents"] {
         let line = shown
             .iter()
             .find(|line| line.contains(label))
@@ -3433,7 +3433,7 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
         );
     }
     let before = harness_row(&view, HarnessKind::Rcli);
-    for (row, label) in [(4, "rcli sub-agents"), (5, "Messages to rcli agents")] {
+    for (row, label) in [(4, "RCLI sub-agents"), (5, "Messages to RCLI agents")] {
         view.key(press(KeyCode::Down));
         assert_eq!(view.coord.as_ref().unwrap().row, row);
         assert_eq!(view.key(press(KeyCode::Right)), TeamReply::Handled);
@@ -3775,7 +3775,7 @@ fn the_terminal_display_shows_classic_by_default_and_space_flips_it() {
     for (next, words) in [
         (
             TerminalDisplay::Fullscreen,
-            "Fullscreen. rcli stays Classic",
+            "Fullscreen. RCLI stays Classic",
         ),
         (TerminalDisplay::Classic, "Classic"),
     ] {
@@ -3811,12 +3811,12 @@ fn the_terminal_display_row_names_only_the_kinds_that_stay_classic() {
     assert_eq!(display_kept(&view, TerminalDisplay::Classic), "");
     assert_eq!(
         display_kept(&view, TerminalDisplay::Fullscreen),
-        " rcli stays Classic."
+        " RCLI stays Classic."
     );
     view.harnesses[1].displays = vec![TerminalDisplay::Classic];
     assert_eq!(
         display_kept(&view, TerminalDisplay::Fullscreen),
-        " Codex and rcli stay Classic."
+        " Codex and RCLI stay Classic."
     );
     for row in &mut view.harnesses {
         row.displays.clear();

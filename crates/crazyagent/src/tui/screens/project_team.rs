@@ -4151,8 +4151,8 @@ fn cycle<T: Copy + PartialEq>(all: &[T], current: T, forward: bool) -> T {
     all[next]
 }
 
-/// The words a per-harness Coordination row goes by, the same as the desktop's: "rcli
-/// sub-agents" for its mode, "Messages to rcli agents" for its message delivery. Inputs:
+/// The words a per-harness Coordination row goes by, the same as the desktop's: "RCLI
+/// sub-agents" for its mode, "Messages to RCLI agents" for its message delivery. Inputs:
 /// whether the row is the delivery row and its harness kind. Output: the label.
 fn harness_row_label(delivery: bool, kind: HarnessKind) -> String {
     let name = harness_name(kind.as_str(), None);
