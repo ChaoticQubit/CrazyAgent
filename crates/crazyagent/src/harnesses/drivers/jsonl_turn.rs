@@ -56,10 +56,7 @@ impl Config {
                 "piped.argv: {prompt} is needed, so each turn's prompt reaches the harness.".into(),
             );
         }
-        let positional = argv
-            .iter()
-            .position(|argument| argument == "--")
-            .unwrap_or(argv.len());
+        let positional = positional_start(&argv);
         if argv[..positional]
             .iter()
             .any(|argument| argument.starts_with("{prompt}"))
@@ -93,22 +90,7 @@ impl Config {
                 );
             }
         }
-        let set = match piped.get("rules") {
-            None | Some(Yaml::Null) => {
-                return refuse(
-                    manifest::MISSING,
-                    "piped.rules: this setting is needed.".into(),
-                );
-            }
-            Some(Yaml::Str(set)) => set,
-            Some(_) => {
-                return refuse(
-                    manifest::TYPE,
-                    "piped.rules: this must be text in quotes.".into(),
-                );
-            }
-        };
-        let rules = rules::read(manifest, set)?;
+        let rules = rule_set(manifest, piped)?;
         assert!(positional <= argv.len());
         Ok(Self {
             argv,
@@ -131,11 +113,11 @@ pub enum Phase {
 
 /// What the running turn has reported so far that decides how it ends.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct Turn {
-    success: Option<bool>,
-    errored: bool,
-    interrupted: bool,
-    breached: bool,
+pub(super) struct Turn {
+    pub(super) success: Option<bool>,
+    pub(super) errored: bool,
+    pub(super) interrupted: bool,
+    pub(super) breached: bool,
 }
 
 /// One conversation with a harness that runs one process per turn and writes JSON lines,
@@ -169,21 +151,7 @@ impl JsonlTurn {
         tools: bool,
         resume: Option<&str>,
     ) -> Result<(Self, Vec<LaunchEvent>), LaunchError> {
-        let absolute = |path: &Path| {
-            path.to_str()
-                .filter(|_| path.is_absolute())
-                .map(str::to_owned)
-        };
-        let home = absolute(home).ok_or_else(|| failure("launch_account_home_unsafe"))?;
-        let cwd = absolute(cwd).ok_or_else(|| failure("launch_working_dir_unavailable"))?;
-        if model.is_some_and(|model| {
-            model.is_empty() || model.len() > MODEL_BYTES_MAX || model.chars().any(char::is_control)
-        }) {
-            return Err(failure("launch_model_unsupported"));
-        }
-        if resume.is_some_and(|id| !plain_session(id)) {
-            return Err(failure("launch_session_id_invalid"));
-        }
+        let (home, cwd) = inputs(home, cwd, model, resume)?;
         if !tools && config.tools_off.is_none() {
             return Err(failure("launch_tools_off_unsupported"));
         }
@@ -258,7 +226,7 @@ impl JsonlTurn {
             .chain(resume)
             .chain(off)
             .chain(positional)
-            .map(|argument| self.fill(argument, prompt))
+            .map(|argument| fill(argument, &|name| self.value(name, prompt)))
             .collect::<Result<Vec<String>, LaunchError>>()?;
         assert_eq!(
             argv.len(),
@@ -376,31 +344,6 @@ impl JsonlTurn {
         Ok(events)
     }
 
-    fn fill(&self, argument: &str, prompt: &str) -> Result<String, LaunchError> {
-        let mut filled = String::with_capacity(argument.len());
-        let mut rest = argument;
-        while let Some(open) = rest.find('{') {
-            filled.push_str(&rest[..open]);
-            let after = &rest[open + 1..];
-            let name = after
-                .find('}')
-                .map(|close| &after[..close])
-                .filter(|name| PLACEHOLDERS.contains(name));
-            match name {
-                Some(name) => {
-                    filled.push_str(self.value(name, prompt)?);
-                    rest = &after[name.len() + 1..];
-                }
-                None => {
-                    filled.push('{');
-                    rest = after;
-                }
-            }
-        }
-        filled.push_str(rest);
-        Ok(filled)
-    }
-
     fn value<'a>(&'a self, name: &str, prompt: &'a str) -> Result<&'a str, LaunchError> {
         match name {
             "home" => Ok(&self.home),
@@ -429,7 +372,93 @@ impl JsonlTurn {
     }
 }
 
-fn arguments(piped: &Yaml, key: &str) -> Result<Option<Vec<String>>, Refused> {
+/// Checks the starting inputs both shared JSON lines drivers take. Inputs: the harness's
+/// private home and working folder, the model and the session to continue. Output: the home
+/// and the folder as text, or `launch_account_home_unsafe`, `launch_working_dir_unavailable`
+/// for one that is not absolute UTF-8, `launch_model_unsupported` for a model that is not 1
+/// to `MODEL_BYTES_MAX` bytes without a control character, or `launch_session_id_invalid`.
+pub(super) fn inputs(
+    home: &Path,
+    cwd: &Path,
+    model: Option<&str>,
+    resume: Option<&str>,
+) -> Result<(String, String), LaunchError> {
+    let absolute = |path: &Path| {
+        path.to_str()
+            .filter(|_| path.is_absolute())
+            .map(str::to_owned)
+    };
+    let home = absolute(home).ok_or_else(|| failure("launch_account_home_unsafe"))?;
+    let cwd = absolute(cwd).ok_or_else(|| failure("launch_working_dir_unavailable"))?;
+    if model.is_some_and(|model| {
+        model.is_empty() || model.len() > MODEL_BYTES_MAX || model.chars().any(char::is_control)
+    }) {
+        return Err(failure("launch_model_unsupported"));
+    }
+    if resume.is_some_and(|id| !plain_session(id)) {
+        return Err(failure("launch_session_id_invalid"));
+    }
+    Ok((home, cwd))
+}
+
+/// Fills each placeholder of one argument once and never again inside a filled value; a
+/// brace that opens no placeholder stays text. Inputs: the argument and the value of each
+/// placeholder name. Output: the filled argument, or the first refused value's refusal.
+pub(super) fn fill<'a>(
+    argument: &str,
+    value: &dyn Fn(&str) -> Result<&'a str, LaunchError>,
+) -> Result<String, LaunchError> {
+    let mut filled = String::with_capacity(argument.len());
+    let mut rest = argument;
+    while let Some(open) = rest.find('{') {
+        filled.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let name = after
+            .find('}')
+            .map(|close| &after[..close])
+            .filter(|name| PLACEHOLDERS.contains(name));
+        match name {
+            Some(name) => {
+                filled.push_str(value(name)?);
+                rest = &after[name.len() + 1..];
+            }
+            None => {
+                filled.push('{');
+                rest = after;
+            }
+        }
+    }
+    filled.push_str(rest);
+    Ok(filled)
+}
+
+/// Where the positional arguments of a manifest's argument list begin. Input: the list.
+/// Output: the index of its first `--` entry, or its length when it has none.
+pub(super) fn positional_start(argv: &[String]) -> usize {
+    argv.iter()
+        .position(|argument| argument == "--")
+        .unwrap_or(argv.len())
+}
+
+/// Reads the rule set `piped.rules` names. Inputs: the manifest and its piped block.
+/// Output: the rules, or a refusal that names `piped.rules` or the refused rule.
+pub(super) fn rule_set(manifest: &Manifest, piped: &Yaml) -> Result<Vec<Rule>, Refused> {
+    match piped.get("rules") {
+        None | Some(Yaml::Null) => refuse(
+            manifest::MISSING,
+            "piped.rules: this setting is needed.".into(),
+        ),
+        Some(Yaml::Str(set)) => rules::read(manifest, set),
+        Some(_) => refuse(
+            manifest::TYPE,
+            "piped.rules: this must be text in quotes.".into(),
+        ),
+    }
+}
+
+/// Reads one argument list setting. Inputs: the piped block and the key. Output: the list,
+/// none when the key is absent, or a refusal that names the setting.
+pub(super) fn arguments(piped: &Yaml, key: &str) -> Result<Option<Vec<String>>, Refused> {
     let place = format!("piped.{key}");
     let items = match piped.get(key) {
         None | Some(Yaml::Null) => return Ok(None),
@@ -464,14 +493,18 @@ fn arguments(piped: &Yaml, key: &str) -> Result<Option<Vec<String>>, Refused> {
         .map(Some)
 }
 
-fn plain_session(id: &str) -> bool {
+/// Whether a harness session id may be kept and passed back as an argument. Input: the id.
+/// Output: true for 1 to `SESSION_BYTES_MAX` bytes without a control character or a
+/// leading `-`.
+pub(super) fn plain_session(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= SESSION_BYTES_MAX
         && !id.starts_with('-')
         && !id.chars().any(char::is_control)
 }
 
-fn refuse<T>(code: &'static str, message: String) -> Result<T, Refused> {
+/// A manifest refusal. Inputs: its code and its message. Output: the refusal as an error.
+pub(super) fn refuse<T>(code: &'static str, message: String) -> Result<T, Refused> {
     Err(Refused { code, message })
 }
 
