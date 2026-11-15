@@ -15683,6 +15683,49 @@ fn the_engine_start_removes_the_step_folder_of_a_gone_engine_step() {
     assert_eq!(ran.code, 0, "the master's steps run again");
 }
 
+/// RV-DS241-142 r2 (rv-code4 F1): an engine that cannot name itself takes the worktree's
+/// `index.lock` empty, so the start sweep keeps it and the owner removes it by hand. The git
+/// killed with that engine left its own `index.lock` in the step folder; the next start
+/// removes a step folder whose worktree holds no `index.lock`, so the steps run again.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_engine_start_removes_a_step_folder_left_beside_no_worktree_lock() {
+    let case = Case::new();
+    let master = master_agent(&case);
+    let lock = master.git_dir.join("index.lock");
+    let step = master.git_dir.join("crazyagent-step");
+    let repo = git::Repo::open(&master.repository, &master.git_dir, Some(&master.worktree))
+        .unwrap()
+        .confined(git::Writes::WorkTree)
+        .unwrap();
+    write(&lock, "");
+    write(&step.join("index.lock"), "killed git
+");
+    assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 0);
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), "");
+    assert_eq!(
+        std::fs::read_to_string(step.join("index.lock")).unwrap(),
+        "killed git
+",
+        "a kept worktree lock keeps its step folder"
+    );
+    std::fs::remove_file(&lock).unwrap();
+    assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 0);
+    assert!(
+        std::fs::symlink_metadata(&step).is_err(),
+        "the step folder beside no worktree lock went"
+    );
+    let ran = repo
+        .exec(
+            &["diff-index", "--quiet", "--cached", "HEAD"],
+            None,
+            &[],
+            4096,
+        )
+        .unwrap();
+    assert_eq!(ran.code, 0, "the master's steps run again");
+}
+
 /// RV-DS241-135 r2 (rv-code4 F1): while a confined Linux step runs, the `index.lock` it took
 /// holds `crazyagent-step <pid> <start>` for this engine process. The start sweep reads that
 /// very text as the engine's: kept while this engine runs, swept once the process it names
