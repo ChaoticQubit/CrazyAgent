@@ -18133,6 +18133,52 @@ fn unreached_lists_idle_tools_off_codex_sub_agents_in_kept_sessions_under_native
     team.workers.clear();
 }
 
+/// Leader 18:48 (T19 Q2), by the owner's 2026-11-05 rule for an agent with no channel: a
+/// listed harness has no channel of its own, so under Native only the engine wakes an idle
+/// listed sub-agent in a kept session for its messages, tools on or off; a teammate, the
+/// master, a per-turn agent, a busy or stopping one and the Auto or Typing only setting are
+/// left out. The tools-on one trips `unreached`'s check of what it lists while that check
+/// names tools-off agents only.
+#[test]
+fn unreached_lists_idle_listed_sub_agents_in_kept_sessions_under_native_only_tools_on_or_off() {
+    use crate::coord::settings::{self, Delivery, HarnessKind};
+    let fixture = Fixture::new(2);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let listed = |role, tools| {
+        let mut worker = between_turns(&project, role, false, false);
+        worker.harness = "standin-screen".into();
+        worker.tools = tools;
+        worker
+    };
+    let (tools_off, tools_on) = (401, 402);
+    team.workers
+        .insert(tools_off, listed(AgentRole::Sub, false));
+    team.workers.insert(tools_on, listed(AgentRole::Sub, true));
+    team.workers.insert(403, listed(AgentRole::Teammate, true));
+    team.workers.insert(404, listed(AgentRole::Master, true));
+    let mut per_turn = listed(AgentRole::Sub, true);
+    per_turn.managed = true;
+    team.workers.insert(405, per_turn);
+    let mut busy = listed(AgentRole::Sub, true);
+    busy.busy = Some(Busy::Task(9));
+    team.workers.insert(406, busy);
+    let mut stopping = listed(AgentRole::Sub, true);
+    stopping.stopping = true;
+    team.workers.insert(407, stopping);
+    let kind = HarnessKind::from_harness("standin-screen").unwrap();
+    assert_eq!(kind, HarnessKind::Listed("standin-screen"));
+    for (delivery, expected) in [
+        (Delivery::Auto, BTreeSet::new()),
+        (Delivery::NativeOnly, BTreeSet::from([tools_off, tools_on])),
+        (Delivery::TypingOnly, BTreeSet::new()),
+    ] {
+        settings::set_delivery(&team.connection, &project, kind, delivery).unwrap();
+        assert_eq!(team.unreached(&project).unwrap(), expected, "{delivery:?}");
+    }
+    team.workers.clear();
+}
+
 /// F2: an asleep agent with a waking message gets one `WAKE_TASK` task pinned to it, with
 /// its lead as the task's parent; with no pool for the project the task waits as
 /// needs_pool, with a usable account it is queued, and no second task is made while one

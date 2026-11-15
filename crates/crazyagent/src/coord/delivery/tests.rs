@@ -1490,6 +1490,64 @@ fn no_channel_names_only_a_tools_off_codex_sub_agent_in_a_kept_session_under_nat
     );
 }
 
+/// Leader 18:48 (T19 Q2), by the owner's 2026-11-05 rule for an agent with no channel: a
+/// listed harness has no channel of its own, so a listed sub-agent in a kept session under
+/// Native only, tools on or off, is never typed into and waits for a task of its own; the
+/// master, a teammate, a per-turn agent and the Auto or Typing only setting each still
+/// reach it.
+#[test]
+fn no_channel_names_a_listed_sub_agent_in_a_kept_session_under_native_only_tools_on_or_off() {
+    use crate::team::AgentRole;
+    let fixture = Fixture::new();
+    let listed = HarnessKind::from_harness("standin-screen").unwrap();
+    assert_eq!(listed, HarnessKind::Listed("standin-screen"));
+    let mut named = Vec::new();
+    for delivery in [Delivery::Auto, Delivery::NativeOnly, Delivery::TypingOnly] {
+        settings::set_delivery(&fixture.db, &project(), listed, delivery).unwrap();
+        for role in [AgentRole::Master, AgentRole::Sub, AgentRole::Teammate] {
+            for tools in [false, true] {
+                for kept in [false, true] {
+                    let note =
+                        no_channel(&fixture.db, &project(), role, "standin-screen", tools, kept)
+                            .unwrap();
+                    if let Some(note) = note {
+                        assert_eq!(note, LISTED_NO_CHANNEL);
+                        named.push((delivery, role, tools, kept));
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        named,
+        [
+            (Delivery::NativeOnly, AgentRole::Sub, false, true),
+            (Delivery::NativeOnly, AgentRole::Sub, true, true),
+        ]
+    );
+    assert_eq!(
+        LISTED_NO_CHANNEL,
+        "Messages come as a task of their own once it is idle: Native only never types, and this harness has no channel of its own."
+    );
+    let agent = fixture.agent("sub", "standin-screen", "idle", None);
+    let now = 1_000_000;
+    let waits = fixture.send(Party::Owner, agent, MessageKind::Prompt, "Waits", now);
+    let asleep = BTreeSet::new();
+    let none = reach(None, None, &fixture.base, &asleep);
+    assert!(
+        deliver_to(
+            &fixture.db,
+            &project(),
+            agent,
+            now,
+            &none,
+            &mut BTreeMap::new()
+        )
+        .unwrap()
+    );
+    assert_eq!(fixture.receipt(waits), "sent");
+}
+
 /// Owner 2026-11-05: Native only never drops nor types a tools-off Codex agent's message:
 /// it stays Sent over ticks, retried, with nothing in its pane; once the setting is Auto
 /// the next tick types it in.

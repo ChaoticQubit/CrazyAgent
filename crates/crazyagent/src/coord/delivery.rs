@@ -407,6 +407,12 @@ fn pane_of(reach: &Reach<'_>, agent: AgentId) -> Option<u32> {
 /// of their own once it is idle (PA-11, DEC-141; supersedes the owner's 2026-11-05 sentence).
 pub const NO_CHANNEL: &str = "Messages come as a task of their own once it is idle: Native only never types into a tools-off Codex agent.";
 
+/// What the owner sees on a listed-harness sub-agent in a kept session under Native only: a
+/// listed harness has no channel of its own and Native only never types into it, so the
+/// engine brings its messages as a task of their own once it is idle, by the owner's
+/// 2026-11-05 rule for an agent with no channel (T19, leader 18:48).
+pub const LISTED_NO_CHANNEL: &str = "Messages come as a task of their own once it is idle: Native only never types, and this harness has no channel of its own.";
+
 /// Tells whether a team agent has no channel for its messages while it works under the
 /// project's Delivery setting: a tools-off Codex sub-agent in a kept session has no bridge
 /// and is never typed into under Native only, so its messages wait Sent until the engine
