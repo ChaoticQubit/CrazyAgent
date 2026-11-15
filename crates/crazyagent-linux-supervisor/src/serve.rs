@@ -246,6 +246,15 @@ impl Caller {
         })
     }
 
+    /// The caller's own thread in procfs, whose `cwd`, `root` and `fd` are that thread's
+    /// even when it unshared them or its first thread ended (rv-sec2 linux-t4b F1). Output:
+    /// the folder path.
+    fn task(&self) -> String {
+        assert!(self.tid > 0);
+        assert!(self.tgid > 0);
+        format!("/proc/{}/task/{}", self.tgid, self.tid)
+    }
+
     /// Copies bytes from the caller's memory. Inputs: the address and the count. Output:
     /// exactly that many bytes, or `EFAULT`.
     fn bytes(&self, at: u64, len: usize) -> Result<Vec<u8>, Errno> {
@@ -353,14 +362,29 @@ impl Job<'_> {
     }
 
     /// Takes a copy of one of the caller's descriptors, so what the supervisor acts on
-    /// cannot be swapped under it. The call must still wait once the caller's process is
-    /// held. Input: the descriptor register. Output: the copy.
+    /// cannot be swapped under it. The call must still wait once the caller is held.
+    /// Input: the descriptor register. Output: the copy.
     fn taken(&self, register: u64) -> Result<OwnedFd, Errno> {
         let number = i32::try_from(register as u32).map_err(|_| Errno::BADF)?;
-        let process = Pid::from_raw(self.caller.tgid).ok_or(Errno::SRCH)?;
-        let held = rustix::process::pidfd_open(process, PidfdFlags::empty())?;
+        let held = self.held_thread()?;
         self.alive()?;
         rustix::process::pidfd_getfd(&held, number, PidfdGetfdFlags::empty())
+    }
+
+    /// A pidfd of the calling thread (`PIDFD_THREAD`, Linux 6.9), so `pidfd_getfd` reads
+    /// that thread's descriptor table. An older kernel opens only a thread-group leader:
+    /// there the leader's table is read, which every thread shares unless it unshared its
+    /// own (DONE residual). Output: the pidfd.
+    fn held_thread(&self) -> Result<OwnedFd, Errno> {
+        let thread = Pid::from_raw(self.caller.tid).ok_or(Errno::SRCH)?;
+        let per_thread = PidfdFlags::from_bits_retain(OFlags::EXCL.bits());
+        match rustix::process::pidfd_open(thread, per_thread) {
+            Err(Errno::INVAL) => {
+                let leader = Pid::from_raw(self.caller.tgid).ok_or(Errno::SRCH)?;
+                rustix::process::pidfd_open(leader, PidfdFlags::empty())
+            }
+            opened => opened,
+        }
     }
 
     /// Connects for the caller: the address is copied, judged against the ports the agent
@@ -392,13 +416,13 @@ impl Job<'_> {
     }
 
     /// The path a Unix socket address names, as this process must spell it: a relative
-    /// one starts at the caller's working folder. Input: the path bytes.
+    /// one starts at the calling thread's working folder. Input: the path bytes.
     fn unix_path(&self, path: &[u8]) -> PathBuf {
         let path = Path::new(OsStr::from_bytes(path));
         if path.is_absolute() {
             return path.to_path_buf();
         }
-        PathBuf::from(format!("/proc/{}/cwd", self.caller.tgid)).join(path)
+        PathBuf::from(format!("{}/cwd", self.caller.task())).join(path)
     }
 
     /// Tells whether a signal's target is inside the agent: a program it started, the
@@ -537,10 +561,11 @@ impl Job<'_> {
         let from = |start: String| {
             OsString::from_vec([start.as_bytes(), &b"/"[..], folder].concat())
         };
+        let task = self.caller.task();
         let start = match base {
-            _ if folder.first() == Some(&b'/') => Ok(from(format!("/proc/{tgid}/root"))),
-            Base::Here => Ok(from(format!("/proc/{tgid}/cwd"))),
-            Base::Number(number) if *number >= 0 => Ok(from(format!("/proc/{tgid}/fd/{number}"))),
+            _ if folder.first() == Some(&b'/') => Ok(from(format!("{task}/root"))),
+            Base::Here => Ok(from(format!("{task}/cwd"))),
+            Base::Number(number) if *number >= 0 => Ok(from(format!("{task}/fd/{number}"))),
             Base::Number(_) => return Err(Errno::BADF),
             Base::Held(held) if folder.is_empty() => Err((held, OsStr::new("."))),
             Base::Held(held) => Err((held, OsStr::from_bytes(folder))),
