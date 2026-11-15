@@ -1358,6 +1358,41 @@ fn removing_a_wide_tree_of_folders_that_deny_listing_holds_few_handles_at_once()
     assert!(peak <= 64, "{peak} stuck folders held at once");
 }
 
+/// ds181 r2 (rv-sec3 F1): removing an agent's tree that is one long chain of folders, each
+/// with an ACL that denies listing it, starts no more `/bin/chmod` children than the walk's
+/// flush cap allows, and the removal fails closed past the cap instead of clearing one more
+/// folder per child.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_a_long_chain_of_folders_that_deny_listing_starts_a_bounded_number_of_children() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let tree = root.join("tree");
+    let mut levels = Vec::new();
+    let mut folder = tree.clone();
+    for _ in 0..150 {
+        folder.push("d");
+        levels.push(folder.clone());
+    }
+    write(&folder.join("f"), b"the agent's\n");
+    let _cleared = AclsCleared(levels.clone());
+    let deepest_first: Vec<PathBuf> = levels.iter().rev().cloned().collect();
+    add_acl("everyone deny list,search,delete_child", &deepest_first);
+    ACL_FLUSHES_CAP.set(Some(16));
+    let before = crate::spawn_gate::spawned();
+
+    let outcome = remove_agent_tree(&tree);
+
+    let started = crate::spawn_gate::spawned() - before;
+    ACL_FLUSHES_CAP.set(None);
+    assert!(outcome.is_err(), "the chain went past the cap: {outcome:?}");
+    assert!(
+        started <= 4 * 16 + 8,
+        "{started} children for a chain of {}",
+        levels.len()
+    );
+}
+
 #[test]
 fn a_claim_an_engine_stop_interrupted_is_offered_again_or_handed_back_when_it_changed() {
     let case = Case::new();

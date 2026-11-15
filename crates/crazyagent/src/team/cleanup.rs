@@ -1303,6 +1303,12 @@ const ACL_BATCH: usize = 512;
 #[cfg(unix)]
 const STUCK_MAX: usize = 32;
 
+/// The most flushes that start `/bin/chmod` children in one walk: enough for every batch of
+/// [`DISK_ENTRIES_MAX`] entries and 64 more, so one walk starts at most twice this many
+/// children (ds181 r2, rv-sec3 F1).
+#[cfg(target_os = "macos")]
+const ACL_FLUSHES_MAX: usize = DISK_ENTRIES_MAX / ACL_BATCH + 64;
+
 /// Extended ACLs a walk clears in batches, each entry named `/.vol/<device>/<inode>`, which
 /// the system looks up by those numbers alone, so `/bin/chmod -N` resolves no path an agent
 /// can change and follows no link in one (RV-DS241-181). A folder or a file with one link
@@ -1312,8 +1318,10 @@ const STUCK_MAX: usize = 32;
 /// most [`ACL_BATCH`] of them (RV-DS241-182). An entry is taken once per walk: one waiting
 /// for the next clear is answered as taken again, so every folder that needs that clear is
 /// tried after it, and one already cleared is refused, so a folder the clear did not help is
-/// not tried again (ds181 r2, rv-code4 F2). Holds the entries waiting by name and by
-/// device and inode, those already cleared, and how many more it takes.
+/// not tried again (ds181 r2, rv-code4 F2). Children start in at most [`ACL_FLUSHES_MAX`]
+/// flushes; past that nothing more is taken, so the walk ends and the removal fails closed
+/// (ds181 r2, rv-sec3 F1). Holds the entries waiting by name and by device and inode, those
+/// already cleared, how many more it takes and how many more flushes may start children.
 #[cfg(target_os = "macos")]
 struct AclClears {
     named: Vec<PathBuf>,
@@ -1321,26 +1329,39 @@ struct AclClears {
     waiting: std::collections::HashSet<(i64, u64)>,
     cleared: std::collections::HashSet<(i64, u64)>,
     left: usize,
+    flushes_left: usize,
 }
 
 #[cfg(target_os = "macos")]
 impl AclClears {
-    /// An empty batch that takes up to [`DISK_ENTRIES_MAX`] entries. Output: the batch.
+    /// An empty batch that takes up to [`DISK_ENTRIES_MAX`] entries and starts children in up
+    /// to [`ACL_FLUSHES_MAX`] flushes. Output: the batch.
     fn new() -> Self {
+        #[cfg(test)]
+        let flushes_left = ACL_FLUSHES_CAP.get().unwrap_or(ACL_FLUSHES_MAX);
+        #[cfg(not(test))]
+        let flushes_left = ACL_FLUSHES_MAX;
+        assert!(flushes_left <= ACL_FLUSHES_MAX);
         Self {
             named: Vec::new(),
             links: Vec::new(),
             waiting: std::collections::HashSet::new(),
             cleared: std::collections::HashSet::new(),
             left: DISK_ENTRIES_MAX,
+            flushes_left,
         }
     }
 
     /// Takes the entry `found` describes, clearing the batch once [`ACL_BATCH`] wait. Input:
     /// the entry's status, read without following a link. Output: whether it was taken now or
-    /// waits from earlier; false for an entry already cleared in this walk or one never taken.
+    /// waits from earlier; false for an entry already cleared in this walk, one never taken,
+    /// and every entry once no flush may start a child.
     fn add(&mut self, found: &rustix::fs::Stat) -> bool {
         use rustix::fs::FileType;
+        if self.flushes_left == 0 {
+            assert!(self.waiting.is_empty());
+            return false;
+        }
         let kind = FileType::from_raw_mode(found.st_mode);
         let key = (i64::from(found.st_dev), found.st_ino);
         if self.waiting.contains(&key) {
@@ -1368,12 +1389,18 @@ impl AclClears {
     }
 
     /// Clears the ACLs of the entries waiting, in at most two children, and empties the
-    /// batch. A child that fails or does not start leaves those ACLs, and the step that needs
-    /// an entry then reports it.
+    /// batch; one flush of [`ACL_FLUSHES_MAX`] is spent only when some entry waits. A child
+    /// that fails or does not start leaves those ACLs, and the step that needs an entry then
+    /// reports it.
     fn flush(&mut self) {
         use std::process::{Command, Stdio};
         assert_eq!(self.waiting.len(), self.named.len() + self.links.len());
         assert!(self.named.len() <= ACL_BATCH && self.links.len() <= ACL_BATCH);
+        if self.waiting.is_empty() {
+            return;
+        }
+        assert!(self.flushes_left > 0);
+        self.flushes_left -= 1;
         self.cleared.extend(self.waiting.drain());
         let batches = [
             (&["-f", "-N"][..], &mut self.named),
@@ -1689,6 +1716,15 @@ thread_local! {
     /// waiting for an ACL clear at once, each with its parent's open handle, so a row can
     /// bound the handles that walk keeps open.
     pub(super) static STUCK_PEAK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    /// The most flushes that start a `/bin/chmod` child one walk on this thread may make, in
+    /// place of [`ACL_FLUSHES_MAX`], so a row reaches the cap with a short chain of folders;
+    /// None keeps the real cap.
+    pub(super) static ACL_FLUSHES_CAP: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(all(test, target_os = "macos"))]
