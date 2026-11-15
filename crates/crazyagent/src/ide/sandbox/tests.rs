@@ -367,9 +367,11 @@ fn the_remote_settings_folder_is_read_only_to_the_ide_server() {
 /// The server's data folder and its other writable folders are granted after the base
 /// profile, so the base denies there hold only when given again after that grant (sandbox-git
 /// r1 note 4): no `.git` at any depth in any letter case, no launch file or folder of an
-/// agent home, and no mode change of a granted folder itself. Everything else there stays
-/// writable, npm's config and a flag on its own file too, since no launch resets the data
-/// folder and the agent config denies are an agent home's alone (RV-DS241-188, -187).
+/// agent home, and no mode change of a granted folder itself, nor any flag or ACL in the
+/// data folder, which the engine walks and rewrites before each start, so none keeps the
+/// owner's IDE from starting (rv-sa241 b8 L1). Everything else there stays writable, npm's
+/// config too, since no launch resets the data folder and the agent config denies are an
+/// agent home's alone (RV-DS241-188).
 #[test]
 fn the_ide_data_folders_keep_the_git_launch_file_and_root_denies_after_their_grant() {
     let scratch = tempfile::Builder::new()
@@ -428,7 +430,9 @@ fn the_ide_data_folders_keep_the_git_launch_file_and_root_denies_after_their_gra
     assert!(sh(&profile, write, &home.join("data/User/settings.json")));
     assert!(sh(&profile, write, &home.join(".npmrc")));
     let flagged = r#"/usr/bin/chflags uchg "$1" && /usr/bin/chflags nouchg "$1""#;
-    assert!(sh(&profile, flagged, &home.join("kept.txt")));
+    assert!(!sh(&profile, flagged, &home.join("kept.txt")));
+    let listed = r#"/bin/chmod +a 'everyone deny read' "$1" && /bin/chmod -N "$1""#;
+    assert!(!sh(&profile, listed, &home.join("kept.txt")));
     for granted in [&home, &work] {
         assert!(!granted.join(".git").exists() && !granted.join("deep/.GIT").exists());
         assert_eq!(
