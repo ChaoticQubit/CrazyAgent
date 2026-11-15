@@ -3,15 +3,20 @@ use super::manifest::DriverKind;
 use super::registry::{Harness, registry};
 
 pub mod acp;
+pub mod jsonl_turn;
+pub mod rules;
 
-/// The piped drivers the engine runs: its own adapters for Codex and Claude Code, and the
-/// Agent Client Protocol client ([`acp::Acp`]) for any harness whose manifest names `acp`.
-/// Each other shared driver kind a manifest names joins this list when its task lands.
+/// The piped drivers the engine runs: its own adapters for Codex and Claude Code and the
+/// Agent Client Protocol client ([`acp::Acp`]) for any harness whose manifest names `acp`,
+/// which run in a [`super::launch::Session`], and the shared `jsonl-turn` driver, which runs
+/// one process per turn in a [`super::launch::TurnSession`]. Each other shared driver kind
+/// a manifest names joins this list when its task lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Piped {
     Codex,
     Claude,
     Acp,
+    JsonlTurn,
 }
 
 /// The one dispatch point of piped launches: the driver the engine runs for a driver kind.
@@ -25,7 +30,7 @@ pub fn of(kind: DriverKind) -> Result<Piped, LaunchError> {
         DriverKind::ClaudeStreamJson => Ok(Piped::Claude),
         DriverKind::Rcli => Err(failure("launch_harness_unsupported")),
         DriverKind::Acp => Ok(Piped::Acp),
-        DriverKind::JsonlTurn => Err(failure("launch_harness_unsupported")),
+        DriverKind::JsonlTurn => Ok(Piped::JsonlTurn),
         DriverKind::JsonlRpc => Err(failure("launch_harness_unsupported")),
         DriverKind::TextTurn => Err(failure("launch_harness_unsupported")),
     }
