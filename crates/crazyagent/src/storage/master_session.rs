@@ -6842,6 +6842,77 @@ auth = { method = "none" }"#;
         case.close().await;
     }
 
+    /// RV-DS241-50 r1 (rv-code4 A2, rv-sec3 F1): an account save undone after its swap puts
+    /// the old config back with its inode and bytes but a new change time. The master's next
+    /// turn re-pins its slot on that home and prepares; before, every turn was refused with
+    /// rcli_profile_identity_changed until the owner opened a new session.
+    #[tokio::test]
+    async fn a_master_turn_after_an_undone_save_moved_its_config_change_time_still_prepares() {
+        use std::os::unix::fs::MetadataExt;
+        let case = Fixture::new(true).await;
+        let connection = case
+            .config
+            .settings
+            .model_access
+            .as_ref()
+            .unwrap()
+            .connections[0]
+            .clone();
+        let profile_ref =
+            super::super::account_profile::configured_profile_ref(&connection).unwrap();
+        let homes = case.root.path().join("configured-sdk-homes");
+        std::fs::create_dir(&homes).unwrap();
+        std::fs::set_permissions(&homes, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let generated = homes.join(format!(
+            "{:x}",
+            Sha256::digest(profile_ref.as_str().as_bytes())
+        ));
+        std::fs::rename(&case.home, &generated).unwrap();
+        let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("an engine-generated SDK home must register and prepare the first turn");
+        };
+        fail_first(&case, &first, MasterReason::RuntimeUnavailable).await;
+        let config = generated.join(".backboard/config.json");
+        let aside = generated.join(".backboard/config.json.undone");
+        let before = std::fs::symlink_metadata(&config).unwrap();
+        std::fs::rename(&config, &aside).unwrap();
+        std::fs::rename(&aside, &config).unwrap();
+        let after = std::fs::symlink_metadata(&config).unwrap();
+        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        assert_ne!(
+            (after.ctime(), after.ctime_nsec()),
+            (before.ctime(), before.ctime_nsec())
+        );
+
+        let prepare = next_turn(&case, "after-undone-save").await;
+        let prepared = match case.runtime(prepare).await {
+            Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+            Ok(MasterRuntimeResult::Turn(turn)) => panic!(
+                "a config put back in place must not block the master: {:?}",
+                turn.cause
+            ),
+            Ok(_) => panic!("a config put back in place must prepare the master turn"),
+            Err(failure) => {
+                panic!("a config put back in place must not stop the master: {failure:?}")
+            }
+        };
+
+        assert_eq!(prepared.attempt.connection, connection);
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        let record = registration(
+            &tx,
+            &case.session.session_id,
+            &case.session.selection.target_profile_ref,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(record.proof.generation, 2);
+        drop(tx);
+        case.close().await;
+    }
+
     /// KY-M1 (DEC-150 addendum 9a): a keyed RCLI key saved under an rcli builtin provider id
     /// before the fix, already in the pool, left a slot-less generated home naming that id.
     /// The next master turn rewrites it to the hashed id, registers it and prepares, with no
