@@ -112,7 +112,7 @@ test("the delete command is wired from the Remove dialog to the engine's job, an
   const signature = lib.slice(at, lib.indexOf(")", at));
   for (const param of ["id: String", "name: String"]) assert.ok(signature.includes(param), param);
   assert.ok(!signature.includes("generation"), "a job start carries no window generation");
-  assert.ok((lib.match(/desktop_delete_project_job/g) ?? []).length >= 3, "the command is registered beside its body");
+  assert.equal((lib.match(/desktop_delete_project_job/g) ?? []).length, 2, "the command's body and its handler entry");
   assert.match(read("src-tauri/src/bridge/intake.rs"), /JobSubject::Delete \{ project_id, name \}/);
   assert.match(read("src/state.ts"), /kind === "delete"[^;]*refreshProjects\(\)/, "a delete that ended reads the projects again");
   assert.match(read("src/engine-client.ts"), /export type JobKind = "add" \| "move_project" \| "delete";/);
