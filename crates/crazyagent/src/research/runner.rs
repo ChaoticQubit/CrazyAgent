@@ -87,9 +87,10 @@ static REPOSITORY_FREED: Condvar = Condvar::new();
 const BRIEF_BYTES_MAX: u64 = 32 * 1024;
 const DOCUMENTS_LISTED_MAX: usize = 50;
 /// The lines a job shows while it waits out a refused launch, the same in the desktop app
-/// and the terminal app (DEC-141, DEC-170 addendum 6).
-const HOME_MOVE_WAITING: &str = "Waiting for the projects home move to finish";
-const PROFILE_BUSY_WAITING: &str = "Waiting for another run to finish with this account's sign-in";
+/// and the terminal app (DEC-141, DEC-170 addendum 6), each at most 40 characters so it
+/// shows whole beside a work row's status on the Overview (RV-DS241-27 r3).
+const HOME_MOVE_WAITING: &str = "Waiting for the projects home move";
+const PROFILE_BUSY_WAITING: &str = "Waiting for another run on this sign-in";
 const ACCOUNT_WAITING: &str = "Waiting for this account to be ready";
 /// Every line a refused launch leaves on a job that waits Queued, so its progress reports why
 /// (RV-DS241-27 r2).
@@ -6469,7 +6470,7 @@ mod tests {
         assert_eq!((job.attempts, job.claimer), (0, None));
         assert_eq!(
             job.error.as_deref(),
-            Some("Waiting for the projects home move to finish")
+            Some("Waiting for the projects home move")
         );
         let started: i64 = connection
             .query_row(

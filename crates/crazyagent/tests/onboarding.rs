@@ -2897,7 +2897,7 @@ async fn a_research_job_claimed_while_the_home_moves_goes_back_to_wait() {
     );
     assert_eq!(
         job.error.as_deref(),
-        Some("Waiting for the projects home move to finish")
+        Some("Waiting for the projects home move")
     );
     db.execute("DELETE FROM projects_home_move WHERE singleton=1", [])
         .unwrap();
