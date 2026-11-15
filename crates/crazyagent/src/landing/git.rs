@@ -327,7 +327,8 @@ pub(crate) fn owner_excludes_setting(within: super::Within<'_>) -> Option<String
 /// system or global config, no system attributes, hooks, fsmonitor, pager, submodule
 /// recursion, protocols or upkeep, and with every filter
 /// driver the repository's own config names blanked. A work tree also honours the
-/// owner's global ignore file, so what the owner's git ignores the engine never stages.
+/// ignore file the owner's git applies in that repository, its own value first, so what the
+/// owner's git ignores the engine never stages.
 #[derive(Clone)]
 pub(super) struct Repo {
     git_dir: PathBuf,
@@ -360,8 +361,8 @@ pub(super) enum Writes {
 
 impl Repo {
     /// Opens a repository for engine git calls, lists the filter drivers to blank and,
-    /// for a work tree, finds the owner's global ignore file. The git folder is always the
-    /// owner checkout's own `.git` or a linked worktree's folder directly in its
+    /// for a work tree, finds the ignore file the owner's git applies there. The git folder is
+    /// always the owner checkout's own `.git` or a linked worktree's folder directly in its
     /// `.git/worktrees`, never an agent's own clone, whose config is the agent's (CC-N1).
     /// Inputs: the owner checkout root, the git folder and the work tree, none for object
     /// and ref work only. Output: the repository, or `changes_git_unsupported` for a git
