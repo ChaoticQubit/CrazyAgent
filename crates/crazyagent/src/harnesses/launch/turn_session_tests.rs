@@ -24,6 +24,10 @@ printf '{"type":"text","delta":"%s|%s"}\n' "$prompt" "$resume"
 case "$prompt" in
   fail) exit 3 ;;
   wait) exec /bin/sleep 30 ;;
+  tool)
+    printf '%s\n' '{"type":"tool","name":"Bash"}'
+    exec /bin/sleep 30
+    ;;
 esac
 printf '%s\n' '{"type":"done","ok":true}'
 "#;
@@ -89,7 +93,13 @@ fn begin() -> (tempfile::TempDir, TurnSession) {
 /// Collects events until the turn's `TurnFinished`, for at most 30 seconds. Input: the
 /// session. Output: the events, the last one `TurnFinished`.
 fn finish(session: &mut TurnSession) -> Vec<LaunchEvent> {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    finish_within(session, Duration::from_secs(30))
+}
+
+/// Collects events until the turn's `TurnFinished`. Inputs: the session and the longest
+/// wait. Output: the events, the last one `TurnFinished`.
+fn finish_within(session: &mut TurnSession, wait: Duration) -> Vec<LaunchEvent> {
+    let deadline = Instant::now() + wait;
     let mut events = Vec::new();
     while !events
         .iter()
@@ -101,6 +111,18 @@ fn finish(session: &mut TurnSession) -> Vec<LaunchEvent> {
         }
     }
     events
+}
+
+/// Waits up to 30 seconds for the turn's first event, so a fresh script's first start is
+/// not timed. Input: the session. Output: the event.
+fn first(session: &mut TurnSession) -> LaunchEvent {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline);
+        if let Some(event) = session.next_event(Duration::from_millis(200)).unwrap() {
+            return event;
+        }
+    }
 }
 
 /// Runs one whole turn. Inputs: the session and the prompt. Output: the turn's events.
@@ -166,24 +188,51 @@ fn a_turn_whose_process_exits_with_an_error_code_ends_with_a_turn_error() {
 #[test]
 fn an_interrupt_stops_the_turn_process_and_ends_the_turn_interrupted() {
     let (_directory, mut session) = begin();
-    let started = Instant::now();
     session.send("wait").unwrap();
-    let deadline = started + Duration::from_secs(20);
-    loop {
-        assert!(Instant::now() < deadline);
-        if let Some(event) = session.next_event(Duration::from_millis(200)).unwrap() {
-            assert_eq!(event, text("wait|"));
-            break;
-        }
-    }
+    assert_eq!(first(&mut session), text("wait|"));
+    let started = Instant::now();
     session.interrupt().unwrap();
     assert_eq!(
-        finish(&mut session),
+        finish_within(&mut session, Duration::from_secs(20)),
         [LaunchEvent::Interrupted, finished(false)]
     );
     assert!(started.elapsed() < Duration::from_secs(20));
     assert_eq!(session.turn_group(), None);
     assert_eq!(code(session.interrupt()), "launch_not_running");
+    session.stop().unwrap();
+}
+
+/// DEC-180 Task 11, macOS only, the jsonl-turn side of rv-sec3 F1 on ACP: with tools off, a
+/// turn whose harness reports a tool is stopped by the session well before its 30 second
+/// sleep ends, with one `ApprovalDenied` and an unsuccessful end, no `Interrupted`.
+#[test]
+fn a_tool_used_with_tools_off_stops_the_turn_process() {
+    let (_directory, mut session) = begin();
+    session.send("tool").unwrap();
+    assert_eq!(first(&mut session), text("tool|"));
+    let started = Instant::now();
+    assert_eq!(
+        finish_within(&mut session, Duration::from_secs(20)),
+        [LaunchEvent::ApprovalDenied, finished(false)]
+    );
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert_eq!(session.turn_group(), None);
+    assert_eq!(turn(&mut session, "two"), [text("two|s-5"), finished(true)]);
+    session.stop().unwrap();
+}
+
+/// DEC-180 Task 11, macOS only: each turn checks its launch again before its process starts,
+/// so a home made unsafe between turns refuses the prompt and starts nothing, and the next
+/// prompt runs once the home is safe again.
+#[test]
+fn each_turn_checks_its_launch_again_before_its_process_starts() {
+    let (directory, mut session) = begin();
+    let home = directory.path().canonicalize().unwrap().join("home");
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(code(session.send("one")), "launch_account_home_unsafe");
+    assert_eq!(session.turn_group(), None);
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(turn(&mut session, "one"), [text("one|"), finished(true)]);
     session.stop().unwrap();
 }
 

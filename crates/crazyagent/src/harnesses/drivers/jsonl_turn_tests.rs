@@ -247,6 +247,38 @@ fn an_interrupt_marks_the_turn_and_its_exit_ends_it_interrupted() {
     assert_eq!(code(turns.interrupt()), "launch_not_running");
 }
 
+/// DEC-180 Task 11, the jsonl-turn side of rv-sec3 F1 on ACP: with tools off, a tool the
+/// harness reports using is a breach. It gives one `ApprovalDenied` and nothing more from
+/// the turn, an interrupt is refused as the caller already stops the turn, and the exit ends
+/// the turn unsuccessfully with no `Interrupted` or turn error. With tools on the same line
+/// is a plain tool use.
+#[test]
+fn a_tool_used_with_tools_off_is_a_breach_that_ends_the_turn_unsuccessfully() {
+    let mut turns = begin(Some("m-1"), false, None);
+    turns.start("hello").unwrap();
+    assert!(!turns.breached());
+    assert_eq!(
+        events_of(&mut turns, json!({"type": "tool", "name": "Bash"})),
+        [LaunchEvent::ApprovalDenied]
+    );
+    assert!(turns.breached());
+    assert!(events_of(&mut turns, json!({"type": "tool", "name": "Read"})).is_empty());
+    assert!(events_of(&mut turns, json!({"type": "text", "delta": "after"})).is_empty());
+    assert_eq!(code(turns.interrupt()), "launch_not_running");
+    assert_eq!(turns.exited(None).unwrap(), [finished(false)]);
+    assert!(!turns.breached());
+    assert_eq!(turns.phase(), Phase::Idle);
+
+    let mut on = running(Some("m-1"));
+    assert_eq!(
+        events_of(&mut on, json!({"type": "tool", "name": "Bash"})),
+        [LaunchEvent::ToolUse {
+            name: "Bash".into()
+        }]
+    );
+    assert!(!on.breached());
+}
+
 /// DEC-180 Task 11: one turn runs at a time, and a prompt that is empty, holds a NUL byte or
 /// is over `PROMPT_BYTES_MAX` is refused before anything starts.
 #[test]

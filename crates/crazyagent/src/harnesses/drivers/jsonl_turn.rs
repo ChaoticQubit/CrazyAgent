@@ -179,6 +179,12 @@ impl JsonlTurn {
         self.session.as_deref()
     }
 
+    /// Whether the running turn used a tool with tools off, so its caller must stop the
+    /// turn's process. Output: false until the breach check lands.
+    pub fn breached(&self) -> bool {
+        false
+    }
+
     /// Starts a turn. Input: the prompt. Output: the turn's arguments, each placeholder
     /// filled once and never again inside a filled value: `piped.argv`, then `piped.resume`
     /// when a session id is known, then `piped.tools_off` with tools off. Refusals:
