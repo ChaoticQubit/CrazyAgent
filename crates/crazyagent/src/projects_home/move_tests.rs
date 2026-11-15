@@ -1143,3 +1143,41 @@ fn landing_work_in_flight_holds_the_folder_and_the_move_holds_it_until_its_recor
     old.clear().unwrap();
     assert_eq!(case.stored_folder(), case.target());
 }
+
+/// DEC-177: while a project move waits for its agents to stop, its tally says it waits and how
+/// many agents are left, and a stop asked there ends the move cancelled before anything moves.
+#[test]
+fn a_stop_while_a_move_waits_for_its_agents_ends_it_with_nothing_moved() {
+    let case = Case::new();
+    case.record_agent(4, "working", &case.worktree(4).join(".git"));
+    case.db
+        .execute(
+            "INSERT INTO team_paused_projects(project,since_ms) VALUES (?1,1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let planned = case.plan(AddMode::Move, &[]).unwrap();
+    let tally = std::sync::Arc::new(super::Tally::default());
+    let shared = std::sync::Arc::clone(&tally);
+    let runs = std::thread::spawn(move || planned.run_with(Duration::from_secs(30), &shared));
+    let start = std::time::Instant::now();
+    while !tally.waiting() {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the move never waited"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(tally.agents_left(), 1);
+    tally.stop();
+    let ended = runs.join().unwrap();
+    assert_eq!(ended.unwrap_err().0, "home_add_cancelled");
+    assert!(
+        tally.waiting(),
+        "a move stopped while it waits ends in that phase"
+    );
+    assert!(case.repo.join("README").is_file());
+    assert!(std::fs::symlink_metadata(case.target()).is_err());
+    assert_eq!(case.finish(false), Some(Finished::Left));
+    assert_eq!(case.stored_folder(), case.repo);
+}

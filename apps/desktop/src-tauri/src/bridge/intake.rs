@@ -1064,6 +1064,7 @@ mod tests {
             include_str!("../../../../../crates/crazyagent/src/projects_home/intake.rs"),
             include_str!("../../../../../crates/crazyagent/src/projects_home/layout.rs"),
             include_str!("../../../../../crates/crazyagent/src/projects_home/icloud.rs"),
+            include_str!("../../../../../crates/crazyagent/src/projects_home/move_project.rs"),
         ];
         let mut refusals: Vec<&str> = engine
             .iter()
@@ -1088,6 +1089,11 @@ mod tests {
             "icloud_path_invalid",
             "icloud_outcome_unknown",
             "icloud_owner_unavailable",
+            "move_project_interrupted",
+            "move_project_old_folder_left",
+            "home_move_project",
+            "invalid_project",
+            "project_setup_missing",
         ]) {
             assert_eq!(intake_code(code), Some(code), "{code}");
         }

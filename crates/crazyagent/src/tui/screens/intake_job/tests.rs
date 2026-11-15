@@ -256,3 +256,104 @@ fn the_header_brief_says_what_a_running_job_does_with_its_count_and_a_short_name
     );
     assert!(std::panic::catch_unwind(|| brief(&job(JobState::Done), "~")).is_err());
 }
+
+fn moving(state: JobState) -> JobView {
+    JobView {
+        id: RequestId::new("move-1").unwrap(),
+        kind: JobKind::MoveProject,
+        project_id: Some(crate::protocol::ProjectId::new("reading").unwrap()),
+        source: "/Users/mira/Code/reading-list".into(),
+        mode: AddMode::Move,
+        overrides: Vec::new(),
+        stopping: false,
+        state,
+    }
+}
+
+/// DEC-177: a project move says it waits for the project's agents, moves, and ends in the
+/// move's words; Stop is offered while it waits, Retry only while nothing landed, and the
+/// card, the header and the end line name the move.
+#[test]
+fn a_project_move_job_says_it_waits_for_its_agents_moves_and_ends_in_the_move_s_words() {
+    let waiting = moving(JobState::Stopping { agents_left: 2 });
+    assert_eq!(
+        line(&waiting),
+        "Waiting for 2 agents of reading-list to stop..."
+    );
+    assert_eq!(
+        line(&moving(JobState::Stopping { agents_left: 1 })),
+        "Waiting for 1 agent of reading-list to stop..."
+    );
+    assert_eq!(
+        line(&moving(copying(18, 0))),
+        "Moving reading-list: 18 files copied"
+    );
+    assert_eq!(
+        line(&moving(JobState::Done)),
+        "reading-list is now in your projects folder. Start the team again from Team."
+    );
+    assert_eq!(
+        line(&moving(JobState::Cancelled {
+            phase: Phase::Stopping
+        })),
+        "Moving reading-list stopped. Nothing was moved or copied."
+    );
+    let busy = line(&moving(failed("move_project_busy", Phase::Stopping)));
+    assert!(
+        busy.starts_with("reading-list: The project is still working"),
+        "{busy}"
+    );
+    assert_eq!(
+        line(&moving(failed("move_project_interrupted", Phase::Copying))),
+        "reading-list: The move stopped part way. Check the project folder before trying again."
+    );
+    let left = line(&moving(failed(
+        "move_project_old_folder_left",
+        Phase::Clearing,
+    )));
+    assert!(
+        left.starts_with("reading-list: The project moved, but part of its old folder"),
+        "{left}"
+    );
+    assert!(
+        !left.contains("yourself"),
+        "what a move leaves may be the only copy of newer edits: {left}"
+    );
+
+    assert!(running(&waiting));
+    assert_eq!(actions(&waiting), [JobAction::Stop]);
+    let asked = JobView {
+        stopping: true,
+        ..waiting.clone()
+    };
+    assert_eq!(actions(&asked), []);
+    assert_eq!(line(&asked), "Stopping reading-list...");
+    assert_eq!(
+        actions(&moving(failed("move_project_busy", Phase::Stopping))),
+        [JobAction::Retry, JobAction::Dismiss]
+    );
+    assert_eq!(
+        actions(&moving(failed(
+            "move_project_old_folder_left",
+            Phase::Clearing
+        ))),
+        [JobAction::Dismiss]
+    );
+
+    assert_eq!(badge(&waiting), (Status::Active, "Waiting"));
+    assert_eq!(badge(&moving(copying(3, 0))), (Status::Active, "Moving"));
+    assert_eq!(
+        badge(&moving(JobState::Clearing)),
+        (Status::Active, "Finishing")
+    );
+    assert_eq!(badge(&moving(JobState::Done)), (Status::Ok, "Moved"));
+    assert_eq!(brief(&waiting, "..."), "Stopping reading-list: 2 agents");
+    assert_eq!(
+        brief(&moving(copying(4, 0)), "..."),
+        "Moving reading-list: 4 files"
+    );
+    assert_eq!(
+        end_line(Some(&waiting), Some(&moving(JobState::Done))).as_deref(),
+        Some("reading-list is now in your projects folder. Start the team again from Team.")
+    );
+}

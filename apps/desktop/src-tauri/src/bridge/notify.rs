@@ -659,6 +659,50 @@ mod tests {
         );
     }
 
+    /// DEC-177: an ended project move's notice says the project's folder is in the projects
+    /// folder and the team starts again from Team, and a stopped or failed move says Moving.
+    #[test]
+    fn an_ended_project_move_notice_speaks_of_the_move() {
+        use crazyagent::projects_home::job::{JobKind, JobState, Phase};
+        let moved = |state| {
+            let view = JobView {
+                kind: JobKind::MoveProject,
+                project_id: Some(crazyagent::protocol::ProjectId::new("reading").unwrap()),
+                source: "/Users/mira/Code/reading-list".into(),
+                ..job(state)
+            };
+            intake_notice(&view).map(|notice| (notice.title, notice.body))
+        };
+        let pair = |title: &str, body: &str| Some((title.to_owned(), body.to_owned()));
+        assert_eq!(
+            moved(JobState::Done),
+            pair(
+                "reading-list is in your projects folder",
+                "Start the team again from Team."
+            )
+        );
+        assert_eq!(
+            moved(JobState::Cancelled {
+                phase: Phase::Stopping
+            }),
+            pair(
+                "Moving reading-list stopped",
+                "Nothing was moved or copied."
+            )
+        );
+        assert_eq!(
+            moved(JobState::Failed {
+                code: "move_project_busy".into(),
+                phase: Phase::Stopping
+            }),
+            pair(
+                "Moving reading-list failed",
+                "Open Home in CrazyAgent to see why."
+            )
+        );
+        assert_eq!(moved(JobState::Stopping { agents_left: 1 }), None);
+    }
+
     /// A job's notification is claimed once, shares the bound with questions, and a click on
     /// it brings the window front without naming a project to open.
     #[test]

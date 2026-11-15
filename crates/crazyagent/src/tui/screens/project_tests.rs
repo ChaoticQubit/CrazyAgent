@@ -175,7 +175,6 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
         | SetupQuery::TeamChange { .. }
         | SetupQuery::TeamMessages { .. }
         | SetupQuery::OpenLiveSession { .. }
-        | SetupQuery::MoveHome { .. }
         | SetupQuery::Library(_)
         | SetupQuery::CoordQuestions { .. } => {
             panic!("the project screen never reads the team or the library")
@@ -4431,8 +4430,7 @@ fn the_access_box_keeps_its_save_line_and_the_cursor_row_in_a_short_window() {
 
 /// The Settings key m asks before a project moves into the projects home: the ask says the
 /// team must be stopped and its work follows, m sends a Move, c a Copy, and n or Esc keeps the
-/// project where it is. A refusal shows as a plain line and an applied move reads the setup
-/// again.
+/// project where it is. A refused start of the move job shows as a plain line (DEC-177).
 #[test]
 fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     use crate::projects_home::AddMode;
@@ -4480,17 +4478,7 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     );
     assert!(!screen.confirm_move);
 
-    let query = SetupQuery::MoveHome {
-        project,
-        mode: AddMode::Move,
-        generation: 4,
-    };
-    let refused = |code: &str| {
-        Ok(SetupView::Changed(OwnerResult::Rejected {
-            code: code.into(),
-        }))
-    };
-    screen.apply(&query, refused("move_project_busy"));
+    screen.move_refused("move_project_busy");
     assert!(
         screen
             .problem
@@ -4499,12 +4487,17 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
         "{:?}",
         screen.problem
     );
-    screen.apply(&query, refused("move_project_already_home"));
+    screen.move_refused("move_project_already_home");
     assert_eq!(
         screen.problem.as_deref(),
         Some("This project is already in your projects folder.")
     );
-    screen.apply(&query, refused("home_move_worktrees"));
+    screen.move_refused("job_busy");
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("Another job is running. Wait for it to finish on Home.")
+    );
+    screen.move_refused("home_move_worktrees");
     assert!(
         screen
             .problem
@@ -4513,11 +4506,6 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
         "{:?}",
         screen.problem
     );
-    screen.problem = None;
-    screen.setup_due = false;
-    screen.apply(&query, Ok(SetupView::Changed(OwnerResult::Applied)));
-    assert_eq!(screen.problem, None);
-    assert!(screen.setup_due);
 }
 
 #[test]

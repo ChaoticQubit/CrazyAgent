@@ -15,7 +15,9 @@ use crate::master_session::{
 };
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
 use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, SetupView, TeamPlan};
+use crate::projects_home::job::{JobKind, JobState};
 use crate::protocol::{ConfigId, CredentialRef, ProjectId, ProjectSpec, SessionId};
+use crate::tui::client::intake::IntakeQuery;
 use crate::tui::client::process::ProcessQuery;
 use crate::tui::client::questions::QuestionsQuery;
 use crate::tui::client::settings::SettingsJob;
@@ -154,9 +156,17 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         SetupQuery::OpenLiveSession { .. } => "live session open",
                         SetupQuery::Overview { .. } => "overview",
                         SetupQuery::RefreshOverview { .. } => "overview refresh",
-                        SetupQuery::MoveHome { .. } => "move home",
                     });
                     connection.project_setup(query).unwrap();
+                }
+                Request::Intake(job) => {
+                    sent.push(match job.query() {
+                        IntakeQuery::JobStart { .. } => "job start",
+                        IntakeQuery::JobStatus => "job status",
+                        IntakeQuery::Found => "found",
+                        _ => "intake",
+                    });
+                    connection.intake(*job).unwrap();
                 }
                 Request::Changes(query) => {
                     sent.push("changes");
@@ -762,6 +772,113 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
         };
         assert!(read, "{request:?}");
     }
+}
+
+/// DEC-177: m then m on Settings starts the engine's job that moves a project kept outside
+/// the projects folder into it, says so and lets the owner keep working. When the job ends
+/// its end is said, the project list and the project's setup are read again, and the folder
+/// is in the projects folder and gone from its old place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_project_kept_outside_the_projects_folder_moves_in_as_the_engine_s_job() {
+    let mut engine = Engine::start().await;
+    let notes = ProjectId::new("notes-cli").unwrap();
+    let made = engine
+        .controller
+        .setup_project(
+            notes.clone(),
+            ProjectSpec {
+                name: "Notes CLI".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Notes CLI keeps notes.".into(),
+                tech_stack: vec!["rust".into()],
+                platforms: vec![Platform::Cli],
+                research: vec![],
+                pool: None,
+                team: None,
+                documents: vec![],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            made,
+            OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+        ),
+        "{made:?}"
+    );
+    let origin = std::fs::canonicalize(engine.home.path())
+        .unwrap()
+        .join("notes-cli");
+    assert!(origin.is_dir(), "{origin:?}");
+    let next = crate::tui::test_home::projects_home(&mut engine.controller, 2).await;
+    let target = std::fs::canonicalize(next.path())
+        .unwrap()
+        .join("notes-cli");
+    let mut connection = engine.connect();
+    let mut ctx = ctx(120, 30);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Overview,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Char('m'));
+    let shown = render(&mut shell, 120, 30);
+    assert!(
+        shown.contains("Move Notes CLI into your CrazyAgent folder?"),
+        "{shown}"
+    );
+    shell.key(Key::Char('m'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"job start"), "{sent:?}");
+    let said = shell.ctx.message().expect("the start is said");
+    assert_eq!(
+        (said.lead.as_str(), said.rest.as_str()),
+        (
+            "Moving Notes CLI.",
+            "Follow it on Home; you can keep working."
+        )
+    );
+    assert!(shell.ctx.store.intake.is_some(), "the started job is kept");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last = Vec::new();
+    let ended = loop {
+        let ended = shell.ctx.store.intake.clone();
+        if let Some(job) = ended.filter(|job| !super::intake_job::running(job)) {
+            break job;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the move never ended: {:?}",
+            shell.ctx.store.intake
+        );
+        super::intake::ask(&mut shell.ctx, IntakeQuery::JobStatus);
+        last = pump(&mut shell, &mut connection).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(ended.state, JobState::Done, "{ended:?}");
+    assert_eq!(ended.kind, JobKind::MoveProject);
+    assert_eq!(ended.project_id.as_ref(), Some(&notes));
+    assert!(last.contains(&"projects"), "{last:?}");
+    assert!(last.contains(&"setup"), "{last:?}");
+    let said = shell.ctx.message().expect("the end is said");
+    assert_eq!(
+        said.lead,
+        "notes-cli is now in your projects folder. Start the team again from Team."
+    );
+    assert!(target.is_dir(), "{target:?}");
+    assert!(!origin.exists(), "{origin:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

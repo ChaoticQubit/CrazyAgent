@@ -134,7 +134,8 @@ test("Move takes a project kept outside the projects folder into it, stops the t
     await openMove(page, me, id, name);
     await me.capture("move-dialog");
     await me.click("Stop the team and move", "dialog[open] button");
-    await me.waitFor("the moved line", (text) => text.includes(`${name} is now in your CrazyAgent folder`), MOVE_MS);
+    await me.waitFor("the started line", (text) => text.includes("Follow it on Home; you can keep working."));
+    await me.waitFor("the moved line", (text) => text.includes(`${basename(folder)} is now in your projects folder`), MOVE_MS);
     await me.waitFor("Settings without the move row", (text) => text.includes("Remove project") && !text.includes(ROW));
     await me.capture("move-done");
   });
@@ -158,7 +159,7 @@ test("Copy leaves the old folder whole and the project uses the copy", { timeout
     await me.waitFor("the copy wording", (text) => text.includes("Stop the team and copy") && text.includes("The copy becomes the project."));
     await me.capture("copy-dialog");
     await me.click("Stop the team and copy", "dialog[open] button");
-    await me.waitFor("the copied line", (text) => text.includes(`${name} now uses the copy in your CrazyAgent folder`), MOVE_MS);
+    await me.waitFor("the copied line", (text) => text.includes(`${basename(folder)} is now in your projects folder`), MOVE_MS);
   });
   assert.equal(readFileSync(join(folder, "notes.md"), "utf8"), "copied with the project\n", "the old folder stays whole");
   assert.equal(readFileSync(join(target, "notes.md"), "utf8"), "copied with the project\n");
@@ -188,11 +189,39 @@ test("an agent's commit that has not landed is still in its copy after the proje
   await onPage("unlanded", async (page, me) => {
     await openMove(page, me, id, name);
     await me.click("Stop the team and move", "dialog[open] button");
-    await me.waitFor("the moved line", (text) => text.includes(`${name} is now in your CrazyAgent folder`), MOVE_MS);
+    await me.waitFor("the moved line", (text) => text.includes(`${basename(folder)} is now in your projects folder`), MOVE_MS);
   });
   assert.ok(!existsSync(folder), "the old folder is gone");
   assert.equal(git(moved, ["rev-parse", "HEAD"]).trim(), head, "the agent's commit is still the head of its copy");
   assert.equal(git(moved, ["rev-parse", "HEAD~1"]).trim(), first, "its parent is read from the moved project's objects");
   assert.equal(readFileSync(join(moved, ".git", "objects", "info", "alternates"), "utf8"), `${target}/.git/objects\n`, "the copy borrows the moved project's objects");
   assert.equal(sql(`SELECT worktree FROM team_worktrees WHERE agent=71`), moved, "the engine records the copy at its new place");
+});
+
+test("a move runs on Home as the engine's job, and Stop there leaves the project where it was (DEC-177)", { timeout: 300000 }, async () => {
+  const name = "Stop Me";
+  const { id, folder, home } = await keptOutside(name);
+  for (let part = 0; part < 200; part++) {
+    mkdirSync(join(folder, `p${part}`), { recursive: true });
+    for (let file = 0; file < 200; file++) writeFileSync(join(folder, `p${part}`, `f${file}.txt`), `${part} ${file}\n`);
+  }
+  const target = join(home, basename(folder));
+  await onPage("stop", async (page, me) => {
+    await openMove(page, me, id, name);
+    await me.click("Copy", WAYS);
+    await me.click("Stop the team and copy", "dialog[open] button");
+    await me.waitFor("the started line", (text) => text.includes("Follow it on Home; you can keep working."));
+    await page.send("Page.navigate", { url: `http://127.0.0.1:${run.site.port}/#/` });
+    await me.waitFor("the job row copying", (text) => text.includes(`Copying ${basename(folder)}`), MOVE_MS);
+    await me.capture("move-job-running");
+    await me.click("Stop", ".in-row button");
+    await me.waitFor("the stopped line", (text) => text.includes(`Moving ${basename(folder)} stopped. Nothing was moved or copied.`), MOVE_MS);
+    await me.capture("move-job-stopped");
+  });
+  assert.ok(!existsSync(target), "nothing was copied into the projects folder");
+  assert.equal(readFileSync(join(folder, "p199", "f199.txt"), "utf8"), "199 199\n", "the folder stays whole");
+  assert.equal(await projectFolder(id), folder, "the project still names its own folder");
+  assert.equal(sql("SELECT COUNT(*) FROM projects_home_project_move"), "0", "no move stays pending");
+  const starts = run.log.trail.filter((entry) => entry.cmd === "desktop_move_project_home");
+  assert.ok(starts.length > 0, "the dialog started the job");
 });
