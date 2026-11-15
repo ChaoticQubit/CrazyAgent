@@ -111,6 +111,15 @@ impl GitOwn {
         walked.is_absolute()
     }
 
+    /// Tells whether a folder or file may be moved away from a path: never a folder that
+    /// holds one of the agent's own `.git` entries, nor a folder above one, since the move
+    /// would land that `.git` where none may be made. Input: the real, absolute source
+    /// path. Output: true when no own git folder sits at or below it.
+    pub fn moves(&self, real: &Path) -> bool {
+        let _ = real;
+        true
+    }
+
     /// Tells whether a path ending in a `.git` component is one of the agent's own git
     /// folders, named exactly `.git`. Input: the path up to that component. Output: true
     /// for a tree's top-level one, a kid folder's one, or an exact one.
@@ -210,6 +219,47 @@ pub fn field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
         let (key, value) = line.split_once(':')?;
         (key == name).then(|| value.trim())
     })
+}
+
+/// Splits a path into the folder part and the last name, as a creating call reads it:
+/// slashes at the end do not count. Input: the path bytes. Output: the folder part (empty
+/// for a bare name, `/` for a name in the root) and the name, or none when the path is
+/// empty or only slashes.
+pub fn split_last(path: &[u8]) -> Option<(&[u8], &[u8])> {
+    let _ = path;
+    None
+}
+
+/// Rewrites a path that begins with `/proc/self` or `/proc/thread-self` to name the agent
+/// that asked, since here those names mean the supervisor. Inputs: the path bytes, the
+/// agent's process id and thread id. Output: the path to resolve; other paths unchanged.
+pub fn as_agent(path: &[u8], tgid: i32, tid: i32) -> Vec<u8> {
+    let _ = (tgid, tid);
+    path.to_vec()
+}
+
+/// Rewrites a resolved folder that lies under the supervisor's own `/proc` entry to the
+/// agent's, for a path that reached `/proc/self` through a link. Inputs: the real path,
+/// the supervisor's process and thread ids, the agent's. Output: the agent's path, or
+/// none when the folder is not under the supervisor's entry.
+pub fn from_own(real: &Path, own: (i32, i32), agent: (i32, i32)) -> Option<PathBuf> {
+    let _ = (real, own, agent);
+    None
+}
+
+/// Reads the file mode mask from the text of `/proc/<pid>/status`. Input: the text.
+/// Output: the mask, or none when the line is missing or not octal.
+pub fn umask(status: &str) -> Option<u32> {
+    let _ = status;
+    None
+}
+
+/// The mode a new entry gets when the supervisor makes it for an agent: the asked mode
+/// without the bits the agent's mask clears. Inputs: the asked mode and the mask. Output:
+/// the mode to make the entry with, under a mask of zero.
+pub fn mode_under(mode: u32, umask: u32) -> u32 {
+    let _ = umask;
+    mode
 }
 
 #[cfg(test)]
@@ -421,5 +471,92 @@ mod tests {
         assert_eq!(field(status, "PPid"), None);
         assert_eq!(field(status, "gid"), None, "the whole name");
         assert_eq!(field("pos:\t0\nflags:\t02000002\nPid:\t77\n", "Pid"), Some("77"));
+    }
+
+    #[test]
+    fn a_folder_that_holds_an_own_git_folder_is_not_moved_away() {
+        let own = own();
+        let moved = |path: &str| own.moves(Path::new(path));
+        for free in [
+            "/work/project/src",
+            "/work/project/src/main.rs",
+            "/work/project/.git/index.lock",
+            "/work/project/worktrees/a1/src",
+            "/work/clone/teammates/bo/src",
+            "/work/clone/src",
+            "/work/setup/two",
+            "/tmp/build",
+        ] {
+            assert!(moved(free), "{free}");
+        }
+        for held in [
+            "/work/project",
+            "/work",
+            "/",
+            "/work/project/worktrees",
+            "/work/project/worktrees/a1",
+            "/work/clone",
+            "/work/clone/teammates",
+            "/work/clone/teammates/bo",
+            "/work/clone/teammates/any",
+            "/work/setup",
+            "/work/setup/one",
+        ] {
+            assert!(!moved(held), "{held}");
+        }
+        assert!(!moved("work/project/src"), "not a real path");
+        assert!(GitOwn::default().moves(Path::new("/work/project")));
+    }
+
+    #[test]
+    fn a_path_splits_into_its_folder_and_last_name_whatever_slashes_end_it() {
+        let split = |path: &'static str| {
+            let parts = split_last(path.as_bytes())?;
+            Some((std::str::from_utf8(parts.0).unwrap(), std::str::from_utf8(parts.1).unwrap()))
+        };
+        assert_eq!(split("a/b"), Some(("a", "b")));
+        assert_eq!(split("b"), Some(("", "b")));
+        assert_eq!(split("/b"), Some(("/", "b")));
+        assert_eq!(split("/a/b/.git"), Some(("/a/b", ".git")));
+        assert_eq!(split("a/b///"), Some(("a", "b")));
+        assert_eq!(split("a//b"), Some(("a/", "b")));
+        assert_eq!(split("a/.."), Some(("a", "..")));
+        assert_eq!(split("./x"), Some((".", "x")));
+        for none in ["", "/", "///"] {
+            assert_eq!(split(none), None, "{none}");
+        }
+    }
+
+    #[test]
+    fn the_supervisors_own_proc_names_are_read_as_the_agents() {
+        let agent = |path: &str| String::from_utf8(as_agent(path.as_bytes(), 4242, 4250)).unwrap();
+        assert_eq!(agent("/proc/self/fd/2"), "/proc/4242/fd/2");
+        assert_eq!(agent("/proc/self"), "/proc/4242");
+        assert_eq!(agent("/proc/thread-self/comm"), "/proc/4242/task/4250/comm");
+        assert_eq!(agent("/proc/thread-self"), "/proc/4242/task/4250");
+        for kept in ["/proc/selfish/x", "/proc/1/fd/2", "proc/self/fd/2", "/work/proc/self", ""] {
+            assert_eq!(agent(kept), kept);
+        }
+        let moved = |real: &str| from_own(Path::new(real), (900, 907), (4242, 4250));
+        assert_eq!(moved("/proc/900/fd"), Some("/proc/4242/fd".into()));
+        assert_eq!(moved("/proc/900"), Some("/proc/4242".into()));
+        assert_eq!(moved("/proc/900/task/907/fd"), Some("/proc/4242/task/4250/fd".into()));
+        assert_eq!(moved("/proc/900/task/908"), Some("/proc/4242/task/908".into()));
+        for kept in ["/proc/9000/fd", "/proc/4242/fd", "/work/proc/900", "/proc"] {
+            assert_eq!(moved(kept), None, "{kept}");
+        }
+    }
+
+    #[test]
+    fn a_new_entry_gets_the_asked_mode_without_what_the_agents_mask_clears() {
+        let status = "Name:\tnode\nUmask:\t0027\nState:\tS (sleeping)\n";
+        assert_eq!(umask(status), Some(0o027));
+        assert_eq!(umask("Name:\tnode\n"), None);
+        assert_eq!(umask("Umask:\t0x12\n"), None);
+        assert_eq!(umask("Umask:\t7777\n"), None, "more than a mask holds");
+        assert_eq!(mode_under(0o666, 0o027), 0o640);
+        assert_eq!(mode_under(0o777, 0o022), 0o755);
+        assert_eq!(mode_under(0o2775, 0), 0o2775);
+        assert_eq!(mode_under(0o100644, 0o077), 0o600, "only mode bits");
     }
 }
