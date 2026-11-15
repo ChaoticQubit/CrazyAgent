@@ -63,8 +63,27 @@ pub enum Dest {
 /// copied bytes, at most [`ADDRESS_BYTES_MAX`]. Output: the destination; a Unix path
 /// ends at its first zero byte, an abstract name keeps every byte after the leading zero.
 pub fn dest(bytes: &[u8]) -> Dest {
-    let _ = bytes;
-    Dest::Other
+    let Some(family) = bytes.first_chunk::<2>() else {
+        return Dest::Other;
+    };
+    let word = |at: usize| bytes.get(at..at + 4)?.first_chunk::<4>().copied();
+    match (u16::from_ne_bytes(*family), address(bytes)) {
+        (_, Address::V4 { ip, port }) => Dest::Ip(SocketAddr::from((ip, port))),
+        (_, Address::V6 { ip, port }) => {
+            let flow = word(4).map_or(0, u32::from_be_bytes);
+            let scope = word(24).map_or(0, u32::from_ne_bytes);
+            Dest::Ip(SocketAddrV6::new(ip.into(), port, flow, scope).into())
+        }
+        (AF_UNSPEC, _) => Dest::Unspec,
+        (AF_UNIX, _) => match &bytes[2..] {
+            [0, name @ ..] => Dest::UnixName(name.to_vec()),
+            path => {
+                let end = path.iter().position(|byte| *byte == 0);
+                Dest::UnixPath(path[..end.unwrap_or(path.len())].to_vec())
+            }
+        },
+        _ => Dest::Other,
+    }
 }
 
 /// The TCP ports an agent may reach: `any` on every host, `loopback` only on this
