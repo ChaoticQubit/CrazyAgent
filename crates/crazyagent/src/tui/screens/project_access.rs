@@ -1,7 +1,7 @@
 use super::new_project_view::{Look, Row, wrap_words};
 use super::project_team::window;
 use crate::sandbox::policy::{
-    AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ToolchainChoice,
+    AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles, PolicyView, ToolchainChoice,
 };
 use crate::sandbox::shared_folders::{
     CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope, UNREACHABLE_SECRETS_LINE,
@@ -77,6 +77,7 @@ pub(in crate::tui) struct AccessEdit {
     pub allowed: Vec<bool>,
     pub ide_git_hooks: bool,
     pub ide_agent_files: IdeAgentFiles,
+    pub home_caches: HomeCaches,
     pub shared: SharedFolders,
     pub folders: Vec<String>,
     pub cursor: usize,
@@ -104,6 +105,7 @@ impl AccessEdit {
             allowed: view.toolchains.iter().map(|row| row.allowed).collect(),
             ide_git_hooks: view.ide_git_hooks,
             ide_agent_files: view.ide_agent_files,
+            home_caches: view.home_caches,
             shared: view.shared_folders.clone(),
             folders: pickable_folders(&view.local_folders, &view.shared_folders.chosen),
             view: view.clone(),
@@ -178,7 +180,7 @@ impl AccessEdit {
             toolchains,
             ide_git_hooks: self.ide_git_hooks,
             tool_cache: self.view.tool_cache,
-            home_caches: self.view.home_caches,
+            home_caches: self.home_caches,
             ide_agent_files: self.ide_agent_files,
             apply_changes: self.view.apply_changes,
             grants: self

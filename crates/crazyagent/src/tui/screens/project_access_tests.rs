@@ -7,7 +7,8 @@ use super::project_access::{
     SHARED_SECRETS_LINE, TOOLCHAIN_OFF_STOPS_AGENTS, agent_files_help, network_help, summary,
 };
 use crate::sandbox::policy::{
-    AgentAccess, AgentNetwork, IdeAgentFiles, LevelView, NetworkView, PolicyView, ToolchainView,
+    AgentAccess, AgentNetwork, HomeCaches, IdeAgentFiles, LevelView, NetworkView, PolicyView,
+    ToolchainView,
 };
 use crate::sandbox::shared_folders::{
     CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope, UNREACHABLE_SECRETS_LINE,
@@ -292,6 +293,64 @@ fn the_access_box_keeps_the_tool_cache_choice_when_it_saves() {
     assert_eq!(edit.policy().tool_cache, scope);
 }
 
+/// DEC-173 add.1: the Tool caches in agent homes choice has the box's last row under its own
+/// heading, starts on the saved choice, cycles through the three choices with the engine's
+/// words and each one's help, the same in the desktop app, and is what Save sends.
+#[test]
+fn the_access_box_saves_the_home_caches_choice_on_its_last_row_with_its_help() {
+    let kept = AccessEdit::of(&PolicyView {
+        home_caches: HomeCaches::Keep,
+        ..view()
+    });
+    assert_eq!(kept.home_caches, HomeCaches::Keep);
+    assert_eq!(kept.policy().home_caches, HomeCaches::Keep);
+    let mut edit = AccessEdit::of(&view());
+    assert_eq!(edit.home_caches, HomeCaches::ClearWhenRaised);
+    for _ in 0..40 {
+        assert_eq!(edit.key(key(KeyCode::Down)), AccessKey::Handled);
+    }
+    assert_eq!(
+        edit.cursor, 8,
+        "the caches row follows the shared access row"
+    );
+    let help = [
+        (
+            HomeCaches::ClearWhenRaised,
+            "An agent home loses its .cache and npm cache when its agent starts at a wider access level than its last start, so nothing a narrower run left there reaches a wider one.",
+        ),
+        (
+            HomeCaches::ClearEveryLaunch,
+            "An agent home loses its .cache and npm cache at every start; tools download what they need again.",
+        ),
+        (
+            HomeCaches::Keep,
+            "An agent home keeps its .cache and npm cache from start to start, whatever level wrote them, so tools download less.",
+        ),
+    ];
+    for (choice, line) in help {
+        assert_eq!(edit.home_caches, choice);
+        let rows = shown_rows(&edit);
+        assert!(
+            rows.iter().any(|row| row == "Tool caches in agent homes"),
+            "{rows:?}"
+        );
+        let row = rows
+            .iter()
+            .position(|row| row.contains(&format!("< {} >", choice.label())))
+            .expect("the caches row");
+        assert!(rows[row].starts_with("> Caches"), "{}", rows[row]);
+        assert!(shown_words(&edit).contains(line), "{rows:?}");
+        let AccessKey::Save(policy) = edit.clone().key(key(KeyCode::Enter)) else {
+            panic!("Enter saves");
+        };
+        assert_eq!(policy.home_caches, choice);
+        assert_eq!(edit.key(key(KeyCode::Right)), AccessKey::Handled);
+    }
+    assert_eq!(edit.home_caches, HomeCaches::ClearWhenRaised);
+    assert_eq!(edit.key(key(KeyCode::Left)), AccessKey::Handled);
+    assert_eq!(edit.home_caches, HomeCaches::Keep);
+}
+
 /// DEC-124: the agent folders choice has its own row after the IDE hooks switch, cycles
 /// through its three choices with each one's help, says it does not apply at Full access and
 /// is what Save sends.
@@ -473,9 +532,11 @@ fn the_access_box_saves_every_shared_folders_choice_and_access_with_its_help() {
                 .expect("the shared folders row");
             assert!(rows[row].starts_with("> "), "{}", rows[row]);
             assert!(shown_words(&edit).contains(scope.help()), "{rows:?}");
-            for _ in 0..12 {
+            let folders = if scope == SharedScope::Chosen { 2 } else { 0 };
+            for _ in 0..=folders {
                 assert_eq!(edit.key(key(KeyCode::Down)), AccessKey::Handled);
             }
+            assert_eq!(edit.cursor, 7 + folders, "the shared access row");
             if access == SharedAccess::ReadWrite {
                 assert_eq!(edit.key(key(KeyCode::Right)), AccessKey::Handled);
             }
