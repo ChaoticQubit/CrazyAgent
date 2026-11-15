@@ -830,6 +830,10 @@ dependencies = [
 [[package]]
 name = "crazyagent-linux-supervisor"
 version = "2.3.0"
+dependencies = [
+ "libc",
+ "rustix 1.1.5",
+]
 
 [[package]]
 name = "crazyagent-win-sandbox"
