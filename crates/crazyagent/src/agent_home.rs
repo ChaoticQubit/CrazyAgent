@@ -52,7 +52,7 @@ const HOME_PASSES_MAX: usize = 8;
 /// per-agent keychain; and the download caches. No entry kept holds config a tool runs.
 const HOME_KEPT: &[(&str, Kept)] = &[
     (crate::launch_context::STATE, Kept::Folder),
-    (crate::launch_context::LOCK, Kept::File),
+    (crate::launch_context::LOCK, Kept::Lock),
     (crate::coord::relay::PLUGIN_FOLDER, Kept::Folder),
     (crate::harnesses::interactive::KEY_FILE, Kept::File),
     (Harness::Claude.instruction_file(), Kept::File),
@@ -111,6 +111,9 @@ static TEMPORARY: AtomicU64 = AtomicU64::new(0);
 enum Kept {
     /// A plain file.
     File,
+    /// The launch lock, kept as [`crate::launch_context::lock_kept`] judges it, the lock
+    /// the launch holds (RV-DS241-137 r3 code F2).
+    Lock,
     /// A real folder with all it holds.
     Folder,
     /// A link, never followed: a cache the engine links to the owner's read-only one
@@ -1175,6 +1178,7 @@ fn keep_only(
                 .map(|(_, kind)| *kind);
             match wanted {
                 Some(Kept::File) if metadata.is_file() && sole_own_link(&metadata) => unpin(&path),
+                Some(Kept::Lock) if crate::launch_context::lock_kept(&metadata) => unpin(&path),
                 Some(Kept::Folder) if metadata.is_dir() => unpin(&path),
                 Some(Kept::Link) if link => unpin(&path),
                 Some(Kept::Only(inner)) if metadata.is_dir() => {
@@ -1250,7 +1254,7 @@ fn pin_below(prefix: &str, kept: &[(&str, Kept)], pinned: &mut Vec<String>) {
                 pin_below(&path, inner, pinned);
             }
             Kept::Link => pinned.push(path),
-            Kept::File | Kept::Folder => {}
+            Kept::File | Kept::Lock | Kept::Folder => {}
         }
     }
 }
