@@ -296,3 +296,48 @@ fn a_resumed_stand_in_gets_its_resume_arguments_and_reports_only_later_turns() {
     let arguments = ["--home", home.as_str(), "--resume", id];
     assert_eq!(standin.argv(2), arguments);
 }
+
+/// DEC-180 Task 16: a stand-in a quitting engine left running is taken over from its pane
+/// record, its record found again through the manifest's record path: no earlier turn is
+/// reported again, and the manifest's interrupt key stops a later one.
+#[test]
+fn a_running_stand_in_is_adopted_from_its_pane_record_and_keeps_its_manifest_s_keys() {
+    let standin = standin("jsonl-append", true);
+    let one = [
+        json!({"type": "started"}),
+        json!({"type": "text", "delta": "one"}),
+        json!({"type": "done"}),
+    ];
+    standin.put("turn-1.jsonl", &jsonl(&one));
+    standin.put("turn-2.out", "working\n@standin sleep 30\n");
+    let stopped = [
+        json!({"type": "started"}),
+        json!({"type": "stopped"}),
+        json!({"type": "done", "ok": false}),
+    ];
+    standin.put("turn-2.jsonl", &jsonl(&stopped));
+    let mut first = standin.start("manifest-adopt", None);
+    ready(&mut first);
+    first.send("one").unwrap();
+    assert_eq!(turn(&mut first), [said("one"), DONE]);
+    let record = first.record().cloned();
+    assert!(record.is_some());
+    let record = record.unwrap();
+    let stored = record.encode().and_then(|text| PaneRecord::decode(&text));
+    assert_eq!(stored.as_ref(), Some(&record));
+    first.leave();
+    let agent = AgentId::new("manifest-adopt").unwrap();
+    let host = standin.host.clone();
+    let (limits, settings) = (LaunchLimits::default(), standin.settings.clone());
+    let adopted = TerminalSession::adopt_with(host, agent, &record, limits, settings);
+    assert!(adopted.is_ok(), "{:?}", adopted.as_ref().err());
+    let mut adopted = adopted.unwrap();
+    adopted.send("long job").unwrap();
+    standin.typed(1, "long job");
+    adopted.interrupt().unwrap();
+    let ended = [
+        LaunchEvent::Interrupted,
+        LaunchEvent::TurnFinished { success: false },
+    ];
+    assert_eq!(turn(&mut adopted), ended);
+}

@@ -3,6 +3,7 @@ use super::{
     codex_folder, host_failure,
 };
 use crate::harnesses::interactive::Transcript;
+use crate::harnesses::interactive::settings::TerminalSettings;
 use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
 use crate::harnesses::leftovers::LineageToken;
 use crate::harnesses::transcript::{READ_BYTES_MAX, TranscriptEvent, TranscriptReader};
@@ -344,6 +345,20 @@ impl TerminalSession {
         limits: LaunchLimits,
     ) -> Result<Self, LaunchError> {
         Self::adopt_as(host, agent, record, limits, true)
+    }
+
+    /// Takes over the pane of a harness run from given terminal settings, such as a
+    /// stand-in outside the catalog; see `adopt_as`, whose rule for a pane that is no live
+    /// master applies. Takes the host, the pane name, the stored record, the limits and the
+    /// settings. Returns the idle session, or a plain code.
+    pub fn adopt_with(
+        host: Arc<dyn Host>,
+        agent: AgentId,
+        record: &PaneRecord,
+        limits: LaunchLimits,
+        _settings: TerminalSettings,
+    ) -> Result<Self, LaunchError> {
+        Self::adopt_as(host, agent, record, limits, false)
     }
 
     /// Takes over an agent pane a previous engine left running, without starting the harness

@@ -1,6 +1,7 @@
 use super::*;
 #[cfg(target_os = "macos")]
 use crate::harnesses::interactive::InteractiveCommand;
+use crate::harnesses::interactive::settings::TerminalSettings;
 #[cfg(target_os = "macos")]
 use crate::terminal::FOLDER;
 #[cfg(target_os = "macos")]
@@ -901,4 +902,32 @@ fn a_pane_whose_process_is_not_the_recorded_one_is_not_adopted_and_its_group_is_
         std::slice::from_ref(&agent),
         "a pane that is not the record's is left running"
     );
+}
+
+/// DEC-180 Task 16: a manifest pane's record keeps its harness, its private home and its
+/// session, never a record file, and a stored one whose home is not absolute is refused.
+#[test]
+fn a_manifest_pane_record_keeps_its_harness_home_and_session_and_refuses_a_relative_home() {
+    let text = include_str!("../../../../tests/fixtures/harness/standin-jsonl-append.yaml");
+    let manifest = crate::harnesses::manifest::parse(text.as_bytes()).unwrap();
+    let settings = TerminalSettings::read(&manifest).unwrap();
+    let records = settings.records(Path::new("/agent/home"), "s-1");
+    assert!(records.is_ok(), "{records:?}");
+    let transcript = Transcript::Records(records.unwrap());
+    let (cwd, since) = (Path::new("/work"), SystemTime::now());
+    let record = PaneRecord::new(&transcript, cwd, since, 4242, None);
+    assert!(record.is_some());
+    let record = record.unwrap();
+    let stored = record.encode();
+    assert!(stored.is_some());
+    let stored = stored.unwrap();
+    let source = concat!(
+        r#"{"kind":"manifest","harness":"standin-jsonl-append","#,
+        r#""home":"/agent/home","session":"s-1"}"#,
+    );
+    assert!(stored.contains(source), "{stored}");
+    assert_eq!(PaneRecord::decode(&stored), Some(record));
+    let relative = stored.replace(r#""home":"/agent/home""#, r#""home":"agent/home""#);
+    assert_ne!(relative, stored);
+    assert_eq!(PaneRecord::decode(&relative), None);
 }
