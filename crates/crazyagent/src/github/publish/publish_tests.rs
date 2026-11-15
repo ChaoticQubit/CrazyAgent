@@ -812,3 +812,74 @@ fn the_scan_needs_a_plain_git_folder_and_never_reads_through_a_linked_folder() {
         "github_publish_not_plain_repo"
     );
 }
+
+#[test]
+fn docs_off_after_an_earlier_on_takes_the_context_folder_out_again() {
+    let fixture = fixture();
+    let project = fixture.path();
+    crate::projects_home::prepare_layout(&project).unwrap();
+    fixture.write(".crazyagent/context/roadmap.md", "plan\n");
+    fixture.write("src/a.rs", "a\n");
+    let listed = || {
+        git(&["ls-files", "--others", "--exclude-standard"], &project)
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    for (docs, context) in [(false, false), (true, true), (false, false), (true, true)] {
+        let local = fixture.inspect().unwrap();
+        fixture.prepare(&local, true, docs, &[]).unwrap();
+        assert_eq!(
+            listed().contains(&".crazyagent/context/roadmap.md".to_owned()),
+            context,
+            "docs {docs}: {:?}",
+            listed()
+        );
+    }
+    let local = fixture.inspect().unwrap();
+    fixture.prepare(&local, true, false, &[]).unwrap();
+    assert_eq!(
+        fixture.read(".gitignore"),
+        "/.crazyagent/\n/graphify-out/\n"
+    );
+    assert_eq!(listed(), [".gitignore", "src/a.rs"]);
+}
+
+#[test]
+fn a_gitignore_publish_cannot_read_is_refused_before_anything_is_written() {
+    for bytes in [vec![0xff, b'\n'], vec![b'x'; (1 << 20) + 1]] {
+        let fixture = fixture();
+        std::fs::write(fixture.path().join(".gitignore"), &bytes).unwrap();
+        fixture.write("a.txt", "a\n");
+        let local = fixture.inspect().unwrap();
+        assert_eq!(
+            fixture.prepare(&local, false, false, &[]).unwrap_err().0,
+            "github_publish_gitignore_invalid"
+        );
+        assert!(!fixture.path().join(".git").exists());
+        assert!(!fixture.path().join("SECURITY.md").exists());
+        assert_eq!(
+            std::fs::read(fixture.path().join(".gitignore")).unwrap(),
+            bytes
+        );
+    }
+}
+
+#[test]
+fn a_born_head_whose_history_cannot_be_read_is_not_taken_for_an_empty_one() {
+    let fixture = fixture();
+    let project = fixture.path();
+    git(&["init", "-q", "-b", "main"], &project);
+    fixture.write("a.txt", "a\n");
+    git(&["add", "-A"], &project);
+    git(&["commit", "-q", "-m", "first"], &project);
+    let head = git(&["rev-parse", "HEAD"], &project).trim().to_owned();
+    std::fs::remove_file(
+        project
+            .join(".git/objects")
+            .join(&head[..2])
+            .join(&head[2..]),
+    )
+    .unwrap();
+    assert_eq!(fixture.inspect().unwrap_err().0, "github_publish_failed");
+}
