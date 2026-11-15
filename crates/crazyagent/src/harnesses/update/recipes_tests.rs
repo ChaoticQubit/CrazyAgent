@@ -372,3 +372,131 @@ fn a_name_that_names_a_folder_or_a_path_instead_of_a_package_is_refused() {
         .is_ok()
     );
 }
+
+#[test]
+fn an_npm_spec_npm_would_read_as_a_folder_an_archive_or_another_package_is_refused() {
+    let npm = |scope: &str, name: &str, package: &str, spec: &str| {
+        let scope = if scope.is_empty() {
+            String::new()
+        } else {
+            format!("  scope: \"{scope}\"\n")
+        };
+        format!(
+            "npm:\n{scope}  name: \"{name}\"\n  package: \"{package}\"\n  spec: \"{spec}\"\n{GUIDE}"
+        )
+    };
+    let taken = |cases: &[(&'static str, &'static str, &'static str, &'static str)]| {
+        cases
+            .iter()
+            .filter(|(scope, name, package, spec)| {
+                read("sample", block(&npm(scope, name, package, spec))).is_ok()
+            })
+            .map(|(_, name, package, spec)| format!("{name} {package} {spec}"))
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(
+        taken(&[
+            ("", "cli", "cli", "cli@."),
+            ("", "cli", "cli", "cli@.."),
+            ("", "cli", "cli", "cli@.hidden"),
+            ("", "cli", "cli", "cli@"),
+            ("", "cli", "cli", "cli@@latest"),
+            ("", "cli", "cli", "cli@latest@1"),
+            ("", "cli", "cli", "cli@evil.tgz"),
+            ("", "cli", "cli", "cli@evil.tar"),
+            ("", "cli", "cli", "cli@evil.tar.gz"),
+            ("", "cli", "cli", "evil.tgz"),
+            ("", "cli", "cli", "other"),
+            ("", "cli", "cli", "cli-other"),
+            ("", "cli", "cli", "cli.tgz"),
+            ("", "cli", "cli", "@sample/cli"),
+            ("", "evil.tgz", "evil.tgz", "evil.tgz"),
+            ("", "evil.tar", "evil.tar", "evil.tar"),
+            ("", "evil.tar.gz", "evil.tar.gz", "evil.tar.gz"),
+            ("", "cli", "cli@.", "cli@."),
+            ("", "cli", "cli@latest", "cli@latest"),
+            ("", "cli", "other", "other"),
+            ("", "cli@1", "cli@1", "cli@1"),
+            ("@sample", "cli", "@sample/cli", "@sample/cli@."),
+            ("@sample", "cli", "@sample/cli", "@sample/cli@.."),
+            ("@sample", "cli", "@sample/cli", "@sample/other"),
+            ("@sample", "cli", "@sample/cli", "@other/cli"),
+            ("@sample", "cli", "@sample/cli", "cli"),
+            ("@sample", "cli", "cli", "cli"),
+            ("@sample", "cli", "@other/cli", "@other/cli"),
+            ("@sample", "cli.tgz", "@sample/cli.tgz", "@sample/cli.tgz"),
+            ("@sample.tgz", "cli", "@sample.tgz/cli", "@sample.tgz/cli"),
+            ("@sam@ple", "cli", "@sam@ple/cli", "@sam@ple/cli"),
+        ]),
+        Vec::<String>::new(),
+        "these blocks are taken"
+    );
+    for spec in [
+        "cli@file:evil",
+        "cli@file:../evil",
+        "cli@git+https://example.com/evil.git",
+        "cli@https://example.com/evil.tgz",
+        "cli@http://example.com/evil",
+        "cli@npm:other",
+        "cli@github:evil/evil",
+        "cli@evil/evil",
+        "cli@..\\\\evil",
+        "cli@~/evil",
+        "cli@^1.0.0",
+        "cli@1.0.0 || 2",
+        "cli@C:evil",
+        "file:evil",
+        "git+https://example.com/evil.git",
+        "https://example.com/evil.tgz",
+    ] {
+        assert!(
+            read("sample", block(&npm("", "cli", "cli", spec))).is_err(),
+            "{spec}"
+        );
+    }
+    assert_eq!(
+        taken(&[
+            ("", "cli", "cli", "cli"),
+            ("", "cli", "cli", "cli@latest"),
+            ("", "cli", "cli", "cli@next"),
+            ("", "cli", "cli", "cli@1.2.3"),
+            ("", "cli", "cli", "cli@1.2.3-beta.1"),
+            ("", "cli", "cli", "cli@0.42.0-nightly_7"),
+            ("", "pi.dev_cli", "pi.dev_cli", "pi.dev_cli"),
+            ("@sample", "cli", "@sample/cli", "@sample/cli"),
+            ("@sample", "cli", "@sample/cli", "@sample/cli@latest"),
+            ("@sample", "cli", "@sample/cli", "@sample/cli@2.0.0"),
+            (
+                "@sam.ple-1",
+                "claude-code",
+                "@sam.ple-1/claude-code",
+                "@sam.ple-1/claude-code@latest"
+            ),
+        ])
+        .len(),
+        11
+    );
+}
+
+#[test]
+fn every_bundled_npm_recipe_installs_the_one_package_it_names() {
+    let mut seen = 0;
+    for recipe in recipes() {
+        let Some(npm) = &recipe.npm else { continue };
+        seen += 1;
+        let whole = if npm.scope.is_empty() {
+            npm.name.to_owned()
+        } else {
+            format!("{}/{}", npm.scope, npm.name)
+        };
+        assert_eq!(npm.package, whole, "{}", recipe.id);
+        let version = npm.spec.strip_prefix(npm.package).unwrap();
+        assert!(
+            version.is_empty() || version == "@latest",
+            "{}: {}",
+            recipe.id,
+            npm.spec
+        );
+    }
+    assert_eq!(seen, 13);
+}
