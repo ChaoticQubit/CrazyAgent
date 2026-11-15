@@ -1051,8 +1051,9 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
 }
 
 /// Checks that an account home is safe to launch in: an absolute 0700 directory owned by
-/// this user that is neither the owner's HOME nor their real `~/.codex` or `~/.claude`.
-/// Input: the home. Output: Ok, or a plain `launch_account_home_*` refusal code.
+/// this user that is neither the owner's HOME nor a folder any harness manifest names as
+/// the owner's own (`home.owner_folders`, such as `~/.codex`). Input: the home. Output: Ok,
+/// or a plain `launch_account_home_*` refusal code.
 #[cfg(unix)]
 pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
     let metadata =
@@ -1067,7 +1068,8 @@ pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
     let canonical =
         std::fs::canonicalize(home).map_err(|_| failure("launch_account_home_unavailable"))?;
     if let Some(owner) = std::env::var_os("HOME").map(PathBuf::from) {
-        for forbidden in [owner.clone(), owner.join(".codex"), owner.join(".claude")] {
+        let folders = crate::sandbox::harness_folders().map(|folder| owner.join(folder));
+        for forbidden in std::iter::once(owner.clone()).chain(folders) {
             if std::fs::canonicalize(&forbidden).is_ok_and(|forbidden| forbidden == canonical)
                 || forbidden == home
             {
