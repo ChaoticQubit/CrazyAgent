@@ -1341,16 +1341,16 @@ impl TeamRuntime {
                 thawed.adopted(id);
                 continue;
             };
-            match end_left_pane(host.as_ref(), &agent, "team") {
-                Ok(_) => {}
-                Err(problem) if problem.0 == "terminal_agent_unknown" => {}
+            let confirmed = match end_left_pane(host.as_ref(), &agent, "team") {
+                Ok(confirmed) => confirmed,
+                Err(problem) if problem.0 == "terminal_agent_unknown" => true,
                 Err(problem) => return Err(problem.into()),
-            }
+            };
             thawed.end(id);
             if let Some(record) = records.get(&id) {
                 record.remove_context_files();
             }
-            self.closed_note(id, &reason)?;
+            self.closed_note(id, &uncertain_unless(confirmed, reason))?;
         }
         for id in thawed.ids() {
             thawed.end(id);
@@ -1654,14 +1654,13 @@ impl TeamRuntime {
             && !(host.pane_pid(&agent).ok().flatten() == Some(record.pid)
                 && hold_keeper(record.pid, &agent_pane_state(&self.state, id), Hold::Thaw))
         {
-            let ended = end_left_pane(host.as_ref(), &agent, "team");
+            let confirmed = match end_left_pane(host.as_ref(), &agent, "team") {
+                Ok(confirmed) => confirmed,
+                Err(problem) => problem.0 == "terminal_agent_unknown",
+            };
             drop(proxy);
             let reason = "it could not be continued after its freeze";
-            return Ok(Err(match ended {
-                Ok(true) => reason.into(),
-                Err(problem) if problem.0 == "terminal_agent_unknown" => reason.into(),
-                _ => format!("{reason}. {}", crate::sandbox::warden::CLEANUP_UNCERTAIN),
-            }));
+            return Ok(Err(uncertain_unless(confirmed, reason.into())));
         }
         let record = &match (record.frozen_ms, u64::try_from(now_ms())) {
             (Some(at), Ok(now)) => PaneRecord {
@@ -3043,15 +3042,31 @@ impl TeamRuntime {
             let _ = worker.orders.send(Order::Stop);
             worker.stop_for("engine_stop:shutdown");
         }
+        let uncertain = with_code(
+            crate::sandbox::warden::CLEANUP_UNCERTAIN,
+            Some(crate::harnesses::leftovers::UNCERTAIN),
+        );
+        let mut unconfirmed = BTreeSet::new();
         let deadline = Instant::now() + JOIN_WAIT;
-        for worker in self.workers.values_mut() {
-            if let Some(thread) = worker.thread.take() {
+        for (id, worker) in &mut self.workers {
+            let finished = worker.thread.take().is_none_or(|thread| {
                 while !thread.is_finished() && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                if thread.is_finished() {
+                let finished = thread.is_finished();
+                if finished {
                     let _ = thread.join();
                 }
+                finished
+            });
+            let ended_uncertain = worker.reports.try_iter().any(|report| match report {
+                Report::Ended {
+                    problem: Some(problem),
+                } => problem.contains(uncertain.as_str()),
+                _ => false,
+            });
+            if (ended_uncertain || !finished) && !kept.contains(id) {
+                unconfirmed.insert(*id);
             }
         }
         let mut frozen = BTreeSet::new();
@@ -3064,7 +3079,6 @@ impl TeamRuntime {
                     .is_some_and(|worker| worker.proxy.is_some())
             })
             .collect();
-        let mut unconfirmed = BTreeSet::new();
         let mut failed = None;
         for id in proxied {
             let (left, problem) = self.freeze_or_end(id);
@@ -3080,10 +3094,6 @@ impl TeamRuntime {
                 failed = problem;
             }
         }
-        let uncertain = with_code(
-            crate::sandbox::warden::CLEANUP_UNCERTAIN,
-            Some(crate::harnesses::leftovers::UNCERTAIN),
-        );
         let now = now_ms();
         let ids: Vec<i64> = self.workers.keys().copied().collect();
         self.workers.clear();
@@ -9643,6 +9653,7 @@ impl TeamRuntime {
                 )
             })?
             .terminal_display;
+        let relayed = relay.is_some();
         let plan = Plan {
             harness: launch.into(),
             entry: executable.clone(),
@@ -9663,7 +9674,7 @@ impl TeamRuntime {
                 .clone()
                 .map(|host| {
                     if native {
-                        crate::terminal::own_server(host)
+                        crate::terminal::own_server(host, relayed)
                     } else {
                         host
                     }
@@ -11388,7 +11399,9 @@ fn work(
             Mode::Kept { account, context } => {
                 let resume = plan.resume.as_ref();
                 plan.request(account, plan.access).and_then(|request| {
-                    AgentSession::start_resuming(
+                    start_session(
+                        &by,
+                        plan.access,
                         request,
                         plan.team_context(*context),
                         plan.pane.clone(),
@@ -11481,7 +11494,9 @@ fn live(
                 Err(problem) => return Some(problem),
             };
             (
-                AgentSession::start_resuming(
+                start_session(
+                    by,
+                    plan.access,
                     request,
                     plan.team_context((*context).with_live_instructions(&instructions)),
                     plan.pane.clone(),
@@ -11505,17 +11520,21 @@ fn live(
                     Ok(request) => request,
                     Err(problem) => return Some(problem),
                 };
-            let credential = match profile.hand_to_turn(&home, None, &plan.entry) {
-                Ok(credential) => credential,
-                Err(problem) => {
+            let handed = hand_after_check(by, || profile.hand_to_turn(&home, None, &plan.entry));
+            let credential = match handed {
+                Ok(Ok(credential)) => credential,
+                Ok(Err(problem)) => {
                     return Some(with_code(
                         "The signed-in account could not reach the agent",
                         Some(&problem.0),
                     ));
                 }
+                Err(refused) => return Some(start_problem(&refused)),
             };
             (
-                AgentSession::start_resuming(
+                start_session(
+                    by,
+                    access,
                     request,
                     plan.team_context(context.with_live_instructions(&instructions)),
                     plan.pane.clone(),
@@ -11921,18 +11940,27 @@ fn native_session(
             return Some(problem);
         }
     };
-    let credential = match profile.hand_to_agent(home, plan.limits.run_time, &plan.entry) {
-        Ok(credential) => credential,
-        Err(problem) => {
+    let handed = hand_after_check(by, || {
+        profile.hand_to_agent(home, plan.limits.run_time, &plan.entry)
+    });
+    let credential = match handed {
+        Ok(Ok(credential)) => credential,
+        Ok(Err(problem)) => {
             turn_closed(reports, taken, Some(problem.0.clone()));
             return Some(with_code(
                 "The signed-in account could not reach the agent",
                 Some(&problem.0),
             ));
         }
+        Err(refused) => {
+            turn_closed(reports, taken, Some(refused.0.clone()));
+            return Some(start_problem(&refused));
+        }
     };
     let resume = plan.resume.as_ref();
-    match AgentSession::start_resuming(
+    match start_session(
+        by,
+        access,
         request,
         plan.team_context(context),
         plan.pane.clone(),
@@ -11957,7 +11985,7 @@ fn native_session(
                 let _ = reports.send(Report::ResumeRefused);
             }
             turn_closed(reports, taken, Some(problem.0.clone()));
-            Some(with_code("The agent could not start", Some(&problem.0)))
+            Some(start_problem(&problem))
         }
     }
 }
@@ -12406,9 +12434,10 @@ fn per_turn(
         let process = rules.limit.map_or(plan.limits.run_time, |limit| {
             limit.min(plan.limits.run_time)
         });
-        let credential = match profile.hand_to_agent(home, process, &plan.entry) {
-            Ok(credential) => credential,
-            Err(problem) => {
+        let handed = hand_after_check(by, || profile.hand_to_agent(home, process, &plan.entry));
+        let credential = match handed {
+            Ok(Ok(credential)) => credential,
+            Ok(Err(problem)) => {
                 let _ = reports.send(Report::Finished {
                     text: String::new(),
                     end: TurnEnd::Closed,
@@ -12419,8 +12448,18 @@ fn per_turn(
                     Some(&problem.0),
                 ));
             }
+            Err(refused) => {
+                let _ = reports.send(Report::Finished {
+                    text: String::new(),
+                    end: TurnEnd::Closed,
+                    cause: Some(refused.0.clone()),
+                });
+                return Some(start_problem(&refused));
+            }
         };
-        let started = AgentSession::start_resuming(
+        let started = start_session(
+            by,
+            access,
             request,
             plan.team_context(context),
             plan.pane.clone(),
@@ -13255,6 +13294,52 @@ fn turn_bound(limits: super::TimeLimits, ran: Duration) -> Option<(Duration, Tur
     }
 }
 
+/// The code an agent's start is refused with while a hold still lists commands a sandboxed
+/// run of it left that go on running.
+const COMMANDS_LEFT: &str = "team_commands_left";
+
+/// The owner's line for a start refused with [`COMMANDS_LEFT`].
+const COMMANDS_LEFT_PROBLEM: &str = "This agent still has commands running from its last run. \
+     End them on the team page, then start it again";
+
+/// Refuses an agent's start while a hold still lists commands a sandboxed run of it left
+/// that the owner keeps or has yet to end or keep
+/// ([`crate::harnesses::leftovers::confined_left_by`]): they write where the agent does, so
+/// the home the start resets would hold what they write next (SA vid 12). Input: who would
+/// start. Output: unit, or [`COMMANDS_LEFT`].
+fn commands_left(by: &HoldBy) -> Result<(), LaunchError> {
+    if crate::harnesses::leftovers::confined_left_by(by) {
+        return Err(LaunchError(COMMANDS_LEFT.to_owned(), None));
+    }
+    Ok(())
+}
+
+/// Hands an agent's home what its run takes from the account, such as the credential copy,
+/// only once [`commands_left`] finds none of its last run's commands still running under a
+/// hold, so a held process never reads a fresh credential there (rv-code2 B2P2-1). Inputs:
+/// who starts and the hand-off. Output: what the hand-off gave, or [`COMMANDS_LEFT`].
+fn hand_after_check<T>(by: &HoldBy, hand: impl FnOnce() -> T) -> Result<T, LaunchError> {
+    commands_left(by)?;
+    Ok(hand())
+}
+
+/// Starts an agent's harness as [`AgentSession::start_resuming`] does, once
+/// [`commands_left`] finds none of its last run's commands still running under a hold, with
+/// the context naming the level the request was built for, so the home reset keeps or clears
+/// the download caches by it (DEC-173 add.1). Inputs: who starts, the request's access level,
+/// then as for that start. Output: the session, or the refusal.
+fn start_session(
+    by: &HoldBy,
+    access: AgentAccess,
+    request: LaunchRequest,
+    context: AgentContext,
+    pane: Option<(Arc<dyn Host>, AgentId)>,
+    resume: Option<&Resume>,
+) -> Result<AgentSession, LaunchError> {
+    commands_left(by)?;
+    AgentSession::start_resuming(request, context.at_access(access), pane, resume)
+}
+
 /// The owner's line for a Codex launch refused because skills an earlier run locked into its
 /// home could not be removed (CTX-M1 r2 I3).
 const SKILLS_KEPT_PROBLEM: &str = "The agent could not start: an earlier run locked skills into \
@@ -13269,7 +13354,21 @@ fn start_problem(problem: &LaunchError) -> String {
         None if problem.0 == crate::launch_context::SKILLS_KEPT => {
             with_code(SKILLS_KEPT_PROBLEM, Some(&problem.0))
         }
+        None if problem.0 == COMMANDS_LEFT => with_code(COMMANDS_LEFT_PROBLEM, Some(&problem.0)),
         None => with_code("The agent could not start", Some(&problem.0)),
+    }
+}
+
+/// The reason a left pane was closed for, naming once that its sandbox could not be
+/// confirmed empty when its end was not confirmed; a reason that names it already stays as
+/// it is (SA vid 10). Inputs: whether the end was confirmed and the reason. Output: the
+/// reason to note.
+fn uncertain_unless(confirmed: bool, reason: String) -> String {
+    let named = reason.ends_with(crate::sandbox::warden::CLEANUP_UNCERTAIN);
+    if confirmed || named {
+        reason
+    } else {
+        format!("{reason}. {}", crate::sandbox::warden::CLEANUP_UNCERTAIN)
     }
 }
 

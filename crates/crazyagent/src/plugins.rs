@@ -408,8 +408,9 @@ pub enum ContextModeOff {
 pub(crate) const CONTEXT_MODE_PACKAGE: &str = "context-mode";
 const PACKAGE_VERSION_BYTES_MAX: usize = 32;
 
-/// Reads the default pack's pinned context-mode launch from an approved spec: an absolute
-/// `npx` given exactly `-y context-mode@<version>` with an exact version. Input: the spec.
+/// Reads the default pack's pinned context-mode launch from an approved spec: a rooted
+/// `npx`, the leading `/` [`ServerSpec::validate`] asks for on every platform, given exactly
+/// `-y context-mode@<version>` with an exact version (RV-DS241-153). Input: the spec.
 /// Output: npx's folder and the version, or none for any other spec.
 pub(crate) fn pinned_context_mode(spec: &ServerSpec) -> Option<(&Path, &str)> {
     let ServerSpec::Stdio { command, args } = spec else {
@@ -423,7 +424,7 @@ pub(crate) fn pinned_context_mode(spec: &ServerSpec) -> Option<(&Path, &str)> {
         .strip_prefix(CONTEXT_MODE_PACKAGE)
         .and_then(|rest| rest.strip_prefix('@'))
         .filter(|version| flag == "-y" && exact_version(version))?;
-    let npx = command.is_absolute() && npx_program(command);
+    let npx = command.has_root() && npx_program(command);
     command.parent().filter(|_| npx).map(|bin| (bin, version))
 }
 
@@ -644,6 +645,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "Can't start: this file can't be run.",
     ),
     ("server_cant_start", "The server can't start."),
+    (
+        "server_stored_spec_invalid",
+        "This server's command or address holds hidden or control characters, so it can't start. Remove it, then add it again.",
+    ),
     (
         crate::sandbox::OWNER_PORTS_UNREADABLE,
         "CrazyAgent can't read its settings file, so it did not run the check. Fix the file and check again.",
@@ -1047,6 +1052,19 @@ mod tests {
         assert_eq!(
             known_code("server_npx_not_found"),
             Some("server_npx_not_found")
+        );
+    }
+
+    /// RV-DS241-153: the pinned context-mode launch is read from the rooted npx path that
+    /// `validate` accepts on every platform, so on Windows, which counts a path with no drive
+    /// as relative, it is still the pinned launch and is never run through npx as approved.
+    #[test]
+    fn the_pinned_context_mode_launch_is_read_from_the_rooted_npx_validate_accepts() {
+        let spec = stdio("/usr/local/bin/npx", &["-y", "context-mode@1.0.169"]);
+        assert!(spec.validate().is_ok());
+        assert_eq!(
+            pinned_context_mode(&spec),
+            Some((Path::new("/usr/local/bin"), "1.0.169"))
         );
     }
 }

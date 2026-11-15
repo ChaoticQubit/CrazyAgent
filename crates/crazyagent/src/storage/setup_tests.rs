@@ -1046,10 +1046,36 @@ fn seed(
     )
 }
 
+/// The launch set a project's agents get, as the effective set gives it with no secret read,
+/// for rows that ask about a project with no stored row, which the engine's own launch set
+/// refuses. Inputs: the transaction, the engine root and the project. Output: the set.
+fn launch_of(
+    tx: &Transaction<'_>,
+    root: &Path,
+    project: &crate::protocol::ProjectId,
+) -> crate::plugins::LaunchPlugins {
+    let effective = plugins::effective(tx, root, project).unwrap();
+    let servers = effective
+        .servers
+        .into_iter()
+        .map(|server| crate::plugins::LaunchServer {
+            name: server.name,
+            spec: server.spec,
+            secrets: Vec::new(),
+        })
+        .collect();
+    crate::plugins::LaunchPlugins {
+        skills: effective.skills,
+        servers,
+        ..crate::plugins::LaunchPlugins::default()
+    }
+}
+
 fn effective_events(connection: &mut Connection, root: &Path, project: &str) -> Vec<String> {
     let project = crate::protocol::ProjectId::new(project).unwrap();
     let tx = connection.transaction().unwrap();
-    let hooks = plugins::effective_hooks(&tx, root, &project, &[]).unwrap();
+    let launch = launch_of(&tx, root, &project);
+    let hooks = plugins::effective_hooks(&tx, root, &project, &launch).unwrap();
     for hook in &hooks {
         assert!(hook.folder.join("hooks/start.sh").is_file(), "{hook:?}");
     }
@@ -1166,7 +1192,8 @@ fn seeded_hooks_follow_their_entry_and_turn_off_per_hook_per_project_or_with_the
     let folders: Vec<PathBuf> = {
         let tx = connection.transaction().unwrap();
         let project = crate::protocol::ProjectId::new("project-2").unwrap();
-        plugins::effective_hooks(&tx, root, &project, &[])
+        let launch = launch_of(&tx, root, &project);
+        plugins::effective_hooks(&tx, root, &project, &launch)
             .unwrap()
             .into_iter()
             .map(|hook| hook.folder)
@@ -1866,4 +1893,426 @@ fn removing_the_skill_pack_hooks_follow_keeps_the_hooks_the_owner_switched_off()
         row.hooks.is_empty(),
         "what was kept is forgotten once applied"
     );
+}
+
+/// A plugin folder named caveman whose hooks file lists one SessionStart hook per script,
+/// in the order given, with each script in place. Inputs: the parent folder and the
+/// scripts. Output: the plugin folder.
+fn ordered_hook_plugin(parent: &Path, scripts: &[&str]) -> PathBuf {
+    let folder = parent.join("caveman");
+    std::fs::create_dir_all(folder.join("hooks")).unwrap();
+    let hooks: Vec<serde_json::Value> = scripts
+        .iter()
+        .map(|script| {
+            let command = format!("sh \"${{CLAUDE_PLUGIN_ROOT}}/hooks/{script}\"");
+            serde_json::json!({"type": "command", "command": command})
+        })
+        .collect();
+    let file = serde_json::json!({"hooks": {"SessionStart": [{"hooks": hooks}]}});
+    std::fs::write(folder.join("hooks/hooks.json"), file.to_string()).unwrap();
+    for script in scripts {
+        std::fs::write(folder.join("hooks").join(script), "exit 0\n").unwrap();
+    }
+    std::fs::create_dir_all(folder.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        folder.join(".claude-plugin/plugin.json"),
+        r#"{"name":"caveman"}"#,
+    )
+    .unwrap();
+    folder
+}
+
+/// RV-DS241-155: a new pin whose hooks file lists one event's hooks in another order keeps
+/// the owner's switch on the hook it was set on, known by what it runs, never on whichever
+/// hook took that hook's place in the list.
+#[test]
+fn a_new_pin_with_its_hooks_reordered_keeps_each_switch_on_the_same_hook() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let first = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@1",
+        vec![skill(first.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let plugin = ordered_hook_plugin(work.path(), &["start.sh", "other.sh"]);
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    let other = hook_views(&mut connection, root, None)
+        .into_iter()
+        .find(|view| view.command.contains("other.sh"))
+        .unwrap()
+        .id;
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetHook {
+            id: other,
+            enabled: false,
+        },
+    )
+    .unwrap();
+
+    let second = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@2",
+        vec![skill(second.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    let moved = tempfile::tempdir().unwrap();
+    let reordered = ordered_hook_plugin(moved.path(), &["other.sh", "start.sh"]);
+    seed(&mut connection, root, "caveman", &reordered).unwrap();
+    let views = hook_views(&mut connection, root, None);
+    assert_eq!(views.len(), 2);
+    let enabled = |script: &str| {
+        views
+            .iter()
+            .find(|view| view.command.contains(script))
+            .unwrap()
+            .enabled
+    };
+    assert!(!enabled("other.sh"), "the hook switched off stays off");
+    assert!(enabled("start.sh"), "the hook left on stays on");
+}
+
+/// RV-DS241-155: a new pin that changes what a hook the owner switched off runs keeps the
+/// changed hook off, since nothing says which new hook took its place, and leaves the hook
+/// that still runs what it ran before on.
+#[test]
+fn a_new_pin_that_changes_a_switched_off_hook_keeps_the_changed_hook_off() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let first = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@1",
+        vec![skill(first.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let plugin = ordered_hook_plugin(work.path(), &["start.sh", "other.sh"]);
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    let other = hook_views(&mut connection, root, None)
+        .into_iter()
+        .find(|view| view.command.contains("other.sh"))
+        .unwrap()
+        .id;
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetHook {
+            id: other,
+            enabled: false,
+        },
+    )
+    .unwrap();
+
+    let second = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@2",
+        vec![skill(second.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    let changed = tempfile::tempdir().unwrap();
+    let renamed = ordered_hook_plugin(changed.path(), &["start.sh", "renamed.sh"]);
+    seed(&mut connection, root, "caveman", &renamed).unwrap();
+    let views = hook_views(&mut connection, root, None);
+    let enabled = |script: &str| {
+        views
+            .iter()
+            .find(|view| view.command.contains(script))
+            .unwrap()
+            .enabled
+    };
+    assert!(!enabled("renamed.sh"), "the changed hook stays off");
+    assert!(enabled("start.sh"), "the unchanged hook stays on");
+}
+
+/// RV-DS241-155: a kept hook saved before what hooks run was kept, as 2.4.1 wrote it, still
+/// loads and gives its switches to the added hook of its name, and, with the name standing
+/// only for a place in a list a new pin may reorder, to the other hook of its event too.
+#[test]
+fn a_kept_hook_saved_without_what_it_runs_loads_and_matches_its_event() {
+    let old = r#"{"name":"caveman/SessionStart/2","enabled":false,"projects":["project-1"]}"#;
+    let kept: KeptHook = serde_json::from_str(old).unwrap();
+    assert!(kept.event.is_empty() && kept.matcher.is_none() && kept.command.is_empty());
+    let view = |name: &str, command: &str| crate::plugins::HookView {
+        id: format!("id-{name}"),
+        name: name.into(),
+        plugin: "caveman".into(),
+        event: "SessionStart".into(),
+        matcher: None,
+        command: command.into(),
+        scope: Scope::Global,
+        scope_label: "All projects".into(),
+        enabled: true,
+        on_here: None,
+        follows: Some("caveman".into()),
+        source: "/private/tmp/caveman".into(),
+        version: 1,
+    };
+    let added = [
+        view("caveman/SessionStart/1", "sh other.sh"),
+        view("caveman/SessionStart/2", "sh start.sh"),
+    ];
+    let kept = [kept];
+    assert_eq!(kept_for(&kept, &added, &added[1]), [&kept[0]]);
+    assert_eq!(kept_for(&kept, &added, &added[0]), [&kept[0]]);
+}
+
+/// An added hook as setup lists it, for one plugin's event at a place in its list. Inputs:
+/// the plugin, the event, the place from 1 and what it runs. Output: the hook.
+fn added_hook(plugin: &str, event: &str, place: u32, command: &str) -> crate::plugins::HookView {
+    crate::plugins::HookView {
+        id: format!("id-{plugin}-{event}-{place}"),
+        name: format!("{plugin}/{event}/{place}"),
+        plugin: plugin.into(),
+        event: event.into(),
+        matcher: None,
+        command: command.into(),
+        scope: Scope::Global,
+        scope_label: "All projects".into(),
+        enabled: true,
+        on_here: None,
+        follows: Some(plugin.into()),
+        source: format!("/private/tmp/{plugin}"),
+        version: 1,
+    }
+}
+
+/// b3b4 r2 F1: a hook the owner switched off that a new pin moves to another event, running
+/// the same thing, stays off there, known by what it runs wherever the pin lists it, and a
+/// new hook in the event it left takes nothing from it, since it was moved, not replaced.
+#[test]
+fn a_switched_off_hook_a_new_pin_moves_to_another_event_stays_off() {
+    let kept = KeptHook {
+        name: "caveman/SessionStart/1".into(),
+        enabled: false,
+        projects: vec!["project-1".into()],
+        event: "SessionStart".into(),
+        matcher: None,
+        command: "sh guard.sh".into(),
+    };
+    let added = [
+        added_hook("caveman", "UserPromptSubmit", 1, "sh guard.sh"),
+        added_hook("caveman", "SessionStart", 1, "sh fresh.sh"),
+    ];
+    let kept = [kept];
+    assert_eq!(kept_for(&kept, &added, &added[0]), [&kept[0]]);
+    assert!(kept_for(&kept, &added, &added[1]).is_empty());
+}
+
+/// b3b4 r2 F2: a switched kept hook 2.4.1 saved without what it runs gives its switches to
+/// every added hook of its plugin and event, since its name only says where it stood in a
+/// list the new pin may have reordered; a hook of another event or plugin takes nothing.
+#[test]
+fn a_kept_hook_saved_without_what_it_runs_turns_off_every_hook_of_its_event() {
+    let old = r#"{"name":"caveman/SessionStart/2","enabled":false,"projects":["project-1"]}"#;
+    let kept: KeptHook = serde_json::from_str(old).unwrap();
+    let added = [
+        added_hook("caveman", "SessionStart", 1, "sh other.sh"),
+        added_hook("caveman", "SessionStart", 2, "sh start.sh"),
+        added_hook("caveman", "UserPromptSubmit", 2, "sh other.sh"),
+        added_hook("ponytail", "SessionStart", 2, "sh start.sh"),
+    ];
+    let kept = [kept];
+    for hook in &added[..2] {
+        assert_eq!(kept_for(&kept, &added, hook), [&kept[0]], "{}", hook.name);
+    }
+    for hook in &added[2..] {
+        assert!(kept_for(&kept, &added, hook).is_empty(), "{}", hook.name);
+    }
+}
+
+/// A kept hook of the caveman plugin as a pin keeps it, first in its event. Inputs: the
+/// event, whether it is on and what it runs. Output: the kept hook, with no project switch.
+fn kept_hook(event: &str, enabled: bool, command: &str) -> KeptHook {
+    KeptHook {
+        name: format!("caveman/{event}/1"),
+        enabled,
+        projects: Vec::new(),
+        event: event.into(),
+        matcher: None,
+        command: command.into(),
+    }
+}
+
+/// b3b4 r3 (rv-code2 r2 F1): a switched-off hook that a new pin changes into a command
+/// another kept hook still runs exactly in another event keeps its off, since that other hook
+/// has its own successor and was not moved; the other hook keeps its own switches.
+#[test]
+fn a_switched_off_hook_changed_to_a_command_another_event_still_runs_stays_off() {
+    let kept = [
+        kept_hook("SessionStart", false, "sh guard.sh"),
+        kept_hook("UserPromptSubmit", true, "sh d.sh"),
+    ];
+    let added = [
+        added_hook("caveman", "SessionStart", 1, "sh d.sh"),
+        added_hook("caveman", "UserPromptSubmit", 1, "sh d.sh"),
+    ];
+    assert_eq!(kept_for(&kept, &added, &added[0]), [&kept[0]]);
+    assert_eq!(kept_for(&kept, &added, &added[1]), [&kept[1]]);
+}
+
+/// b3b4 r3 (rv-sec2 r2 N1): an added hook that takes the switches of a hook the pin moved
+/// into its event also takes the off of the switched hook it replaced there, so any off the
+/// owner set wins.
+#[test]
+fn an_added_hook_that_both_moved_and_replaced_takes_every_off() {
+    let kept = [
+        kept_hook("SessionStart", false, "sh guard.sh"),
+        kept_hook("UserPromptSubmit", true, "sh d.sh"),
+    ];
+    let added = [added_hook("caveman", "SessionStart", 1, "sh d.sh")];
+    assert_eq!(kept_for(&kept, &added, &added[0]), [&kept[1], &kept[0]]);
+}
+
+/// RV-DS241-195: the per-project switches kept for a pack entry's hooks never outlive their
+/// project. Removing a project forgets its kept switches, so a new project that takes the
+/// same id starts with the hook on; a kept switch whose project is gone, as a removal before
+/// this fix left it, adds no switch row at the next seed. The second removal call stands for
+/// project creation, which runs it after the new row is written (storage.rs).
+#[test]
+fn kept_hook_switches_never_outlive_their_project() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    for project in ["project-1", "project-2"] {
+        connection
+            .execute("INSERT INTO projects(id, body) VALUES(?1, '{}')", [project])
+            .unwrap();
+    }
+    let work = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/superpowers@1",
+        vec![skill(work.path(), "alpha"), skill(work.path(), "beta")],
+        None,
+    )
+    .unwrap();
+    let plugin = hook_plugin(work.path(), "superpowers");
+    seed(&mut connection, root, "superpowers", &plugin).unwrap();
+    let prompt = hook_views(&mut connection, root, None)
+        .into_iter()
+        .find(|view| view.event == "UserPromptSubmit")
+        .unwrap()
+        .id;
+    for project in ["project-1", "project-2"] {
+        let version = plugins::plugin_version(&connection, &prompt).unwrap();
+        plugins::execute(
+            &mut connection,
+            root,
+            plugins::Command::Switch {
+                project: crate::protocol::ProjectId::new(project).unwrap(),
+                id: prompt.clone(),
+                on: false,
+                version,
+            },
+        )
+        .unwrap();
+    }
+    let alpha = skills(&mut connection, root)
+        .into_iter()
+        .find(|view| view.name == "alpha")
+        .unwrap()
+        .id;
+    let version = plugins::plugin_version(&connection, &alpha).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::RemoveSkill { id: alpha, version },
+    )
+    .unwrap();
+    {
+        let reused = crate::protocol::ProjectId::new("project-1").unwrap();
+        let tx = connection.transaction().unwrap();
+        tx.execute("DELETE FROM projects WHERE id='project-2'", [])
+            .unwrap();
+        tx.execute("DELETE FROM projects WHERE id='project-1'", [])
+            .unwrap();
+        plugins::remove_project(&tx, &reused).unwrap();
+        tx.execute("INSERT INTO projects(id, body) VALUES('project-1', '{}')", [])
+            .unwrap();
+        plugins::remove_project(&tx, &reused).unwrap();
+        tx.commit().unwrap();
+    }
+
+    seed(&mut connection, root, "superpowers", &plugin).unwrap();
+
+    assert_eq!(
+        effective_events(&mut connection, root, "project-1"),
+        ["SessionStart", "UserPromptSubmit"],
+        "a new project with a removed project's id starts with the hook on"
+    );
+    let left: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM plugin_switches WHERE project IN ('project-1', 'project-2')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0, "no switch row names a project that is gone or new");
+}
+
+/// rv-code2 B3B-1: removing a project drops only its id from the kept hooks, so a hook kept
+/// on everywhere still matches the hook a new pin adds that runs the same thing, and that
+/// hook takes no switched-off sibling's off.
+#[test]
+fn removing_a_project_keeps_the_hooks_a_new_pin_matches_by_what_they_run() {
+    let (_dir, mut connection) = database();
+    let kept = |place: &str, enabled: bool, projects: &[&str], command: &str| KeptHook {
+        name: format!("caveman/SessionStart/{place}"),
+        enabled,
+        projects: projects.iter().copied().map(String::from).collect(),
+        event: "SessionStart".into(),
+        matcher: None,
+        command: command.into(),
+    };
+    let record = PackRecord {
+        id: "caveman".into(),
+        source: "https://example.invalid/caveman@1".into(),
+        skills: vec!["skill-1".into()],
+        server: None,
+        enabled: true,
+        hooks: vec![
+            kept("1", true, &[], "sh x.sh"),
+            kept("2", false, &[], "sh y.sh"),
+            kept("3", true, &["project-1"], "sh z.sh"),
+        ],
+    };
+    let project = crate::protocol::ProjectId::new("project-1").unwrap();
+    let tx = connection.transaction().unwrap();
+    save_pack(&tx, &record).unwrap();
+
+    forget_project(&tx, &project).unwrap();
+
+    let left = load_pack(&tx, "caveman").unwrap().unwrap().hooks;
+    let added = [added_hook("caveman", "SessionStart", 1, "sh x.sh")];
+    let taken: Vec<&str> = kept_for(&left, &added, &added[0])
+        .into_iter()
+        .map(|hook| hook.command.as_str())
+        .collect();
+    assert_eq!(
+        taken,
+        ["sh x.sh"],
+        "the added hook took a switched-off sibling's off"
+    );
+    assert_eq!(left.len(), 3);
+    assert!(left.iter().all(|hook| hook.projects.is_empty()));
 }
