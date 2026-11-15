@@ -108,6 +108,14 @@ test("an empty engine profile opens Welcome; a saved profile opens Home in the s
   assert.doesNotMatch(home, /Tell CrazyAgent about you/);
 });
 
+test("a stored profile the engine read back with a blank name opens Welcome prefilled with its role, bio and stack (RV-DS241-134 r2)", () => {
+  const kept = { name: "", role: "Founder", bio: "Builds tools.", preferred_stack: ["Rust"], working_style: { detail: "detailed", initiative: "act_first" } };
+  const markup = render({ profile: { kind: "ok", value: kept } });
+  assert.match(markup, /<h1>Tell CrazyAgent about you<\/h1>/);
+  assert.doesNotMatch(markup, /class="sidebar"/);
+  for (const shown of ['value="Founder"', ">Builds tools.</textarea>", ">Rust<"]) assert.ok(markup.includes(shown), `${shown} is not prefilled: ${markup}`);
+});
+
 test("a profile read that is not in this build yet skips Welcome instead of blocking the app", () => {
   const markup = render({ profile: { kind: "not_ready" } });
   assert.match(markup, /<h1>Projects<\/h1>/);

@@ -181,8 +181,9 @@ export function AppView({ session, route, alerts, working, under, back }: { sess
   if (session.engine === "outdated") return updates ? <UpdatesAlone session={session} /> : <EngineOutdated onRetry={session.retry} />;
   if (session.engine === "connecting" || session.profile.kind === "loading") return updates ? <UpdatesAlone session={session} /> : <Launching />;
   const profile = session.profile.kind === "ok" ? session.profile.value : undefined;
-  if (session.profile.kind === "ok" && profile === null && updates) return <UpdatesAlone session={session} />;
-  if (session.profile.kind === "ok" && profile === null || route.name === "welcome") {
+  const firstRun = session.profile.kind === "ok" && (session.profile.value === null || !session.profile.value.name.trim());
+  if (firstRun && updates) return <UpdatesAlone session={session} />;
+  if (firstRun || route.name === "welcome") {
     return <SessionContext.Provider value={session}>
       <Welcome profile={profile} onSaved={(_, next, note) => { if (note) session.showToast(note); void session.refreshProfile().then(() => navigate(next ?? { name: "home" }, true)); }}
         onSkip={(next, note) => { if (note) session.showToast(note); navigate(next ?? { name: "home" }, true); }} />

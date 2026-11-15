@@ -1,4 +1,5 @@
 import { useId, useState, type InputHTMLAttributes, type ReactNode, type RefObject } from "react";
+import { displayText, hiddenText } from "../screens/conversation";
 import { Icon } from "./icon";
 
 function describedBy(id: string, helper?: ReactNode, error?: string): string | undefined {
@@ -131,31 +132,37 @@ export function SearchField({ label, value, onValue }: { label: string; value: s
   </span>;
 }
 
-/** Adds a chip value: trimmed, case-insensitively unique, bounded in count and length.
- * Inputs: current values, the new text, max count and max characters. Output: the new list
- * or a plain error. */
-export function addChip(values: string[], text: string, max: number, maxLength: number): { values: string[] } | { error: string } {
+/** Adds a chip value: trimmed, case-insensitively unique, bounded in count and in UTF-8 bytes,
+ * with no control or hidden character, the checks the engine applies on save, so a refused
+ * chip is named as it is added (RV-DS241-136). Inputs: current values, the new text, max count
+ * and max bytes. Output: the new list or a plain error. */
+export function addChip(values: string[], text: string, max: number, maxBytes: number): { values: string[] } | { error: string } {
   const value = text.trim().replace(/\s+/g, " ");
   if (!value) return { values };
-  if ([...value].length > maxLength) return { error: `Keep each one under ${maxLength + 1} characters.` };
-  if (/[\u0000-\u001f\u007f-\u009f]/u.test(value)) return { error: "Use one line without special characters." };
+  const shown = displayText(value);
+  if (/[\u0000-\u001f\u007f-\u009f]/u.test(value) || hiddenText(value)) {
+    return { error: `${shown} has a hidden or special character. Type it again without it.` };
+  }
+  if (new TextEncoder().encode(value).length > maxBytes) {
+    return { error: `${shown} is over ${maxBytes} bytes (about ${maxBytes} English letters or ${Math.floor(maxBytes / 3)} Chinese, Hindi or Thai ones). Shorten it.` };
+  }
   if (values.some((existing) => existing.toLowerCase() === value.toLowerCase())) return { values };
   if (values.length >= max) return { error: `You can add up to ${max}.` };
   return { values: [...values, value] };
 }
 
-/** Chips for a short list (tech stack): removable chips, a text entry that adds on Enter or
- * comma, and catalog suggestions shown as quick-add chips. Inputs: id, label, values,
- * change handler, suggestions, max count and length, helper and whether a label elsewhere on
- * the page already names it. */
-export function ChipInput({ id, label, values, onValues, suggestions = [], max = 12, maxLength = 40, helper, labelOutside = false }: {
+/** Chips for a short list (tech stack): removable chips shown with hidden characters as
+ * escapes, a text entry that adds on Enter or comma, and catalog suggestions shown as quick-add
+ * chips. Inputs: id, label, values, change handler, suggestions, max count and UTF-8 bytes,
+ * helper and whether a label elsewhere on the page already names it. */
+export function ChipInput({ id, label, values, onValues, suggestions = [], max = 12, maxBytes = 40, helper, labelOutside = false }: {
   id: string;
   label: string;
   values: string[];
   onValues: (values: string[]) => void;
   suggestions?: string[];
   max?: number;
-  maxLength?: number;
+  maxBytes?: number;
   helper?: ReactNode;
   labelOutside?: boolean;
 }) {
@@ -163,7 +170,7 @@ export function ChipInput({ id, label, values, onValues, suggestions = [], max =
   const [error, setError] = useState("");
   const [focused, setFocused] = useState(false);
   const commit = (value: string) => {
-    const next = addChip(values, value, max, maxLength);
+    const next = addChip(values, value, max, maxBytes);
     if ("error" in next) { setError(next.error); return; }
     setError("");
     setText("");
@@ -174,11 +181,11 @@ export function ChipInput({ id, label, values, onValues, suggestions = [], max =
   return <div className="field chip-input">
     {!labelOutside && <label htmlFor={id}>{label}</label>}
     {values.length > 0 && <ul className="chips plain-list" aria-label={`${label} chosen`}>
-      {values.map((value) => <li key={value} className="chip">{value}
-        <button type="button" aria-label={`Remove ${value}`} onClick={() => onValues(values.filter((item) => item !== value))}><Icon name="x" size={12} /></button>
+      {values.map((value) => <li key={value} className="chip">{displayText(value)}
+        <button type="button" aria-label={`Remove ${displayText(value)}`} onClick={() => onValues(values.filter((item) => item !== value))}><Icon name="x" size={12} /></button>
       </li>)}
     </ul>}
-    <input id={id} className="input" value={text} maxLength={maxLength + 1} aria-describedby={describedBy(id, helper, error)}
+    <input id={id} className="input" value={text} maxLength={maxBytes + 1} aria-describedby={describedBy(id, helper, error)}
       onFocus={() => setFocused(true)} onBlur={() => { if (text.trim()) commit(text); }}
       onChange={(event) => { setText(event.target.value); setError(""); }}
       onKeyDown={(event) => {

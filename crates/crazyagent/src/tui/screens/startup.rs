@@ -135,8 +135,10 @@ impl Screen for Startup {
                 ctx.request(Request::Profile);
                 Flow::Handled
             }
-            Arrival::Profile(Ok(Some(_))) => Flow::Replace(open(&Place::Home, ctx)),
-            Arrival::Profile(Ok(None)) => Flow::Replace(open(&Place::Welcome, ctx)),
+            Arrival::Profile(Ok(Some(profile))) if !profile.name.trim().is_empty() => {
+                Flow::Replace(open(&Place::Home, ctx))
+            }
+            Arrival::Profile(Ok(_)) => Flow::Replace(open(&Place::Welcome, ctx)),
             Arrival::Profile(Err(problem)) => {
                 ctx.store.profile = Load::Failed(problem.clone());
                 self.profile_failed = true;

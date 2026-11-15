@@ -176,6 +176,25 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
     }
 }
 
+/// The sentence for one preferred-stack entry the profile save would refuse, naming the
+/// entry with its hidden characters shown as escapes, in the desktop chip input's words, so
+/// the owner sees which entry to fix (RV-DS241-136, DEC-141). Input: one trimmed entry.
+/// Output: the sentence, or None when the entry fits.
+pub fn stack_item_problem(item: &str) -> Option<String> {
+    let shown = crate::memory::visible_text(item);
+    if !single_line(item) || crate::memory::hidden_text(item) {
+        return Some(format!(
+            "{shown} has a hidden or special character. Type it again without it."
+        ));
+    }
+    (item.len() > STACK_ITEM_BYTES_MAX).then(|| {
+        format!(
+            "{shown} is over {STACK_ITEM_BYTES_MAX} bytes (about {STACK_ITEM_BYTES_MAX} English letters or {} Chinese, Hindi or Thai ones). Shorten it.",
+            STACK_ITEM_BYTES_MAX / 3
+        )
+    })
+}
+
 #[cfg(unix)]
 pub(crate) fn initialize(tx: &Transaction<'_>) -> Result<(), EngineError> {
     tx.execute_batch(TABLE).map_err(error)
@@ -199,7 +218,12 @@ pub(crate) fn save(tx: &Transaction<'_>, profile: &OwnerProfile) -> Result<Outco
     Ok(Outcome::Applied)
 }
 
-pub(crate) fn load(tx: &Transaction<'_>) -> Result<Option<OwnerProfile>, EngineError> {
+/// Reads the stored owner profile with its hidden characters taken out. A name that
+/// cleaning leaves blank, one stored only of hidden characters before they were refused,
+/// comes back empty with the rest kept, for the first-run page to show (RV-DS241-134).
+/// Input: the transaction. Output: the cleaned profile, None when none is stored, or a code
+/// when the stored body does not fit or parse or a field other than the name is refused.
+fn stored(tx: &Transaction<'_>) -> Result<Option<OwnerProfile>, EngineError> {
     let body: Option<Option<String>> = tx
         .query_row(
             "SELECT CASE WHEN length(CAST(body AS BLOB))<=8192 THEN body END FROM user_profile WHERE singleton=1",
@@ -208,21 +232,48 @@ pub(crate) fn load(tx: &Transaction<'_>) -> Result<Option<OwnerProfile>, EngineE
         )
         .optional()
         .map_err(error)?;
-    body.map(|body| {
-        let body = body.ok_or_else(|| error("owner_profile_bounds"))?;
-        let profile: OwnerProfile = serde_json::from_str::<OwnerProfile>(&body)
-            .map_err(|_| error("owner_profile_invalid"))?
-            .without_hidden();
-        profile
-            .validate()
-            .map_err(|_| error("owner_profile_invalid"))?;
-        Ok(profile)
-    })
-    .transpose()
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    let body = body.ok_or_else(|| error("owner_profile_bounds"))?;
+    let mut profile: OwnerProfile = serde_json::from_str::<OwnerProfile>(&body)
+        .map_err(|_| error("owner_profile_invalid"))?
+        .without_hidden();
+    let named = !profile.name.trim().is_empty();
+    if !named {
+        profile.name = String::new();
+    }
+    let checked = if named {
+        profile.clone()
+    } else {
+        OwnerProfile {
+            name: "Owner".into(),
+            ..profile.clone()
+        }
+    };
+    checked
+        .validate()
+        .map_err(|_| error("owner_profile_invalid"))?;
+    Ok(Some(profile))
 }
 
+/// The owner profile the master prompt is built with: the stored one, cleaned, or None when
+/// none is stored or cleaning left its name blank, so no master turn is refused for it
+/// (RV-DS241-134). Input: the transaction. Output: a profile that validates, None, or a code.
+pub(crate) fn load(tx: &Transaction<'_>) -> Result<Option<OwnerProfile>, EngineError> {
+    let profile = stored(tx)?.filter(|profile| !profile.name.is_empty());
+    assert!(profile.as_ref().is_none_or(|profile| profile.validate().is_ok()));
+    Ok(profile)
+}
+
+/// The owner's profile read: the stored profile, cleaned, whose name is empty when cleaning
+/// left it blank, so both apps open the first-run page prefilled with the stored role, bio,
+/// stack and style instead of saving over them unseen (RV-DS241-134 r2).
+/// Input: the transaction. Output: the read answer, or a code.
 pub(crate) fn read(tx: &Transaction<'_>) -> Result<OwnerData, EngineError> {
-    Ok(OwnerData::OwnerProfile { profile: load(tx)? })
+    Ok(OwnerData::OwnerProfile {
+        profile: stored(tx)?,
+    })
 }
 
 #[cfg(test)]
@@ -409,5 +460,50 @@ mod tests {
         assert_eq!(loaded.bio, "Builds tools.");
         assert_eq!(loaded.preferred_stack, ["Rust"]);
         assert!(!crate::memory::hidden_text(&loaded.preface()));
+    }
+
+    /// RV-DS241-134: a name stored before hidden characters were refused and made only of
+    /// them (or of them and spaces) is left blank by the load-time cleaning; the master path
+    /// loads no profile, while the owner's read gets the cleaned rest with an empty name, so
+    /// the first-run page shows the stored role, bio, stack and style (r2), and a new
+    /// profile saves and loads over it.
+    #[cfg(unix)]
+    #[test]
+    fn a_stored_name_of_only_hidden_characters_loads_as_none_and_reads_as_a_prefill() {
+        let kept = OwnerProfile {
+            name: String::new(),
+            role: "Founder".into(),
+            bio: "Builds tools.".into(),
+            preferred_stack: vec!["Rust".into()],
+            working_style: WorkingStyle {
+                detail: AnswerDetail::Detailed,
+                initiative: Initiative::ActFirst,
+            },
+        };
+        for name in ["\u{200b}", "\u{2060}", "\u{3164}", " \u{200b}\u{2060} "] {
+            let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+            let tx = connection.transaction().unwrap();
+            initialize(&tx).unwrap();
+            let body = serde_json::json!({
+                "name": name,
+                "role": "Founder",
+                "bio": "Builds tools.\u{200b}",
+                "preferred_stack": ["Rust", "\u{2060}"],
+                "working_style": {"detail": "detailed", "initiative": "act_first"},
+            })
+            .to_string();
+            tx.execute(
+                "INSERT INTO user_profile(singleton, body) VALUES(1, ?1)",
+                [&body],
+            )
+            .unwrap();
+            assert_eq!(load(&tx).unwrap(), None, "{name:?}");
+            let OwnerData::OwnerProfile { profile: read_back } = read(&tx).unwrap() else {
+                panic!("the profile read answers with a profile");
+            };
+            assert_eq!(read_back, Some(kept.clone()), "{name:?}");
+            assert!(matches!(save(&tx, &profile()).unwrap(), Outcome::Applied));
+            assert_eq!(load(&tx).unwrap(), Some(profile()));
+        }
     }
 }
