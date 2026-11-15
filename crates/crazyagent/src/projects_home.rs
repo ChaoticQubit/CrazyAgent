@@ -18,7 +18,9 @@ pub use layout::{
     CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
 };
 pub(crate) use move_project::holds as project_move_holds;
-pub(crate) use move_project::{Asked, Finished, finish, forget, pending, plan};
+pub(crate) use move_project::{
+    Asked, Finished, Pending, check as project_move_check, finish, forget, pending, plan,
+};
 pub use move_project::{MOVE_STOP_WAIT, Moved, ProjectMove};
 pub use watch::{FOLDERS_MAX, HomeWatch, scan};
 
@@ -53,6 +55,14 @@ CREATE TABLE IF NOT EXISTS projects_home_project_move (
     origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
     target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),
     mode TEXT NOT NULL CHECK(mode IN ('move', 'copy'))
+);
+CREATE TABLE IF NOT EXISTS projects_home_project_move_ended (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    request TEXT NOT NULL CHECK(length(request) BETWEEN 1 AND 128),
+    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
+    origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
+    mode TEXT NOT NULL CHECK(mode IN ('move', 'copy')),
+    ended TEXT NOT NULL CHECK(length(ended) BETWEEN 1 AND 64)
 );
 CREATE TABLE IF NOT EXISTS projects_home_add (
     request TEXT PRIMARY KEY CHECK(length(request) BETWEEN 1 AND 128),
@@ -1394,6 +1404,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "move_project_in_progress" => {
             "A project is still being moved into your projects folder. Try again when it finishes."
+        }
+        "home_add_in_progress" => {
+            "A folder is being added to your projects folder. Try again when it finishes."
         }
         "move_project_old_folder_left" => {
             "The project moved, but part of its old folder couldn't be deleted. What's left there may be newer than the copy, so check it before you delete anything."

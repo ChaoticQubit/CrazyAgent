@@ -1574,13 +1574,12 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 id: String,
                 mode: AddMode,
                 overrides: Vec<AddOverride>,
-                generation: u64,
             }
-            let Args { id, mode, overrides, generation } = match parse(args) {
+            let Args { id, mode, overrides } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .move_project_home(&id, mode, overrides, generation) .await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.move_project_job(&id, mode, overrides)?; call.await }.await;
             routed(result)
         }
         "desktop_remove_project" => {

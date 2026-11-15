@@ -2759,6 +2759,7 @@ fn owner_reply_frame(
                 | "master_dispatch_stopped"
                 | "master_dispatch_capacity"
                 | "move_project_old_folder_left"
+                | "job_busy"
         );
         let response = if mutation && !known {
             OwnerResponse::OutcomeUnknown {

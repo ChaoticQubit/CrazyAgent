@@ -13,8 +13,8 @@ use ratatui::text::{Line, Span};
 /// The first screen: connects to the engine, then reads the profile and
 /// replaces itself with Welcome on first run or Home afterwards.
 /// Input: connection and profile arrivals. Output: the brand mark over "Connecting"
-/// with a spinner, the full "Engine not running" screen with r and c, or "Could not
-/// read your profile" when the engine answered with a refusal.
+/// with a spinner, the full "Engine not running" screen with r, which also starts the
+/// default engine, and c, or "Could not read your profile" when the engine refused.
 #[derive(Default)]
 pub struct Startup {
     profile_failed: bool,
@@ -106,7 +106,11 @@ impl Screen for Startup {
         match key {
             Key::Char('r') if Self::down(ctx) => {
                 ctx.link = Link::Connecting;
-                ctx.request(Request::Reconnect);
+                if ctx.starts_engine {
+                    ctx.start_engine();
+                } else {
+                    ctx.request(Request::Reconnect);
+                }
                 Flow::Handled
             }
             Key::Char('r') => {
@@ -159,7 +163,11 @@ impl Screen for Startup {
                 ]),
                 Line::default(),
                 Line::raw("  Projects, accounts and agents live in the engine."),
-                Line::raw("  Start it with crazyagent service start, then press r to try again."),
+                Line::raw(if ctx.starts_engine {
+                    "  Press r to start it and try again."
+                } else {
+                    "  Start it, then press r to try again."
+                }),
                 Line::default(),
                 Line::from(vec![
                     Span::raw("  "),

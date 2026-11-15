@@ -7,6 +7,7 @@ use crate::coord::settings::Nudges;
 use crate::engine::owner::{
     Adoption, AppInstructionSettings, InstructionSettings, InstructionView, ProcessText, SavedText,
 };
+use crate::instruction_check::{Finding, lines_label};
 use crate::instruction_files::{EditDelivery, Mode, Repeated};
 use crate::plugins::SkillView;
 use crate::protocol::ProjectId;
@@ -20,7 +21,7 @@ use crate::tui::keys::Key;
 use crate::tui::screens::{Flow, Place, Screen, SettingsSection};
 use crate::tui::seam::{Arrival, Request};
 use crate::tui::text::{char_width, coded, indent, row, styled, wrap};
-use crate::tui::theme::Role;
+use crate::tui::theme::{Role, Theme};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -81,8 +82,8 @@ enum Mark {
 
 /// Where Edit with AI stands while it covers the editor: asking which pool runs the edit of
 /// the app instructions, with the row the cursor is on and no pick kept from an earlier use,
-/// or showing the proposed text with the version it was made from and its marked lines,
-/// none when the texts are too long to mark.
+/// or showing the proposed text with the version it was made from, its marked lines, none
+/// when the texts are too long to mark, and what the check found (DEC-172).
 #[derive(Debug, PartialEq, Eq)]
 enum Cleanup {
     Choosing {
@@ -92,7 +93,36 @@ enum Cleanup {
         text: String,
         base_version: u64,
         rows: Option<Vec<(Mark, String)>>,
+        findings: Vec<Finding>,
     },
+}
+
+/// Lays out what Edit with AI's check found, above the proposed text: a count, then each
+/// finding's kind, lines and note wrapped to the width, or one line saying it found nothing
+/// (DEC-172). Inputs: the findings, the width and the theme. Output: the lines.
+fn finding_lines(findings: &[Finding], width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    if findings.is_empty() {
+        let none = styled("The check found nothing to fix.", Role::Muted, theme);
+        return vec![none];
+    }
+    let count = match findings.len() {
+        1 => "1 finding".to_owned(),
+        many => format!("{many} findings"),
+    };
+    let mut lines = vec![styled(count, Role::Heading, theme)];
+    for finding in findings {
+        let kind = finding.kind.label();
+        let named = lines_label(&finding.lines);
+        let note = format!("{kind}, {named}: {}", finding.note);
+        let wrapped = wrap(&note, width.saturating_sub(2).max(1));
+        lines.extend(
+            wrapped
+                .into_iter()
+                .map(|text| styled(format!("  {text}"), Role::Warning, theme)),
+        );
+    }
+    assert!(lines.len() > findings.len());
+    lines
 }
 
 /// The line changes from one text to another, keeping the longest run of lines both hold.
@@ -341,6 +371,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "instructions_cleanup_too_large" => "The model's file is over 64 KB, so nothing changed. Try again.".into(),
         "instructions_cleanup_off" => "Edit with AI is off for these instructions, so nothing was sent. Turn it on first.".into(),
         "instructions_cleanup_unavailable" => "Edit with AI can't run in this engine, so nothing was sent.".into(),
+        "instructions_cleanup_master_harness" => "Edit with AI runs on this project's master harness, and it can't run on that one yet, so nothing was sent.".into(),
         other => coded("CrazyAgent couldn't finish that.", other),
     }
 }
@@ -1127,10 +1158,14 @@ impl ProcessPage {
                 }
             }
             Some(Cleanup::Proposed {
-                text, rows: marked, ..
+                text,
+                rows: marked,
+                findings,
+                ..
             }) => {
                 lines.push(styled("Proposed instructions", Role::Heading, theme));
-                let body: Vec<Line<'static>> = match marked {
+                let mut body = finding_lines(findings, width, theme);
+                let marks: Vec<Line<'static>> = match marked {
                     Some(marked) => {
                         let count =
                             |mark| marked.iter().filter(|(found, _)| *found == mark).count();
@@ -1171,6 +1206,7 @@ impl ProcessPage {
                             .collect()
                     }
                 };
+                body.extend(marks);
                 let shown = room(lines);
                 self.cleanup_top = self.cleanup_top.min(body.len().saturating_sub(shown));
                 lines.extend(body.into_iter().skip(self.cleanup_top).take(shown));
@@ -1379,13 +1415,14 @@ impl ProcessPage {
                         "These instructions changed since you opened them.",
                         "The page now reads the saved ones; run Edit with AI again.",
                     ));
-                } else if proposal.text == *saved {
+                } else if proposal.text == *saved && proposal.findings.is_empty() {
                     ctx.say(Message::success("The model found nothing to change.", ""));
                 } else {
                     self.cleanup = Some(Cleanup::Proposed {
                         rows: line_diff(saved, &proposal.text),
                         text: proposal.text.clone(),
                         base_version: proposal.base_version,
+                        findings: proposal.findings.clone(),
                     });
                     self.cleanup_top = 0;
                 }

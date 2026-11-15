@@ -1,6 +1,6 @@
 use super::intake::copy;
 use crate::projects_home::AddMode;
-use crate::projects_home::job::{JobState, JobView, Phase};
+use crate::projects_home::job::{JobKind, JobState, JobView, Phase};
 use crate::tui::glyphs::Status;
 use crate::tui::text::cut;
 
@@ -9,8 +9,8 @@ const BRIEF_NAME_CELLS_MAX: usize = 16;
 #[cfg(test)]
 mod tests;
 
-/// What the TUI offers for the engine's intake job: stop it, start it again, answer its soft
-/// refusal in Add folder, or forget it once it ended.
+/// What the TUI offers for the engine's job: stop it, start it again, answer its soft refusal,
+/// or forget it once it ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum JobAction {
     Stop,
@@ -19,13 +19,55 @@ pub(in crate::tui) enum JobAction {
     Dismiss,
 }
 
-/// Whether the intake job is still at work: downloading, copying or clearing.
-/// Takes the job. Returns true while it runs.
+/// Whether the job is still at work: downloading, waiting for agents to stop, copying or
+/// clearing. Takes the job. Returns true while it runs.
 pub(in crate::tui) fn running(job: &JobView) -> bool {
     matches!(
         job.state,
-        JobState::Downloading { .. } | JobState::Copying { .. } | JobState::Clearing
+        JobState::Downloading { .. }
+            | JobState::Stopping { .. }
+            | JobState::Copying { .. }
+            | JobState::Clearing
     )
+}
+
+/// The few words for a count of agents still stopping. Takes the count. Returns the words.
+fn agents(left: u64) -> String {
+    match left {
+        1 => "1 agent".to_owned(),
+        left => format!("{left} agents"),
+    }
+}
+
+/// The line for a start the engine refused `job_busy`: names the job that runs, as the client
+/// last read it, or says another job runs when that read found none running. Takes the job
+/// read. Returns the line.
+pub(in crate::tui) fn busy(held: Option<&JobView>) -> String {
+    let line = match held.filter(|job| running(job)) {
+        Some(job) => {
+            let verb = match job.kind {
+                JobKind::Add => "Adding",
+                JobKind::MoveProject => "Moving",
+            };
+            format!(
+                "{verb} {} is running. Wait for it to finish on Home.",
+                name(job)
+            )
+        }
+        None => copy("job_busy"),
+    };
+    assert!(line.ends_with("Wait for it to finish on Home."));
+    line
+}
+
+/// The line for a refused job request: a busy refusal names the job that runs, any other
+/// refusal says its own sentence. Takes the code and the job read. Returns the line.
+pub(in crate::tui) fn refusal(code: &str, held: Option<&JobView>) -> String {
+    assert!(!code.is_empty());
+    match code {
+        "job_busy" => busy(held),
+        code => copy(code),
+    }
 }
 
 /// The folder's own name, or the whole path when it has none.
@@ -39,8 +81,8 @@ pub(in crate::tui) fn name(job: &JobView) -> String {
     name
 }
 
-/// What the intake job does now or how it ended, with the folder's name and the counts as
-/// files land, in the desktop's words. Takes the job. Returns one sentence.
+/// What the job does now or how it ended, with the folder's name and the counts as files
+/// land, in the desktop's words. Takes the job. Returns one sentence.
 pub(in crate::tui) fn line(job: &JobView) -> String {
     let name = name(job);
     if running(job) && job.stopping {
@@ -60,6 +102,9 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
                 format!("Downloading {name} from iCloud: {done} of {total} files")
             }
         }
+        JobState::Stopping { agents_left } => {
+            format!("Waiting for {} of {name} to stop...", agents(*agents_left))
+        }
         JobState::Copying { checked, .. } if *checked > 0 => {
             format!("Checking the copy of {name}: {checked} files checked")
         }
@@ -68,7 +113,13 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
         }
         JobState::Copying { .. } => format!("{verb} {name}..."),
         JobState::Clearing => format!("Removing {name} from its old place..."),
+        JobState::Done if job.kind == JobKind::MoveProject => {
+            format!("{name} is now in your projects folder. Start the team again from Team.")
+        }
         JobState::Done => format!("{name} is in your projects folder. Set it up from Home."),
+        JobState::Cancelled { .. } if job.kind == JobKind::MoveProject => {
+            format!("Moving {name} stopped. Nothing was moved or copied.")
+        }
         JobState::Cancelled { .. } => {
             format!("Adding {name} stopped. Nothing was moved or copied.")
         }
@@ -79,13 +130,20 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
     }
 }
 
-/// What the TUI offers for the job: Stop while it downloads or copies, nothing while it
-/// clears, Retry only when the folder did not land, Answer for a soft refusal, Dismiss once
-/// it ended. Takes the job. Returns the actions, the one Enter does first.
+/// What the TUI offers for the job: Stop while it downloads, waits for agents or copies,
+/// nothing while it clears, Retry only when the folder did not land, Answer for a soft
+/// refusal, Dismiss once it ended. Takes the job. Returns the actions, the one Enter does
+/// first.
 pub(in crate::tui) fn actions(job: &JobView) -> Vec<JobAction> {
     let offered = match &job.state {
-        JobState::Downloading { .. } | JobState::Copying { .. } if job.stopping => vec![],
-        JobState::Downloading { .. } | JobState::Copying { .. } => vec![JobAction::Stop],
+        JobState::Downloading { .. } | JobState::Stopping { .. } | JobState::Copying { .. }
+            if job.stopping =>
+        {
+            vec![]
+        }
+        JobState::Downloading { .. } | JobState::Stopping { .. } | JobState::Copying { .. } => {
+            vec![JobAction::Stop]
+        }
         JobState::Clearing => vec![],
         JobState::Done => vec![JobAction::Dismiss],
         JobState::Failed {
@@ -121,6 +179,10 @@ pub(in crate::tui) fn end_line(
 pub(in crate::tui) fn brief(job: &JobView, ellipsis: &str) -> String {
     assert!(running(job), "an ended job has no brief: {:?}", job.state);
     let name = cut(&name(job), BRIEF_NAME_CELLS_MAX, ellipsis);
+    let verb = match job.kind {
+        JobKind::Add => "Adding",
+        JobKind::MoveProject => "Moving",
+    };
     let brief = match &job.state {
         _ if job.stopping => format!("Stopping {name}..."),
         JobState::Downloading { progress } if progress.total > 0 => {
@@ -130,11 +192,14 @@ pub(in crate::tui) fn brief(job: &JobView, ellipsis: &str) -> String {
             )
         }
         JobState::Downloading { .. } => format!("Downloading {name}..."),
+        JobState::Stopping { agents_left } => {
+            format!("Stopping {name}: {}", agents(*agents_left))
+        }
         JobState::Copying { checked, .. } if *checked > 0 => {
             format!("Checking {name}: {checked} files")
         }
-        JobState::Copying { copied, .. } if *copied > 0 => format!("Adding {name}: {copied} files"),
-        JobState::Copying { .. } => format!("Adding {name}..."),
+        JobState::Copying { copied, .. } if *copied > 0 => format!("{verb} {name}: {copied} files"),
+        JobState::Copying { .. } => format!("{verb} {name}..."),
         _ => format!("Finishing {name}..."),
     };
     assert!(brief.contains(&name));
@@ -144,10 +209,14 @@ pub(in crate::tui) fn brief(job: &JobView, ellipsis: &str) -> String {
 /// The word Home's job card shows beside the folder's name, in the desktop's words, with the
 /// status kind that colors it. Takes the job. Returns the kind and the word.
 pub(in crate::tui) fn badge(job: &JobView) -> (Status, &'static str) {
+    let moving = job.kind == JobKind::MoveProject;
     let badge = match &job.state {
         JobState::Downloading { .. } => (Status::Active, "Downloading"),
+        JobState::Stopping { .. } => (Status::Active, "Waiting"),
+        JobState::Copying { .. } if moving => (Status::Active, "Moving"),
         JobState::Copying { .. } => (Status::Active, "Adding"),
         JobState::Clearing => (Status::Active, "Finishing"),
+        JobState::Done if moving => (Status::Ok, "Moved"),
         JobState::Done => (Status::Ok, "Added"),
         JobState::Failed { .. } => (Status::Fail, "Failed"),
         JobState::Cancelled { .. } => (Status::Off, "Stopped"),
@@ -166,7 +235,7 @@ pub(in crate::tui) fn next(job: &JobView) -> &'static str {
         [JobAction::Dismiss] => "Enter dismisses it.",
         [JobAction::Retry, JobAction::Dismiss] => "Enter tries again. d dismisses it.",
         [JobAction::Answer, JobAction::Dismiss] => "Enter answers. d dismisses it.",
-        other => panic!("no intake job offers {other:?}"),
+        other => panic!("no job offers {other:?}"),
     };
     assert!(next.ends_with('.'));
     next

@@ -30,11 +30,11 @@ const TASK = "Merge main into your branch, then list the pears.";
 const MERGING_CODEX = String.raw`#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/11/07"
-/bin/mkdir -p "$d" || exit 1
+/bin/mkdir -p "$d" "$CODEX_HOME/.cache" || exit 1
 id=$(printf '%08x-0000-4000-8000-%012x' $$ $$)
 f="$d/rollout-2026-11-07T00-00-00-$id.jsonl"
 printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$(/bin/pwd -P)" > "$f"
-if /usr/bin/grep -qF 'git merge crazyagent/main before you finish' "$CODEX_HOME/config.toml"; then echo told; else echo untold; fi > "$CODEX_HOME/told"
+if /usr/bin/grep -qF 'git merge crazyagent/main before you finish' "$CODEX_HOME/config.toml"; then echo told; else echo untold; fi > "$CODEX_HOME/.cache/told"
 printf '\033[?2004hCodex stand-in ready\n'
 e=$(printf '\033')
 open=0
@@ -46,13 +46,13 @@ while IFS= read -r line; do
   [ "$open" = 1 ] && continue
   case "$said" in
     *pears*)
-      git rev-parse crazyagent/main > "$CODEX_HOME/main" 2>&1
-      git merge --no-edit crazyagent/main > "$CODEX_HOME/merged" 2>&1
-      printf 'exit %s\n' "$?" >> "$CODEX_HOME/merged" ;;
+      git rev-parse crazyagent/main > "$CODEX_HOME/.cache/main" 2>&1
+      git merge --no-edit crazyagent/main > "$CODEX_HOME/.cache/merged" 2>&1
+      printf 'exit %s\n' "$?" >> "$CODEX_HOME/.cache/merged" ;;
     *apples*)
       printf 'Apples are crisp.\n' > fruit.md
-      git add fruit.md && GIT_AUTHOR_NAME=Agent GIT_AUTHOR_EMAIL=agent@example.invalid GIT_COMMITTER_NAME=Agent GIT_COMMITTER_EMAIL=agent@example.invalid git commit -q -m 'Write fruit.md' > "$CODEX_HOME/wrote" 2>&1
-      printf 'exit %s\n' "$?" >> "$CODEX_HOME/wrote" ;;
+      git add fruit.md && GIT_AUTHOR_NAME=Agent GIT_AUTHOR_EMAIL=agent@example.invalid GIT_COMMITTER_NAME=Agent GIT_COMMITTER_EMAIL=agent@example.invalid git commit -q -m 'Write fruit.md' > "$CODEX_HOME/.cache/wrote" 2>&1
+      printf 'exit %s\n' "$?" >> "$CODEX_HOME/.cache/wrote" ;;
   esac
   said=
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
@@ -93,7 +93,7 @@ function taskRow(runtime, project, prompt) {
     store.exec("PRAGMA busy_timeout = 5000");
     const task = store.prepare("SELECT status, agent FROM team_tasks WHERE project=? AND prompt=?").get(project, prompt);
     if (!task) return null;
-    const home = join(runtime, "team", "agents", `agent-${task.agent}`, "home");
+    const home = join(runtime, "team", "agents", `agent-${task.agent}`, "home", ".cache");
     const read = (name) => existsSync(join(home, name)) ? readFileSync(join(home, name), "utf8") : null;
     return { status: task.status, wrote: read("wrote"), main: read("main"), merged: read("merged"), told: read("told")?.trim() ?? null };
   } finally {

@@ -7,7 +7,7 @@ use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerData, OwnerMuta
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::onboarding::OnboardingView;
 use crazyagent::projects_home::icloud::Progress;
-use crazyagent::projects_home::job::{JobState, JobView};
+use crazyagent::projects_home::job::{JobState, JobSubject, JobView};
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::{CredentialRef, ProjectId, RequestId};
 use crazyagent::setup::{Dependency, RefusedTool, SetupStatus};
@@ -22,7 +22,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 75] = [
+pub const INTAKE_CODES: [&str; 86] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -64,7 +64,7 @@ pub const INTAKE_CODES: [&str; 75] = [
     "home_add_interrupted",
     "home_add_cancelled",
     "home_add_in_progress",
-    "intake_busy",
+    "job_busy",
     "intake_failed",
     "home_record_invalid",
     "home_icloud_not_downloaded",
@@ -98,6 +98,17 @@ pub const INTAKE_CODES: [&str; 75] = [
     "project_missing",
     "project_folder_missing",
     "pool_missing",
+    "invalid_project",
+    "move_project_already_home",
+    "move_project_busy",
+    "move_project_copy_worktrees",
+    "move_project_folder_link",
+    "move_project_in_progress",
+    "move_project_master_session",
+    "move_project_record_invalid",
+    "move_project_unavailable",
+    "move_project_interrupted",
+    "move_project_old_folder_left",
 ];
 
 const GITHUB_CODES: [&str; 35] = [
@@ -138,7 +149,7 @@ const GITHUB_CODES: [&str; 35] = [
     "not_connected",
 ];
 
-const SETUP_CODES: [&str; 43] = [
+const SETUP_CODES: [&str; 48] = [
     "owner_outcome_unknown_reconcile_same_identity",
     "stale_revision",
     "setup_checksum_mismatch",
@@ -153,6 +164,11 @@ const SETUP_CODES: [&str; 43] = [
     "setup_winget_missing",
     "setup_store_unavailable",
     "setup_pin_invalid",
+    "setup_archive_unsafe",
+    "setup_pin_unlocked",
+    "setup_local_app_data_missing",
+    "setup_platform_unsupported",
+    "agent_git_needs_tools",
     "setup_busy",
     "setup_readonly",
     "setup_tool_unsupported",
@@ -585,7 +601,7 @@ impl NativeBridge {
     /// Add folder or quitting the app never stops it. Each start has a fresh id; a start for
     /// the folder already being added attaches to that job. Inputs: the absolute folder, move
     /// or copy and the soft refusals the owner chose to go past. Output: the job's view, or
-    /// `intake_busy` while another folder is being added.
+    /// `job_busy` while another job runs.
     pub fn intake_start(
         &mut self,
         path: String,
@@ -597,7 +613,31 @@ impl NativeBridge {
         let request_id = intake_id(&native_random_id()?)?;
         let client = self.icloud_client()?;
         Ok(Box::pin(async move {
-            let view = client.intake_start(request_id, path, mode, overrides).await;
+            let subject = JobSubject::Add { path };
+            let view = client.job_start(request_id, subject, mode, overrides).await;
+            bounded(shown(view.map_err(intake_failure)?))
+        }))
+    }
+
+    /// Starts the engine's job that moves or copies a project kept where it is into the
+    /// projects home, apart from the window: the engine checks the move at once, downloads
+    /// what of the folder is only in iCloud, waits for the project's agents to stop, then
+    /// moves the folder and points the project and its agents' copies at the new place
+    /// (DEC-177). Inputs: the project id, move or copy and the soft refusals the owner chose
+    /// to go past. Output: the job's view, `job_busy` while another job runs, or the move's
+    /// refusal.
+    pub fn move_project_job(
+        &mut self,
+        id: &str,
+        mode: AddMode,
+        overrides: Vec<AddOverride>,
+    ) -> Result<Unlocked<JobView>, BridgeError> {
+        let project_id = project(id)?;
+        let request_id = intake_id(&native_random_id()?)?;
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            let subject = JobSubject::MoveProject { project_id };
+            let view = client.job_start(request_id, subject, mode, overrides).await;
             bounded(shown(view.map_err(intake_failure)?))
         }))
     }
@@ -606,7 +646,7 @@ impl NativeBridge {
     pub fn intake_status(&mut self) -> Result<Unlocked<Option<JobView>>, BridgeError> {
         let client = self.icloud_client()?;
         Ok(Box::pin(async move {
-            let view = client.intake_status().await.map_err(intake_failure)?;
+            let view = client.job_status().await.map_err(intake_failure)?;
             bounded(view.map(shown))
         }))
     }
@@ -617,12 +657,7 @@ impl NativeBridge {
         let request_id = intake_id(&id)?;
         let client = self.icloud_client()?;
         Ok(Box::pin(async move {
-            bounded(
-                client
-                    .intake_stop(request_id)
-                    .await
-                    .map_err(intake_failure)?,
-            )
+            bounded(client.job_stop(request_id).await.map_err(intake_failure)?)
         }))
     }
 
@@ -634,7 +669,7 @@ impl NativeBridge {
         Ok(Box::pin(async move {
             bounded(
                 client
-                    .intake_dismiss(request_id)
+                    .job_dismiss(request_id)
                     .await
                     .map_err(intake_failure)?,
             )
@@ -1068,6 +1103,7 @@ mod tests {
             include_str!("../../../../../crates/crazyagent/src/projects_home/intake.rs"),
             include_str!("../../../../../crates/crazyagent/src/projects_home/layout.rs"),
             include_str!("../../../../../crates/crazyagent/src/projects_home/icloud.rs"),
+            include_str!("../../../../../crates/crazyagent/src/projects_home/move_project.rs"),
         ];
         let mut refusals: Vec<&str> = engine
             .iter()
@@ -1092,6 +1128,11 @@ mod tests {
             "icloud_path_invalid",
             "icloud_outcome_unknown",
             "icloud_owner_unavailable",
+            "move_project_interrupted",
+            "move_project_old_folder_left",
+            "home_move_project",
+            "invalid_project",
+            "project_setup_missing",
         ]) {
             assert_eq!(intake_code(code), Some(code), "{code}");
         }
@@ -1105,6 +1146,8 @@ mod tests {
     fn an_intake_job_reaches_the_window_with_listed_codes_only() {
         let view = |state| JobView {
             id: RequestId::new("add-1").unwrap(),
+            kind: crazyagent::projects_home::job::JobKind::Add,
+            project_id: None,
             source: "/Users/mira/site".into(),
             mode: AddMode::Copy,
             overrides: vec![AddOverride::TooLarge],
@@ -1132,11 +1175,7 @@ mod tests {
         );
         assert_eq!(asked.overrides, vec![AddOverride::TooLarge]);
         assert_eq!(shown(view(JobState::Done)), view(JobState::Done));
-        for code in [
-            "intake_busy",
-            "home_add_in_progress",
-            "home_add_interrupted",
-        ] {
+        for code in ["job_busy", "home_add_in_progress", "home_add_interrupted"] {
             assert_eq!(intake_code(code), Some(code));
         }
     }

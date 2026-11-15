@@ -1732,8 +1732,36 @@ fn proposal(query: ProcessQuery, text: &str, base_version: u64) -> Arrival {
         Ok(ProcessReply::Proposal(crate::engine::owner::Proposal {
             text: text.to_owned(),
             base_version,
+            findings: Vec::new(),
         })),
     )
+}
+
+fn checked(query: ProcessQuery, text: &str, findings: Vec<Finding>) -> Arrival {
+    answered(
+        query,
+        Ok(ProcessReply::Proposal(crate::engine::owner::Proposal {
+            text: text.to_owned(),
+            base_version: READ_VERSION,
+            findings,
+        })),
+    )
+}
+
+fn project_edit(saved: &str) -> (Shell, ProcessQuery) {
+    let project = ProjectId::new("harbor-notes").unwrap();
+    let scope = Scope::Project {
+        id: project.clone(),
+        name: "Harbor Notes".into(),
+    };
+    let mut shell = opened(scope, saved);
+    shell.key(Key::Ctrl('p'));
+    let propose = ProcessQuery::Propose {
+        project: Some(project),
+        pool: None,
+    };
+    assert_eq!(requests(&mut shell), vec![propose.clone()]);
+    (shell, propose)
 }
 
 fn pool(name: &str) -> crate::pools::PoolSummary {
@@ -1927,6 +1955,77 @@ fn edit_with_ai_on_a_project_proposes_on_its_own_pool_and_y_saves_at_the_version
     assert!(
         !asks_before_quit(&mut shell),
         "the accepted text is the saved text"
+    );
+}
+
+/// Edit with AI shows what its check found above the marked lines: a count, then each
+/// finding's kind, the lines it names and its note, for each of the four kinds (DEC-172).
+#[test]
+fn a_proposal_shows_each_finding_with_its_kind_lines_and_note_above_the_marked_lines() {
+    use crate::instruction_check::FindingKind;
+    let (mut shell, propose) = project_edit("- A.\n- B.\n- A.\n- Go.\n- Stop.\n");
+    let repeat = "Line 3 repeats line 1.";
+    let findings = vec![
+        Finding::new(FindingKind::OverBudget, Vec::new(), "Agents get 30 KB."),
+        Finding::new(FindingKind::BrokenReference, vec![2], "`x.md` is missing."),
+        Finding::new(FindingKind::Duplicate, vec![1, 3], repeat),
+        Finding::new(FindingKind::Contradiction, vec![4, 5], "These disagree."),
+    ];
+    shell.arrive(checked(propose, "- A.\n- B.\n- Go.\n", findings));
+    let shown = tall(&mut shell);
+    assert!(shown.contains("Proposed instructions"), "{shown}");
+    let rows = [
+        "4 findings",
+        "  Over budget, whole file: Agents get 30 KB.",
+        "  Broken reference, line 2: `x.md` is missing.",
+        "  Duplicate, lines 1, 3: Line 3 repeats line 1.",
+        "  Contradiction, lines 4, 5: These disagree.",
+        "- - A.",
+    ];
+    let mut from = 0;
+    for row in rows {
+        let at = shown[from..].find(row).map(|at| at + from);
+        assert!(at.is_some(), "{row:?} in order: {shown}");
+        from = at.unwrap_or(from);
+    }
+    let nothing = "The check found nothing to fix.";
+    assert!(!shown.contains(nothing), "{shown}");
+}
+
+/// A proposal whose check found nothing says so, and one that keeps the saved text but
+/// carries findings still shows them, where a clean one only says nothing changed (DEC-172).
+#[test]
+fn a_proposal_says_when_the_check_found_nothing_and_shows_findings_on_an_unchanged_text() {
+    use crate::instruction_check::FindingKind;
+    let saved = "- Always run tests.\n- Never run tests.\n";
+    let (mut shell, propose) = project_edit(saved);
+    let kept = "- Always run tests.\n";
+    shell.arrive(proposal(propose.clone(), kept, READ_VERSION));
+    let shown = tall(&mut shell);
+    let nothing = "The check found nothing to fix.";
+    assert!(shown.contains(nothing), "{shown}");
+    assert!(!shown.contains("findings"), "{shown}");
+
+    let (mut same, propose) = project_edit(saved);
+    let found = Finding::new(FindingKind::Contradiction, vec![1, 2], "These disagree.");
+    same.arrive(checked(propose, saved, vec![found]));
+    let shown = tall(&mut same);
+    assert!(shown.contains("Proposed instructions"), "{shown}");
+    assert!(shown.contains("1 finding"), "{shown}");
+    assert!(
+        shown.contains("  Contradiction, lines 1, 2: These disagree."),
+        "{shown}"
+    );
+    assert!(!shown.contains("found nothing to change"), "{shown}");
+}
+
+/// A project whose master harness cannot run Edit with AI is refused with one sentence
+/// that says nothing was sent (DEC-172 Q1).
+#[test]
+fn an_edit_with_ai_run_on_a_master_harness_it_cannot_run_on_says_nothing_was_sent() {
+    assert_eq!(
+        message(crate::instruction_cleanup::MASTER_HARNESS),
+        "Edit with AI runs on this project's master harness, and it can't run on that one yet, so nothing was sent."
     );
 }
 

@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import type { OwnerProfile, Result } from "./api";
@@ -84,6 +85,20 @@ export function applyTheme(choice: ThemeChoice): void {
   } catch {
     return;
   }
+}
+
+/** Tells the native side the appearance choice, so the window and the app icon follow it
+ * (DEC-181). It skips bridgeCall: nothing here is an engine reply. A page without the native
+ * bridge, or a window the command refuses, keeps its web theme. Input: the choice. Output: none. */
+export function mirrorTheme(choice: ThemeChoice): void {
+  void invoke<void>("desktop_set_theme", { choice }).catch(() => undefined);
+}
+
+/** Applies, remembers and mirrors a choice the owner just made in Profile.
+ * Input: the choice. Output: none. */
+export function chooseTheme(choice: ThemeChoice): void {
+  applyTheme(choice);
+  mirrorTheme(choice);
 }
 
 /** Keeps the value shown when a poll reads the same one, compared as the bridge's JSON, so a
@@ -303,6 +318,7 @@ export function useSession(): Session {
           showToast(line, { name: "home" });
           setFoundTick((value) => value + 1);
           void notifyIntake(result.value.id);
+          if (result.value.kind === "move_project") void refreshProjects();
         }
       }
       if (result.kind !== "not_ready") timer = setTimeout(() => void read(), intakePollMs(intakeSeen.current));

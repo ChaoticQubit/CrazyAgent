@@ -6,8 +6,8 @@ use crazyagent::credentials::{Keychain, SecretString, Store, reference};
 use crazyagent::model_gateway::relay::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use crazyagent::sandbox::toolchains::{self, ToolHomes};
 use crazyagent::sandbox::{
-    AGENT_GIT_ENV, AGENT_TLS_ENV, ProjectSandbox, SECRET_ROOT_REFUSED, SandboxError,
-    SandboxNetwork, agent_command, agent_env_refused, agent_variable_allowed,
+    AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, ProjectSandbox, SECRET_ROOT_REFUSED,
+    SandboxError, SandboxNetwork, agent_command, agent_env_refused, agent_variable_allowed,
 };
 use keychain_support::TemporaryKeychain;
 use std::collections::BTreeMap;
@@ -585,6 +585,7 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
     .into_iter()
     .chain(AGENT_GIT_ENV)
     .chain(AGENT_TLS_ENV)
+    .chain(AGENT_HOME_ENV)
     .map(|(name, value)| (name.to_owned(), value.to_owned()))
     .collect();
     expected.extend(
@@ -1069,4 +1070,56 @@ fn an_agent_git_never_opens_a_folder_laid_out_as_a_bare_repository() {
         project.join(".git"),
         "an agent's git still finds an ordinary repository from a subfolder"
     );
+}
+
+/// Every agent process, sandboxed or at Full access, reads no global git config, no Python
+/// user site and no npm user config, so a `.gitconfig`, `.config/git/config`, user-site
+/// `.pth` or `.npmrc` file an agent leaves in its home runs nothing in a later process
+/// (RV-DS241-137, sec r1 F1). A harness can neither point git at another global config nor
+/// turn the user site or the user `.npmrc` back on.
+#[test]
+fn every_agent_process_reads_no_global_git_config_and_no_python_user_site() {
+    let pinned = [
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("PYTHONNOUSERSITE", "1"),
+        ("NPM_CONFIG_USERCONFIG", "/dev/null"),
+    ];
+    let home = OsStr::new("/private/tmp/ca-agent-home");
+    let base = [("HOME", home)];
+    let reopened = [
+        (OsStr::new("PYTHONNOUSERSITE"), Some(OsStr::new("0"))),
+        (
+            OsStr::new("NPM_CONFIG_USERCONFIG"),
+            Some(OsStr::new("/private/tmp/ca-agent-home/.npmrc")),
+        ),
+    ];
+    let env = crazyagent::sandbox::agent_env(&base, reopened).unwrap();
+    for (name, value) in pinned {
+        let values: Vec<&OsStr> = env
+            .iter()
+            .filter(|(known, _)| known == name)
+            .map(|(_, value)| value.as_os_str())
+            .collect();
+        assert_eq!(values, [OsStr::new(value)], "{name}");
+    }
+    let elsewhere = [(
+        OsStr::new("GIT_CONFIG_GLOBAL"),
+        Some(OsStr::new("/private/tmp/ca-agent-home/.gitconfig")),
+    )];
+    assert!(crazyagent::sandbox::agent_env(&base, elsewhere).is_err());
+    let program = Path::new("/usr/bin/true");
+    let none = || std::iter::empty::<(&OsStr, Option<&OsStr>)>();
+    let full = crazyagent::sandbox::unconfined_command(program, &base, none()).unwrap();
+    let confined =
+        agent_command(Path::new("/private/tmp/agent.sb"), program, &base, none()).unwrap();
+    for (level, command) in [("full", &full), ("confined", &confined)] {
+        for (name, value) in pinned {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(known, set)| known == name && set == Some(OsStr::new(value))),
+                "{level}: {name}"
+            );
+        }
+    }
 }
