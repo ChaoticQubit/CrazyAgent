@@ -394,15 +394,15 @@ mod failed {
     /// launch and every typed line, and in a fresh session hangs once in a task that started
     /// a command it never finishes, as a turn cut short does, reading single keys until
     /// Escape, which ends that turn as interrupted in its rollout, as Codex records it, and
-    /// then reads what is typed again; with a `deaf` file in its home it never answers
+    /// then reads what is typed again; with a `deaf` file in its home's `.cache` it never answers
     /// Escape, and with a `stubborn` file it ignores terminate from the next key on. Any
     /// other turn, and every turn of a resumed session, even one whose note quotes that
     /// task, ends with "Done.".
     const RESUMING_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
-/bin/mkdir -p "$d" || exit 1
-printf '%s\n' "$*" >> "$CODEX_HOME/launches"
+/bin/mkdir -p "$d" "$CODEX_HOME/.cache" || exit 1
+printf '%s\n' "$*" >> "$CODEX_HOME/.cache/launches"
 id=""
 resumed=""
 prev=""
@@ -428,7 +428,7 @@ hung=""
 said=""
 while IFS= read -r line; do
   case "$line" in *"$e[200~"*) open=1 ;; esac
-  printf '%s\n' "$line" >> "$CODEX_HOME/typed"
+  printf '%s\n' "$line" >> "$CODEX_HOME/.cache/typed"
   said="$said$(printf '%s' "$line" | /usr/bin/sed "s/$e\[20[01]~//g") "
   case "$line" in *"hang here"*) [ -z "$resumed" ] && [ -z "$hung" ] && hang=1 ;; esac
   case "$line" in
@@ -447,8 +447,8 @@ while IFS= read -r line; do
     while :; do
       c=$(/bin/dd bs=1 count=1 2>/dev/null | /usr/bin/od -An -tx1 | /usr/bin/tr -d ' \n')
       [ -n "$c" ] || exit 0
-      [ -e "$CODEX_HOME/stubborn" ] && trap '' TERM
-      [ "$c" = 1b ] && [ ! -e "$CODEX_HOME/deaf" ] && break
+      [ -e "$CODEX_HOME/.cache/stubborn" ] && trap '' TERM
+      [ "$c" = 1b ] && [ ! -e "$CODEX_HOME/.cache/deaf" ] && break
     done
     printf '{"type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}\n' >> "$f"
     /bin/stty icanon
@@ -652,7 +652,7 @@ done
                 self.base
                     .join("team/agents")
                     .join(format!("agent-{agent}"))
-                    .join("home")
+                    .join("home/.cache")
                     .join(name),
             )
             .unwrap_or_default()
@@ -683,7 +683,7 @@ done
                 self.base
                     .join("team/agents")
                     .join(format!("agent-{agent}"))
-                    .join("home")
+                    .join("home/.cache")
                     .join(marker),
                 "",
             )

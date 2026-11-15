@@ -29,14 +29,14 @@ const CATALOG: &str = "version = 1\ntimeout_ms = 5000\nallowed_destinations = []
 
 const LIVE_CODEX: &str = r#"#!/bin/sh
 d="$CODEX_HOME/sessions/2026/10/28"
-/bin/mkdir -p "$d" || exit 1
+/bin/mkdir -p "$d" "$CODEX_HOME/.cache" || exit 1
 f="$d/rollout-2026-10-28T00-00-00-$$.jsonl"
 printf '{"type":"session_meta","payload":{"cwd":"%s"}}\n' "$(/bin/pwd -P)" > "$f"
 printf '\033[?2004hCodex stand-in ready\n'
 e=$(printf '\033')
 open=0
 while IFS= read -r line; do
-  printf '%s\n' "$line" >> "$CODEX_HOME/heard.log"
+  printf '%s\n' "$line" >> "$CODEX_HOME/.cache/heard.log"
   case "$line" in
     *"$e[201~"*) open=0 ;;
     *"$e[200~"*) open=1; continue ;;
@@ -44,7 +44,7 @@ while IFS= read -r line; do
   esac
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
   case "$line" in
-    *"hold the turn"*) while [ ! -e "$CODEX_HOME/release" ]; do /bin/sleep 0.2; done ;;
+    *"hold the turn"*) while [ ! -e "$CODEX_HOME/.cache/release" ]; do /bin/sleep 0.2; done ;;
   esac
   /bin/sleep 0.3
   printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}\n' >> "$f"
@@ -374,7 +374,7 @@ fn an_answer_settled_before_an_engine_kill_reaches_the_live_master_once_after_th
         .unwrap();
     assert_eq!(live_agent(&database), Some(master));
     let home = crazyagent::team::runtime::agent_home(&root.join("team"), master);
-    let log = home.join("heard.log");
+    let log = home.join(".cache/heard.log");
     std::thread::sleep(WATCHED);
     assert_eq!(
         live_turns(&database),
@@ -460,7 +460,7 @@ fn an_answer_settled_before_an_engine_kill_reaches_the_live_master_once_after_th
         "the live master's pane outlives the killed engine"
     );
     assert_eq!(state(&database, message), "pending");
-    fs::write(home.join("release"), b"").unwrap();
+    fs::write(home.join(".cache/release"), b"").unwrap();
 
     let engine = Engine::start(&root, &codex);
     until(

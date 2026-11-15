@@ -1073,6 +1073,58 @@ fn clean_up_takes_a_worktree_its_agent_pinned_inside() {
     assert_eq!(case.listed(), Vec::<i64>::new());
 }
 
+/// Clears the ACL of a test file when dropped, so its temporary folder can always be
+/// deleted, whatever the test asserted. Holds the file's path.
+#[cfg(target_os = "macos")]
+struct AclCleared(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for AclCleared {
+    fn drop(&mut self) {
+        let _ = Command::new("/bin/chmod").arg("-N").arg(&self.0).output();
+    }
+}
+
+/// RV-DS241-137 sec r2 F1: removing an agent's tree whose folder the agent left without
+/// write never changes the ACL of an owner file a link in it names: the tree goes, and the
+/// owner's file keeps its entry, since a tree's ACLs go only on its one-link entries that
+/// are not links and on links themselves.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_an_agent_tree_never_clears_an_acl_a_link_in_it_leads_to() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let owner = root.join("owner.txt");
+    write(&owner, b"the owner's\n");
+    let _owner = AclCleared(owner.clone());
+    let added = Command::new("/bin/chmod")
+        .args(["+a", "everyone deny write"])
+        .arg(&owner)
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{added:?}");
+    let worktree = root.join("worktree");
+    let shut = worktree.join("target");
+    std::fs::create_dir_all(&shut).unwrap();
+    std::os::unix::fs::symlink(&owner, shut.join("x")).unwrap();
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let outcome = remove_agent_tree(&worktree);
+
+    let listed = Command::new("/bin/ls")
+        .arg("-led")
+        .arg(&owner)
+        .output()
+        .unwrap();
+    assert_eq!(outcome, Ok(()));
+    assert!(!worktree.exists(), "the tree stayed");
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("deny"),
+        "the owner's file lost its ACL"
+    );
+}
+
 #[test]
 fn a_claim_an_engine_stop_interrupted_is_offered_again_or_handed_back_when_it_changed() {
     let case = Case::new();

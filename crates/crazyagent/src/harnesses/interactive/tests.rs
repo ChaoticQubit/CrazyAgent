@@ -125,6 +125,7 @@ fn with_git_env(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
         crate::sandbox::AGENT_GIT_ENV
             .into_iter()
             .chain(crate::sandbox::AGENT_TLS_ENV)
+            .chain(crate::sandbox::AGENT_HOME_ENV)
             .map(|(name, value)| (name.to_owned(), value.to_owned())),
     );
     env
