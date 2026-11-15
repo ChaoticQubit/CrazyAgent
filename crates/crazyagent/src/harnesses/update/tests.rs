@@ -2224,9 +2224,9 @@ fn a_harness_entry_that_leads_into_temp_is_never_asked_its_version_on_macos() {
 
 /// security-audit vid 1, leader 03:14 (a): a version read runs the real file the resolver
 /// checked, not the entry's chain a second time. An owner entry whose chain passes through a
-/// link in a project agents can write, which the resolver does not judge, has that link moved
-/// to a planted Codex between the check and the run: the owner's file still answers, and the
-/// planted one never starts.
+/// middle link in an owner folder, which passes the check, has that link moved to a planted
+/// Codex between the check and the run: the owner's file still answers, and the planted one
+/// never starts.
 #[test]
 fn a_version_read_runs_the_file_it_checked_when_a_middle_link_moves_before_the_run() {
     let machine = Machine::new();
@@ -2244,10 +2244,11 @@ fn a_version_read_runs_the_file_it_checked_when_a_middle_link_moves_before_the_r
     let (owner_ran, planted_ran) = (at.join("owner-ran"), at.join("planted-ran"));
     let owned = at.join("owner/lib/node_modules/@openai/codex/bin/codex.js");
     let planted = work.join("tools/planted/codex");
-    let middle = work.join("tools/codex");
+    let middle = at.join("links/codex");
     let link = at.join("bin/codex");
     executable(&owned, &text(&owner_ran, "0.167.1"));
     executable(&planted, &text(&planted_ran, "6.6.6"));
+    std::fs::create_dir_all(middle.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&owned, &middle).unwrap();
     std::fs::create_dir_all(link.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&middle, &link).unwrap();
@@ -2279,9 +2280,9 @@ fn a_version_read_runs_the_file_it_checked_when_a_middle_link_moves_before_the_r
 
 /// security-audit vid 1 r2 (rv-secreview, leader 03:29): an update command is checked when
 /// it is built and run later, so the check must bind what runs. A standalone Codex whose
-/// owner entry leads through a link in a project agents can write, which the resolver does
-/// not judge, has that link moved to a planted file after the self-update command passed its
-/// checks: the planted file never runs.
+/// owner entry leads through a link in a project agents can write, which the resolver now
+/// refuses too (B1), has that link moved to a planted file after the self-update command's
+/// checks, if a command is built at all: the planted file never runs.
 #[test]
 fn a_self_update_never_runs_a_file_a_middle_link_moved_to_after_its_check() {
     let machine = Machine::new();
@@ -2341,9 +2342,10 @@ fn a_self_update_is_refused_when_a_middle_link_sits_where_agents_or_others_can_m
         std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&middle, &entry).unwrap();
         assert_eq!(method("codex", &real, &roots), Method::SelfUpdate);
-        assert!(
+        assert_eq!(
             crate::tools::resolve_entry(&entry, &roots.places).is_ok(),
-            "{place}"
+            !refused,
+            "{place}: the resolver judges every link too (B1)"
         );
         let command = update_command("codex", &entry, &real, &roots);
         if refused {
@@ -2382,7 +2384,7 @@ fn a_command_whose_link_chain_passes_through_the_temp_folder_is_refused_on_macos
         search: vec![program.parent().unwrap().to_path_buf()],
         prefix: None,
     };
-    assert!(crate::tools::resolve_entry(&through, &engine).is_ok());
+    assert!(crate::tools::resolve_entry(&through, &engine).is_err());
     assert_eq!(
         checked(command(&through), &engine).unwrap_err(),
         TOOL_UNSAFE
