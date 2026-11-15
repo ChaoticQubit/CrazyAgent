@@ -955,18 +955,22 @@ pub(super) fn reset_settling(agent: &Agent, from: &str, target: &str) -> Result<
 }
 
 /// Puts an agent worktree's index and files back after its reset did not hold, moving them
-/// from `target` to whatever HEAD now holds with the same two-tree read-tree, path by path:
+/// from `target` to whatever HEAD now holds, named by its id so the index the engine rebuilds
+/// after the step reads the same trees (SA vid 3), with the same two-tree read-tree, path by path:
 /// a path the agent committed meanwhile is at HEAD already and stays, so no reversal of
 /// that commit is staged, and the rest go back to the commit HEAD holds. An edit the agent
 /// made meanwhile is never overwritten: git refuses, writing nothing, and the refusal is
 /// logged. Inputs: the worktree and the reset's target. Output: none.
 fn files_back(agent: &Agent, target: &str) {
     assert!(is_object_id(target));
-    let back = agent
-        .repo
-        .confined(Writes::WorkTree)
-        .and_then(|repo| repo.exec(&["read-tree", "-u", "-m", target, "HEAD"], None, &[], 4096));
-    if !back.is_ok_and(|back| back.code == 0) {
+    let head = agent.repo.commit_of("HEAD").ok().flatten();
+    let back = head.as_deref().map(|head| {
+        agent
+            .repo
+            .confined(Writes::WorkTree)
+            .and_then(|repo| repo.exec(&["read-tree", "-u", "-m", target, head], None, &[], 4096))
+    });
+    if !back.is_some_and(|back| back.is_ok_and(|back| back.code == 0)) {
         eprintln!("landing_reset_files_back_refused");
     }
 }

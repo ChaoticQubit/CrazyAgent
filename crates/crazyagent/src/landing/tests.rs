@@ -15511,7 +15511,7 @@ fn a_confined_step_on_linux_never_takes_a_link_or_a_special_file_as_the_index() 
     let placed = std::fs::symlink_metadata(&index).unwrap().ino();
     for (name, plant) in index_plants(&outside) {
         let repo = confined_agent(&case, git::Writes::WorkTree);
-        let left = repo.swapped(|| {
+        let left = repo.swapped(None, || {
             std::fs::remove_file(&copy).unwrap();
             plant(&copy);
             Ok(git::Output {
@@ -15566,7 +15566,7 @@ fn a_confined_work_tree_step_on_linux_never_takes_the_index_copy_it_leaves() {
     let copy = step.join("index");
     let before = std::fs::read(&index).unwrap();
     let repo = confined_agent(&case, git::Writes::WorkTree);
-    let left = repo.swapped(|| {
+    let left = repo.swapped(None, || {
         let planted = step.join("index.lock");
         write(&planted, "forged index\n");
         std::fs::rename(&planted, &copy).unwrap();
@@ -15583,6 +15583,118 @@ fn a_confined_work_tree_step_on_linux_never_takes_the_index_copy_it_leaves() {
     assert_eq!(std::fs::read(&index).unwrap(), before);
     assert!(std::fs::symlink_metadata(&lock).is_err());
     assert!(std::fs::symlink_metadata(&step).is_err());
+}
+
+/// SA vid 3: a confined Linux step that fills the work tree and names its index-only form takes
+/// the index the engine rebuilds from the worktree's own index with that form, whatever the step
+/// left as its copy: a plain file put there by a rename is passed over, the index holds the
+/// target's tree, and no lock or step folder is left.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_work_tree_step_on_linux_takes_the_index_the_engine_rebuilds() {
+    let case = Case::new();
+    let worktree = case.workspace.worktree.clone();
+    let index = case.workspace.git_dir.join("index");
+    let lock = case.workspace.git_dir.join("index.lock");
+    let step = case.workspace.git_dir.join("crazyagent-step");
+    let copy = step.join("index");
+    let target = case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    let index_only = ["read-tree", "-i", "-m", "HEAD", target.as_str()];
+    let repo = confined_agent(&case, git::Writes::WorkTree);
+    let moved = repo
+        .swapped(Some(index_only.as_slice()), || {
+            let planted = step.join("index.lock");
+            write(&planted, "forged index\n");
+            std::fs::rename(&planted, &copy).unwrap();
+            Ok(git::Output {
+                code: 0,
+                stdout: Vec::new(),
+                overflow: false,
+            })
+        })
+        .unwrap();
+    assert_eq!(moved.code, 0);
+    assert_ne!(std::fs::read(&index).unwrap(), b"forged index\n");
+    assert_eq!(
+        git_in(
+            &case.home,
+            &worktree,
+            &["diff-index", "--cached", "--name-only", &target]
+        ),
+        ""
+    );
+    assert!(std::fs::symlink_metadata(&lock).is_err());
+    assert!(std::fs::symlink_metadata(&step).is_err());
+}
+
+/// SA vid 3: the index a confined Linux `read-tree -u -m` ends with is the one the engine
+/// rebuilds with no work tree, and it keeps the worktree index's modified time, so an entry racy
+/// against that index stays racy: the move lands, the index holds the target's tree, and an edit
+/// of the same size in the index's own second to a path the move leaves alone is still seen, as
+/// the step's own copy, where git checked the file, would show it. `core.checkStat=minimal` and
+/// set times keep the second fixed.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_read_tree_on_linux_keeps_a_racy_edit_to_a_path_it_leaves_alone_in_view() {
+    let case = Case::new();
+    let worktree = case.workspace.worktree.clone();
+    let readme = worktree.join("README");
+    let index = case.workspace.git_dir.join("index");
+    let then = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let stamp = |path: &Path| {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(then))
+            .unwrap();
+    };
+    git_in(
+        &case.home,
+        &case.repo,
+        &["config", "core.checkStat", "minimal"],
+    );
+    let target = case.owner_commit("notes", "Notes\n", "Target");
+    stamp(&readme);
+    git_in(&case.home, &worktree, &["update-index", "--refresh"]);
+    let edit = "ONE\nTWO\nTHREE\n";
+    assert_eq!(
+        std::fs::read(&readme).unwrap().len(),
+        edit.len(),
+        "the same size"
+    );
+    write(&readme, edit);
+    stamp(&readme);
+    stamp(&index);
+    assert_eq!(
+        git_in(&case.home, &worktree, &["diff-files", "--name-only"]),
+        "README\n",
+        "the real index sees the racy edit"
+    );
+    let moved = confined_agent(&case, git::Writes::WorkTree)
+        .exec(&["read-tree", "-u", "-m", "HEAD", &target], None, &[], 4096)
+        .unwrap();
+    assert_eq!(moved.code, 0);
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("notes")).unwrap(),
+        "Notes\n"
+    );
+    assert_eq!(std::fs::read_to_string(&readme).unwrap(), edit);
+    assert_eq!(
+        git_in(
+            &case.home,
+            &worktree,
+            &["diff-index", "--cached", "--name-only", &target]
+        ),
+        ""
+    );
+    assert_eq!(
+        git_in(&case.home, &worktree, &["diff-files", "--name-only"]),
+        "README\n",
+        "the rebuilt index lost the racy edit"
+    );
+    assert!(std::fs::symlink_metadata(case.workspace.git_dir.join("index.lock")).is_err());
+    assert!(std::fs::symlink_metadata(case.workspace.git_dir.join("crazyagent-step")).is_err());
 }
 
 /// LINUX-GIT-CONFINE r1 F2 (rv-code), RV-DS241-135: an engine stopped during a confined Linux
@@ -15877,7 +15989,7 @@ fn a_confined_step_on_linux_names_its_engine_process_in_the_lock_it_takes() {
         .unwrap()
         .unwrap();
     let mut seen = String::new();
-    repo.swapped(|| {
+    repo.swapped(None, || {
         seen = std::fs::read_to_string(&lock).unwrap();
         Ok(git::Output {
             code: 0,
@@ -15927,7 +16039,7 @@ fn a_confined_step_on_linux_never_copies_an_index_that_is_a_link_or_a_special_fi
         gone(&index);
         plant(&index);
         let ran = std::cell::Cell::new(false);
-        let refused = repo.swapped(|| {
+        let refused = repo.swapped(None, || {
             ran.set(true);
             Ok(git::Output {
                 code: 0,
