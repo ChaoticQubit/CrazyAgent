@@ -681,7 +681,7 @@ fn register_harnesses(
             crazyagent::paths::RCLI_EXECUTABLE,
             &mut harnesses.rcli,
             EngineService::register_rcli_executable,
-            EngineService::register_rcli_executable,
+            EngineService::register_found_rcli_executable,
             found_on_path[2],
         ),
     ];
