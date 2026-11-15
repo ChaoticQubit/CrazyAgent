@@ -312,9 +312,12 @@ impl<'a> Pass<'a> {
                 Ok(not_applicable("needs secret scanning"))
             }
             R::PushProtection => self.security("secret_scanning_push_protection", wanted),
-            R::PrivateVulnerabilityReporting | R::ActionsOutsidePrApproval if private => {
+            R::PrivateVulnerabilityReporting if private => {
                 Ok(not_applicable("public repositories only"))
             }
+            R::ActionsOutsidePrApproval if private => Ok(not_applicable(
+                "a private repository runs no outside pull request workflows",
+            )),
             R::PrivateVulnerabilityReporting => {
                 self.toggle("private-vulnerability-reporting", wanted)
             }
@@ -544,18 +547,20 @@ impl<'a> Pass<'a> {
         let on = self.on;
         let facts = self.facts;
         let wanted = on.contains(&rule);
-        let checks: &[String] = match (&facts.ci, rule, wanted) {
-            (GitHubCi::None, GitHubRule::RequiredChecks, true) => {
+        let checks: &[String] = match &facts.ci {
+            GitHubCi::Checks(checks) => checks,
+            GitHubCi::None | GitHubCi::Waiting => &[],
+        };
+        if rule == GitHubRule::RequiredChecks && wanted {
+            if facts.ci == GitHubCi::None {
                 return Ok(not_applicable("no CI workflows in this repository"));
             }
-            (GitHubCi::Waiting, GitHubRule::RequiredChecks, true) => {
+            if checks.is_empty() {
                 return Ok(GitHubRuleState::Waiting {
                     reason: "waiting for the first CI run to name its checks".into(),
                 });
             }
-            (GitHubCi::Checks(checks), _, _) => checks,
-            _ => &[],
-        };
+        }
         let found = match self.listed()? {
             Ok(listed) => listed
                 .iter()
