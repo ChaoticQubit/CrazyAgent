@@ -1,0 +1,24 @@
+ [◆▪◆▪] CrazyAgent  /  Settings  /  Connector activity                          
+────────────────────────────────────────────────────────────────────────────────
+  Connector activity                                                            
+  Every tool list and tool call an agent made through a connector. Arguments    
+  and results are never kept.                                                   
+                                                                                
+  > Activity log keeps   7 days  [30 days]  90 days                             
+    Connector           All                                                     
+    Project             All                                                     
+                                                                                
+  Calls  3                                                                      
+    Nov 15 12:04  board  list_issues  Read  OK                                  
+      Project: Plant shop  Agent: Agent 1  120 B in, 2.0 KiB out  340 ms        
+    Nov 15 12:03  board  create_issue  Write  This tool can change things at …  
+      Project: Plant shop  Agent: Master  64 B in, 0 B out  0 ms                
+    Nov 15 11:58  desk  Tool list  OK                                           
+      Project: beta  Agent: Agent 2  0 B in, 5.3 KiB out  1210 ms               
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ↑↓ Move  ←→ Change  r Read again  Esc Back                              ? Help 

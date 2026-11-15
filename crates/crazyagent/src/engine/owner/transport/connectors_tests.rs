@@ -530,3 +530,81 @@ fn a_connector_add_never_replaces_an_embedding_plugin_of_that_name() {
         .unwrap();
     assert_eq!(near.sha256, sha(NEAR));
 }
+
+fn logged(connector: &str, started_ms: i64) -> crate::connectors::audit::CallRow {
+    crate::connectors::audit::CallRow {
+        launch: "l1".into(),
+        connector: connector.into(),
+        tool: "list_issues".into(),
+        kind: crate::connectors::audit::CallKind::Read,
+        sent: true,
+        project: PROJECT.into(),
+        agent: "Agent 1".into(),
+        started_ms,
+        ms: 340,
+        bytes_in: 120,
+        bytes_out: 2048,
+        outcome: "ok".into(),
+    }
+}
+
+fn activity(root: &Path, action: serde_json::Value) -> crate::connectors::audit::ActivityView {
+    match send(root, request(action), None).unwrap() {
+        Reply::Activity { view } => *view,
+        other => panic!("expected the activity page, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_activity_page_reads_with_its_filters_and_a_keep_save_drops_older_calls_at_once() {
+    const DAY: i64 = 24 * 60 * 60 * 1000;
+    let (_tmp, root) = engine();
+    let db = crate::questions::open(&root).unwrap();
+    let now = crate::semantic::now_ms();
+    for (connector, days) in [("board", 3), ("board", 10), ("desk", 20)] {
+        crate::connectors::audit::record(&db, &logged(connector, now - days * DAY), KeepLog::Days90)
+            .unwrap();
+    }
+
+    let all = activity(&root, json!({"kind": "activity", "connector": null, "project": null}));
+    assert_eq!(all.calls.len(), 3);
+    assert_eq!(all.connectors, ["board", "desk"]);
+    assert_eq!(all.projects.len(), 1);
+    assert_eq!(
+        (all.projects[0].id.as_str(), all.settings.keep_log, all.version),
+        (PROJECT, KeepLog::Days30, 0)
+    );
+    let board = activity(&root, json!({"kind": "activity", "connector": "board", "project": null}));
+    assert_eq!(board.calls.len(), 2);
+    assert_eq!(board.connector.as_deref(), Some("board"));
+    let alpha = activity(&root, json!({"kind": "activity", "connector": null, "project": PROJECT}));
+    assert_eq!(alpha.calls.len(), 3);
+    let ghost = activity(&root, json!({"kind": "activity", "connector": null, "project": "ghost"}));
+    assert!(ghost.calls.is_empty(), "a project that is gone filters to nothing, never a refusal");
+
+    let saved = ask(
+        &root,
+        json!({"kind": "set", "settings": {
+            "write": "ask_every_time", "wait": "minutes10", "native": "off",
+            "size_cap": "kib256", "keep_log": "days7"
+        }, "version": 0}),
+    );
+    assert_eq!((saved.settings.keep_log, saved.version), (KeepLog::Days7, 1));
+    let left: i64 = db
+        .query_row("SELECT COUNT(*) FROM connector_calls", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(left, 1, "the save drops the calls the new keep time no longer holds");
+    let after = activity(&root, json!({"kind": "activity", "connector": null, "project": null}));
+    assert_eq!(after.calls.len(), 1);
+    assert_eq!((after.settings.keep_log, after.version), (KeepLog::Days7, 1));
+
+    for action in [
+        json!({"kind": "activity", "connector": "", "project": null}),
+        json!({"kind": "activity", "connector": "a".repeat(NAME_BYTES_MAX + 1), "project": null}),
+        json!({"kind": "activity", "connector": null, "project": ""}),
+        json!({"kind": "activity", "connector": null, "project": "p".repeat(PROJECT_BYTES_MAX + 1)}),
+        json!({"kind": "activity", "connector": null, "project": null, "arguments": true}),
+    ] {
+        assert_eq!(refused(&root, action.clone()), "connector_request_invalid", "{action}");
+    }
+}

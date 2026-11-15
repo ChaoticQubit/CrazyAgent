@@ -268,6 +268,7 @@ pub enum Place {
     },
     AppPlugins,
     SearchSettings,
+    ConnectorActivity,
 }
 
 /// One item a screen picks when a notification opens it (DEC-136a): a logged question on
@@ -467,7 +468,8 @@ pub trait Screen {
             | Place::NotificationSettings
             | Place::Demo
             | Place::AppPlugins
-            | Place::SearchSettings => None,
+            | Place::SearchSettings
+            | Place::ConnectorActivity => None,
         }
     }
 }
@@ -567,6 +569,9 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::Demo => Box::new(demo::DemoPage::new()),
         Place::AppPlugins => Box::new(settings::app_plugins::AppPluginsPage::new()),
         Place::SearchSettings => Box::new(settings::search::SearchPage::new()),
+        Place::ConnectorActivity => {
+            Box::new(settings::connector_activity::ConnectorActivityPage::new())
+        }
         Place::Onboarding {
             path,
             name,

@@ -1,5 +1,6 @@
 use super::*;
 use crate::app_plugins::{PluginKind, Preview, store};
+use crate::connectors::audit::{self, ActivityView};
 use crate::connectors::{ConnectorSettings, ConnectorsView, Who};
 use crate::engine::owner::AccountSecret;
 use crate::protocol::encode_frame;
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 const REQUEST_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX;
 const NAME_BYTES_MAX: usize = 64;
 const PROJECT_BYTES_MAX: usize = 128;
+const _: () = assert!(PROJECT_BYTES_MAX == audit::PROJECT_ID_BYTES_MAX);
 pub(super) const CONNECTORS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Every code a Connectors request can answer an owner client with: the plugin store's
@@ -47,8 +49,8 @@ pub const CONNECTORS_CODES: &[&str] = &[
 ];
 
 /// One Connectors request. Reads: `view` (the page, with one project's switches),
-/// `preview` (a pasted manifest's trust screen) and `review` (the trust screen of a listed
-/// connector). Changes: add, trust, remove, save a key sent in the frame after the
+/// `preview` (a pasted manifest's trust screen), `review` (the trust screen of a listed
+/// connector) and `activity` (the activity log with its filters). Changes: add, trust, remove, save a key sent in the frame after the
 /// request, clear a key, turn a connector on or off for a project, and save the settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -92,6 +94,10 @@ enum Action {
         settings: ConnectorSettings,
         version: u64,
     },
+    Activity {
+        connector: Option<String>,
+        project: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -106,6 +112,7 @@ struct Envelope {
 enum Reply {
     Connectors { view: Box<ConnectorsView> },
     Preview { preview: Box<Preview> },
+    Activity { view: Box<ActivityView> },
     Stale { current: u64 },
     Rejected { code: String },
 }
@@ -239,6 +246,22 @@ impl OwnerClient {
         {
             Reply::Connectors { view } => Ok(ConnectorsSaved::Saved(view)),
             Reply::Stale { current } => Ok(ConnectorsSaved::Stale(current)),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads the connector activity log. Inputs: the connector and the project to filter
+    /// by, none for all. Output: the newest calls, the filter choices and the settings.
+    pub async fn connector_activity(
+        &self,
+        connector: Option<String>,
+        project: Option<String>,
+    ) -> Result<ActivityView, EngineError> {
+        match self
+            .connectors_exchange(Action::Activity { connector, project }, None)
+            .await?
+        {
+            Reply::Activity { view } => Ok(*view),
             _ => Err(unknown()),
         }
     }
@@ -400,15 +423,30 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         Action::SetKey { name, secret } | Action::ClearKey { name, secret } => {
             &[name.as_str(), secret.as_str()]
         }
-        Action::Grant { connector, .. } => &[connector.as_str()],
-        Action::View { .. } | Action::Preview { .. } | Action::Add { .. } | Action::Set { .. } => {
-            &[]
-        }
+        Action::Grant { connector, .. }
+        | Action::Activity {
+            connector: Some(connector),
+            ..
+        } => &[connector.as_str()],
+        Action::View { .. }
+        | Action::Preview { .. }
+        | Action::Add { .. }
+        | Action::Set { .. }
+        | Action::Activity {
+            connector: None, ..
+        } => &[],
     };
     let project = match &connectors {
-        Action::View { project } => project.as_deref(),
+        Action::View { project } | Action::Activity { project, .. } => project.as_deref(),
         Action::Grant { project, .. } => Some(project.as_str()),
-        _ => None,
+        Action::Preview { .. }
+        | Action::Review { .. }
+        | Action::Add { .. }
+        | Action::Trust { .. }
+        | Action::Remove { .. }
+        | Action::SetKey { .. }
+        | Action::ClearKey { .. }
+        | Action::Set { .. } => None,
     };
     if names
         .iter()
@@ -501,6 +539,13 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
                 Err(current) => Ok(Reply::Stale { current }),
             }
         }
+        Action::Activity { connector, project } => Ok(Reply::Activity {
+            view: Box::new(audit::view(
+                &db,
+                connector.as_deref(),
+                project.as_deref(),
+            )?),
+        }),
     }
 }
 

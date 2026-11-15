@@ -4515,3 +4515,117 @@ fn harnesses_with_an_unknown_version_sign_in_from_the_tui_as_before() {
     drop(pty);
     engine.stop();
 }
+
+/// V3 Connectors Task 8: stores `seed` as the activity log's keep time through the owner
+/// protocol, logs three calls 3, 10 and 45 days old, opens Settings / Connector activity
+/// through Go to, sends `keys` on the keep row, saves with Enter and reads back the keep
+/// time, the days of the calls the page lists and how many rows the engine still holds.
+/// Inputs: the keep time stored first and the keys. Output: the three; panics when the page
+/// or the save never shows.
+fn connector_keep_after(
+    seed: crazyagent::connectors::KeepLog,
+    keys: &[&str],
+) -> (crazyagent::connectors::KeepLog, Vec<i64>, i64) {
+    use crazyagent::connectors::ConnectorSettings;
+    use crazyagent::connectors::audit::{self, CallKind, CallRow};
+    const DAY: i64 = 24 * 60 * 60 * 1000;
+    let (mut engine, pty, _home) = tui_at_home("ca-e2e-conn-keep-");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let version = owner.controller.connectors(None).await.unwrap().version;
+        let settings = ConnectorSettings {
+            keep_log: seed,
+            ..ConnectorSettings::DEFAULT
+        };
+        owner
+            .controller
+            .set_connector_settings(settings, version)
+            .await
+            .unwrap();
+        owner.controller.detach();
+    });
+    let now = crazyagent::semantic::now_ms();
+    let db = questions::open(engine.path()).unwrap();
+    for days in [3, 10, 45] {
+        let row = CallRow {
+            launch: "e2e-launch".into(),
+            connector: "board".into(),
+            tool: "list_issues".into(),
+            kind: CallKind::Read,
+            sent: true,
+            project: "e2e-project".into(),
+            agent: "Agent 1".into(),
+            started_ms: now - days * DAY,
+            ms: 340,
+            bytes_in: 120,
+            bytes_out: 2048,
+            outcome: "ok".into(),
+        };
+        audit::record(&db, &row, crazyagent::connectors::KeepLog::Days90).unwrap();
+    }
+
+    go_to(
+        &pty,
+        "Settings / Connector activity",
+        "Settings / Connector activity",
+    );
+    pty.until("Settings, Connector activity lists the calls", |screen| {
+        header_row(screen).contains("Settings  /  Connector activity")
+            && screen.contains("Activity log keeps")
+            && screen.contains("list_issues")
+    });
+    pty.keys(keys);
+    pty.until("the keep pick waits for Enter", |screen| {
+        screen.contains("Save changes")
+    });
+    pty.keys(&["Enter"]);
+    pty.until("the save is confirmed", |screen| {
+        screen.contains("Connector settings saved.")
+    });
+    let view = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let view = owner
+            .controller
+            .connector_activity(None, None)
+            .await
+            .unwrap();
+        owner.controller.detach();
+        view
+    });
+    let left: i64 = db
+        .query_row("SELECT COUNT(*) FROM connector_calls", [], |row| row.get(0))
+        .unwrap();
+    let days = view
+        .calls
+        .iter()
+        .map(|call| (now - call.started_ms + DAY / 2) / DAY)
+        .collect();
+    drop(pty);
+    engine.stop();
+    (view.settings.keep_log, days, left)
+}
+
+#[test]
+fn connectors_keep_log_7_days() {
+    use crazyagent::connectors::KeepLog;
+    let (keep, days, left) = connector_keep_after(KeepLog::Days30, &["Left"]);
+    assert_eq!((keep, days, left), (KeepLog::Days7, vec![3], 1));
+}
+
+#[test]
+fn connectors_keep_log_30_days() {
+    use crazyagent::connectors::KeepLog;
+    let (keep, days, left) = connector_keep_after(KeepLog::Days90, &["Left"]);
+    assert_eq!((keep, days, left), (KeepLog::Days30, vec![3, 10], 2));
+}
+
+#[test]
+fn connectors_keep_log_90_days() {
+    use crazyagent::connectors::KeepLog;
+    let (keep, days, left) = connector_keep_after(KeepLog::Days30, &["Right"]);
+    assert_eq!((keep, days, left), (KeepLog::Days90, vec![3, 10, 45], 3));
+}

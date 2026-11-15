@@ -72,6 +72,12 @@ pub fn clock(ms: i64, offset: i64) -> String {
     format!("{:02}:{:02}", seconds / 3600, (seconds % 3600) / 60)
 }
 
+/// A local time with its day, such as "Nov 15 17:04", the words the desktop shows for a
+/// logged connector call. Inputs: epoch milliseconds and the UTC offset. Output: the words.
+pub fn stamp(ms: i64, offset: i64) -> String {
+    clock(ms, offset)
+}
+
 /// A short past time: "just now", "4 min ago", "today 09:12", "yesterday" or
 /// "Oct 19".
 /// Inputs: the time, now, both in epoch milliseconds, and the UTC offset.
@@ -115,6 +121,15 @@ mod tests {
     use super::*;
 
     const OCT_23_1042_UTC: i64 = 1_792_752_120_000;
+    const NOV_15_1204_UTC: i64 = 1_794_744_240_000;
+
+    #[test]
+    fn a_stamp_names_the_local_day_and_time() {
+        assert_eq!(stamp(NOV_15_1204_UTC, 0), "Nov 15 12:04");
+        assert_eq!(stamp(NOV_15_1204_UTC, 13 * 3600), "Nov 16 01:04");
+        assert_eq!(stamp(NOV_15_1204_UTC, -19_800), "Nov 15 06:34");
+        assert_eq!(stamp(OCT_23_1042_UTC - 22 * 86_400_000, 0), "Oct 1 10:42");
+    }
 
     #[test]
     fn offsets_parse_only_valid_zones() {

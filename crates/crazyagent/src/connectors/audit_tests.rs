@@ -227,7 +227,7 @@ fn a_full_log_at_the_longest_lengths_still_fits_one_owner_frame() {
                     'c' || replace(hex(zeroblob(36)), '00', 'c') || printf('%03d', i % 40),
                     replace(hex(zeroblob(128)), '00', '\u{1d538}'),
                     'read', 1,
-                    printf('%03d', i % 40) || replace(hex(zeroblob(253)), '00', '\u{1d538}'),
+                    printf('%03d', i % 40) || replace(hex(zeroblob(125)), '00', 'p'),
                     replace(hex(zeroblob(128)), '00', '\u{1d538}'),
                     ?1, 1, 1, 1,
                     replace(hex(zeroblob(61)), '00', 'x') || printf('%03d', i % 40)
@@ -235,7 +235,10 @@ fn a_full_log_at_the_longest_lengths_still_fits_one_owner_frame() {
             [now],
         )
         .unwrap();
-    assert_eq!(count(&case.db, "length(project) = 256"), 300);
+    assert_eq!(
+        count(&case.db, "length(CAST(project AS BLOB)) = 128"),
+        300
+    );
 
     let full = view(&case.db, None, None).unwrap();
     assert!(full.more, "more calls matched than the view holds");
@@ -247,6 +250,21 @@ fn a_full_log_at_the_longest_lengths_still_fits_one_owner_frame() {
         bytes + 1024 <= crate::protocol::FRAME_BYTES_MAX,
         "{bytes} bytes leave no room in one frame"
     );
+}
+
+#[test]
+fn a_project_id_longer_than_a_filter_takes_is_listed_but_never_offered_as_a_choice() {
+    let case = case();
+    let now = crate::semantic::now_ms();
+    let long = "p".repeat(PROJECT_ID_BYTES_MAX + 1);
+    record(&case.db, &call("board", &long, "l1", now - 2_000), KeepLog::Days90).unwrap();
+    record(&case.db, &call("board", "alpha", "l1", now - 1_000), KeepLog::Days90).unwrap();
+
+    let shown = view(&case.db, None, None).unwrap();
+    assert_eq!(shown.calls.len(), 2);
+    assert_eq!(shown.calls[1].project, long);
+    let ids: Vec<&str> = shown.projects.iter().map(|choice| choice.id.as_str()).collect();
+    assert_eq!(ids, ["alpha"]);
 }
 
 #[test]

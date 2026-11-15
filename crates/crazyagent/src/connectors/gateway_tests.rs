@@ -863,6 +863,14 @@ fn the_audit_row_has_sizes_and_outcome_and_no_content() {
     let everything = format!("{rows:?}");
     assert!(!everything.contains("SECRET-ARG-TEXT"));
     assert!(!everything.contains("RESULT-TEXT-123"));
+
+    let shown = audit::view(&bench.case.db, None, None).unwrap();
+    assert_eq!(shown.calls.len(), 4);
+    assert_eq!(shown.calls[2].tool, "list_issues");
+    assert_eq!(shown.calls[2].bytes_in, arguments.to_string().len() as i64);
+    let reply = serde_json::to_string(&shown).unwrap();
+    assert!(!reply.contains("SECRET-ARG-TEXT"), "{reply}");
+    assert!(!reply.contains("RESULT-TEXT-123"), "{reply}");
 }
 
 #[test]

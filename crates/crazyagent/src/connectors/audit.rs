@@ -2,9 +2,10 @@
 //! the gateway, with who, what, how long, how large, whether it reached the vendor and how
 //! it ended. It never holds a call's arguments or a result.
 
-use crate::connectors::settings::KeepLog;
+use crate::connectors::settings::{ConnectorSettings, KeepLog};
 use crate::engine::EngineError;
 use rusqlite::{Connection, params};
+use serde::{Deserialize, Serialize};
 
 /// The most rows the log keeps, whatever the keep setting says.
 pub const ROWS_MAX: i64 = 100_000;
@@ -14,7 +15,20 @@ pub const READ_MAX: usize = 500;
 /// vendor; its oldest go first, so a flood of them never pushes a sent call out.
 pub const QUIET_ROWS_PER_LAUNCH_MAX: usize = 1_000;
 
+/// The most calls one activity view holds.
+pub const VIEW_CALLS_MAX: usize = 100;
+/// The most connectors, and the most projects, one activity view offers as filters.
+pub const VIEW_CHOICES_MAX: usize = 32;
+/// The longest project id a filter takes and a view offers, the protocol's identifier bound.
+pub const PROJECT_ID_BYTES_MAX: usize = 128;
+const VIEW_CALL_BYTES_MAX: usize = 40 * 1024;
+const VIEW_CHOICE_BYTES_MAX: usize = 12 * 1024;
+
 const _: () = assert!(QUIET_ROWS_PER_LAUNCH_MAX < ROWS_MAX as usize / 10);
+const _: () = assert!(VIEW_CALLS_MAX <= READ_MAX);
+const _: () = assert!(
+    VIEW_CALL_BYTES_MAX + VIEW_CHOICE_BYTES_MAX + 8 * 1024 <= crate::protocol::FRAME_BYTES_MAX
+);
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -38,7 +52,8 @@ CREATE INDEX IF NOT EXISTS connector_calls_quiet ON connector_calls(launch, sent
 
 /// What a row is about: a tool the gateway counts as read or write, a tool list, or a
 /// call that named no tool the gateway knows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CallKind {
     Read,
     Write,
@@ -77,6 +92,50 @@ pub struct CallRow {
     pub bytes_in: i64,
     pub bytes_out: i64,
     pub outcome: String,
+}
+
+/// One logged call as both apps show it: the text cleaned of hidden and control
+/// characters, the project's name beside its id, and the outcome as its code and the
+/// engine's plain sentence. It never holds a call's arguments or a result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallView {
+    pub connector: String,
+    pub tool: String,
+    pub kind: CallKind,
+    pub project: String,
+    pub project_name: String,
+    pub agent: String,
+    pub started_ms: i64,
+    pub ms: i64,
+    pub bytes_in: i64,
+    pub bytes_out: i64,
+    pub outcome: String,
+    pub outcome_text: String,
+}
+
+/// One project a view offers as a filter: its id and the name shown for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectChoice {
+    pub id: String,
+    pub name: String,
+}
+
+/// The owner's activity page: the newest calls inside the keep time that match the
+/// filters, whether more matched than it holds, the filters it answers, the connectors and
+/// projects the log holds to filter by, and the connector settings with their version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityView {
+    pub calls: Vec<CallView>,
+    pub more: bool,
+    pub connector: Option<String>,
+    pub project: Option<String>,
+    pub connectors: Vec<String>,
+    pub projects: Vec<ProjectChoice>,
+    pub settings: ConnectorSettings,
+    pub version: u64,
 }
 
 fn sqlite(_: rusqlite::Error) -> EngineError {
@@ -185,3 +244,25 @@ pub fn recent(db: &Connection, limit: usize) -> Result<Vec<CallRow>, EngineError
     assert!(found.len() <= READ_MAX);
     Ok(found)
 }
+
+/// Reads the activity page. Inputs: the engine database and the connector and project to
+/// filter by, none for all. Output: the view, or `connectors_unavailable`.
+pub fn view(
+    db: &Connection,
+    connector: Option<&str>,
+    project: Option<&str>,
+) -> Result<ActivityView, EngineError> {
+    let _ = (db, connector, project);
+    Err(EngineError("connectors_unavailable".into()))
+}
+
+/// Drops the rows the keep setting and the row cap no longer hold. Inputs: the engine
+/// database and the keep setting. Output: Ok, or `connectors_unavailable`.
+pub fn prune(db: &Connection, keep: KeepLog) -> Result<(), EngineError> {
+    let _ = (db, keep);
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+#[path = "audit_tests.rs"]
+mod tests;

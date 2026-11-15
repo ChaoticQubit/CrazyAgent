@@ -28,6 +28,7 @@ pub(super) mod changes;
 pub(super) mod checks;
 mod claude_code;
 pub(super) mod cleanup;
+pub(super) mod connectors;
 pub(super) mod conflict;
 pub(super) mod demo;
 pub(super) mod editor;

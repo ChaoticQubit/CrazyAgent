@@ -1,5 +1,6 @@
 use super::*;
 use crate::app_plugins::Preview;
+use crate::connectors::audit::ActivityView;
 use crate::connectors::{ConnectorSettings, ConnectorsView, Who};
 use crate::engine::owner::{AccountSecret, ConnectorsSaved};
 
@@ -107,6 +108,18 @@ impl OwnerController {
     ) -> Result<ConnectorsSaved, EngineError> {
         self.connectors_client()?
             .set_connector_settings(settings, version)
+            .await
+    }
+
+    /// Reads the connector activity log. Inputs: the connector and the project to filter
+    /// by, none for all. Output: the view, or a `CONNECTORS_CODES` refusal.
+    pub async fn connector_activity(
+        &self,
+        connector: Option<String>,
+        project: Option<String>,
+    ) -> Result<ActivityView, EngineError> {
+        self.connectors_client()?
+            .connector_activity(connector, project)
             .await
     }
 }
