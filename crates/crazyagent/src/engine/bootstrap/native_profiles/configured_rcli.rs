@@ -81,7 +81,7 @@ fn configuration_missing(error: EngineError) -> EngineError {
     }
 }
 
-fn validate_connection(connection: &ModelConnection) -> Result<(), EngineError> {
+pub(super) fn validate_connection(connection: &ModelConnection) -> Result<(), EngineError> {
     if connection.harness.as_str() != "rcli"
         || !matches!(
             connection.auth,
@@ -319,11 +319,29 @@ fn same_home(pinned: &ConfiguredHomeIdentity, live: &ConfiguredHomeIdentity) -> 
         && pinned.config.changed == live.config.changed
 }
 
-/// The profile root, its manifest and its identity while a registration holds the lock.
+/// The profile root, its manifest and its identity while a registration holds the lock,
+/// and the exclusive locks the caller already holds on a slot manifest or a configured home
+/// for the whole registration, which the registration then does not take again.
 pub(super) struct LockedRoot<'a> {
     pub(super) root: &'a Directory,
     pub(super) manifest: &'a Manifest,
     pub(super) identity: &'a RootIdentity,
+    pub(super) held: &'a [HeldLock],
+}
+
+impl LockedRoot<'_> {
+    /// Takes the exclusive lock one registration step needs on a profile file, unless a
+    /// lock the caller holds is on that same file (RV-DS241-51). Input: the open file.
+    /// Output: the new lock, None when a held one covers the file, or the lock failure.
+    fn lock(&self, file: &File) -> Result<Option<HeldLock>, EngineError> {
+        let identity = Identity::of(&file.metadata().map_err(unsafe_custody)?);
+        for held in self.held {
+            if Identity::of(&held.0.metadata().map_err(unsafe_custody)?) == identity {
+                return Ok(None);
+            }
+        }
+        lock(file).map(Some)
+    }
 }
 
 impl NativeProfileCustody {
@@ -448,6 +466,7 @@ impl NativeProfileCustody {
             root: &root,
             manifest: &root_manifest,
             identity: &root_identity,
+            held: &[],
         };
         self.register_locked(host, connection, target_profile_ref, captured, &locked)
     }
@@ -493,15 +512,15 @@ impl NativeProfileCustody {
                     },
                 ));
             }
-            let held = lock(&manifest.file)?;
-            (Some(profile), Some(manifest), Some(actual), Some(held))
+            let held = locked.lock(&manifest.file)?;
+            (Some(profile), Some(manifest), Some(actual), held)
         } else {
             if slots.len() >= MAX_PROFILES {
                 return Err(failure("native_profile_capacity"));
             }
             (None, None, None, None)
         };
-        let _home_lock = lock(&home.file)?;
+        let _home_lock = locked.lock(&home.file)?;
         configured.verify(&home, connection)?;
         let generation = match &previous {
             Some(actual) => actual

@@ -1,6 +1,9 @@
-use super::configured_rcli::{ConfiguredRcliUse, LockedRoot};
+use super::configured_rcli::{
+    ConfiguredProfileIdentity, ConfiguredRcliUse, LockedRoot, validate_connection,
+};
 use super::*;
 use crate::engine::owner::AccountSecret;
+use rustix::fs::RenameFlags;
 use std::io::Write;
 
 pub(super) const HOMES: &str = crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER;
@@ -113,10 +116,97 @@ fn rewrite_config(homes: &Directory, key: &str, bytes: &[u8]) -> Result<(), Engi
     home.verify(&homes.file, OsStr::new(key))
 }
 
-/// Builds the SDK config the engine generates for a configured RCLI connection, and the
-/// one it wrote before a keyed connection under an rcli builtin provider id got a hashed
-/// id (DEC-150 addendum 9a). Inputs: the connection and its auth type. Output: the bytes,
-/// and the old bytes when the hashed provider id is their only difference.
+/// A changed connection's config swapped into a generated SDK home, with the file it
+/// replaced kept in staging until the save is known to have registered or not.
+struct Swapped {
+    staged: Staging,
+    sdk: Directory,
+    replaced: bool,
+}
+
+impl Swapped {
+    /// Puts the replaced config back, the same file, so the slot's pin on it still holds;
+    /// with nothing replaced, takes the new config out again. No input. Output: Ok once
+    /// the SDK directory names what it named before the swap.
+    fn undo(&self) -> Result<(), EngineError> {
+        let staged = &self.staged.directory.file;
+        let (from, to, flags) = if self.replaced {
+            (staged, &self.sdk.file, RenameFlags::EXCHANGE)
+        } else {
+            (&self.sdk.file, staged, RenameFlags::NOREPLACE)
+        };
+        rustix::fs::renameat_with(from, CONFIG, to, CONFIG, flags).map_err(unsafe_custody)?;
+        self.sdk.file.sync_all().map_err(unsafe_custody)?;
+        staged.sync_all().map_err(unsafe_custody)
+    }
+
+    /// Ends a swap once the save's outcome is known: keeps the new config, or first puts
+    /// the replaced one back, then removes the staging directory. Inputs: the homes
+    /// directory and whether to keep the new config. Output: none; a staging directory a
+    /// failure here leaves, the replaced config in it after a failed undo included, goes
+    /// at the next sweep.
+    fn settle(self, homes: &File, keep: bool) {
+        if keep || self.undo().is_ok() {
+            let _ = self.staged.discard(homes);
+        }
+    }
+}
+
+/// Swaps the engine's config for a changed connection into a generated SDK home in one
+/// rename, keeping the file it replaces in staging (RV-DS241-50). Inputs: the homes
+/// directory, the home the caller holds locked, its key and the bytes. Output: the swap,
+/// or the failure with the home's config as it was.
+fn swap_config(
+    homes: &Directory,
+    home: &Directory,
+    key: &str,
+    bytes: &[u8],
+) -> Result<Swapped, EngineError> {
+    let sdk = Directory::open(&home.file, OsStr::new(".backboard"))?;
+    let staged = Staging::create(&homes.file, STAGING)?;
+    write_config(&staged.directory.file, bytes)?;
+    let replaced = staged.exchange(CONFIG, &sdk.file)?;
+    let swapped = Swapped {
+        staged,
+        sdk,
+        replaced,
+    };
+    let checked = (|| {
+        swapped.sdk.file.sync_all().map_err(unsafe_custody)?;
+        let staged = &swapped.staged;
+        staged.directory.file.sync_all().map_err(unsafe_custody)?;
+        step()?;
+        staged.verify_in(&homes.file)?;
+        swapped.sdk.verify(&home.file, OsStr::new(".backboard"))?;
+        home.verify(&homes.file, OsStr::new(key))
+    })();
+    match checked {
+        Ok(()) => Ok(swapped),
+        Err(error) => {
+            swapped.settle(&homes.file, false);
+            Err(error)
+        }
+    }
+}
+
+/// Tells whether an account's slot pins the connection a failed save was for, as when the
+/// save stopped only after its new manifest was in place. Inputs: the slot and the
+/// connection. Output: true only for a readable manifest naming that connection.
+fn pins(profile: &Directory, connection: &ModelConnection) -> bool {
+    Manifest::open(&profile.file, false)
+        .ok()
+        .and_then(|manifest| {
+            serde_json::from_slice::<ConfiguredProfileIdentity>(&manifest.bytes).ok()
+        })
+        .is_some_and(|identity| identity.connection == *connection)
+}
+
+/// Builds the SDK config the engine generates for a configured RCLI connection, checked as
+/// a written config is checked so nothing the custody would refuse is ever written
+/// (RV-DS241-50), and the one it wrote before a keyed connection under an rcli builtin
+/// provider id got a hashed id (DEC-150 addendum 9a). Inputs: the connection and its auth
+/// type. Output: the bytes, and the old bytes when the hashed provider id is their only
+/// difference.
 fn generated_config(
     connection: &ModelConnection,
     auth: &str,
@@ -128,6 +218,7 @@ fn generated_config(
     let ModelEndpoint::Http { url } = &connection.endpoint else {
         return Err(failure("account_profile_endpoint_unsupported"));
     };
+    validate_connection(connection)?;
     let selection = crate::rcli_host::configured_sdk_connection(connection)
         .map_err(|_| failure("account_profile_config_invalid"))?;
     let config = |provider: &CredentialRef| -> Result<Vec<u8>, EngineError> {
@@ -149,6 +240,8 @@ fn generated_config(
         selection.protocol == connection.protocol && selection.provider != connection.provider;
     let old = legacy.then(|| config(&connection.provider)).transpose()?;
     let bytes = config(&selection.provider)?;
+    crate::rcli_host::checked_configured_config(&bytes, connection)
+        .map_err(|_| failure("rcli_profile_configuration_invalid"))?;
     assert!(old.as_ref().is_none_or(|old| *old != bytes));
     Ok((bytes, old))
 }
@@ -196,28 +289,28 @@ impl NativeProfileCustody {
         self.verify()?;
         let (root, root_manifest, root_identity) = self.root(host)?;
         let _root_lock = lock(&root_manifest.file)?;
-        let locked = LockedRoot {
-            root: &root,
-            manifest: &root_manifest,
-            identity: &root_identity,
-        };
         let key = digest(profile_ref.as_str().as_bytes());
         let slots = scan_slots(&root.file)?;
         let homes = self.homes()?;
         staging::sweep(&homes.file, STAGING)?;
+        let mut held = Vec::new();
+        let mut swapped = None;
         if slots.contains_key(&key) {
             let (profile, manifest, actual) =
                 self.read_configured_slot(&root, &root_identity, &slots, &key, profile_ref)?;
-            let manifest_lock = lock(&manifest.file)?;
+            held.push(lock(&manifest.file)?);
             manifest.verify(&profile.file)?;
-            drop(manifest_lock);
             drop(manifest);
             if actual.connection != *connection {
-                rewrite_config(&homes, &key, &bytes)?;
+                let home = Directory::open(&homes.file, OsStr::new(&key))?;
+                held.push(lock(&home.file)?);
+                swapped = Some((swap_config(&homes, &home, &key, &bytes)?, profile));
             }
         } else if slots.len() >= MAX_PROFILES {
             return Err(failure("native_profile_capacity"));
         } else if rustix::fs::statat(&homes.file, key.as_str(), AtFlags::SYMLINK_NOFOLLOW).is_ok() {
+            let home = Directory::open(&homes.file, OsStr::new(&key))?;
+            held.push(lock(&home.file)?);
             accept_generated(&homes, &key, &bytes, legacy.as_deref())?;
         } else {
             let staged = Staging::create(&homes.file, STAGING)?;
@@ -226,17 +319,34 @@ impl NativeProfileCustody {
             write_config(&sdk.file, &bytes)?;
             staged.commit(&homes.file, &key)?;
         }
-        homes.verify(&self.anchor.directory, OsStr::new(HOMES))?;
+        let locked = LockedRoot {
+            root: &root,
+            manifest: &root_manifest,
+            identity: &root_identity,
+            held: &held,
+        };
         let path = self.anchor.path.join(HOMES).join(&key);
-        let captured = ConfiguredRcliUse::capture(&path, connection)?;
-        self.register_locked(host, connection, profile_ref, captured, &locked)
+        let registered = homes
+            .verify(&self.anchor.directory, OsStr::new(HOMES))
+            .and_then(|()| ConfiguredRcliUse::capture(&path, connection))
+            .and_then(|captured| {
+                self.register_locked(host, connection, profile_ref, captured, &locked)
+            });
+        if let Some((swapped, profile)) = swapped {
+            swapped.settle(
+                &homes.file,
+                registered.is_ok() || pins(&profile, connection),
+            );
+        }
+        registered
     }
 
     /// Repairs, before a master turn registers it, the generated SDK home a keyed account
     /// saved before DEC-150 addendum 9a left: one holding exactly the engine's old config
     /// naming the builtin provider id gets the current config. Inputs: host, connection and
     /// the account's profile reference. Output: Ok; any other home, or a connection the
-    /// engine generates no config for, is left as it is for registration to judge.
+    /// engine generates no config for, is left as it is for registration to judge. The
+    /// rewrite holds the home's lock, so it never runs under a configured use (RV-DS241-51).
     pub(crate) fn repair_legacy_configured_home(
         &mut self,
         host: &HostStamp,
@@ -258,8 +368,13 @@ impl NativeProfileCustody {
         let homes = self.homes()?;
         staging::sweep(&homes.file, STAGING)?;
         if require_generated(&homes, &key, &legacy).is_ok() {
-            rewrite_config(&homes, &key, &bytes)?;
-            require_generated(&homes, &key, &bytes)?;
+            let home = Directory::open(&homes.file, OsStr::new(&key))?;
+            let _home_lock = lock(&home.file)?;
+            if require_generated(&homes, &key, &legacy).is_ok() {
+                rewrite_config(&homes, &key, &bytes)?;
+                require_generated(&homes, &key, &bytes)?;
+            }
+            home.verify(&homes.file, OsStr::new(&key))?;
         }
         homes.verify(&self.anchor.directory, OsStr::new(HOMES))
     }
