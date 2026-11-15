@@ -56,10 +56,11 @@ const STEP_LOCK_TEXT_MAX: u64 = 128;
 /// Removes the `index.lock` a confined Linux step of a stopped engine left: only in a linked
 /// worktree's git folder, only a plain file read without following a link, and only one
 /// whose whole text names an engine process that is gone ([`left_by_gone_step`]), so a lock
-/// another git took, or one a running engine holds, stays (RV-DS241-135). With such a lock
-/// the step folder beside it goes too, where the step's git, killed with that engine, can have
-/// left its own lock (RV-DS241-142). The engine runs it once at start, before any landing
-/// step. Input: the repository's canonical root. Output: how many locks it removed.
+/// another git took, or one a running engine holds, stays (RV-DS241-135). With such a lock,
+/// or with no `index.lock` at all, the step folder goes too, where a step's git, killed with
+/// its engine, can have left its own lock (RV-DS241-142). The engine runs it once at start,
+/// before any landing step. Input: the repository's canonical root. Output: how many locks it
+/// removed.
 #[cfg(target_os = "linux")]
 pub(super) fn clear_step_locks(root: &Path) -> usize {
     let real = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
@@ -74,7 +75,12 @@ pub(super) fn clear_step_locks(root: &Path) -> usize {
     for folder in folders.take(STEP_LOCK_FOLDERS_MAX).flatten() {
         let private = folder.path();
         let lock = private.join("index.lock");
-        if real(&private)
+        let unlocked = std::fs::symlink_metadata(&lock)
+            .err()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        if real(&private) && unlocked {
+            let _ = std::fs::remove_dir_all(private.join(STEP_FOLDER));
+        } else if real(&private)
             && std::fs::symlink_metadata(&lock).is_ok_and(|meta| meta.is_file())
             && left_by_gone_step(&lock)
             && std::fs::remove_dir_all(private.join(STEP_FOLDER))
