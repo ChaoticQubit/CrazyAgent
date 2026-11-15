@@ -265,9 +265,10 @@ impl<H: Host> Host for LastScreenHost<H> {
         &self,
         agent: &AgentId,
         command: &InteractiveCommand,
+        relayed: bool,
     ) -> Result<PaneRef, HostError> {
         let _turn = self.turns.take(agent);
-        let pane = self.inner.spawn_own_server(agent, command)?;
+        let pane = self.inner.spawn_own_server(agent, command, relayed)?;
         self.screens().forget(agent);
         Ok(pane)
     }
