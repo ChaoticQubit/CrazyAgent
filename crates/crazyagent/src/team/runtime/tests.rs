@@ -12554,6 +12554,7 @@ fn own_turn_outliving(
         Some(LaunchEvent::Ready { .. })
     ));
     session.follow_own_turns();
+    std::fs::create_dir_all(home.join(".cache")).unwrap();
     std::fs::write(home.join(".cache/go"), "").unwrap();
     let (order, orders) = channel();
     let (reports, reported) = channel();
