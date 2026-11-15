@@ -144,6 +144,11 @@ pub(in crate::engine) struct ChildOutput {
     pub(super) exit: Option<i32>,
 }
 
+/// Runs one Claude Code auth child to its end: reads its output, answers the custody checks
+/// and hands it the owner's code. The deadline is checked between steps and bounds only the
+/// poll wait, never a custody exchange, so an exchange in flight finishes and the channel can
+/// still report the failure (RV-DS241-53). Inputs: the session, channel, pipes, action and
+/// deadline. Output: the child's output, or the failure.
 async fn drive(
     session: &mut CustodySession,
     channel: &mut NativeAuthCustodyChannel,
@@ -231,7 +236,7 @@ async fn drive(
                 exit: exit.code(),
             });
         }
-        tokio::time::sleep(POLL).await;
+        tokio::time::sleep(POLL.min(deadline.saturating_duration_since(Instant::now()))).await;
     }
 }
 
@@ -275,13 +280,7 @@ pub(in crate::engine) async fn run_child(
         .ok_or_else(|| failure("native_auth_child_cleanup_uncertain"))?;
     let deadline = operation_deadline.min(Instant::now() + command_bound(action));
     let result = match Pipes::take(session.child_mut()?, action) {
-        Ok(mut pipes) => tokio::time::timeout(
-            deadline.saturating_duration_since(Instant::now()),
-            drive(session, channel, &mut pipes, action, deadline),
-        )
-        .await
-        .map_err(|_| failure("native_auth_claude_deadline"))
-        .and_then(|result| result),
+        Ok(mut pipes) => drive(session, channel, &mut pipes, action, deadline).await,
         Err(error) => Err(error),
     };
     if !cleanup_owned_group(session.child_mut()?, group, Instant::now() + CLEANUP)
