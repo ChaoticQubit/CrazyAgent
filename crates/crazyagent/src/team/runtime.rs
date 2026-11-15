@@ -758,6 +758,7 @@ struct Worker {
     network: AgentNetwork,
     ran_before: Duration,
     proxy: Option<Arc<ModelProxy>>,
+    keyed: bool,
     told_finished: BTreeSet<i64>,
     parent: Option<i64>,
     ready: bool,
@@ -3020,15 +3021,16 @@ impl TeamRuntime {
     /// to the queue. While the owner keeps team agents running when CrazyAgent quits, the
     /// default and also when that setting cannot be read, an agent in a pane a later engine
     /// can take over keeps running there with its turn stopped, so agent sessions outlive the
-    /// engine; with Stop every agent stops as an owner Stop would (FBTMUX-P1). Every other
-    /// agent process group stops. Waits a bounded time for each agent thread. Returns the
-    /// panes left running.
+    /// engine; with Stop every agent stops as an owner Stop would (FBTMUX-P1). A keyed agent
+    /// is never kept: its key relay ends with this engine, and a process that later took the
+    /// relay's port would get its next model request (SA vid 9). Every other agent process
+    /// group stops. Waits a bounded time for each agent thread. Returns the panes left running.
     pub fn shutdown(&mut self) -> Result<Vec<AgentId>, EngineError> {
         let keep_panes = crate::quit_settings::load(&self.connection)
             .map_or(true, |settings| settings.keeps_team_agents());
         let mut kept = BTreeSet::new();
         for (id, worker) in &self.workers {
-            if keep_panes && !worker.stopping && self.has_pane_record(*id)? {
+            if keep_panes && !worker.stopping && !worker.keyed && self.has_pane_record(*id)? {
                 kept.insert(*id);
             }
         }
@@ -7990,6 +7992,7 @@ impl TeamRuntime {
             reminded: BTreeSet::new(),
         };
         let proxy = launch.proxy();
+        let keyed = launch.relay().is_some();
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
             .spawn(move || work(launch, inbox, outbox, flag, interrupt, kept, wrap, by))
@@ -8056,6 +8059,7 @@ impl TeamRuntime {
                 network,
                 ran_before: Duration::ZERO,
                 proxy,
+                keyed,
                 told_finished: BTreeSet::new(),
                 parent,
                 ready: false,

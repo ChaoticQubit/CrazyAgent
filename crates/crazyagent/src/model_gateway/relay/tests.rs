@@ -1,6 +1,7 @@
 use super::*;
 use std::ffi::OsStr;
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::Instant;
@@ -494,7 +495,7 @@ fn curl_arguments_and_environment_hold_no_key_url_or_token() {
         &incoming,
         KeyHeader::Bearer,
         &key(),
-        Some(Path::new("/tmp/crazyagent-relay-x/request-1")),
+        Some(Path::new("/dev/fd/7")),
     )
     .unwrap();
     let config = String::from_utf8(config).unwrap();
@@ -502,7 +503,7 @@ fn curl_arguments_and_environment_hold_no_key_url_or_token() {
     assert!(config.contains("request = \"POST\"\n"));
     assert!(config.contains(&format!("header = \"Authorization: Bearer {KEY}\"\n")));
     assert!(config.contains("header = \"openai-beta: responses=v1\"\n"));
-    assert!(config.contains("data-binary = \"@/tmp/crazyagent-relay-x/request-1\"\n"));
+    assert!(config.contains("data-binary = \"@/dev/fd/7\"\n"));
     assert!(!config.contains(&token));
     assert!(!config.contains("gzip"));
     assert!(!config.contains("127.0.0.1:9"));
@@ -575,26 +576,23 @@ fn request_limits_refuse_oversized_or_malformed_requests() {
 }
 
 #[test]
-fn dropping_the_relay_stops_it_and_removes_its_scratch() {
+fn dropping_the_relay_after_a_request_stops_it() {
     let provider = Provider::json();
     let relay = Relay::start(&provider.origin(), key()).unwrap();
-    let scratch = relay.shared.scratch.clone();
-    let mode = std::os::unix::fs::PermissionsExt::mode(
-        &std::fs::metadata(&scratch).unwrap().permissions(),
-    );
-    assert_eq!(mode & 0o777, 0o700);
     let (status, _, _) = send(
         relay.port(),
         &post(
             "/v1/messages",
             &format!("x-api-key: {}", relay.token()),
-            r#"{"body":"kept in a private file"}"#,
+            r#"{"body":"handed to curl on a pipe"}"#,
         ),
     );
     assert_eq!(status, 200);
-    assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+    assert_eq!(
+        provider.seen()[0].body,
+        br#"{"body":"handed to curl on a pipe"}"#
+    );
     drop(relay);
-    assert!(!scratch.exists());
 }
 
 #[test]
