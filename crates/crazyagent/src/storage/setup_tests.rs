@@ -2047,3 +2047,67 @@ fn a_kept_hook_saved_without_what_it_runs_loads_and_matches_by_name() {
     assert_eq!(kept_for(&kept, &added, &added[1]), [&kept[0]]);
     assert!(kept_for(&kept, &added, &added[0]).is_empty());
 }
+
+/// An added hook as setup lists it, for one plugin's event at a place in its list. Inputs:
+/// the plugin, the event, the place from 1 and what it runs. Output: the hook.
+fn added_hook(plugin: &str, event: &str, place: u32, command: &str) -> crate::plugins::HookView {
+    crate::plugins::HookView {
+        id: format!("id-{plugin}-{event}-{place}"),
+        name: format!("{plugin}/{event}/{place}"),
+        plugin: plugin.into(),
+        event: event.into(),
+        matcher: None,
+        command: command.into(),
+        scope: Scope::Global,
+        scope_label: "All projects".into(),
+        enabled: true,
+        on_here: None,
+        follows: Some(plugin.into()),
+        source: format!("/private/tmp/{plugin}"),
+        version: 1,
+    }
+}
+
+/// b3b4 r2 F1: a hook the owner switched off that a new pin moves to another event, running
+/// the same thing, stays off there, known by what it runs wherever the pin lists it, and a
+/// new hook in the event it left takes nothing from it, since it was moved, not replaced.
+#[test]
+fn a_switched_off_hook_a_new_pin_moves_to_another_event_stays_off() {
+    let kept = KeptHook {
+        name: "caveman/SessionStart/1".into(),
+        enabled: false,
+        projects: vec!["project-1".into()],
+        event: "SessionStart".into(),
+        matcher: None,
+        command: "sh guard.sh".into(),
+    };
+    let added = [
+        added_hook("caveman", "UserPromptSubmit", 1, "sh guard.sh"),
+        added_hook("caveman", "SessionStart", 1, "sh fresh.sh"),
+    ];
+    let kept = [kept];
+    assert_eq!(kept_for(&kept, &added, &added[0]), [&kept[0]]);
+    assert!(kept_for(&kept, &added, &added[1]).is_empty());
+}
+
+/// b3b4 r2 F2: a switched kept hook 2.4.1 saved without what it runs gives its switches to
+/// every added hook of its plugin and event, since its name only says where it stood in a
+/// list the new pin may have reordered; a hook of another event or plugin takes nothing.
+#[test]
+fn a_kept_hook_saved_without_what_it_runs_turns_off_every_hook_of_its_event() {
+    let old = r#"{"name":"caveman/SessionStart/2","enabled":false,"projects":["project-1"]}"#;
+    let kept: KeptHook = serde_json::from_str(old).unwrap();
+    let added = [
+        added_hook("caveman", "SessionStart", 1, "sh other.sh"),
+        added_hook("caveman", "SessionStart", 2, "sh start.sh"),
+        added_hook("caveman", "UserPromptSubmit", 2, "sh other.sh"),
+        added_hook("ponytail", "SessionStart", 2, "sh start.sh"),
+    ];
+    let kept = [kept];
+    for hook in &added[..2] {
+        assert_eq!(kept_for(&kept, &added, hook), [&kept[0]], "{}", hook.name);
+    }
+    for hook in &added[2..] {
+        assert!(kept_for(&kept, &added, hook).is_empty(), "{}", hook.name);
+    }
+}
