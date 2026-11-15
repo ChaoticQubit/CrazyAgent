@@ -1004,7 +1004,7 @@ const HOME_NAMES_CHUNK: usize = 4096;
 
 /// How many listings' worth of entries past those a folder held when its emptying began
 /// [`empty_home_folder`] removes before it refuses, as only a process still adding entries
-/// keeps a folder from listing empty by then; as many as a kept folder's reset passes.
+/// keeps a folder from listing empty by then.
 #[cfg(unix)]
 const HOME_ADDED_CHUNKS_MAX: usize = 8;
 
