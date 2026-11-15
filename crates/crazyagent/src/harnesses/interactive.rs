@@ -17,6 +17,8 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+pub mod settings;
+
 pub const KEY_FILE: &str = ".crazyagent-key";
 pub const CLAUDE_PROJECT_NAME_MAX: usize = 200;
 #[cfg(unix)]
