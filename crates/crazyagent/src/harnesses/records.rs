@@ -2,6 +2,8 @@ use super::launch::{LaunchError, failure};
 use super::manifest::RecordKind;
 use super::registry::registry;
 
+pub mod json_files;
+
 /// The record readers the engine runs today: the Codex rollouts and the Claude Code session
 /// transcript. Each shared reader kind a manifest names joins this list when its task lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

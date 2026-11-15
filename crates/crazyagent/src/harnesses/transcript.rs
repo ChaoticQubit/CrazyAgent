@@ -483,18 +483,18 @@ pub(crate) fn open_plain(path: &Path) -> Option<File> {
 }
 
 #[cfg(unix)]
-type FileKey = (u64, u64);
+pub(crate) type FileKey = (u64, u64);
 #[cfg(not(unix))]
-type FileKey = PathBuf;
+pub(crate) type FileKey = PathBuf;
 
 #[cfg(unix)]
-fn file_key(metadata: &std::fs::Metadata, _path: &Path) -> FileKey {
+pub(crate) fn file_key(metadata: &std::fs::Metadata, _path: &Path) -> FileKey {
     use std::os::unix::fs::MetadataExt;
     (metadata.dev(), metadata.ino())
 }
 
 #[cfg(not(unix))]
-fn file_key(_metadata: &std::fs::Metadata, path: &Path) -> FileKey {
+pub(crate) fn file_key(_metadata: &std::fs::Metadata, path: &Path) -> FileKey {
     path.to_path_buf()
 }
 
