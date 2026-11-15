@@ -424,9 +424,13 @@ async fn ide_terminal_tasks_run_the_owner_shell_inside_the_ide_sandbox_with_no_n
         + bind.len();
     let tmp = PathBuf::from(&text[at..at + text[at..].find('"').unwrap()]);
     assert!(
-        tmp.is_dir(),
-        "the IDE start made the server's short temp folder"
+        !tmp.exists(),
+        "the IDE stop removed the server's short temp folder"
     );
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(&tmp).unwrap();
+    }
     let mut command = ide::sandbox::command(&started.profile, Path::new(&shell));
     command
         .args(&arguments)
@@ -445,4 +449,5 @@ async fn ide_terminal_tasks_run_the_owner_shell_inside_the_ide_sandbox_with_no_n
         seen.contains("NET-CLOSED\n") && seen.contains("not permitted"),
         "tasks run inside the IDE server's own sandbox, which has no network: {seen}"
     );
+    fs::remove_dir_all(&tmp).unwrap();
 }
