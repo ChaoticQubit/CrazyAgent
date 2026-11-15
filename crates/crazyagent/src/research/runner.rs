@@ -884,6 +884,10 @@ impl ResearchRunner {
                 let status = jobs.refused(&job, ACCOUNT_WAITING)?;
                 Ok(run(status, None, None))
             }
+            Err(RunError::Invalid(line)) if owner_refusal(&line) => {
+                let status = jobs.fail(&job, &line, 1)?;
+                Ok(run(status, None, None))
+            }
             Err(error) => {
                 let (reason, attempts_max) = match &error {
                     RunError::Context(problem) => (
@@ -2740,6 +2744,24 @@ pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<
     Ok(wait_bounded(crate::spawn_gate::spawn(&mut command)?, SETUP_TIMEOUT)? == Ended::Succeeded)
 }
 
+/// The owner's line refusing agents a folder of the owner's that is no git repository.
+/// Only the owner's `git init` and first commit clear it, so a research job meeting it fails
+/// on that try with this line (RV-DS241-158).
+const NOT_A_REPOSITORY: &str = "The project folder is not a git repository, so agents cannot get their own copy of it; run git init there and make a first commit";
+
+/// How the owner's line refusing a worktree in a repository whose effective Git config
+/// names a hook starts. Only the owner's change to that config clears it, so a research job
+/// meeting it fails on that try with the line (RV-DS241-158).
+const HOOK_REFUSAL_START: &str = "The project's Git config sets ";
+
+/// Whether a setup refusal is one only the owner's change to the project clears, a hook
+/// its Git config names or an owner's folder that is no repository, which a later attempt
+/// meets again. Takes the refusal's line, the engine's own words with at most a hook key
+/// `listed_hook` bounded. Returns true for those two refusals only.
+fn owner_refusal(line: &str) -> bool {
+    line.starts_with(HOOK_REFUSAL_START) || line == NOT_A_REPOSITORY
+}
+
 /// Makes a project folder the engine created a git repository with one empty start commit,
 /// one setup per repository at a time. A folder with any `.git` entry is the owner's repository and
 /// stays as it is; an owner's folder holding `.crazyagent/`, or that folder itself, never
@@ -2753,9 +2775,7 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
     let owners = root.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY)
         || fs::symlink_metadata(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).is_ok();
     if owners {
-        return Err(RunError::Invalid(
-            "the project folder is not a git repository, so agents cannot get their own copy of it; run git init there and make a first commit".into(),
-        ));
+        return Err(RunError::Invalid(NOT_A_REPOSITORY.into()));
     }
     let git = |arguments: &[&str]| engine_git(root, tmp, arguments);
     let created = git(&["init", "-q", "--template="])?
@@ -3231,7 +3251,7 @@ fn hook_refusal(keys: &[u8]) -> Result<(), RunError> {
     match listed_hook(keys) {
         None => Ok(()),
         Some(key) => Err(RunError::Invalid(format!(
-            "the project's Git config sets {key}, a hook the engine never runs; remove it from the repository's config, then start again"
+            "{HOOK_REFUSAL_START}{key}, a hook the engine never runs; remove it from the repository's config, then start again"
         ))),
     }
 }
@@ -3530,6 +3550,14 @@ impl Lifeline {
         if let Some(mut pipe) = self.child.stdin.take() {
             let _ = pipe.write_all(b"done\n");
         }
+        let _ = self.child.wait();
+    }
+
+    /// Closes the lifeline's pipe without `done`, as the engine's death does, and waits
+    /// until the lifeline has acted. For rows only.
+    #[cfg(test)]
+    pub(crate) fn sever(&mut self) {
+        drop(self.child.stdin.take());
         let _ = self.child.wait();
     }
 }
@@ -4679,6 +4707,87 @@ mod tests {
             recovered, 0,
             "a run waiting for its repository setup lost its claim as stale"
         );
+    }
+
+    /// Runs one research job of a fresh project, whose folder `prepare` sets up, on a listening
+    /// loopback provider as far as its runner takes it.
+    /// Takes the folder's setup. Returns the run's ending and the job as it was left.
+    #[cfg(target_os = "macos")]
+    fn one_refused_run(
+        prepare: impl FnOnce(&Path),
+    ) -> (Result<Option<ResearchRun>, RunError>, ResearchJob) {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        prepare(&folder);
+        register_project(&root.database, "alpha", &folder);
+        let runner = ResearchRunner::new(
+            &root.database,
+            &root.state,
+            Path::new("/usr/bin/true"),
+            ResearchLimits {
+                wall_time: Duration::from_secs(10),
+                ..ResearchLimits::default()
+            },
+        )
+        .unwrap();
+        let jobs = ResearchJobs::open(&root.database).unwrap();
+        let id = jobs
+            .enqueue("alpha", "market_research", "codex", false)
+            .unwrap();
+        let provider = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let project = ResearchProject {
+            id: "alpha",
+            root: &folder,
+            account: Some(ResearchAccount::Endpoint {
+                base_url: format!(
+                    "http://127.0.0.1:{}/v1",
+                    provider.local_addr().unwrap().port()
+                ),
+                model: "local-model".into(),
+                key: None,
+            }),
+        };
+        let ending = runner.run_once(&project);
+        (ending, jobs.get(id).unwrap().unwrap())
+    }
+
+    /// RV-DS241-158: a research job refused a worktree for what only the owner's change to
+    /// the project clears, a hook its Git config names or an owner's folder that is no
+    /// repository, fails on its first try with the owner's line, not the sandbox line a
+    /// second try meets again, and its run ends as a plain failure nobody has to read.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_research_job_refused_what_only_the_owner_clears_fails_once_with_the_owners_line() {
+        let hook = "The project's Git config sets hook.x.command, a hook the engine never runs; remove it from the repository's config, then start again";
+        let bare = "The project folder is not a git repository, so agents cannot get their own copy of it; run git init there and make a first commit";
+        let runs = [
+            (
+                hook,
+                one_refused_run(|folder| {
+                    repository_git(folder, &["init", "-q"]);
+                    repository_git(folder, &["commit", "-q", "--allow-empty", "-m", "Start"]);
+                    repository_git(folder, &["config", "hook.x.command", "true"]);
+                }),
+            ),
+            (
+                bare,
+                one_refused_run(|folder| {
+                    let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+                    fs::create_dir(state).unwrap();
+                }),
+            ),
+        ];
+        for (line, (ending, job)) in runs {
+            assert_eq!(job.error.as_deref(), Some(line), "{ending:?}");
+            assert_eq!((job.status, job.attempts), (ResearchStatus::Failed, 1));
+            assert_eq!(job.claimer, None);
+            let run = ending.unwrap().unwrap();
+            assert_eq!(
+                (run.job, run.status, run.process_group),
+                (job.id, ResearchStatus::Failed, None)
+            );
+        }
     }
 
     struct EngineRoot {

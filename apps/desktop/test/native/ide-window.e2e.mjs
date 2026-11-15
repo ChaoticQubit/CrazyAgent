@@ -529,7 +529,7 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     await go("#/");
     await pause(POLL_MS);
     const removing = Date.now();
-    const removal = await invoke("desktop_remove_project", { id: second, generation: ++generation, deleteName: null });
+    const removal = await invoke("desktop_remove_project", { id: second, generation: ++generation });
     assert.equal(removal.outcome, "applied", JSON.stringify(removal));
     await invoke("desktop_close_project_walls", { id: second });
     await rowWhere((row) => row.windows && !row.windows.some((label) => OWN_WINDOW.test(label)), "removing the project left its IDE window open", OWN_WINDOW_MS, removing);

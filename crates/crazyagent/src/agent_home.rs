@@ -54,8 +54,10 @@ const KEPT_DEPTH_MAX: usize = 2;
 /// engine's launch state, lock, relay plugin and key file; both harnesses' instruction and
 /// Codex config files, which the launch rewrites, and a Codex home's skills ([`kept_in`]);
 /// Claude Code's sign-in, transcripts and team, task, todo and plan state; Codex's sign-in
-/// and sessions; the per-agent keychain; and the download caches, unless the launch's caches
-/// choice clears them ([`clears_caches`]). No entry kept holds config a tool runs.
+/// and sessions; the per-agent keychain; the download caches, unless the launch's caches
+/// choice clears them ([`clears_caches`]); and `.config` with nothing in it, which every
+/// agent sandbox makes and keeps in place, so no folder built elsewhere takes its name
+/// (RV-DS241-186). No entry kept holds config a tool runs.
 const HOME_KEPT: &[(&str, Kept)] = &[
     (crate::launch_context::STATE, Kept::Folder),
     (crate::launch_context::LOCK, Kept::Lock),
@@ -77,9 +79,11 @@ const HOME_KEPT: &[(&str, Kept)] = &[
     ("sessions", Kept::Folder),
     ("Library", Kept::Only(LIBRARY_KEPT)),
     (".cargo", Kept::Only(CARGO_KEPT)),
-    (".cache", Kept::Folder),
+    (".cache", Kept::Cache),
     (".npm", Kept::Only(NPM_KEPT)),
+    (".config", Kept::Only(&[])),
 ];
+const _: () = assert!(!HOME_KEPT.is_empty());
 /// The folder of a harness home its harness loads skills from. A Codex launch removes it and
 /// makes it again with the engine's copies ([`crate::launch_context`]); Claude Code is given
 /// the engine's skills in the relay plugin folder, so in its home the folder holds only what
@@ -150,12 +154,17 @@ const LIBRARY_KEPT: &[(&str, Kept)] = &[
 const CARGO_KEPT: &[(&str, Kept)] = &[("registry", Kept::Link), ("git", Kept::Link)];
 /// What a launch keeps in an agent home's `.npm`: npm's content-addressed cache, never the
 /// packages npx installed, which it runs as they are.
-const NPM_KEPT: &[(&str, Kept)] = &[("_cacache", Kept::Folder)];
+const NPM_KEPT: &[(&str, Kept)] = &[("_cacache", Kept::Cache)];
 const TOO_LARGE: &str = "agent_instructions_too_large_";
 const SKILLS_FOLDER: &str = "agent-skills";
 const FILES_FOLDER: &str = "agent-instruction-files";
 const GIVEN_FOLDER: &str = "agent-instructions-given";
 const LEVELS_FOLDER: &str = "agent-home-levels";
+/// The folder in the engine data root keeping, for each project folder, the SHA-256 of the
+/// project instructions text the engine last wrote there, which launches give as it is
+/// (SA vid 7 residual, leader 14:22 A).
+const WRITTEN_FOLDER: &str = "project-instructions-written";
+const WRITTEN_RECORD_BYTES: usize = 64;
 const FILES_RECORD_BYTES_MAX: usize =
     crate::instruction_files::FILES_MAX * ("unreadable\t18446744073709551615\t\n".len() + 32);
 pub const SKILLS_RECORD_MAX: usize = 2 * crate::plugins::SKILLS_PER_SCOPE_MAX;
@@ -176,11 +185,15 @@ enum Kept {
     Lock,
     /// A real folder with all it holds.
     Folder,
+    /// A real folder with all it holds that no launch step writes, removes or reads in: a
+    /// download cache, where an agent's tools may set flags and ACLs on what they copy
+    /// (RV-DS241-187).
+    Cache,
     /// A link, never followed: a cache the engine links to the owner's read-only one
     /// ([`crate::sandbox::toolchains::prepare_cargo_home`]), which the agent's profile keeps
     /// it from moving, removing or making itself.
     Link,
-    /// A real folder holding only the entries its list keeps.
+    /// A real folder holding only the entries its list keeps, none when the list is empty.
     Only(&'static [(&'static str, Kept)]),
 }
 
@@ -407,6 +420,50 @@ pub(crate) fn project_staging(state: &Path) -> PathBuf {
     state.join(crate::project_setup::CONTEXT_DIRECTORY)
 }
 
+/// Records the project instructions text the engine just wrote into a project folder, so
+/// launches give exactly that text as the owner's and any other text there as arrived
+/// ([`text`]). Inputs: the engine data root, the project folder and the text written.
+/// Output: unit, or a plain code; the text is then given as arrived until the next save.
+pub(crate) fn mark_written(data: &Path, folder: &Path, text: &str) -> Result<(), AgentHomeError> {
+    write_record(data, WRITTEN_FOLDER, folder, &written_digest(text))
+}
+
+/// Whether project instructions text reaches agents as arrived: text more than blank that
+/// is not what the engine last wrote into the folder, as a missing, unreadable or other
+/// record says (SA vid 7 residual). Inputs: the engine data root, the project folder and
+/// its text. Output: the answer.
+pub(crate) fn outside(data: &Path, folder: &Path, text: &str) -> bool {
+    if text.trim().is_empty() {
+        return false;
+    }
+    let record = read_record(data, WRITTEN_FOLDER, folder, WRITTEN_RECORD_BYTES);
+    !record.is_ok_and(|record| record == written_digest(text))
+}
+
+/// The SHA-256 of one project instructions text in lowercase hex, the record
+/// [`mark_written`] keeps and [`outside`] compares.
+/// Input: the text. Output: 64 hex characters.
+fn written_digest(text: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+    assert_eq!(digest.len(), WRITTEN_RECORD_BYTES);
+    digest
+}
+
+/// The project instructions agents get: the text the engine last wrote into the folder as
+/// it is, and any other text, as a project onboarded before labels, a pull or another editor
+/// leaves it, under the Imported heading with its headings demoted (SA vid 7 residual).
+/// Inputs: the engine data root and the project folder. Output: the text, or a plain code.
+fn given_project(data: &Path, folder: &Path) -> Result<String, AgentHomeError> {
+    let own = read_project(folder)?;
+    if !outside(data, folder, &own) {
+        return Ok(own);
+    }
+    let (labelled, _) = crate::instruction_files::carried(&own);
+    let heading = crate::instruction_files::CARRIED_HEADING;
+    assert!(labelled == own || labelled.starts_with(heading));
+    Ok(labelled)
+}
+
 /// Builds what every agent of the project receives from the owner's two instruction texts
 /// by the project's mode: the app-wide instructions, the project instructions, or the app
 /// text with the project text appended, each under its heading; empty when the given texts
@@ -421,7 +478,7 @@ pub fn text(project: &AgentProject) -> Result<Given, AgentHomeError> {
         false => String::new(),
     };
     let own = match (&project.folder, project.mode.project()) {
-        (Some(folder), true) => read_project(folder)?,
+        (Some(folder), true) => given_project(&project.data, folder)?,
         _ => String::new(),
     };
     let text = render(&app, &own, project.repeated);
@@ -985,17 +1042,18 @@ fn record_files(
     write_record(data, FILES_FOLDER, home, &record)
 }
 
-/// Names where the engine keeps one kind of launch record for one agent home: a file
-/// named by the SHA-256 of the home's real path in the folder `kind` of the engine data
-/// root's real path, outside every folder an agent may write. Inputs: the engine data
-/// root, the record's folder name and the agent's home. Output: the folder and the file
-/// name, or `agent_instructions_unreadable`.
+/// Names where the engine keeps one kind of record for one agent home or project folder: a
+/// file named by the SHA-256 of that folder's real path in the folder `kind` of the engine
+/// data root's real path, outside every folder an agent may write. Inputs: the engine data
+/// root, the record's folder name and the agent's home or the project folder. Output: the
+/// folder and the file name, or `agent_instructions_unreadable`.
 fn record_place(data: &Path, kind: &str, home: &Path) -> Result<(PathBuf, String), AgentHomeError> {
     assert!(
         kind == FILES_FOLDER
             || kind == SKILLS_FOLDER
             || kind == GIVEN_FOLDER
             || kind == LEVELS_FOLDER
+            || kind == WRITTEN_FOLDER
     );
     let real =
         |path: &Path| fs::canonicalize(path).map_err(|_| failure("agent_instructions_unreadable"));
@@ -1367,7 +1425,7 @@ fn keep_in(
     use std::os::fd::AsFd;
     use std::os::unix::ffi::OsStrExt;
     assert!(depth <= KEPT_DEPTH_MAX);
-    assert!(!kept.is_empty());
+    assert!(depth > 0 || !kept.is_empty());
     let unwritable = |_| failure("agent_home_unwritable");
     let remove = |name: &std::ffi::CStr| {
         crate::team::cleanup::remove_home_entry(folder, name)
@@ -1406,7 +1464,9 @@ fn keep_in(
                 Some(Kept::Lock) if crate::launch_context::lock_kept(&found) => {
                     unpin_at(folder, name)
                 }
-                Some(Kept::Folder) if form == FileType::Directory => unpin_at(folder, name),
+                Some(Kept::Folder | Kept::Cache) if form == FileType::Directory => {
+                    unpin_at(folder, name)
+                }
                 Some(Kept::Link) if form == FileType::Symlink => unpin_at(folder, name),
                 Some(Kept::Only(inner)) if form == FileType::Directory => {
                     #[cfg(all(test, unix))]
@@ -1451,7 +1511,6 @@ fn keep_only(
     held: &mut Vec<PathBuf>,
 ) -> Result<(), AgentHomeError> {
     assert!(folder.is_absolute());
-    assert!(!kept.is_empty());
     let before = held.len();
     for _ in 0..HOME_PASSES_MAX {
         held.truncate(before);
@@ -1476,7 +1535,7 @@ fn keep_only(
             match wanted {
                 Some(Kept::File) if metadata.is_file() && sole_own_link(&metadata) => {}
                 Some(Kept::Lock) if crate::launch_context::lock_kept(&metadata) => {}
-                Some(Kept::Folder) if metadata.is_dir() => {}
+                Some(Kept::Folder | Kept::Cache) if metadata.is_dir() => {}
                 Some(Kept::Link) if link => {}
                 Some(Kept::Only(inner)) if metadata.is_dir() => {
                     keep_only(&path, inner, held)?;
@@ -1626,19 +1685,50 @@ pub(crate) fn pinned_entries() -> Vec<String> {
 /// the home, empty for the home, the list and the paths found so far.
 fn pin_below(prefix: &str, kept: &[(&str, Kept)], pinned: &mut Vec<String>) {
     for (name, kind) in kept {
-        let path = if prefix.is_empty() {
-            (*name).to_owned()
-        } else {
-            format!("{prefix}/{name}")
-        };
+        let path = below(prefix, name);
         match kind {
             Kept::Only(inner) => {
                 pinned.push(path.clone());
                 pin_below(&path, inner, pinned);
             }
             Kept::Link => pinned.push(path),
-            Kept::File | Kept::Lock | Kept::Folder => {}
+            Kept::File | Kept::Lock | Kept::Folder | Kept::Cache => {}
         }
+    }
+}
+
+/// Names, as paths below the home, each entry a launch keeps whole that the engine writes,
+/// removes or reads at a launch or after: every file, lock and folder of [`HOME_KEPT`] at any
+/// depth but the download caches and the links. The agent's profile keeps it from setting a
+/// flag or an ACL on one or on anything in it, so none holds against the engine
+/// (RV-DS241-138, -187). Output: the paths.
+pub(crate) fn kept_entries() -> Vec<String> {
+    let mut kept = Vec::new();
+    keep_below("", HOME_KEPT, &mut kept);
+    kept
+}
+
+/// Adds to `kept` each file, lock and folder kept whole in one list, below `prefix`, and
+/// does the same in each folder kept only in part. Inputs: the path of the list's folder
+/// below the home, empty for the home, the list and the paths found so far.
+fn keep_below(prefix: &str, list: &[(&str, Kept)], kept: &mut Vec<String>) {
+    for (name, kind) in list {
+        let path = below(prefix, name);
+        match kind {
+            Kept::Only(inner) => keep_below(&path, inner, kept),
+            Kept::File | Kept::Lock | Kept::Folder => kept.push(path),
+            Kept::Cache | Kept::Link => {}
+        }
+    }
+}
+
+/// Joins one name of a kept list to the path of the list's folder below the home. Inputs:
+/// that path, empty for the home, and the name. Output: the path below the home.
+fn below(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{prefix}/{name}")
     }
 }
 

@@ -174,6 +174,7 @@ pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
         .keep_ports(launch.kept_ports)?
         .allow_tools(&Toolchains::detect(launch.folder, &homes))?
         .allow_scratch(&scratch)?
+        .keep_owner_config()
         .protect_agent_files(launch.agent_files)
         .allow_extra_reads(launch.extra_reads)?;
     let profile = place.join("shell.sb");

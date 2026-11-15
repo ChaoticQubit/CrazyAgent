@@ -785,6 +785,7 @@ mod launch {
         let (app, own) = (format!("{APP_RULE}\n"), format!("{PROJECT_RULE}\n"));
         crate::agent_home::save_app(&case.data, &app).unwrap();
         crate::agent_home::save_project(&case.checkout, &own).unwrap();
+        crate::agent_home::mark_written(&case.data, &case.checkout, &own).unwrap();
         let options = [
             (
                 Mode::ProjectOnly,
@@ -2181,5 +2182,32 @@ fn names_a_case_insensitive_volume_opens_as_instruction_files_are_marked() {
             !instruction_file(path),
             "{path:?} is not an instruction file"
         );
+    }
+
+    /// SA vid 7 residual (leader 14:22 A): an import with the engine data root records what it
+    /// wrote as the app's own text only after text the app wrote, so text from outside keeps
+    /// reaching agents under the Imported heading after any import.
+    #[test]
+    fn an_import_records_its_text_only_after_text_the_app_wrote() {
+        let checkout = Checkout::new();
+        let folder = &checkout.folder;
+        let data = checkout.root.join("data");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+        crate::agent_home::save_project(folder, "OWNER-RULE\n").unwrap();
+        crate::agent_home::mark_written(&data, folder, "OWNER-RULE\n").unwrap();
+        write(&folder.join("CLAUDE.local.md"), "NEW-RULE\n");
+        import_marked(&data, folder).unwrap();
+        let after = crate::agent_home::read_project(folder).unwrap();
+        let head = "OWNER-RULE\n\n### Imported from ";
+        assert!(after.starts_with(head), "{after}");
+        assert!(after.contains("NEW-RULE"), "{after}");
+        assert!(!crate::agent_home::outside(&data, folder, &after));
+
+        write(&folder.join(".crazyagent/instructions.md"), "PULLED-RULE\n");
+        import_marked(&data, folder).unwrap();
+        let pulled = crate::agent_home::read_project(folder).unwrap();
+        assert!(pulled.starts_with("PULLED-RULE\n"), "{pulled}");
+        assert!(crate::agent_home::outside(&data, folder, &pulled));
     }
 }

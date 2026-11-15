@@ -401,6 +401,41 @@ fn an_engine_set_to_stop_team_agents_ends_their_panes_at_shutdown() {
     assert_eq!(again.shutdown().unwrap(), Vec::<AgentId>::new());
 }
 
+/// SA vid 10 r2 (rv-sec2 F1): an agent whose thread is still stopping when shutdown's join
+/// wait ends was never seen to stop, so it is recorded stopped with the note that its
+/// sandbox could not be confirmed empty, never plainly.
+#[test]
+fn an_agent_whose_stop_outlives_the_join_wait_is_not_recorded_plainly_stopped() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let release = Arc::new(AtomicBool::new(false));
+    let held = release.clone();
+    let mut worker = between_turns(&project, AgentRole::Sub, false, false);
+    worker.thread = Some(std::thread::spawn(move || {
+        while !held.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }));
+    team.workers.insert(agent, worker);
+
+    let started = Instant::now();
+    assert!(team.shutdown().unwrap().is_empty());
+    release.store(true, Ordering::SeqCst);
+    assert!(started.elapsed() >= JOIN_WAIT);
+    assert_eq!(
+        fixture.agent_status(agent),
+        (
+            AgentStatus::Stopped,
+            Some(with_code(
+                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                Some(crate::harnesses::leftovers::UNCERTAIN)
+            ))
+        )
+    );
+}
+
 /// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
 /// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
 #[cfg(target_os = "macos")]
@@ -17457,6 +17492,7 @@ fn between_turns(
         narrowed: None,
         ran_before: Duration::ZERO,
         proxy: None,
+        keyed: false,
         told_finished: BTreeSet::new(),
         parent: None,
         ready: true,
@@ -31729,11 +31765,11 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
 
 /// An agent leaves neither cargo's, git's, npm's nor yarn's own config in its home, nor a
 /// cargo subcommand, a file flag or an ACL there, for its next start (RV-DS241-137, -138,
-/// sec r1 F1, F2). In its installed profile a tools-on agent cannot write `.cargo/config`,
-/// `.cargo/config.toml`, `.npmrc`, `.yarnrc` or `.yarnrc.yml`, in any letter case, nor make
-/// `.config/git` or `.cargo/bin`, nor set a flag or an ACL on its home or on anything in it,
-/// while it still writes a `.gitconfig`, which no agent git reads, and its own caches. The
-/// next launch removes that `.gitconfig` and keeps the caches.
+/// sec r1 F1, F2, RV-DS241-186). In its installed profile a tools-on agent cannot write
+/// `.gitconfig`, `.cargo/config`, `.cargo/config.toml`, `.npmrc`, `.yarnrc` or `.yarnrc.yml`,
+/// in any letter case, nor make `.config/git` or `.cargo/bin`, nor move a `.config` it built
+/// elsewhere into place, nor set a flag or an ACL on its home or on a file the next launch
+/// keeps, while it still writes its own caches. The next launch keeps the caches.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
@@ -31773,6 +31809,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         )
         .unwrap();
     let home = agent_home(&runtime.state, id);
+    std::fs::write(home.join(".claude.json"), "{}\n").unwrap();
     let work = plan.working_dir.clone();
     let tried = work.join("tried.txt");
     let script = work.join("plant.sh");
@@ -31785,14 +31822,15 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
              try cargo_config_old sh -c \"printf '[build]\\n' > '{home}/.cargo/config'\"\n\
              try git_config sh -c \"mkdir -p '{home}/.config/git' && printf '[core]\\n' > '{home}/.config/git/config'\"\n\
              try gitconfig sh -c \"printf '[core]\\n' > '{home}/.gitconfig'\"\n\
+             try config_parent sh -c \"rm -rf '{home}/.config' 2>/dev/null; mkdir -p '{home}/built/git' && printf '[core]\\n' > '{home}/built/git/config' && mv '{home}/built' '{home}/.config'\"\n\
              try control_cache sh -c \"mkdir -p '{home}/.cache/tool' && printf ok > '{home}/.cache/tool/data'\"\n\
              try npmrc sh -c \"printf 'node-options=--require=x\\n' > '{home}/.npmrc'\"\n\
              try npmrc_case sh -c \"printf x > '{home}/.NPMRC'\"\n\
              try yarnrc sh -c \"printf x > '{home}/.yarnrc'\"\n\
              try yarnrc_yml sh -c \"printf x > '{home}/.yarnrc.yml'\"\n\
              try cargo_bin sh -c \"mkdir -p '{home}/.cargo/bin' && printf x > '{home}/.cargo/bin/cargo-x'\"\n\
-             try acl_file /bin/chmod +a 'everyone deny delete' '{home}/.cache/tool/data'\n\
-             try flag_file /usr/bin/chflags uchg '{home}/.cache/tool/data'\n\
+             try acl_file /bin/chmod +a 'everyone deny delete' '{home}/.claude.json'\n\
+             try flag_file /usr/bin/chflags uchg '{home}/.claude.json'\n\
              try flag_home /usr/bin/chflags uchg '{home}'\n",
             home = home.display(),
             tried = tried.display(),
@@ -31819,7 +31857,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         Command::new("/usr/bin/chflags")
             .arg("nouchg")
             .arg(&home)
-            .arg(home.join(".cache/tool/data"))
+            .arg(home.join(".claude.json"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null()),
@@ -31827,7 +31865,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
     let acl_cleared = crate::spawn_gate::output(
         Command::new("/bin/chmod")
             .arg("-N")
-            .arg(home.join(".cache/tool/data"))
+            .arg(home.join(".claude.json"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null()),
@@ -31858,6 +31896,8 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         "cargo_config_case",
         "cargo_config_old",
         "git_config",
+        "gitconfig",
+        "config_parent",
         "npmrc",
         "npmrc_case",
         "yarnrc",
@@ -31871,14 +31911,12 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
             problems.push(format!("{attempt} written: {:?}", exit(attempt)));
         }
     }
-    for attempt in ["gitconfig", "control_cache"] {
-        if exit(attempt).as_deref() != Some("0") {
-            problems.push(format!("{attempt} refused: {:?}", exit(attempt)));
-        }
+    if exit("control_cache").as_deref() != Some("0") {
+        problems.push(format!("control_cache refused: {:?}", exit("control_cache")));
     }
     for entry in [
         ".gitconfig",
-        ".config",
+        ".config/git",
         ".cargo/config",
         ".cargo/config.toml",
         ".cargo/bin",

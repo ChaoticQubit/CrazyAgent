@@ -393,10 +393,17 @@ impl Places {
     }
 
     /// Whether a folder may be on the PATH of a program the engine starts, as a lookup here
-    /// would keep it: not one agents can write ([`Places::agent_writable`]) and, on the
-    /// engine's places, not in a temp folder. Input: the folder. Output: the answer.
+    /// would trust its files: an absolute folder that exists, none agents can write
+    /// ([`Places::agent_writable`]) or another user or group can change, no link on its way
+    /// another can move ([`Places::link_hops_kept`]) and, on the engine's places, none in a
+    /// temp folder (RV-DS241-157). Input: the folder. Output: the answer.
     pub(crate) fn kept_for_children(&self, folder: &Path) -> bool {
-        !self.agent_writable(folder) && !(self.temp_refused && in_temp_of(folder, &self.temps))
+        folder.is_absolute()
+            && folder.is_dir()
+            && !self.agent_writable(folder)
+            && crate::service::changeable_past_sticky(folder).is_none()
+            && !(self.temp_refused && in_temp_of(folder, &self.temps))
+            && self.link_hops_kept(folder)
     }
 
     /// Whether a path run as written meets only links no one else can move: every link and
@@ -406,20 +413,33 @@ impl Places {
     /// Input: the absolute path. Output: the answer, false past the link bound.
     pub(crate) fn link_hops_kept(&self, path: &Path) -> bool {
         assert!(path.is_absolute());
-        let Some(hops) = crate::harnesses::finding::link_hops(path) else {
-            return false;
-        };
-        hops.iter().all(|hop| {
-            !self.agent_writable(hop)
-                && crate::service::changeable_past_sticky(hop).is_none()
-                && !(self.temp_refused && leads_into_temp(path, hop, &self.temps))
-        })
+        crate::harnesses::finding::link_hops(path)
+            .is_some_and(|hops| self.hop_refusal(path, &hops).is_none())
+    }
+
+    /// Why a link or `..` folder on a path's way to its real file refuses the path, read as
+    /// [`check_candidate`] reads the file itself: one agents can write, one another user or
+    /// group can change past a sticky store or, on the engine's places, one in a temp folder
+    /// the path lies outside ([`leads_into_temp`]). Inputs: the path as written and its hops
+    /// ([`crate::harnesses::finding::link_hops`]). Output: the first refusal, or none.
+    fn hop_refusal(&self, path: &Path, hops: &[PathBuf]) -> Option<Refusal> {
+        if hops.iter().any(|hop| self.agent_writable(hop)) {
+            return Some(Refusal::AgentsCanWrite);
+        }
+        let changeable = hops
+            .iter()
+            .find_map(|hop| crate::service::changeable_past_sticky(hop));
+        if let Some(part) = changeable {
+            return Some(Refusal::OthersCanChange(part));
+        }
+        let leads = |hop: &PathBuf| leads_into_temp(path, hop, &self.temps);
+        (self.temp_refused && hops.iter().any(leads)).then_some(Refusal::InTemp)
     }
 
     /// Whether agents can write a folder or file, read as written and with its links
     /// resolved: inside a `.crazyagent` folder, inside a project ([`in_project`]), inside a
-    /// project the engine set up ([`Places::in_set_up_project`]), inside the engine's data
-    /// folder outside its `setup` folder, or inside an agent's short temp folder
+    /// folder the engine names for agents ([`Places::in_set_up_project`]), inside the engine's
+    /// data folder outside its `setup` folder, or inside an agent's short temp folder
     /// ([`crate::sandbox::toolchains::in_agent_tmp`]). Input: the path. Output: the answer.
     pub(crate) fn agent_writable(&self, path: &Path) -> bool {
         let real = path.canonicalize().ok();
@@ -432,9 +452,9 @@ impl Places {
         })
     }
 
-    /// Whether a path lies in the folder of a project the engine set up, which that project's
-    /// agents can write whole. When the projects could not be read it fails closed: every
-    /// path under HOME outside the engine's data folder counts. Input: the path. Output: the
+    /// Whether a path lies in a folder the engine names for agents ([`registered_projects`]),
+    /// which they can write whole. When those could not be read it fails closed: every path
+    /// under HOME outside the engine's data folder counts. Input: the path. Output: the
     /// answer.
     fn in_set_up_project(&self, path: &Path) -> bool {
         match &self.projects {
@@ -451,15 +471,13 @@ impl Places {
     }
 }
 
-/// The folders of every project the engine set up, as recorded and with links resolved, read
-/// read-only from the data folder's `engine.db`: an agent can write its project's whole folder,
-/// with or without a `.crazyagent` folder in it. No database yet, or one with no setups table,
-/// is no project. A database that cannot be read or more than [`PROJECT_ROOTS_MAX`] setups
-/// give none, never a partial list. Each setup is read for its folder alone
-/// ([`setup_folder`]), so one another version wrote still counts, and a row that names no
-/// folder is skipped alone and counted in the engine log. Input: the data folder. Output:
-/// the folders, or none.
+/// Every folder agents can write whole that `engine.db` names, as recorded and real: set-up
+/// project folders, declared repositories, team and leased worktrees with their repositories
+/// ([`crate::harnesses::finding::AGENT_TABLES`]), read read-only. No database or table names
+/// none; a failed read or a table past [`PROJECT_ROOTS_MAX`] rows gives none; a row naming no
+/// folder is skipped alone and counted in the log. Input: the data folder. Output: the folders.
 fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
+    use crate::harnesses::finding::{AGENT_TABLES, Names, PROJECT_REPOSITORIES_MAX, folders_in};
     let database = data_root.join("engine.db");
     match std::fs::symlink_metadata(&database) {
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
@@ -475,51 +493,58 @@ fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
     .ok()?;
     connection.busy_timeout(PROJECTS_READ_TIME).ok()?;
     let tx = connection.unchecked_transaction().ok()?;
-    let tables: i64 = tx
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='project_setups'",
-            [],
-            |row| row.get(0),
-        )
-        .ok()?;
-    if tables == 0 {
-        return Some(Vec::new());
-    }
     let limit = i64::try_from(PROJECT_ROOTS_MAX + 1).ok()?;
-    let bodies: Vec<Option<String>> = tx
-        .prepare("SELECT body FROM project_setups LIMIT ?1")
-        .ok()?
-        .query_map([limit], |row| {
-            Ok(row.get_ref(0)?.as_str().ok().map(str::to_owned))
-        })
-        .ok()?
-        .collect::<Result<_, _>>()
-        .ok()?;
-    if bodies.len() > PROJECT_ROOTS_MAX {
-        return None;
-    }
-    let mut roots = Vec::with_capacity(2 * bodies.len());
+    let mut roots = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     let mut skipped = 0usize;
-    for body in bodies {
-        let Some(folder) = body.as_deref().and_then(setup_folder) else {
-            skipped += 1;
-            continue;
-        };
-        if !folder.is_absolute() {
+    for (table, names, query) in AGENT_TABLES {
+        let tables: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |row| row.get(0),
+            )
+            .ok()?;
+        if tables == 0 {
             continue;
         }
-        let real = folder.canonicalize().ok();
-        for root in std::iter::once(folder).chain(real) {
-            if !roots.contains(&root) {
-                roots.push(root);
+        let rows: Vec<Option<String>> = tx
+            .prepare(query)
+            .ok()?
+            .query_map([limit], |row| {
+                Ok(row.get_ref(0)?.as_str().ok().map(str::to_owned))
+            })
+            .ok()?
+            .collect::<Result<_, _>>()
+            .ok()?;
+        if rows.len() > PROJECT_ROOTS_MAX {
+            return None;
+        }
+        for row in rows {
+            let folders = match (names, row.as_deref()) {
+                (Names::Setup, Some(body)) => setup_folder(body).map(|folder| vec![folder]),
+                (_, Some(text)) => folders_in(names, text).ok(),
+                (_, None) => None,
+            };
+            let Some(folders) = folders else {
+                skipped += 1;
+                continue;
+            };
+            for folder in folders.into_iter().filter(|folder| folder.is_absolute()) {
+                let real = folder.canonicalize().ok();
+                for root in std::iter::once(folder).chain(real) {
+                    if seen.insert(root.clone()) {
+                        roots.push(root);
+                    }
+                }
             }
         }
     }
     if skipped > 0 {
         eprintln!("engine_places_setup_rows_skipped count={skipped}");
     }
-    assert!(skipped <= PROJECT_ROOTS_MAX);
-    assert!(roots.len() <= 2 * PROJECT_ROOTS_MAX);
+    assert!(skipped <= AGENT_TABLES.len() * PROJECT_ROOTS_MAX);
+    assert!(roots.len() <= 2 * PROJECT_ROOTS_MAX * (PROJECT_REPOSITORIES_MAX + 3));
     assert!(roots.iter().all(|root| root.is_absolute()));
     Some(roots)
 }
@@ -975,6 +1000,9 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         Some(Err(why)) => return Err(refused(program.as_path(), why)),
         _ => return Err(not_there()),
     }
+    if places.temp_refused && leads_into_temp(entry, &program, &places.temps) {
+        return Err(refused(program.as_path(), Refusal::InTemp));
+    }
     assert!(program.is_absolute());
     let Some(shebang) = shebang(&program) else {
         return Ok(Resolved {
@@ -1279,16 +1307,16 @@ fn install_hint(tool: &str) -> &'static str {
 }
 
 /// Checks a found file: none when it is not an executable file whose links resolve, else
-/// passed, or passed over as a version-manager shim, as a file agents can write, as found or
-/// through its links ([`Places::agent_writable`]), with the part another user or group can
-/// change ([`crate::service::changeable_past_sticky`]), or, on the engine's places, as a file
-/// that leads into a temp folder ([`leads_into_temp`]). Inputs: the places and the file.
-/// Output: the check.
+/// passed, or passed over as a version-manager shim, as agents' to write, as changeable by
+/// another user or group past a sticky store, or as leading into a temp folder: the file as
+/// found and real first, then each link and `..` folder on its way, as it runs by its path
+/// ([`Places::hop_refusal`], B1). Inputs: the places and the file. Output: the check.
 fn check_candidate(places: &Places, candidate: &Path) -> Option<Result<(), Refusal>> {
     if !executable_file(candidate) {
         return None;
     }
     let real = candidate.canonicalize().ok()?;
+    let hops = crate::harnesses::finding::link_hops(candidate)?;
     Some(if crate::harnesses::is_shim(places.home(), candidate) {
         Err(Refusal::Shim)
     } else if places.agent_writable(candidate) {
@@ -1297,6 +1325,8 @@ fn check_candidate(places: &Places, candidate: &Path) -> Option<Result<(), Refus
         Err(Refusal::OthersCanChange(part))
     } else if places.temp_refused && leads_into_temp(candidate, &real, &places.temps) {
         Err(Refusal::InTemp)
+    } else if let Some(refusal) = places.hop_refusal(candidate, &hops) {
+        Err(refusal)
     } else {
         Ok(())
     })

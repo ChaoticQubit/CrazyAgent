@@ -1313,3 +1313,63 @@ fn an_ide_terminal_reads_the_global_git_python_and_npm_config_of_its_home() {
         );
     }
 }
+
+/// The owner's IDE terminal writes its own npm, yarn, git and cargo config and cargo's
+/// subcommands in its home, and sets a flag and an ACL on what it copies there, since no
+/// launch resets that home and those denies are an agent home's alone (RV-DS241-188, -187):
+/// `npm login`, `yarn config set`, `git config --global` and `cargo install` work there.
+/// The terminal stays confined: the engine's owner keys stay out of its reach.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_ide_terminal_writes_its_own_npm_yarn_git_and_cargo_config_in_its_home() {
+    let case = Case::new();
+    let keys = case.root.join("account-keys").join("planted");
+    let tries = [
+        ("npmrc", "printf 'token=x\\n' > .npmrc"),
+        ("yarnrc", "printf 'x\\n' > .yarnrc"),
+        ("yarnrc_yml", "printf 'x: 1\\n' > .yarnrc.yml"),
+        ("gitconfig", "printf '[user]\\n' > .gitconfig"),
+        (
+            "git_xdg",
+            "mkdir -p .config/git && printf '[user]\\n' > .config/git/config",
+        ),
+        (
+            "cargo_config",
+            "mkdir -p .cargo && printf '[build]\\n' > .cargo/config.toml",
+        ),
+        (
+            "cargo_bin",
+            "mkdir -p .cargo/bin && printf x > .cargo/bin/cargo-x",
+        ),
+        (
+            "flag",
+            "printf x > copied && /usr/bin/chflags uchg copied && /usr/bin/chflags nouchg copied",
+        ),
+        (
+            "acl",
+            "/bin/chmod +a 'everyone deny delete' copied && /bin/chmod -N copied",
+        ),
+    ];
+    let mut script = String::from("cd \"$HOME\" || exit 9\n");
+    for (name, step) in tries {
+        script.push_str(&format!("( {step} ) 2>/dev/null; echo {name}=$?\n"));
+    }
+    script.push_str(&format!(
+        "printf x > {} 2>/dev/null; echo keys=$?\n",
+        quoted(&keys)
+    ));
+    let output = in_terminal(&case, &script);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let refused: Vec<&str> = tries
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !stdout.lines().any(|line| line == format!("{name}=0")))
+        .collect();
+    assert!(
+        refused.is_empty(),
+        "refused in the owner's terminal: {refused:?}\n{stdout}"
+    );
+    let keys_tried = stdout.lines().find(|line| line.starts_with("keys="));
+    assert!(keys_tried.is_some_and(|line| line != "keys=0"), "{stdout}");
+    assert!(!keys.exists());
+}

@@ -44,10 +44,12 @@ pub fn qualified() -> bool {
 }
 
 /// Builds the Seatbelt profile an IDE server process tree runs under. The base is the agent
-/// profile for the project folder: deny by default, system reads, the project writable except
-/// its git hooks, git config and context, the owner's secrets and keychain denied, the
-/// project's toolchains readable, `home` and `tmp` writable and the build readable. On top,
-/// the whole engine data root is denied, then only the grants are given back, with the base
+/// profile for the project folder, with `home` kept as the owner's own
+/// ([`ProjectSandbox::keep_owner_config`]): deny by default, system reads, the project
+/// writable except its git hooks, git config and context, the owner's secrets and keychain
+/// denied, the project's toolchains readable, `home` and `tmp` writable and the build
+/// readable. On top, the whole engine data root is denied, then only the grants are given
+/// back, with the base
 /// write denies in `home` and the writable folders given again after them
 /// ([`crate::sandbox::regranted_denies`]), then every key
 /// file directly in a folder of the data root (the owner keys) and the engine database are
@@ -115,6 +117,7 @@ pub fn profile(
         .and_then(|sandbox| sandbox.keep_ports(kept_ports))
         .and_then(|sandbox| sandbox.allow_read(grants.build))
         .and_then(|sandbox| sandbox.allow_tools(&Toolchains::detect(grants.root, &homes)))
+        .map(ProjectSandbox::keep_owner_config)
         .map_err(invalid)?;
     let mut text = sandbox.profile();
     let base = text.len();

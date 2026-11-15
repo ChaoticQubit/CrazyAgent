@@ -494,7 +494,7 @@ fn curl_arguments_and_environment_hold_no_key_url_or_token() {
         &incoming,
         KeyHeader::Bearer,
         &key(),
-        Some(Path::new("/tmp/crazyagent-relay-x/request-1")),
+        Some(Path::new("/dev/fd/7")),
     )
     .unwrap();
     let config = String::from_utf8(config).unwrap();
@@ -502,7 +502,7 @@ fn curl_arguments_and_environment_hold_no_key_url_or_token() {
     assert!(config.contains("request = \"POST\"\n"));
     assert!(config.contains(&format!("header = \"Authorization: Bearer {KEY}\"\n")));
     assert!(config.contains("header = \"openai-beta: responses=v1\"\n"));
-    assert!(config.contains("data-binary = \"@/tmp/crazyagent-relay-x/request-1\"\n"));
+    assert!(config.contains("data-binary = \"@/dev/fd/7\"\n"));
     assert!(!config.contains(&token));
     assert!(!config.contains("gzip"));
     assert!(!config.contains("127.0.0.1:9"));
@@ -575,26 +575,23 @@ fn request_limits_refuse_oversized_or_malformed_requests() {
 }
 
 #[test]
-fn dropping_the_relay_stops_it_and_removes_its_scratch() {
+fn dropping_the_relay_after_a_request_stops_it() {
     let provider = Provider::json();
     let relay = Relay::start(&provider.origin(), key()).unwrap();
-    let scratch = relay.shared.scratch.clone();
-    let mode = std::os::unix::fs::PermissionsExt::mode(
-        &std::fs::metadata(&scratch).unwrap().permissions(),
-    );
-    assert_eq!(mode & 0o777, 0o700);
     let (status, _, _) = send(
         relay.port(),
         &post(
             "/v1/messages",
             &format!("x-api-key: {}", relay.token()),
-            r#"{"body":"kept in a private file"}"#,
+            r#"{"body":"handed to curl on a pipe"}"#,
         ),
     );
     assert_eq!(status, 200);
-    assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+    assert_eq!(
+        provider.seen()[0].body,
+        br#"{"body":"handed to curl on a pipe"}"#
+    );
     drop(relay);
-    assert!(!scratch.exists());
 }
 
 #[test]
@@ -721,4 +718,102 @@ fn a_relay_port_the_system_refuses_is_skipped_for_the_next_one() {
     assert_eq!(excluded.unwrap_err().kind(), ErrorKind::AddrInUse);
     let broken = first_bound(&ports, 2, |_| Err(Error::other("no sockets")));
     assert_eq!(broken.unwrap_err().kind(), ErrorKind::Other);
+}
+
+/// The files a request body could have been left in where an agent's temp folder grant
+/// reaches: every file directly in the temp folder or one folder below it, changed at or
+/// after `since`, that holds `marker`. Inputs: when the row started and the body's marker.
+/// Output: the paths.
+fn temp_files_holding(since: std::time::SystemTime, marker: &[u8]) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut folders = vec![(std::env::temp_dir(), 0)];
+    while let Some((folder, depth)) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = path.symlink_metadata() else {
+                continue;
+            };
+            if meta.is_dir() && depth == 0 {
+                folders.push((path, depth + 1));
+            } else if meta.is_file()
+                && meta.len() <= 1 << 20
+                && meta.modified().is_ok_and(|at| at >= since)
+                && std::fs::read(&path)
+                    .is_ok_and(|bytes| bytes.windows(marker.len()).any(|seen| seen == marker))
+            {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// SA vid 201: a keyed agent's request body never lands in the temp folder, which every
+/// agent of a project holding the owner's temp folder grant reads and writes, so no agent
+/// of another project can read or rewrite that model request: while the provider holds the
+/// request, no file in the temp folder holds its body.
+#[test]
+fn a_request_body_never_lands_in_the_temp_folder_an_agent_grant_reaches() {
+    let marker = format!("vid201-{}", random_hex(16).unwrap());
+    let since = std::time::SystemTime::now();
+    let during = Arc::new(Mutex::new(None));
+    let (looked, probe) = (Arc::clone(&during), marker.clone());
+    let provider = Provider::start(move |_, stream| {
+        *looked.lock().unwrap() = Some(temp_files_holding(since, probe.as_bytes()));
+        let body = br#"{"ok":true}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+    });
+    let relay = Relay::start(&provider.origin(), key()).unwrap();
+    let body = format!(r#"{{"messages":[{{"role":"user","content":"{marker}"}}]}}"#);
+    let (status, _, _) = send(
+        relay.port(),
+        &post(
+            "/v1/messages",
+            &format!("x-api-key: {}", relay.token()),
+            &body,
+        ),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(provider.seen()[0].body, body.as_bytes());
+    let held_in = during
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the provider got the request");
+    assert!(held_in.is_empty(), "the body sat in {held_in:?}");
+}
+
+/// A body longer than the longest line curl reads from its config (10 MB) still reaches the
+/// provider byte for byte, so the body is never written into curl's config.
+#[test]
+fn a_body_longer_than_a_curl_config_line_reaches_the_provider_whole() {
+    let provider = Provider::json();
+    let relay = Relay::start(&provider.origin(), key()).unwrap();
+    let body = format!(r#"{{"text":"{}"}}"#, "a\\nb".repeat(3 << 20));
+    assert!(body.len() > 10 << 20);
+    let (status, _, _) = send(
+        relay.port(),
+        &post(
+            "/v1/messages",
+            &format!("x-api-key: {}", relay.token()),
+            &body,
+        ),
+    );
+    assert_eq!(status, 200);
+    let seen = provider.seen();
+    assert!(
+        seen[0].body == body.as_bytes(),
+        "the provider got {} of {} bytes, or changed ones",
+        seen[0].body.len(),
+        body.len()
+    );
 }
