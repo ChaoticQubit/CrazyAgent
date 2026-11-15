@@ -71,6 +71,7 @@ mod own_turns {
     use std::time::{Duration, Instant};
 
     const STAND_IN: &str = "#!/bin/sh\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
+    const PID_STAND_IN: &str = "#!/bin/sh\necho $$ > \"$HOME/pid\"\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
 
     /// One test's tmux server, ended when the test ends.
     struct Server {
@@ -895,24 +896,49 @@ mod own_turns {
     #[test]
     fn a_keyed_pane_group_ends_when_the_engine_holding_its_relay_dies() {
         let token = super::longest_key();
-        let mut pane = start_keyed("keyed-crash", false, STAND_IN, Some(&token));
-        let group = pane.session.process_group();
-        assert!(group_alive(group));
-        assert!(
-            pane.session.lifeline.is_some(),
-            "a pane on an engine key relay has no lifeline"
-        );
-        if let Some(lifeline) = pane.session.lifeline.as_mut() {
-            lifeline.sever();
-        }
-        let until = Instant::now() + Duration::from_secs(10);
-        while group_alive(group) {
+        for (name, unconfined) in [("keyed-crash", false), ("keyed-crash-full", true)] {
+            let mut pane = start_keyed(name, unconfined, PID_STAND_IN, Some(&token));
+            let group = pane.session.process_group();
+            let harness = stand_in_pid(&pane.home);
+            assert!(group_alive(group) && running(harness));
             assert!(
-                Instant::now() < until,
-                "the keyed pane outlived the engine that held its relay"
+                pane.session.lifeline.is_some(),
+                "a pane on an engine key relay has no lifeline"
             );
+            if let Some(lifeline) = pane.session.lifeline.as_mut() {
+                lifeline.sever();
+            }
+            let until = Instant::now() + Duration::from_secs(10);
+            while group_alive(group) || running(harness) {
+                assert!(
+                    Instant::now() < until,
+                    "the keyed pane outlived the engine that held its relay"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    /// Reads the process id a [`PID_STAND_IN`] wrote to `pid` in its home, waiting up to
+    /// 10 s for it. Takes the home. Returns the id.
+    fn stand_in_pid(home: &Path) -> u32 {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let read = std::fs::read_to_string(home.join("pid")).unwrap_or_default();
+            if let Ok(pid) = read.trim().parse::<u32>() {
+                return pid;
+            }
+            assert!(Instant::now() < until, "the stand-in never wrote its pid");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Tells whether a process with this id still exists. Takes the id. Returns the answer.
+    fn running(pid: u32) -> bool {
+        i32::try_from(pid)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
     }
 
     /// A pane on the local placeholder key reaches no relay and gets no lifeline, so a later
