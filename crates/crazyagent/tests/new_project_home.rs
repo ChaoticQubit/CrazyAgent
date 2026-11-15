@@ -552,8 +552,10 @@ fn staging_left(home: &Path) -> Vec<String> {
 }
 
 /// RV-DS241-39: New Project's git reads no global config, so a `.gitconfig` planted in the
-/// engine's git home, with a default branch git refuses, does not break it; and two New
-/// Projects of one name at once still give one project and leave no staging folder.
+/// engine's git home, with a default branch git refuses, does not break it; a build that
+/// fails, here with a file where the engine's projects folder goes, leaves no folder and no
+/// setup; and two New Projects of one name at once still give one project and leave no
+/// staging folder.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_project_reads_no_git_config_planted_in_the_engine_git_home() {
     let engine = Engine::with_settings("").await;
@@ -582,6 +584,23 @@ async fn a_new_project_reads_no_git_config_planted_in_the_engine_git_home() {
         research: vec![],
         ..setup()
     };
+
+    let projects = engine.root.path().join("projects");
+    match fs::remove_dir(&projects) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => panic!("{e}"),
+    }
+    fs::write(&projects, "not a folder").unwrap();
+    let response = owner
+        .setup_project(slow.clone(), spec("Slow Start"), quiet(), next())
+        .await
+        .unwrap();
+    assert_eq!(result(response), rejected("home_new_project_failed"));
+    assert!(plain_problem("home_new_project_failed").is_some());
+    assert_eq!(names(&home), Vec::<String>::new());
+    assert!(owner.project_setup(slow.clone()).await.unwrap().is_none());
+    fs::remove_file(&projects).unwrap();
 
     plant_git_config(engine.root.path());
     let response = owner
