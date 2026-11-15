@@ -2356,6 +2356,195 @@ fn a_self_update_is_refused_when_a_middle_link_sits_where_agents_or_others_can_m
     }
 }
 
+/// RV-DS241-203: a self-update whose script asks `env` for node is refused when the entry's
+/// own folder, which the child's PATH looks in first, holds a `node` link whose target is not
+/// there yet: `env` passes over it now, but an agent that makes that target in its project
+/// before the run would have its file started as the owner. The vetted node elsewhere does
+/// not make the command safe.
+#[test]
+fn a_self_update_is_refused_when_its_env_interpreter_has_a_dangling_copy_agents_can_fill() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    std::fs::create_dir_all(&roots.home).unwrap();
+    let at = machine.root.path();
+    std::fs::create_dir_all(at.join("proj/.crazyagent")).unwrap();
+    let vetted = machine.program("brew/bin/node", 0o755);
+    let real = at.join("home/.codex/packages/standalone/0.167.1/codex");
+    let entry = at.join("home/.local/bin/codex");
+    executable(&real, "#!/usr/bin/env node\n");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &entry).unwrap();
+    let filled = at.join("proj/tools/node");
+    std::os::unix::fs::symlink(&filled, entry.with_file_name("node")).unwrap();
+    assert_eq!(method("codex", &real, &roots), Method::SelfUpdate);
+    match crate::tools::resolve_entry(&entry, &roots.places)
+        .unwrap()
+        .kind
+    {
+        crate::tools::Kind::Script { interpreter, .. } => assert_eq!(interpreter.entry, vetted),
+        crate::tools::Kind::Native => panic!("the self-updater is a script"),
+    }
+    assert_eq!(
+        update_command("codex", &entry, &real, &roots).unwrap_err(),
+        TOOL_UNSAFE
+    );
+    assert!(!filled.exists(), "nothing made the agent's file");
+}
+
+/// rv-code2 B11-1: `env` takes the first copy of a name in the search folders, so a link
+/// whose target is gone behind a copy that resolves is never what runs. An engine npm
+/// command whose search holds the vetted node first and the prefix's own `node` link second,
+/// left dangling when the Node it named was removed, is not refused, so checks, updates and
+/// installs keep working; the same dangling link ahead of the vetted node still is.
+#[test]
+fn a_dangling_interpreter_copy_behind_the_copy_env_takes_does_not_refuse_the_command() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    let at = machine.root.path();
+    machine.program("node22/bin/node", 0o755);
+    let npm = at.join("node22/lib/node_modules/npm/bin/npm-cli.js");
+    executable(&npm, "#!/usr/bin/env node\n");
+    let prefix_bin = at.join("setup/harnesses/bin");
+    std::fs::create_dir_all(&prefix_bin).unwrap();
+    std::os::unix::fs::symlink(at.join("node20/bin/node"), prefix_bin.join("node")).unwrap();
+    let fixed = |search: Vec<PathBuf>| Fixed {
+        program: npm.clone(),
+        args: vec!["--version"],
+        search,
+        prefix: None,
+    };
+    let behind = checked(
+        fixed(vec![at.join("node22/bin"), prefix_bin.clone()]),
+        &roots.places,
+    );
+    assert_eq!(behind.map(|fixed| fixed.search.len()), Ok(2));
+    assert_eq!(
+        checked(
+            fixed(vec![prefix_bin.clone(), at.join("node22/bin")]),
+            &roots.places
+        )
+        .unwrap_err(),
+        TOOL_UNSAFE
+    );
+}
+
+/// rv-sec2 F4: at a level whose script asks `env` for a program by name, the walk goes on
+/// from the copy `env` takes, the first one in the command's search folders, not from the
+/// one the resolver found elsewhere. An owner `node` wrapper there that asks `env` for bash,
+/// beside a `bash` link into a project, is refused although the resolver's own node is a
+/// program; with no `bash` beside it the wrapper's bash is the one the resolver vets.
+#[test]
+fn the_interpreter_walk_follows_the_copy_env_takes_and_judges_its_own_interpreter() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    let at = machine.root.path();
+    std::fs::create_dir_all(at.join("proj/.crazyagent")).unwrap();
+    machine.program("brew/bin/node", 0o755);
+    executable(&at.join("brew/bin/bash"), "exit 0\n");
+    let bin = at.join("home/.local/bin");
+    let entry = bin.join("codex");
+    executable(&entry, "#!/usr/bin/env node\n");
+    executable(&bin.join("node"), "#!/usr/bin/env bash\n");
+    let planted = machine.program("proj/tools/bash", 0o755);
+    std::os::unix::fs::symlink(&planted, bin.join("bash")).unwrap();
+    let fixed = || Fixed {
+        program: entry.clone(),
+        args: vec!["update"],
+        search: vec![bin.clone()],
+        prefix: None,
+    };
+    assert_eq!(checked(fixed(), &roots.places).unwrap_err(), TOOL_UNSAFE);
+    std::fs::remove_file(bin.join("bash")).unwrap();
+    assert!(checked(fixed(), &roots.places).is_ok());
+}
+
+/// rv-sec2 F3 (RV-DS241-203's own chain): an `env` copy in the search folder whose middle
+/// link sits in a project is refused although its end is the owner's node, and so is a first
+/// line that names that copy by path; the same chain through an owner folder passes.
+#[test]
+fn a_middle_link_in_a_project_is_refused_and_one_through_an_owner_folder_passes() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    let at = machine.root.path();
+    std::fs::create_dir_all(at.join("proj/.crazyagent")).unwrap();
+    let node = machine.program("brew/bin/node", 0o755);
+    let bin = at.join("home/.local/bin");
+    let by_name = at.join("home/tool/by-name");
+    executable(&by_name, "#!/usr/bin/env node\n");
+    let by_path = at.join("home/tool/by-path");
+    executable(&by_path, &format!("#!{}\n", bin.join("node").display()));
+    let middle = at.join("proj/tools/node");
+    std::fs::create_dir_all(middle.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&node, &middle).unwrap();
+    std::os::unix::fs::symlink(&middle, bin.join("node")).unwrap();
+    let fixed = |program: &Path| Fixed {
+        program: program.to_path_buf(),
+        args: vec!["--version"],
+        search: vec![bin.clone()],
+        prefix: None,
+    };
+    for program in [&by_name, &by_path] {
+        assert_eq!(
+            checked(fixed(program), &roots.places).unwrap_err(),
+            TOOL_UNSAFE,
+            "{}",
+            program.display()
+        );
+    }
+    let owner = at.join("home/links/node");
+    std::fs::create_dir_all(owner.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&node, &owner).unwrap();
+    std::fs::remove_file(bin.join("node")).unwrap();
+    std::os::unix::fs::symlink(&owner, bin.join("node")).unwrap();
+    for program in [&by_name, &by_path] {
+        assert!(
+            checked(fixed(program), &roots.places).is_ok(),
+            "{}",
+            program.display()
+        );
+    }
+}
+
+/// RV-DS241-203: a command's search folders are the child's PATH ahead of the system folders,
+/// so each one that exists must be one a lookup would trust
+/// ([`crate::tools::Places::kept_for_children`]):
+/// a folder every user can write or one inside a project agents can write is refused even
+/// with no copy of an interpreter in it yet, while the owner's folder and a folder not made
+/// yet, as the engine's npm prefix before its first install, pass.
+#[test]
+fn a_command_is_refused_when_a_search_folder_others_or_agents_can_write_exists() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    let at = machine.root.path();
+    let program = machine.program("brew/bin/brew", 0o755);
+    let open = at.join("open/bin");
+    std::fs::create_dir_all(&open).unwrap();
+    std::fs::set_permissions(at.join("open"), std::fs::Permissions::from_mode(0o777)).unwrap();
+    let project = at.join("proj/bin");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(at.join("proj/.crazyagent")).unwrap();
+    let fixed = |folder: &Path| Fixed {
+        program: program.clone(),
+        args: vec!["--version"],
+        search: vec![at.join("brew/bin"), folder.to_path_buf()],
+        prefix: None,
+    };
+    for (folder, refused) in [
+        (&open, true),
+        (&project, true),
+        (&at.join("brew/bin"), false),
+        (&at.join("setup/prefix/bin"), false),
+    ] {
+        let answer = checked(fixed(folder), &roots.places);
+        if refused {
+            assert_eq!(answer.unwrap_err(), TOOL_UNSAFE, "{}", folder.display());
+        } else {
+            assert_eq!(answer.unwrap().search[1], *folder, "{}", folder.display());
+        }
+    }
+}
+
 /// security-audit vid 1 r2 (3), on macOS, where the owner's cache folder lies outside every
 /// temp folder: on the engine's places a command is refused when a link on its program's way
 /// to the real file lies in the temp folder while the program's own place does not, since
