@@ -859,6 +859,10 @@ pub const GIT_STATE_FILES: [&str; 6] = [
     "config.worktree",
 ];
 
+/// The lowest port a loopback bridge carries on Linux: inside a network namespace of its
+/// own an agent's helper has no capability to listen below it.
+pub const BRIDGE_PORT_MIN: u16 = 1024;
+
 /// What a limited network cannot hold on Linux, shown there only, under the network choice
 /// in the desktop and the TUI (RV-DS241-83): Landlock limits outbound TCP by port, not by
 /// host, so a port an agent may reach on this computer is open to it on every host.
@@ -2449,6 +2453,15 @@ impl ProjectSandbox {
     /// How this agent's sockets are held on Linux when its network is limited.
     pub fn linux_sockets(&self) -> LinuxSockets {
         self.linux_sockets
+    }
+
+    /// The loopback ports a Linux that nests agents carries for this one over a bridge, the
+    /// agent then having a network namespace of its own: the sockets setting is `TcpOnly`
+    /// and the limited network names loopback ports only, each [`BRIDGE_PORT_MIN`] or
+    /// higher. Output: the ports in rising order, or none when the agent keeps the shared
+    /// network.
+    pub fn bridged_ports(&self) -> Option<Vec<u16>> {
+        None
     }
 
     /// True when, on Linux, this agent looks host names up over TCP: the setting is

@@ -12,7 +12,7 @@ use std::ffi::{OsStr, OsString};
 
 use std::fs;
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 
 use std::path::{Path, PathBuf};
 
@@ -1980,7 +1980,7 @@ fn nesting_bwrap() -> Option<PathBuf> {
     let made = crazyagent::spawn_gate::status(
         Command::new(bwrap)
             .args(NEST_ARGS)
-            .args(["--", "/bin/true"])
+            .args(["--unshare-net", "--", "/bin/true"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null()),
@@ -2391,4 +2391,103 @@ fn a_host_whose_landlock_does_not_hold_reports_the_process_namespace_bubblewrap_
     let host = crazyagent::sandbox::linux::read_host(refusing);
     assert!(!host.scoped, "{host:?}");
     assert!(host.nested, "{host:?}");
+}
+
+/// This computer's address on its default route, which is never loopback. No input.
+/// Output: the address; it panics on a machine with no route, where the rows that ask for
+/// another host prove nothing.
+fn outward_address() -> std::net::IpAddr {
+    let socket = crazyagent::spawn_gate::bind_udp_std("0.0.0.0:0").unwrap();
+    socket
+        .connect("192.0.2.1:9")
+        .expect("Linux test machines need a default route");
+    let address = socket.local_addr().unwrap().ip();
+    assert!(!address.is_loopback() && !address.is_unspecified(), "{address}");
+    address
+}
+
+#[test]
+fn a_loopback_only_nested_agent_reaches_its_port_on_this_computer_and_on_no_other_host() {
+    let case = case();
+    let served = crazyagent::spawn_gate::bind_tcp_std("0.0.0.0:0").unwrap();
+    let port = served.local_addr().unwrap().port();
+    let other = outward_address();
+    std::thread::spawn(move || {
+        for mut asked in served.incoming().flatten().take(16) {
+            let _ = asked.write_all(b"pong\n");
+        }
+    });
+    let script = format!(
+        "read -r line </dev/tcp/127.0.0.1/{port}; echo \"loopback=$line\"; \
+         (exec 4<>/dev/tcp/{other}/{port}) 2>/dev/null && echo other=reached || echo other=refused"
+    );
+    let reach = |sandbox: &dyn Sandbox| {
+        let mut harness = Command::new("/bin/bash");
+        harness
+            .args(["-c", script.as_str()])
+            .current_dir(case.project.join("worktrees"));
+        agent_stdout(Some(sandbox), harness)
+    };
+    let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(port)]);
+    let shared = pinned(policy(&case, network.clone()));
+    assert_eq!(
+        reach(&shared),
+        "loopback=pong\nother=reached\n",
+        "on the shared network the port is open on every host (RV-DS241-83)"
+    );
+    let Some(bridged) = nested(policy(&case, network)) else {
+        return;
+    };
+    assert_eq!(reach(&bridged), "loopback=pong\nother=refused\n");
+}
+
+#[test]
+fn the_bridge_leaves_no_descriptor_in_the_harness() {
+    let case = case();
+    let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(18_080)]);
+    let Some(bridged) = nested(policy(&case, network.clone())) else {
+        return;
+    };
+    let shared = pinned(policy(&case, network));
+    let open = |sandbox: &dyn Sandbox| {
+        String::from_utf8(run(sandbox, &case, "ls /proc/self/fd").stdout).unwrap()
+    };
+    assert_eq!(open(&bridged), "0\n1\n2\n3\n");
+    assert_eq!(open(&bridged), open(&shared));
+}
+
+/// Tells whether a broker that carries a port runs on this machine, by its arguments.
+/// Input: the port. Output: true when one does.
+fn broker_runs(port: u16) -> bool {
+    let wanted = port.to_string();
+    fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            fs::read(entry.path().join("cmdline")).is_ok_and(|line| {
+                let words: Vec<&[u8]> = line.split(|byte| *byte == 0).collect();
+                words.contains(&b"--broker".as_slice()) && words.contains(&wanted.as_bytes())
+            })
+        })
+}
+
+#[test]
+fn the_broker_runs_while_the_agent_does_and_ends_with_it() {
+    let case = case();
+    let held = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = held.local_addr().unwrap().port();
+    let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(port)]);
+    let Some(bridged) = nested(policy(&case, network)) else {
+        return;
+    };
+    assert!(!broker_runs(port));
+    let (mut child, _output) = started(&bridged, &case, "echo ready; read -r line");
+    assert!(broker_runs(port), "a bridged agent runs with its broker");
+    drop(child.stdin.take());
+    assert!(exit_within(&mut child, Duration::from_secs(5)).is_some());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while broker_runs(port) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!broker_runs(port), "the broker ends with the agent");
 }

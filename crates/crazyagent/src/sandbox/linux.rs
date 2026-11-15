@@ -25,6 +25,10 @@ use std::process::{Command, ExitCode, Stdio};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+mod bridge;
+
+pub use bridge::Bridge;
+
 /// The Landlock helper's file name. It ships next to the engine's own executable.
 pub const HELPER_NAME: &str = "crazyagent-landlock";
 
@@ -284,6 +288,10 @@ pub enum HelperRequest {
         args: Vec<OsString>,
     },
     Scoped,
+    Broker {
+        parent: u32,
+        ports: Vec<u16>,
+    },
 }
 
 impl HelperRequest {
@@ -299,6 +307,9 @@ impl HelperRequest {
             return (args.len() == 1)
                 .then_some(Self::Scoped)
                 .ok_or_else(|| format!("{SCOPED} takes no other argument"));
+        }
+        if args.first().is_some_and(|flag| flag == bridge::BROKER) {
+            return bridge::broker_request(args);
         }
         Self::flagged(args)
     }
@@ -721,6 +732,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         HelperRequest::Filter { program, args } => return filtered(&program, args),
         HelperRequest::Nest { bwrap, args } => return nest(&bwrap, &args),
         HelperRequest::Scoped => return scoped(),
+        HelperRequest::Broker { .. } => return ExitCode::from(2),
         HelperRequest::Probe {
             limit_network,
             open_sockets,
@@ -1851,6 +1863,80 @@ mod tests {
             assert!(!args.contains(&OsStr::new(absent)), "{absent}: {args:?}");
         }
         assert_eq!(args.iter().filter(|arg| **arg == NEST).count(), 1);
+    }
+
+    #[test]
+    fn only_a_loopback_only_tcp_only_agent_with_ports_from_1024_up_is_bridged() {
+        use SandboxRemote::{AnyHost, Loopback};
+        let bridged = |remotes: &[SandboxRemote], sockets: LinuxSockets| {
+            let (_temp, sandbox) = project(SandboxNetwork::Only(remotes.to_vec()));
+            sandbox.limit_sockets(sockets).bridged_ports()
+        };
+        let default = LinuxSockets::TcpOnly;
+        assert_eq!(
+            bridged(&[Loopback(11434), Loopback(8080)], default),
+            Some(vec![8080, 11434])
+        );
+        assert_eq!(bridged(&[Loopback(1024)], default), Some(vec![1024]));
+        assert_eq!(bridged(&[Loopback(8080), AnyHost(443)], default), None);
+        assert_eq!(bridged(&[Loopback(8080), Loopback(1023)], default), None);
+        assert_eq!(bridged(&[], default), None);
+        assert_eq!(bridged(&[Loopback(8080)], LinuxSockets::TcpPorts), None);
+        let (_temp, open) = project(SandboxNetwork::Open);
+        assert_eq!(open.bridged_ports(), None);
+    }
+
+    fn nested_words(network: SandboxNetwork) -> (PathBuf, PathBuf, Vec<OsString>) {
+        let (_temp, sandbox) = project(network);
+        let cwd = sandbox.project_root().to_path_buf();
+        let helper = std::env::current_exe().unwrap();
+        let backend = LinuxBackend::Nested {
+            bwrap: helper.clone(),
+            helper: helper.clone(),
+        };
+        let nested = LinuxSandbox::new(sandbox, backend).unwrap();
+        let mut harness = Command::new("/bin/sh");
+        harness.args(["-c", "true"]).current_dir(&cwd);
+        let command = nested.wrap(&harness).unwrap();
+        let words = command.get_args().map(OsStr::to_os_string).collect();
+        (helper, cwd, words)
+    }
+
+    #[test]
+    fn a_loopback_only_nested_agent_starts_with_a_network_of_its_own_and_its_ports_bridged() {
+        use bridge::{BRIDGE, BRIDGE_FD, UNSHARE_NET};
+        let loopback = [SandboxRemote::Loopback(11434), SandboxRemote::Loopback(8080)];
+        let (helper, cwd, words) = nested_words(SandboxNetwork::Only(loopback.to_vec()));
+        let mut head: Vec<OsString> = [BRIDGE, "8080", BRIDGE, "11434", NEST, "--"]
+            .map(OsString::from)
+            .to_vec();
+        head.push(helper.clone().into());
+        head.extend(NEST_ARGS.map(OsString::from));
+        head.extend([UNSHARE_NET, "--chdir"].map(OsString::from));
+        head.push(cwd.into());
+        head.push("--".into());
+        head.push(helper.into());
+        assert_eq!(words.get(..head.len()), Some(&head[..]), "{words:?}");
+        let inside = &words[head.len()..];
+        let written = |word: &OsString| word == BRIDGE || word == BRIDGE_FD;
+        assert!(!inside.iter().any(written), "the nest writes them: {words:?}");
+        let (bridge, rest) = Bridge::leading(words.clone()).unwrap();
+        let asked = Bridge {
+            fd: None,
+            ports: vec![8080, 11434],
+        };
+        assert_eq!(bridge, Some(asked));
+        assert_eq!(rest.first(), Some(&OsString::from(NEST)));
+        let low = [SandboxRemote::Loopback(8080), SandboxRemote::Loopback(443)];
+        for network in [
+            SandboxNetwork::Only(low.to_vec()),
+            SandboxNetwork::Only(Vec::new()),
+            SandboxNetwork::Open,
+        ] {
+            let (_, _, words) = nested_words(network.clone());
+            assert_eq!(words.first(), Some(&OsString::from(NEST)), "{network:?}");
+            assert!(!words.iter().any(|word| word == UNSHARE_NET), "{network:?}");
+        }
     }
 
     #[test]
