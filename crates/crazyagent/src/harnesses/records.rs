@@ -3,6 +3,7 @@ use super::manifest::RecordKind;
 use super::registry::registry;
 
 pub mod json_files;
+pub mod json_rewrite;
 pub mod jsonl_append;
 
 /// The record readers the engine runs today: the Codex rollouts and the Claude Code session
