@@ -371,7 +371,7 @@ fn walk(
                 if depth < DEPTH_MAX
                     && !named(&UNREAD_FOLDERS, &name)
                     && !named(&DEPENDENCY_FOLDERS, &name)
-                    && !name.eq_ignore_ascii_case(".git")
+                    && !crate::instruction_files::names_git(&name)
                     && !name.eq_ignore_ascii_case(CRAZYAGENT_DIRECTORY)
                 {
                     folders.push((name, path));

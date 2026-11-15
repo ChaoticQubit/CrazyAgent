@@ -15,8 +15,8 @@ pub fn is_ide_config(path: &str) -> bool {
 }
 
 /// Whether a file name opens the same file as a lower-case ASCII name on a
-/// case-insensitive APFS volume. Inputs: the name and the ASCII name. Output: true when
-/// they are the same name there.
+/// case-insensitive APFS or HFS+ volume. Inputs: the name and the ASCII name. Output: true
+/// when they are the same name there.
 pub fn same_name(name: &str, ascii: &str) -> bool {
     assert!(ascii.is_ascii() && !ascii.bytes().any(|byte| byte.is_ascii_uppercase()));
     fold(name) == ascii
@@ -28,11 +28,13 @@ pub fn same_name(name: &str, ascii: &str) -> bool {
 /// question mark) becomes `;` and U+1FEF (Greek varia) becomes a backtick. Trying every
 /// non-ASCII code point on a real volume found no other one that opens a file named with
 /// one printable ASCII character, and none that APFS ignores. So every other character,
-/// composed or decomposed, stays itself and never equals one ASCII character.
-/// Input: the name. Output: the folded name, one character for each.
+/// composed or decomposed, stays itself and never equals one ASCII character. The code
+/// points an HFS+ volume ignores in names go ([`crate::instruction_files::HFS_IGNORED`],
+/// RV-DS241-148). Input: the name. Output: the folded name, at most one character for each.
 fn fold(name: &str) -> String {
     let folded: String = name
         .chars()
+        .filter(|character| !crate::instruction_files::HFS_IGNORED.contains(character))
         .map(|character| match character {
             '\u{17f}' => 's',
             '\u{212a}' => 'k',
@@ -41,7 +43,7 @@ fn fold(name: &str) -> String {
             _ => character.to_ascii_lowercase(),
         })
         .collect();
-    assert_eq!(folded.chars().count(), name.chars().count());
+    assert!(folded.chars().count() <= name.chars().count());
     folded
 }
 

@@ -175,14 +175,18 @@ fn collect(
 }
 
 /// True when a listed path names a regular file in the project: a plain relative path of
-/// at most 512 bytes with no `.git` part and no control character, not itself a link, in
-/// a folder that resolves inside the project. Inputs: the canonical folder and the path.
+/// at most 512 bytes with no part a case-insensitive volume opens as `.git`
+/// ([`crate::instruction_files::names_git`]) and no control character, not itself a link,
+/// in a folder that resolves inside the project. Inputs: the canonical folder and the path.
 #[cfg(unix)]
 fn inside(root: &Path, path: &str) -> bool {
     let relative = Path::new(path);
-    let plain = relative
-        .components()
-        .all(|part| matches!(part, std::path::Component::Normal(name) if !name.eq_ignore_ascii_case(".git")));
+    let plain = relative.components().all(|part| match part {
+        std::path::Component::Normal(name) => {
+            !crate::instruction_files::names_git(&name.to_string_lossy())
+        }
+        _ => false,
+    });
     if !plain || path.len() > PATH_BYTES_MAX || path.chars().any(char::is_control) {
         return false;
     }

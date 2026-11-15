@@ -1959,7 +1959,7 @@ fn tree_entries(
                 .any(|p| !matches!(p, Component::Normal(_)))
             || path
                 .components()
-                .any(|p| p.as_os_str().to_string_lossy().eq_ignore_ascii_case(".git"))
+                .any(|p| crate::instruction_files::names_git(&p.as_os_str().to_string_lossy()))
         {
             return Err(error("unsupported_or_unsafe_tree_entry"));
         }
@@ -2110,8 +2110,9 @@ fn copy_blobs(
 
 /// Says whether a tracked symlink resolves inside the lease wherever it is followed from:
 /// its target is relative, climbs only with leading `..` steps and no higher than the
-/// folder holding the link, then names plain components other than `.git`. Inputs: the
-/// link's path in the tree and its target bytes. Output: true when it stays inside.
+/// folder holding the link, then names plain components other than `.git` in any spelling
+/// a case-insensitive volume opens as it ([`crate::instruction_files::names_git`]). Inputs:
+/// the link's path in the tree and its target bytes. Output: true when it stays inside.
 #[cfg(unix)]
 fn link_stays_inside(link: &Path, target: &[u8]) -> bool {
     let Ok(target) = std::str::from_utf8(target) else {
@@ -2124,7 +2125,9 @@ fn link_stays_inside(link: &Path, target: &[u8]) -> bool {
         match part {
             ".." if climbing => up += 1,
             "" | "." | ".." => return false,
-            name if name.eq_ignore_ascii_case(".git") || name.contains('\0') => return false,
+            name if crate::instruction_files::names_git(name) || name.contains('\0') => {
+                return false;
+            }
             _ => climbing = false,
         }
     }
