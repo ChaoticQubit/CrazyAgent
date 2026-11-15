@@ -635,7 +635,7 @@ fn a_changed_tool_list_stops_the_connector_and_raises_one_notice() {
     assert!(error);
     assert!(text.starts_with("connector_tools_changed"), "{text}");
     assert!(vendor_calls(&vendor).is_empty());
-    let other = launch(&bench);
+    let other = self::launch(&bench);
     assert!(listed(&bench, &other).is_empty());
 
     let kind = NoticeKind::parse("connector_tools_changed").expect("the notice kind exists");
