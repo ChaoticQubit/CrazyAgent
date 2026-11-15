@@ -335,19 +335,20 @@ fn startup_frames_match_the_design() {
     check("too-small", &render(&mut shell, 50, 12), &[]);
 }
 
-/// RV-DS241-118: the engine-down screen names the command that starts the engine, which also
-/// repairs a login service left naming a gone or temporary app path, as the desktop's
-/// Restart engine does.
+/// DS-118: the engine-down screen of a TUI with no engine of its own to start, as one opened
+/// on an explicit socket, asks for the engine to be started and names no command, as the
+/// desktop's does.
 #[test]
-fn the_engine_down_screen_names_the_command_that_starts_and_repairs_the_engine() {
+fn the_engine_down_screen_asks_to_start_the_engine_and_names_no_command() {
     for (width, height) in [(120, 36), (80, 24)] {
         let mut shell = Shell::new(ctx(width, height));
         shell.ctx.link = Link::Down("engine_unavailable".into());
         let text = render(&mut shell, width, height).join("\n");
         assert!(
-            text.contains("Start it with crazyagent service start, then press r to try again."),
+            text.contains("Start it, then press r to try again."),
             "{text}"
         );
+        assert!(!text.contains("crazyagent service start"), "{text}");
     }
 }
 
