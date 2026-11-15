@@ -602,7 +602,7 @@ fn own_session() -> Result<(), String> {
 
 /// Makes the kernel kill this helper, and the program it then becomes, once the thread of
 /// `parent` that started it exits, and refuses when `parent` is already not its parent, as
-/// after that thread exited before the signal was set. The signal survives the exec of a
+/// after that process exited before the signal was set. The signal survives the exec of a
 /// program that is not set-user-ID. Input: the parent's process id. Output: Ok, or the reason.
 fn die_with_parent(parent: u32) -> Result<(), String> {
     rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))

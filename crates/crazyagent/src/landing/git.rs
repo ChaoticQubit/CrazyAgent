@@ -638,15 +638,15 @@ impl Repo {
     /// step folder when empty and leaves one holding another step's copy to that step
     /// (RV-DS241-135). A step whose folder holds a git `index.lock`, as a git an earlier engine
     /// started can, lets the worktree's lock go and answers [`INDEX_LOCKED`] without touching that
-    /// folder (RV-DS241-142). The folder starts empty and is emptied before the worktree's lock
-    /// goes, so a git the step killed never leaves a lock there that no sweep removes, and the
-    /// index is copied only from a plain file with one link, opened without following a link or
-    /// waiting on a FIFO. Once git exits 0 having rewritten the copy, the copy takes the index's
-    /// place only when it too is a plain file with one link, so whatever a raced step leaves there
-    /// is never taken, and a step that only reads leaves the index as it was; the step itself never
-    /// writes the git folder ([`Self::confined`]). Input: the step. Output: its output, git's
-    /// [`INDEX_LOCKED`] exit when the lock is already held, or `changes_git_failed` when the index
-    /// cannot be locked, copied or put back.
+    /// folder (RV-DS241-142). The folder starts empty and is emptied after, before the worktree's
+    /// lock goes when the copy is not put back, so a git the step killed never leaves a lock there
+    /// that no sweep removes, and the index is copied only from a plain file with one link, opened
+    /// without following a link or waiting on a FIFO. Once git exits 0 having rewritten the copy,
+    /// the copy takes the index's place only when it too is a plain file with one link, so whatever
+    /// a raced step leaves there is never taken, and a step that only reads leaves the index as it
+    /// was; the step itself never writes the git folder ([`Self::confined`]). Input: the step.
+    /// Output: its output, git's [`INDEX_LOCKED`] exit when the lock is already held, or
+    /// `changes_git_failed` when the index cannot be locked, copied or put back.
     #[cfg(target_os = "linux")]
     pub(super) fn swapped(
         &self,
