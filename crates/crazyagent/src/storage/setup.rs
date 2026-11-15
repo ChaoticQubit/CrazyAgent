@@ -920,11 +920,11 @@ fn keep_hooks(
     save_pack(tx, &record)
 }
 
-/// The kept hooks whose switches one added hook takes (RV-DS241-155): those that run what it
-/// runs, else, for a hook the old pin did not run, the switched hooks of its event that no
-/// added hook runs any more, so a changed hook the owner turned off stays off; a row saved
-/// before what hooks run was kept matches by name. Inputs: the kept hooks, every added hook
-/// and the one added hook. Output: the kept hooks it takes.
+/// The kept hooks whose switches one added hook takes (RV-DS241-155): those running what it
+/// runs, else its command under another event or matcher, else the switched hooks of its
+/// event whose command no added hook runs any more, so a changed off hook stays off; a row
+/// 2.4.1 saved without what it runs goes to every added hook of its plugin and event.
+/// Inputs: the kept hooks, every added hook and the one added hook. Output: those it takes.
 #[cfg(unix)]
 fn kept_for<'a>(
     kept: &'a [KeptHook],
@@ -938,12 +938,20 @@ fn kept_for<'a>(
     if !same.is_empty() {
         return same;
     }
+    let moved: Vec<&KeptHook> = kept
+        .iter()
+        .filter(|kept| !kept.event.is_empty() && kept.command == hook.command)
+        .collect();
+    if !moved.is_empty() {
+        return moved;
+    }
+    let place = format!("{}/{}", hook.plugin, hook.event);
     let replaced = |kept: &&KeptHook| {
         if kept.event.is_empty() {
-            return kept.name == hook.name;
+            return kept.name.rsplit_once('/').map(|(at, _)| at) == Some(place.as_str());
         }
         let switched = !kept.enabled || !kept.projects.is_empty();
-        let gone = !added.iter().any(|other| runs(kept, other));
+        let gone = !added.iter().any(|other| other.command == kept.command);
         switched && gone && kept.event == hook.event
     };
     kept.iter().filter(replaced).collect()

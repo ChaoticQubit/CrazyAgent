@@ -2017,10 +2017,10 @@ fn a_new_pin_that_changes_a_switched_off_hook_keeps_the_changed_hook_off() {
 }
 
 /// RV-DS241-155: a kept hook saved before what hooks run was kept, as 2.4.1 wrote it, still
-/// loads and still gives its switches to the added hook of its name, as before, and to no
-/// other added hook.
+/// loads and gives its switches to the added hook of its name, and, with the name standing
+/// only for a place in a list a new pin may reorder, to the other hook of its event too.
 #[test]
-fn a_kept_hook_saved_without_what_it_runs_loads_and_matches_by_name() {
+fn a_kept_hook_saved_without_what_it_runs_loads_and_matches_its_event() {
     let old = r#"{"name":"caveman/SessionStart/2","enabled":false,"projects":["project-1"]}"#;
     let kept: KeptHook = serde_json::from_str(old).unwrap();
     assert!(kept.event.is_empty() && kept.matcher.is_none() && kept.command.is_empty());
@@ -2045,7 +2045,7 @@ fn a_kept_hook_saved_without_what_it_runs_loads_and_matches_by_name() {
     ];
     let kept = [kept];
     assert_eq!(kept_for(&kept, &added, &added[1]), [&kept[0]]);
-    assert!(kept_for(&kept, &added, &added[0]).is_empty());
+    assert_eq!(kept_for(&kept, &added, &added[0]), [&kept[0]]);
 }
 
 /// An added hook as setup lists it, for one plugin's event at a place in its list. Inputs:
