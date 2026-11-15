@@ -96,7 +96,7 @@ fn main() -> ExitCode {
         .first()
         .is_some_and(|arg| arg == "native-auth-custodian")
     {
-        return match run_native_auth_custodian(&args) {
+        return match run_native_auth_custodian() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 let _ = writeln!(io::stderr(), "{error}");
@@ -308,9 +308,21 @@ fn run_git_credential(args: &[OsString]) -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
+/// Runs the native sign-in custodian from the process's own command line, read up to
+/// [`crazyagent::engine::CUSTODIAN_ARGUMENTS_MAX`] entries, which the longest launch the
+/// engine hands fits, rather than the general bound (RV-DS241-52). No input. Output: Ok,
+/// `native_auth_host_launch_too_long` past the bound, or the custodian's failure.
 #[cfg(unix)]
-fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
+fn run_native_auth_custodian() -> Result<(), String> {
     let usage = "usage: crazyagent native-auth-custodian RUNTIME_DIR";
+    let args: Vec<OsString> = std::env::args_os()
+        .skip(1)
+        .take(crazyagent::engine::CUSTODIAN_ARGUMENTS_MAX + 1)
+        .collect();
+    if args.len() > crazyagent::engine::CUSTODIAN_ARGUMENTS_MAX {
+        return Err("native_auth_host_launch_too_long".into());
+    }
+    let args = args.as_slice();
     let codex = match args.len() {
         2 => None,
         count
@@ -382,9 +394,9 @@ fn run_native_auth_custodian(args: &[OsString]) -> Result<(), String> {
 }
 
 /// Refuses the native sign-in custodian, which needs Unix fd handoff and process groups.
-/// Takes the command arguments, unused. Returns `native_auth_host_unavailable`.
+/// No input. Returns `native_auth_host_unavailable`.
 #[cfg(not(unix))]
-fn run_native_auth_custodian(_args: &[OsString]) -> Result<(), String> {
+fn run_native_auth_custodian() -> Result<(), String> {
     Err("native_auth_host_unavailable".into())
 }
 
