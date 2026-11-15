@@ -3719,6 +3719,36 @@ fn odd_names_the_owners_ignore_file_names_leave_out_only_themselves() {
     );
 }
 
+/// SA vid 2 r2 (rv-code2 F1, HIGH): a turn end lands beside untracked files the project's own
+/// `.gitignore` ignores as well as ones only the owner's ignore file names, and its set holds
+/// neither: a project-ignored file and folder, an owner-ignored file at the top and in a tracked
+/// folder, a new folder holding a kept file beside one ignored file of each kind, and a new
+/// folder holding only ignored files of both kinds. git's add exits 1 when a pathspec names a
+/// path it ignores itself, so none may reach it as one.
+#[test]
+fn a_turn_end_lands_beside_files_the_projects_gitignore_and_the_owners_ignore_file_name() {
+    let case = Case::new();
+    write(&case.home.join(".config/git/ignore"), "*.tmp\n");
+    case.edit(".gitignore", "*.o\nbuild/\n");
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.edit("a.o", "object\n");
+    case.edit("build/out.bin", "built\n");
+    case.edit("notes.tmp", "scratch\n");
+    case.edit("mixed/keep.c", "int kept;\n");
+    case.edit("mixed/skip.tmp", "scratch\n");
+    case.edit("mixed/c.o", "object\n");
+    case.edit("junk/x.o", "object\n");
+    case.edit("junk/y.tmp", "scratch\n");
+
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+
+    let view = case.view(&id);
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &view.head]),
+        ".gitignore\nREADME\nmixed/keep.c\n"
+    );
+}
+
 #[test]
 fn the_proposed_message_reuses_the_agent_commit_subjects_newest_first_and_lands() {
     let case = Case::new();
