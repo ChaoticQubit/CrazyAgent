@@ -4912,6 +4912,24 @@ mod profile_string_tests {
         assert!(!templates.contains(['\u{df}', '\u{1e9e}']));
     }
 
+    /// B5 r2 (rv-sec3 F1, rv-code4 F1): path text with a long fold run, such as a project
+    /// folder named with 7 `s` or 10 `f` or a top-level folder with 60, is spelled with no
+    /// panic and no runaway list: a stretch past the spelling limit takes one of its pieces
+    /// at each place, its fewest pieces' worth of places and the rest up to one per letter
+    /// optional, since Seatbelt reads no `{m,n}` count. A pattern keeps every stretch exact.
+    #[test]
+    fn a_long_fold_run_in_path_text_is_spelled_in_bounded_length_never_a_panic() {
+        let s = "((s|S|\u{17f})|\u{df}|\u{1e9e})";
+        assert_eq!(any_case("ssss"), format!("{s}{s}{s}?{s}?"));
+        let f = "([fF]|\u{fb00})";
+        assert_eq!(any_case("ffffff"), format!("{f}{f}{f}{f}?{f}?{f}?"));
+        let root = format!("/Users/o/Glasssssss/{}/{}", "f".repeat(10), "s".repeat(60));
+        let spelled = any_case(&root);
+        assert!(spelled.len() <= 20 * root.len(), "{}", spelled.len());
+        assert!(!spelled.contains('{'), "{spelled}");
+        assert!(std::panic::catch_unwind(|| fold_case("sssss")).is_err());
+    }
+
     /// The default secret rule and 64 long open top-level names give a profile with no string
     /// past the limit; a project folder so deep that one secret name no longer fits, and the
     /// most open names at the longest length, which pass the 64 KiB cap, are each refused at

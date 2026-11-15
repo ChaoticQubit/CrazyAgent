@@ -206,6 +206,50 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
 
+/// B5 r2 (rv-sec3 F1, rv-code4 F1): a project folder named with long runs of `s` and `f`
+/// still gets an IDE profile holding its agent folders rule under the folder's spelled
+/// name, rather than a panic while that name is spelled.
+#[test]
+fn an_ide_profile_builds_for_a_project_folder_named_with_long_fold_runs() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let data = fs::canonicalize(scratch.path()).unwrap();
+    let home = data.join("ide").join("p1").join("server");
+    let build = data.join("ide").join("builds").join("v1");
+    let elsewhere = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = fs::canonicalize(elsewhere.path())
+        .unwrap()
+        .join("Glasssssss-ffffffffff");
+    for path in [&home, &build, &root] {
+        folder(path);
+    }
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let rule = AgentFilesRule {
+        choice: IdeAgentFiles::ReadOnly,
+        older_agents: true,
+    };
+    let text = profile(&grants, PORT, closed(), &[], rule).unwrap();
+    let spelled = crate::sandbox::any_case(root.to_str().unwrap());
+    assert!(text.contains(&format!("(regex #\"^{spelled}")), "{text}");
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}
+
 /// Moves `from` to `to` under the profile, the way a server would rename one of its data
 /// folders into the project it can write. Inputs: the profile, the folder and its new path.
 /// Output: whether the move succeeded.

@@ -3855,6 +3855,37 @@ fn an_agent_still_runs_framework_python_whose_launcher_starts_its_python_app() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
 }
 
+/// B5 r2 (rv-sec3 F1, rv-code4 F1): a project folder named with long runs of `s` and `f`
+/// gets a profile Seatbelt reads, so the agent starts, and the folder's own app deny still
+/// holds under the bounded spelling of its name: a framework Python app planted there,
+/// which the profile runs anywhere else, does not run.
+#[test]
+fn an_agent_starts_in_a_project_named_with_long_fold_runs_and_runs_no_app_planted_there() {
+    let case = case();
+    let project = case.root.join("Glasssssss-ffffffffff");
+    let bundle = project.join("Py.framework/Versions/3/Resources/Python.app/Contents/MacOS");
+    fs::create_dir_all(&bundle).unwrap();
+    fs::copy("/usr/bin/true", bundle.join("Python")).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
+    let profile = case.profiles.join("runs.sb");
+    let started = run(&sandbox, &profile, "/usr/bin/true");
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let planted = run(&sandbox, &profile, &quoted(&bundle.join("Python")));
+    assert!(!planted.status.success(), "the planted app ran");
+    let stderr = String::from_utf8_lossy(&planted.stderr);
+    assert!(stderr.contains("Operation not permitted"), "{stderr}");
+}
+
 /// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs: a confined child reads neither
 /// the arguments nor the environment of a process outside its sandbox through either
 /// process-arguments sysctl, and still reads a process of its own sandbox and an ordinary
