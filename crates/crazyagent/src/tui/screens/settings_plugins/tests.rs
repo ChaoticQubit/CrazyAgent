@@ -246,6 +246,72 @@ fn approving_sends_exactly_the_command_shown() {
     }
 }
 
+/// RV-DS241-206: on a 24-row terminal the approval box for an every-project server keeps
+/// its buttons on screen and shows a long command a window at a time; Enter never approves
+/// before the command's last line has shown, and approves the exact command once it has.
+#[test]
+fn a_long_command_in_the_global_approval_box_is_read_to_its_end_before_enter_approves() {
+    let args: Vec<String> = (0..80)
+        .map(|index| format!("--option-{index:02}"))
+        .collect();
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    let spec = stdio("/opt/homebrew/bin/uvx", &words);
+    let mut ctx = plugin_ctx(80, 24);
+    let waiting = server("long", spec.clone(), ServerStatus::WaitingForApproval);
+    let mut screen = Plugins::with(Vec::new(), vec![waiting]);
+    let body = |screen: &Plugins, ctx: &Ctx| {
+        screen
+            .modal(ctx)
+            .map(|(modal, _)| texts(&modal.body))
+            .unwrap_or_default()
+    };
+    screen.key(&Key::Enter, &mut ctx);
+
+    let first = body(&screen, &ctx);
+    screen.key(&Key::Enter, &mut ctx);
+    let early = ctx.next_request();
+    let mut seen = first.clone();
+    for _ in 0..40 {
+        screen.key(&Key::Down, &mut ctx);
+        seen.extend(body(&screen, &ctx));
+    }
+    let last = body(&screen, &ctx);
+    screen.key(&Key::Enter, &mut ctx);
+    let late = ctx.next_request();
+
+    let rows = usize::from(ctx.height);
+    assert!(
+        first.len() + 2 <= rows,
+        "{} rows: {first:?}",
+        first.len() + 2
+    );
+    assert!(
+        first
+            .last()
+            .is_some_and(|line| line.contains("[> Approve ]")),
+        "{first:?}"
+    );
+    assert!(last.len() + 2 <= rows, "{} rows: {last:?}", last.len() + 2);
+    assert!(early.is_none(), "Enter approved with the command unread");
+    for arg in &args {
+        assert!(
+            seen.iter().any(|line| line.contains(arg.as_str())),
+            "{arg} never shown"
+        );
+    }
+    assert!(
+        matches!(
+            &late,
+            Some(Request::Settings(job)) if matches!(
+                &**job,
+                SettingsJob::Plugin(PluginChange::Approve { id, spec: sent })
+                    if id == "server-long" && *sent == spec
+            )
+        ),
+        "the approval that followed the end was not sent"
+    );
+}
+
 #[test]
 fn remove_asks_first() {
     let (skills, servers) = lists();

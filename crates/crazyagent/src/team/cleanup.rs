@@ -1693,6 +1693,15 @@ thread_local! {
 
 #[cfg(all(test, target_os = "macos"))]
 thread_local! {
+    /// The most flushes that start a `/bin/chmod` child one walk on this thread may make, in
+    /// place of the real cap, so a row reaches the cap with a short chain of folders; None
+    /// keeps the real cap.
+    pub(super) static ACL_FLUSHES_CAP: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
     /// A step a cleanup test runs in [`unpin`] once a pinned entry is open and before its
     /// flags change, standing in for a process an agent left that swaps a folder meanwhile.
     /// Runs once; None runs nothing.

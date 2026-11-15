@@ -766,6 +766,32 @@ mod tests {
         );
     }
 
+    /// RV-DS241-207: once a refused stack entry is fixed, the save that goes through leaves
+    /// no refusal under any field, the stack's or one the engine gave the role before.
+    #[test]
+    fn a_save_that_goes_through_leaves_no_refusal_under_any_field() {
+        let mut form = ProfileForm::new(None, None);
+        typed(&mut form, "Mira");
+        form.stack.set("Go, Ru\u{200b}st");
+        let refused = form.profile();
+        form.stack.set("Go, Rust");
+        form.show_problem(Slot::Role, "owner_profile_role");
+
+        let saved = form.profile().map(|profile| profile.preferred_stack);
+
+        assert_eq!(refused.err(), Some(Slot::Stack));
+        assert_eq!(saved, Ok(vec!["Go".to_owned(), "Rust".to_owned()]));
+        assert_eq!(
+            (
+                form.name.error.as_deref(),
+                form.role.error.as_deref(),
+                form.bio.error.as_deref(),
+                form.stack.error.as_deref(),
+            ),
+            (None, None, None, None)
+        );
+    }
+
     /// RV-DS241-136 r2 (DEC-141): a stack entry the save would refuse is named under the
     /// field in the desktop chip input's words, its hidden character shown as an escape,
     /// instead of the general stack sentence; plain entries beside it are kept.
