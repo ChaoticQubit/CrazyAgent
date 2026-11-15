@@ -1,6 +1,7 @@
 pub(crate) mod codex_folder;
 pub mod drivers;
 pub mod finding;
+pub mod home;
 pub mod interactive;
 pub mod launch;
 pub mod leftovers;
