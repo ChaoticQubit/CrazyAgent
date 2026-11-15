@@ -47,7 +47,7 @@ const EXISTS: &str = "Your demo project is ready. Open it to follow the guide.";
 const POOL_REASONS: [(&str, &str); 3] = [
     (
         "demo_harness_unavailable",
-        "Its accounts run only on rcli, which has no live terminal or team agents yet.",
+        "Its accounts run only on RCLI, which has no live terminal or team agents yet.",
     ),
     (
         "demo_pool_not_ready",
@@ -80,7 +80,7 @@ const REFUSALS: [(&str, &str); 8] = [
     ),
     (
         "demo_harness_unavailable",
-        "That pool's accounts run only on rcli, which has no live terminal or team agents yet. Pick a pool with an account that runs Claude Code or Codex.",
+        "That pool's accounts run only on RCLI, which has no live terminal or team agents yet. Pick a pool with an account that runs Claude Code or Codex.",
     ),
     (
         "demo_platform_unqualified",

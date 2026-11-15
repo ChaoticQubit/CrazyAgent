@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import "./load-source.mjs";
 
@@ -244,6 +245,16 @@ test("team validation mirrors the engine agent range", () => {
   assert.equal(wizard.teamErrors({ ...ok, sub_harnesses: nine, max_agents: 10 }, catalog).range, "Use at most 8 agent harnesses.");
   assert.equal(wizard.teamValid(ok, catalog), true);
   assert.equal(wizard.teamValid({ ...ok, max_agents: 2 }, catalog), false);
+});
+
+test("the removed harnesses the desktop names are the engine's own list, id for id and name for name", () => {
+  const source = readFileSync(new URL("../../../crates/crazyagent/src/harnesses.rs", import.meta.url), "utf8");
+  const block = source.match(/const REMOVED: \[\(&str, &str\); (\d+)\] = \[([\s\S]*?)\];/u);
+  assert.ok(block, "the engine's removed list is where this row reads it");
+  const engine = [...block[2].matchAll(/\("([^"]+)", "([^"]+)"\)/gu)].map(([, id, name]) => [id, name]);
+  assert.equal(engine.length, Number(block[1]));
+  assert.ok(engine.length > 0);
+  assert.deepEqual([...wizard.REMOVED_HARNESSES], engine);
 });
 
 test("a removed harness is shown by its product name wherever a harness is named", async () => {

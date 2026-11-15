@@ -8,7 +8,9 @@ import type { IconName, SelectOption } from "../../ui";
 import { SettingFind, SettingRow, settingMatches } from "../../ui/setting";
 import { afterSave, shownChoice, useHeld } from "../../state";
 import { displayText } from "../conversation";
+import { harnessName } from "../new-project/team-editor";
 import { savedStale } from "../project/settings";
+import { valueOf } from "../project/shared";
 import { CoordinationControls, HeavyLaneControls, PerHarnessControls, TerminalDisplaySetting, ToolsControls } from "./coordination";
 import { AgentAccessSetting, MasterHarnessSetting, SubHarnessesSetting, useTeam, type TeamProject } from "./setup-rows";
 
@@ -298,7 +300,7 @@ export type SettingGroupId = "model" | "access" | "tools" | "coord" | "limits";
 
 const MERGE_INTO_MAIN = "Under Full access, merging into main";
 const RESTARTS_FROM_MAIN = "After you accept, the agent's branch restarts from main";
-const PER_HARNESS_ROWS = ["Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents"];
+const PER_HARNESS_ROWS = ["Messages to Claude Code agents", "Messages to Codex agents", "Messages to RCLI agents"];
 
 /** The Agent settings groups in the order the approved mockup lists them, each with its purpose
  * line and the labels of its rows in the order they show. */
@@ -310,7 +312,7 @@ export const SETTING_GROUPS: readonly (SettingGroupInfo & { id: SettingGroupId; 
   { id: "tools", title: "Skills and tools", about: "What agents can call and how they are nudged to use it.", icon: "puzzle",
     rows: ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply", "End a turn after done"] },
   { id: "coord", title: "Coordination", about: "How agents talk to each other and to you.", icon: "users",
-    rows: ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Landing", "Finished agents", "Terminal display", "Heavy lane", "Shared resources", ...PER_HARNESS_ROWS] },
+    rows: ["Claude Code sub-agents", "Codex sub-agents", "RCLI sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Landing", "Finished agents", "Terminal display", "Heavy lane", "Shared resources", ...PER_HARNESS_ROWS] },
   { id: "limits", title: "Limits", about: "Time and token bounds for every agent.", icon: "hourglass",
     rows: ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Left running after a stop", "Token budget", "Master run time", "Sub-agent rounds per message"] },
 ];
@@ -394,10 +396,10 @@ export function MasterIdleSetting({ projectId, status, reload }: { projectId: st
 
 /** The Live terminal setting as one row of the master's settings: on, the master runs in its
  * own terminal; off, the area shows the conversation and a running live master ends at its next
- * stop (DEC-117 Q4). A master with no live terminal gets the row unavailable with the reason.
- * Inputs: the project id, the team status, a reload and whether the master runs in a live
- * terminal. Output: the row. */
-export function LiveTerminalSetting({ projectId, status, reload, liveHarness }: { projectId: string; status: TeamStatus; reload: () => void; liveHarness: boolean }) {
+ * stop (DEC-117 Q4). A master that cannot run live gets the row unavailable with the reason.
+ * Inputs: the project id, the team status, a reload and why the master cannot run in a live
+ * terminal, or undefined when it can. Output: the row. */
+export function LiveTerminalSetting({ projectId, status, reload, noLive }: { projectId: string; status: TeamStatus; reload: () => void; noLive?: string }) {
   const { busy, note, change } = useChange(reload);
   const [shown, hold] = useHeld<"off" | "on">(status.master_live_terminal === false ? "off" : "on", Object.is, status);
 
@@ -405,8 +407,8 @@ export function LiveTerminalSetting({ projectId, status, reload, liveHarness }: 
 
   return <SettingRow label="Live terminal">
     <span className="set-label" aria-hidden="true">Live terminal</span>
-    <span className="set-ctl"><Switch id={`tg-live-terminal-${projectId}`} label="Live terminal" hideLabel disabledReason={liveHarness ? undefined : "This master has no live terminal: its conversation is the console."} checked={shown === "on"} onChecked={(on) => { if (!busy) void choose(on); }} /></span>
-    {liveHarness && <span className="tg-terminal-note">You see and type into the master's own terminal.</span>}
+    <span className="set-ctl"><Switch id={`tg-live-terminal-${projectId}`} label="Live terminal" hideLabel disabledReason={noLive} checked={shown === "on"} onChecked={(on) => { if (!busy) void choose(on); }} /></span>
+    {noLive === undefined && <span className="tg-terminal-note">You see and type into the master's own terminal.</span>}
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
   </SettingRow>;
 }
@@ -560,6 +562,8 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   group?: SettingGroupId | null;
 }) {
   const harnessRows = useTeam(data);
+  const catalog = data === undefined ? null : valueOf(data.harnesses);
+  const name = (harness: string) => harnessName(catalog, harness);
   const [masterBranch, setMasterBranchText] = useState<string | null>(null);
   const [landOn, setLandOnText] = useState<string | null>(null);
   const [graceText, setGraceText] = useState<string | null>(null);
@@ -784,7 +788,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
           <DoneQuietSetting projectId={projectId} status={status} reload={reload} />
         </SettingGroup>
         <SettingGroup group={coord} prefix={prefix}>
-          <CoordinationControls projectId={projectId} status={status} reload={reload}>
+          <CoordinationControls projectId={projectId} status={status} reload={reload} name={name}>
             <SettingRow label="Sub-agent depth">
               <Select id={`tg-depth-${projectId}`} label="Sub-agent depth" value={String(depth)} options={DEPTH_OPTIONS}
                 onValue={(value) => { const chosen = Number(value); if (!busy && [1, 2, 3].includes(chosen)) void chooseDepth(chosen); }}
@@ -809,10 +813,10 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               options={[{ value: "hide", label: "Hide" }, { value: "show", label: "Show" }]} />
             <span className="tg-terminal-note">Hide moves stopped and failed agents to the Finished list.</span>
           </SettingRow>
-          <TerminalDisplaySetting projectId={projectId} status={status} reload={reload} />
+          <TerminalDisplaySetting projectId={projectId} status={status} reload={reload} name={name} />
           <HeavyLaneControls projectId={projectId} status={status} reload={reload} />
           <h3 className="set-sub" hidden={!PER_HARNESS_ROWS.some((row) => settingMatches(row, words))}>Per harness</h3>
-          <PerHarnessControls projectId={projectId} status={status} reload={reload} />
+          <PerHarnessControls projectId={projectId} status={status} reload={reload} name={name} />
         </SettingGroup>
         <SettingGroup group={limitsGroup} prefix={prefix}>
           <SettingRow label="Each task may run">
@@ -832,7 +836,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
           <SettingRow label="Background commands at task end">
             <Select id={`tg-background-${projectId}`} label="Background commands at task end" value={backgroundShown.mode} options={BACKGROUND_OPTIONS}
               onValue={(value) => { if (!busy) chooseBackground(value); }}
-              helper="The default is a grace time of 30 minutes (1800 seconds). Wait keeps a task open until the commands its agent started in the background end, up to the task limit. A grace time gives them that long after the turn ends, then stops them. Stop ends the task with its turn and stops them; the agent is told first. Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an rcli agent has no tools, so it starts none." />
+              helper="The default is a grace time of 30 minutes (1800 seconds). Wait keeps a task open until the commands its agent started in the background end, up to the task limit. A grace time gives them that long after the turn ends, then stops them. Stop ends the task with its turn and stops them; the agent is told first. Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an RCLI agent has no tools, so it starts none." />
             {graceTyped !== null && <form className="pj-row" aria-label="Grace time" onSubmit={(event) => { event.preventDefault(); const secs = graceSecs(graceTyped); if (secs === null) setNote(failureCopy("team_background_grace_invalid")); else void saveBackground({ mode: "grace", secs }); }}>
               <label htmlFor={`tg-grace-${projectId}`}>Grace time in seconds</label><input id={`tg-grace-${projectId}`} className="pj-input" inputMode="numeric" value={graceTyped}
                 onChange={(event) => setGraceText(event.target.value)} aria-describedby={`tg-grace-help-${projectId}`} />

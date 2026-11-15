@@ -204,7 +204,7 @@ async function master(me, open) {
   await open("#/settings/master", "the Master setting", (text) => text.includes(TOP));
   await me.waitFor("the four step options", (text) => ["Master step limit", "No limit", "50 steps", "100 steps", "200 steps", "reply with 'continue' to go on"].every((words) => text.includes(words)));
   await me.waitFor("the four time options", (text) => ["Master time limit", "10 min", "30 min", "60 min", "Stopped after N minutes"].every((words) => text.includes(words)));
-  await me.waitFor("the three frame size options", (text) => ["Master frame size limit", "64 KiB", "256 KiB", "1 MiB", "rcli keeps 64 KiB"].every((words) => text.includes(words)));
+  await me.waitFor("the three frame size options", (text) => ["Master frame size limit", "64 KiB", "256 KiB", "1 MiB", "RCLI keeps 64 KiB"].every((words) => text.includes(words)));
 }
 
 /** One stored master limit as the engine reads it. Inputs: the bridge and the limit's entry.

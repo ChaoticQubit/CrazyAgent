@@ -20,7 +20,7 @@ const GROUPS = [
   ["Model and harness", ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "Reuse idle agents", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
   ["Access and merging", ["Agent access", "Under Full access, merging into main", "Master accepts change sets", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
   ["Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply", "End a turn after done"]],
-  ["Coordination", ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Landing", "Finished agents", "Terminal display", "Heavy lane", "Shared resources", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents"]],
+  ["Coordination", ["Claude Code sub-agents", "Codex sub-agents", "RCLI sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Landing", "Finished agents", "Terminal display", "Heavy lane", "Shared resources", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to RCLI agents"]],
   ["Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Left running after a stop", "Token budget", "Master run time", "Sub-agent rounds per message"]],
 ];
 /** The engine's sentence for a harness kind no sub-agent runs on (DEC-141 PA-15), read from
@@ -29,14 +29,14 @@ const NO_SUB_AGENTS = readFileSync(new URL("../../../../crates/crazyagent/src/te
   .match(/pub const NO_SUB_AGENTS: &str =\s*"([^"]+)";/u)?.[1];
 /** The rows of rcli, which runs only as a master: each says why instead of holding a control,
  * so Tab never stops on it. */
-const MASTER_ONLY = ["rcli sub-agents", "Messages to rcli agents"];
+const MASTER_ONLY = ["RCLI sub-agents", "Messages to RCLI agents"];
 const READ_ONLY = ["MCP servers", "After you accept, the agent's branch restarts from main", ...MASTER_ONLY];
 /** Reads the first note of each master-only row, the reason it holds no control. */
 const MASTER_ONLY_NOTES = `${JSON.stringify(MASTER_ONLY)}.map((label) => document.querySelector('.set-row[data-setting="' + label + '"] .tg-terminal-note')?.innerText.trim() ?? null)`;
 const DRAWER_GROUPS = [
   ["Master", ["Harness", "Account", "Live terminal"]],
   ["Conversation", ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"]],
-  ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents", "Re-ask a sub-agent's empty reply", "End a turn after done"]],
+  ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to RCLI agents", "Re-ask a sub-agent's empty reply", "End a turn after done"]],
   ["Access", ["Full access"]],
 ];
 const DRAWER_SETTLED = `Promise.all(document.querySelector("dialog.drawer[open]").getAnimations({ subtree: true })

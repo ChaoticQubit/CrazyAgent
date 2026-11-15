@@ -30,7 +30,7 @@ const NO_SUB_AGENTS = readFileSync(new URL("../../../../crates/crazyagent/src/te
   .match(/pub const NO_SUB_AGENTS: &str =\s*"([^"]+)";/u)?.[1];
 /** Each harness kind that runs only as a master, with its sub-agent and message row labels:
  * those rows say why instead of holding a control. */
-const MASTER_ONLY = new Map([["rcli", ["rcli sub-agents", "Messages to rcli agents"]]]);
+const MASTER_ONLY = new Map([["rcli", ["RCLI sub-agents", "Messages to RCLI agents"]]]);
 const DEFAULT_COUNTED = ["start_work", "inspect_work", "update_work", "transfer_work", "finish_work", "ctx_*", "graphify", "Skill"];
 const COUNTED = ["start_work", "ctx_*", "review_notes"];
 

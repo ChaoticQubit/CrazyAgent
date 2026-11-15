@@ -361,7 +361,7 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
 const MASTER_GROUPS: readonly SettingGroupInfo[] = [
   { id: "master", title: "Master", icon: "brain", rows: ["Harness", "Account", "Live terminal"] },
   { id: "conversation", title: "Conversation", icon: "message-square", rows: ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"] },
-  { id: "messages", title: "Messages", icon: "send", rows: ["Sub-agent questions go to", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents", "Re-ask a sub-agent's empty reply", "End a turn after done"] },
+  { id: "messages", title: "Messages", icon: "send", rows: ["Sub-agent questions go to", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to RCLI agents", "Re-ask a sub-agent's empty reply", "End a turn after done"] },
   { id: "access", title: "Access", icon: "shield-check", rows: ["Full access"] },
 ];
 
@@ -371,7 +371,7 @@ const MASTER_GROUPS: readonly SettingGroupInfo[] = [
  * shared rows save exactly as they do in Agent settings. Inputs: the project data, whether its
  * master runs in a live terminal and what to do before a button leaves the drawer for another
  * page. Output: the groups, or the team read's state. */
-export function MasterSettings({ data, liveHarness, onLeave = () => {} }: { data: ProjectData; liveHarness: boolean; onLeave?: () => void }) {
+export function MasterSettings({ data, noLive, onLeave = () => {} }: { data: ProjectData; noLive?: string; onLeave?: () => void }) {
   const harnessRows = useTeam(data);
   const team = data.team.result;
   if (team === undefined) return <p className="pj-muted" role="status">Loading...</p>;
@@ -381,12 +381,14 @@ export function MasterSettings({ data, liveHarness, onLeave = () => {} }: { data
   const base = `/projects/${encodeURIComponent(data.id)}`;
   const prefix = `master-set-${data.id}`;
   const go = (path: string) => { onLeave(); data.navigate(path); };
+  const catalog = valueOf(data.harnesses);
+  const name = (harness: string) => harnessName(catalog, harness);
   const [masterGroup, talk, messages, access] = MASTER_GROUPS;
   return <div className="set-groups">
     <SettingGroup group={masterGroup} prefix={prefix} level={3}>
       <MasterHarnessSetting rows={harnessRows} data={data} label="Harness" id={`${prefix}-harness`} helper="A change reaches the running master as Apply a master harness change says." />
       <AccountSetting data={data} id={`${prefix}-account`} />
-      <LiveTerminalSetting projectId={data.id} status={status} reload={data.reloadTeam} liveHarness={liveHarness} />
+      <LiveTerminalSetting projectId={data.id} status={status} reload={data.reloadTeam} noLive={noLive} />
     </SettingGroup>
     <SettingGroup group={talk} prefix={prefix} level={3}>
       <OnSwitchSetting projectId={data.id} status={status} reload={data.reloadTeam} />
@@ -395,7 +397,7 @@ export function MasterSettings({ data, liveHarness, onLeave = () => {} }: { data
     </SettingGroup>
     <SettingGroup group={messages} prefix={prefix} level={3}>
       <QuestionsSetting projectId={data.id} status={status} reload={data.reloadTeam} />
-      {coordination(status).harnesses.map((row) => <DeliverySetting key={row.harness} projectId={data.id} row={row} status={status} reload={data.reloadTeam} />)}
+      {coordination(status).harnesses.map((row) => <DeliverySetting key={row.harness} projectId={data.id} row={row} status={status} reload={data.reloadTeam} name={name} />)}
       <ReaskSetting projectId={data.id} status={status} reload={data.reloadTeam} />
       <DoneQuietSetting projectId={data.id} status={status} reload={data.reloadTeam} />
     </SettingGroup>
@@ -416,13 +418,13 @@ export function MasterSettings({ data, liveHarness, onLeave = () => {} }: { data
  * swaps that view leaves the drawer and the owner's place in it alone, and closing the drawer
  * returns to the button of the view now shown (DEC-117 Q4). Inputs: the project data, whether
  * its master runs in a live terminal and the view. Output: the view and its drawer. */
-export function MasterSettingsDrawer({ data, liveHarness, children }: { data: ProjectData; liveHarness: boolean; children: ReactNode }) {
+export function MasterSettingsDrawer({ data, noLive, children }: { data: ProjectData; noLive?: string; children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const button = useId();
   return <MasterSettingsHost.Provider value={{ open: () => setOpen(true), button }}>
     {children}
     <Drawer open={open} title="Master settings" onClose={() => setOpen(false)} returnFocus={() => document.getElementById(button)}>
-      <MasterSettings data={data} liveHarness={liveHarness} onLeave={() => setOpen(false)} />
+      <MasterSettings data={data} noLive={noLive} onLeave={() => setOpen(false)} />
     </Drawer>
   </MasterSettingsHost.Provider>;
 }

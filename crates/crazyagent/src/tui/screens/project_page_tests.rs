@@ -322,6 +322,49 @@ impl Engine {
         project
     }
 
+    /// Stops this engine, its owner client first, and starts a new one on the same data folder,
+    /// running `between` on that folder while none runs, as quitting and opening the app does.
+    /// Input: what to do in between. Output: the engine started again, with a new owner client.
+    #[cfg(target_os = "macos")]
+    async fn restart(self, between: impl FnOnce(&std::path::Path)) -> Self {
+        let Self {
+            root,
+            home,
+            _service: mut service,
+            _stop: stop,
+            controller,
+        } = self;
+        drop(controller);
+        service.shutdown().await.unwrap();
+        drop(stop);
+        between(root.path());
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &root.path().join("global.toml"),
+            &root.path().join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let client = Client::new(
+            root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap();
+        let (_, controller) = OwnerController::attach_configured(client, OwnerClientKind::Tui)
+            .await
+            .unwrap();
+        Self {
+            root,
+            home,
+            _service: service,
+            _stop: stop,
+            controller,
+        }
+    }
+
     fn connect(&self) -> Connection {
         Connection::connect_paired(
             Client::new(
@@ -1268,6 +1311,399 @@ async fn a_project_move_s_soft_refusal_is_answered_from_home_and_move_anyway_mov
     assert!(!origin.exists(), "{origin:?}");
 }
 
+/// Counts what a query of the test engine's database selects, for a row to check what no client
+/// reads. Inputs: the engine and the query. Output: the count.
+#[cfg(target_os = "macos")]
+fn engine_count(engine: &Engine, query: &str) -> i64 {
+    let database = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    database.busy_timeout(Duration::from_secs(10)).unwrap();
+    database.query_row(query, [], |row| row.get(0)).unwrap()
+}
+
+/// Adds a stand-in team agent of a project that reads working until the row flips it, as an
+/// agent slow to stop. Inputs: the engine, the project and the agent's number. Output: none.
+#[cfg(target_os = "macos")]
+fn working(engine: &Engine, project: &str, agent: u32) {
+    let worktree = engine.root.path().join(format!("agent-{agent}"));
+    engine_sql(
+        engine,
+        &format!(
+            "INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms)
+             VALUES ({agent},'{project}','team','codex',1,'{}','working',0,0);",
+            worktree.to_str().unwrap()
+        ),
+    );
+}
+
+/// Opens a project's page on Settings, opens its remove ask, lets the engine answer what
+/// removing would do, then picks Delete everything and types the exact name, so Enter deletes.
+/// Inputs: the shell, its connection and the project's name. Output: none.
+#[cfg(target_os = "macos")]
+async fn delete_typed(shell: &mut Shell, connection: &mut Connection, name: &str) {
+    pump(shell, connection).await;
+    shell.key(Key::ShiftLeft);
+    pump(shell, connection).await;
+    shell.key(Key::Char('x'));
+    let sent = pump(shell, connection).await;
+    assert!(sent.contains(&"removal"), "{sent:?}");
+    shell.key(Key::Down);
+    for typed in name.chars() {
+        shell.key(Key::Char(typed));
+    }
+}
+
+/// Presses Enter on a typed Delete everything and pumps until the page went Home, as it does
+/// once the engine's job started. Inputs: the shell and its connection. Output: every request
+/// the pumps sent.
+#[cfg(target_os = "macos")]
+async fn delete_entered(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static str> {
+    shell.key(Key::Enter);
+    let mut sent = pump(shell, connection).await;
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while shell.place() != Some(Place::Home) {
+        assert!(
+            Instant::now() < deadline,
+            "the delete never went Home: {:?}",
+            shell.place()
+        );
+        sent.extend(pump(shell, connection).await);
+    }
+    sent
+}
+
+/// DEC-177 add.1: Delete everything on the project page starts the engine's delete job and goes
+/// Home, where it waits for the project's agents with nothing moved; another project's delete
+/// is refused naming it, a terminal started again shows it, and Enter there stops it, keeping
+/// the project and its folder. Runs on macOS only, the one platform that offers Delete
+/// everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delete_waits_for_its_agents_on_home_another_is_refused_and_enter_there_stops_it() {
+    let mut engine = Engine::start().await;
+    let (notes, folder) = made_in_first_home(&mut engine, "notes-cli", "Notes CLI", 1).await;
+    let (reading, kept) = made_in_first_home(&mut engine, "reading-list", "Reading List", 2).await;
+    std::fs::write(folder.join("notes.txt"), b"kept\n").unwrap();
+    working(&engine, "notes-cli", 44);
+    let mut connection = engine.connect();
+    let mut shell = project_shell(&notes, "Notes CLI");
+    delete_typed(&mut shell, &mut connection, "Notes CLI").await;
+    let sent = delete_entered(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"job start"), "{sent:?}");
+    assert!(!sent.contains(&"change"), "no direct delete: {sent:?}");
+    let said = shell.ctx.message().expect("the start is said");
+    assert_eq!(said.lead, "Deleting Notes CLI.");
+    let (waiting, _) = job_until(&mut shell, &mut connection, |job| {
+        matches!(job.state, JobState::Stopping { .. })
+    })
+    .await;
+    assert_eq!(waiting.kind, JobKind::Delete);
+    assert_eq!(waiting.source, "Notes CLI");
+    assert_eq!(waiting.state, JobState::Stopping { agents_left: 1 });
+    let rows = render(&mut shell, 120, 30);
+    assert!(
+        rows.contains("Waiting for 1 agent of Notes CLI to stop..."),
+        "{rows}"
+    );
+    assert!(
+        folder.join("notes.txt").is_file(),
+        "nothing moves while it waits"
+    );
+    drop(shell);
+    drop(connection);
+
+    let mut connection = engine.connect();
+    let mut shell = project_shell(&reading, "Reading List");
+    pump(&mut shell, &mut connection).await;
+    super::intake::ask(&mut shell.ctx, IntakeQuery::JobStatus);
+    delete_typed(&mut shell, &mut connection, "Reading List").await;
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"job start"), "{sent:?}");
+    let said = shell.ctx.message().expect("the refusal is said");
+    assert_eq!(
+        said.lead,
+        "Deleting Notes CLI is running. Wait for it to finish on Home."
+    );
+    assert!(kept.is_dir(), "{kept:?}");
+    drop(shell);
+    drop(connection);
+
+    let mut connection = engine.connect();
+    let mut shell = home_shell(&mut connection).await;
+    let shown = shell.ctx.store.intake.clone().expect("the running delete");
+    assert_eq!(
+        shown.id, waiting.id,
+        "a terminal started again shows the running delete"
+    );
+    shell.key(Key::Home);
+    shell.key(Key::Enter);
+    let (ended, _) = job_until(&mut shell, &mut connection, |job| {
+        !super::intake_job::running(job)
+    })
+    .await;
+    assert_eq!(
+        ended.state,
+        JobState::Cancelled {
+            phase: crate::projects_home::job::Phase::Stopping
+        }
+    );
+    let rows = render(&mut shell, 120, 30);
+    assert!(
+        rows.contains("Deleting Notes CLI stopped. Nothing was moved to the Trash."),
+        "{rows}"
+    );
+    assert_eq!(
+        std::fs::read(folder.join("notes.txt")).unwrap(),
+        b"kept\n",
+        "a stopped delete keeps the folder"
+    );
+    assert_eq!(
+        engine_count(
+            &engine,
+            "SELECT count(*) FROM projects WHERE id='notes-cli'"
+        ),
+        1,
+        "and the project"
+    );
+    engine_sql(
+        &engine,
+        "UPDATE team_agents SET status='stopped' WHERE id=44;",
+    );
+}
+
+/// DEC-177 add.1: a delete whose agents do not stop within the wait ends failed on Home with
+/// the reason, the project and its folder kept. Runs on macOS only, the one platform that
+/// offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delete_whose_agents_never_stop_fails_on_home_with_the_reason() {
+    let mut engine = Engine::start().await;
+    let (notes, folder) = made_in_first_home(&mut engine, "notes-cli", "Notes CLI", 1).await;
+    working(&engine, "notes-cli", 45);
+    let mut connection = engine.connect();
+    let mut shell = project_shell(&notes, "Notes CLI");
+    delete_typed(&mut shell, &mut connection, "Notes CLI").await;
+    delete_entered(&mut shell, &mut connection).await;
+    let (ended, _) = job_until(&mut shell, &mut connection, |job| {
+        !super::intake_job::running(job)
+    })
+    .await;
+    assert!(
+        matches!(&ended.state, JobState::Failed { code, .. } if code == "delete_agents_running"),
+        "{ended:?}"
+    );
+    let rows = render(&mut shell, 120, 30);
+    assert!(
+        rows.contains("Notes CLI: Its agents did not stop in time, so nothing was deleted."),
+        "{rows}"
+    );
+    assert!(folder.join(".crazyagent").is_dir(), "{folder:?}");
+    assert_eq!(
+        engine_count(
+            &engine,
+            "SELECT count(*) FROM projects WHERE id='notes-cli'"
+        ),
+        1
+    );
+    engine_sql(
+        &engine,
+        "UPDATE team_agents SET status='stopped' WHERE id=45;",
+    );
+}
+
+/// DEC-177 add.1: a delete whose folder cannot be moved to the Trash ends failed on Home with
+/// the reason and the project kept; Enter there is Try again, which opens the project's remove
+/// ask and sends no delete. The projects folder is made read-only so nothing reaches the
+/// owner's Trash. Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delete_whose_trash_move_fails_says_why_on_home_and_enter_reopens_the_remove_ask() {
+    let mut engine = Engine::start().await;
+    let (notes, folder) = made_in_first_home(&mut engine, "notes-cli", "Notes CLI", 1).await;
+    let home = std::fs::canonicalize(engine.home.path()).unwrap();
+    let mut connection = engine.connect();
+    let mut shell = project_shell(&notes, "Notes CLI");
+    delete_typed(&mut shell, &mut connection, "Notes CLI").await;
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o555)).unwrap();
+    delete_entered(&mut shell, &mut connection).await;
+    let (ended, _) = job_until(&mut shell, &mut connection, |job| {
+        !super::intake_job::running(job)
+    })
+    .await;
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        ended.state,
+        JobState::Failed {
+            code: "home_trash_failed".into(),
+            phase: crate::projects_home::job::Phase::Trashing
+        }
+    );
+    let rows = render(&mut shell, 120, 30);
+    assert!(
+        rows.contains(
+            "Notes CLI: The folder could not be moved to the Trash. Nothing was deleted."
+        ),
+        "{rows}"
+    );
+    assert!(folder.join(".crazyagent").is_dir(), "{folder:?}");
+    shell.key(Key::Home);
+    shell.key(Key::Enter);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Settings,
+        }),
+        "Try again opens the remove ask"
+    );
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"removal"), "{sent:?}");
+    assert!(
+        !sent.contains(&"job start"),
+        "nothing deletes in one click: {sent:?}"
+    );
+    assert!(folder.join(".crazyagent").is_dir(), "{folder:?}");
+}
+
+/// DEC-177 add.1: a delete ends done on Home with the project's name and its records gone, and
+/// the terminal reads the projects again. Its folder is gone before Enter, so the delete moves
+/// nothing to the owner's Trash. Runs on macOS only, the one platform that offers Delete
+/// everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delete_ends_done_on_home_and_the_projects_are_read_again() {
+    let mut engine = Engine::start().await;
+    let (notes, folder) = made_in_first_home(&mut engine, "notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut shell = project_shell(&notes, "Notes CLI");
+    delete_typed(&mut shell, &mut connection, "Notes CLI").await;
+    std::fs::remove_dir_all(&folder).unwrap();
+    delete_entered(&mut shell, &mut connection).await;
+    let (ended, last) = job_until(&mut shell, &mut connection, |job| {
+        !super::intake_job::running(job)
+    })
+    .await;
+    assert_eq!(ended.state, JobState::Done, "{ended:?}");
+    let mut sent = last;
+    sent.extend(pump(&mut shell, &mut connection).await);
+    assert!(
+        sent.contains(&"projects"),
+        "the projects are read again: {sent:?}"
+    );
+    let said = shell.ctx.message().expect("the end is said");
+    assert_eq!(
+        said.lead,
+        "Notes CLI is deleted. Its files are in the Trash."
+    );
+    assert_eq!(
+        engine_count(
+            &engine,
+            "SELECT count(*) FROM projects WHERE id='notes-cli'"
+        ),
+        0,
+        "the records went"
+    );
+}
+
+/// DEC-177 answer 3, add.1: a delete an engine stop cut short shows on Home after the next start
+/// with how many of its folders reached the Trash, and never goes on by itself; Enter is Finish
+/// delete, which opens the project's remove ask and sends no delete, and d keeps the project,
+/// ending the banner's mark. Nothing reaches the owner's Trash. Runs on macOS only, the one
+/// platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delete_cut_short_shows_on_home_after_a_restart_and_d_keeps_the_project() {
+    let mut engine = Engine::start().await;
+    let (notes, folder) = made_in_first_home(&mut engine, "notes-cli", "Notes CLI", 1).await;
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let engine = engine
+        .restart(|root| {
+            drop(crate::ledger::open(root).unwrap());
+            rusqlite::Connection::open(root.join("engine.db"))
+                .unwrap()
+                .execute_batch(&format!(
+                    "INSERT INTO projects_delete_pending(exchange) VALUES (904);
+                     INSERT INTO ledger_actions(kind,action_key,payload,started_ms)
+                     VALUES ('project_delete','notes-cli',
+                             '{{\"project\":\"notes-cli\",\"exchange\":904,\"request\":\"delete-cut-tui\",\"name\":\"Notes CLI\",\"total\":2}}',{started});"
+                ))
+                .unwrap();
+        })
+        .await;
+    let mut connection = engine.connect();
+    let mut shell = home_shell(&mut connection).await;
+    let cut = shell
+        .ctx
+        .store
+        .intake
+        .clone()
+        .expect("the delete cut short");
+    assert_eq!(cut.kind, JobKind::Delete);
+    assert_eq!(
+        cut.state,
+        JobState::CutShort {
+            trashed: 1,
+            total: 2
+        }
+    );
+    let rows = render(&mut shell, 120, 30);
+    assert!(
+        rows.contains("Deleting Notes CLI was cut short with 1 of 2 folders in the Trash."),
+        "{rows}"
+    );
+    assert!(
+        folder.join(".crazyagent").is_dir(),
+        "the start never finishes it"
+    );
+    shell.key(Key::Home);
+    shell.key(Key::Enter);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Settings,
+        }),
+        "Finish delete opens the remove ask"
+    );
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"removal"), "{sent:?}");
+    assert!(
+        !sent.contains(&"job start"),
+        "nothing deletes in one click: {sent:?}"
+    );
+    drop(shell);
+    drop(connection);
+
+    let mut connection = engine.connect();
+    let mut shell = home_shell(&mut connection).await;
+    assert_eq!(
+        shell.ctx.store.intake.as_ref().map(|job| &job.id),
+        Some(&cut.id)
+    );
+    shell.key(Key::Home);
+    shell.key(Key::Char('d'));
+    pump(&mut shell, &mut connection).await;
+    pump(&mut shell, &mut connection).await;
+    assert_eq!(
+        shell.ctx.store.intake, None,
+        "d keeps the project and forgets the job"
+    );
+    assert_eq!(
+        engine_count(
+            &engine,
+            "SELECT count(*) FROM ledger_actions WHERE kind='project_delete' AND action_key='notes-cli' AND outcome IS NULL"
+        ),
+        0,
+        "Keep the project ends the banner's mark"
+    );
+    assert!(folder.join(".crazyagent").is_dir(), "{folder:?}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_settings_pick_a_pool_and_the_engine_assigns_it() {
     let mut engine = Engine::start().await;
@@ -1619,7 +2055,7 @@ async fn a_master_saved_from_the_team_screen_is_read_again_by_the_project_page()
     );
     let shown = render(&mut shell, 100, 40);
     assert!(
-        shown.contains("Master  rcli"),
+        shown.contains("Master  RCLI"),
         "the console names the saved master:\n{shown}"
     );
 
