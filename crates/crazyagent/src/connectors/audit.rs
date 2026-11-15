@@ -7,7 +7,8 @@ use crate::engine::EngineError;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-/// The most rows the log keeps, whatever the keep setting says.
+/// The most rows the log keeps of calls that reached a vendor, whatever the keep setting
+/// says. Rows are counted, never id distance, so ids that deleted rows used up never count.
 pub const ROWS_MAX: i64 = 100_000;
 /// The most rows one read returns.
 pub const READ_MAX: usize = 500;
@@ -29,6 +30,8 @@ const VIEW_CALL_BYTES_MAX: usize = 40 * 1024;
 const VIEW_CHOICE_BYTES_MAX: usize = 12 * 1024;
 
 const _: () = assert!(QUIET_ROWS_PER_LAUNCH_MAX < ROWS_MAX as usize / 10);
+const _: () = assert!(QUIET_ROWS_PER_LAUNCH_MAX < QUIET_ROWS_MAX);
+const _: () = assert!(QUIET_ROWS_MAX <= ROWS_MAX as usize / 10);
 const _: () = assert!(VIEW_CALLS_MAX <= READ_MAX);
 const _: () = assert!(
     VIEW_CALL_BYTES_MAX + VIEW_CHOICE_BYTES_MAX + 8 * 1024 <= crate::protocol::FRAME_BYTES_MAX
@@ -52,7 +55,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS connector_calls (
     outcome TEXT NOT NULL CHECK(length(outcome) BETWEEN 1 AND 64)
 );
 CREATE INDEX IF NOT EXISTS connector_calls_started ON connector_calls(started_ms);
-CREATE INDEX IF NOT EXISTS connector_calls_quiet ON connector_calls(launch, sent, id);";
+CREATE INDEX IF NOT EXISTS connector_calls_quiet ON connector_calls(launch, sent, id);
+CREATE INDEX IF NOT EXISTS connector_calls_sent ON connector_calls(sent, id);";
 
 /// What a row is about: a tool the gateway counts as read or write, a tool list, or a
 /// call that named no tool the gateway knows.
@@ -417,7 +421,9 @@ fn outcome_text(outcome: &str) -> String {
     }
 }
 
-/// Drops the rows the keep setting and the row cap no longer hold. Inputs: the engine
+/// Drops the rows the keep setting no longer holds, then the oldest past each cap: rows of
+/// calls that reached a vendor past `ROWS_MAX`, and the rest past `QUIET_ROWS_MAX`, each
+/// counted on its own so the second kind never pushes out the first. Inputs: the engine
 /// database and the keep setting. Output: Ok, or `connectors_unavailable`.
 pub fn prune(db: &Connection, keep: KeepLog) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(sqlite)?;
@@ -426,12 +432,15 @@ pub fn prune(db: &Connection, keep: KeepLog) -> Result<(), EngineError> {
         [cutoff(keep)],
     )
     .map_err(sqlite)?;
-    db.execute(
-        "DELETE FROM connector_calls
-         WHERE id <= (SELECT MAX(id) FROM connector_calls) - ?1",
-        [ROWS_MAX],
-    )
-    .map_err(sqlite)?;
+    for (sent, cap) in [(true, ROWS_MAX), (false, QUIET_ROWS_MAX as i64)] {
+        db.execute(
+            "DELETE FROM connector_calls WHERE sent=?1 AND id <= (
+                 SELECT id FROM connector_calls WHERE sent=?1
+                 ORDER BY id DESC LIMIT 1 OFFSET ?2)",
+            params![sent, cap],
+        )
+        .map_err(sqlite)?;
+    }
     Ok(())
 }
 

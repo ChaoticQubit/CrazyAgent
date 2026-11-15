@@ -349,8 +349,18 @@ fn one_launchs_flood_of_calls_that_never_reached_a_vendor_leaves_every_sent_call
 fn refused_calls_past_every_cap_never_evict_a_call_that_reached_a_vendor() {
     let case = case();
     let now = crate::semantic::now_ms();
-    record(&case.db, &call("board", "alpha", "a", now - 5_000), KeepLog::Days90).unwrap();
-    record(&case.db, &call("desk", "beta", "b", now - 4_000), KeepLog::Days90).unwrap();
+    record(
+        &case.db,
+        &call("board", "alpha", "a", now - 5_000),
+        KeepLog::Days90,
+    )
+    .unwrap();
+    record(
+        &case.db,
+        &call("desk", "beta", "b", now - 4_000),
+        KeepLog::Days90,
+    )
+    .unwrap();
     case.db
         .execute(
             "UPDATE sqlite_sequence SET seq = seq + ?1 WHERE name='connector_calls'",
