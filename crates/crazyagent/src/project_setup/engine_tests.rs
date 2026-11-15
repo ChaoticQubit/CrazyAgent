@@ -3414,7 +3414,11 @@ async fn owner_removal_takes_the_projects_repository_admissions_with_it() {
 
     let removed = owner.remove_project(project.clone(), 2).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
-    assert_eq!(engine.rows(admissions), 0, "the admission goes with the project");
+    assert_eq!(
+        engine.rows(admissions),
+        0,
+        "the admission goes with the project"
+    );
     let again = owner
         .setup_project(
             project.clone(),
