@@ -249,7 +249,7 @@ export interface PolicyView {
   access: AgentAccess;
   network: AgentNetwork;
   levels: AccessLevel[];
-  networks: { network: AgentNetwork; label: string }[];
+  networks: { network: AgentNetwork; label: string; gap?: string | null }[];
   toolchains: { toolchain: Toolchain; label: string; installed: boolean; used: boolean; allowed: boolean }[];
   ide_git_hooks: boolean;
   tool_cache: ToolCacheScope;

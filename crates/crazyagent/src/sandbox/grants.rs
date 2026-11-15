@@ -610,6 +610,14 @@ pub fn request(
     if grown.validate().is_err() {
         return Err("grant_full".into());
     }
+    let host = crate::sandbox::linux_host_kept();
+    let gap = match crate::sandbox_settings::load(db) {
+        Ok(settings) => {
+            let sockets = settings.linux_sockets;
+            super::policy::linux_network_gap(policy.network, host, sockets, &grown.grants)
+        }
+        Err(_) => host.map(|_| crate::sandbox::LINUX_PORTS_ANY_HOST_LINE.to_owned()),
+    };
     let body = serde_json::to_string(&grant).map_err(|_| "grant_requests_unavailable")?;
     requests_table(db).map_err(|_| "grant_requests_unavailable")?;
     let waiting: i64 = db
@@ -640,10 +648,7 @@ pub fn request(
         recommended: Some(DONT_ALLOW.to_owned()),
         context: Some(format!(
             "{} Its reason, in its own words: {}. Allow only if you trust it. Allowing adds it to this project's Agent access, where you can remove it; running agents restart at their next pause to use it.",
-            asked_meaning(
-                &grant,
-                cfg!(target_os = "linux").then_some(crate::sandbox::LINUX_PORTS_ANY_HOST_LINE)
-            ),
+            asked_meaning(&grant, gap.as_deref()),
             serde_json::to_string(&reason).map_err(|_| "grant_requests_unavailable")?
         )),
     };

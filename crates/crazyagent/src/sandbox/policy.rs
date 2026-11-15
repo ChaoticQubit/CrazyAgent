@@ -758,16 +758,32 @@ pub struct NetworkView {
 }
 
 /// What a network choice cannot hold on this Linux, for the project's Agent access page:
-/// that a port agents may reach on this computer is open to them on every host. Inputs:
-/// the choice, what this Linux holds, none on another system, the sockets setting and the
-/// project's grants. Output: the line, or none.
+/// that a port agents may reach on this computer is open to them on every host. Only None
+/// drops the line, where this Linux nests agents and the sockets setting is `TcpOnly`, so
+/// an agent's loopback ports are bridged; an allowed port below the bridge's lowest then
+/// brings it back with the port named. Inputs: the choice, what this Linux holds, none on
+/// another system, the sockets setting and the project's grants. Output: the line, or none.
 pub fn linux_network_gap(
-    _network: AgentNetwork,
-    _host: Option<crate::sandbox::LinuxHost>,
-    _sockets: crate::sandbox::LinuxSockets,
-    _grants: &[AccessGrant],
+    network: AgentNetwork,
+    host: Option<crate::sandbox::LinuxHost>,
+    sockets: crate::sandbox::LinuxSockets,
+    grants: &[AccessGrant],
 ) -> Option<String> {
-    None
+    let host = host?;
+    let bridges = network == AgentNetwork::None
+        && host.nested
+        && sockets == crate::sandbox::LinuxSockets::TcpOnly;
+    if !bridges {
+        return Some(crate::sandbox::LINUX_PORTS_ANY_HOST_LINE.to_owned());
+    }
+    grants
+        .iter()
+        .filter_map(|grant| match grant {
+            AccessGrant::Port { port } if *port < crate::sandbox::BRIDGE_PORT_MIN => Some(*port),
+            _ => None,
+        })
+        .min()
+        .map(crate::sandbox::linux_unbridged_line)
 }
 
 /// One access level with the reason it cannot run here, if any.

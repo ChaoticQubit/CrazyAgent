@@ -2511,7 +2511,23 @@ impl ProjectSandbox {
     /// loopback ports only, but one lies below [`BRIDGE_PORT_MIN`]. Output: the lowest such
     /// port, or none when the agent is bridged or shares the network for another reason.
     pub fn unbridged_port(&self) -> Option<u16> {
-        None
+        let SandboxNetwork::Only(remotes) = &self.network else {
+            return None;
+        };
+        if self.linux_sockets != LinuxSockets::TcpOnly {
+            return None;
+        }
+        let mut lowest: Option<u16> = None;
+        for remote in remotes {
+            let SandboxRemote::Loopback(port) = remote else {
+                return None;
+            };
+            if *port < BRIDGE_PORT_MIN && lowest.is_none_or(|low| *port < low) {
+                lowest = Some(*port);
+            }
+        }
+        assert!(lowest.is_none() || self.bridged_ports().is_none());
+        lowest
     }
 
     /// True when, on Linux, this agent looks host names up over TCP: the setting is
