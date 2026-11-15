@@ -113,8 +113,10 @@ fn forget_grants(db: &Connection, name: &str) -> Result<(), EngineError> {
 /// name a bundled plugin now has: its secret bindings with the keys entered for it, its
 /// switch, its switches in projects, a Search choice naming it and its trust record. A
 /// bundled plugin never gets a trust record, so one is the mark of such a leftover, and it
-/// goes last so an interrupted pass runs again. Inputs: database and engine root.
-/// Output: Ok, or `app_plugins_unavailable`.
+/// goes last so an interrupted pass runs again. Each key is deleted before its binding
+/// row, so a key that cannot be deleted stops the pass with its row still there. Inputs:
+/// database and engine root. Output: Ok, `app_plugins_unavailable`, or
+/// `app_plugin_key_store_unavailable`.
 fn prepare(db: &Connection, root: &Path) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(sqlite)?;
     for (name, _) in BUNDLED {
@@ -128,15 +130,8 @@ fn prepare(db: &Connection, root: &Path) -> Result<(), EngineError> {
         if !leftover {
             continue;
         }
-        let bindings = binding_rows(db, name)?;
-        db.execute("DELETE FROM app_plugin_secrets WHERE plugin=?1", [name])
-            .map_err(sqlite)?;
-        for (_, source, reference) in bindings {
-            if source == KEY
-                && let Some(key) = plugin_key(&reference)
-            {
-                let _ = accounts::remove_key_in(root, PLUGIN_KEYS, key.as_str());
-            }
+        for (secret, source, reference) in binding_rows(db, name)? {
+            drop_binding(db, root, name, &secret, &source, &reference)?;
         }
         db.execute("DELETE FROM app_plugin_state WHERE name=?1", [name])
             .map_err(sqlite)?;
