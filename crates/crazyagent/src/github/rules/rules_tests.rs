@@ -286,9 +286,11 @@ fn the_standard_rules_on_a_new_private_repository_make_each_call_once_in_order()
                 GitHubRule::RequiredChecks => GitHubRuleState::NotApplicable {
                     reason: "no CI workflows in this repository".into(),
                 },
-                GitHubRule::PrivateVulnerabilityReporting
-                | GitHubRule::ActionsOutsidePrApproval => GitHubRuleState::NotApplicable {
+                GitHubRule::PrivateVulnerabilityReporting => GitHubRuleState::NotApplicable {
                     reason: "public repositories only".into(),
+                },
+                GitHubRule::ActionsOutsidePrApproval => GitHubRuleState::NotApplicable {
+                    reason: "a private repository runs no outside pull request workflows".into(),
                 },
                 _ => GitHubRuleState::Applied,
             },
@@ -509,6 +511,19 @@ fn required_checks_wait_for_the_first_ci_run_and_a_public_repository_gets_its_ow
             reason: "waiting for the first CI run to name its checks".into()
         }
     );
+    let unnamed = set(
+        &endpoints,
+        &token(),
+        "octo-cat/tool",
+        GitHubRule::RequiredChecks,
+        &on,
+        &GitHubRepoFacts {
+            private: false,
+            ci: GitHubCi::Checks(Vec::new()),
+        },
+    )
+    .unwrap();
+    assert_eq!(unnamed.state, waiting.state);
     assert!(server.seen().is_empty());
     let facts = GitHubRepoFacts {
         private: false,
