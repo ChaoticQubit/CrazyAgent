@@ -98,10 +98,10 @@ fn a_link_below_the_home_is_never_followed_to_a_record() {
     symlink(&target, file_link).unwrap();
     symlink(away.path(), home.path().join("standin")).unwrap();
     let deep = pattern(&home, DEEP_PATH).expect("the deep record path reads");
-    assert_eq!(deep.found().len(), 0);
+    assert!(deep.found().is_empty());
     assert!(deep.newest(&[]).is_none());
     let standin = pattern(&home, STANDIN_PATH).expect("the stand-in record path reads");
-    assert_eq!(standin.found().len(), 0);
+    assert!(standin.found().is_empty());
     assert!(standin.newest(&[]).is_none());
 }
 
