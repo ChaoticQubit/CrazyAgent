@@ -1187,8 +1187,10 @@ fn a_flag_an_agent_set_in_its_home_never_blocks_its_next_launch() {
     fs::create_dir(&cargo).unwrap();
     let config = cargo.join("config.toml");
     fs::write(&config, "[build]\nrustc-wrapper = \"/private/tmp/run\"\n").unwrap();
-    fs::write(home.join(".claude.json"), "{}\n").unwrap();
+    let claude = home.join(".claude.json");
+    fs::write(&claude, "{}\n").unwrap();
     let pinned = [
+        (claude.as_path(), FileFlag::UF_IMMUTABLE),
         (hook.as_path(), FileFlag::UF_IMMUTABLE),
         (session.as_path(), FileFlag::UF_IMMUTABLE),
         (startup.as_path(), FileFlag::UF_APPEND),
@@ -1202,6 +1204,9 @@ fn a_flag_an_agent_set_in_its_home_never_blocks_its_next_launch() {
 
     let prepared = prepare(&home, Harness::Claude, &project, &given);
 
+    let kept_flags = fs::symlink_metadata(&claude).map(|metadata| {
+        FileFlag::from_bits_retain(std::os::macos::fs::MetadataExt::st_flags(&metadata))
+    });
     let left: Vec<&Path> = [hook.as_path(), session.as_path(), startup.as_path(), config.as_path()]
         .into_iter()
         .filter(|path| fs::symlink_metadata(path).is_ok())
@@ -1211,10 +1216,38 @@ fn a_flag_an_agent_set_in_its_home_never_blocks_its_next_launch() {
     }
     assert_eq!(prepared, Ok(()));
     assert!(left.is_empty(), "a flag kept {left:?} from the launch");
-    assert_eq!(
-        fs::read_to_string(home.join(".claude.json")).unwrap(),
-        "{}\n"
+    assert_eq!(fs::read_to_string(&claude).unwrap(), "{}\n");
+    assert!(
+        kept_flags
+            .as_ref()
+            .is_ok_and(|flags| !flags.intersects(FileFlag::UF_IMMUTABLE)),
+        "a kept file stayed pinned: {kept_flags:?}"
     );
+}
+
+/// A home an agent filled with more entries than one listing of it takes still launches,
+/// and every entry it planted goes while what the harness keeps stays (RV-DS241-137), so a
+/// run that makes a hundred thousand files in its home never refuses every later launch.
+#[cfg(unix)]
+#[test]
+fn a_launch_clears_a_home_an_agent_filled_with_entries() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    fs::write(home.join(".claude.json"), "{}\n").unwrap();
+    let planted = 100_001;
+    for index in 0..planted {
+        File::create(home.join(format!("n-{index}"))).unwrap();
+    }
+
+    prepare(&home, Harness::Claude, &project, &given).unwrap();
+
+    let left: Vec<String> = fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, [".claude.json"]);
 }
 
 /// What an agent's own run leaves in its home runs nothing in a git, Python or cargo it
