@@ -2655,11 +2655,7 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
         ("registry_case", format!("rm {}", home(".CARGO/Registry"))),
         (
             "registry_move",
-            format!(
-                "mv {} {}",
-                home(".cargo/registry"),
-                home(".cargo/moved")
-            ),
+            format!("mv {} {}", home(".cargo/registry"), home(".cargo/moved")),
         ),
         (
             "registry_swap",
@@ -2677,7 +2673,10 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
             ),
         ),
         ("git_cache", format!("mkdir -p {}", home(".cargo/git/db"))),
-        ("gitconfig", format!("printf '[core]\\n' > {}", home(".gitconfig"))),
+        (
+            "gitconfig",
+            format!("printf '[core]\\n' > {}", home(".gitconfig")),
+        ),
     ];
     let mut problems = Vec::new();
     for (name, script) in denied {
@@ -2720,11 +2719,9 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
     if fs::read_link(case.home.join(".cargo/registry")).ok() != Some(registry.clone()) {
         problems.push("the link to the owner's crates changed".to_owned());
     }
-    for (entry, folder) in [(".npm", true), (".cargo", true), (".cargo/git", true)] {
-        if fs::symlink_metadata(case.home.join(entry))
-            .map(|metadata| metadata.is_dir())
-            .ok()
-            != Some(folder)
+    for entry in [".npm", ".cargo", ".cargo/git"] {
+        if !fs::symlink_metadata(case.home.join(entry))
+            .is_ok_and(|metadata| metadata.is_dir())
         {
             problems.push(format!("{entry} is no longer a real folder"));
         }

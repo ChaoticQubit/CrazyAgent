@@ -1201,7 +1201,10 @@ fn a_cargo_cache_an_agent_made_goes_at_each_launch_and_only_a_link_stays() {
             .filter(|cache| !(linked && *cache == "registry"))
             .filter(|cache| fs::symlink_metadata(cargo.join(cache)).is_ok())
             .collect();
-        assert!(left.is_empty(), "{name}: cargo caches the agent made stayed: {left:?}");
+        assert!(
+            left.is_empty(),
+            "{name}: cargo caches the agent made stayed: {left:?}"
+        );
         if linked {
             assert_eq!(fs::read_link(cargo.join("registry")).unwrap(), crates);
         }
@@ -1308,7 +1311,10 @@ fn a_flag_on_an_entry_at_mode_000_never_blocks_the_next_launch() {
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
     }
     assert_eq!(prepared, Ok(()));
-    assert!(left.is_empty(), "a flag at mode 000 kept {left:?} from the launch");
+    assert!(
+        left.is_empty(),
+        "a flag at mode 000 kept {left:?} from the launch"
+    );
 }
 
 /// An ACL entry an agent set in its own home never keeps its next launch from starting
@@ -1344,7 +1350,11 @@ fn an_acl_an_agent_set_in_its_home_never_blocks_its_next_launch() {
 
     let prepared = prepare(&home, Harness::Claude, &project, &given);
 
-    let listed = Command::new("/bin/ls").arg("-led").arg(&claude).output().unwrap();
+    let listed = Command::new("/bin/ls")
+        .arg("-led")
+        .arg(&claude)
+        .output()
+        .unwrap();
     let kept_acl = String::from_utf8_lossy(&listed.stdout).into_owned();
     let left: Vec<&Path> = [note.as_path(), stuck.as_path()]
         .into_iter()
@@ -1522,14 +1532,26 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
         .unwrap();
     let mut ran = Vec::new();
     for (program, arguments, folder) in [
-        (OsString::from("/usr/bin/git"), &["status", "--porcelain"][..], &repo),
-        (OsString::from("/usr/bin/python3"), &["-c", "pass"][..], &repo),
+        (
+            OsString::from("/usr/bin/git"),
+            &["status", "--porcelain"][..],
+            &repo,
+        ),
+        (
+            OsString::from("/usr/bin/python3"),
+            &["-c", "pass"][..],
+            &repo,
+        ),
         (
             OsString::from(env!("CARGO")),
             &["check", "--offline", "--quiet", "--manifest-path", "Cargo.toml"][..],
             &probe,
         ),
-        (npm.clone(), &["--no-update-notifier", "run", "x"][..], &package),
+        (
+            npm.clone(),
+            &["--no-update-notifier", "run", "x"][..],
+            &package,
+        ),
     ] {
         let output = Command::new(&program)
             .args(arguments)

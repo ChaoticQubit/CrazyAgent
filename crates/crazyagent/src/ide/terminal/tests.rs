@@ -1252,7 +1252,11 @@ fn an_ide_terminal_reads_the_global_git_python_and_npm_config_of_its_home() {
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(output.status.success(), "{output:?}");
     assert!(stdout.contains("HOME="), "{stdout}");
-    for pinned in ["GIT_CONFIG_GLOBAL=", "PYTHONNOUSERSITE=", "NPM_CONFIG_USERCONFIG="] {
+    for pinned in [
+        "GIT_CONFIG_GLOBAL=",
+        "PYTHONNOUSERSITE=",
+        "NPM_CONFIG_USERCONFIG=",
+    ] {
         assert!(
             !stdout.lines().any(|line| line.starts_with(pinned)),
             "{pinned} reached the owner's terminal: {stdout}"
