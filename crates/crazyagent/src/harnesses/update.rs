@@ -820,10 +820,19 @@ fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'stati
 
 /// Passes a command only when the tool resolver would run its program and every copy of an
 /// interpreter the program asks `env` for by name that the command's own search folders
-/// hold, since the child's PATH looks there first and would find that copy ahead of the one
-/// the resolver vetted. Inputs: the command and the resolver's places. Output: the real file
-/// the resolver resolved the program to and checked, or `TOOL_UNSAFE`.
+/// hold, a link whose target is not there yet included, since the child's PATH looks there
+/// first and would find that copy ahead of the one the resolver vetted, and only when each
+/// of those folders that exists is one a lookup would trust
+/// ([`crate::tools::Places::kept_for_children`]), so no copy can appear there before the run
+/// (RV-DS241-203). Inputs: the command and the resolver's places. Output: the real file the
+/// resolver resolved the program to and checked, or `TOOL_UNSAFE`.
 fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<PathBuf, &'static str> {
+    let kept = fixed.search.iter().all(|folder| {
+        std::fs::symlink_metadata(folder).is_err() || places.kept_for_children(folder)
+    });
+    if !kept {
+        return Err(TOOL_UNSAFE);
+    }
     let resolved = crate::tools::resolve_entry(&fixed.program, places).map_err(|_| TOOL_UNSAFE)?;
     let mut at = &resolved;
     for _ in 0..=crate::tools::INTERPRETER_DEPTH_MAX {
@@ -842,7 +851,7 @@ fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<PathBuf, &'sta
                 .iter()
                 .map(|folder| folder.join(name))
                 .any(|copy| {
-                    std::fs::metadata(&copy).is_ok()
+                    std::fs::symlink_metadata(&copy).is_ok()
                         && crate::tools::resolve_entry(&copy, places).is_err()
                 });
             if refused {
