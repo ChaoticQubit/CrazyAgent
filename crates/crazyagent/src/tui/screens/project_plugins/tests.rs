@@ -497,6 +497,36 @@ fn only_the_painted_frame_lets_y_approve_a_command_it_showed_to_the_end() {
     assert_eq!(id, "pl0xpostgres");
 }
 
+/// An approval refused because a stored server holds hidden characters says so and that the
+/// way out is Remove, then add again, never the add form's wording; any other refusal keeps
+/// its own sentence (RV-DS241-151 r2).
+#[test]
+fn an_approval_refused_for_hidden_characters_says_remove_and_add_again() {
+    let look = Look::plain();
+    let approve = "This server's command or address holds hidden or control characters, so it can't be approved. Remove it, then add it again.";
+    for (code, shown) in [
+        ("server_command_invalid", approve),
+        ("server_args_invalid", approve),
+        ("server_url_invalid", approve),
+        ("server_changed", plugin_plain("server_changed")),
+    ] {
+        let mut view = loaded();
+        for _ in 0..5 {
+            view.key(press(KeyCode::Down));
+        }
+        view.key(press(KeyCode::Enter));
+        view.painting(true);
+        view.rows(76, 40, &look);
+        view.painting(false);
+        let PluginChange::Approve { id, .. } = sent(view.key(press(KeyCode::Char('y')))) else {
+            panic!("an approval expected");
+        };
+        assert_eq!(id, "pl0xpostgres");
+        view.apply(&SettingsEvent::PluginChanged(Err(code.into())));
+        assert_eq!(view.notice, Some(Notice::problem(shown)), "{code}");
+    }
+}
+
 /// RV-DS241-104: a taller layout that never reaches the screen does not hold the scroll back,
 /// so Down still brings the painted frame to the command's last line.
 #[test]

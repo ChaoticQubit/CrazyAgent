@@ -231,6 +231,25 @@ test("a stored server whose command, argument or address holds hidden characters
   assert.equal(serverFacts(remote)[0], "Connects to: https://mcp.example.invalid/\\u202emcp");
 });
 
+test("Approve or Check refused for a stored server's hidden characters says so and to remove and add it again, not the add form's wording", async () => {
+  const { readFileSync } = await import("node:fs");
+  const refused = (code) => ({ kind: "error", code, message: api.plainError(code) });
+  for (const code of ["server_command_invalid", "server_args_invalid", "server_url_invalid"]) {
+    for (const action of ["approved", "checked"]) {
+      assert.deepEqual(plugins.storedServerRefusal(refused(code), action), { kind: "error", code,
+        message: `This server's command or address holds hidden or control characters, so it can't be ${action}. Remove it, then add it again.` });
+    }
+  }
+  assert.deepEqual(plugins.storedServerRefusal(refused("server_changed"), "approved"), refused("server_changed"), "other refusals keep their sentence");
+  assert.deepEqual(plugins.storedServerRefusal({ kind: "not_ready" }, "checked"), { kind: "not_ready" });
+  const ok = { kind: "ok", value: server() };
+  assert.equal(plugins.storedServerRefusal(ok, "approved"), ok);
+  assert.equal(api.plainError("server_command_invalid"), "Enter the full path to the command, starting with /.", "the add form keeps its wording");
+  const source = readFileSync(new URL("../src/screens/settings/plugins.tsx", import.meta.url), "utf8");
+  assert.match(source, /approveMcpServer\(server\.id, server\.spec\)\.then\(\(result\) => storedServerRefusal\(result, "approved"\)\)/, "Approve's reply goes through it");
+  assert.match(source, /checkMcpServer\(server\.id\)\.then\(\(result\) => storedServerRefusal\(result, "checked"\)\)/, "Check's reply goes through it");
+});
+
 test("switches follow the engine: global items in global settings, the per-project switch in a project", () => {
   assert.deepEqual(pluginSwitch(skill({ enabled: false })), { checked: false, label: "On for every project", project: false });
   assert.deepEqual(pluginSwitch(skill({ on_here: false }), "project-1"), { checked: false, label: "On in this project", project: true });

@@ -392,6 +392,61 @@ fn a_server_with_hidden_characters_shows_them_escaped_in_its_line_and_its_approv
     assert!(!crate::memory::hidden_text(&text), "{text}");
 }
 
+fn refused(code: &str) -> Arrival {
+    Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::PluginChanged(Err(code.into())),
+    ))))
+}
+
+/// Approve or Check refused because a stored server holds hidden characters says so and that
+/// the way out is Remove, then add again, never the add form's wording; any other refusal
+/// keeps its own sentence (RV-DS241-151 r2).
+#[test]
+fn approve_or_check_refused_for_hidden_characters_says_remove_and_add_again() {
+    let approve = "This server's command or address holds hidden or control characters, so it can't be approved. Remove it, then add it again.";
+    let check = "This server's command or address holds hidden or control characters, so it can't be checked. Remove it, then add it again.";
+    for (code, approved, checked) in [
+        ("server_command_invalid", approve, check),
+        ("server_args_invalid", approve, check),
+        ("server_url_invalid", approve, check),
+        (
+            "server_changed",
+            plugin_plain("server_changed"),
+            plugin_plain("server_changed"),
+        ),
+    ] {
+        let (skills, servers) = lists();
+        let mut ctx = plugin_ctx(80, 24);
+        let mut screen = Plugins::with(skills, servers);
+        for _ in 0..5 {
+            screen.key(&Key::Down, &mut ctx);
+        }
+        screen.key(&Key::Enter, &mut ctx);
+        screen.key(&Key::Enter, &mut ctx);
+        assert!(
+            matches!(ctx.next_request(), Some(Request::Settings(job)) if matches!(*job, SettingsJob::Plugin(PluginChange::Approve { .. }))),
+            "{code}"
+        );
+        screen.arrive(&refused(code), &mut ctx);
+        assert_eq!(ctx.message().unwrap().lead, approved, "{code}");
+
+        let (skills, servers) = lists();
+        let mut ctx = plugin_ctx(80, 24);
+        let mut screen = Plugins::with(skills, servers);
+        for _ in 0..4 {
+            screen.key(&Key::Down, &mut ctx);
+        }
+        screen.key(&Key::Enter, &mut ctx);
+        screen.key(&Key::Enter, &mut ctx);
+        assert!(
+            matches!(ctx.next_request(), Some(Request::Settings(job)) if matches!(*job, SettingsJob::Plugin(PluginChange::CheckServer { .. }))),
+            "{code}"
+        );
+        screen.arrive(&refused(code), &mut ctx);
+        assert_eq!(ctx.message().unwrap().lead, checked, "{code}");
+    }
+}
+
 #[test]
 fn a_skill_folder_under_home_is_sent_as_a_full_path() {
     let mut ctx = plugin_ctx(80, 24);

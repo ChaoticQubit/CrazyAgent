@@ -226,6 +226,69 @@ fn approving_a_stored_spec_with_hidden_characters_is_refused_and_it_stays_waitin
     }
 }
 
+/// A server spec stored by 2.4.0 with hidden characters, waiting or already approved, is
+/// refused when a check asks for it, so Check never runs it, not even in its sandbox; a
+/// valid spec still gives what the check runs (RV-DS241-151 r2).
+#[test]
+fn checking_a_stored_spec_with_hidden_characters_is_refused_before_it_runs() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let valid = ServerSpec::Stdio {
+        command: "/usr/bin/true".into(),
+        args: vec!["--stdio".into()],
+    };
+    let cases = [
+        (
+            ServerSpec::Stdio {
+                command: "/usr/bin/tr\u{202e}ue".into(),
+                args: vec!["--stdio".into()],
+            },
+            false,
+            "server_command_invalid",
+        ),
+        (
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: vec!["--st\u{200b}dio".into()],
+            },
+            false,
+            "server_args_invalid",
+        ),
+        (
+            ServerSpec::Stdio {
+                command: "/usr/bin/tr\u{202e}ue".into(),
+                args: vec!["--stdio".into()],
+            },
+            true,
+            "server_command_invalid",
+        ),
+    ];
+    for (index, (stored, approved, code)) in cases.into_iter().enumerate() {
+        let id = server(&mut connection, root, &format!("old{index}"), &valid);
+        {
+            let tx = connection.transaction().unwrap();
+            let mut record: ServerRecord = load(&tx, "server", &id).unwrap();
+            record.spec = stored.clone();
+            record.approved = approved.then(|| stored.digest());
+            put_server(&tx, &record).unwrap();
+            tx.commit().unwrap();
+        }
+        let refused = execute(&mut connection, root, Command::GetServer { id });
+        assert_eq!(
+            refused.err().map(|problem| problem.0).as_deref(),
+            Some(code),
+            "case {index}"
+        );
+    }
+    let id = server(&mut connection, root, "fresh", &valid);
+    let ResultValue::Check(spec, _, _) =
+        execute(&mut connection, root, Command::GetServer { id }).unwrap()
+    else {
+        panic!("check value required");
+    };
+    assert_eq!(*spec, valid);
+}
+
 #[test]
 fn a_stored_skill_description_or_source_with_hidden_characters_is_shown_escaped() {
     let record = SkillRecord {
