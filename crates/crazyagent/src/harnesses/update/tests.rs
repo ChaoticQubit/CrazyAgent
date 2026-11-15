@@ -2440,7 +2440,7 @@ fn the_interpreter_walk_follows_the_copy_env_takes_and_judges_its_own_interprete
     let at = machine.root.path();
     std::fs::create_dir_all(at.join("proj/.crazyagent")).unwrap();
     machine.program("brew/bin/node", 0o755);
-    machine.program("brew/bin/bash", 0o755);
+    executable(&at.join("brew/bin/bash"), "exit 0\n");
     let bin = at.join("home/.local/bin");
     let entry = bin.join("codex");
     executable(&entry, "#!/usr/bin/env node\n");
