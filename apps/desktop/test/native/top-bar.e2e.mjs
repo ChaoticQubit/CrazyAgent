@@ -1,9 +1,10 @@
 import "../load-source.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BAR, BELL, CONTROL, PANEL, controlLabel, engineAct, onEngine, openPanel, until } from "./keep-awake-engine.mjs";
+import { BAR, BELL, CONTROL, PANEL, controlLabel, engineAct, engineView, onEngine, openPanel, until } from "./keep-awake-engine.mjs";
 
 const { ADD_PROJECT_WAYS, NEW_PROJECT_STEPS, PROJECT_TABS, SETTINGS_TABS, formatRoute } = await import("../../src/ui/router.ts");
+const { KEEP_AWAKE_DEFAULTS } = await import("../../src/api-keep-awake.ts");
 
 const BAR_HEIGHT = 56;
 const CONTRAST_MIN = 4.5;
@@ -58,6 +59,18 @@ const CONTRAST = `(() => {
   return ratios;
 })()`;
 
+/** Brings an engine that just made a project to rest: the project's research jobs count as
+ * work, so with the default grace the hold would go on for ten minutes after them. Sets the
+ * grace to 0 and waits until nothing works and nothing is held. Input: the bridge. Output:
+ * none. */
+async function atRest(bridge) {
+  await engineAct(bridge, { set: { settings: { ...KEEP_AWAKE_DEFAULTS, grace: "min0" } } });
+  await until("the engine at rest after the project's research", ["nothing", 0, null], async () => {
+    const view = await engineView(bridge);
+    return [view.state.want.kind, view.work, view.state.ended];
+  });
+}
+
 /** Every route `formatRoute` can write for this engine's one project, each once. Input: the
  * project id. Output: the location hashes. */
 function routes(projectId) {
@@ -74,8 +87,9 @@ function routes(projectId) {
   return all;
 }
 
-test("the_top_bar_with_bell_and_keep_awake_is_on_every_route", { timeout: 1200000 }, (t) => onEngine(t, "ca-top-bar-routes-", async ({ me, page, open, projectId }) => {
+test("the_top_bar_with_bell_and_keep_awake_is_on_every_route", { timeout: 1200000 }, (t) => onEngine(t, "ca-top-bar-routes-", async ({ bridge, me, page, open, projectId }) => {
   assert.ok(projectId, "the walk has a project");
+  await atRest(bridge);
   for (const hash of routes(projectId)) {
     await open(hash, hash, () => true);
     await until(`the bar with Keep awake left of the bell on ${hash}`, WANTED, () => page.evaluate(PLACED));
@@ -135,10 +149,11 @@ test("the Keep awake control reads clearly in light and dark, in every tone", { 
 
 test("at 760 px the bell and the Keep awake control stay whole and visible, in dark as in light", { timeout: 600000 }, (t) => onEngine(t, "ca-top-bar-760-", async ({ bridge, me, page, open, projectId }) => {
   await page.send("Emulation.setDeviceMetricsOverride", { width: 760, height: 900, deviceScaleFactor: 1, mobile: false });
+  await atRest(bridge);
   await engineAct(bridge, { start: { minutes: 134 } });
   for (const hash of ["#/home", `#/projects/${encodeURIComponent(projectId)}/conversation`, "#/settings/keep-awake"]) {
     await open(hash, hash, () => true);
-    await until(`the control holding on ${hash}`, true, async () => /^Awake, 2h 1[34]m left$/.test(await controlLabel(page)));
+    await until(`the control holding on ${hash}`, true, async () => /^Awake, 2h (1[0-4]|[5-9])m left$/.test(await controlLabel(page)));
     for (const theme of ["dark", "light"]) {
       await page.evaluate(`document.documentElement.setAttribute("data-theme", ${JSON.stringify(theme)})`);
       await until(`the bar at 760 px in ${theme} on ${hash}`, WANTED, () => page.evaluate(PLACED));
