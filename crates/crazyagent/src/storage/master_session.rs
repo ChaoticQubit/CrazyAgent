@@ -1747,7 +1747,8 @@ fn rcli_profile(
 
 /// The target a pool member runs master turns under: its connection for a native master,
 /// its RCLI profile for an RCLI one. Inputs: the session and the member. Output: the target,
-/// or None when the member has none.
+/// or None when the member has none, as every member has for a listed master the engine
+/// does not host yet.
 fn master_target(
     session: &MasterSessionView,
     member: &ModelConnection,
@@ -1755,6 +1756,7 @@ fn master_target(
     match session.selection.backend {
         MasterBackend::Rcli => rcli_profile(session, member),
         MasterBackend::Codex | MasterBackend::Claude => Some(member.id.clone()),
+        MasterBackend::Listed(_) => None,
     }
 }
 

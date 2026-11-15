@@ -116,6 +116,7 @@ impl OwnerRuntimeHandle {
             MasterBackend::Codex => self.registered_codex_executable()?,
             MasterBackend::Claude => self.registered_claude_executable()?,
             MasterBackend::Rcli => return Err(failure("master_runtime_backend_unsupported")),
+            MasterBackend::Listed(_) => return Err(failure("launch_harness_unsupported")),
         };
         let artifact_sha256 = executable.verified_sha256()?;
         if !is_hex_id(&artifact_sha256) {
@@ -718,6 +719,7 @@ fn require_master_delegate(
             crate::engine::claude_host::require_delegate(&turn.command, expected)?
         }
         MasterBackend::Rcli => return Err(failure("master_runtime_backend_unsupported")),
+        MasterBackend::Listed(_) => return Err(failure("launch_harness_unsupported")),
     }
     if turn.tool_record.as_deref() != expected.map(|tools| tools.drop) {
         return Err(failure("master_delegate_unverified"));
@@ -744,11 +746,10 @@ fn delegate_engine(
 fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineError> {
     let binding = prepared.profile.binding();
     let lease = &prepared.lease;
-    if !matches!(
-        prepared.session.selection.backend,
-        MasterBackend::Codex | MasterBackend::Claude
-    ) {
-        return Err(failure("master_runtime_backend_unsupported"));
+    match prepared.session.selection.backend {
+        MasterBackend::Codex | MasterBackend::Claude => {}
+        MasterBackend::Rcli => return Err(failure("master_runtime_backend_unsupported")),
+        MasterBackend::Listed(_) => return Err(failure("launch_harness_unsupported")),
     }
     if prepared.session.current_turn.is_none()
         || prepared.attempt.completion.is_some()

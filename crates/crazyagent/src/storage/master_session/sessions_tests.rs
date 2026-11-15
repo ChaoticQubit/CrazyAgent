@@ -190,7 +190,9 @@ impl Case {
     async fn basis_for(&self, backend: MasterBackend) -> (ConfigId, String, Box<MasterSelection>) {
         let (pool, account) = match backend {
             MasterBackend::Rcli => ("session-pool", "session-account"),
-            MasterBackend::Codex | MasterBackend::Claude => ("native-pool", "native-account"),
+            MasterBackend::Codex | MasterBackend::Claude | MasterBackend::Listed(_) => {
+                ("native-pool", "native-account")
+            }
         };
         let basis = self
             .read(OwnerRead::ModelAccessPage {
@@ -989,6 +991,62 @@ async fn resume_refuses_a_session_the_current_settings_or_engine_run_no_longer_a
         );
         assert_eq!(snapshot(&case), before, "a refused Resume changes nothing");
     }
+    case.close().await;
+}
+
+/// DEC-180 Phase 1: a master on a listed harness is refused with `launch_harness_unsupported`
+/// when the owner opens it or asks for a new session on it, and nothing is stored for it,
+/// while the same choice on Claude is taken.
+#[tokio::test]
+async fn a_master_on_a_listed_harness_is_refused_and_no_session_is_stored_for_it() {
+    let case = Case::new().await;
+    let listed = MasterBackend::Listed("opencode");
+    let (expected_config_id, expected_source_hash, selection) = case.basis_for(listed).await;
+    assert_eq!(selection.backend, listed);
+    let opened = case
+        .master(
+            "open-listed",
+            MasterOwnerAction::Open {
+                project_id: case.project.clone(),
+                expected_config_id,
+                expected_source_hash,
+                selection,
+            },
+        )
+        .await;
+    assert_eq!(
+        opened,
+        OwnerResult::Rejected {
+            code: "launch_harness_unsupported".into()
+        }
+    );
+    assert!(
+        snapshot(&case).is_empty(),
+        "a refused Open stores no session"
+    );
+
+    assert_eq!(case.open("open-rcli").await, OwnerResult::Applied);
+    let rcli = case.shown().await;
+    case.used_in_terminal(&rcli.session_id);
+    let before = snapshot(&case);
+    assert_eq!(
+        case.renew_with("renew-listed", false, listed).await,
+        OwnerResult::Rejected {
+            code: "launch_harness_unsupported".into()
+        }
+    );
+    assert_eq!(
+        snapshot(&case),
+        before,
+        "a refused New session changes nothing"
+    );
+    assert_eq!(case.shown().await.session_id, rcli.session_id);
+    assert_eq!(
+        case.renew_with("renew-native", false, MasterBackend::Claude)
+            .await,
+        OwnerResult::Applied,
+        "the same pool and account on Claude are taken"
+    );
     case.close().await;
 }
 

@@ -77,6 +77,7 @@ fn selection(backend: MasterBackend) -> MasterSelection {
         MasterBackend::Rcli => "api-account",
         MasterBackend::Codex => "codex-account",
         MasterBackend::Claude => "claude-account",
+        MasterBackend::Listed(id) => unreachable!("{id} is not a native backend"),
     };
     MasterSelection {
         backend,

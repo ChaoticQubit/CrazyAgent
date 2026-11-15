@@ -1875,16 +1875,12 @@ impl Form {
     }
 
     fn cycle_backend(&mut self, catalog: Option<&Catalog>, forward: bool) {
-        let backends = [
-            MasterBackend::Rcli,
-            MasterBackend::Codex,
-            MasterBackend::Claude,
-        ];
-        let current = backends
-            .iter()
-            .position(|backend| backend == &self.backend)
-            .unwrap();
-        self.backend = backends[(current + if forward { 1 } else { 2 }) % 3];
+        let backends = MasterBackend::NATIVE;
+        let current = backends.iter().position(|backend| backend == &self.backend);
+        self.backend = match current {
+            Some(current) => backends[(current + if forward { 1 } else { 2 }) % 3],
+            None => backends[0],
+        };
         self.account = None;
         self.target = None;
         if catalog.is_some_and(|catalog| {
@@ -1996,13 +1992,7 @@ impl Catalog {
     /// form's project as master. Input: the form, whose backend is ignored. Output: that
     /// backend, or None when no pool is assigned to the project.
     fn assigned_backend(&self, form: &Form) -> Option<MasterBackend> {
-        [
-            MasterBackend::Rcli,
-            MasterBackend::Codex,
-            MasterBackend::Claude,
-        ]
-        .into_iter()
-        .find(|backend| {
+        MasterBackend::NATIVE.into_iter().find(|backend| {
             let probe = Form {
                 database: None,
                 project: form.project.clone(),
@@ -2207,6 +2197,7 @@ fn backend_label(backend: MasterBackend) -> &'static str {
         MasterBackend::Rcli => "RCLI",
         MasterBackend::Codex => "Native Codex",
         MasterBackend::Claude => "Native Claude",
+        MasterBackend::Listed(id) => crate::harnesses::spec(id).map_or(id, |spec| spec.name),
     }
 }
 
@@ -2226,6 +2217,7 @@ fn backend_matches(backend: MasterBackend, connection: &ModelConnection) -> bool
                 && connection.protocol.as_str() == "native"
                 && matches!(connection.endpoint, ModelEndpoint::Native {})
         }
+        MasterBackend::Listed(_) => false,
     }
 }
 
@@ -2908,13 +2900,8 @@ pub async fn default_master_open(
             _ => "The project's team plan could not be read".to_owned(),
         })?
         .and_then(|setup| crate::team::master_backend(&setup.team.master));
-    let order = [
-        MasterBackend::Rcli,
-        MasterBackend::Codex,
-        MasterBackend::Claude,
-    ];
     let backends = planned.into_iter().chain(
-        order
+        MasterBackend::NATIVE
             .into_iter()
             .filter(|backend| Some(*backend) != planned),
     );
@@ -3242,6 +3229,99 @@ pools = [
         let clipped = default_master_budget(&[roomy.clone(), roomy, tight.clone()]);
         assert_eq!(clipped.output_bytes, 4_194_304);
         assert!(clipped.fits(&tight));
+    }
+}
+
+#[cfg(test)]
+mod backend_form_tests {
+    use super::*;
+
+    fn form(backend: MasterBackend) -> Form {
+        Form {
+            database: None,
+            project: ProjectId::new("demo").unwrap(),
+            backend,
+            pool: None,
+            account: None,
+            target: None,
+            values: budget_values(&ResourceBudget::unit()).map(|value| value.to_string()),
+            field: 0,
+            generation: 1,
+            open: false,
+            explicit: false,
+            edited: false,
+        }
+    }
+
+    /// DEC-180 Phase 1: the master form's backend choice walks RCLI, Codex and Claude in
+    /// that order, both ways, drops the account and target chosen for the backend before,
+    /// and names each backend as it did.
+    #[test]
+    fn the_backend_choice_walks_rcli_codex_and_claude_both_ways() {
+        let mut form = form(MasterBackend::Rcli);
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            form.cycle_backend(None, true);
+            seen.push(form.backend);
+        }
+        assert_eq!(
+            seen,
+            [
+                MasterBackend::Codex,
+                MasterBackend::Claude,
+                MasterBackend::Rcli
+            ]
+        );
+        seen.clear();
+        for _ in 0..3 {
+            form.cycle_backend(None, false);
+            seen.push(form.backend);
+        }
+        assert_eq!(
+            seen,
+            [
+                MasterBackend::Claude,
+                MasterBackend::Codex,
+                MasterBackend::Rcli
+            ]
+        );
+        form.account = Some(CredentialRef::new("account").unwrap());
+        form.target = Some(CredentialRef::new("target").unwrap());
+        form.cycle_backend(None, true);
+        assert_eq!((form.account, form.target), (None, None));
+        assert_eq!(
+            [
+                MasterBackend::Rcli,
+                MasterBackend::Codex,
+                MasterBackend::Claude
+            ]
+            .map(backend_label),
+            ["RCLI", "Native Codex", "Native Claude"]
+        );
+    }
+
+    /// DEC-180 Phase 1: a form that holds a listed backend, which the form itself never
+    /// offers, shows it by its catalog name and goes to RCLI on either key instead of
+    /// stopping the app.
+    #[test]
+    fn a_form_on_a_listed_backend_shows_its_catalog_name_and_goes_back_to_rcli() {
+        let listed = MasterBackend::Listed("opencode");
+        for forward in [true, false] {
+            let mut form = form(listed);
+            form.account = Some(CredentialRef::new("account").unwrap());
+            form.cycle_backend(None, forward);
+            assert_eq!(form.backend, MasterBackend::Rcli, "forward {forward}");
+            assert_eq!(form.account, None);
+        }
+        assert_eq!(
+            backend_label(listed),
+            crate::harnesses::spec("opencode").unwrap().name
+        );
+        assert_eq!(
+            backend_label(MasterBackend::Listed("no-such-harness")),
+            "no-such-harness"
+        );
+        assert!(!MasterBackend::NATIVE.contains(&listed));
     }
 }
 
