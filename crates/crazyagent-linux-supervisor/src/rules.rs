@@ -1,9 +1,11 @@
 #![forbid(unsafe_code)]
 
 use std::ffi::OsStr;
-use std::net::Ipv6Addr;
+use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::path::{Component, Path, PathBuf};
 
+pub const AF_UNSPEC: u16 = 0;
+pub const AF_UNIX: u16 = 1;
 pub const AF_INET: u16 = 2;
 pub const AF_INET6: u16 = 10;
 pub const ADDRESS_BYTES_MAX: usize = 128;
@@ -43,6 +45,26 @@ pub fn address(bytes: &[u8]) -> Address {
         }
         _ => Address::Other,
     }
+}
+
+/// A connect's address in the form the supervisor connects with for the agent: an IP
+/// address with its flow and scope, a Unix socket's path or abstract name, the address
+/// that ends a connection, or a family the supervisor does not carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Dest {
+    Ip(SocketAddr),
+    UnixPath(Vec<u8>),
+    UnixName(Vec<u8>),
+    Unspec,
+    Other,
+}
+
+/// Reads a socket address whole, for the connect made on the agent's behalf. Input: the
+/// copied bytes, at most [`ADDRESS_BYTES_MAX`]. Output: the destination; a Unix path
+/// ends at its first zero byte, an abstract name keeps every byte after the leading zero.
+pub fn dest(bytes: &[u8]) -> Dest {
+    let _ = bytes;
+    Dest::Other
 }
 
 /// The TCP ports an agent may reach: `any` on every host, `loopback` only on this
@@ -589,5 +611,37 @@ mod tests {
         assert_eq!(mode_under(0o777, 0o022), 0o755);
         assert_eq!(mode_under(0o2775, 0), 0o2775);
         assert_eq!(mode_under(0o100644, 0o077), 0o600, "only mode bits");
+    }
+
+    #[test]
+    fn a_connect_address_is_carried_whole_to_the_connect_made_for_the_agent() {
+        let local = dest(&v4([127, 0, 0, 1], 8080));
+        assert_eq!(local, Dest::Ip("127.0.0.1:8080".parse().unwrap()));
+        let mut six = v6("fe80::1".parse().unwrap(), 443);
+        six[4..8].copy_from_slice(&7u32.to_be_bytes());
+        six[24..28].copy_from_slice(&3u32.to_ne_bytes());
+        let Dest::Ip(SocketAddr::V6(read)) = dest(&six) else {
+            panic!("not an IPv6 destination");
+        };
+        assert_eq!((read.port(), read.flowinfo(), read.scope_id()), (443, 7, 3));
+        assert_eq!(read.ip(), &"fe80::1".parse::<Ipv6Addr>().unwrap());
+        let Dest::Ip(SocketAddr::V6(short)) = dest(&six[..24]) else {
+            panic!("not an IPv6 destination");
+        };
+        assert_eq!(short.scope_id(), 0, "no scope in a short address");
+        let unix = |path: &[u8]| [&AF_UNIX.to_ne_bytes()[..], path].concat();
+        let path = |path: &[u8]| Dest::UnixPath(path.to_vec());
+        assert_eq!(dest(&unix(b"/run/user/1000/bus\0")), path(b"/run/user/1000/bus"));
+        assert_eq!(dest(&unix(b"sock\0junk")), path(b"sock"));
+        assert_eq!(dest(&unix(b"sock")), path(b"sock"), "no zero byte at the end");
+        assert_eq!(dest(&unix(b"")), path(b""));
+        assert_eq!(dest(&unix(b"\0name\0x")), Dest::UnixName(b"name\0x".to_vec()));
+        assert_eq!(dest(&[0u8; 16]), Dest::Unspec);
+        assert_eq!(dest(&AF_UNSPEC.to_ne_bytes()), Dest::Unspec);
+        let netlink = [&16u16.to_ne_bytes()[..], &[0u8; 10]].concat();
+        assert_eq!(dest(&netlink), Dest::Other);
+        assert_eq!(dest(&v4([127, 0, 0, 1], 8080)[..7]), Dest::Other, "a cut address");
+        assert_eq!(dest(&[]), Dest::Other);
+        assert_eq!(dest(&[1]), Dest::Other);
     }
 }
