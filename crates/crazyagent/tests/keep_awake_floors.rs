@@ -226,6 +226,18 @@ fn a_silent_system_battery_with_nothing_online_stays_unknown() {
     );
     put(&root.join("AC"), "online", "1");
     assert_eq!(power_linux::supplies(root), (PowerSource::Ac, Some(40)));
+    put(&root.join("AC"), "online", "2");
+    assert_eq!(
+        power_linux::supplies(root),
+        (PowerSource::Ac, Some(40)),
+        "2 is online too: a supply that sets its own voltage"
+    );
+    put(&root.join("AC"), "online", "on");
+    assert_eq!(
+        power_linux::supplies(root),
+        (PowerSource::Unknown, Some(40)),
+        "a value that is no number is not online"
+    );
 }
 
 fn zone(root: &Path, name: &str, temp: &str, trips: &[(&str, &str)]) {
