@@ -1360,12 +1360,16 @@ fn sole_own(found: &rustix::fs::Stat) -> bool {
     found.st_nlink == 1 && found.st_uid == rustix::process::geteuid().as_raw()
 }
 
+/// What [`BEFORE_HOME_STEP`] holds: the entry the step waits for and the step.
+#[cfg(all(test, unix))]
+type HomeStep = (PathBuf, Box<dyn FnOnce()>);
+
 #[cfg(all(test, unix))]
 thread_local! {
     /// A step a reset test runs once, when the reset is about to walk into or remove the
     /// entry its path names, standing in for a process an agent left that swaps a folder
     /// meanwhile. None runs nothing.
-    static BEFORE_HOME_STEP: std::cell::RefCell<Option<(PathBuf, Box<dyn FnOnce()>)>> =
+    static BEFORE_HOME_STEP: std::cell::RefCell<Option<HomeStep>> =
         const { std::cell::RefCell::new(None) };
 }
 
