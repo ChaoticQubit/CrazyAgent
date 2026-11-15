@@ -1,5 +1,6 @@
 use super::interactive::Transcript;
 use super::launch::{LaunchError, failure, rate_limited};
+use super::records::{self, Reader};
 use serde_json::Value;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -513,12 +514,13 @@ pub(crate) fn open_rollout(record: &Path) -> Option<File> {
 }
 
 /// Opens a harness conversation record to read: a Codex rollout through [`open_rollout`],
-/// any other record as [`open_plain`] does. Takes the harness and the record. Returns the
-/// file, none when it cannot be opened that way.
+/// any other record as [`open_plain`] does. Takes the harness stored with the record
+/// ([`records::stored`]) and the record. Returns the file, none when it cannot be opened
+/// that way.
 pub(crate) fn open_record(harness: &str, record: &Path) -> Option<File> {
-    match harness {
-        "codex" => open_rollout(record),
-        _ => open_plain(record),
+    match records::stored(harness) {
+        Some(Reader::CodexRollouts) => open_rollout(record),
+        Some(Reader::ClaudeSession) | None => open_plain(record),
     }
 }
 
@@ -1045,6 +1047,7 @@ pub fn conversation_messages(harness: &str, record: &Path) -> Vec<(Speaker, Stri
     let Some(mut file) = open_record(harness, record) else {
         return Vec::new();
     };
+    let reader = records::stored(harness);
     let Ok(length) = file.metadata().map(|metadata| metadata.len()) else {
         return Vec::new();
     };
@@ -1067,10 +1070,10 @@ pub fn conversation_messages(harness: &str, record: &Path) -> Vec<(Speaker, Stri
         let Ok(value) = serde_json::from_slice::<Value>(line) else {
             continue;
         };
-        let said = match harness {
-            "codex" => codex_message(&value),
-            "claude-code" => claude_message(&value),
-            _ => None,
+        let said = match reader {
+            Some(Reader::CodexRollouts) => codex_message(&value),
+            Some(Reader::ClaudeSession) => claude_message(&value),
+            None => None,
         };
         if let Some(said) = said {
             if messages.len() == EXCERPT_MESSAGES_MAX {
@@ -1098,11 +1101,11 @@ const FIELDS_BYTES_MAX: usize = TOOL_TEXT_BYTES_MAX + 4;
 /// "instructions" or "summary") and the text, or none for any other line, a harness without
 /// a reader or a line that is not JSON.
 pub fn record_message(harness: &str, line: &[u8]) -> Option<(&'static str, String)> {
+    let reader = records::stored(harness)?;
     let value = serde_json::from_slice::<Value>(line).ok()?;
-    match harness {
-        "codex" => codex_entry(&value),
-        "claude-code" => claude_entry(&value),
-        _ => None,
+    match reader {
+        Reader::CodexRollouts => codex_entry(&value),
+        Reader::ClaudeSession => claude_entry(&value),
     }
 }
 
@@ -1372,6 +1375,7 @@ pub mod pending;
 /// is now shorter than the offset.
 pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<String>> {
     let mut file = open_record(harness, record)?;
+    let reader = records::stored(harness);
     let length = file.metadata().ok()?.len();
     if length < offset {
         return None;
@@ -1386,10 +1390,10 @@ pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<Stri
         let Ok(value) = serde_json::from_slice::<Value>(line) else {
             continue;
         };
-        let said = match harness {
-            "codex" => codex_message(&value),
-            "claude-code" => claude_message(&value),
-            _ => None,
+        let said = match reader {
+            Some(Reader::CodexRollouts) => codex_message(&value),
+            Some(Reader::ClaudeSession) => claude_message(&value),
+            None => None,
         };
         if let Some((Speaker::Input, text)) = said {
             typed.push(text);
@@ -1414,6 +1418,7 @@ pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<Stri
 /// than the offset.
 pub fn typed_past(harness: &str, record: &Path, offset: u64) -> Option<(Vec<(u64, String)>, u64)> {
     let mut file = open_record(harness, record)?;
+    let reader = records::stored(harness);
     let length = file.metadata().ok()?.len();
     if length < offset {
         return None;
@@ -1443,7 +1448,7 @@ pub fn typed_past(harness: &str, record: &Path, offset: u64) -> Option<(Vec<(u64
                 continue;
             }
             end = at;
-            let text = (!long).then(|| typed_line(harness, &line)).flatten();
+            let text = (!long).then(|| typed_line(reader, &line)).flatten();
             long = false;
             line.clear();
             if let Some(text) = text {
@@ -1462,20 +1467,23 @@ pub fn typed_past(harness: &str, record: &Path, offset: u64) -> Option<(Vec<(u64
 
 /// Reads one finished line of a harness record as a typed message, as `typed_past` counts
 /// one. A line without the word `"user"` cannot be typed and is not parsed, so the many
-/// long lines a turn writes cost one scan each. Takes the harness and the line. Returns
-/// the typed text, or none for any other line.
-fn typed_line(harness: &str, line: &[u8]) -> Option<String> {
+/// long lines a turn writes cost one scan each. Takes the record's reader and the line.
+/// Returns the typed text, or none for any other line or a record with no reader.
+fn typed_line(reader: Option<Reader>, line: &[u8]) -> Option<String> {
     const USER: &[u8] = b"\"user\"";
+    let reader = reader?;
     if !line.windows(USER.len()).any(|part| part == USER) {
         return None;
     }
     let value = serde_json::from_slice::<Value>(line).ok()?;
-    let said = match harness {
-        "codex" => codex_message(&value),
-        "claude-code" if claude_prompt(&value, &content_texts(&value["message"]["content"])) => {
+    let said = match reader {
+        Reader::CodexRollouts => codex_message(&value),
+        Reader::ClaudeSession
+            if claude_prompt(&value, &content_texts(&value["message"]["content"])) =>
+        {
             claude_message(&value)
         }
-        _ => None,
+        Reader::ClaudeSession => None,
     };
     match said {
         Some((Speaker::Input, text)) => Some(text),
