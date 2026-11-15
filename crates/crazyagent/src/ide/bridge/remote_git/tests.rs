@@ -1138,3 +1138,98 @@ fn a_hook_reached_through_an_include_of_the_project_config_never_runs() {
     let _ = project.git(&["push", "origin", "main"]);
     assert!(!marker.exists());
 }
+
+/// An `includeIf "onbranch:"` entry in the owner's global config makes what git reads follow
+/// HEAD, which the IDE can write between the check and the run, so every IDE git command
+/// refuses with `ide_git_config_refused` whatever branch HEAD names at the check: the hook in
+/// the branch-only file never runs and nothing is pushed. The same config without that entry
+/// lands (RV-DS241-144).
+#[test]
+fn an_onbranch_include_in_the_owner_config_refuses_every_ide_git_command() {
+    let project = Project::new();
+    let commit = project.commit("a.txt", "a\n");
+    let global = project.home.join(".gitconfig");
+    let included = project.root.join("branch.inc");
+    let marker = project.root.join("ran-onbranch");
+    config_hook(&included, "onbranch", "pre-push", &marker);
+    ok(
+        &project.home,
+        &[
+            "config",
+            "--file",
+            global.to_str().unwrap(),
+            "includeIf.onbranch:feat/*.path",
+            included.to_str().unwrap(),
+        ],
+    );
+    for branch in ["main", "feat/x"] {
+        ok(&project.folder, &["checkout", "-q", "-B", branch]);
+        for args in [
+            &["fetch", "origin"][..],
+            &["push", "origin", "main"],
+            &["ls-remote", "origin"],
+            &["pull"],
+        ] {
+            assert_eq!(
+                refused(project.git(args)),
+                "ide_git_config_refused",
+                "{branch} {args:?}"
+            );
+        }
+    }
+    assert!(!marker.exists());
+    assert_ne!(project.served("main"), Some(commit.clone()));
+
+    ok(
+        &project.home,
+        &[
+            "config",
+            "--file",
+            global.to_str().unwrap(),
+            "--unset",
+            "includeIf.onbranch:feat/*.path",
+        ],
+    );
+    landed(project.git(&["push", "origin", "main"]));
+    assert_eq!(project.served("main"), Some(commit));
+    assert!(!marker.exists());
+}
+
+/// An `includeIf "onbranch:"` entry in the project's own `.git/config` naming a file inside
+/// the project folder is refused even while HEAD names no matching branch, when git lists
+/// none of that file's entries, so the `core.gitProxy` it holds never runs (RV-DS241-144).
+#[test]
+fn an_onbranch_include_of_a_project_file_is_refused_whatever_head_names() {
+    let project = Project::new();
+    let commit = project.commit("a.txt", "a\n");
+    let marker = project.root.join("proxy-ran");
+    std::fs::write(
+        project.folder.join("branch.gitconfig"),
+        format!("[core]\n\tgitProxy = touch {}\n", marker.display()),
+    )
+    .unwrap();
+    ok(
+        &project.folder,
+        &[
+            "config",
+            "includeIf.onbranch:feat/*.path",
+            "../branch.gitconfig",
+        ],
+    );
+    for branch in ["main", "feat/x"] {
+        ok(&project.folder, &["checkout", "-q", "-B", branch]);
+        for args in [
+            &["fetch", "origin"][..],
+            &["push", "origin", "main"],
+            &["ls-remote", "origin"],
+        ] {
+            assert_eq!(
+                refused(project.git(args)),
+                "ide_git_config_refused",
+                "{branch} {args:?}"
+            );
+        }
+    }
+    assert!(!marker.exists());
+    assert_ne!(project.served("main"), Some(commit));
+}
