@@ -182,7 +182,7 @@ pub fn header_fits(
     if right == 0 {
         return true;
     }
-    crumb_line(crumbs, theme, glyphs).width() + HEADER_GAP_MIN + right + 1 <= limit
+    crumb_line(crumbs, theme, glyphs).width() + HEADER_GAP_MIN + right < limit
 }
 
 /// The help line with the pending questions badge, "2 questions", before `? Help` while
