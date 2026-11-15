@@ -973,7 +973,7 @@ fn gone(result: std::io::Result<()>) -> Result<(), EngineError> {
 /// once nothing has its name.
 pub(crate) fn remove_tree(folder: &Path) -> Result<(), EngineError> {
     if std::fs::remove_dir_all(folder).is_err() {
-        writable(folder, Flags::Kept);
+        writable(folder, Flags::Kept, Acls::Kept);
         gone(std::fs::remove_dir_all(folder))?;
     }
     Ok(())
@@ -981,11 +981,11 @@ pub(crate) fn remove_tree(folder: &Path) -> Result<(), EngineError> {
 
 /// Deletes a folder an agent wrote as [`remove_tree`] does and, when a plain delete stops,
 /// also clears the immutable and append-only flags of this user's entries on the way and
-/// then every extended ACL in it ([`clear_tree_acls`]), so an agent's `chflags uchg`,
+/// the extended ACLs in it ([`remove_pinned_tree`]), so an agent's `chflags uchg`,
 /// `chmod 0500` or deny entry in its own tool cache or worktree keeps neither Clean up nor
-/// a project's delete from removing it (T8 r1 L3, T8-R2-N4, RV-DS241-137 sec r1 F2). A
-/// folder an ACL kept the first walk out of is walked once more after the ACLs go. Input:
-/// the folder. Output: Ok once nothing has its name.
+/// a project's delete from removing it (T8 r1 L3, T8-R2-N4, RV-DS241-137 sec r1 F2). ACLs
+/// go only through entries the walk reached from the tree's own handles, never a path
+/// (RV-DS241-181). Input: the folder. Output: Ok once nothing has its name.
 pub(crate) fn remove_agent_tree(folder: &Path) -> Result<(), EngineError> {
     remove_pinned_tree(folder, Flags::Cleared)
 }
@@ -1209,25 +1209,24 @@ fn unlink_home_entry(
     unlink().map_err(|_| folder_failed())
 }
 
-/// Clears the ACLs of entries of an open agent home folder by their paths for a step that
-/// stopped on them ([`release_acls`]), `.` naming the folder, whose path is read from its
-/// handle. Inputs: the folder and the names.
+/// Clears the ACLs of entries of an open agent home folder for a step that stopped on them,
+/// each through its inode as read from the folder's handle without following a link
+/// ([`AclClears`]), `.` naming the folder itself, so no path an agent can change is
+/// resolved (RV-DS241-181). Inputs: the folder and the names.
 #[cfg(target_os = "macos")]
 fn release_home_acls(folder: std::os::fd::BorrowedFd<'_>, names: &[&std::ffi::CStr]) {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(at) = rustix::fs::getpath(folder) else {
-        return;
-    };
-    let at = Path::new(OsStr::from_bytes(at.to_bytes()));
-    let paths: Vec<PathBuf> = names
-        .iter()
-        .map(|name| match name.to_bytes() {
-            b"." => at.to_path_buf(),
-            name => at.join(OsStr::from_bytes(name)),
-        })
-        .collect();
-    release_acls(paths.iter().map(PathBuf::as_path));
+    use rustix::fs::AtFlags;
+    let mut clears = AclClears::new();
+    for name in names {
+        let found = match name.to_bytes() {
+            b"." => rustix::fs::fstat(folder),
+            _ => rustix::fs::statat(folder, *name, AtFlags::SYMLINK_NOFOLLOW),
+        };
+        if let Ok(found) = found {
+            clears.add(&found);
+        }
+    }
+    clears.flush();
 }
 
 /// Leaves ACLs alone where no deny entry an agent may set keeps an entry from going. Inputs:
@@ -1249,16 +1248,17 @@ fn folder_failed() -> EngineError {
     EngineError("cleanup_folder_failed".into())
 }
 
-/// Deletes a folder, clearing flags as `flags` says and then every ACL in it when a plain
-/// delete stops, and walking it once more if it still stays. Inputs: the folder and what
-/// to do with the flags. Output: Ok once nothing has its name.
+/// Deletes a folder. When a plain delete stops, it is walked clearing flags as `flags`
+/// says and the ACLs of folders that will not open or list, so a delete a mode change lets
+/// through starts no child (RV-DS241-182); when it still stays, it is walked once more
+/// clearing every ACL in it too ([`writable`]). Inputs: the folder and what to do with the
+/// flags. Output: Ok once nothing has its name.
 fn remove_pinned_tree(folder: &Path, flags: Flags) -> Result<(), EngineError> {
     assert!(flags != Flags::Kept);
     if std::fs::remove_dir_all(folder).is_err() {
-        writable(folder, flags);
-        clear_tree_acls(folder);
+        writable(folder, flags, Acls::Stuck);
         if std::fs::remove_dir_all(folder).is_err() {
-            writable(folder, flags);
+            writable(folder, flags, Acls::All);
             gone(std::fs::remove_dir_all(folder))?;
         }
     }
@@ -1273,6 +1273,123 @@ enum Flags {
     Kept,
     /// Clears them through each entry's own handle ([`unpin`]).
     Cleared,
+}
+
+/// What a walk that opens up a folder for removal does with the extended ACLs an agent may
+/// set, which only macOS clears.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Acls {
+    /// Leaves them.
+    Kept,
+    /// Clears those of folders that will not open or list, then walks those folders.
+    Stuck,
+    /// Also clears those of every folder walked and of every entry in them.
+    All,
+}
+
+/// The most entries one `/bin/chmod` of an ACL clear is given.
+#[cfg(target_os = "macos")]
+const ACL_BATCH: usize = 512;
+
+/// The most times a walk that opens up a folder for removal clears the ACLs of folders that
+/// would not open or list and walks them again, which is as deep as a chain of such folders
+/// inside one another it opens.
+#[cfg(unix)]
+const ACL_ROUNDS_MAX: usize = 64;
+
+/// Extended ACLs a walk clears in batches, each entry named `/.vol/<device>/<inode>`, which
+/// the system looks up by those numbers alone, so `/bin/chmod -N` resolves no path an agent
+/// can change and follows no link in one (RV-DS241-181). A folder or a file with one link
+/// goes through that name, a link with one link through `-h`, so its target never changes.
+/// A file with a second link, which may be the owner's file an agent linked in, is never
+/// taken (V231-ACL). At most [`DISK_ENTRIES_MAX`] entries are taken, and one child gets at
+/// most [`ACL_BATCH`] of them (RV-DS241-182). Holds the entries waiting and how many more
+/// it takes.
+#[cfg(target_os = "macos")]
+struct AclClears {
+    named: Vec<PathBuf>,
+    links: Vec<PathBuf>,
+    left: usize,
+}
+
+#[cfg(target_os = "macos")]
+impl AclClears {
+    /// An empty batch that takes up to [`DISK_ENTRIES_MAX`] entries. Output: the batch.
+    fn new() -> Self {
+        Self {
+            named: Vec::new(),
+            links: Vec::new(),
+            left: DISK_ENTRIES_MAX,
+        }
+    }
+
+    /// Takes the entry `found` describes, clearing the batch once [`ACL_BATCH`] wait. Input:
+    /// the entry's status, read without following a link. Output: whether it was taken.
+    fn add(&mut self, found: &rustix::fs::Stat) -> bool {
+        use rustix::fs::FileType;
+        let kind = FileType::from_raw_mode(found.st_mode);
+        if self.left == 0 || (kind != FileType::Directory && found.st_nlink != 1) {
+            return false;
+        }
+        self.left -= 1;
+        let entry = PathBuf::from(format!("/.vol/{}/{}", found.st_dev, found.st_ino));
+        let waiting = if kind == FileType::Symlink {
+            &mut self.links
+        } else {
+            &mut self.named
+        };
+        waiting.push(entry);
+        if waiting.len() >= ACL_BATCH {
+            self.flush();
+        }
+        true
+    }
+
+    /// Clears the ACLs of the entries waiting, in at most two children, and empties the
+    /// batch. A child that fails or does not start leaves those ACLs, and the step that needs
+    /// an entry then reports it.
+    fn flush(&mut self) {
+        use std::process::{Command, Stdio};
+        assert!(self.named.len() <= ACL_BATCH && self.links.len() <= ACL_BATCH);
+        let batches = [
+            (&["-f", "-N"][..], &mut self.named),
+            (&["-f", "-h", "-N"][..], &mut self.links),
+        ];
+        for (flags, waiting) in batches {
+            if waiting.is_empty() {
+                continue;
+            }
+            let _ = crate::spawn_gate::status(
+                Command::new("/bin/chmod")
+                    .args(flags)
+                    .args(waiting.iter())
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            );
+            waiting.clear();
+        }
+    }
+}
+
+/// Clears no ACL where no deny entry an agent may set keeps an entry from going.
+#[cfg(all(unix, not(target_os = "macos")))]
+struct AclClears;
+
+#[cfg(all(unix, not(target_os = "macos")))]
+impl AclClears {
+    /// The batch. Output: it.
+    fn new() -> Self {
+        Self
+    }
+
+    /// Takes nothing. Input: unused. Output: false.
+    fn add(&mut self, _found: &rustix::fs::Stat) -> bool {
+        false
+    }
+
+    /// Does nothing.
+    fn flush(&mut self) {}
 }
 
 /// Clears the flags of one entry as `flags` says. Inputs: what to do, the entry's open
@@ -1362,86 +1479,58 @@ fn chmod_acls(flags: &[&str], entries: &[&Path]) {
     );
 }
 
-/// The `find -P` expression an agent tree's ACL clear runs first: each folder's ACL by its
-/// path and then the owner's read, write and search on it, before `find` reads it, so a
-/// folder whose ACL denies listing opens too. Flags stay with [`writable`].
-#[cfg(target_os = "macos")]
-const TREE_FOLDERS: [&str; 17] = [
-    "-type",
-    "d",
-    "(",
-    "-exec",
-    "/bin/chmod",
-    "-N",
-    "{}",
-    ";",
-    "-o",
-    "-true",
-    ")",
-    "-exec",
-    "/bin/chmod",
-    "-h",
-    "u+rwx",
-    "{}",
-    ";",
-];
-
-/// Clears the extended ACL of a folder and of all it holds as a launch context's release
-/// does, through `find -P`: each folder by its path before it is read ([`TREE_FOLDERS`]),
-/// then what the folders hold ([`crate::launch_context::RELEASED_ACLS`]), never following a
-/// link and never changing a file with a second link, which may be the owner's file an
-/// agent linked in (V231-ACL, RV-DS241-137 sec r2 F1). The folder itself goes first through
-/// [`release_acls`], since `find` stops on a start folder whose ACL denies searching it.
-/// Input: the folder. What a pinned folder keeps the walk out of keeps its ACLs.
-#[cfg(target_os = "macos")]
-fn clear_tree_acls(folder: &Path) {
-    use std::process::{Command, Stdio};
-    release_acls([folder]);
-    let passes = std::iter::once(&TREE_FOLDERS[..]).chain(crate::launch_context::RELEASED_ACLS);
-    for expression in passes {
-        let _ = crate::spawn_gate::status(
-            Command::new("/usr/bin/find")
-                .arg("-P")
-                .arg(folder)
-                .args(expression)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null()),
-        );
-    }
-}
-
-/// Leaves ACLs alone where no deny entry an agent may set keeps a folder from going. Input:
-/// unused.
-#[cfg(not(target_os = "macos"))]
-fn clear_tree_acls(_folder: &Path) {}
-
 /// Lets the owner delete inside every real folder under `folder`, visiting at most
 /// `DISK_ENTRIES_MAX` folders. Every folder is opened relative to its parent's open
 /// handle without following a link, and changed and listed through its own handle, so a
 /// link swapped in meanwhile is never followed. Unless `pins` keeps them, the flags
 /// [`unpin`] clears go first from the folder, each folder below it and each entry in them.
-/// Inputs: the folder and what to do with those flags.
+/// ACLs go as `acls` says, each through the inode of an entry read from a handle the walk
+/// holds ([`AclClears`]): a folder that will not open or list has its ACL cleared and is
+/// walked again, at most [`ACL_ROUNDS_MAX`] times, and [`Acls::All`] also clears every
+/// folder walked and every entry in them. Inputs: the folder, what to do with those flags
+/// and what to do with ACLs.
 #[cfg(unix)]
-fn writable(folder: &Path, pins: Flags) {
-    use rustix::fs::{Dir, FileType, Mode, OFlags};
+fn writable(folder: &Path, pins: Flags, acls: Acls) {
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
     use std::ffi::CString;
     use std::rc::Rc;
     let pinned = pins != Flags::Kept;
     let flags =
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    let mut clears = AclClears::new();
     if pinned {
         clear_flags(pins, rustix::fs::CWD, folder);
         let _ = open_up(rustix::fs::CWD, folder);
     }
-    let Ok(top) = rustix::fs::open(folder, flags, Mode::empty()) else {
+    let open = || rustix::fs::open(folder, flags, Mode::empty());
+    let opened = open().or_else(|problem| {
+        if acls == Acls::Kept {
+            return Err(problem);
+        }
+        let found = rustix::fs::statat(rustix::fs::CWD, folder, AtFlags::SYMLINK_NOFOLLOW)?;
+        clears.add(&found);
+        clears.flush();
+        open()
+    });
+    let Ok(top) = opened else {
         return;
     };
     let mut pending: Vec<(Rc<std::os::fd::OwnedFd>, Option<CString>)> = vec![(Rc::new(top), None)];
+    let mut stuck = Vec::new();
+    let mut rounds = 0;
     let mut budget = DISK_ENTRIES_MAX;
-    while let Some((parent, name)) = pending.pop() {
+    loop {
+        let Some((parent, name)) = pending.pop() else {
+            if stuck.is_empty() || rounds == ACL_ROUNDS_MAX {
+                break;
+            }
+            rounds += 1;
+            clears.flush();
+            pending.append(&mut stuck);
+            continue;
+        };
         if budget == 0 {
-            return;
+            break;
         }
         budget -= 1;
         let opened = match &name {
@@ -1454,14 +1543,33 @@ fn writable(folder: &Path, pins: Flags) {
                 })
                 .map(Rc::new),
         };
-        let Ok(handle) = opened else {
+        let listed = opened.and_then(|handle| {
+            clear_flags(pins, &*handle, c".");
+            let _ = rustix::fs::fchmod(&*handle, Mode::RWXU);
+            let entries = Dir::read_from(&*handle)?;
+            Ok((handle, entries))
+        });
+        let Ok((handle, entries)) = listed else {
+            let found = match &name {
+                None => rustix::fs::fstat(&*parent),
+                Some(name) => {
+                    rustix::fs::statat(&*parent, name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW)
+                }
+            };
+            if acls != Acls::Kept
+                && let Ok(found) = found
+                && FileType::from_raw_mode(found.st_mode) == FileType::Directory
+                && clears.add(&found)
+            {
+                stuck.push((parent, name));
+            }
             continue;
         };
-        clear_flags(pins, &*handle, c".");
-        let _ = rustix::fs::fchmod(&*handle, Mode::RWXU);
-        let Ok(entries) = Dir::read_from(&*handle) else {
-            continue;
-        };
+        if acls == Acls::All
+            && let Ok(found) = rustix::fs::fstat(&*handle)
+        {
+            clears.add(&found);
+        }
         for entry in entries.flatten() {
             if pending.len() >= budget {
                 break;
@@ -1472,15 +1580,22 @@ fn writable(folder: &Path, pins: Flags) {
             }
             if !matches!(entry.file_type(), FileType::Directory | FileType::Unknown) {
                 clear_flags(pins, &*handle, child);
+                if acls == Acls::All
+                    && let Ok(found) =
+                        rustix::fs::statat(&*handle, child, AtFlags::SYMLINK_NOFOLLOW)
+                {
+                    clears.add(&found);
+                }
                 continue;
             }
             pending.push((Rc::clone(&handle), Some(child.to_owned())));
         }
     }
+    clears.flush();
 }
 
 #[cfg(not(unix))]
-fn writable(_: &Path, _: Flags) {}
+fn writable(_: &Path, _: Flags, _: Acls) {}
 
 /// Gives this user rwx on the folder `name` under `parent` without following a link. Linux
 /// `fchmodat` cannot refuse a link, so there the folder is pinned by an `O_PATH` handle that
