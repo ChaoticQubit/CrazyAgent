@@ -1690,6 +1690,7 @@ pub(super) fn run(
             if record.spec != spec {
                 return Err(error("server_changed"));
             }
+            record.spec.validate()?;
             record.approved = Some(record.spec.digest());
             put_server(tx, &record)?;
             ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))

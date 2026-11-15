@@ -121,7 +121,7 @@ function assert(condition: boolean, message: string): asserts condition {
 /** The review lines for an MCP server: where it runs or connects, its secrets and where it
  * applies. Input: the server. Output: the lines in display order. */
 export function serverFacts(server: McpServerView): string[] {
-  const where = server.spec.kind === "stdio" ? `Runs: ${server.runs}` : `Connects to: ${server.spec.url}`;
+  const where = server.spec.kind === "stdio" ? `Runs: ${displayText(server.runs)}` : `Connects to: ${displayText(server.spec.url)}`;
   const secrets = server.secrets.length
     ? server.secrets.map((secret) => `${secret.name} (${secret.saved ? "Key saved" : "Not saved"})`).join(", ") : "none";
   return [where, `Secrets: ${secrets}`, server.scope_label];
@@ -416,9 +416,9 @@ export function ServersView({ servers, projectId, failure, busy, onAdd, onToggle
     const open = expanded === server.id;
     return <Fragment key={server.id}>
       <SettingLine label={server.name} changed={pluginChanged(server, projectId)} shown={<>{server.name} <StatusBadge word={serverWord(server.status)} /></>} help={<>
-        {!waiting && <span className="mono small">{server.runs}</span>}
-        {waiting && (command ? <span>Runs: <span className="mono">{server.runs}</span></span>
-          : <span>Connects to: <span className="mono">{server.spec.kind === "http" ? server.spec.url : ""}</span></span>)}
+        {!waiting && <span className="mono small">{displayText(server.runs)}</span>}
+        {waiting && (command ? <span>Runs: <span className="mono">{displayText(server.runs)}</span></span>
+          : <span>Connects to: <span className="mono">{server.spec.kind === "http" ? displayText(server.spec.url) : ""}</span></span>)}
         {waiting && serverFacts(server).slice(1).map((fact) => <span key={fact}>{fact}</span>)}
         {broken && <span className="field-error">Can't start: {server.problem ?? "the server didn't answer."}</span>}
         {server.tools.length > 0 && <span><Button size="small" variant="quiet" icon={open ? "chevron-down" : "chevron-right"} aria-expanded={open} onClick={() => setExpanded(open ? null : server.id)}>

@@ -56,20 +56,20 @@ pub fn server_word(status: ServerStatus) -> &'static str {
 }
 
 /// What a server runs, as the list shows it: the command without its folder,
-/// or the URL.
+/// or the URL, each hidden character shown as an escape (RV-DS241-151).
 /// Input: the server. Output: the short line; details show the whole line.
 pub fn short_runs(server: &ServerView) -> String {
-    match &server.spec {
+    let line = match &server.spec {
         ServerSpec::Stdio { command, .. } => match command.rfind('/') {
             Some(slash) => server
                 .runs
                 .strip_prefix(&command[..=slash])
-                .unwrap_or(server.runs.as_str())
-                .to_owned(),
-            None => server.runs.clone(),
+                .unwrap_or(server.runs.as_str()),
+            None => server.runs.as_str(),
         },
-        ServerSpec::Http { .. } => server.runs.clone(),
-    }
+        ServerSpec::Http { .. } => server.runs.as_str(),
+    };
+    crate::memory::visible_text(line)
 }
 
 /// A path with the home folder written as `~`.
@@ -982,7 +982,11 @@ impl Plugins {
                     ]));
                 }
                 body.push(Line::default());
-                wrapped("Runs", &server.runs, &mut body);
+                wrapped(
+                    "Runs",
+                    &crate::memory::visible_text(&server.runs),
+                    &mut body,
+                );
                 for (index, secret) in server.secrets.iter().enumerate() {
                     let state = if secret.saved {
                         status("Key saved", theme, glyphs)
