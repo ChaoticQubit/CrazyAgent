@@ -2184,23 +2184,24 @@ fn a_harness_the_resolver_refuses_as_changeable_is_never_asked_its_version() {
     assert!(!ran.exists(), "a refused harness file is never run");
 }
 
-/// A folder for a row's owner entry outside every temp folder, where this user's cache folder
-/// is not on macOS (it lies in `/private/var/folders`): next to the test build, which runs
-/// outside every temp folder, checked here. Input: the folder name's prefix. Output: the
-/// folder, removed when dropped.
+/// A folder for a row's owner entry outside every temp folder and every folder agents can
+/// write: in `~/Library/Caches`, since this user's `getconf` cache folder lies in
+/// `/private/var/folders`, a temp folder, and the checkout and its build sit below a project
+/// folder. Input: the folder name's prefix. Output: the folder, removed when dropped.
 #[cfg(target_os = "macos")]
 fn outside_temp(prefix: &str) -> tempfile::TempDir {
-    let build = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
+    let caches = home.join("Library").join("Caches").canonicalize().unwrap();
     let folder = tempfile::Builder::new()
         .prefix(prefix)
-        .tempdir_in(build.parent().unwrap())
+        .tempdir_in(caches)
         .unwrap();
     let place = folder.path().canonicalize().unwrap();
     assert!(
         !crate::tools::temp_roots()
             .iter()
             .any(|temp| place.starts_with(temp)),
-        "the test build runs in a temp folder: {}",
+        "HOME lies in a temp folder: {}",
         place.display()
     );
     folder
