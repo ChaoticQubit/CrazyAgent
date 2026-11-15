@@ -1539,6 +1539,48 @@ mod tests {
         engine.close().await.unwrap();
     }
 
+    /// A listener that ended after the engine started keeps its first failure: every later
+    /// check, the readiness check and a run give that same failure instead of a panic, and
+    /// the run's cleanup still removes the locator (RV-DS241-56).
+    #[tokio::test]
+    async fn a_listener_that_ended_gives_its_failure_on_every_later_call() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let (_stop, stopped) = watch::channel(false);
+        let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+            .await
+            .unwrap();
+        service.ensure_ready(&stopped).unwrap();
+        assert_eq!(service.stops.len(), 2);
+        assert!(service.stops.remove(1).send(()).is_ok());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let first = loop {
+            match service.live() {
+                Ok(()) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the listener never ended"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(first.0, "engine_listener_stopped_before_ready");
+        for _ in 0..3 {
+            assert_eq!(service.live(), Err(first.clone()));
+            assert_eq!(service.ensure_ready(&stopped), Err(first.clone()));
+        }
+        let ended = tokio::time::timeout(Duration::from_secs(5), service.run(stopped))
+            .await
+            .expect("a run gives the kept failure at once")
+            .unwrap_err();
+        assert!(ended.0.starts_with(&first.0), "{}", ended.0);
+        assert!(!root.path().join(LOCATOR).exists());
+    }
+
     #[tokio::test]
     async fn actual_listener_completion_stops_sibling_and_releases_database() {
         let root = tempfile::tempdir().unwrap();
