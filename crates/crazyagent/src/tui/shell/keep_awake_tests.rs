@@ -223,9 +223,25 @@ fn narrow_header_drops_the_screen_status_first_and_never_the_counts() {
 fn before_the_first_read_the_header_is_built_as_before() {
     let mut shell = on(Page::new());
     counted(&mut shell);
-    let header = header_at(&mut shell, 80);
+    let header = header_at(&mut shell, 100);
     in_order(&header, &["Tidepool Docs", STATUS, COUNTS]);
     assert!(!header.contains("wake"), "{header}");
+}
+
+#[test]
+fn the_narrow_rule_keeps_three_cells_between_the_crumbs_and_the_status() {
+    let mut shell = on(Page::new());
+    shell.arrive(read(Ok(working(3))));
+    counted(&mut shell);
+    let whole = format!("Tidepool Docs   {STATUS}  {LONG}  {COUNTS} ");
+    let header = header_at(&mut shell, 115);
+    assert!(
+        header.ends_with(&whole),
+        "everything, three cells away: {header}"
+    );
+    let header = header_at(&mut shell, 114);
+    assert!(!header.contains(STATUS), "two cells are too few: {header}");
+    in_order(&header, &["Tidepool Docs", LONG, COUNTS]);
 }
 
 #[test]

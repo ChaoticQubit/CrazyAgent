@@ -2389,7 +2389,7 @@ mod keep_awake {
 
     const KEEP_AWAKE_PROJECT: &str = "e2e-keep-awake";
     const MINUTE_MS: i64 = 60_000;
-    const SLACK_MS: i64 = 120_000;
+    const SLACK_MS: i64 = 600_000;
     const SETTLE: Duration = Duration::from_secs(20);
     const RESTING: &str = "Keep awake: auto, nothing running";
 

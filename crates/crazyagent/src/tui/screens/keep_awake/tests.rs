@@ -546,6 +546,29 @@ fn a_refused_change_shows_the_engines_words() {
 }
 
 #[test]
+fn losing_the_engine_closes_the_minutes_field_and_drops_the_change_under_way() {
+    let mut shell = screen(resting());
+    shell.key(Key::Char('c'));
+    typed(&mut shell, "45");
+    shell.arrive(Arrival::Disconnected("trusted_connection_lost".into()));
+    let text = shown(&mut shell);
+    assert!(
+        !text.contains("Type minutes"),
+        "the field is closed: {text}"
+    );
+    assert_eq!(
+        shell.ctx.store.keep_awake, None,
+        "the view went with the engine"
+    );
+    shell.key(Key::Enter);
+    assert_eq!(
+        changes(&mut shell),
+        Vec::new(),
+        "nothing starts without a view"
+    );
+}
+
+#[test]
 fn s_opens_every_setting_and_esc_returns() {
     let mut shell = screen(resting());
     let depth = shell.depth();

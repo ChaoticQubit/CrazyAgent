@@ -163,9 +163,14 @@ fn crumb_line(crumbs: &[String], theme: &Theme, glyphs: &Glyphs) -> Line<'static
     Line::from(spans)
 }
 
+/// The fewest cells `header_fits` leaves between the crumbs and a status, so the status
+/// never reads as one more crumb.
+pub const HEADER_GAP_MIN: usize = 3;
+
 /// Says whether `header` draws a status next to the whole crumbs, without shortening
-/// them. Inputs: width, crumbs after the badge, the status line, theme and glyphs.
-/// Output: true when both fit; an empty status always fits.
+/// them and at least `HEADER_GAP_MIN` cells away. Inputs: width, crumbs after the badge,
+/// the status line, theme and glyphs. Output: true when both fit; an empty status always
+/// fits.
 pub fn header_fits(
     limit: usize,
     crumbs: &[String],
@@ -177,7 +182,7 @@ pub fn header_fits(
     if right == 0 {
         return true;
     }
-    crumb_line(crumbs, theme, glyphs).width() + right + 1 < limit
+    crumb_line(crumbs, theme, glyphs).width() + HEADER_GAP_MIN + right + 1 <= limit
 }
 
 /// The help line with the pending questions badge, "2 questions", before `? Help` while

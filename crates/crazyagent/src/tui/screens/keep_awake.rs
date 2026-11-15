@@ -364,7 +364,10 @@ impl Screen for KeepAwakeScreen {
                     self.take(event, ctx);
                 }
             }
-            Arrival::Disconnected(_) => self.sent = None,
+            Arrival::Disconnected(_) => {
+                self.sent = None;
+                self.custom = None;
+            }
             _ => {}
         }
         Flow::Handled
