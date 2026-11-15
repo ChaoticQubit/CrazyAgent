@@ -29,6 +29,21 @@ export function runsLive(harness: HarnessEntry | undefined): boolean {
   return harness !== undefined && harness.terminal && harness.master;
 }
 
+/** Why Live terminal is unavailable for a master the catalog says cannot run live. */
+export const NO_LIVE_TERMINAL = "This master has no live terminal: its conversation is the console.";
+
+/** Why Live terminal is unavailable while the harness catalog cannot be read. */
+export const CATALOG_UNREAD = "The harness catalog couldn't be read, so the master's conversation is the console until it can be.";
+
+/** Says why the master cannot run in a live terminal. Inputs: the team plan's master id, or
+ * undefined when none is known, and the catalog read. Output: the reason, or undefined when
+ * the master runs live or none is known yet. */
+export function noLiveReason(master: string | undefined, catalog: Result<HarnessEntry[]>): string | undefined {
+  if (master === undefined) return undefined;
+  if (catalog.kind !== "ok") return CATALOG_UNREAD;
+  return runsLive(entry(catalog.value, master)) ? undefined : NO_LIVE_TERMINAL;
+}
+
 /** Finds the master's node in a team graph. Input: the graph nodes. Output: the master node,
  * or null before the engine lists one. */
 export function masterNode(nodes: GraphNode[]): GraphNode | null {
@@ -273,7 +288,7 @@ export function MasterArea({ data }: { data: ProjectData }) {
   const area = harness === undefined || !runsLive(listed) || liveTerminalOff(data.team.result, data.id)
     ? <ConversationTab data={data} />
     : <LiveMaster key={`${data.id}:${harness}`} data={data} harness={harness} />;
-  return <MasterSettingsDrawer data={data} liveHarness={harness === undefined || runsLive(listed)}>{area}</MasterSettingsDrawer>;
+  return <MasterSettingsDrawer data={data} noLive={noLiveReason(stored, data.harnesses)}>{area}</MasterSettingsDrawer>;
 }
 
 function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
