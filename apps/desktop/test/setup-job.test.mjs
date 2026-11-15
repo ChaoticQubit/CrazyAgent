@@ -150,6 +150,6 @@ test("New Project starts the engine's job, follows it on the page and runs its f
   assert.match(state, /kind === "setup"[^;]*refreshProjects\(\)/, "a New Project that ended reads the projects again");
   assert.match(state, /result\.value\.id !== followed\.current/, "Home's toast stays quiet for the job the page follows");
   const client = read("src/engine-client.ts");
-  assert.match(client, /export type JobKind = "add" \| "move_project" \| "delete" \| "setup";/);
+  assert.match(client, /export type ProjectJobKind = "add" \| "move_project" \| "delete" \| "setup";/);
   assert.match(client, /\| \{ state: "building"; done: number; total: number \}/);
 });
