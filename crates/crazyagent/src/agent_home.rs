@@ -124,6 +124,7 @@ const TOO_LARGE: &str = "agent_instructions_too_large_";
 const SKILLS_FOLDER: &str = "agent-skills";
 const FILES_FOLDER: &str = "agent-instruction-files";
 const GIVEN_FOLDER: &str = "agent-instructions-given";
+const LEVELS_FOLDER: &str = "agent-home-levels";
 const FILES_RECORD_BYTES_MAX: usize =
     crate::instruction_files::FILES_MAX * ("unreadable\t18446744073709551615\t\n".len() + 32);
 pub const SKILLS_RECORD_MAX: usize = 2 * crate::plugins::SKILLS_PER_SCOPE_MAX;
@@ -254,6 +255,15 @@ pub struct AgentProject {
     pub folder: Option<PathBuf>,
     pub mode: crate::instruction_files::Mode,
     pub repeated: Repeated,
+}
+
+/// What one launch does with the download caches an earlier run left in its agent home
+/// (DEC-173 add.1): the project's choice and the access level the launch runs at, none when
+/// the launch does not know it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Caches {
+    pub choice: crate::sandbox::policy::HomeCaches,
+    pub level: Option<crate::sandbox::policy::AgentAccess>,
 }
 
 /// Whether the project part of a joined instruction text leaves out lines the app part
@@ -885,6 +895,7 @@ pub fn prepare(
     harness: Harness,
     project: &AgentProject,
     given: &Given,
+    caches: Caches,
 ) -> Result<(), AgentHomeError> {
     assert!(project.data.is_absolute());
     assert!(project.folder.as_deref().is_none_or(Path::is_absolute));
@@ -892,6 +903,7 @@ pub fn prepare(
     if !home.is_absolute() {
         return Err(failure("agent_home_invalid"));
     }
+    let _ = caches;
     real_folder(home)?;
     record_files(&project.data, home, &given.files)?;
     write_record(&project.data, GIVEN_FOLDER, home, &given.text)?;
@@ -938,7 +950,12 @@ fn record_files(
 /// root, the record's folder name and the agent's home. Output: the folder and the file
 /// name, or `agent_instructions_unreadable`.
 fn record_place(data: &Path, kind: &str, home: &Path) -> Result<(PathBuf, String), AgentHomeError> {
-    assert!(kind == FILES_FOLDER || kind == SKILLS_FOLDER || kind == GIVEN_FOLDER);
+    assert!(
+        kind == FILES_FOLDER
+            || kind == SKILLS_FOLDER
+            || kind == GIVEN_FOLDER
+            || kind == LEVELS_FOLDER
+    );
     let real =
         |path: &Path| fs::canonicalize(path).map_err(|_| failure("agent_instructions_unreadable"));
     let home = real(home)?;

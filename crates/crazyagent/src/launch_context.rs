@@ -193,13 +193,15 @@ pub struct AgentContext {
 }
 
 /// The project whose app and project instructions and instruction files each launch reads
-/// and writes into the agent's home, the hooks the owner turned on for it, and the owner's
-/// own instructions for the one team agent launched, empty for none.
+/// and writes into the agent's home, the hooks the owner turned on for it, the owner's
+/// own instructions for the one team agent launched, empty for none, and what the launch does
+/// with the download caches in the home (DEC-173 add.1).
 #[derive(Debug)]
 struct Process {
     project: crate::agent_home::AgentProject,
     hooks: Vec<EffectiveHook>,
     agent: String,
+    caches: crate::agent_home::Caches,
 }
 
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
@@ -271,6 +273,9 @@ pub fn for_project(
     let catch_up_main = crate::team::catch_up_main(&tx, project)
         .map_err(|problem| LaunchError(problem.0, None))?
         == crate::team::CatchUpMain::On;
+    let home_caches = crate::sandbox::policy::load(&tx, project.as_str())
+        .map_err(unavailable)?
+        .home_caches;
     drop(tx);
     crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0, None))?;
     Ok(AgentContext {
@@ -280,6 +285,10 @@ pub fn for_project(
             project: home_project,
             hooks,
             agent: String::new(),
+            caches: crate::agent_home::Caches {
+                choice: home_caches,
+                level: None,
+            },
         })),
         transcripts,
         off_tools,
@@ -768,6 +777,16 @@ impl AgentContext {
         self
     }
 
+    /// Names the access level this launch runs at, which decides whether the launch keeps
+    /// the download caches an earlier run left in its home (DEC-173 add.1). A launch that
+    /// never names one is treated as unknown. Input: the level. Output: the context.
+    pub fn at_access(mut self, level: crate::sandbox::policy::AgentAccess) -> Self {
+        if let Some(process) = self.process.as_mut() {
+            process.caches.level = Some(level);
+        }
+        self
+    }
+
     /// Lets a quitting engine freeze this launch's pane while its model proxy is down
     /// (DEC-158): the pane's keeper gets the engine's freeze record, and the pane record
     /// says so. Input: the record's absolute path. Output: the context.
@@ -1095,7 +1114,7 @@ impl AgentContext {
                     crate::agent_home::with_agent(std::mem::take(&mut given.text), &process.agent);
                 given.text.push_str(&section);
                 assert!(given.text.len() <= crate::agent_home::PROCESS_BYTES_MAX);
-                crate::agent_home::prepare(home, harness, &process.project, &given)
+                crate::agent_home::prepare(home, harness, &process.project, &given, process.caches)
                     .map_err(|problem| LaunchError(problem.0, None))?;
                 given
             }

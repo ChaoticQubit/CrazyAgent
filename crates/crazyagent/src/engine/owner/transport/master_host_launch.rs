@@ -189,8 +189,18 @@ impl OwnerRuntimeHandle {
         } else {
             crate::agent_home::Harness::Codex
         };
-        crate::agent_home::prepare(&turn.home, harness, &prepared.agent_project, &process)
-            .map_err(|problem| EngineError(problem.0))?;
+        let caches = crate::agent_home::Caches {
+            choice: policy.home_caches,
+            level: Some(policy.access),
+        };
+        crate::agent_home::prepare(
+            &turn.home,
+            harness,
+            &prepared.agent_project,
+            &process,
+            caches,
+        )
+        .map_err(|problem| EngineError(problem.0))?;
         let MasterTurnLaunch {
             command,
             sandbox,

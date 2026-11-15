@@ -178,6 +178,7 @@ impl AccessEdit {
             toolchains,
             ide_git_hooks: self.ide_git_hooks,
             tool_cache: self.view.tool_cache,
+            home_caches: self.view.home_caches,
             ide_agent_files: self.ide_agent_files,
             apply_changes: self.view.apply_changes,
             grants: self

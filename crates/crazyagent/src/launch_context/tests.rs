@@ -2006,6 +2006,67 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
     );
 }
 
+/// DEC-173 add.1: a launch hands the level its context names to the home reset, so a launch
+/// at a wider level than the home's last one clears the download caches and one at the same
+/// level keeps them, while a context that names no level clears under the default choice.
+#[cfg(unix)]
+#[test]
+fn a_launch_clears_its_home_caches_when_its_context_names_a_wider_level() {
+    use crate::sandbox::policy::AgentAccess;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let data = root.join("data");
+    fs::create_dir_all(&data).unwrap();
+    let context = || AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: Some(Box::new(Process {
+            project: crate::agent_home::AgentProject {
+                data: data.clone(),
+                id: ProjectId::new("process").unwrap(),
+                folder: None,
+                mode: crate::instruction_files::Mode::Both,
+                repeated: crate::agent_home::Repeated::LeaveOut,
+            },
+            hooks: Vec::new(),
+            agent: String::new(),
+            caches: crate::agent_home::Caches::default(),
+        })),
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        native_threads: None,
+        relay: None,
+        model_proxy: None,
+        freeze_record: None,
+        terminal_display: TerminalDisplay::Classic,
+        catch_up_main: true,
+    };
+    let home = root.join("claude");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let cache = home.join(".cache").join("x");
+    let launch = |context: AgentContext| {
+        fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        fs::write(&cache, "cached\n").unwrap();
+        drop(context.install("claude-code", &home, false).unwrap());
+        cache.exists()
+    };
+
+    assert!(
+        !launch(context()),
+        "a context with no level clears under the default"
+    );
+    assert!(
+        launch(context().at_access(AgentAccess::Sandboxed)),
+        "the launch of unknown level recorded Sandboxed"
+    );
+    assert!(
+        !launch(context().at_access(AgentAccess::OwnBranch)),
+        "a wider level clears"
+    );
+    assert!(launch(context().at_access(AgentAccess::OwnBranch)));
+}
+
 #[test]
 fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
     let directory = tempfile::tempdir().unwrap();
@@ -2030,6 +2091,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
             project,
             hooks: Vec::new(),
             agent: String::new(),
+            caches: Default::default(),
         })),
         transcripts: true,
         off_tools: Vec::new(),
@@ -2681,6 +2743,7 @@ fn context_with(
             },
             hooks: Vec::new(),
             agent: String::new(),
+            caches: Default::default(),
         })),
         transcripts: true,
         off_tools,
@@ -3580,6 +3643,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
                 hook("PreToolUse", Some("Grep|Glob"), Some(5)),
             ],
             agent: String::new(),
+            caches: Default::default(),
         })),
         transcripts: true,
         off_tools: Vec::new(),
@@ -4740,6 +4804,7 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
             },
             hooks: Vec::new(),
             agent: String::new(),
+            caches: Default::default(),
         })),
         transcripts: true,
         off_tools: Vec::new(),
