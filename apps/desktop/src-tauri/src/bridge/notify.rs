@@ -118,9 +118,12 @@ pub fn notice(project: Option<&str>, question: &Question) -> Notice {
 
 /// The notification text for a job that ended, built from the engine's view: the folder's
 /// name and what happened to an add or a project move in plain words, never an engine code.
-/// Input: the job. Output: the notice, or None while the job still runs.
+/// Input: the job. Output: the notice, or None while the job still runs or for a delete.
 pub fn intake_notice(job: &JobView) -> Option<Notice> {
     use crazyagent::projects_home::job::{JobKind, JobState, Phase};
+    if job.kind == JobKind::Delete {
+        return None;
+    }
     let folder = std::path::Path::new(&job.source)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -161,7 +164,9 @@ pub fn intake_notice(job: &JobView) -> Option<Notice> {
         JobState::Downloading { .. }
         | JobState::Stopping { .. }
         | JobState::Copying { .. }
-        | JobState::Clearing => {
+        | JobState::Trashing { .. }
+        | JobState::Clearing
+        | JobState::CutShort { .. } => {
             return None;
         }
     };

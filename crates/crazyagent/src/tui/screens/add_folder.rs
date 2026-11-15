@@ -195,7 +195,7 @@ impl AddFolder {
                 page.kept = Some((view.source.clone(), view.mode, view.overrides.clone()));
                 page.moving = match view.kind {
                     JobKind::MoveProject => view.project_id.clone(),
-                    JobKind::Add => None,
+                    JobKind::Add | JobKind::Delete => None,
                 };
                 page.pending = Some(code);
                 page.focus = Focus::Add;
@@ -539,6 +539,7 @@ impl AddFolder {
         let verb = match job.kind {
             JobKind::Add => "Adding",
             JobKind::MoveProject => "Moving",
+            JobKind::Delete => "Deleting",
         };
         ctx.say(Message::success(
             &format!("{verb} {name}."),

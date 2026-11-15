@@ -466,9 +466,10 @@ pub(super) fn add_ended(db: &Connection) -> Result<Option<AddEnded>, EngineError
     .transpose()
 }
 
-/// Forgets an ended job the owner dismissed or a new job replaced, of either kind: an ended
-/// add or a project move an engine stop cut short. Inputs: the connection and its request.
-/// Output: Ok.
+/// Forgets an ended job the owner dismissed or a new job replaced: an ended add or a project
+/// move an engine stop cut short. A delete cut short stays on its project's banner until the
+/// owner keeps the project ([`delete_keep`]) or deletes it again. Inputs: the connection and
+/// its request. Output: Ok.
 pub(super) fn job_forget(db: &Connection, request: &RequestId) -> Result<(), EngineError> {
     db.execute(
         "DELETE FROM projects_home_add WHERE request=?1 AND ended IS NOT NULL",
@@ -481,6 +482,74 @@ pub(super) fn job_forget(db: &Connection, request: &RequestId) -> Result<(), Eng
     )
     .map_err(error)?;
     Ok(())
+}
+
+/// Checks a Delete everything job before it starts, writing nothing: the owner's admission,
+/// the project, its exact name and what [`delete_check`] refuses, as the plan checks them
+/// before its mark. Inputs: the connection, the admission, the project and the name the owner
+/// typed. Output: the project's folder as text, or the refusal code.
+pub(super) fn delete_job_check(
+    db: &mut Connection,
+    a: &Admission,
+    project: &ProjectId,
+    name: &str,
+) -> Result<String, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    let Some(checked) = delete_check(&tx, project)? else {
+        return Err(error("invalid_project"));
+    };
+    if checked.name != name {
+        return Err(error("delete_name_mismatch"));
+    }
+    if let Err(refusal) = checked.planned {
+        return Err(error(refusal.code));
+    }
+    let folder = checked
+        .folders
+        .first()
+        .filter(|folder| folder.is_absolute())
+        .and_then(|folder| folder.to_str())
+        .ok_or_else(|| error("projects_home_path_invalid"))?
+        .to_owned();
+    tx.rollback().map_err(error)?;
+    assert!(!folder.is_empty());
+    Ok(folder)
+}
+
+/// The Delete everything job an engine stop cut short, for the engine start to show: the
+/// newest delete the owner is shown as cut short whose mark names its job, with how many of
+/// its folders reached the Trash, its count less the folders the project's records still
+/// name that are there. Input: the connection. Output: the delete and that count, or None.
+pub(super) fn delete_cut_short(
+    db: &Connection,
+) -> Result<Option<(delete_mark::CutShort, u64)>, EngineError> {
+    let tx = db.unchecked_transaction().map_err(error)?;
+    let Some(found) = delete_mark::cut_short(&tx)? else {
+        return Ok(None);
+    };
+    let home = home::load(&tx)?.and_then(|saved| std::fs::canonicalize(saved).ok());
+    let left = match (delete_check(&tx, &found.project)?, home) {
+        (Some(checked), Some(home)) => {
+            home::plan_delete(&home, &checked.folders).map_or(0, |moved| moved.len())
+        }
+        _ => 0,
+    };
+    tx.rollback().map_err(error)?;
+    let left = u64::try_from(left).map_err(error)?;
+    let trashed = found.total.saturating_sub(left);
+    assert!(trashed <= found.total);
+    Ok(Some((found, trashed)))
+}
+
+/// Keeps a project whose Delete everything was cut short, as its banner's Dismiss does: ends
+/// the mark naming the job's request, so neither Home nor the banner offers it again.
+/// Inputs: the connection and the request. Output: whether a mark ended.
+pub(super) fn delete_keep(db: &Connection, request: &RequestId) -> Result<bool, EngineError> {
+    let tx = db.unchecked_transaction().map_err(error)?;
+    let kept = delete_mark::keep(&tx, request)?;
+    tx.commit().map_err(error)?;
+    Ok(kept)
 }
 
 /// A project move an engine stop cut short, as the engine start found it: its request, the
@@ -895,10 +964,11 @@ pub(super) fn delete_plan(
     if &checked.name != name {
         return Ok(Err("delete_name_mismatch".into()));
     }
-    let home = match checked.planned {
-        Ok((home, _)) => home,
+    let (home, moved) = match checked.planned {
+        Ok(planned) => planned,
         Err(refusal) => return Ok(Err(refusal.code)),
     };
+    let total = u64::try_from(moved.len()).map_err(error)?;
     let ids = |sql: &str| -> Result<Vec<i64>, EngineError> {
         let mut statement = tx.prepare(sql).map_err(error)?;
         let rows = statement
@@ -910,7 +980,7 @@ pub(super) fn delete_plan(
     };
     let agents = ids("SELECT id FROM team_agents WHERE project=?1 ORDER BY id LIMIT ?2")?;
     let research = ids("SELECT id FROM research_jobs WHERE project=?1 ORDER BY id LIMIT ?2")?;
-    match delete_mark::begin(&tx, project_id, exchange) {
+    match delete_mark::begin(&tx, project_id, exchange, &request.request_id, name, total) {
         Ok(Ok(())) => {}
         Ok(Err(code)) => return Ok(Err(code.into())),
         Err(e) => {

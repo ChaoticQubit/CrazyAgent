@@ -1589,6 +1589,7 @@ fn retry_failed(kind: JobKind) -> &'static str {
     match kind {
         JobKind::Add => "Adding the folder did not start again.",
         JobKind::MoveProject => "Moving the project did not start again.",
+        JobKind::Delete => "Deleting the project did not start again.",
     }
 }
 

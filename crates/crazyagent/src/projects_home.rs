@@ -781,21 +781,26 @@ pub struct DeletePlan {
 
 impl DeletePlan {
     /// Waits for the project's agents to stop, then moves its folders to the system Trash
-    /// in order. Output: Ok once every folder is gone from the home, or the refusal code.
-    pub fn run(&self) -> Result<(), String> {
-        self.run_with(DELETE_STOP_WAIT, &trash)
+    /// in order. Input: the tally it reports into and whose stop it obeys until the first
+    /// move. Output: Ok once every folder is gone from the home, or the refusal code.
+    pub fn run(&self, tally: &Tally) -> Result<(), String> {
+        self.run_with(DELETE_STOP_WAIT, &trash, tally)
     }
 
     /// Runs the plan with a bounded wait and a mover: no folder moves while an agent of the
-    /// project runs (`delete_agents_running` past the wait), the folders are checked again
-    /// just before the first move, with any other project using one of them, research of the
-    /// project not finished or a pending home move refusing as the plan did, and a later
-    /// folder that fails leaves the earlier ones moved (`delete_trash_partial`). Inputs: the
-    /// wait and the mover. Output: the outcome.
+    /// project runs (`delete_agents_running` past the wait; the tally counts the agents
+    /// left), the folders are checked again just before the first move, with any other
+    /// project using one of them, research of the project not finished or a pending home move
+    /// refusing as the plan did, and a later folder that fails leaves the earlier ones moved
+    /// (`delete_trash_partial`). A stop asked before the first move ends it with
+    /// `home_add_cancelled` and nothing moved; the delete then commits, refusing any later
+    /// stop, and counts each folder it moved. Inputs: the wait, the mover and the tally.
+    /// Output: the outcome.
     pub(crate) fn run_with(
         &self,
         wait: std::time::Duration,
         mover: &dyn Fn(&Path) -> Result<(), EngineError>,
+        tally: &Tally,
     ) -> Result<(), String> {
         let unavailable = |_| "delete_unavailable".to_owned();
         let mut db = rusqlite::Connection::open_with_flags(
@@ -807,6 +812,7 @@ impl DeletePlan {
             .map_err(unavailable)?;
         let deadline = std::time::Instant::now() + wait;
         loop {
+            tally.go_on().map_err(|e| e.0)?;
             let running: i64 = db
                 .query_row(
                     "SELECT COUNT(*) FROM team_agents WHERE project=?1 AND status NOT IN ('stopped','failed')",
@@ -814,7 +820,11 @@ impl DeletePlan {
                     |row| row.get(0),
                 )
                 .map_err(unavailable)?;
-            if running == 0 {
+            match u64::try_from(running) {
+                Ok(0) | Err(_) => tally.waited(),
+                Ok(left) => tally.wait_for(left),
+            }
+            if running <= 0 {
                 break;
             }
             if std::time::Instant::now() >= deadline {
@@ -822,12 +832,15 @@ impl DeletePlan {
             }
             std::thread::sleep(DELETE_POLL);
         }
+        assert!(!tally.waiting());
         let folders = plan_delete(&self.home, &self.folders).map_err(|refusal| refusal.0)?;
         if let Some(code) = crate::storage::delete_recheck(&mut db, &self.project, &folders)
             .map_err(|_| "delete_unavailable".to_owned())?
         {
             return Err(code);
         }
+        let total = u64::try_from(folders.len()).map_err(|_| "delete_unavailable".to_owned())?;
+        tally.commit_trash(total).map_err(|e| e.0)?;
         for (moved, folder) in folders.iter().enumerate() {
             if mover(folder).is_err() {
                 return Err(if moved == 0 {
@@ -837,7 +850,9 @@ impl DeletePlan {
                 }
                 .into());
             }
+            tally.trashed_one();
         }
+        assert_eq!(tally.trashing(), Some((total, total)));
         Ok(())
     }
 

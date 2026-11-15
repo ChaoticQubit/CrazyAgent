@@ -13,22 +13,25 @@ pub const NEEDS_ANSWER: [&str; 3] = [
     "home_copy_too_large",
 ];
 
-/// What a job does: adds an existing folder, or moves a registered project kept outside the
-/// projects home into it.
+/// What a job does: adds an existing folder, moves a registered project kept outside the
+/// projects home into it, or deletes a project with its folders (Delete everything).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
     Add,
     MoveProject,
+    Delete,
 }
 
-/// What a client asks a job to bring into the projects home: a folder by the path the owner
-/// gave, or a registered project by its id.
+/// What a client asks a job to do: bring a folder into the projects home by the path the
+/// owner gave, bring a registered project in by its id, or delete a project, named by the
+/// exact name the owner typed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobSubject {
     Add { path: String },
     MoveProject { project_id: ProjectId },
+    Delete { project_id: ProjectId, name: String },
 }
 
 impl JobSubject {
@@ -37,6 +40,7 @@ impl JobSubject {
         match self {
             Self::Add { .. } => JobKind::Add,
             Self::MoveProject { .. } => JobKind::MoveProject,
+            Self::Delete { .. } => JobKind::Delete,
         }
     }
 }
@@ -49,10 +53,14 @@ pub enum Phase {
     Stopping,
     Copying,
     Clearing,
+    Trashing,
 }
 
-/// What a job is doing, or how it ended. A project move waits in `Stopping` for the
-/// project's agents to stop before anything moves.
+/// What a job is doing, or how it ended. A project move or a delete waits in `Stopping` for
+/// the project's agents to stop before anything moves, and reads `Copying` with no counts
+/// before it counted them; a delete then moves its folders to the Trash in `Trashing`, and
+/// `CutShort` is a delete an engine stop cut short, with how many of its folders reached the
+/// Trash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobState {
@@ -60,16 +68,19 @@ pub enum JobState {
     Stopping { agents_left: u64 },
     Copying { copied: u64, checked: u64 },
     Clearing,
+    Trashing { done: u64, total: u64 },
     Done,
     Failed { code: String, phase: Phase },
     Cancelled { phase: Phase },
     NeedsAnswer { code: String },
+    CutShort { trashed: u64, total: u64 },
 }
 
 /// One job as a client sees it: its id, which is the change's request id, its kind, the
-/// project a move takes, the folder, the mode, the soft refusals it goes past, whether a stop
-/// was asked and its state. A client answering a soft refusal starts again with these
-/// overrides and the new one.
+/// project a move or a delete takes, the folder (for a delete the project's name, which still
+/// labels its end once the project is gone), the mode (a delete reads Move, unused), the soft
+/// refusals it goes past, whether a stop was asked and its state. A client answering a soft
+/// refusal starts again with these overrides and the new one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobView {
@@ -85,7 +96,9 @@ pub struct JobView {
 
 impl JobView {
     /// The subject that starts this job again, for a retry or an answer to its soft refusal.
-    /// Output: the subject, or None for a view whose kind and project do not match.
+    /// A delete has none: it starts again only from the remove ask, where the owner types the
+    /// exact name (DEC-177 addendum 1, Q1 A). Output: the subject, or None for a delete or a
+    /// view whose kind and project do not match.
     pub fn subject(&self) -> Option<JobSubject> {
         match (self.kind, &self.project_id) {
             (JobKind::Add, None) => Some(JobSubject::Add {
@@ -106,10 +119,12 @@ enum Stage {
     Ended(JobState),
 }
 
-/// One job the engine runs apart from any client: an add of an existing folder, or a move of
-/// a registered project into the projects home. It downloads what is only in iCloud, then
-/// moves or copies the folder into the projects home, reporting progress as files land and
-/// are copied, and stops between files when asked.
+/// One job the engine runs apart from any client: an add of an existing folder, a move of a
+/// registered project into the projects home, or a Delete everything. An add or a move
+/// downloads what is only in iCloud, then moves or copies the folder into the projects home,
+/// reporting progress as files land and are copied, and stops between files when asked. A
+/// delete waits for the project's agents, then moves its folders to the Trash one by one and
+/// stops only before the first.
 #[derive(Debug)]
 pub struct IntakeJob {
     id: RequestId,
@@ -124,9 +139,9 @@ pub struct IntakeJob {
 }
 
 impl IntakeJob {
-    /// A job not yet started. Inputs: the change's request id, the kind, the project a move
-    /// takes (none for an add), the folder text, the mode and the overrides. Output: the job,
-    /// downloading.
+    /// A job not yet started. Inputs: the change's request id, the kind, the project a move or
+    /// a delete takes (none for an add), the folder text (a delete's project name), the mode
+    /// and the overrides. Output: the job, downloading.
     pub fn new(
         id: RequestId,
         kind: JobKind,
@@ -135,9 +150,10 @@ impl IntakeJob {
         mode: AddMode,
         overrides: Vec<AddOverride>,
     ) -> Self {
-        assert_eq!(kind == JobKind::MoveProject, project.is_some());
+        assert_eq!(kind != JobKind::Add, project.is_some());
         assert!(!source.is_empty());
         assert!(overrides.len() <= ADD_OVERRIDES_MAX);
+        assert!(kind != JobKind::Delete || overrides.is_empty());
         Self {
             id,
             kind,
@@ -181,6 +197,32 @@ impl IntakeJob {
         job
     }
 
+    /// A Delete everything an engine stop cut short, as the engine start found its mark: its
+    /// request, the project and its name, and how many of its folders reached the Trash.
+    /// Inputs: those. Output: the ended job, which waits for the owner to finish the delete
+    /// from the remove ask or keep the project.
+    pub fn cut_short(
+        id: RequestId,
+        project: ProjectId,
+        name: String,
+        trashed: u64,
+        total: u64,
+    ) -> Self {
+        assert!(trashed <= total);
+        let job = Self::new(
+            id,
+            JobKind::Delete,
+            Some(project),
+            name,
+            AddMode::Move,
+            Vec::new(),
+        );
+        let state = JobState::CutShort { trashed, total };
+        *job.stage.lock().unwrap_or_else(PoisonError::into_inner) = Stage::Ended(state);
+        assert!(job.ended());
+        job
+    }
+
     /// The change's request id, which names the job.
     pub fn id(&self) -> &RequestId {
         &self.id
@@ -191,22 +233,22 @@ impl IntakeJob {
         self.kind
     }
 
-    /// The project a move takes, or None for an add.
+    /// The project a move or a delete takes, or None for an add.
     pub fn project(&self) -> Option<&ProjectId> {
         self.project.as_ref()
     }
 
-    /// The code a job its task left before it ended gets: the add's or the move's interrupted
-    /// code.
+    /// The code a job its task left before it ended gets: its kind's interrupted code.
     pub fn interrupted(&self) -> &'static str {
         match self.kind {
             JobKind::Add => "home_add_interrupted",
             JobKind::MoveProject => "move_project_interrupted",
+            JobKind::Delete => "project_delete_interrupted",
         }
     }
 
     /// The folder being added or moved: as the owner gave it for an add, the project's real
-    /// folder for a move.
+    /// folder for a move. A delete's is the project's name.
     pub fn source(&self) -> &str {
         &self.source
     }
@@ -242,13 +284,18 @@ impl IntakeJob {
         *stage = Stage::Copying;
     }
 
-    /// Asks the job to stop: the download at its next check, a move's wait for its agents at
-    /// its next poll, the copy between entries. Clearing the old folder never stops, since
-    /// the copy it follows is complete.
-    pub fn stop(&self) {
+    /// Asks the job to stop: the download at its next check, a move's or a delete's wait for
+    /// its agents at its next poll, the copy between entries. Clearing the old folder never
+    /// stops, since the copy it follows is complete, and a delete that committed to its first
+    /// Trash move refuses the stop. Output: whether the stop was taken.
+    pub fn stop(&self) -> bool {
+        if !self.tally.stop() {
+            assert!(self.tally.trashing().is_some());
+            return false;
+        }
         self.download.cancel();
-        self.tally.stop();
         assert!(self.tally.stopped());
+        true
     }
 
     /// Records how the job ended. Input: the result of the download or the add.
@@ -257,7 +304,10 @@ impl IntakeJob {
         let phase = match *stage {
             Stage::Downloading => Phase::Downloading,
             Stage::Copying if self.tally.clearing() => Phase::Clearing,
-            Stage::Copying if self.tally.waiting() => Phase::Stopping,
+            Stage::Copying if self.tally.trashing().is_some() => Phase::Trashing,
+            Stage::Copying if self.tally.waiting() || self.kind == JobKind::Delete => {
+                Phase::Stopping
+            }
             Stage::Copying => Phase::Copying,
             Stage::Ended(_) => panic!("a job ends once"),
         };
@@ -279,9 +329,10 @@ impl IntakeJob {
                 progress: self.download.progress(),
             },
             Stage::Copying if self.tally.clearing() => JobState::Clearing,
-            Stage::Copying => match self.tally.waiting_for() {
-                Some(agents_left) => JobState::Stopping { agents_left },
-                None => JobState::Copying {
+            Stage::Copying => match (self.tally.waiting_for(), self.tally.trashing()) {
+                (_, Some((done, total))) => JobState::Trashing { done, total },
+                (Some(agents_left), None) => JobState::Stopping { agents_left },
+                (None, None) => JobState::Copying {
                     copied: self.tally.copied(),
                     checked: self.tally.checked(),
                 },
@@ -300,7 +351,14 @@ impl IntakeJob {
             state,
         };
         assert!(view.overrides.len() <= ADD_OVERRIDES_MAX);
-        assert_eq!(view.kind == JobKind::MoveProject, view.project_id.is_some());
+        assert_eq!(view.kind != JobKind::Add, view.project_id.is_some());
+        assert!(
+            view.kind == JobKind::Delete
+                || !matches!(
+                    view.state,
+                    JobState::Trashing { .. } | JobState::CutShort { .. }
+                )
+        );
         view
     }
 }
@@ -318,6 +376,10 @@ fn ended(phase: Phase, stopped: bool, result: Result<(), EngineError>) -> JobSta
     let cancelled = code == "home_add_cancelled" || (stopped && phase == Phase::Downloading);
     if cancelled {
         assert!(phase != Phase::Clearing, "clearing never stops");
+        assert!(
+            phase != Phase::Trashing,
+            "a delete stops only before its first Trash move"
+        );
         return JobState::Cancelled { phase };
     }
     if NEEDS_ANSWER.contains(&code.as_str()) {
