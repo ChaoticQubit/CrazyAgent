@@ -4276,7 +4276,9 @@ fn an_owner_stop_of_a_clashing_sub_agent_leaves_its_set_for_the_owner() {
 
 /// The owner asks a sub-agent that has stopped to update its change set: the resolve task
 /// is pinned to that agent's worktree, so the same agent comes back in the same worktree
-/// and works on it, and no other sub-agent or worktree is started for it.
+/// and works on it, and no other sub-agent or worktree is started for it. The owner first
+/// cancels the task its stop held for it, since a resolve task waits behind held work and
+/// keeps its own pin (RV-DS241-123, GB-4).
 #[cfg(target_os = "macos")]
 #[test]
 fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
@@ -4400,12 +4402,35 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
     let sets = crate::landing::list(&db, &fixture.setup.project_id).unwrap();
     assert_eq!(sets.len(), 1, "{sets:?}");
     assert_eq!(sets[0].agent.id, member.id.to_string());
+    let held: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM team_tasks WHERE prompt='Write page.md' AND status='queued'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::Cancel {
+                project_id: fixture.setup.project_id.clone(),
+                task: Some(held),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    assert_eq!(task_of(&fixture, "Write page.md").0, "cancelled");
     assert!(crate::landing_turns::update(&db, &sets[0].id).unwrap());
     let prompt = crate::landing::resolve_task_prompt(&db, &sets[0].id).unwrap();
     let resolve: i64 = fixture
         .connection
         .query_row(
-            "SELECT task FROM team_task_pins WHERE agent=?1",
+            "SELECT task FROM team_task_pins WHERE agent=?1 AND resolve=1",
             [member.id],
             |row| row.get(0),
         )
