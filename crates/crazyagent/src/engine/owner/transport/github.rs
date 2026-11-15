@@ -2,14 +2,16 @@ use super::*;
 use crate::credentials::{SECRET_BYTES_MAX, SecretString};
 use crate::engine::owner::AccountSecret;
 use crate::github::{
-    CloneReceipt, GitHub, GitHubDeviceCode, GitHubOwners, GitHubRepoPage, GitHubStatus,
+    CloneReceipt, GitHub, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishPlan,
+    GitHubRepoPage, GitHubStatus,
 };
-use crate::protocol::encode_frame;
+use crate::protocol::{ProjectId, encode_frame};
 use serde::{Deserialize, Serialize};
 
 const TOKEN_FRAME_TIME: Duration = Duration::from_secs(5);
 const ACTION_TIME: Duration = Duration::from_secs(75);
 const CLONE_TIME: Duration = Duration::from_secs(1900);
+const PUBLISH_TIME: Duration = Duration::from_secs(1900);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -19,15 +21,44 @@ enum Action {
     Token,
     UseCli,
     SignOut,
-    Repos { page: u32 },
-    Clone { full_name: String },
+    Repos {
+        page: u32,
+    },
+    Clone {
+        full_name: String,
+    },
     Owners,
+    PublishStart {
+        project: ProjectId,
+        plan: GitHubPublishPlan,
+    },
+    PublishApprove {
+        project: ProjectId,
+        lines: Vec<String>,
+    },
+    PublishExclude {
+        project: ProjectId,
+        path: String,
+    },
+    PublishRecheck {
+        project: ProjectId,
+    },
+    PublishContinue {
+        project: ProjectId,
+    },
+    PublishStatus {
+        project: ProjectId,
+    },
 }
 
 impl Action {
     fn time(&self) -> Duration {
         match self {
             Self::Clone { .. } => CLONE_TIME,
+            Self::PublishApprove { .. }
+            | Self::PublishExclude { .. }
+            | Self::PublishRecheck { .. }
+            | Self::PublishContinue { .. } => PUBLISH_TIME,
             _ => ACTION_TIME,
         }
     }
@@ -48,6 +79,8 @@ enum Reply {
     Repos { page: GitHubRepoPage },
     Cloned { receipt: CloneReceipt },
     Owners { owners: GitHubOwners },
+    Publish { job: GitHubPublishJob },
+    PublishStatus { job: Option<GitHubPublishJob> },
     Rejected { code: String },
 }
 
@@ -121,6 +154,82 @@ impl OwnerClient {
     pub async fn github_owners(&self) -> Result<GitHubOwners, EngineError> {
         match self.github_exchange(Action::Owners, None).await? {
             Reply::Owners { owners } => Ok(owners),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Starts publishing a project on GitHub: the engine checks the plan, the sign-in and
+    /// the project's git and records the .gitignore lines to show first. Inputs: the
+    /// project and the plan. Output: the job at its lines.
+    pub async fn github_publish_start(
+        &self,
+        project: ProjectId,
+        plan: GitHubPublishPlan,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.github_publish(Action::PublishStart { project, plan })
+            .await
+    }
+
+    /// Approves a project's .gitignore lines and runs its publish as far as it goes.
+    /// Inputs: the project and the lines. Output: the job where it stands.
+    pub async fn github_publish_approve(
+        &self,
+        project: ProjectId,
+        lines: Vec<String>,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.github_publish(Action::PublishApprove { project, lines })
+            .await
+    }
+
+    /// Leaves a file that holds a secret out of a project's publish and runs on.
+    /// Inputs: the project and the file's path as the check named it. Output: the job.
+    pub async fn github_publish_exclude(
+        &self,
+        project: ProjectId,
+        path: String,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.github_publish(Action::PublishExclude { project, path })
+            .await
+    }
+
+    /// Checks a blocked publish for secrets again and runs on. Input: the project.
+    /// Output: the job where it stands.
+    pub async fn github_publish_recheck(
+        &self,
+        project: ProjectId,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.github_publish(Action::PublishRecheck { project })
+            .await
+    }
+
+    /// Runs a project's publish on from the last step it finished. Input: the project.
+    /// Output: the job where it stands.
+    pub async fn github_publish_continue(
+        &self,
+        project: ProjectId,
+    ) -> Result<GitHubPublishJob, EngineError> {
+        self.github_publish(Action::PublishContinue { project })
+            .await
+    }
+
+    /// Reads where a project's publish stands. Input: the project. Output: the job, or
+    /// None when the project has none.
+    pub async fn github_publish_status(
+        &self,
+        project: ProjectId,
+    ) -> Result<Option<GitHubPublishJob>, EngineError> {
+        match self
+            .github_exchange(Action::PublishStatus { project }, None)
+            .await?
+        {
+            Reply::PublishStatus { job } => Ok(job),
+            _ => Err(unknown()),
+        }
+    }
+
+    async fn github_publish(&self, action: Action) -> Result<GitHubPublishJob, EngineError> {
+        match self.github_exchange(action, None).await? {
+            Reply::Publish { job } => Ok(job),
             _ => Err(unknown()),
         }
     }
@@ -297,6 +406,12 @@ async fn handle(
             Action::Owners => Reply::Owners {
                 owners: account.owners()?,
             },
+            Action::PublishStart { .. }
+            | Action::PublishApprove { .. }
+            | Action::PublishExclude { .. }
+            | Action::PublishRecheck { .. }
+            | Action::PublishContinue { .. }
+            | Action::PublishStatus { .. } => return Err(failure("github_publish_unbuilt")),
         })
     })
     .await
@@ -366,6 +481,7 @@ fn read_kind(action: &Action) -> Option<&'static str> {
         Action::Status => Some("github.status"),
         Action::Repos { .. } => Some("github.repos"),
         Action::Owners => Some("github.owners"),
+        Action::PublishStatus { .. } => Some("github.publish_status"),
         _ => None,
     }
 }

@@ -486,4 +486,153 @@ mod slow_remote {
         })
         .await;
     }
+
+    #[tokio::test]
+    async fn a_project_publish_runs_over_the_owner_socket_by_its_project_id() {
+        use crate::github::{GitHubPublishPlan, GitHubPublishStep};
+        use crate::protocol::ProjectId;
+        run_case(false, |context| async move {
+            let token = "gho_enginepublish0123456789";
+            let bearer = format!("Bearer {token}");
+            let server = Server::start(move |seen, _| {
+                if seen.header("authorization") != Some(bearer.as_str()) {
+                    return Answer::json(401, serde_json::json!({ "message": "Bad credentials" }));
+                }
+                match (seen.method.as_str(), seen.path.as_str()) {
+                    ("GET", "/user") => Answer::json(
+                        200,
+                        serde_json::json!({ "login": "octo-cat", "id": 583_231 }),
+                    ),
+                    ("POST", "/user/repos") => Answer::json(
+                        403,
+                        serde_json::json!({ "message": "Resource not accessible by integration" }),
+                    ),
+                    _ => Answer::json(404, serde_json::json!({ "message": "Not Found" })),
+                }
+            });
+            let root = context.state.clone();
+            let space = namespace(&root);
+            let mut keychain = TestKeychain::temporary();
+            keychain.serve(&space);
+            let store = platform_store(&space)
+                .expect("UNAVAILABLE: the macOS Keychain of the signed-in user");
+            let _forget = Forget {
+                root: root.clone(),
+                store: Arc::clone(&store),
+                item: reference(&format!("{space}.github"), "token").unwrap(),
+            };
+            GitHub::new(&root, space, store, Endpoints::loopback(server.port))
+                .use_token(SecretString::new(token.as_bytes().to_vec()).unwrap())
+                .unwrap();
+            use_loopback(&root, Some(server.port));
+
+            let folder = tempfile::Builder::new()
+                .prefix("ca-gh-publish-")
+                .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+                .unwrap();
+            let project = std::fs::canonicalize(folder.path()).unwrap();
+            std::fs::write(project.join("main.rs"), "fn main() {}\n").unwrap();
+            std::fs::write(
+                project.join("keys.txt"),
+                "token ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8\n",
+            )
+            .unwrap();
+            {
+                let db = crate::landing::open(&root).unwrap();
+                crate::ide::workspace::tests::add_project(&db, "alpha", &project);
+            }
+            let (client, _) =
+                OwnerClient::discover(&root, OwnerClientKind::Tui, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+            let plan = GitHubPublishPlan {
+                owner: "octo-cat".into(),
+                name: "tool".into(),
+                description: String::new(),
+                private: true,
+                docs: false,
+            };
+            let alpha = ProjectId::new("alpha").unwrap();
+            let beta = ProjectId::new("beta").unwrap();
+            assert_eq!(
+                client
+                    .github_publish_status(beta.clone())
+                    .await
+                    .unwrap_err()
+                    .0,
+                "github_publish_project_unknown"
+            );
+            assert_eq!(
+                client
+                    .github_publish_start(beta, plan.clone())
+                    .await
+                    .unwrap_err()
+                    .0,
+                "github_publish_project_unknown"
+            );
+            assert_eq!(
+                client.github_publish_status(alpha.clone()).await.unwrap(),
+                None
+            );
+            let started = client
+                .github_publish_start(alpha.clone(), plan.clone())
+                .await
+                .unwrap();
+            assert_eq!(started.project, project);
+            assert!(
+                matches!(started.step, GitHubPublishStep::Lines { .. }),
+                "{started:?}"
+            );
+            let lines = vec![".env*".to_owned()];
+            let blocked = client
+                .github_publish_approve(alpha.clone(), lines)
+                .await
+                .unwrap();
+            assert!(
+                matches!(blocked.step, GitHubPublishStep::Blocked { .. }),
+                "{blocked:?}"
+            );
+            assert_eq!(
+                client.github_publish_recheck(alpha.clone()).await.unwrap(),
+                blocked
+            );
+            let stopped = client
+                .github_publish_exclude(alpha.clone(), "keys.txt".into())
+                .await
+                .unwrap();
+            assert!(
+                matches!(stopped.step, GitHubPublishStep::Creating { .. }),
+                "{stopped:?}"
+            );
+            assert_eq!(
+                stopped.stopped.as_deref(),
+                Some("github_repo_create_refused")
+            );
+            assert_eq!(
+                client.github_publish_status(alpha.clone()).await.unwrap(),
+                Some(stopped.clone())
+            );
+            assert_eq!(
+                client.github_publish_continue(alpha.clone()).await.unwrap(),
+                stopped
+            );
+            assert_eq!(
+                client
+                    .github_publish_recheck(alpha.clone())
+                    .await
+                    .unwrap_err()
+                    .0,
+                "github_publish_step_invalid"
+            );
+            let creates = server
+                .seen()
+                .iter()
+                .filter(|seen| seen.method == "POST" && seen.path == "/user/repos")
+                .count();
+            assert_eq!(creates, 2);
+            assert!(!holds(&root, token.as_bytes()));
+            assert!(!holds(&project, token.as_bytes()));
+        })
+        .await;
+    }
 }
