@@ -115,8 +115,9 @@ fn append_excludes(folder: &Path, lines: &[&str]) -> Result<bool, EngineError> {
 }
 
 /// Appends each of `lines` a text file lacks, each at most once, creating the file and
-/// never writing through a link. Inputs: the file, the lines and the refusal code for a
-/// file that is a link, not a plain file or past 1 MiB. Output: how many lines were added.
+/// never writing through a link or waiting on a FIFO. Inputs: the file, the lines and the
+/// refusal code for a file that is a link, not a plain file or past 1 MiB. Output: how many
+/// lines were added.
 pub(crate) fn append_lines(path: &Path, lines: &[&str], code: &str) -> Result<usize, EngineError> {
     let mut existing = String::new();
     match fs::symlink_metadata(path) {
@@ -124,8 +125,13 @@ pub(crate) fn append_lines(path: &Path, lines: &[&str], code: &str) -> Result<us
             if metadata.len() > EXCLUDE_BYTES_MAX {
                 return Err(refused(code));
             }
-            fs::File::open(path)
-                .and_then(|file| file.take(EXCLUDE_BYTES_MAX).read_to_string(&mut existing))
+            let file = crate::platform::open_plain(path).map_err(|_| refused(code))?;
+            let opened = file.metadata().map_err(|_| refused(code))?;
+            if !opened.is_file() || opened.len() > EXCLUDE_BYTES_MAX {
+                return Err(refused(code));
+            }
+            file.take(EXCLUDE_BYTES_MAX)
+                .read_to_string(&mut existing)
                 .map_err(|_| refused(code))?;
         }
         Ok(_) => return Err(refused(code)),
@@ -150,6 +156,9 @@ pub(crate) fn append_lines(path: &Path, lines: &[&str], code: &str) -> Result<us
         text.push('\n');
     }
     let mut file = open_append(path).map_err(|_| refused(code))?;
+    if !file.metadata().map_err(|_| refused(code))?.is_file() {
+        return Err(refused(code));
+    }
     file.write_all(text.as_bytes())
         .and_then(|()| file.sync_all())
         .map_err(|_| refused(code))?;

@@ -5,7 +5,9 @@ use crate::research::runner::GIT_SAFE;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Output, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 #[cfg(all(test, target_os = "macos"))]
@@ -17,6 +19,16 @@ const SCAN_FILE_BYTES_MAX: u64 = 1 << 20;
 const BINARY_PROBE_BYTES: usize = 8 << 10;
 const LISTING_BYTES_MAX: u64 = 16 << 20;
 const CONFIG_BYTES_MAX: u64 = 64 << 10;
+const OUTPUT_BYTES_MAX: u64 = 1 << 20;
+const GITIGNORE_BYTES_MAX: u64 = 1 << 20;
+const FINDINGS_MAX: usize = 1000;
+const FILE_FINDINGS_MAX: usize = 20;
+const LOOKUP_TIME: Duration = Duration::from_secs(20);
+const WORK_TIME: Duration = Duration::from_secs(600);
+const EMPTY_TREES: [&str; 2] = [
+    "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321",
+];
 const BATCH_HEADER_BYTES_MAX: u64 = 256;
 const BRANCH_BYTES_MAX: usize = 255;
 const IGNORE_LINES_MAX: usize = 1000;
@@ -40,6 +52,7 @@ const DOCS_ON: [&str; 4] = [
     "/graphify-out/",
 ];
 const OLDER_LAYOUT: [&str; 1] = ["/graphify-out/"];
+const DOCS_ON_ONLY: [&str; 3] = ["!/.crazyagent/", "/.crazyagent/*", "!/.crazyagent/context/"];
 const SECURITY_PATHS: [&str; 3] = ["SECURITY.md", ".github/SECURITY.md", "docs/SECURITY.md"];
 const SECURITY_POLICY: &str = "# Security Policy\n\n## Reporting a Vulnerability\n\nPlease report a vulnerability privately through GitHub's private vulnerability reporting: open this repository's Security tab and choose \"Report a vulnerability\". Please do not open a public issue for it.\n";
 const DEPENDABOT: &str = ".github/dependabot.yml";
@@ -209,35 +222,135 @@ fn project_git(git: &Path, home: &Path, project: &Path) -> Command {
     command
 }
 
-/// Runs a git command whose output is small and fixed. Input: the command. Output: what
-/// it printed and its status, or `github_publish_failed` when it could not start.
-fn run(command: &mut Command) -> Result<Output, EngineError> {
-    crate::spawn_gate::output(command.stdout(Stdio::piped()))
-        .map_err(|_| failure("github_publish_failed"))
+/// A started git that a watcher thread kills when it still runs at its time limit, so a
+/// config include, an ignore file or any pipe that never ends, such as a FIFO, never holds
+/// publish.
+struct Watched {
+    child: Arc<Mutex<Child>>,
+    done: mpsc::Sender<()>,
+    watcher: std::thread::JoinHandle<bool>,
 }
 
-/// Runs a git command that lists files, reading at most `LISTING_BYTES_MAX` of it.
-/// Input: the command. Output: the listing, or `github_publish_too_large`,
+impl Watched {
+    /// Starts the command and its watcher. Inputs: the command and the time limit.
+    /// Output: the watched git, or `github_publish_failed` when it could not start.
+    fn start(command: &mut Command, limit: Duration) -> Result<Self, EngineError> {
+        let child =
+            crate::spawn_gate::spawn(command).map_err(|_| failure("github_publish_failed"))?;
+        let child = Arc::new(Mutex::new(child));
+        let (done, told) = mpsc::channel::<()>();
+        let watched = Arc::clone(&child);
+        let watcher = std::thread::spawn(move || {
+            let late = matches!(told.recv_timeout(limit), Err(RecvTimeoutError::Timeout));
+            if late {
+                let _ = watched
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .kill();
+            }
+            late
+        });
+        Ok(Self {
+            child,
+            done,
+            watcher,
+        })
+    }
+
+    /// Takes git's piped output and input. Output: each, None when it is not piped.
+    fn pipes(&self) -> (Option<ChildStdout>, Option<ChildStdin>) {
+        let mut child = self.child.lock().unwrap_or_else(PoisonError::into_inner);
+        (child.stdout.take(), child.stdin.take())
+    }
+
+    /// Stops git at once, for a reply publish no longer reads.
+    fn stop(&self) {
+        let _ = self
+            .child
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .kill();
+    }
+
+    /// Ends the watch and waits for git. Output: its status, or `github_publish_failed`
+    /// when it ran past its limit or could not be waited for.
+    fn finish(self) -> Result<ExitStatus, EngineError> {
+        let _ = self.done.send(());
+        let late = self.watcher.join().unwrap_or(true);
+        let status = self
+            .child
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .wait();
+        match status {
+            Ok(status) if !late => Ok(status),
+            _ => Err(failure("github_publish_failed")),
+        }
+    }
+}
+
+/// Runs a git command to its end within `limit`, keeping at most `cap` bytes and one more
+/// of what it prints and draining the rest, so git never waits on a full pipe. Inputs:
+/// the command, the limit and the cap. Output: its status and what was kept, or
 /// `github_publish_failed`.
-fn listing(command: &mut Command) -> Result<Vec<u8>, EngineError> {
-    let failed = || failure("github_publish_failed");
-    let mut child =
-        crate::spawn_gate::spawn(command.stdout(Stdio::piped())).map_err(|_| failed())?;
+fn collect(
+    command: &mut Command,
+    limit: Duration,
+    cap: u64,
+) -> Result<(ExitStatus, Vec<u8>), EngineError> {
+    let watched = Watched::start(command.stdout(Stdio::piped()), limit)?;
+    let stdout = watched.pipes().0.expect("git stdout is piped");
     let mut bytes = Vec::new();
-    let read = child
-        .stdout
-        .take()
-        .expect("git stdout is piped")
-        .take(LISTING_BYTES_MAX + 1)
-        .read_to_end(&mut bytes);
+    let mut source = stdout.take(cap + 1);
+    let read = source.read_to_end(&mut bytes).is_ok()
+        && std::io::copy(&mut source.into_inner(), &mut std::io::sink()).is_ok();
+    if !read {
+        watched.stop();
+    }
+    let status = watched.finish()?;
+    if !read {
+        return Err(failure("github_publish_failed"));
+    }
+    Ok((status, bytes))
+}
+
+/// Runs a git command whose output is small within `LOOKUP_TIME`. Input: the command.
+/// Output: as [`run_within`].
+fn run(command: &mut Command) -> Result<Output, EngineError> {
+    run_within(command, LOOKUP_TIME)
+}
+
+/// Runs a git command that writes the repository, such as add or commit, within
+/// `WORK_TIME`. Input: the command. Output: as [`run_within`].
+fn work(command: &mut Command) -> Result<Output, EngineError> {
+    run_within(command, WORK_TIME)
+}
+
+/// Runs a git command whose output is small, within `limit`. Inputs: the command and the
+/// limit. Output: what it printed and its status, or `github_publish_failed` when it
+/// could not start, ran over or printed past 1 MiB.
+fn run_within(command: &mut Command, limit: Duration) -> Result<Output, EngineError> {
+    let (status, stdout) = collect(command, limit, OUTPUT_BYTES_MAX)?;
+    if stdout.len() as u64 > OUTPUT_BYTES_MAX {
+        return Err(failure("github_publish_failed"));
+    }
+    Ok(Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    })
+}
+
+/// Runs a git command that lists files within `limit`, keeping at most
+/// `LISTING_BYTES_MAX` of it. Inputs: the command and the limit. Output: the listing, or
+/// `github_publish_too_large`, `github_publish_failed`.
+fn listing(command: &mut Command, limit: Duration) -> Result<Vec<u8>, EngineError> {
+    let (status, bytes) = collect(command, limit, LISTING_BYTES_MAX)?;
     if bytes.len() as u64 > LISTING_BYTES_MAX {
-        let _ = child.kill();
-        let _ = child.wait();
         return Err(failure("github_publish_too_large"));
     }
-    let status = child.wait().map_err(|_| failed())?;
-    if read.is_err() || !status.success() {
-        return Err(failed());
+    if !status.success() {
+        return Err(failure("github_publish_failed"));
     }
     Ok(bytes)
 }
@@ -252,7 +365,7 @@ pub(super) fn inspect(
     project: &Path,
     host: &str,
 ) -> Result<GitHubLocal, EngineError> {
-    inspect_within(git, home, project, host, Duration::ZERO)
+    inspect_within(git, home, project, host, LOOKUP_TIME)
 }
 
 /// Reads how a project's git stands as [`inspect`] does, each git run within `limit`.
@@ -265,7 +378,6 @@ fn inspect_within(
     host: &str,
     limit: Duration,
 ) -> Result<GitHubLocal, EngineError> {
-    let _ = limit;
     let folder =
         std::fs::symlink_metadata(project).map_err(|_| failure("project_folder_missing"))?;
     if !project.is_absolute() || !folder.is_dir() {
@@ -278,8 +390,8 @@ fn inspect_within(
             history: GitHubHistory::Empty,
         });
     }
-    remotes(git, home, project, host)?;
-    let (branch, history) = head_state(git, home, project)?;
+    remotes(git, home, project, host, limit)?;
+    let (branch, history) = head_state(git, home, project, limit)?;
     Ok(GitHubLocal {
         repository: true,
         branch: Some(branch),
@@ -298,15 +410,22 @@ fn plain_repository(project: &Path) -> Result<bool, EngineError> {
     }
 }
 
-/// Reads the branch HEAD names and what the history holds. Inputs: git, its empty home
-/// and the project. Output: the branch and the history, or `github_publish_detached`,
-/// `github_publish_not_plain_repo`.
+/// Reads the branch HEAD names and what the history holds: none while HEAD is unborn,
+/// the engine's start when the one commit is the engine's empty "Start project", else the
+/// owner's. Inputs: git, its empty home, the project and the limit for each git run.
+/// Output: the branch and the history, or `github_publish_detached`,
+/// `github_publish_not_plain_repo`, `github_publish_failed` for a history git cannot read.
 fn head_state(
     git: &Path,
     home: &Path,
     project: &Path,
+    limit: Duration,
 ) -> Result<(String, GitHubHistory), EngineError> {
-    let head = run(project_git(git, home, project).args(["symbolic-ref", "-q", "HEAD"]))?;
+    let failed = || failure("github_publish_failed");
+    let head = run_within(
+        project_git(git, home, project).args(["symbolic-ref", "-q", "HEAD"]),
+        limit,
+    )?;
     match head.status.code() {
         Some(0) => {}
         Some(1) => return Err(failure("github_publish_detached")),
@@ -324,29 +443,44 @@ fn head_state(
         })
         .ok_or_else(|| failure("github_publish_detached"))?
         .to_owned();
-    let log = run(project_git(git, home, project).args([
-        "log",
-        "-2",
-        "--format=%ae%x00%s%x00",
-        "HEAD",
-        "--",
-    ]))?;
-    let history = if log.status.success() {
-        let text = String::from_utf8_lossy(&log.stdout);
-        let mut fields: Vec<&str> = text
-            .split('\0')
-            .map(|field| field.trim_matches('\n'))
-            .collect();
-        if fields.last() == Some(&"") {
-            fields.pop();
-        }
-        if fields == [ENGINE_EMAIL, ENGINE_START] {
-            GitHubHistory::EngineStart
-        } else {
-            GitHubHistory::Owner
-        }
+    let born = run_within(
+        project_git(git, home, project).args(["rev-parse", "-q", "--verify", "HEAD"]),
+        limit,
+    )?;
+    match born.status.code() {
+        Some(0) => {}
+        Some(1) => return Ok((branch, GitHubHistory::Empty)),
+        _ => return Err(failed()),
+    }
+    let log = run_within(
+        project_git(git, home, project).args([
+            "log",
+            "-2",
+            "--format=%ae%x00%s%x00%T%x00",
+            "HEAD",
+            "--",
+        ]),
+        limit,
+    )?;
+    if !log.status.success() {
+        return Err(failed());
+    }
+    let text = String::from_utf8_lossy(&log.stdout);
+    let mut fields: Vec<&str> = text
+        .split('\0')
+        .map(|field| field.trim_matches('\n'))
+        .collect();
+    if fields.last() == Some(&"") {
+        fields.pop();
+    }
+    let engine = fields.len() == 3
+        && fields[0] == ENGINE_EMAIL
+        && fields[1] == ENGINE_START
+        && EMPTY_TREES.contains(&fields[2]);
+    let history = if engine {
+        GitHubHistory::EngineStart
     } else {
-        GitHubHistory::Empty
+        GitHubHistory::Owner
     };
     Ok((branch, history))
 }
@@ -355,19 +489,28 @@ fn head_state(
 /// and any other is another host's. git lists the keys of `.git/config` alone, includes
 /// left out. Inputs: git, its empty home, the project and GitHub's web host.
 /// Output: `()`, or `github_publish_on_github`, `github_publish_other_host`.
-fn remotes(git: &Path, home: &Path, project: &Path, host: &str) -> Result<(), EngineError> {
+fn remotes(
+    git: &Path,
+    home: &Path,
+    project: &Path,
+    host: &str,
+    limit: Duration,
+) -> Result<(), EngineError> {
     let config = project.join(".git").join("config");
     match std::fs::symlink_metadata(&config) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Ok(metadata) if metadata.is_file() && metadata.len() <= CONFIG_BYTES_MAX => {}
         _ => return Err(failure("github_publish_not_plain_repo")),
     }
-    let listed = run(clone::git_command(git, home)
-        .args(["config", "--file"])
-        .arg(&config)
-        .args(["--no-includes", "-z", "--list"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null()))?;
+    let listed = run_within(
+        clone::git_command(git, home)
+            .args(["config", "--file"])
+            .arg(&config)
+            .args(["--no-includes", "-z", "--list"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null()),
+        limit,
+    )?;
     if !listed.status.success() {
         return Err(failure("github_publish_failed"));
     }
@@ -440,11 +583,7 @@ pub(super) fn prepare(
         return Err(failure("github_publish_ignore_invalid"));
     }
     let ignore = project.join(GITIGNORE);
-    match std::fs::symlink_metadata(&ignore) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Ok(metadata) if metadata.is_file() => {}
-        _ => return Err(failure("github_publish_gitignore_invalid")),
-    }
+    let existing = read_gitignore(&ignore)?;
     let files = generated(project, choices.private)?;
     if !local.repository {
         let made = run(project_git(git, home, project)
@@ -460,7 +599,8 @@ pub(super) fn prepare(
     if !hidden {
         return Err(failure("github_publish_not_plain_repo"));
     }
-    let docs: &[&str] = if crate::projects_home::state_folder(project).as_path() == project {
+    let older = crate::projects_home::state_folder(project).as_path() == project;
+    let docs: &[&str] = if older {
         &OLDER_LAYOUT
     } else if choices.docs {
         &DOCS_ON
@@ -470,7 +610,24 @@ pub(super) fn prepare(
     let mut lines: Vec<&str> = docs.to_vec();
     lines.extend(approved.iter().map(String::as_str));
     let mut written = Vec::new();
-    if crate::projects_home::append_lines(&ignore, &lines, "github_publish_gitignore_invalid")? > 0
+    let text = existing.unwrap_or_default();
+    let stale = |line: &str| DOCS_ON_ONLY.contains(&line.trim_end());
+    if !older && !choices.docs && text.lines().any(stale) {
+        let mut kept: Vec<&str> = text.lines().filter(|line| !stale(*line)).collect();
+        for line in lines {
+            if !kept.iter().any(|present| present.trim_end() == line) {
+                kept.push(line);
+            }
+        }
+        let mut replaced = kept.join("\n");
+        replaced.push('\n');
+        replace_file(project, &ignore, &replaced)?;
+        written.push(GITIGNORE.to_owned());
+    } else if crate::projects_home::append_lines(
+        &ignore,
+        &lines,
+        "github_publish_gitignore_invalid",
+    )? > 0
     {
         written.push(GITIGNORE.to_owned());
     }
@@ -479,6 +636,57 @@ pub(super) fn prepare(
         written.push(path.to_owned());
     }
     Ok(written)
+}
+
+/// Reads a project's .gitignore before publish writes anything: a plain file, never a
+/// link or a FIFO, of at most 1 MiB of UTF-8, as `append_lines` then needs it.
+/// Input: the path. Output: its text, None when there is none, or
+/// `github_publish_gitignore_invalid`.
+fn read_gitignore(path: &Path) -> Result<Option<String>, EngineError> {
+    let invalid = || failure("github_publish_gitignore_invalid");
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Ok(metadata) if metadata.is_file() => {}
+        _ => return Err(invalid()),
+    }
+    let file = crate::platform::open_plain(path).map_err(|_| invalid())?;
+    let metadata = file.metadata().map_err(|_| invalid())?;
+    if !metadata.is_file() || metadata.len() > GITIGNORE_BYTES_MAX {
+        return Err(invalid());
+    }
+    let mut text = String::new();
+    file.take(GITIGNORE_BYTES_MAX + 1)
+        .read_to_string(&mut text)
+        .map_err(|_| invalid())?;
+    if text.len() as u64 > GITIGNORE_BYTES_MAX {
+        return Err(invalid());
+    }
+    Ok(Some(text))
+}
+
+/// Replaces a project file with new text through a new file beside it, renamed over the
+/// old one, so a link put in its place is replaced, never written through. Inputs: the
+/// project, the file and the text. Output: `()`, or `github_publish_gitignore_invalid`.
+fn replace_file(project: &Path, path: &Path, text: &str) -> Result<(), EngineError> {
+    let invalid = || failure("github_publish_gitignore_invalid");
+    let mut token = [0_u8; 8];
+    getrandom::fill(&mut token).map_err(|_| invalid())?;
+    let name: String = token.iter().map(|byte| format!("{byte:02x}")).collect();
+    let temporary = project.join(format!(".gitignore.publish-{name}"));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|_| invalid())?;
+    let replaced = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| std::fs::rename(&temporary, path));
+    if replaced.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 /// The files publish writes into a project where none of their kind exists: the
@@ -563,7 +771,7 @@ pub(super) fn secret_findings(
         history,
         SCAN_FILES_MAX,
         SCAN_BYTES_MAX,
-        Duration::ZERO,
+        WORK_TIME,
     )
 }
 
@@ -579,20 +787,26 @@ fn findings_within(
     bytes_max: u64,
     limit: Duration,
 ) -> Result<GitHubSecretScan, EngineError> {
-    let _ = limit;
     let too_large = || failure("github_publish_too_large");
     let failed = || failure("github_publish_failed");
+    if !plain_repository(project)? {
+        return Err(failure("github_publish_not_plain_repo"));
+    }
     let mut findings = Vec::new();
+    let mut truncated = false;
     let mut total: u64 = 0;
     if history == GitHubHistory::Owner {
-        let listed = listing(project_git(git, home, project).args([
-            "ls-tree",
-            "-r",
-            "-z",
-            "-l",
-            "--full-tree",
-            "HEAD",
-        ]))?;
+        let listed = listing(
+            project_git(git, home, project).args([
+                "ls-tree",
+                "-r",
+                "-z",
+                "-l",
+                "--full-tree",
+                "HEAD",
+            ]),
+            limit,
+        )?;
         let mut blobs: Vec<(String, String)> = Vec::new();
         for entry in listed
             .split(|byte| *byte == 0)
@@ -620,15 +834,26 @@ fn findings_within(
                 return Err(too_large());
             }
         }
-        read_blobs(git, home, project, &blobs, &mut findings)?;
+        read_blobs(
+            git,
+            home,
+            project,
+            &blobs,
+            &mut findings,
+            &mut truncated,
+            limit,
+        )?;
     } else {
-        let listed = listing(project_git(git, home, project).args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ]))?;
+        let listed = listing(
+            project_git(git, home, project).args([
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ]),
+            limit,
+        )?;
         let paths: Vec<&[u8]> = listed
             .split(|byte| *byte == 0)
             .filter(|path| !path.is_empty())
@@ -637,8 +862,11 @@ fn findings_within(
             return Err(too_large());
         }
         for path in paths {
-            let full = project.join(listed_path(path).ok_or_else(failed)?);
-            let Ok(metadata) = std::fs::symlink_metadata(&full) else {
+            let relative = listed_path(path).ok_or_else(failed)?;
+            let Ok(file) = crate::platform::open_plain_beneath(project, &relative) else {
+                continue;
+            };
+            let Ok(metadata) = file.metadata() else {
                 continue;
             };
             if !metadata.is_file() {
@@ -649,16 +877,16 @@ fn findings_within(
                 return Err(too_large());
             }
             let mut head = Vec::new();
-            std::fs::File::open(&full)
-                .and_then(|file| file.take(SCAN_FILE_BYTES_MAX).read_to_end(&mut head))
+            file.take(SCAN_FILE_BYTES_MAX)
+                .read_to_end(&mut head)
                 .map_err(|_| failed())?;
-            scan(&String::from_utf8_lossy(path), &head, &mut findings);
+            truncated |= scan(&String::from_utf8_lossy(path), &head, &mut findings);
         }
     }
     findings.sort();
     Ok(GitHubSecretScan {
         findings,
-        truncated: false,
+        truncated,
     })
 }
 
@@ -677,15 +905,18 @@ fn listed_path(bytes: &[u8]) -> Option<PathBuf> {
     std::str::from_utf8(bytes).ok().map(PathBuf::from)
 }
 
-/// Reads blobs through one `git cat-file --batch`, scanning the first 1 MiB of each.
-/// Inputs: git, its empty home, the project, each blob's id and path, and the findings to
-/// add to. Output: `()`, or `github_publish_failed`.
+/// Reads blobs through one `git cat-file --batch` within `limit`, scanning the first
+/// 1 MiB of each. Inputs: git, its empty home, the project, each blob's id and path, the
+/// findings to add to, the flag a cut list sets and the limit. Output: `()`, or
+/// `github_publish_failed`.
 fn read_blobs(
     git: &Path,
     home: &Path,
     project: &Path,
     blobs: &[(String, String)],
     findings: &mut Vec<GitHubSecretFinding>,
+    truncated: &mut bool,
+    limit: Duration,
 ) -> Result<(), EngineError> {
     if blobs.is_empty() {
         return Ok(());
@@ -696,21 +927,22 @@ fn read_blobs(
         .args(["cat-file", "--batch"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
-    let mut child: Child = crate::spawn_gate::spawn(&mut command).map_err(|_| failed())?;
-    let mut stdin = child.stdin.take().expect("cat-file stdin is piped");
+    let watched = Watched::start(&mut command, limit)?;
+    let (stdout, stdin) = watched.pipes();
+    let mut stdin = stdin.expect("cat-file stdin is piped");
     let names: Vec<u8> = blobs
         .iter()
         .flat_map(|(object, _)| format!("{object}\n").into_bytes())
         .collect();
     let writer = std::thread::spawn(move || stdin.write_all(&names));
-    let mut reader = BufReader::new(child.stdout.take().expect("cat-file stdout is piped"));
-    let read = read_batch(&mut reader, blobs, findings);
+    let mut reader = BufReader::new(stdout.expect("cat-file stdout is piped"));
+    let read = read_batch(&mut reader, blobs, findings, truncated);
     if read.is_err() {
-        let _ = child.kill();
+        watched.stop();
     }
     drop(reader);
     let written = writer.join();
-    let status = child.wait().map_err(|_| failed())?;
+    let status = watched.finish()?;
     read?;
     if !matches!(written, Ok(Ok(()))) || !status.success() {
         return Err(failed());
@@ -719,12 +951,14 @@ fn read_blobs(
 }
 
 /// Reads each blob `cat-file --batch` prints, in the order asked: its header, the first
-/// 1 MiB scanned and the rest skipped. Inputs: the reader, the blobs and the findings.
-/// Output: `()`, or `github_publish_failed` for a reply that does not match.
+/// 1 MiB scanned and the rest skipped. Inputs: the reader, the blobs, the findings and
+/// the flag a cut list sets. Output: `()`, or `github_publish_failed` for a reply that
+/// does not match.
 fn read_batch(
     reader: &mut BufReader<ChildStdout>,
     blobs: &[(String, String)],
     findings: &mut Vec<GitHubSecretFinding>,
+    truncated: &mut bool,
 ) -> Result<(), EngineError> {
     let failed = || failure("github_publish_failed");
     for (object, path) in blobs {
@@ -759,20 +993,22 @@ fn read_batch(
         if head.len() as u64 != kept || skipped != rest {
             return Err(failed());
         }
-        scan(path, &head, findings);
+        *truncated |= scan(path, &head, findings);
     }
     Ok(())
 }
 
 /// Adds a finding for each line of a file's first bytes that holds a secret: a private
 /// key block, a known token, or, in a settings file only, a credential-named key with a
-/// literal value. A file with a NUL in its first 8 KiB is binary and skipped.
-/// Inputs: the path, the bytes and the findings.
-fn scan(path: &str, head: &[u8], findings: &mut Vec<GitHubSecretFinding>) {
+/// literal value. A file with a NUL in its first 8 KiB is binary and skipped. At most 20
+/// findings come from one file and 1000 in all. Inputs: the path, the bytes and the
+/// findings. Output: true when a line holding a secret was left out at those bounds.
+fn scan(path: &str, head: &[u8], findings: &mut Vec<GitHubSecretFinding>) -> bool {
     if head[..head.len().min(BINARY_PROBE_BYTES)].contains(&0) {
-        return;
+        return false;
     }
     let settings = settings_file(path);
+    let mut found = 0_usize;
     for (number, line) in (1u32..).zip(head.split(|byte| *byte == b'\n')) {
         let line = String::from_utf8_lossy(line);
         let kind = if line.contains("-----BEGIN ") && line.contains("PRIVATE KEY-----") {
@@ -784,12 +1020,17 @@ fn scan(path: &str, head: &[u8], findings: &mut Vec<GitHubSecretFinding>) {
         } else {
             continue;
         };
+        if found == FILE_FINDINGS_MAX || findings.len() == FINDINGS_MAX {
+            return true;
+        }
         findings.push(GitHubSecretFinding {
             path: path.to_owned(),
             line: number,
             kind,
         });
+        found += 1;
     }
+    false
 }
 
 /// Tells whether a line holds a known token: a run of letters, digits, `-` and `_` that
@@ -1000,9 +1241,9 @@ pub(super) fn commit(
     if !plain_repository(project)? {
         return Err(failure("github_publish_not_plain_repo"));
     }
-    let (branch, history) = head_state(git, home, project)?;
+    let (branch, history) = head_state(git, home, project, LOOKUP_TIME)?;
     let succeeded = |command: &mut Command| -> Result<(), EngineError> {
-        let output = run(command)?;
+        let output = work(command)?;
         if output.status.success() {
             Ok(())
         } else {
@@ -1028,9 +1269,11 @@ pub(super) fn commit(
                     .args(["add", "-f", "--"])
                     .args(&paths),
             )?;
-            let changed = run(project_git(git, home, project)
-                .args(["diff", "--cached", "--quiet", "HEAD", "--"])
-                .args(&paths))?;
+            let changed = work(
+                project_git(git, home, project)
+                    .args(["diff", "--cached", "--quiet", "HEAD", "--"])
+                    .args(&paths),
+            )?;
             match changed.status.code() {
                 Some(0) => {}
                 Some(1) => succeeded(committing().args(["--only", "--"]).args(&paths))?,
@@ -1042,13 +1285,16 @@ pub(super) fn commit(
         succeeded(committing().arg("--allow-empty"))?;
     }
     let commit = head_commit(git, home, project)?;
-    let status = listing(project_git(git, home, project).args([
-        "status",
-        "--porcelain",
-        "-z",
-        "--no-renames",
-        "--untracked-files=all",
-    ]))?;
+    let status = listing(
+        project_git(git, home, project).args([
+            "status",
+            "--porcelain",
+            "-z",
+            "--no-renames",
+            "--untracked-files=all",
+        ]),
+        WORK_TIME,
+    )?;
     let left_out = status
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
@@ -1099,7 +1345,7 @@ pub(super) fn push(
     if !plain_repository(project)? {
         return Err(failure("github_publish_not_plain_repo"));
     }
-    let (branch, _) = head_state(git, home, project)?;
+    let (branch, _) = head_state(git, home, project, LOOKUP_TIME)?;
     let commit = head_commit(git, home, project)?;
     if branch != committed.branch || commit != committed.commit {
         return Err(failure("github_publish_head_moved"));
