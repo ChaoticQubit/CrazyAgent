@@ -1892,7 +1892,7 @@ fn a_kept_home_loses_every_shell_startup_file_and_nothing_else() {
     fs::create_dir(home.join("sessions")).unwrap();
     fs::write(home.join("sessions").join(".zshrc"), "kept\n").unwrap();
 
-    let removed = remove_shell_startup(&home).map_err(|error| error.0);
+    let removed = remove_shell_startup(&home, &root).map_err(|error| error.0);
 
     assert_eq!(removed, Ok(()));
     let mut left: Vec<_> = fs::read_dir(&home)
@@ -1906,6 +1906,47 @@ fn a_kept_home_loses_every_shell_startup_file_and_nothing_else() {
         "kept\n"
     );
     assert_eq!(fs::read_to_string(&outside).unwrap(), "the owner's\n");
+}
+
+/// A home the owner chose that lies outside the engine's data root, such as the owner's own
+/// HOME picked as an rcli SDK home while the engine keeps its data elsewhere
+/// (`CRAZYAGENT_HOME`), keeps every shell startup file the owner has there: only a home the
+/// engine made, below its data root, loses them (rv-sec3 B2 r1 F1). A folder beside the root
+/// whose name only begins like it counts as outside, and so does the root itself.
+#[cfg(unix)]
+#[test]
+fn an_owner_home_outside_the_engine_root_keeps_its_shell_startup_files() {
+    let (_directory, root) = folder();
+    let engine = root.join("engine");
+    let owner = root.join("owner-home");
+    let beside = root.join("engine-beside");
+    let made = engine.join("HOMES").join("generated");
+    for home in [&engine, &owner, &beside, &made] {
+        fs::create_dir_all(home).unwrap();
+        for name in [".zshrc", ".bashrc", ".profile"] {
+            fs::write(home.join(name), "the owner's\n").unwrap();
+        }
+    }
+
+    let removed: Vec<_> = [&owner, &beside, &engine, &made]
+        .into_iter()
+        .map(|home| remove_shell_startup(home, &engine).map_err(|error| error.0))
+        .collect();
+
+    assert_eq!(removed, [Ok(()), Ok(()), Ok(()), Ok(())]);
+    for home in [&owner, &beside, &engine] {
+        for name in [".zshrc", ".bashrc", ".profile"] {
+            assert_eq!(
+                fs::read_to_string(home.join(name)).unwrap(),
+                "the owner's\n",
+                "{}: {name}",
+                home.display()
+            );
+        }
+    }
+    for name in [".zshrc", ".bashrc", ".profile"] {
+        assert!(fs::symlink_metadata(made.join(name)).is_err(), "{name}");
+    }
 }
 
 /// A home an agent filled with more entries than one listing of it takes still launches,

@@ -163,7 +163,7 @@ pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
     for folder in [&home, &tmp] {
         private_folder(folder)?;
     }
-    crate::agent_home::remove_shell_startup(&home)
+    crate::agent_home::remove_shell_startup(&home, &root)
         .map_err(|_| invalid("the terminal home keeps a shell startup file"))?;
     let homes = ToolHomes::owner()?;
     let scratch = toolchains::make_tmp(&home)?;
