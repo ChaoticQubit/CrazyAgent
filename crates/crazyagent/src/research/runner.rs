@@ -4679,6 +4679,87 @@ mod tests {
         );
     }
 
+    /// Runs one research job of a fresh project, whose folder `prepare` sets up, on a listening
+    /// loopback provider as far as its runner takes it.
+    /// Takes the folder's setup. Returns the run's ending and the job as it was left.
+    #[cfg(target_os = "macos")]
+    fn one_refused_run(
+        prepare: impl FnOnce(&Path),
+    ) -> (Result<Option<ResearchRun>, RunError>, ResearchJob) {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        prepare(&folder);
+        register_project(&root.database, "alpha", &folder);
+        let runner = ResearchRunner::new(
+            &root.database,
+            &root.state,
+            Path::new("/usr/bin/true"),
+            ResearchLimits {
+                wall_time: Duration::from_secs(10),
+                ..ResearchLimits::default()
+            },
+        )
+        .unwrap();
+        let jobs = ResearchJobs::open(&root.database).unwrap();
+        let id = jobs
+            .enqueue("alpha", "market_research", "codex", false)
+            .unwrap();
+        let provider = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let project = ResearchProject {
+            id: "alpha",
+            root: &folder,
+            account: Some(ResearchAccount::Endpoint {
+                base_url: format!(
+                    "http://127.0.0.1:{}/v1",
+                    provider.local_addr().unwrap().port()
+                ),
+                model: "local-model".into(),
+                key: None,
+            }),
+        };
+        let ending = runner.run_once(&project);
+        (ending, jobs.get(id).unwrap().unwrap())
+    }
+
+    /// RV-DS241-158: a research job refused a worktree for what only the owner's change to
+    /// the project clears, a hook its Git config names or an owner's folder that is no
+    /// repository, fails on its first try with the owner's line, not the sandbox line a
+    /// second try meets again, and its run ends as a plain failure nobody has to read.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_research_job_refused_what_only_the_owner_clears_fails_once_with_the_owners_line() {
+        let hook = "The project's Git config sets hook.x.command, a hook the engine never runs; remove it from the repository's config, then start again";
+        let bare = "The project folder is not a git repository, so agents cannot get their own copy of it; run git init there and make a first commit";
+        let runs = [
+            (
+                hook,
+                one_refused_run(|folder| {
+                    repository_git(folder, &["init", "-q"]);
+                    repository_git(folder, &["commit", "-q", "--allow-empty", "-m", "Start"]);
+                    repository_git(folder, &["config", "hook.x.command", "true"]);
+                }),
+            ),
+            (
+                bare,
+                one_refused_run(|folder| {
+                    let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+                    fs::create_dir(state).unwrap();
+                }),
+            ),
+        ];
+        for (line, (ending, job)) in runs {
+            assert_eq!(job.error.as_deref(), Some(line), "{ending:?}");
+            assert_eq!((job.status, job.attempts), (ResearchStatus::Failed, 1));
+            assert_eq!(job.claimer, None);
+            let run = ending.unwrap().unwrap();
+            assert_eq!(
+                (run.job, run.status, run.process_group),
+                (job.id, ResearchStatus::Failed, None)
+            );
+        }
+    }
+
     struct EngineRoot {
         _temp: tempfile::TempDir,
         base: PathBuf,
