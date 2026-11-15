@@ -623,6 +623,7 @@ impl AgentContext {
         let claude = match drivers::piped(harness).ok()? {
             Piped::Codex => false,
             Piped::Claude => true,
+            Piped::Acp => return None,
         };
         let names = context_mode_names(claude, &self.off_tools);
         let context_mode = !names.is_empty()
@@ -1062,6 +1063,7 @@ impl AgentContext {
         let codex = match drivers::piped(harness)? {
             Piped::Codex => true,
             Piped::Claude => false,
+            Piped::Acp => return Err(failure("launch_harness_unsupported")),
         };
         crate::harnesses::launch::validate_home(home)?;
         let lock = lock(home)?;

@@ -1339,3 +1339,65 @@ fn a_harness_launch_takes_the_owner_retry_option_for_its_provider() {
         );
     }
 }
+
+/// DEC-180 Task 10: an ACP launch hands its prompt, its interrupt and each line to the ACP
+/// protocol, and keeps the prompt check every driver shares: a prompt sent before the session
+/// opens is held, an interrupt asked meanwhile goes out right after it, and the cancelled
+/// turn ends as interrupted.
+#[test]
+fn an_acp_driver_hands_prompts_interrupts_and_lines_to_its_protocol() {
+    let (protocol, start) =
+        crate::harnesses::drivers::acp::Acp::new(std::path::Path::new("/work"), true, None)
+            .unwrap();
+    let start: Value = serde_json::from_slice(&start).unwrap();
+    assert_eq!(start["method"], "initialize");
+    let mut driver = Driver::Acp {
+        protocol: Box::new(protocol),
+    };
+    assert_eq!(
+        driver.send(" ").unwrap_err().0,
+        "launch_prompt_invalid",
+        "the shared prompt check comes first"
+    );
+    assert_eq!(driver.interrupt().unwrap_err().0, "launch_not_running");
+    assert_eq!(driver.send("Say hi.").unwrap(), None);
+    assert_eq!(driver.interrupt().unwrap(), None);
+    let (events, writes) = driver
+        .receive(&line(json!({
+            "jsonrpc": "2.0", "id": 0,
+            "result": {"protocolVersion": 1, "agentCapabilities": {}}
+        })))
+        .unwrap();
+    assert!(events.is_empty());
+    assert_eq!(writes.len(), 1);
+    let (events, writes) = driver
+        .receive(&line(
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s-1"}}),
+        ))
+        .unwrap();
+    assert_eq!(
+        events,
+        [LaunchEvent::Ready {
+            native_session: Some("s-1".into())
+        }]
+    );
+    let methods: Vec<Value> = writes
+        .iter()
+        .map(|frame| serde_json::from_slice::<Value>(frame).unwrap()["method"].clone())
+        .collect();
+    assert_eq!(methods, [json!("session/prompt"), json!("session/cancel")]);
+    let (events, writes) = driver
+        .receive(&line(
+            json!({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "cancelled"}}),
+        ))
+        .unwrap();
+    assert!(writes.is_empty());
+    assert_eq!(
+        events,
+        [
+            LaunchEvent::Interrupted,
+            LaunchEvent::TurnFinished { success: false }
+        ]
+    );
+    assert_eq!(driver.interrupt().unwrap_err().0, "launch_not_running");
+}

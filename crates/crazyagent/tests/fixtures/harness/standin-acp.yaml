@@ -20,3 +20,5 @@ piped:
   argv:
     - "--home"
     - "{home}"
+  tools_off:
+    - "--no-tools"
