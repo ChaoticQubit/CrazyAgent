@@ -523,7 +523,9 @@ fn a_replaced_or_shortened_record_starts_over_and_an_overlong_line_is_skipped() 
     );
     assert_eq!(Format::of("claude-code"), Some(Format::Claude));
     assert_eq!(Format::of("codex"), Some(Format::Codex));
+    assert_eq!(Format::of("claude"), Some(Format::Claude));
     assert_eq!(Format::of("aider"), None);
+    assert_eq!(Format::of("rcli"), None);
 }
 
 #[test]

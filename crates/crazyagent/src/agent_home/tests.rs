@@ -611,6 +611,8 @@ fn both_texts_are_written_in_order_into_each_harness_file() {
     assert_eq!(Harness::from_id("claude-code"), Some(Harness::Claude));
     assert_eq!(Harness::from_id("codex"), Some(Harness::Codex));
     assert_eq!(Harness::from_id("opencode"), None);
+    assert_eq!(Harness::from_id("claude"), None);
+    assert_eq!(Harness::from_id("rcli"), None);
 }
 
 #[cfg(unix)]

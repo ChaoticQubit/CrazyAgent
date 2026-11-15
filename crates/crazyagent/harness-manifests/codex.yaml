@@ -39,6 +39,9 @@ roles:
   - "master"
   - "research"
 sub_agents: "threads"
+home:
+  owner_folders:
+    - ".codex"
 piped:
   driver: "codex-app-server"
 terminal:

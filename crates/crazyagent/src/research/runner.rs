@@ -12,6 +12,7 @@ use crate::harnesses::launch::{
 #[cfg(unix)]
 use crate::harnesses::launch::{await_group_exit, kill_group};
 use crate::harnesses::leftovers::{self, Unstopped};
+use crate::harnesses::manifest::DriverKind;
 use crate::harnesses::terminal_session::{TerminalSession, end_left_pane};
 use crate::launch_context::AgentContext;
 use crate::project_setup::ResearchKind;
@@ -181,14 +182,24 @@ pub enum ResearchHarness {
 }
 
 impl ResearchHarness {
-    /// Maps a team plan or connection harness id to a research harness.
+    /// Maps a team plan or connection harness id to a research harness: one the registry
+    /// names for research, run by the piped driver the registry names for it. A driver
+    /// kind research has no runner for is listed here by name.
     /// Takes the id, such as `codex`, `claude` or `claude-code`.
     /// Returns `None` for a harness research cannot run on.
     pub fn of(id: &str) -> Option<Self> {
-        match id {
-            "codex" => Some(Self::Codex),
-            "claude" | "claude-code" => Some(Self::ClaudeCode),
-            _ => None,
+        let harness = crate::harnesses::registry::registry().get(id)?;
+        if !harness.research() {
+            return None;
+        }
+        match harness.piped()? {
+            DriverKind::CodexAppServer => Some(Self::Codex),
+            DriverKind::ClaudeStreamJson => Some(Self::ClaudeCode),
+            DriverKind::Rcli
+            | DriverKind::Acp
+            | DriverKind::JsonlTurn
+            | DriverKind::JsonlRpc
+            | DriverKind::TextTurn => None,
         }
     }
 
@@ -4303,6 +4314,21 @@ mod tests {
     use crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT;
     use crate::protocol::{ConfigId, CredentialRef, Cursor};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn research_runs_on_codex_and_on_claude_code_under_both_its_names_and_on_nothing_else() {
+        assert_eq!(ResearchHarness::of("codex"), Some(ResearchHarness::Codex));
+        for name in ["claude", "claude-code"] {
+            assert_eq!(
+                ResearchHarness::of(name),
+                Some(ResearchHarness::ClaudeCode),
+                "{name}"
+            );
+        }
+        for name in ["rcli", "opencode", "pi", "aider", ""] {
+            assert_eq!(ResearchHarness::of(name), None, "{name}");
+        }
+    }
 
     /// A Claude Code research agent with no signed-in account handed to it gets one agent
     /// keychain of its own as its home's default and search list, and a Codex one gets no

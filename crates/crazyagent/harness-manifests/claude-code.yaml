@@ -42,6 +42,10 @@ roles:
   - "master"
   - "research"
 sub_agents: "teams"
+home:
+  owner_folders:
+    - ".claude"
+    - ".claude.json"
 piped:
   driver: "claude-stream-json"
 terminal:
