@@ -2,8 +2,6 @@ use crate::credentials::SecretString;
 use crate::engine::EngineError;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
-#[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -56,16 +54,22 @@ const RESPONSE_DROPPED: [&str; 6] = [
 ];
 
 /// Tells whether a model key value is a CrazyAgent placeholder rather than a provider key:
-/// the local placeholder for keyless endpoints, or a relay token
-/// `crazyagent-relay-<64 lowercase hex>`. Input: the value. Output: true for a placeholder.
+/// the local placeholder for keyless endpoints, or a relay token (see [`is_relay_token`]).
+/// Input: the value. Output: true for a placeholder.
 pub fn is_placeholder(value: &str) -> bool {
-    value == LOCAL_PLACEHOLDER
-        || value.strip_prefix(TOKEN_PREFIX).is_some_and(|hex| {
-            hex.len() == TOKEN_HEX
-                && hex
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
+    value == LOCAL_PLACEHOLDER || is_relay_token(value)
+}
+
+/// Tells whether a model key value is a relay token `crazyagent-relay-<64 lowercase hex>`,
+/// the placeholder a harness on an engine key relay is given in place of the key.
+/// Input: the value. Output: true for a relay token.
+pub fn is_relay_token(value: &str) -> bool {
+    value.strip_prefix(TOKEN_PREFIX).is_some_and(|hex| {
+        hex.len() == TOKEN_HEX
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 fn failure(code: &str) -> EngineError {
@@ -130,7 +134,6 @@ struct Shared {
     upstream: Upstream,
     key: SecretString,
     token: String,
-    scratch: PathBuf,
     open: Mutex<Vec<Open>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
     stop: AtomicBool,
@@ -290,24 +293,21 @@ impl Relay {
     /// Output: the running relay, or `model_relay_upstream_invalid`, `model_relay_unavailable`.
     pub fn start(base_url: &str, key: SecretString) -> Result<Self, EngineError> {
         let upstream = upstream(base_url)?;
+        handed_bodies()?;
         let token = format!("{TOKEN_PREFIX}{}", random_hex(TOKEN_HEX / 2)?);
         assert!(is_placeholder(&token));
-        let scratch = std::env::temp_dir().join(format!("crazyagent-relay-{}", random_hex(8)?));
-        private_scratch(&scratch).map_err(|_| failure("model_relay_unavailable"))?;
         let bound = relay_listener().and_then(|listener| {
             listener.set_nonblocking(true)?;
             let port = listener.local_addr()?.port();
             Ok((listener, port))
         });
         let Ok((listener, port)) = bound else {
-            let _ = std::fs::remove_dir_all(&scratch);
             return Err(failure("model_relay_unavailable"));
         };
         let shared = Arc::new(Shared {
             upstream,
             key,
             token,
-            scratch,
             open: Mutex::new(Vec::new()),
             workers: Mutex::new(Vec::new()),
             stop: AtomicBool::new(false),
@@ -316,10 +316,7 @@ impl Relay {
         let accept = std::thread::Builder::new()
             .name("model-relay".into())
             .spawn(move || accept_loop(&listener, &accepting))
-            .map_err(|_| {
-                let _ = std::fs::remove_dir_all(&shared.scratch);
-                failure("model_relay_unavailable")
-            })?;
+            .map_err(|_| failure("model_relay_unavailable"))?;
         assert_ne!(port, 0);
         Ok(Self {
             port,
@@ -371,7 +368,6 @@ impl Drop for Relay {
             let _ = worker.join();
         }
         assert!(self.shared.open().is_empty());
-        let _ = std::fs::remove_dir_all(&self.shared.scratch);
     }
 }
 
@@ -482,21 +478,7 @@ fn exchange(
     shared.authorize(id);
     confined(&incoming.target, &shared.upstream)?;
     incoming.body = read_body(reader, &incoming.headers)?;
-    let body_file = if incoming.body.is_empty() {
-        None
-    } else {
-        Some(BodyFile::write(&shared.scratch, &incoming.body).map_err(|_| 500_u16)?)
-    };
-    let mut config = upstream_config(
-        &shared.upstream,
-        &incoming,
-        scheme,
-        &shared.key,
-        body_file.as_ref().map(|file| file.0.as_path()),
-    )
-    .map_err(|_| 400_u16)?;
-    let mut child =
-        crate::spawn_gate::spawn(&mut upstream_command(&shared.upstream)).map_err(|_| 502_u16)?;
+    let (mut child, mut config, body) = upstream_child(shared, &incoming, scheme)?;
     let input = child.stdin.take();
     let output = child.stdout.take();
     if let Err(mut child) = shared.attach(id, child) {
@@ -506,14 +488,18 @@ fn exchange(
     }
     let written = input.map(|mut input| input.write_all(&config));
     config.fill(0);
-    let relayed = match (written, output) {
-        (Some(Ok(())), Some(output)) => relay_reply(&mut BufReader::new(output), stream),
+    let sent = match (written, body) {
+        (Some(Ok(())), Some(mut body)) => body.write_all(&incoming.body).is_ok(),
+        (Some(Ok(())), None) => true,
+        _ => false,
+    };
+    let relayed = match (sent, output) {
+        (true, Some(output)) => relay_reply(&mut BufReader::new(output), stream),
         _ => Err(502),
     };
     if let Some(mut child) = shared.detach(id) {
         stop(&mut child);
     }
-    drop(body_file);
     relayed
 }
 
@@ -524,63 +510,85 @@ fn stop(child: &mut Child) {
     let _ = child.wait();
 }
 
-struct BodyFile(PathBuf);
-
-impl BodyFile {
-    fn write(scratch: &Path, body: &[u8]) -> std::io::Result<Self> {
-        let name = random_hex(16).map_err(|_| std::io::Error::other("random"))?;
-        let path = scratch.join(format!("request-{name}"));
-        let mut file = create_private(&path)?;
-        let file_path = Self(path);
-        file.write_all(body)?;
-        Ok(file_path)
+/// Starts curl for one forwarded request. A body goes on a pipe curl inherits at its own
+/// number and reads as `/dev/fd/<n>`, so it is never written to disk, where an agent's temp
+/// folder grant could read or rewrite it (SA vid 201). Inputs: the relay, the request and
+/// the key header form. Output: curl, its config for stdin and the body pipe's write end
+/// (none for an empty body), or the status the harness gets.
+fn upstream_child(
+    shared: &Shared,
+    incoming: &Incoming,
+    scheme: KeyHeader,
+) -> Result<(Child, Vec<u8>, Option<std::io::PipeWriter>), u16> {
+    let pipe = if incoming.body.is_empty() {
+        None
+    } else {
+        Some(crate::spawn_gate::guarded(std::io::pipe).map_err(|_| 500_u16)?)
+    };
+    let handed = pipe.as_ref().map(|(reader, _)| handed_path(reader));
+    let mut config = upstream_config(
+        &shared.upstream,
+        incoming,
+        scheme,
+        &shared.key,
+        handed.as_deref(),
+    )
+    .map_err(|_| 400_u16)?;
+    let mut command = upstream_command(&shared.upstream);
+    let (spawned, body) = match pipe {
+        Some((reader, writer)) => (spawn_holding(&mut command, reader), Some(writer)),
+        None => (crate::spawn_gate::spawn(&mut command), None),
+    };
+    match spawned {
+        Ok(child) => Ok((child, config, body)),
+        Err(_) => {
+            config.fill(0);
+            Err(502)
+        }
     }
 }
 
-/// Creates the relay's scratch folder for request bodies, private to the engine user.
-/// Input: the new folder path. Output: Ok once it exists with mode 0700.
+/// The path curl reads a request body from: the body pipe's read end, at the number curl
+/// inherits it under. Input: the read end. Output: `/dev/fd/<n>`.
 #[cfg(unix)]
-fn private_scratch(path: &Path) -> std::io::Result<()> {
-    std::fs::DirBuilder::new().mode(0o700).create(path)
+fn handed_path(reader: &std::io::PipeReader) -> PathBuf {
+    use std::os::fd::AsRawFd;
+    PathBuf::from(format!("/dev/fd/{}", reader.as_raw_fd()))
 }
 
-/// Refuses the relay's scratch folder where it cannot be made private to the engine
-/// user. Input: the folder path, unused. Output: an `Unsupported` error, which the
-/// relay reports as `model_relay_unavailable`.
+/// Never reached: [`Relay::start`] refuses where curl cannot inherit the body pipe.
+/// Input: unused. Output: an empty path.
 #[cfg(not(unix))]
-fn private_scratch(_path: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "model_relay_unavailable",
-    ))
+fn handed_path(_reader: &std::io::PipeReader) -> PathBuf {
+    PathBuf::new()
 }
 
-/// Creates one request body file, readable only by the engine user, refusing a link
-/// placed at its path. Input: the new file path. Output: the open file.
+/// Starts curl holding the body pipe's read end at its own number, under the spawn gate, so
+/// no other child ever holds it. Inputs: the curl command and the read end. Output: curl.
 #[cfg(unix)]
-fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)
+fn spawn_holding(command: &mut Command, reader: std::io::PipeReader) -> std::io::Result<Child> {
+    crate::spawn_gate::spawn_handing(command, reader.into())
 }
 
-/// Refuses a request body file where it cannot be made private to the engine user.
-/// Input: the file path, unused. Output: an `Unsupported` error.
+/// Never reached: [`Relay::start`] refuses where curl cannot inherit the body pipe.
+/// Inputs: unused. Output: an `Unsupported` error.
 #[cfg(not(unix))]
-fn create_private(_path: &Path) -> std::io::Result<std::fs::File> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "model_relay_unavailable",
-    ))
+fn spawn_holding(_command: &mut Command, _reader: std::io::PipeReader) -> std::io::Result<Child> {
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
 }
 
-impl Drop for BodyFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
+/// Lets a relay start where curl can inherit the pipe that carries each request body.
+/// Output: Ok.
+#[cfg(unix)]
+fn handed_bodies() -> Result<(), EngineError> {
+    Ok(())
+}
+
+/// Refuses a relay where curl cannot inherit the pipe that carries each request body, so no
+/// body is ever written to disk. Output: `model_relay_unavailable`.
+#[cfg(not(unix))]
+fn handed_bodies() -> Result<(), EngineError> {
+    Err(failure("model_relay_unavailable"))
 }
 
 fn read_line(reader: &mut impl BufRead, total: &mut usize) -> Result<String, u16> {
