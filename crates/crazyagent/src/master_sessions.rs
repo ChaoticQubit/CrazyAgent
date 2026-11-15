@@ -2647,11 +2647,7 @@ fn divide(
 /// The stored name of the backend a one-turn master runs on. Takes the backend. Returns
 /// the name a session row keeps for it.
 fn backend_name(backend: MasterBackend) -> &'static str {
-    match backend {
-        MasterBackend::Rcli => "rcli",
-        MasterBackend::Codex => "codex",
-        MasterBackend::Claude => "claude",
-    }
+    backend.as_str()
 }
 
 /// The owner's On harness switch setting for a project, Carry over where a database has no

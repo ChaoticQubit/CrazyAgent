@@ -102,13 +102,77 @@ impl From<&MasterBootstrapAuth> for MasterBootstrapAuth {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// The backend that runs a project's master: one of the three the engine hosts itself, or
+/// another harness of the registry whose manifest names the master role, by its catalog id.
+/// It is stored and sent as one word: `rcli`, `codex`, `claude`, or that catalog id.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum MasterBackend {
     #[default]
     Rcli,
     Codex,
     Claude,
+    Listed(&'static str),
+}
+
+impl MasterBackend {
+    /// The three backends the engine hosts itself, in the order the master form lists them.
+    pub const NATIVE: [Self; 3] = [Self::Rcli, Self::Codex, Self::Claude];
+
+    /// The stored word of this backend. Takes the backend. Returns `rcli`, `codex`,
+    /// `claude`, or a listed harness's catalog id.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rcli => "rcli",
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Listed(id) => id,
+        }
+    }
+
+    /// Reads a stored word: one of the three native words, or the exact catalog id of a
+    /// listed harness whose manifest names the master role. Takes the text. Returns the
+    /// backend, or None for any other word, the catalog id `claude-code` among them.
+    pub fn parse(text: &str) -> Option<Self> {
+        let native = Self::NATIVE
+            .into_iter()
+            .find(|backend| backend.as_str() == text);
+        native.or_else(|| {
+            crate::harnesses::registry::registry()
+                .get(text)
+                .and_then(Self::of)
+                .filter(|backend| matches!(backend, Self::Listed(id) if *id == text))
+        })
+    }
+
+    /// Names the backend that runs a master on one harness of a registry. Takes the
+    /// harness. Returns Codex, Claude or RCLI for the harness the engine hosts itself,
+    /// Listed with its id for any other harness whose manifest names the master role, None
+    /// for a harness without that role.
+    pub fn of(harness: &'static crate::harnesses::registry::Harness) -> Option<Self> {
+        use crate::coord::settings::HarnessKind;
+        if !harness.master() {
+            return None;
+        }
+        match HarnessKind::of(harness)? {
+            HarnessKind::Codex => Some(Self::Codex),
+            HarnessKind::ClaudeCode => Some(Self::Claude),
+            HarnessKind::Rcli => Some(Self::Rcli),
+            HarnessKind::Listed(id) => Some(Self::Listed(id)),
+        }
+    }
+}
+
+impl Serialize for MasterBackend {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for MasterBackend {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let word = String::deserialize(deserializer)?;
+        Self::parse(&word).ok_or_else(|| serde::de::Error::custom("unknown master backend"))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -673,6 +737,9 @@ pub(crate) fn validate_selection(
     project: &ProjectId,
     selection: &MasterSelection,
 ) -> Result<(), EngineError> {
+    if let MasterBackend::Listed(_) = selection.backend {
+        return Err(error("launch_harness_unsupported"));
+    }
     selection.route.validate().map_err(error)?;
     validate_pool_scope(
         config,
@@ -728,7 +795,8 @@ pub(crate) fn validate_selection(
 
 /// Tells whether a connection can run a master of this backend.
 /// Inputs: the backend and the connection. Output: true for an RCLI HTTP connection, or
-/// for a native connection of the Codex or Claude harness the backend names.
+/// for a native connection of the Codex or Claude harness the backend names; false for a
+/// listed backend, which no connection runs until the engine hosts a master on it.
 pub(crate) fn backend_member(backend: MasterBackend, connection: &ModelConnection) -> bool {
     match backend {
         MasterBackend::Rcli => {
@@ -745,6 +813,7 @@ pub(crate) fn backend_member(backend: MasterBackend, connection: &ModelConnectio
                 && connection.protocol.as_str() == "native"
                 && matches!(connection.endpoint, ModelEndpoint::Native {})
         }
+        MasterBackend::Listed(_) => false,
     }
 }
 
@@ -778,7 +847,8 @@ mod cause_code_tests {
 
 #[cfg(test)]
 mod backend_tests {
-    use super::{MasterBackend, MasterSelection};
+    use super::{MasterBackend, MasterSelection, backend_member};
+    use crate::config::ModelConnection;
     use crate::protocol::CredentialRef;
     use crate::routing::{ResourceBudget, RouteRequest};
 
@@ -867,5 +937,129 @@ mod backend_tests {
                 "{word}"
             );
         }
+    }
+
+    fn manifest(id: &str, role: &str) -> String {
+        format!(
+            "schema: 1\nkind: harness\nid: \"{id}\"\nname: \"Sample\"\nbinaries:\n  - \"{id}-bin\"\nheadless: \"sample --json\"\nmodel_selection: true\naccount_kinds:\n  - \"api_key\"\nroles:\n  - \"{role}\"\n"
+        )
+    }
+
+    /// DEC-180 Phase 1: the backend of a master follows the manifest of its harness. A
+    /// harness that is not Codex, Claude Code or RCLI gets a listed backend, stored under
+    /// its own id, the moment its manifest names the master role, and no bundled manifest
+    /// does that yet, so a team plan's master maps as it did.
+    #[test]
+    fn a_harness_gets_a_listed_backend_when_its_manifest_names_the_master_role() {
+        use crate::harnesses::registry::{Registry, registry};
+        let files = [
+            ("master-only", manifest("master-only", "master")),
+            ("agent-only", manifest("agent-only", "agent")),
+            ("codex", manifest("codex", "master")),
+            ("claude-code", manifest("claude-code", "master")),
+            ("rcli", manifest("rcli", "master")),
+        ];
+        let borrowed: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(file, text)| (*file, text.as_str()))
+            .collect();
+        let built: &'static Registry = Box::leak(Box::new(Registry::build(&borrowed).unwrap()));
+        let backend = |id: &str| MasterBackend::of(built.get(id).unwrap());
+        let listed = MasterBackend::Listed("master-only");
+        assert_eq!(backend("master-only"), Some(listed));
+        assert_eq!(backend("agent-only"), None);
+        assert_eq!(backend("codex"), Some(MasterBackend::Codex));
+        assert_eq!(backend("claude-code"), Some(MasterBackend::Claude));
+        assert_eq!(backend("rcli"), Some(MasterBackend::Rcli));
+        assert_eq!(listed.as_str(), "master-only");
+        assert_eq!(serde_json::to_string(&listed).unwrap(), "\"master-only\"");
+        assert_eq!(
+            serde_json::to_value(selection(listed)).unwrap()["backend"],
+            serde_json::json!("master-only")
+        );
+        assert_eq!(MasterBackend::parse("master-only"), None);
+        assert_eq!(
+            MasterBackend::NATIVE.map(MasterBackend::as_str),
+            ["rcli", "codex", "claude"]
+        );
+
+        let mut masters = Vec::new();
+        for harness in registry().all() {
+            let id = harness.id();
+            let named = MasterBackend::of(harness);
+            assert_eq!(named.is_some(), harness.master(), "{id}");
+            assert_eq!(crate::team::master_backend(id), named, "{id}");
+            assert!(!matches!(named, Some(MasterBackend::Listed(_))), "{id}");
+            masters.extend(named);
+        }
+        assert_eq!(
+            masters,
+            [
+                MasterBackend::Codex,
+                MasterBackend::Claude,
+                MasterBackend::Rcli
+            ]
+        );
+        assert_eq!(
+            crate::team::master_backend("claude"),
+            Some(MasterBackend::Claude)
+        );
+    }
+
+    fn connection(harness: &str, native: bool) -> ModelConnection {
+        let (protocol, endpoint, auth) = if native {
+            (
+                "native",
+                serde_json::json!({"kind": "native"}),
+                serde_json::json!({"method": "native_managed", "profile_ref": "profile"}),
+            )
+        } else {
+            (
+                "openai-chat",
+                serde_json::json!({"kind": "http", "url": "http://127.0.0.1:11434/v1"}),
+                serde_json::json!({"method": "none"}),
+            )
+        };
+        serde_json::from_value(serde_json::json!({
+            "id": "connection",
+            "provider": "provider",
+            "harness": harness,
+            "protocol": protocol,
+            "account_ref": "account",
+            "endpoint": endpoint,
+            "model": {"id": "model", "author": "author"},
+            "auth": auth,
+        }))
+        .unwrap()
+    }
+
+    /// DEC-180 Phase 1: no connection runs a master on a listed backend yet, not even a
+    /// connection of that very harness, while RCLI, Codex and Claude keep the connections
+    /// they ran on.
+    #[test]
+    fn no_connection_runs_a_master_on_a_listed_backend() {
+        let connections = [
+            connection("rcli", false),
+            connection("codex", true),
+            connection("claude-code", true),
+            connection("claude", true),
+            connection("opencode", true),
+            connection("opencode", false),
+        ];
+        let runs =
+            |backend: MasterBackend| connections.each_ref().map(|c| backend_member(backend, c));
+        assert_eq!(
+            runs(MasterBackend::Rcli),
+            [true, false, false, false, false, false]
+        );
+        assert_eq!(
+            runs(MasterBackend::Codex),
+            [false, true, false, false, false, false]
+        );
+        assert_eq!(
+            runs(MasterBackend::Claude),
+            [false, false, true, true, false, false]
+        );
+        assert_eq!(runs(MasterBackend::Listed("opencode")), [false; 6]);
     }
 }

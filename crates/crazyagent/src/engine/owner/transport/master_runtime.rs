@@ -797,6 +797,7 @@ impl OwnerRuntimeHandle {
             MasterBackend::Codex => NativeHarness::Codex,
             MasterBackend::Claude => NativeHarness::Claude,
             MasterBackend::Rcli => return Err(failure("master_runtime_backend_unsupported")),
+            MasterBackend::Listed(_) => return Err(failure("launch_harness_unsupported")),
         };
         let profile_ref = match &prepared.profile.binding().connection.auth {
             ModelAuthentication::NativeManaged { profile_ref } => profile_ref.clone(),
@@ -959,6 +960,7 @@ impl OwnerRuntimeHandle {
             MasterBackend::Claude => (Some(Format::Claude), "claude-code"),
             MasterBackend::Codex => (Some(Format::Codex), "codex"),
             MasterBackend::Rcli => (None, "rcli"),
+            MasterBackend::Listed(id) => (None, id),
         };
         let attribution = Attribution {
             kind: RunKind::Master,
@@ -1498,7 +1500,9 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         | "master_capture_encoding" => MasterReason::CaptureIncomplete,
         "codex_host_approval_required" => MasterReason::ApprovalRequired,
         "codex_host_cancelled" => MasterReason::Cancelled,
-        "master_runtime_backend_unsupported" => MasterReason::UnsupportedCapability,
+        "master_runtime_backend_unsupported" | "launch_harness_unsupported" => {
+            MasterReason::UnsupportedCapability
+        }
         "master_repository_missing" => MasterReason::RepositoryMissing,
         "master_instructions_too_large" => MasterReason::InstructionsTooLarge,
         "codex_host_protocol_invalid_state"
