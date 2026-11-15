@@ -368,7 +368,8 @@ fn the_remote_settings_folder_is_read_only_to_the_ide_server() {
 /// profile, so the base denies there hold only when given again after that grant (sandbox-git
 /// r1 note 4): no `.git` at any depth in any letter case, no launch file or folder of an
 /// agent home, and no mode change of a granted folder itself. Everything else there stays
-/// writable.
+/// writable, npm's config and a flag on its own file too, since no launch resets the data
+/// folder and the agent config denies are an agent home's alone (RV-DS241-188, -187).
 #[test]
 fn the_ide_data_folders_keep_the_git_launch_file_and_root_denies_after_their_grant() {
     let scratch = tempfile::Builder::new()
@@ -425,6 +426,9 @@ fn the_ide_data_folders_keep_the_git_launch_file_and_root_denies_after_their_gra
     assert!(!sh(&profile, make, &home.join("agents")));
     assert!(sh(&profile, make, &home.join("data/User/globalStorage")));
     assert!(sh(&profile, write, &home.join("data/User/settings.json")));
+    assert!(sh(&profile, write, &home.join(".npmrc")));
+    let flagged = r#"/usr/bin/chflags uchg "$1" && /usr/bin/chflags nouchg "$1""#;
+    assert!(sh(&profile, flagged, &home.join("kept.txt")));
     for granted in [&home, &work] {
         assert!(!granted.join(".git").exists() && !granted.join("deep/.GIT").exists());
         assert_eq!(
