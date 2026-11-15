@@ -1075,7 +1075,9 @@ impl ResearchRunner {
         let display = jobs
             .terminal_display(&project)
             .map_err(|_| RunError::Invalid("project coordination settings unreadable".into()))?;
-        let context = context.with_terminal_display(display);
+        let context = context
+            .with_terminal_display(display)
+            .at_access(policy.access);
         let context = match &proxy {
             Some(proxy) => context.with_model_proxy(proxy.port()),
             None => context,

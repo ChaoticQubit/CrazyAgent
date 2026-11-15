@@ -106,6 +106,7 @@ fn shown(text: &str, version: u64) -> ProcessText {
     ProcessText {
         text: text.into(),
         version,
+        outside: false,
     }
 }
 
@@ -1014,7 +1015,14 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         section_bytes: 0,
     };
     let sub_home = launched_home(&root, sub);
-    prepare(&sub_home, Harness::Codex, &given, &text("# Sub rules\n")).unwrap();
+    prepare(
+        &sub_home,
+        Harness::Codex,
+        &given,
+        &text("# Sub rules\n"),
+        crate::agent_home::Caches::default(),
+    )
+    .unwrap();
     record_skills(&root, &sub_home, &["tdd", "code-review"]).unwrap();
     assert_eq!(
         agent_instructions(&root, &project, Some(sub)).unwrap(),
@@ -1068,6 +1076,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         Harness::Claude,
         &given,
         &text("# Master rules\n"),
+        crate::agent_home::Caches::default(),
     )
     .unwrap();
     let shown = agent_instructions(&root, &project, None).unwrap();
@@ -1144,7 +1153,14 @@ fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
         mode: Mode::Both,
         repeated: crate::agent_home::Repeated::LeaveOut,
     };
-    prepare(&home, Harness::Claude, &launch, &given).unwrap();
+    prepare(
+        &home,
+        Harness::Claude,
+        &launch,
+        &given,
+        crate::agent_home::Caches::default(),
+    )
+    .unwrap();
     assert_eq!(
         agent_instructions(&root, &project, Some(sub))
             .unwrap()
@@ -1193,7 +1209,14 @@ fn an_agent_cannot_change_the_skills_its_card_lists() {
         files: Vec::new(),
         section_bytes: 0,
     };
-    prepare(&home, Harness::Codex, &launch, &given).unwrap();
+    prepare(
+        &home,
+        Harness::Codex,
+        &launch,
+        &given,
+        crate::agent_home::Caches::default(),
+    )
+    .unwrap();
     record_skills(&root, &home, &["tdd", "code-review"]).unwrap();
     let installed = vec!["tdd".to_owned(), "code-review".to_owned()];
     assert_eq!(
@@ -2322,7 +2345,8 @@ fn only_a_proposal_request_is_served_past_the_owner_exchange() {
 
 /// SA vid 7 (leader 09:47): the import Process confirms takes the project text as it is, so
 /// text in a `.crazyagent/instructions.md` the project's git tracks, here the owner's with
-/// the Imported heading taken off, stays first and unlabelled after the import.
+/// the Imported heading taken off, stays first and unlabelled in the file after the import,
+/// while agents still get it labelled, as Process never saved it (SA vid 7 residual).
 #[test]
 fn process_import_never_labels_the_project_text() {
     let (_directory, root) = root();
@@ -2356,9 +2380,72 @@ fn process_import_never_labels_the_project_text() {
         assert!(done.status.success(), "{done:?}");
     }
     let project = with_project(&root, &folder);
-    run(&root, Action::ConfirmImport { project }, None).unwrap();
+    let action = Action::ConfirmImport {
+        project: project.clone(),
+    };
+    run(&root, action, None).unwrap();
     assert_eq!(
         crate::agent_home::read_project(&folder).unwrap(),
         "OWNER-TEXT-7\n\n### Imported from CLAUDE.md\n\nREPO-RULE-7\n"
     );
+    assert!(read(&root, Some(project.clone())).unwrap().outside);
+    let shown = given(&root, &project).unwrap();
+    let heading = crate::instruction_files::CARRIED_HEADING;
+    assert!(
+        shown.contains(&format!("{heading}\n\nOWNER-TEXT-7\n")),
+        "text Process never saved keeps its label after an import (SA vid 7 residual): {shown}"
+    );
+}
+
+/// SA vid 7 residual (leader 14:22 A): once the project file holds text Process did not
+/// save, as the owner's own git or an accepted change set leaves it, agents get that text
+/// under the Imported heading with its headings demoted, until the owner saves it in Process.
+#[test]
+fn project_text_changed_after_a_process_save_reaches_agents_labelled_until_saved_again() {
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    save(&root, Some(project.clone()), "Owner rule.\n", 0).unwrap();
+    let saved = given(&root, &project).unwrap();
+    assert!(
+        saved.ends_with("## Project instructions\n\nOwner rule.\n"),
+        "{saved}"
+    );
+    let pulled = "## Pulled\nRule.\n";
+    fs::write(folder.join(".crazyagent/instructions.md"), pulled).unwrap();
+    let heading = crate::instruction_files::CARRIED_HEADING;
+    let label = format!("## Project instructions\n\n{heading}\n\n##### Pulled\nRule.\n");
+    let changed = given(&root, &project).unwrap();
+    assert!(changed.ends_with(&label), "{changed}");
+    save(&root, Some(project.clone()), pulled, 1).unwrap();
+    let kept = given(&root, &project).unwrap();
+    assert!(
+        kept.ends_with("## Project instructions\n\n## Pulled\nRule.\n"),
+        "{kept}"
+    );
+}
+
+/// SA vid 7 residual (leader 14:22 A): Process says when the project file holds text it did
+/// not save there last, in a read and in a stale reply, never for the app text, and a save
+/// that lands clears it.
+#[test]
+fn process_says_when_the_project_text_changed_outside_until_a_save_lands() {
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    assert!(!read(&root, Some(project.clone())).unwrap().outside);
+    fs::write(folder.join(".crazyagent/instructions.md"), "Pulled rule.\n").unwrap();
+    assert!(read(&root, Some(project.clone())).unwrap().outside);
+    fs::write(root.join(crate::agent_home::APP_FILE), "App rule.\n").unwrap();
+    assert!(!read(&root, None).unwrap().outside, "never the app text");
+    let refused = save(&root, Some(project.clone()), "Mine.\n", 5).unwrap();
+    let SavedText::Stale { current, .. } = refused else {
+        panic!("a save at another version is stale");
+    };
+    assert!(current.outside, "{current:?}");
+    assert_eq!(current.text, "Pulled rule.\n");
+    save(&root, Some(project.clone()), "Pulled rule.\n", 0).unwrap();
+    assert!(!read(&root, Some(project)).unwrap().outside);
 }

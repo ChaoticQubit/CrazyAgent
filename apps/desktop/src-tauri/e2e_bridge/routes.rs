@@ -1602,13 +1602,12 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             struct Args {
                 id: String,
                 generation: u64,
-                delete_name: Option<String>,
             }
-            let Args { id, generation, delete_name } = match parse(args) {
+            let Args { id, generation } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .remove_project(&id, generation, delete_name) .await }.await;
+            let result: Result<_, BridgeError> = async { lock(state).await?.remove_project(&id, generation).await }.await;
             routed(result)
         }
         "desktop_project_demo" => {

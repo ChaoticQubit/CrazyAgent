@@ -53,7 +53,7 @@ fn leftovers(setup: &Path) -> Vec<String> {
 
 /// A clean-Mac gate build maps Homebrew's folders for every search the tool resolver makes
 /// ([`crate::tools::homebrew_folders`]); setup's Mac finder takes its `brew` and Homebrew
-/// folders from there too, so under the gate it never finds or runs this Mac's own Homebrew.
+/// folders from there too, each that exists, so under the gate it never runs this Mac's own.
 #[test]
 fn setup_looks_for_homebrew_where_the_tool_resolver_does() {
     let root = root();
@@ -62,7 +62,7 @@ fn setup_looks_for_homebrew_where_the_tool_resolver_does() {
     let brew: Vec<PathBuf> = homebrew.iter().map(|folder| folder.join("brew")).collect();
     assert_eq!(installer.brew, brew);
     let search: Vec<PathBuf> = std::env::split_paths(&installer.search_path()).collect();
-    for folder in &homebrew {
+    for folder in homebrew.iter().filter(|folder| folder.is_dir()) {
         assert!(search.contains(folder), "{}", folder.display());
     }
     for fixed in ["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from) {

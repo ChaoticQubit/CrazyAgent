@@ -201,11 +201,19 @@ impl Servers {
     /// listens at another socket. The lead's record gets the last renewed deadline before the
     /// keeper starts, so a server started after the last renewal pass still ends (QL-L1);
     /// before the first pass, which runs at once as the engine starts, it keeps what it holds.
-    /// Takes the lead, its socket and which server. Returns whether a
-    /// keeper started now, `terminal_folder_unsafe` for a socket path that is not this user's
-    /// socket, or `terminal_unavailable`.
+    /// For a lead on an engine key relay the keeper also holds the engine's lifeline, a pipe
+    /// on its input whose closing, as at the engine's death, stops it (B6b).
+    /// Takes the lead, its socket, which server and whether the lead is relayed. Returns
+    /// whether a keeper started now, `terminal_folder_unsafe` for a socket path that is not
+    /// this user's socket, or `terminal_unavailable`.
     #[cfg(target_os = "macos")]
-    fn keep_server(&self, lead: &AgentId, socket: &Path, mates: bool) -> Result<bool, HostError> {
+    fn keep_server(
+        &self,
+        lead: &AgentId,
+        socket: &Path,
+        mates: bool,
+        relayed: bool,
+    ) -> Result<bool, HostError> {
         use std::os::unix::process::CommandExt;
         let program = self
             .program
@@ -288,13 +296,19 @@ impl Servers {
                     crate::sandbox::KEEPER_STATE,
                     crate::team::runtime::agent_servers_state(&self.root.join("team"), id, mates),
                 )
+                .envs(relayed.then_some((crate::sandbox::KEEPER_LIFELINE, "0")))
                 .current_dir(folder)
-                .stdin(std::process::Stdio::null())
+                .stdin(if relayed {
+                    std::process::Stdio::piped()
+                } else {
+                    std::process::Stdio::null()
+                })
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .process_group(0),
         )
         .map_err(|_| failure("terminal_unavailable"))?;
+        assert_eq!(keeper.stdin.is_some(), relayed);
         let ready = Instant::now() + KEEPER_READY;
         while crate::spawn_gate::connect_unix_std(socket).is_err() {
             if !keeper_runs(&mut keeper) || Instant::now() >= ready {
@@ -311,14 +325,15 @@ impl Servers {
     }
 
     /// A lead's own or teammates' server with no keeper, off macOS, where no lead runs on
-    /// one. Takes the lead, its socket and which server. Returns
-    /// `terminal_own_server_unavailable`.
+    /// one. Takes the lead, its socket, which server and whether the lead is relayed.
+    /// Returns `terminal_own_server_unavailable`.
     #[cfg(not(target_os = "macos"))]
     fn keep_server(
         &self,
         _lead: &AgentId,
         _socket: &Path,
         _mates: bool,
+        _relayed: bool,
     ) -> Result<bool, HostError> {
         Err(failure(OWN_SERVER_UNAVAILABLE))
     }
@@ -634,6 +649,7 @@ impl Host for Servers {
         &self,
         agent: &AgentId,
         command: &InteractiveCommand,
+        relayed: bool,
     ) -> Result<PaneRef, HostError> {
         if !cfg!(target_os = "macos") || self.program.is_none() {
             return Err(failure(OWN_SERVER_UNAVAILABLE));
@@ -647,7 +663,7 @@ impl Host for Servers {
             return Err(failure("terminal_agent_running"));
         }
         let mates_socket = teammates_socket(&self.root, agent)?;
-        let mates_started = self.keep_server(agent, &mates_socket, true)?;
+        let mates_started = self.keep_server(agent, &mates_socket, true, relayed)?;
         let spawned = self
             .mates_host(agent, &mates_socket)
             .and_then(|mates| {
@@ -657,7 +673,7 @@ impl Host for Servers {
                 mates.anchor_for(agent, command)
             })
             .and_then(|pane_env| {
-                let started = self.keep_server(agent, &socket, false)?;
+                let started = self.keep_server(agent, &socket, false, relayed)?;
                 let ready = if started {
                     server.exit_when_empty()
                 } else {
@@ -795,6 +811,17 @@ impl Host for Servers {
                 keeper_runs(keeper).then(|| (keeper.id(), mates))
             })
             .collect()
+    }
+
+    #[cfg(test)]
+    fn sever_lifelines(&self, agent: &AgentId) {
+        for kept in [&self.keepers, &self.mates_keepers] {
+            if let Ok(mut keepers) = kept.lock()
+                && let Some(keeper) = keepers.get_mut(agent)
+            {
+                drop(keeper.stdin.take());
+            }
+        }
     }
 
     fn end_kept_server(&self, agent: &AgentId) -> Option<bool> {

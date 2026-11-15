@@ -152,11 +152,15 @@ impl ProjectMove {
     /// Runs the plan with a bounded wait: nothing moves while an agent of the project
     /// runs or a main graph refresh works in its folder (`move_project_busy` past the
     /// wait), then the folder is placed by [`AddPlan::place`], which leaves the source
-    /// whole. Inputs: the wait and the tally. Output: the outcome.
+    /// whole, and the project text the engine wrote stays the owner's there
+    /// ([`carry_written`]). Inputs: the wait and the tally. Output: the outcome.
     pub(crate) fn run_with(self, wait: Duration, tally: &Tally) -> Result<Moved, EngineError> {
         let landing = self.ready(wait, tally)?;
         assert!(!tally.waiting());
+        let written = self.written_text();
+        let target = self.add.destination().to_path_buf();
         let placed = self.add.place(tally)?;
+        carry_written(&self.database, &target, written);
         Ok(Moved { placed, landing })
     }
 
@@ -166,8 +170,23 @@ impl ProjectMove {
     #[cfg(all(test, unix))]
     pub(crate) fn run_by_copy(self, wait: Duration, tally: &Tally) -> Result<Moved, EngineError> {
         let landing = self.ready(wait, tally)?;
+        let written = self.written_text();
+        let target = self.add.destination().to_path_buf();
         let placed = self.add.place_by_copy(tally)?;
+        carry_written(&self.database, &target, written);
         Ok(Moved { placed, landing })
+    }
+
+    /// The project instructions text the engine last wrote into the folder, read before the
+    /// folder moves, since that record is named by the folder's real path and stays behind
+    /// ([`crate::agent_home::outside`], rv-code2 b7-rest F1). Output: the text, or none for
+    /// blank or other text, a folder that cannot be read or no engine data folder.
+    fn written_text(&self) -> Option<String> {
+        let data = self.database.parent()?;
+        let source = self.add.source();
+        let text = crate::agent_home::read_project(source).ok()?;
+        let owners = !text.trim().is_empty() && !crate::agent_home::outside(data, source, &text);
+        owners.then_some(text)
     }
 
     /// Waits until no agent of the project runs, no main graph refresh builds or publishes
@@ -222,6 +241,19 @@ impl ProjectMove {
             Some(code) => Err(refused(code)),
             None => Ok(landing),
         }
+    }
+}
+
+/// Records the text a move carried at the folder's place in the home once that is the text
+/// there, so the owner's own text stays theirs after the move; a record that cannot be
+/// written leaves the text labelled until the next save, the safe side. Inputs: the engine
+/// database, the folder's new place and the text [`ProjectMove::written_text`] read.
+fn carry_written(database: &Path, target: &Path, text: Option<String>) {
+    if let Some(text) = text
+        && let Some(data) = database.parent()
+        && crate::agent_home::read_project(target).is_ok_and(|now| now == text)
+    {
+        let _ = crate::agent_home::mark_written(data, target, &text);
     }
 }
 

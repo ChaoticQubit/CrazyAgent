@@ -802,6 +802,7 @@ pub(in crate::tui) struct ProcessPage {
     cleanup: Option<Cleanup>,
     cleanup_top: usize,
     app_ai: Option<Result<bool, String>>,
+    outside: bool,
 }
 
 impl ProcessPage {
@@ -824,6 +825,7 @@ impl ProcessPage {
             cleanup: None,
             cleanup_top: 0,
             app_ai: None,
+            outside: false,
         }
     }
 
@@ -1294,8 +1296,13 @@ impl ProcessPage {
         match (&event.query, &event.result) {
             (
                 ProcessQuery::Read { .. },
-                Ok(ProcessReply::Current(ProcessText { text, version })),
+                Ok(ProcessReply::Current(ProcessText {
+                    text,
+                    version,
+                    outside,
+                })),
             ) => {
+                self.outside = *outside;
                 self.editor = Editor::new(text);
                 self.state = State::Ready {
                     saved: text.clone(),
@@ -1321,6 +1328,7 @@ impl ProcessPage {
                 }
                 self.problem = None;
                 self.conflict = None;
+                self.outside = false;
                 ctx.say(match reply.claude_warning() {
                     None => Message::success(
                         "Instructions saved.",
@@ -1338,6 +1346,7 @@ impl ProcessPage {
                 })),
             ) => {
                 self.problem = Some(message("process_text_stale"));
+                self.outside = current.outside;
                 self.conflict = Some(Conflict {
                     opened: *version,
                     version: current.version,
@@ -1570,6 +1579,13 @@ impl ProcessPage {
             Scope::Project { .. } => {
                 self.settings_lines(width, &mut lines, ctx);
                 self.adoption_lines(width, &mut lines, ctx);
+                if self.outside {
+                    lines.extend(
+                        wrap(crate::instruction_files::OUTSIDE_NOTICE, width)
+                            .into_iter()
+                            .map(|text| styled(text, Role::Warning, theme)),
+                    );
+                }
             }
             Scope::App => self.app_ai_lines(width, &mut lines, ctx),
         }

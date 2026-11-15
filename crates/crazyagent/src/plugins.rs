@@ -646,6 +646,10 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     ("server_cant_start", "The server can't start."),
     (
+        "server_stored_spec_invalid",
+        "This server's command or address holds hidden or control characters, so it can't start. Remove it, then add it again.",
+    ),
+    (
         crate::sandbox::OWNER_PORTS_UNREADABLE,
         "CrazyAgent can't read its settings file, so it did not run the check. Fix the file and check again.",
     ),

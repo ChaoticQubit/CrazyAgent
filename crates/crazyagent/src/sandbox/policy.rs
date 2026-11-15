@@ -186,6 +186,43 @@ impl ToolCacheScope {
     }
 }
 
+/// What a launch does with the download caches an earlier run left in an agent home, its
+/// `.cache` and npm's `_cacache` (DEC-173 add.1): Keep leaves them; Clear when access is
+/// raised, the default, removes them when the launch runs at a wider level than the home's
+/// last launch, so nothing a narrower run wrote reaches a wider one; Clear every launch
+/// removes them each time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeCaches {
+    Keep,
+    #[default]
+    ClearWhenRaised,
+    ClearEveryLaunch,
+}
+
+impl HomeCaches {
+    /// Every choice, in the order the owner reads them.
+    pub const ALL: [Self; 3] = [Self::Keep, Self::ClearWhenRaised, Self::ClearEveryLaunch];
+
+    /// The choice's stable id, as stored and sent to clients.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::ClearWhenRaised => "clear_when_raised",
+            Self::ClearEveryLaunch => "clear_every_launch",
+        }
+    }
+
+    /// The name shown to the owner, the same in the desktop app and the terminal app.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Keep => "Keep",
+            Self::ClearWhenRaised => "Clear when access is raised",
+            Self::ClearEveryLaunch => "Clear every launch",
+        }
+    }
+}
+
 /// How far a sandboxed IDE server or terminal at a level reaches: nothing at Sandboxed, and
 /// the project's network choice at Own branch through [`AgentNetwork::sandbox`], with no
 /// model port. A Full access process has no Seatbelt for a choice to limit, so it never
@@ -372,7 +409,9 @@ pub struct ToolchainChoice {
 /// and whether git in the IDE runs the project's own hooks in the Project section (Off
 /// unless the owner turned it on; a policy saved before the setting existed reads Off), what
 /// the IDE may do to agent files (Allow all changes when none was saved) and who shares the
-/// agents' tool cache (T8; a policy saved before that setting reads Shared), when running
+/// agents' tool cache (T8; a policy saved before that setting reads Shared), what a launch
+/// does with the download caches in an agent home (DEC-173 add.1; a policy saved before that
+/// setting reads Clear when access is raised), when running
 /// agents pick up a wider policy and the narrow grants the owner allowed (F08; a policy saved
 /// before those settings reads When the agent is idle and no grants), and which of the
 /// project folder's local folders agents see and how (DEC-147.9; a policy saved before that
@@ -388,6 +427,8 @@ pub struct AgentPolicy {
     pub network: AgentNetwork,
     #[serde(default)]
     pub tool_cache: ToolCacheScope,
+    #[serde(default)]
+    pub home_caches: HomeCaches,
     #[serde(default)]
     pub ide_agent_files: IdeAgentFiles,
     #[serde(default)]
@@ -465,6 +506,7 @@ impl AgentPolicy {
             ide_git_hooks: self.ide_git_hooks,
             network: self.network,
             tool_cache: self.tool_cache,
+            home_caches: self.home_caches,
             ide_agent_files: self.ide_agent_files,
             apply_changes: self.apply_changes,
             grants: self.grants.clone(),
@@ -524,6 +566,14 @@ impl AgentPolicy {
                 .map(|scope| ToolCacheView {
                     scope,
                     label: scope.label().to_owned(),
+                })
+                .collect(),
+            home_caches: self.home_caches,
+            home_cache_choices: HomeCaches::ALL
+                .into_iter()
+                .map(|choice| HomeCachesView {
+                    choice,
+                    label: choice.label().to_owned(),
                 })
                 .collect(),
             ide_agent_files: self.ide_agent_files,
@@ -698,6 +748,10 @@ pub struct PolicyView {
     pub tool_cache: ToolCacheScope,
     #[serde(default)]
     pub tool_caches: Vec<ToolCacheView>,
+    #[serde(default)]
+    pub home_caches: HomeCaches,
+    #[serde(default)]
+    pub home_cache_choices: Vec<HomeCachesView>,
     pub ide_agent_files: IdeAgentFiles,
     #[serde(default)]
     pub apply_changes: AccessApply,
@@ -745,6 +799,14 @@ pub struct TempFolderView {
 #[serde(deny_unknown_fields)]
 pub struct ToolCacheView {
     pub scope: ToolCacheScope,
+    pub label: String,
+}
+
+/// One agent home caches choice with the name shown to the owner (DEC-173 add.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HomeCachesView {
+    pub choice: HomeCaches,
     pub label: String,
 }
 
@@ -1056,6 +1118,54 @@ mod tests {
         );
     }
 
+    /// DEC-173 add.1: a policy saved before the agent home caches setting reads Clear when
+    /// access is raised, each choice survives a save, a load and a pin, and the view lists
+    /// every choice with the words the owner reads.
+    #[test]
+    fn a_policy_saved_before_the_home_caches_setting_clears_when_access_is_raised() {
+        let old: AgentPolicy =
+            serde_json::from_str(r#"{"access":"sandboxed","toolchains":[]}"#).unwrap();
+        assert_eq!(old.home_caches, HomeCaches::ClearWhenRaised);
+        let connection = Connection::open_in_memory().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        for choice in HomeCaches::ALL {
+            let policy = AgentPolicy {
+                home_caches: choice,
+                ..AgentPolicy::default()
+            };
+            let body = serde_json::to_string(&policy).unwrap();
+            assert!(
+                body.contains(&format!(r#""home_caches":"{}""#, choice.id())),
+                "{body}"
+            );
+            save(&connection, "p", &policy).unwrap();
+            let read = load(&connection, "p").unwrap();
+            assert_eq!(read.home_caches, choice);
+            assert_eq!(read.pinned(folder.path()).home_caches, choice);
+            let view = read.view(folder.path(), &ToolHomes::at(folder.path()), 1, None);
+            assert_eq!(view.home_caches, choice);
+            let listed: Vec<(&str, &str)> = view
+                .home_cache_choices
+                .iter()
+                .map(|row| (row.choice.id(), row.label.as_str()))
+                .collect();
+            assert_eq!(
+                listed,
+                [
+                    ("keep", "Keep"),
+                    ("clear_when_raised", "Clear when access is raised"),
+                    ("clear_every_launch", "Clear every launch")
+                ]
+            );
+        }
+        assert!(
+            serde_json::from_str::<AgentPolicy>(
+                r#"{"access":"sandboxed","toolchains":[],"home_caches":"clear_sometimes"}"#
+            )
+            .is_err()
+        );
+    }
+
     /// F08: a policy saved before the access change settings reads When the agent is idle
     /// and no grants, a pinned policy keeps both, the view lists every Apply choice, the
     /// default first, and the saved grants with their words.
@@ -1296,6 +1406,7 @@ mod tests {
                 .collect(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             network: AgentNetwork::default(),
@@ -1409,6 +1520,7 @@ mod tests {
             }],
             ide_git_hooks: true,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()

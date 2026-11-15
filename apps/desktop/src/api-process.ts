@@ -107,10 +107,13 @@ export function processTextError(text: string): string | undefined {
 /** Who saved a shared item's current version: nobody yet, the owner, or one agent. */
 export type LastWriter = "nobody" | "owner" | { agent: string };
 
-/** One instructions text and the version it was read at; a save names that version. */
+/** One instructions text and the version it was read at; a save names that version.
+ * `outside` says a project's text is not what CrazyAgent last saved there, so agents get it
+ * under the Imported heading until the owner saves it in Process. */
 export interface ProcessText {
   text: string;
   version: number;
+  outside?: boolean;
 }
 
 /** What a save comes to: the bytes of app and project instructions the project's agents now

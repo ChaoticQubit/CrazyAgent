@@ -1430,9 +1430,9 @@ fn unread_projects_make_every_place_under_home_but_the_engine_agent_writable() {
 
 /// rv-code2 r1 F1, vid 1's race in the shared resolver: `entry_at` reads the entry's real file
 /// before it checks the entry, so the file it hands back must pass the check itself. An owner
-/// entry whose chain passes through a link in a project agents can write leads to a planted
-/// file when the real file is read, and back to the owner's file when the entry is checked:
-/// the planted file is refused, never handed back. Once the chain holds still it resolves.
+/// entry whose middle link moves between the two leads to a file planted in a project when the
+/// real file is read, and back to the owner's file when the entry is checked: the planted file
+/// is refused, never handed back. Once the chain holds still it resolves.
 #[test]
 fn an_entry_never_resolves_to_a_file_its_check_did_not_see() {
     let (_folder, root) = scratch();
@@ -1441,7 +1441,8 @@ fn an_entry_never_resolves_to_a_file_its_check_did_not_see() {
     let sh = "#!/bin/sh\necho ran\n";
     let owned = program(&root.join("owner/codex"), sh);
     let planted = program(&work.join("tools/planted/codex"), sh);
-    let middle = work.join("tools/codex");
+    let middle = root.join("links/codex");
+    std::fs::create_dir_all(middle.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&planted, &middle).unwrap();
     let entry = root.join("bin/codex");
     std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
@@ -1472,4 +1473,172 @@ fn an_entry_never_resolves_to_a_file_its_check_did_not_see() {
         resolve_entry(&entry, &places).is_ok(),
         "the owner's chain resolves once it holds still"
     );
+}
+
+/// DeepSec -193 (SA vid 1 F1 residual): the file `entry_at` hands back must also pass the temp
+/// rule the entry passes, as the engine runs it outside the sandbox. An owner entry whose
+/// middle link, in the temp folder or an owner folder, leads to a file planted in the temp
+/// folder when the real file is read, and back to the owner's file at the check, is refused
+/// as leading into temp; once the chain holds still only the owner folder's link resolves.
+#[test]
+fn an_entry_never_resolves_to_a_temp_file_its_check_did_not_see() {
+    for place in ["tmp/links", "links"] {
+        let (_folder, root) = scratch();
+        let sh = "#!/bin/sh\necho ran\n";
+        let owned = program(&root.join("owner/codex"), sh);
+        let planted = program(&root.join("tmp/planted/codex"), sh);
+        let middle = root.join(place).join("codex");
+        std::fs::create_dir_all(middle.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&planted, &middle).unwrap();
+        let entry = root.join("bin/codex");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&middle, &entry).unwrap();
+        let places = Places::engine(None, None, Some(root.join("home")), Some(OsStr::new("")))
+            .with_temps(vec![root.join("tmp")]);
+        let (moved, to) = (middle.clone(), owned.clone());
+        let step: Step = Box::new(move || {
+            std::fs::remove_file(&moved).unwrap();
+            std::os::unix::fs::symlink(&to, &moved).unwrap();
+        });
+        BETWEEN_PROGRAM_AND_CHECK
+            .lock()
+            .unwrap()
+            .push((entry.clone(), step));
+        let resolved = resolve_entry(&entry, &places);
+        let moved_to = std::fs::read_link(&middle).unwrap();
+        assert_eq!(moved_to, owned, "{place}: the step ran");
+        let why = resolved
+            .err()
+            .and_then(|missing| missing.refused)
+            .map(|refused| refused.why);
+        assert_eq!(why, Some(Refusal::InTemp), "{place}");
+        let kept = resolve_entry(&entry, &places).is_ok();
+        assert_eq!(kept, place == "links", "{place}");
+    }
+}
+
+/// B1 (SA vid 1 residual, the two-end chain): a found file is later run by its path, so the
+/// resolver judges every link on the way to the real file, not only the two ends. An owner
+/// entry whose middle link sits in a project agents can write, or in a folder another user
+/// can change, is refused with the entry named, though both ends pass; through an owner
+/// folder the same chain resolves.
+#[test]
+fn an_entry_whose_middle_link_agents_or_others_can_move_is_refused() {
+    let (_folder, root) = scratch();
+    let real = program(&root.join("owner/codex"), NODE);
+    let work = project(&root.join("work/app"));
+    let open = root.join("open");
+    std::fs::create_dir_all(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = Places::new(Vec::new(), Some(root.join("home")));
+    let chain = |middle: &Path, entry: &Path| {
+        std::fs::create_dir_all(middle.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&real, middle).unwrap();
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(middle, entry).unwrap();
+        resolve_entry(entry, &places)
+    };
+
+    let entry = root.join("bin/project/codex");
+    let refused = chain(&work.join("tools/codex"), &entry)
+        .err()
+        .and_then(|missing| missing.refused);
+    assert_eq!(
+        refused,
+        Some(Box::new(Refused {
+            file: entry,
+            why: Refusal::AgentsCanWrite,
+        }))
+    );
+
+    let entry = root.join("bin/open/codex");
+    let refused = chain(&open.join("codex"), &entry)
+        .err()
+        .and_then(|missing| missing.refused);
+    let why = refused
+        .as_ref()
+        .filter(|refused| refused.file == entry)
+        .map(|refused| &refused.why);
+    assert!(
+        matches!(why, Some(Refusal::OthersCanChange(_))),
+        "{refused:?}"
+    );
+
+    let entry = root.join("bin/owned/codex");
+    let resolved = chain(&root.join("links/codex"), &entry).unwrap();
+    assert_eq!(resolved.program, real);
+}
+
+/// RV-DS241-157 / SA vid 5: a PATH folder a program the engine starts may keep is one a
+/// lookup here would trust, so a child's own lookup never finds what the resolver refuses:
+/// never a folder another user or group can change, nor one that does not exist yet, which
+/// an agent could make while the child runs. An owner folder is kept.
+#[test]
+fn a_path_folder_others_can_change_or_that_is_missing_is_never_kept_for_children() {
+    let (_folder, home) = scratch();
+    let places = Places::new(Vec::new(), Some(home.clone()));
+    let kept = home.join("kept/bin");
+    let open = home.join("open/bin");
+    for folder in [&kept, &open] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(places.kept_for_children(&kept));
+    assert!(!places.kept_for_children(&open), "others can change it");
+    assert!(
+        !places.kept_for_children(&home.join("missing/bin")),
+        "an agent could make it"
+    );
+}
+
+/// B1 (SA vid 1 residual, the agent space): agents can write every repository the engine
+/// names for them, not only a set-up project's folder: one a project declares, a team
+/// worktree's repository and worktree, and a leased worktree. The resolver's places count
+/// each as agent-writable, as engine start does ([`crate::harnesses::finding::AgentSpace`]).
+#[test]
+fn every_repository_the_engine_names_for_agents_is_agent_writable() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    std::fs::create_dir_all(&root).unwrap();
+    let declared = home.join("repos/api");
+    let team = home.join("legacy");
+    let worktree = home.join("legacy-worktrees/agent-1");
+    let leased = home.join("leases/task-9");
+    let other = home.join("apps");
+    for folder in [&declared, &team, &worktree, &leased, &other] {
+        std::fs::create_dir_all(folder.join("bin")).unwrap();
+    }
+    let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    let text = |path: &Path| path.to_str().unwrap().to_owned();
+    let body = serde_json::json!({
+        "project_id": "api",
+        "spec": { "name": "Api", "repositories": [text(&declared)] },
+    });
+    db.execute(
+        "INSERT INTO projects(id, body) VALUES ('api', ?1)",
+        [body.to_string()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO team_worktrees(agent, project, repository, worktree, git_dir)
+         VALUES (1, 'old', ?1, ?2, 'git')",
+        [text(&team), text(&worktree)],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO worktree_leases VALUES ('task-9', 'repo', ?1, '{}')",
+        [text(&leased)],
+    )
+    .unwrap();
+    drop(db);
+    let places = Places::at_roots(Some(&root), None);
+    for folder in [&declared, &team, &worktree, &leased] {
+        assert!(
+            places.agent_writable(&folder.join("bin")),
+            "{}",
+            folder.display()
+        );
+    }
+    assert!(!places.agent_writable(&other.join("bin")));
 }

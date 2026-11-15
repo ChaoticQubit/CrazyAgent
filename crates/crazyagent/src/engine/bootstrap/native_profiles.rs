@@ -412,6 +412,13 @@ impl NativeProfileUse {
         &self.binding.connection.id
     }
 
+    /// Names the engine's data root this lease's custody is anchored at, the canonical
+    /// folder of `engine.db`: a profile home the engine made lies below it, while one the
+    /// owner chose may lie anywhere. Input: the lease. Output: the folder.
+    pub(crate) fn engine_root(&self) -> &std::path::Path {
+        &self.custody.anchor.path
+    }
+
     pub(crate) fn profile_path(&self) -> Result<std::path::PathBuf, EngineError> {
         self.revalidate_retained()?;
         if let Some(configured) = &self.configured {
