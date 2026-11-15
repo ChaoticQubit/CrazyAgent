@@ -15955,12 +15955,28 @@ fn a_confined_work_tree_step_on_linux_takes_the_index_its_index_only_gits_wrote(
 
 /// SA vid 3 option A: a split Linux move removes a path it drops only through leading folders
 /// opened with no link followed, so a folder the agent swapped for a link to a folder outside
-/// is never removed through: the move refuses and the file outside stays.
+/// is never removed through: the engine's removal refuses (1, not git's 128) and the file
+/// outside stays. The file outside matches the index entry under `core.checkStat=minimal`
+/// with one set second, so read-tree's own check passes and the removal is reached (F2).
 #[cfg(target_os = "linux")]
 #[test]
 fn a_split_move_on_linux_never_removes_a_dropped_path_through_a_link() {
     let case = Case::new();
     let worktree = case.workspace.worktree.clone();
+    let then = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let stamp = |path: &Path| {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(then))
+            .unwrap();
+    };
+    git_in(
+        &case.home,
+        &case.repo,
+        &["config", "core.checkStat", "minimal"],
+    );
     let head = git_in(&case.home, &worktree, &["rev-parse", "HEAD"]);
     let head = head.trim().to_owned();
     let kept = case.owner_commit("docs/notes", "Notes\n", "Docs");
@@ -15974,12 +15990,18 @@ fn a_split_move_on_linux_never_removes_a_dropped_path_through_a_link() {
             .code
     };
     assert_eq!(moved(&head, &kept), 0);
+    stamp(&worktree.join("docs/notes"));
+    git_in(&case.home, &worktree, &["update-index", "--refresh"]);
     let outside = case.home.join("outside-docs");
     write(&outside.join("notes"), "Notes\n");
+    stamp(&outside.join("notes"));
     std::fs::remove_dir_all(worktree.join("docs")).unwrap();
     std::os::unix::fs::symlink(&outside, worktree.join("docs")).unwrap();
     let refused = moved(&kept, &dropped);
-    assert_ne!(refused, 0, "the move removed through the link");
+    assert_eq!(
+        refused, 1,
+        "the engine's removal refused, past read-tree's check"
+    );
     assert_eq!(
         std::fs::read_to_string(outside.join("notes")).unwrap(),
         "Notes\n"
