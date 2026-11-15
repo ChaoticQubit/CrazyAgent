@@ -1690,6 +1690,7 @@ pub(super) fn run(
             if record.spec != spec {
                 return Err(error("server_changed"));
             }
+            record.spec.validate()?;
             record.approved = Some(record.spec.digest());
             put_server(tx, &record)?;
             ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
@@ -1800,6 +1801,7 @@ pub(super) fn run(
         }
         Command::GetServer { id } => {
             let record: ServerRecord = load(tx, "server", &id)?;
+            record.spec.validate()?;
             let network = match &record.scope {
                 Scope::Project { project_id } => {
                     crate::sandbox::policy::load(tx, project_id.as_str())

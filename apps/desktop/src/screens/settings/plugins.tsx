@@ -34,6 +34,17 @@ export function readsAgain(failure: Failure): boolean {
   return failure.kind === "error" && /changed|not_found|stale_revision/.test(failure.code);
 }
 
+const STORED_SPEC_CODES = new Set(["server_command_invalid", "server_args_invalid", "server_url_invalid"]);
+
+/** Says why Approve or Check refused a stored server. Both run its command or address through
+ * the add form's checks, which one stored before hidden characters were refused fails only for
+ * hidden or control characters, and this page can't edit a server, so the form's wording is
+ * replaced. Inputs: the reply and the action. Output: the reply, code kept, sentence replaced. */
+export function storedServerRefusal<T>(result: Result<T>, action: "approved" | "checked"): Result<T> {
+  if (result.kind !== "error" || !STORED_SPEC_CODES.has(result.code)) return result;
+  return { ...result, message: `This server's command or address holds hidden or control characters, so it can't be ${action}. Remove it, then add it again.` };
+}
+
 const WORDS: Record<McpServerView["status"], string> = {
   approved: "Approved", waiting_for_approval: "Needs approval", off: "Turned off", cant_start: "Can't start",
 };
@@ -121,7 +132,7 @@ function assert(condition: boolean, message: string): asserts condition {
 /** The review lines for an MCP server: where it runs or connects, its secrets and where it
  * applies. Input: the server. Output: the lines in display order. */
 export function serverFacts(server: McpServerView): string[] {
-  const where = server.spec.kind === "stdio" ? `Runs: ${server.runs}` : `Connects to: ${server.spec.url}`;
+  const where = server.spec.kind === "stdio" ? `Runs: ${displayText(server.runs)}` : `Connects to: ${displayText(server.spec.url)}`;
   const secrets = server.secrets.length
     ? server.secrets.map((secret) => `${secret.name} (${secret.saved ? "Key saved" : "Not saved"})`).join(", ") : "none";
   return [where, `Secrets: ${secrets}`, server.scope_label];
@@ -416,9 +427,9 @@ export function ServersView({ servers, projectId, failure, busy, onAdd, onToggle
     const open = expanded === server.id;
     return <Fragment key={server.id}>
       <SettingLine label={server.name} changed={pluginChanged(server, projectId)} shown={<>{server.name} <StatusBadge word={serverWord(server.status)} /></>} help={<>
-        {!waiting && <span className="mono small">{server.runs}</span>}
-        {waiting && (command ? <span>Runs: <span className="mono">{server.runs}</span></span>
-          : <span>Connects to: <span className="mono">{server.spec.kind === "http" ? server.spec.url : ""}</span></span>)}
+        {!waiting && <span className="mono small">{displayText(server.runs)}</span>}
+        {waiting && (command ? <span>Runs: <span className="mono">{displayText(server.runs)}</span></span>
+          : <span>Connects to: <span className="mono">{server.spec.kind === "http" ? displayText(server.spec.url) : ""}</span></span>)}
         {waiting && serverFacts(server).slice(1).map((fact) => <span key={fact}>{fact}</span>)}
         {broken && <span className="field-error">Can't start: {server.problem ?? "the server didn't answer."}</span>}
         {server.tools.length > 0 && <span><Button size="small" variant="quiet" icon={open ? "chevron-down" : "chevron-right"} aria-expanded={open} onClick={() => setExpanded(open ? null : server.id)}>
@@ -849,8 +860,9 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
         onImport={projectId ? undefined : () => setImporting(true)} onOpen={(item) => open(item.id)} onToggle={toggleSkill} onRemove={(skill) => setRemoving({ kind: "skill", skill })} />
       : <ServersView servers={servers} projectId={projectId} failure={failure} busy={busy} onRetry={reloadServers} onAdd={() => setAdding({ kind: "server" })}
         onToggle={toggleServer} onSecrets={setSecrets} onRemove={(server) => setRemoving({ kind: "server", server })}
-        onApprove={(server) => void act(server.id, () => approveMcpServer(server.id, server.spec), () => "Server approved.", reloadServers)}
-        onCheck={(server) => void act(`check:${server.id}`, () => checkMcpServer(server.id),
+        onApprove={(server) => void act(server.id, () => approveMcpServer(server.id, server.spec).then((result) => storedServerRefusal(result, "approved")),
+          () => "Server approved.", reloadServers)}
+        onCheck={(server) => void act(`check:${server.id}`, () => checkMcpServer(server.id).then((result) => storedServerRefusal(result, "checked")),
           (checked) => checked.status === "cant_start" ? `${checked.name} can't start.` : `${checked.name} answered with ${checked.tools.length} ${checked.tools.length === 1 ? "tool" : "tools"}.`,
           reloadServers)} />}
     <AddSkillDialog open={adding?.kind === "skill"} scope={scope} message={adding?.kind === "skill" ? adding.message : undefined} onClose={() => setAdding(undefined)}

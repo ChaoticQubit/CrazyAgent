@@ -215,6 +215,41 @@ test("a URL server's review says where it connects; its secrets that are not sav
   assert.deepEqual(serverFacts(server({ secrets: [] })).slice(1), ["Secrets: none", "For every project"]);
 });
 
+test("a stored server whose command, argument or address holds hidden characters shows each one as an escape, waiting or approved", () => {
+  const spec = { kind: "stdio", command: "/usr/bin/tr‮ue", args: ["--st​dio"] };
+  const runs = "/usr/bin/tr‮ue --st​dio";
+  const waiting = server({ spec, runs, status: "waiting_for_approval" });
+  const approved = server({ id: "server-2", name: "files", spec, runs });
+  const remote = server({ id: "server-3", name: "remote", spec: { kind: "http", url: "https://mcp.example.invalid/‮mcp" },
+    runs: "https://mcp.example.invalid/‮mcp", status: "waiting_for_approval" });
+  const markup = renderToStaticMarkup(createElement(ServersView, serversProps({ kind: "ok", value: [waiting, approved, remote] })));
+  assert.match(markup, /Runs: <span class="mono">\/usr\/bin\/tr\\u202eue --st\\u200bdio<\/span>/);
+  assert.match(markup, /<span class="mono small">\/usr\/bin\/tr\\u202eue --st\\u200bdio<\/span>/);
+  assert.match(markup, /Connects to: <span class="mono">https:\/\/mcp\.example\.invalid\/\\u202emcp<\/span>/);
+  assert.doesNotMatch(markup, /[‮​]/);
+  assert.equal(serverFacts(waiting)[0], "Runs: /usr/bin/tr\\u202eue --st\\u200bdio");
+  assert.equal(serverFacts(remote)[0], "Connects to: https://mcp.example.invalid/\\u202emcp");
+});
+
+test("Approve or Check refused for a stored server's hidden characters says so and to remove and add it again, not the add form's wording", async () => {
+  const { readFileSync } = await import("node:fs");
+  const refused = (code) => ({ kind: "error", code, message: api.plainError(code) });
+  for (const code of ["server_command_invalid", "server_args_invalid", "server_url_invalid"]) {
+    for (const action of ["approved", "checked"]) {
+      assert.deepEqual(plugins.storedServerRefusal(refused(code), action), { kind: "error", code,
+        message: `This server's command or address holds hidden or control characters, so it can't be ${action}. Remove it, then add it again.` });
+    }
+  }
+  assert.deepEqual(plugins.storedServerRefusal(refused("server_changed"), "approved"), refused("server_changed"), "other refusals keep their sentence");
+  assert.deepEqual(plugins.storedServerRefusal({ kind: "not_ready" }, "checked"), { kind: "not_ready" });
+  const ok = { kind: "ok", value: server() };
+  assert.equal(plugins.storedServerRefusal(ok, "approved"), ok);
+  assert.equal(api.plainError("server_command_invalid"), "Enter the full path to the command, starting with /.", "the add form keeps its wording");
+  const source = readFileSync(new URL("../src/screens/settings/plugins.tsx", import.meta.url), "utf8");
+  assert.match(source, /approveMcpServer\(server\.id, server\.spec\)\.then\(\(result\) => storedServerRefusal\(result, "approved"\)\)/, "Approve's reply goes through it");
+  assert.match(source, /checkMcpServer\(server\.id\)\.then\(\(result\) => storedServerRefusal\(result, "checked"\)\)/, "Check's reply goes through it");
+});
+
 test("switches follow the engine: global items in global settings, the per-project switch in a project", () => {
   assert.deepEqual(pluginSwitch(skill({ enabled: false })), { checked: false, label: "On for every project", project: false });
   assert.deepEqual(pluginSwitch(skill({ on_here: false }), "project-1"), { checked: false, label: "On in this project", project: true });

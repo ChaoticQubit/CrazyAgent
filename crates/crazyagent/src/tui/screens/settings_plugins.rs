@@ -56,20 +56,20 @@ pub fn server_word(status: ServerStatus) -> &'static str {
 }
 
 /// What a server runs, as the list shows it: the command without its folder,
-/// or the URL.
+/// or the URL, each hidden character shown as an escape (RV-DS241-151).
 /// Input: the server. Output: the short line; details show the whole line.
 pub fn short_runs(server: &ServerView) -> String {
-    match &server.spec {
+    let line = match &server.spec {
         ServerSpec::Stdio { command, .. } => match command.rfind('/') {
             Some(slash) => server
                 .runs
                 .strip_prefix(&command[..=slash])
-                .unwrap_or(server.runs.as_str())
-                .to_owned(),
-            None => server.runs.clone(),
+                .unwrap_or(server.runs.as_str()),
+            None => server.runs.as_str(),
         },
-        ServerSpec::Http { .. } => server.runs.clone(),
-    }
+        ServerSpec::Http { .. } => server.runs.as_str(),
+    };
+    crate::memory::visible_text(line)
 }
 
 /// A path with the home folder written as `~`.
@@ -87,6 +87,24 @@ pub fn tilde(path: &str, ctx: &Ctx) -> String {
 /// Input: the refusal code. Output: the sentence.
 pub fn unused(code: &str) -> String {
     format!("Agents don't get this skill. {}", plugin_plain(code))
+}
+
+/// Says why a plugin list's change was refused. Approve and Check run a stored server through
+/// the add form's checks, which one stored before hidden characters were refused fails only
+/// for hidden or control characters, so those say that and the way out, not the form's fix.
+/// Inputs: the change's done line and the refusal code. Output: the sentence.
+pub fn change_plain(done: &str, code: &str) -> &'static str {
+    let stored = matches!(
+        code,
+        "server_command_invalid" | "server_args_invalid" | "server_url_invalid"
+    );
+    if stored && done.starts_with("Approved.") {
+        return "This server's command or address holds hidden or control characters, so it can't be approved. Remove it, then add it again.";
+    }
+    if stored && done.starts_with("Checked ") {
+        return "This server's command or address holds hidden or control characters, so it can't be checked. Remove it, then add it again.";
+    }
+    plugin_plain(code)
 }
 
 /// A plain sentence for an engine problem code about skills and MCP servers.
@@ -982,7 +1000,11 @@ impl Plugins {
                     ]));
                 }
                 body.push(Line::default());
-                wrapped("Runs", &server.runs, &mut body);
+                wrapped(
+                    "Runs",
+                    &crate::memory::visible_text(&server.runs),
+                    &mut body,
+                );
                 for (index, secret) in server.secrets.iter().enumerate() {
                     let state = if secret.saved {
                         status("Key saved", theme, glyphs)
@@ -1243,7 +1265,7 @@ impl Screen for Plugins {
                         ))
                     }
                     Ok(_) => ctx.say(Message::success(&done, "")),
-                    Err(code) => ctx.say(Message::error(plugin_plain(code), "")),
+                    Err(code) => ctx.say(Message::error(change_plain(&done, code), "")),
                 }
                 self.reload(ctx);
             }
