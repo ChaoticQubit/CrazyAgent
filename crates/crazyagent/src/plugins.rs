@@ -392,7 +392,8 @@ pub struct LaunchServer {
 /// Why a launch left the default pack's context-mode server out rather than run its npx
 /// spec: the engine's shared install is still being set up, setting it up failed or cannot
 /// run, the installed files did not match the pinned hashes, the Node.js beside npx is older
-/// than context-mode needs, or this platform has no shared install at all.
+/// than context-mode needs, this platform has no shared install at all, or the npx a spec
+/// only shaped like that launch names is not one the engine's tool resolver finds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextModeOff {
     SettingUp,
@@ -400,6 +401,7 @@ pub enum ContextModeOff {
     Mismatch,
     NodeTooOld,
     Unsupported,
+    NpxNotFound,
 }
 
 /// The npm package of the default pack's context-mode server.
@@ -423,6 +425,49 @@ pub(crate) fn pinned_context_mode(spec: &ServerSpec) -> Option<(&Path, &str)> {
         .filter(|version| flag == "-y" && exact_version(version))?;
     let npx = command.is_absolute() && npx_program(command);
     command.parent().filter(|_| npx).map(|bin| (bin, version))
+}
+
+/// Reads the default pack's pinned context-mode launch from an approved spec only when its
+/// npx is one the engine's tool resolver finds, as setup writes that launch; a spec only
+/// shaped like it, such as a repository's own npx, never runs (RV-DS241-150). The probe
+/// state is read before the places are built, so a probe ending between the two counts.
+/// Inputs: the engine root and the spec. Output: as [`context_mode_on`].
+pub(crate) fn found_context_mode<'a>(
+    root: &Path,
+    spec: &'a ServerSpec,
+) -> Result<Option<(&'a Path, &'a str)>, ContextModeOff> {
+    if pinned_context_mode(spec).is_none() {
+        return Ok(None);
+    }
+    let pending = crate::tools::probe::mark().first_run_pending;
+    let places = crate::tools::Places::from_environment(Some(root));
+    context_mode_on(spec, &places, pending)
+}
+
+/// Reads the pinned context-mode launch from a spec on the given places, where its npx must
+/// pass the resolver's checks in a folder they look in. Any other npx is being set up while
+/// the first background folder probe may still add its folder, and after that is one
+/// CrazyAgent did not find, and the probes look again. Inputs: the spec, the places and
+/// whether that probe was still going. Output: npx's folder and version, none, or why not.
+pub(crate) fn context_mode_on<'a>(
+    spec: &'a ServerSpec,
+    places: &crate::tools::Places,
+    pending: bool,
+) -> Result<Option<(&'a Path, &'a str)>, ContextModeOff> {
+    let (ServerSpec::Stdio { command, .. }, Some((bin, version))) =
+        (spec, pinned_context_mode(spec))
+    else {
+        return Ok(None);
+    };
+    let listed = places.folders().iter().any(|folder| folder == bin);
+    if listed && crate::tools::resolve_entry(Path::new(command), places).is_ok() {
+        return Ok(Some((bin, version)));
+    }
+    if pending {
+        return Err(ContextModeOff::SettingUp);
+    }
+    crate::tools::probe::missed();
+    Err(ContextModeOff::NpxNotFound)
 }
 
 #[cfg(unix)]
@@ -633,6 +678,10 @@ const PROBLEMS: &[(&str, &str)] = &[
     (
         "server_node_too_old",
         "context-mode needs Node.js 22.5 or newer. Update Node.js, then check again.",
+    ),
+    (
+        "server_npx_not_found",
+        "CrazyAgent did not find the npx this context-mode server runs on this computer, so it did not start it.",
     ),
     (
         "server_output_too_large",

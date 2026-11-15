@@ -1,5 +1,6 @@
 use super::*;
 use crate::plugins::ContextModeOff;
+use crate::plugins::pinned_context_mode as pinned;
 use std::fs;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -568,8 +569,8 @@ fn a_pinned_shaped_npx_the_resolver_does_not_find_is_left_out_and_nothing_of_its
         ForCheck::Refused("context_mode_npx_not_found")
     );
     assert_eq!(
-        for_launch(&case.root, spec).map_err(|off| format!("{off:?}")),
-        Err::<ServerSpec, String>("NpxNotFound".to_owned())
+        for_launch(&case.root, spec),
+        Err(ContextModeOff::NpxNotFound)
     );
     assert!(!ran.exists(), "a file of that folder ran");
     assert!(!registered(&case.folder()));
@@ -613,10 +614,11 @@ fn the_node_version_check_runs_inside_a_boundary_with_a_cleared_environment() {
 fn an_npx_in_the_engines_own_setup_bin_is_one_the_resolver_finds() {
     let case = case("/usr/bin/false");
     let spec = npx_in(&case, VERSION);
-    let found = Some((case.bin.as_path(), VERSION));
-    assert_eq!(found_pinned(&case.root, &spec), found);
+    let found = Ok(Some((case.bin.as_path(), VERSION)));
+    let found_now = || crate::plugins::found_context_mode(&case.root, &spec);
+    assert_eq!(found_now(), found);
     fs::write(case.bin.join("npx"), "").unwrap();
-    assert_eq!(found_pinned(&case.root, &spec), found, "an empty npx file too");
+    assert_eq!(found_now(), found, "an empty npx file too");
 }
 
 #[test]

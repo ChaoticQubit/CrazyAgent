@@ -1,5 +1,5 @@
 use crate::file_lock::HeldLock;
-use crate::plugins::{ContextModeOff, ServerSpec, exact_version, pinned_context_mode as pinned};
+use crate::plugins::{ContextModeOff, ServerSpec, exact_version};
 use crate::setup::InstallError;
 use crate::setup::process::{private_folder, run_command, staging_folder};
 use base64::Engine;
@@ -24,6 +24,7 @@ const INSTALL_TIME: Duration = Duration::from_secs(900);
 const NODE_CHECK_TIME: Duration = Duration::from_secs(10);
 const NODE_OLDEST: (u32, u32) = (22, 5);
 const NODE_TOO_OLD: &str = "context_mode_node_too_old";
+const NPX_NOT_FOUND: &str = "context_mode_npx_not_found";
 const NODE_CHECK: &str = "node-check";
 const INSTALL_BACKOFF: Duration = Duration::from_secs(600);
 const INSTALLS_MAX: usize = 16;
@@ -34,10 +35,12 @@ const _: () =
 static INSTALLING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// What a server check runs for one approved spec. The check never runs the default pack's
-/// pinned context-mode npx launch, one whose npx the tool resolver finds ([`found_pinned`]):
-/// it runs from the engine's shared install once that is complete, waits while its install
-/// runs in this engine, and otherwise says why no install can run, with the time left after a
-/// recent failure. Every other spec, one only shaped like it included, runs as approved.
+/// pinned context-mode npx launch, nor a spec only shaped like it whose npx the tool resolver
+/// does not find ([`crate::plugins::found_context_mode`]): the pinned one runs from the
+/// engine's shared install once that is complete, waits while its install runs in this
+/// engine, and otherwise says why no install can run, with the time left after a recent
+/// failure; the shaped one waits as being set up or is refused. Every other spec runs as
+/// approved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ForCheck {
     Run(ServerSpec),
@@ -70,12 +73,12 @@ pub fn install_folder(root: &Path, version: &str) -> PathBuf {
 /// shared install of that same version, checked against the pinned hashes, with the `node`
 /// beside npx. It never runs the npx spec, which would let npm run dependency install
 /// scripts: until the install is complete the launch leaves the server out, says why, and
-/// the engine installs the shared copy in the background when it can. Every other server is
-/// unchanged, a pinned-shaped spec whose npx the tool resolver does not find among them
-/// ([`found_pinned`]). Inputs: the engine root and the spec. Output: the spec, or why it is
-/// left out.
+/// the engine installs the shared copy in the background when it can. A spec only shaped like
+/// it, whose npx the tool resolver does not find, is left out too
+/// ([`crate::plugins::found_context_mode`]). Every other server is unchanged. Inputs: the
+/// engine root and the spec. Output: the spec, or why it is left out.
 pub fn for_launch(root: &Path, spec: ServerSpec) -> Result<ServerSpec, ContextModeOff> {
-    let Some((bin, version)) = found_pinned(root, &spec) else {
+    let Some((bin, version)) = crate::plugins::found_context_mode(root, &spec)? else {
         return Ok(spec);
     };
     let folder = install_folder(root, version);
@@ -103,8 +106,14 @@ pub fn for_launch(root: &Path, spec: ServerSpec) -> Result<ServerSpec, ContextMo
 /// A shared install found complete after the start wins, so an install that finished between
 /// the two reads still runs. Inputs: the engine root and the approved spec. Output: the run.
 pub fn for_check(root: &Path, spec: ServerSpec) -> ForCheck {
-    let Some((bin, version)) = found_pinned(root, &spec) else {
-        return ForCheck::Run(spec);
+    let (bin, version) = match crate::plugins::found_context_mode(root, &spec) {
+        Ok(Some(found)) => found,
+        Ok(None) => return ForCheck::Run(spec),
+        Err(ContextModeOff::SettingUp) => return ForCheck::SettingUp,
+        Err(off) => {
+            assert_eq!(off, ContextModeOff::NpxNotFound);
+            return ForCheck::Refused(NPX_NOT_FOUND);
+        }
     };
     let folder = install_folder(root, version);
     let node = bin.join("node");
@@ -112,18 +121,6 @@ pub fn for_check(root: &Path, spec: ServerSpec) -> ForCheck {
         return ForCheck::Run(shared);
     }
     after_begin(begin_install(root, bin, version), &folder, &node, version)
-}
-
-/// Reads the default pack's pinned context-mode launch from a spec ([`pinned`]) only when its
-/// npx is one the engine's tool resolver finds: in a folder the resolver looks in and passing
-/// its checks, as setup writes that launch. A repository's own npx is not (RV-DS241-150).
-/// Inputs: the engine root and the spec. Output: npx's folder and the version, or none.
-fn found_pinned<'a>(root: &Path, spec: &'a ServerSpec) -> Option<(&'a Path, &'a str)> {
-    let (bin, version) = pinned(spec)?;
-    let places = crate::tools::Places::from_environment(Some(root));
-    let listed = places.folders().iter().any(|folder| folder == bin);
-    let found = listed && crate::tools::resolve_entry(&bin.join("npx"), &places).is_ok();
-    found.then_some((bin, version))
 }
 
 /// Reads what a check runs once its install request went one way: the shared install when
