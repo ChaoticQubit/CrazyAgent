@@ -70,7 +70,8 @@ pub fn supplies(root: &Path) -> (PowerSource, Option<u8>) {
     for supply in entries(root, "") {
         let kind = value(&supply.join("type")).unwrap_or_default();
         if kind != "Battery" {
-            online |= value(&supply.join("online")).as_deref() == Some("1");
+            let state = value(&supply.join("online")).and_then(|text| text.parse::<u32>().ok());
+            online |= state.is_some_and(|state| state > 0);
             continue;
         }
         if value(&supply.join("scope")).as_deref() == Some("Device") {
@@ -196,7 +197,9 @@ pub fn read_under(root: &Path) -> PowerReading {
     }
 }
 
-/// Reads this computer. Output: the reading of the real file system root.
+/// Reads this computer's power source, charge, heat and lid, with no bus connection.
+/// Input: none, the files sit below the real file system root. Output: the reading,
+/// unknown where the files say nothing.
 #[cfg(target_os = "linux")]
 pub(crate) fn read() -> PowerReading {
     read_under(Path::new("/"))
