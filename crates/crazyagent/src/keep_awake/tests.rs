@@ -741,13 +741,14 @@ mod with_a_real_hold {
 
     /// A real process that stands in for the engine the hold is taken for.
     fn stand_in() -> Child {
-        let child = Command::new("/bin/sleep")
-            .arg("120")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let child = crate::spawn_gate::spawn(
+            Command::new("/bin/sleep")
+                .arg("120")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
         assert!(child.id() > 1);
         child
     }
@@ -757,10 +758,8 @@ mod with_a_real_hold {
     /// nobody reaped yet has no command line and is not counted.
     fn holders(engine: u32) -> usize {
         let line = format!("^/usr/bin/caffeinate (-d )?-i -w {engine}$");
-        let output = Command::new("/usr/bin/pgrep")
-            .args(["-f", &line])
-            .output()
-            .unwrap();
+        let output =
+            crate::spawn_gate::output(Command::new("/usr/bin/pgrep").args(["-f", &line])).unwrap();
         String::from_utf8(output.stdout).unwrap().lines().count()
     }
 
@@ -852,7 +851,11 @@ mod with_a_real_hold {
             .tick(&connection, NOW_MS + 3 * TICK_MS)
             .unwrap()
             .unwrap();
-        assert_eq!(stood.state.want, Want::Nothing, "stands down while work runs");
+        assert_eq!(
+            stood.state.want,
+            Want::Nothing,
+            "stands down while work runs"
+        );
         assert_eq!(stood.state.ended, Some(EndReason::HoldLost));
 
         mark(&connection, worker, "idle");

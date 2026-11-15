@@ -2844,8 +2844,10 @@ impl TeamRuntime {
     /// can take over keeps running there with its turn stopped, so agent sessions outlive the
     /// engine; with Stop every agent stops as an owner Stop would (FBTMUX-P1). Every other
     /// agent process group stops. Waits a bounded time for each agent thread. Returns the
-    /// panes left running.
+    /// panes left running. The Keep awake hold (DEC-167) is dropped first, before any step
+    /// that can fail.
     pub fn shutdown(&mut self) -> Result<Vec<AgentId>, EngineError> {
+        self.keep_awake.release();
         let keep_panes = crate::quit_settings::load(&self.connection)
             .map_or(true, |settings| settings.keeps_team_agents());
         let mut kept = BTreeSet::new();
@@ -14314,6 +14316,9 @@ pub fn start_for_engine(
         .map_err(|e| format!("team runtime: {e}"))?;
     let state = runtime.join("team");
     private_directory(&state).map_err(|e| e.0)?;
+    if let Err(problem) = crate::keep_awake::reconcile(&runtime) {
+        eprintln!("keep awake journal: {}", bound_text(&problem.0, 300));
+    }
     let settings = (global.to_path_buf(), project.to_path_buf());
     let (global, project) = settings.clone();
     let access: AccessSource = Box::new(move || {
@@ -14356,7 +14361,9 @@ pub fn start_for_engine(
         Some(probe) => runtime.with_terminal_probe(probe),
         None => runtime,
     };
-    let runtime = runtime.with_events(super::events::HANDLERS);
+    let mut runtime = runtime.with_events(super::events::HANDLERS);
+    runtime.keep_awake =
+        crate::keep_awake::Keeper::with_hold(crate::keep_awake::platform_hold(std::process::id()));
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
 }
 

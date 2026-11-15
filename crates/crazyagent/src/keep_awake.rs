@@ -1,3 +1,11 @@
+pub mod hold;
+#[cfg(target_os = "linux")]
+mod hold_linux;
+#[cfg(target_os = "macos")]
+mod hold_macos;
+#[cfg(windows)]
+mod hold_windows;
+pub mod journal;
 pub mod settings;
 pub mod state;
 pub mod work;
@@ -5,6 +13,7 @@ pub mod work;
 #[cfg(test)]
 mod tests;
 
+pub use hold::{Held, Hold, HoldError, REASON, platform_hold};
 pub use settings::{
     BatteryFloor, Cap, DisplayAwake, Grace, HeatEnd, HeatNotice, KeepAwakeSettings, LidDisplay,
     LidRule, Mode,
@@ -20,6 +29,7 @@ use crate::paths::Platform;
 use crate::protocol::Outcome;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// How often the keeper evaluates when nothing changed.
 pub const TICK_MS: i64 = 5000;
@@ -360,16 +370,102 @@ pub(crate) fn read(connection: &Connection) -> Result<OwnerData, EngineError> {
     })
 }
 
+/// Records that the platform hold could not be kept: the decision becomes no hold with the
+/// end reason `HoldLost`, any timer is gone, and Auto stands down until the running work
+/// finishes, so a hold that cannot be taken is not tried again every few seconds. Inputs:
+/// the engine database outside any transaction. Output: the view after the change.
+fn hold_failed(connection: &Connection) -> Result<KeepAwakeView, EngineError> {
+    assert!(connection.is_autocommit());
+    let tx =
+        Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)?;
+    let settings = settings::load(&tx)?;
+    let (mut stored, dirty) = load_state(&tx)?;
+    stored.manual_until_ms = None;
+    stored.work_last_ms = None;
+    stored.hold_since_ms = None;
+    stored.stood_down = stored.work > 0;
+    stored.decision = Decision {
+        ended: Some(EndReason::HoldLost),
+        ..Decision::NONE
+    };
+    save_state(&tx, &stored, dirty)?;
+    tx.commit().map_err(error)?;
+    assert_eq!(stored.decision.want, Want::Nothing);
+    Ok(view_of(settings, &stored))
+}
+
+/// Undoes one persistent change an earlier engine recorded. No kind of change exists yet,
+/// so every entry is refused and stays recorded. Input: the entry. Output: the refusal.
+fn undo(entry: &journal::Entry) -> Result<(), EngineError> {
+    assert!(!entry.kind.is_empty());
+    Err(error(format!(
+        "keep_awake_journal_kind_unknown: {}",
+        entry.kind
+    )))
+}
+
+/// Undoes at engine start every persistent change an earlier engine left behind (DEC-167).
+/// Input: the engine root. Output: Ok when the journal is empty afterwards, else the first
+/// failure, with the entries that failed still recorded.
+pub(crate) fn reconcile(root: &Path) -> Result<(), EngineError> {
+    journal::Journal::open(root)?.reconcile(undo)
+}
+
 /// The engine's Keep awake pacer: looks once a second for a changed work count or an owner
-/// change and evaluates at once when it finds one, and every `TICK_MS` otherwise.
+/// change and evaluates at once when it finds one, and every `TICK_MS` otherwise. After
+/// every evaluation it brings the platform hold, when it has one, in step with the
+/// decision.
 #[derive(Debug, Default)]
 pub struct Keeper {
     looked_ms: Option<i64>,
     evaluated_ms: Option<i64>,
     work: Option<u32>,
+    hold: Option<Box<dyn Hold + Send>>,
+    lost: bool,
 }
 
 impl Keeper {
+    /// Builds a keeper that takes and drops a platform hold. Input: the hold. Output: the
+    /// keeper; a default keeper decides the same but holds nothing.
+    pub fn with_hold(hold: Box<dyn Hold + Send>) -> Self {
+        Self {
+            hold: Some(hold),
+            ..Self::default()
+        }
+    }
+
+    /// Drops the platform hold, as the engine stops.
+    pub fn release(&mut self) {
+        if let Some(hold) = self.hold.as_mut() {
+            hold.release();
+        }
+        self.lost = false;
+    }
+
+    /// Brings the platform hold in step with the wanted state. A hold found lost is logged
+    /// and taken again at once; one lost twice in a row, or one that cannot be taken, is
+    /// logged and counts as failed. Input: the wanted state. Output: false when the hold is
+    /// wanted and not in place.
+    fn keep(&mut self, want: &Want) -> bool {
+        let Some(hold) = self.hold.as_mut() else {
+            return true;
+        };
+        let first = hold.apply(want);
+        let again = self.lost;
+        self.lost = first == Err(HoldError::Lost);
+        match first {
+            Ok(_) => true,
+            Err(HoldError::Lost) if !again => {
+                eprintln!("keep awake: the hold was lost, taking it again");
+                hold.apply(want).is_ok()
+            }
+            Err(problem) => {
+                eprintln!("keep awake: no hold: {problem}");
+                false
+            }
+        }
+    }
+
     /// Runs one step. Inputs: the engine database and the time. Output: the view when this
     /// step evaluated, none when nothing was due, or the first failure.
     pub fn tick(
@@ -390,6 +486,12 @@ impl Keeper {
             return Ok(None);
         }
         let view = evaluate(connection, now_ms, None)?;
+        let view = if self.keep(&view.state.want) {
+            view
+        } else {
+            self.release();
+            hold_failed(connection)?
+        };
         self.evaluated_ms = Some(now_ms);
         self.work = Some(view.work);
         assert!(view.work <= work::WORK_MAX);

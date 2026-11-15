@@ -15,13 +15,14 @@ mod macos {
 
     impl StandIn {
         fn start() -> Self {
-            let child = Command::new("/bin/sleep")
-                .arg("120")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
+            let child = crazyagent::spawn_gate::spawn(
+                Command::new("/bin/sleep")
+                    .arg("120")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .unwrap();
             assert!(child.id() > 1);
             Self(child)
         }
@@ -60,10 +61,10 @@ mod macos {
     /// Lists the assertions the system holds on behalf of one engine pid. Input: the pid.
     /// Output: the caffeinate pid and kind of each, sorted by kind.
     fn assertions(engine: u32) -> Vec<(u32, String)> {
-        let output = Command::new("/usr/bin/pmset")
-            .args(["-g", "assertions"])
-            .output()
-            .unwrap();
+        let output = crazyagent::spawn_gate::output(
+            Command::new("/usr/bin/pmset").args(["-g", "assertions"]),
+        )
+        .unwrap();
         assert!(output.status.success());
         let text = String::from_utf8(output.stdout).unwrap();
         let behalf = format!("on behalf of Process ID {engine}");
@@ -169,10 +170,10 @@ mod macos {
         assert!(until(|| kinds(pid) == [SYSTEM]));
         let first = assertions(pid)[0].0;
 
-        let killed = Command::new("/bin/kill")
-            .args(["-9", &first.to_string()])
-            .status()
-            .unwrap();
+        let killed = crazyagent::spawn_gate::status(
+            Command::new("/bin/kill").args(["-9", &first.to_string()]),
+        )
+        .unwrap();
         assert!(killed.success());
         assert!(until(|| assertions(pid).is_empty()));
 
@@ -253,14 +254,15 @@ mod linux {
 
     #[test]
     fn the_logind_lock_is_listed_while_held_and_gone_when_the_holder_dies() {
-        let mut holder = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "linux::holder_process", "--nocapture"])
-            .env(HOLDER, "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut holder = crazyagent::spawn_gate::spawn(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "linux::holder_process", "--nocapture"])
+                .env(HOLDER, "1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
         let pid = holder.id();
         let listed = until(|| ours(pid));
         holder.kill().unwrap();
@@ -278,7 +280,8 @@ mod windows {
     /// Tells whether `powercfg /requests` lists our reason. It needs an elevated prompt, so
     /// this row runs on the Windows probe machine as an administrator.
     fn listed() -> bool {
-        let output = Command::new("powercfg").arg("/requests").output().unwrap();
+        let output =
+            crazyagent::spawn_gate::output(Command::new("powercfg").arg("/requests")).unwrap();
         assert!(output.status.success());
         String::from_utf8_lossy(&output.stdout).contains(REASON)
     }
@@ -307,11 +310,12 @@ mod journal {
     /// The stand-in for a program that changes a persistent setting: a real shell that
     /// writes one value into the stand-in setting file.
     fn change(setting: &Path, value: &str) {
-        let status = Command::new("/bin/sh")
-            .args(["-c", "printf %s \"$1\" > \"$2\"", "sh", value])
-            .arg(setting)
-            .status()
-            .unwrap();
+        let status = crazyagent::spawn_gate::status(
+            Command::new("/bin/sh")
+                .args(["-c", "printf %s \"$1\" > \"$2\"", "sh", value])
+                .arg(setting),
+        )
+        .unwrap();
         assert!(status.success());
     }
 

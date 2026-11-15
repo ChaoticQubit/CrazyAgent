@@ -3,6 +3,7 @@ mod container;
 mod job;
 mod launch;
 mod name;
+pub mod power;
 mod record;
 
 pub use name::final_name;
