@@ -406,16 +406,59 @@ async fn handle(
             Action::Owners => Reply::Owners {
                 owners: account.owners()?,
             },
-            Action::PublishStart { .. }
-            | Action::PublishApprove { .. }
-            | Action::PublishExclude { .. }
-            | Action::PublishRecheck { .. }
-            | Action::PublishContinue { .. }
-            | Action::PublishStatus { .. } => return Err(failure("github_publish_unbuilt")),
+            Action::PublishStart { project, plan } => Reply::Publish {
+                job: account.publish_start(&project_folder(&root, &project)?, &plan)?,
+            },
+            Action::PublishApprove { project, lines } => Reply::Publish {
+                job: account.publish_approve(
+                    &project_folder(&root, &project)?,
+                    &crate::projects_home::owner_home()?,
+                    &lines,
+                )?,
+            },
+            Action::PublishExclude { project, path } => Reply::Publish {
+                job: account.publish_exclude(
+                    &project_folder(&root, &project)?,
+                    &crate::projects_home::owner_home()?,
+                    &path,
+                )?,
+            },
+            Action::PublishRecheck { project } => Reply::Publish {
+                job: account.publish_recheck(
+                    &project_folder(&root, &project)?,
+                    &crate::projects_home::owner_home()?,
+                )?,
+            },
+            Action::PublishContinue { project } => Reply::Publish {
+                job: account.publish_continue(
+                    &project_folder(&root, &project)?,
+                    &crate::projects_home::owner_home()?,
+                )?,
+            },
+            Action::PublishStatus { project } => Reply::PublishStatus {
+                job: account.publish_status(&project_folder(&root, &project)?)?,
+            },
         })
     })
     .await
     .map_err(|_| unknown())?
+}
+
+/// Finds the folder a publish works on from the project's stored setup, so a client names
+/// a project by its id and never by a path. Inputs: the engine root and the project.
+/// Output: the absolute folder, or `github_publish_project_unknown`,
+/// `github_publish_unavailable`.
+fn project_folder(root: &Path, project: &ProjectId) -> Result<PathBuf, EngineError> {
+    let unavailable = || failure("github_publish_unavailable");
+    let db = crate::landing::open(root).map_err(|_| unavailable())?;
+    let folder = crate::project_setup::load_setup(&db, project)
+        .map_err(|_| unavailable())?
+        .ok_or_else(|| failure("github_publish_project_unknown"))?
+        .project_folder();
+    if !folder.is_absolute() {
+        return Err(failure("github_publish_project_unknown"));
+    }
+    Ok(folder)
 }
 
 async fn projects_home(engine: &Engine, admission: &Admission) -> Result<PathBuf, EngineError> {
