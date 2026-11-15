@@ -159,6 +159,29 @@ fn claude_rate_limit_errors_and_rejections_report_a_rate_limited_turn_error() {
     assert!(turn_errors(&events).is_empty());
 }
 
+/// A rate-limit status, limit type or overage reason a newer Claude Code adds is neither a
+/// rate-limited turn error nor a protocol fault, so a team agent's turn goes on and a later
+/// rejection still reads as one (RV-DS241-49).
+#[test]
+fn claude_unknown_rate_limit_status_is_not_a_rejection_and_keeps_the_turn() {
+    let mut driver = claude_driver();
+    let (events, _) = driver
+        .receive(&line(json!({
+            "type":"rate_limit_event", "uuid":"rate-future", "session_id":"native-session",
+            "rate_limit_info":{"status":"future_status","rateLimitType":"ten_day",
+                "overageDisabledReason":"future_reason"}
+        })))
+        .unwrap();
+    assert!(turn_errors(&events).is_empty());
+    let (events, _) = driver
+        .receive(&line(json!({
+            "type":"rate_limit_event", "uuid":"rate-after", "session_id":"native-session",
+            "rate_limit_info":{"status":"rejected"}
+        })))
+        .unwrap();
+    assert_eq!(turn_errors(&events), [true]);
+}
+
 #[test]
 fn claude_assistant_errors_other_than_rate_limits_are_not_rate_limited() {
     let mut driver = claude_driver();

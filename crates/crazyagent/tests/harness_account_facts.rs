@@ -709,13 +709,51 @@ fn claude_duplicate_rate_event_cannot_be_replayed() {
     assert_eq!(protocol.state(), ClaudeState::Failed);
 }
 
+/// A status, limit type or overage reason a newer Claude Code adds keeps the session: the
+/// status reads as unknown, a plain name is kept as sent, and text that is not a plain name
+/// is left out, so the next frame is still read (RV-DS241-49).
 #[test]
-fn claude_unknown_limit_status_is_explicitly_unsupported() {
-    assert_invalid_claude_rate(json!({"status":"future_status"}), ClaudeError::Unsupported);
-    assert_invalid_claude_rate(
-        json!({"status":"allowed","overageStatus":"future_status"}),
-        ClaudeError::Unsupported,
+fn claude_unknown_limit_status_type_or_reason_keeps_the_session() {
+    let mut protocol = claude_idle();
+    let event = claude_rate(
+        &mut protocol,
+        "rate-future",
+        json!({
+            "status":"future_status", "rateLimitType":"ten_day",
+            "overageStatus":"future_status", "overageDisabledReason":"future_reason"
+        }),
     );
+    let serialized = serde_json::to_value(&event).unwrap();
+    assert_eq!(serialized["kind"]["status"], "unknown");
+    assert_eq!(serialized["kind"]["overage_status"], "unknown");
+    assert_eq!(serialized["kind"]["rate_limit_type"], "ten_day");
+    assert_eq!(
+        serialized["kind"]["overage_disabled_reason"],
+        "future_reason"
+    );
+    assert_eq!(protocol.state(), ClaudeState::Idle);
+    let event = claude_rate(
+        &mut protocol,
+        "rate-odd",
+        json!({
+            "status":"allowed", "rateLimitType":"Ten Day\u{202e}",
+            "overageDisabledReason":"y".repeat(65)
+        }),
+    );
+    assert_eq!(
+        event.kind,
+        EventKind::RateLimitObserved {
+            status: RateLimitStatus::Allowed,
+            resets_at_unix_secs: None,
+            rate_limit_type: None,
+            utilization: None,
+            overage_status: None,
+            overage_resets_at_unix_secs: None,
+            overage_disabled_reason: None
+        }
+    );
+    claude_rate(&mut protocol, "rate-after", json!({"status":"rejected"}));
+    assert_eq!(protocol.state(), ClaudeState::Idle);
 }
 
 #[test]
