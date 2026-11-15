@@ -4023,6 +4023,38 @@ fn a_stepped_over_folder_named_like_a_pattern_never_hides_its_neighbour() {
     );
 }
 
+/// G6 code r2 F1: a folder the repository ignores whose name is not UTF-8, which a Linux
+/// file system allows, never stops what the onboarding reads while the owner's global ignore
+/// file opens: the owner's run then steps over no folder, as before G6 r2, and the plain
+/// document beside it is still read.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_repository_ignored_folder_named_in_bytes_never_stops_the_onboarding_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let (home, repo) = (root.join("home"), root.join("repo"));
+    for folder in [&home, &repo] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    git::OWNER_HOME.with(|owner| *owner.borrow_mut() = Some(home.clone()));
+    git_in(&home, &repo, &["init", "-q", "--template="]);
+    write(&home.join(".config/git/ignore"), "drafts.txt\n");
+    write(&repo.join(".gitignore"), "/cache-*/\n");
+    let bytes = repo.join(OsStr::from_bytes(b"cache-\xff"));
+    std::fs::create_dir(&bytes).unwrap();
+    std::fs::write(bytes.join("held.txt"), "Held\n").unwrap();
+    write(&repo.join("notes.txt"), "Plain notes\n");
+
+    let documents = crate::onboarding::draft::gather(&repo, &[]).documents;
+
+    assert!(
+        documents
+            .iter()
+            .any(|document| document.path == "notes.txt"),
+        "nothing was read"
+    );
+}
+
 /// RV-DS241-145: a change set keeps git's ignore precedence too: a file only the owner
 /// checkout's own `core.excludesFile` names stays out of it while the owner's global ignore
 /// file is present, as the owner's git would leave it unstaged.
