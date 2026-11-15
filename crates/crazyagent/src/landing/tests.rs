@@ -16161,14 +16161,22 @@ fn a_confined_step_on_linux_keeps_a_racy_entry_racy_in_its_index_copy() {
             .set_times(std::fs::FileTimes::new().set_modified(then))
             .unwrap();
     };
-    git_in(&case.home, &case.repo, &["config", "core.checkStat", "minimal"]);
+    git_in(
+        &case.home,
+        &case.repo,
+        &["config", "core.checkStat", "minimal"],
+    );
     write(&case.repo.join("README"), "uno\ndos\ntres\n");
     git_in(&case.home, &case.repo, &["commit", "-q", "-am", "Target"]);
     let target = git_in(&case.home, &case.repo, &["rev-parse", "HEAD"]);
     stamp(&readme);
     git_in(&case.home, &worktree, &["update-index", "--refresh"]);
     let edit = "ONE\nTWO\nTHREE\n";
-    assert_eq!(std::fs::read(&readme).unwrap().len(), edit.len(), "the same size");
+    assert_eq!(
+        std::fs::read(&readme).unwrap().len(),
+        edit.len(),
+        "the same size"
+    );
     write(&readme, edit);
     stamp(&readme);
     stamp(&index);
@@ -16178,7 +16186,12 @@ fn a_confined_step_on_linux_keeps_a_racy_entry_racy_in_its_index_copy() {
         "the real index sees the racy edit"
     );
     let moved = confined_agent(&case, git::Writes::WorkTree)
-        .exec(&["read-tree", "-u", "-m", "HEAD", target.trim()], None, &[], 4096)
+        .exec(
+            &["read-tree", "-u", "-m", "HEAD", target.trim()],
+            None,
+            &[],
+            4096,
+        )
         .unwrap();
     assert_ne!(moved.code, 0, "read-tree wrote over the agent's edit");
     assert_eq!(std::fs::read_to_string(&readme).unwrap(), edit);
@@ -16218,7 +16231,11 @@ fn a_confined_step_on_linux_never_runs_while_its_step_folder_holds_a_git_lock() 
     };
     assert!(step.is_dir(), "confining makes the step folder");
     write(&held, "orphan git\n");
-    assert_eq!(diff(), 128, "the step waits for the git that holds its folder");
+    assert_eq!(
+        diff(),
+        128,
+        "the step waits for the git that holds its folder"
+    );
     assert_eq!(std::fs::read_to_string(&held).unwrap(), "orphan git\n");
     assert!(
         std::fs::symlink_metadata(&lock).is_err(),
@@ -16290,8 +16307,11 @@ fn the_engine_start_removes_a_step_folder_left_beside_no_worktree_lock() {
         .confined(git::Writes::WorkTree)
         .unwrap();
     write(&lock, "");
-    write(&step.join("index.lock"), "killed git
-");
+    write(
+        &step.join("index.lock"),
+        "killed git
+",
+    );
     assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 0);
     assert_eq!(std::fs::read_to_string(&lock).unwrap(), "");
     assert_eq!(

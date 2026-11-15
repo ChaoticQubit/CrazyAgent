@@ -1029,11 +1029,7 @@ enum Flags {
 /// Clears the flags of one entry as `flags` says. Inputs: what to do, the entry's open
 /// parent and its name there.
 #[cfg(unix)]
-fn clear_flags<P: rustix::path::Arg + Copy>(
-    flags: Flags,
-    parent: impl std::os::fd::AsFd,
-    name: P,
-) {
+fn clear_flags<P: rustix::path::Arg + Copy>(flags: Flags, parent: impl std::os::fd::AsFd, name: P) {
     match flags {
         Flags::Kept => {}
         Flags::Cleared => unpin(parent, name),

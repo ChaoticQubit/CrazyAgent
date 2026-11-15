@@ -3969,7 +3969,10 @@ fn a_launch_that_left_context_mode_out_leaves_out_the_hooks_that_follow_it() {
         crate::agent_git::Layout::Linked,
     )
     .unwrap();
-    assert!(context.plugins.servers.is_empty(), "the server was left out");
+    assert!(
+        context.plugins.servers.is_empty(),
+        "the server was left out"
+    );
     assert_eq!(
         context.plugins.context_mode_off,
         Some(crate::plugins::ContextModeOff::Failed)

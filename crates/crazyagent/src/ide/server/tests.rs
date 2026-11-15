@@ -1513,8 +1513,14 @@ fn removing_a_recorded_temp_folder_never_follows_a_link_in_it() {
     }
     assert!(started.is_ok());
     assert!(gone, "the recorded temp folder was kept");
-    assert!(file.is_file(), "a file a link in the temp folder named was removed");
-    assert!(inner.is_file(), "a folder a link in the temp folder named was emptied");
+    assert!(
+        file.is_file(),
+        "a file a link in the temp folder named was removed"
+    );
+    assert!(
+        inner.is_file(),
+        "a folder a link in the temp folder named was emptied"
+    );
 }
 
 /// Runs git as a built IDE server starts it: the engine's shim under the server's installed
