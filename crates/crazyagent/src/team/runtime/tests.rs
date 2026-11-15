@@ -33744,3 +33744,59 @@ fn the_team_runtime_refuses_a_store_that_keeps_a_rollback_journal() {
         Ok(_) => panic!("the team runtime opened a store that keeps a rollback journal"),
     }
 }
+
+/// DEC-180 Phase 1: under the None network a signed-in agent reaches its harness's own model
+/// hosts. Codex and Claude Code have a list, by their exact launch ids; RCLI and each of the
+/// 15 other catalog harnesses is refused with today's sentence.
+#[test]
+fn only_codex_and_claude_code_name_model_hosts_for_a_signed_in_agent_with_no_network() {
+    let managed = TeamReach::Managed {
+        profile_ref: reference("managed-profile"),
+        model: None,
+    };
+    let listed = |hosts: &[(&str, u16)]| -> Vec<ModelHost> {
+        hosts
+            .iter()
+            .filter_map(|(name, port)| ModelHost::new(name, *port))
+            .collect()
+    };
+    assert!(!listed(CODEX_MODEL_HOSTS).is_empty() && !listed(CLAUDE_MODEL_HOSTS).is_empty());
+    assert_eq!(
+        model_hosts("codex", &managed),
+        Ok(listed(CODEX_MODEL_HOSTS))
+    );
+    assert_eq!(
+        model_hosts("claude-code", &managed),
+        Ok(listed(CLAUDE_MODEL_HOSTS))
+    );
+    let refused = with_code(
+        "this harness has no model hosts for the no network setting",
+        Some("network_none_harness_unlisted"),
+    );
+    for launch in [
+        "claude",
+        "rcli",
+        "opencode",
+        "gemini-cli",
+        "fx",
+        "openclaw",
+        "pi",
+        "goose",
+        "aider",
+        "qwen-code",
+        "crush",
+        "droid",
+        "copilot",
+        "cline",
+        "continue",
+        "openhands",
+        "kimi",
+        "no-such-harness",
+    ] {
+        assert_eq!(
+            model_hosts(launch, &managed),
+            Err(refused.clone()),
+            "{launch}"
+        );
+    }
+}

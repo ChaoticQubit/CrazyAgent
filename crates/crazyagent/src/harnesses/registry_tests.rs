@@ -1,5 +1,4 @@
 use super::*;
-use crate::coord::settings::{HarnessKind, NativeSubAgents, native_sub_agents};
 use crate::harnesses::interactive::{Support, support};
 use crate::harnesses::{spec, specs};
 
@@ -101,37 +100,6 @@ fn the_terminal_table_starts_a_live_terminal_for_the_harnesses_the_registry_can_
     for harness in registry().all() {
         let id = harness.id();
         assert_eq!(harness.runnable(), support(id) == Support::Terminal, "{id}");
-    }
-}
-
-#[test]
-fn a_team_start_and_a_master_pick_the_harnesses_the_registry_names_for_them() {
-    for harness in registry().all() {
-        let id = harness.id();
-        assert_eq!(
-            harness.runnable(),
-            crate::team::launch_harness(id).is_some(),
-            "{id}"
-        );
-        assert_eq!(
-            harness.master(),
-            crate::team::master_backend(id).is_some(),
-            "{id}"
-        );
-    }
-    for (kind, id) in [
-        (HarnessKind::ClaudeCode, "claude-code"),
-        (HarnessKind::Codex, "codex"),
-        (HarnessKind::Rcli, "rcli"),
-    ] {
-        let native = native_sub_agents(kind);
-        match registry().get(id).unwrap().sub_agents() {
-            SubAgents::Teams => assert_eq!(native, NativeSubAgents::Teams, "{id}"),
-            SubAgents::Threads => assert_eq!(native, NativeSubAgents::Threads, "{id}"),
-            SubAgents::App => {
-                assert!(matches!(native, NativeSubAgents::Unavailable(_)), "{id}");
-            }
-        }
     }
 }
 

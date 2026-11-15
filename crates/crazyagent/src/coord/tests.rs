@@ -3444,3 +3444,71 @@ fn harness_name(harness: HarnessKind) -> &'static str {
         HarnessKind::Rcli => "RCLI",
     }
 }
+
+/// DEC-180 Phase 1: coordination settings are kept for Codex, Claude Code and RCLI and for
+/// no other catalog harness. A stored or sent kind is its exact id, so the alias a team
+/// plan may hold names the kind but is never a stored name.
+#[cfg(unix)]
+#[test]
+fn coordination_settings_are_kept_for_codex_claude_code_and_rcli_and_no_other_harness() {
+    for (name, kind) in [
+        ("claude-code", HarnessKind::ClaudeCode),
+        ("codex", HarnessKind::Codex),
+        ("rcli", HarnessKind::Rcli),
+    ] {
+        assert_eq!(HarnessKind::from_harness(name), Some(kind));
+        assert_eq!(HarnessKind::parse(name), Some(kind));
+        assert_eq!(kind.as_str(), name);
+        let stored = format!("\"{name}\"");
+        assert_eq!(serde_json::to_string(&kind).unwrap(), stored);
+        assert_eq!(serde_json::from_str::<HarnessKind>(&stored).unwrap(), kind);
+        assert_eq!(
+            serde_json::from_value::<HarnessKind>(serde_json::json!(name)).unwrap(),
+            kind
+        );
+    }
+    assert_eq!(
+        HarnessKind::ALL,
+        [
+            HarnessKind::ClaudeCode,
+            HarnessKind::Codex,
+            HarnessKind::Rcli
+        ]
+    );
+    assert_eq!(
+        HarnessKind::from_harness("claude"),
+        Some(HarnessKind::ClaudeCode)
+    );
+    for name in [
+        "opencode",
+        "gemini-cli",
+        "fx",
+        "openclaw",
+        "pi",
+        "goose",
+        "aider",
+        "qwen-code",
+        "crush",
+        "droid",
+        "copilot",
+        "cline",
+        "continue",
+        "openhands",
+        "kimi",
+        "",
+        "Codex",
+        "listed",
+        "no-such-harness",
+        "cursor-agent",
+    ] {
+        assert_eq!(HarnessKind::from_harness(name), None, "{name}");
+        assert_eq!(HarnessKind::parse(name), None, "{name}");
+        let sent = serde_json::to_string(name).unwrap();
+        assert!(
+            serde_json::from_str::<HarnessKind>(&sent).is_err(),
+            "{name}"
+        );
+    }
+    assert_eq!(HarnessKind::parse("claude"), None);
+    assert!(serde_json::from_str::<HarnessKind>("\"claude\"").is_err());
+}
