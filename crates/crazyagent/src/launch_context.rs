@@ -1059,7 +1059,10 @@ impl AgentContext {
         home: &Path,
         tools: bool,
     ) -> Result<Installed, LaunchError> {
-        let piped = drivers::piped(harness)?;
+        let codex = match drivers::piped(harness)? {
+            Piped::Codex => true,
+            Piped::Claude => false,
+        };
         crate::harnesses::launch::validate_home(home)?;
         let lock = lock(home)?;
         let state = home.join(STATE);
@@ -1067,7 +1070,7 @@ impl AgentContext {
             arguments: Vec::new(),
             files: Some(InstalledFiles {
                 home: home.to_path_buf(),
-                codex: piped == Piped::Codex,
+                codex,
             }),
             transcripts: self.transcripts,
             hooks: false,
@@ -1122,7 +1125,7 @@ impl AgentContext {
         }
         let first_skill = names.first().copied();
         assert_eq!(first_skill.is_some(), skills);
-        if piped == Piped::Codex {
+        if codex {
             let config = home.join("config.toml");
             let copies = home.join("skills").join(STATE);
             remove_copies(home)?;
@@ -1274,9 +1277,9 @@ impl AgentContext {
         assert!(!installed.hooks || !hooks.is_empty());
         assert!(!installed.relay || self.relay.is_some());
         assert!(installed.denied.len() <= DENIED_TOOLS_MAX);
-        assert!(installed.denied.is_empty() || (piped == Piped::Claude && tools));
-        assert!(installed.native.is_none() || (piped == Piped::Claude && tools));
-        assert!(!installed.native_threads || (piped == Piped::Codex && tools));
+        assert!(installed.denied.is_empty() || (!codex && tools));
+        assert!(installed.native.is_none() || (!codex && tools));
+        assert!(!installed.native_threads || (codex && tools));
         assert!(installed.model_proxy.is_none() || tools);
         Ok(installed)
     }
