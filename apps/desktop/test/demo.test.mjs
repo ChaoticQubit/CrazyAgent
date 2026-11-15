@@ -78,7 +78,7 @@ test("a pool that runs only on RCLI or has no ready account is listed disabled w
   assert.match(html, /<input(?=[^>]*value="pool-r")(?=[^>]*disabled="")[^>]*>/);
   assert.match(html, /<input(?=[^>]*value="pool-n")(?=[^>]*disabled="")[^>]*>/);
   assert.doesNotMatch(html, /<input(?=[^>]*value="pool-a")(?=[^>]*disabled="")[^>]*>/);
-  assert.ok(text(html).includes("rcli"), "the rcli reason is on the page, not hidden");
+  assert.ok(text(html).includes("RCLI"), "the RCLI reason is on the page, not hidden");
   assert.match(html, /<button(?=[^>]*disabled="")[^>]*>[^<]*(<[^>]+>)*Create the demo/);
 });
 

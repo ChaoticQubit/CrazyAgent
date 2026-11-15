@@ -162,7 +162,7 @@ test("the app page names agents from the metrics read and reads no team status p
     runs: metrics.runs.map((run) => ({ ...run, label: label(run.agent) })),
     agents: metrics.agents.map((row) => ({ ...row, label: label(row.agent) })),
   };
-  const shown = (by) => tableText(render({ names: { agents: new Map(), accounts: names.accounts }, metrics: { kind: "ok", value: labelled } }), by);
+  const shown = (by) => tableText(render({ names: { ...names, agents: new Map() }, metrics: { kind: "ok", value: labelled } }), by);
   assert.match(shown("agent"), /Ada \(@calendar\) Alpha 1\.4K/);
   assert.match(shown("agent"), /Master Beta 900/);
   assert.match(shown("run"), /#142 Calendar API endpoints Alpha 1\.4K 700 500 200 3K Ada \(@calendar\) /);

@@ -31,7 +31,7 @@ const report = (patch = {}) => ({
   limits: [limits()], partial_homes: 0,
   money: { settings: { main_number: "tokens", prices: "off" }, shown: "tokens", as_of: null, cost_nanos: 0, unpriced_tokens: 0 }, ...patch,
 });
-const names = { agents: new Map(), accounts: new Map([["acct-claude", "Work Claude"]]) };
+const names = { agents: new Map(), accounts: new Map([["acct-claude", "Work Claude"]]), harness: (id) => id };
 const PROJECTS = [{ id: "project-harbor", name: "Harbor Notes" }];
 const LIMITS = { pools: new Map([["pool-main", "Main pool"]]), failure: "", busy: null, next: null, revision: 0, onRefresh: forbidden, onSetReset: forbidden };
 const counted = (rows) => rows.filter((item) => !item.not_reported_by || usage.headlineTokens(item.tokens) > 0);
