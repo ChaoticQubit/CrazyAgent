@@ -1173,7 +1173,8 @@ fn server_view(
     let invalid = record
         .spec
         .validate()
-        .err()
+        .is_err()
+        .then_some("server_stored_spec_invalid")
         .filter(|_| status == ServerStatus::CantStart);
     Ok(ServerView {
         id: record.id.clone(),
@@ -1186,8 +1187,6 @@ fn server_view(
         status,
         status_label: status.label().into(),
         problem: invalid
-            .as_ref()
-            .map(|problem| problem.0.as_str())
             .or_else(|| current.and_then(|check| check.problem.as_deref()))
             .map(crate::plugins::check_problem),
         tools: current.map(|check| check.tools.clone()).unwrap_or_default(),

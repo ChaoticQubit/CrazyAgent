@@ -164,10 +164,11 @@ pub(crate) fn entry_switch(tx: &Transaction<'_>, id: &str) -> Result<Option<bool
 
 /// Drops one project from the switched-off hooks every pack row keeps ([`KeptHook`]) when the
 /// project is removed or its id is taken again, so a later setup run never switches a hook
-/// off in a new project that reuses the id (RV-DS241-195); a kept hook then left on
-/// everywhere and in no project is forgotten. A database with no pack table, or a row that
-/// does not read, is left as it is. Inputs: the transaction and the project. Output: any
-/// SQLite failure.
+/// off in a new project that reuses the id (RV-DS241-195). Every kept hook stays, so the
+/// hook a new pin adds still matches the one running the same thing and takes nothing from
+/// a switched-off sibling (rv-code2 B3B-1); the next seed clears them all. A database with
+/// no pack table, or a row that does not read, is left as it is. Inputs: the transaction
+/// and the project. Output: any SQLite failure.
 pub(super) fn forget_project(
     tx: &Transaction<'_>,
     project: &crate::protocol::ProjectId,
@@ -199,9 +200,6 @@ pub(super) fn forget_project(
         for hook in &mut record.hooks {
             hook.projects.retain(|id| id != project.as_str());
         }
-        record
-            .hooks
-            .retain(|hook| !hook.enabled || !hook.projects.is_empty());
         assert!(!record.hooks.iter().any(holds));
         save_pack(tx, &record)?;
     }
