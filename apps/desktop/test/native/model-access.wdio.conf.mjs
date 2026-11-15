@@ -25,6 +25,7 @@ const SPECS = {
   "learning-replay-guide": "learning-replay-guide.e2e.mjs",
   "learning-replay-first-run": "learning-replay-first-run.e2e.mjs",
   "refused-tool": "refused-tool.e2e.mjs",
+  "app-theme": "app-theme.e2e.mjs",
 };
 assert(SPECS[process.env.CRAZYAGENT_DESKTOP_TEST_SUITE], "a suite this configuration runs");
 
