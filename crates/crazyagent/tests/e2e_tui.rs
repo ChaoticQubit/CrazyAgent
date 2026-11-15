@@ -5,7 +5,7 @@ mod e2e_support;
 use crazyagent::engine::owner::{OwnerData, OwnerRead, OwnerResult};
 use crazyagent::master_session::{MasterReason, MasterTurnPhase, MasterTurnView};
 use crazyagent::notifications::{
-    Banners, Delivery, NoticeAction, NoticeKind, NoticeReport, NoticeSettings,
+    Banners, Delivery, NoticeAction, NoticeClass, NoticeKind, NoticeReport, NoticeSettings,
 };
 use crazyagent::protocol::ProjectId;
 use crazyagent::questions::{self, Ask, EngineSource, QuestionKind};
@@ -2334,10 +2334,9 @@ fn the_tui_saves_an_action_kind_back_to_on() {
 
 #[test]
 fn the_tui_saves_an_info_kind_as_off() {
-    let saved = notice_settings_after(
-        NoticeSettings::default(),
-        &["Down", "Down", "Down", "Down", "Down", "Right", "Right"],
-    );
+    let mut keys = vec!["Down"; 7];
+    keys.extend(["Right", "Right"]);
+    let saved = notice_settings_after(NoticeSettings::default(), &keys);
     assert_eq!(saved, notice_kind(NoticeKind::AgentFinished, Delivery::Off));
 }
 
@@ -2361,6 +2360,110 @@ fn the_tui_saves_macos_notifications_for_all_items() {
     };
     let saved = notice_settings_after(seed, &["End", "Up", "Right", "Right"]);
     assert_eq!(saved.banners, Banners::All);
+}
+
+/// DEC-167 addendum 10: saves one Keep awake notice kind's delivery through Settings /
+/// Notifications. Inputs: the kind, its delivery stored first, how many choices Right
+/// steps and the delivery expected. Output: none; panics when the engine holds another
+/// one.
+fn keep_awake_notice_saves(kind: NoticeKind, seed: Delivery, steps: usize, wanted: Delivery) {
+    let row = NoticeKind::ALL
+        .iter()
+        .filter(|known| known.class() == kind.class())
+        .position(|known| *known == kind)
+        .unwrap();
+    let actions = NoticeKind::ALL
+        .iter()
+        .filter(|known| known.class() == NoticeClass::Action)
+        .count();
+    let downs = match kind.class() {
+        NoticeClass::Action => row,
+        NoticeClass::Info => actions + row,
+    };
+    let mut keys = vec!["Down"; downs];
+    keys.extend(std::iter::repeat_n("Right", steps));
+    let saved = notice_settings_after(notice_kind(kind, seed), &keys);
+    assert_eq!(saved, notice_kind(kind, wanted), "{kind:?}");
+}
+
+#[test]
+fn the_tui_saves_the_keep_awake_restore_notice_as_bell_only() {
+    keep_awake_notice_saves(
+        NoticeKind::KeepAwakeRestore,
+        Delivery::On,
+        1,
+        Delivery::BellOnly,
+    );
+}
+
+#[test]
+fn the_tui_saves_the_keep_awake_restore_notice_on() {
+    keep_awake_notice_saves(
+        NoticeKind::KeepAwakeRestore,
+        Delivery::BellOnly,
+        1,
+        Delivery::On,
+    );
+}
+
+#[test]
+fn the_tui_saves_the_keep_awake_approval_notice_as_bell_only() {
+    keep_awake_notice_saves(
+        NoticeKind::KeepAwakeApproval,
+        Delivery::On,
+        1,
+        Delivery::BellOnly,
+    );
+}
+
+#[test]
+fn the_tui_saves_the_keep_awake_approval_notice_on() {
+    keep_awake_notice_saves(
+        NoticeKind::KeepAwakeApproval,
+        Delivery::BellOnly,
+        1,
+        Delivery::On,
+    );
+}
+
+#[test]
+fn the_tui_saves_the_keep_awake_ended_notice_as_bell_only() {
+    keep_awake_notice_saves(
+        NoticeKind::KeepAwakeEnded,
+        Delivery::On,
+        1,
+        Delivery::BellOnly,
+    );
+}
+
+#[test]
+fn the_tui_saves_the_keep_awake_ended_notice_off() {
+    keep_awake_notice_saves(NoticeKind::KeepAwakeEnded, Delivery::On, 2, Delivery::Off);
+}
+
+#[test]
+fn the_tui_saves_the_keep_awake_ended_notice_on() {
+    keep_awake_notice_saves(NoticeKind::KeepAwakeEnded, Delivery::Off, 1, Delivery::On);
+}
+
+#[test]
+fn the_tui_saves_the_heat_notice_kind_as_bell_only() {
+    keep_awake_notice_saves(
+        NoticeKind::KeepAwakeHeat,
+        Delivery::On,
+        1,
+        Delivery::BellOnly,
+    );
+}
+
+#[test]
+fn the_tui_saves_the_heat_notice_kind_off() {
+    keep_awake_notice_saves(NoticeKind::KeepAwakeHeat, Delivery::On, 2, Delivery::Off);
+}
+
+#[test]
+fn the_tui_saves_the_heat_notice_kind_on() {
+    keep_awake_notice_saves(NoticeKind::KeepAwakeHeat, Delivery::Off, 1, Delivery::On);
 }
 
 #[test]

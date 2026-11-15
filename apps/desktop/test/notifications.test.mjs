@@ -53,16 +53,20 @@ test("every kind has one engine name, its class and the label the engine gives i
   const arms = (text) => new Map([...text.matchAll(/Self::(\w+) => "([^"]+)",/g)].map(([, variant, words]) => [variant, words]));
   const names = arms(body("pub fn name(self)", "pub fn label(self)"));
   const labels = arms(body("pub fn label(self)", "pub fn parse("));
-  assert.equal(api.NOTICE_KINDS.length, 20);
-  assert.equal(labels.size, 20);
+  assert.equal(api.NOTICE_KINDS.length, 24);
+  assert.equal(labels.size, 24);
   for (const entry of api.NOTICE_KINDS) {
     const variant = entry.kind.split("_").map((part) => part[0].toUpperCase() + part.slice(1)).join("");
     assert.equal(names.get(variant), entry.kind, `the engine names ${entry.kind}`);
     assert.equal(labels.get(variant), entry.label, `the engine labels ${entry.kind}`);
   }
   assert.deepEqual(api.NOTICE_KINDS.filter((entry) => entry.class === "action").map((entry) => entry.kind),
-    ["question", "account_sign_in", "research_pool", "memory_review", "change_set_review"]);
+    ["question", "account_sign_in", "research_pool", "memory_review", "change_set_review", "keep_awake_restore", "keep_awake_approval"]);
+  assert.deepEqual(api.NOTICE_KINDS.slice(-2).map((entry) => entry.kind), ["keep_awake_ended", "keep_awake_heat"]);
   assert.equal(api.kindLabel("change_set_landed"), "Change set landed");
+  assert.equal(api.kindLabel("keep_awake_heat"), "Hot during Keep awake");
+  assert.deepEqual(api.deliveryChoices("keep_awake_restore"), ["on", "bell_only"], "an Action kind is never Off");
+  assert.deepEqual(api.deliveryChoices("keep_awake_ended"), ["on", "bell_only", "off"]);
 });
 
 test("each target opens its exact page, with the anchor of the item to highlight", () => {
@@ -81,6 +85,7 @@ test("each target opens its exact page, with the anchor of the item to highlight
   assert.deepEqual(opened({ page: "updates" }), ["#/settings/updates", null]);
   assert.deepEqual(opened({ page: "harnesses" }), ["#/settings/harnesses", null]);
   assert.deepEqual(opened({ page: "home" }), ["#/home", null]);
+  assert.deepEqual(opened({ page: "keep_awake" }), [null, null], "the Keep awake panel opens over the page the owner is on");
 });
 
 test("a badge shows its count up to 99, then 99+, and nothing at zero", () => {

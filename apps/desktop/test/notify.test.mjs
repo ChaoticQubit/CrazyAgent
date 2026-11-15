@@ -137,6 +137,18 @@ test("a click on a banner opens the item's exact page and marks only that item r
   assert.equal(anchor, "question-12");
 });
 
+test("a click on a Keep awake banner opens the Keep awake panel where the owner is and marks the item read", async () => {
+  const went = [];
+  const sent = [];
+  const anchor = await notify.openClicked({ id: 9, target: { page: "keep_awake" } }, {
+    go: (hash) => went.push(hash),
+    send: async (action) => { sent.push(action); return { kind: "ok", value: undefined }; },
+  });
+  assert.deepEqual(went, [null], "no page change: the panel opens over the current page");
+  assert.deepEqual(sent, [{ read: { ids: [9] } }]);
+  assert.equal(anchor, null);
+});
+
 test("only the plugin's refusal earns the System Settings toast", () => {
   const refused = (code) => ({ kind: "error", code, message: "" });
   assert.equal(notify.failureLine(refused("notifications_failed")), notify.FAILED_LINE);

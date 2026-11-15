@@ -335,6 +335,7 @@ fn enter_opens_each_items_page_and_marks_an_unread_item_read() {
             Place::Settings(SettingsSection::Harnesses),
         ),
         (NoticeTarget::Home, Place::Home),
+        (NoticeTarget::KeepAwake, Place::KeepAwake),
     ];
     for (target, place) in cases {
         let mut item = question(7);

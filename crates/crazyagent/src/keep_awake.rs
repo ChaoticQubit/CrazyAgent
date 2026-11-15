@@ -421,11 +421,22 @@ fn undo(entry: &journal::Entry) -> Result<(), EngineError> {
     )))
 }
 
+/// What the engine start's undo left (DEC-167 addendum 10): the kinds of the recorded
+/// changes it could not undo, none when every one was undone, or a journal it could not
+/// read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Leftover {
+    Kinds(Vec<String>),
+    Unreadable,
+}
+
 /// Undoes at engine start every persistent change an earlier engine left behind (DEC-167).
-/// Input: the engine root. Output: Ok when the journal is empty afterwards, else the first
-/// failure, with the entries that failed still recorded.
-pub(crate) fn reconcile(root: &Path) -> Result<(), EngineError> {
-    journal::Journal::open(root)?.reconcile(undo)
+/// Not written yet: says nothing is left. Input: the engine root. Output: what was left.
+pub(crate) fn reconcile(root: &Path) -> Leftover {
+    if let Err(problem) = journal::Journal::open(root).and_then(|mut found| found.reconcile(undo)) {
+        eprintln!("keep awake journal: {}", problem.0);
+    }
+    Leftover::Kinds(Vec::new())
 }
 
 /// The engine's Keep awake pacer: looks once a second for a changed work count, an owner
@@ -445,6 +456,7 @@ pub struct Keeper {
     battery_unread: bool,
     battery_unread_twice: bool,
     lid_refused: bool,
+    leftover: Option<Leftover>,
 }
 
 impl Keeper {
@@ -467,6 +479,12 @@ impl Keeper {
             Ok(sensing) => self.sensing = Some(sensing),
             Err(problem) => eprintln!("keep awake: no sensor thread: {problem}"),
         }
+        self
+    }
+
+    /// Gives the keeper what the engine start's undo left. Not written yet: drops it. Input:
+    /// what was left. Output: the keeper.
+    pub fn with_leftover(self, _leftover: Leftover) -> Self {
         self
     }
 

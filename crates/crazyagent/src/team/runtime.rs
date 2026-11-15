@@ -15126,9 +15126,7 @@ pub fn start_for_engine(
         .map_err(|e| format!("team runtime: {e}"))?;
     let state = runtime.join("team");
     private_directory(&state).map_err(|e| e.0)?;
-    if let Err(problem) = crate::keep_awake::reconcile(&runtime) {
-        eprintln!("keep awake journal: {}", bound_text(&problem.0, 300));
-    }
+    let leftover = crate::keep_awake::reconcile(&runtime);
     let settings = (global.to_path_buf(), project.to_path_buf());
     let (global, project) = settings.clone();
     let access: AccessSource = Box::new(move || {
@@ -15174,7 +15172,8 @@ pub fn start_for_engine(
     let mut runtime = runtime.with_events(super::events::HANDLERS);
     runtime.keep_awake =
         crate::keep_awake::Keeper::with_hold(crate::keep_awake::platform_hold(std::process::id()))
-            .with_reader(crate::keep_awake::power::platform_reader());
+            .with_reader(crate::keep_awake::power::platform_reader())
+            .with_leftover(leftover);
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
 }
 

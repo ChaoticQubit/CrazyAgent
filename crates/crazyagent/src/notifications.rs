@@ -10,6 +10,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod events;
+pub(crate) mod keep_awake;
 pub mod reconcile;
 mod sources;
 
@@ -96,6 +97,8 @@ pub enum NoticeKind {
     ResearchPool,
     MemoryReview,
     ChangeSetReview,
+    KeepAwakeRestore,
+    KeepAwakeApproval,
     AgentFinished,
     AgentFailed,
     AgentStopped,
@@ -111,15 +114,19 @@ pub enum NoticeKind {
     EngineLost,
     HarnessUpdate,
     TeamAlert,
+    KeepAwakeEnded,
+    KeepAwakeHeat,
 }
 
 impl NoticeKind {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 24] = [
         Self::Question,
         Self::AccountSignIn,
         Self::ResearchPool,
         Self::MemoryReview,
         Self::ChangeSetReview,
+        Self::KeepAwakeRestore,
+        Self::KeepAwakeApproval,
         Self::AgentFinished,
         Self::AgentFailed,
         Self::AgentStopped,
@@ -135,9 +142,11 @@ impl NoticeKind {
         Self::EngineLost,
         Self::HarnessUpdate,
         Self::TeamAlert,
+        Self::KeepAwakeEnded,
+        Self::KeepAwakeHeat,
     ];
 
-    /// The kind's class. Input: the kind. Output: Action for the five kinds the owner must
+    /// The kind's class. Input: the kind. Output: Action for the seven kinds the owner must
     /// act on, Info for the rest.
     pub fn class(self) -> NoticeClass {
         match self {
@@ -145,7 +154,9 @@ impl NoticeKind {
             | Self::AccountSignIn
             | Self::ResearchPool
             | Self::MemoryReview
-            | Self::ChangeSetReview => NoticeClass::Action,
+            | Self::ChangeSetReview
+            | Self::KeepAwakeRestore
+            | Self::KeepAwakeApproval => NoticeClass::Action,
             _ => NoticeClass::Info,
         }
     }
@@ -174,6 +185,10 @@ impl NoticeKind {
             Self::EngineLost => "engine_lost",
             Self::HarnessUpdate => "harness_update",
             Self::TeamAlert => "team_alert",
+            Self::KeepAwakeRestore => "keep_awake_restore",
+            Self::KeepAwakeApproval => "keep_awake_approval",
+            Self::KeepAwakeEnded => "keep_awake_ended",
+            Self::KeepAwakeHeat => "keep_awake_heat",
         }
     }
 
@@ -201,6 +216,10 @@ impl NoticeKind {
             Self::EngineLost => "Engine lost",
             Self::HarnessUpdate => "Harness update",
             Self::TeamAlert => "Team alert",
+            Self::KeepAwakeRestore => "Sleep not restored",
+            Self::KeepAwakeApproval => "Lid hold approval",
+            Self::KeepAwakeEnded => "Keep awake ended",
+            Self::KeepAwakeHeat => "Hot during Keep awake",
         }
     }
 
@@ -245,6 +264,7 @@ pub enum NoticeTarget {
     Updates,
     Harnesses,
     Home,
+    KeepAwake,
 }
 
 impl NoticeTarget {
@@ -263,7 +283,8 @@ impl NoticeTarget {
             | Self::Usage
             | Self::Updates
             | Self::Harnesses
-            | Self::Home => None,
+            | Self::Home
+            | Self::KeepAwake => None,
         }
     }
 }
@@ -534,10 +555,11 @@ fn rejected(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }
 
-/// Creates the store's tables when missing. Input: the engine database. Output: Ok, or
-/// the SQLite failure.
+/// Creates the store's tables and the Keep awake restore state when missing. Input: the
+/// engine database. Output: Ok, or the SQLite failure.
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
-    connection.execute_batch(SCHEMA).map_err(error)
+    connection.execute_batch(SCHEMA).map_err(error)?;
+    keep_awake::initialize(connection)
 }
 
 /// Item text as it is stored and as every client and banner gets it: credentials hidden by
@@ -1309,3 +1331,6 @@ mod reconcile_tests;
 
 #[cfg(test)]
 mod events_tests;
+
+#[cfg(all(test, unix))]
+mod keep_awake_tests;
