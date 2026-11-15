@@ -86,3 +86,46 @@ impl Request {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Status, status, status_of};
+
+    #[test]
+    fn the_power_status_fields_map_to_the_source_and_the_charge() {
+        let read = |line: u8, flag: u8, percent: u8| status_of(line, flag, percent);
+        assert_eq!(
+            read(1, 8, 83),
+            Status {
+                ac: Some(true),
+                battery_pct: Some(83)
+            }
+        );
+        assert_eq!(
+            read(0, 1, 100),
+            Status {
+                ac: Some(false),
+                battery_pct: Some(100)
+            }
+        );
+        assert_eq!(read(0, 4, 0).battery_pct, Some(0));
+        assert_eq!(read(2, 0, 40).ac, Some(false), "backup power is battery");
+        assert_eq!(read(255, 0, 40).ac, None);
+        assert_eq!(read(7, 0, 40).ac, None, "a line value Windows does not name");
+        assert_eq!(read(1, 128, 255).battery_pct, None, "no system battery");
+        assert_eq!(
+            read(1, 128, 50).battery_pct,
+            None,
+            "the no battery flag wins over a percent"
+        );
+        assert_eq!(read(0, 255, 50).battery_pct, None, "unknown battery flag");
+        assert_eq!(read(0, 0, 255).battery_pct, None, "unknown percent");
+        assert_eq!(read(0, 0, 101).battery_pct, None);
+    }
+
+    #[test]
+    fn this_computer_reports_a_power_status() {
+        let now = status().unwrap();
+        assert!(now.battery_pct.is_none_or(|percent| percent <= 100));
+    }
+}

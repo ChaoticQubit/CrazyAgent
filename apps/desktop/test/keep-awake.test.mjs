@@ -230,6 +230,7 @@ test("a setting this computer cannot honour carries its reason, and the others n
   const mac = view({}, { lid_support: { kind: "held" } });
   assert.equal(model.unavailable("heat_end", windows), "Not available on Windows");
   assert.equal(model.unavailable("heat_notice", windows), "Not available on Windows");
+  assert.ok(source("../../../crates/crazyagent/src/keep_awake/power.rs").includes('Platform::Windows => Some("Not available on Windows")'), "the engine gives the TUI the same words");
   assert.equal(model.unavailable("lid_display", windows), "Only on macOS");
   assert.equal(model.unavailable("lid_display", linux), "Only on macOS");
   assert.equal(model.unavailable("lid", view()), "Not set up on this computer yet");

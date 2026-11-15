@@ -824,6 +824,8 @@ fn the_keeper_looks_each_second_and_evaluates_on_a_change_or_every_five_seconds(
     );
 }
 
+mod sensing;
+
 #[cfg(target_os = "linux")]
 mod on_linux {
     use crate::keep_awake::hold_linux::close_on_exec;
