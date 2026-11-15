@@ -1081,6 +1081,64 @@ fn a_list_that_names_one_tool_twice_or_never_ends_is_refused() {
 }
 
 #[test]
+fn a_list_of_empty_pages_stops_at_the_page_bound() {
+    let desk = desk();
+    let paged = |last: Option<usize>| {
+        Vendor::start(move |seen, _, stream| {
+            let reply = legacy(seen, None, LEGACY_VERSIONS[0]).unwrap_or_else(|| {
+                assert_eq!(seen.rpc(), "tools/list");
+                let page = seen.body["params"]
+                    .get("cursor")
+                    .and_then(Value::as_str)
+                    .map_or(1, |cursor| {
+                        cursor
+                            .strip_prefix("page-")
+                            .unwrap()
+                            .parse::<usize>()
+                            .unwrap()
+                    });
+                let tools: Vec<Value> = if page == 1 {
+                    vec![tool("search")]
+                } else {
+                    Vec::new()
+                };
+                if last == Some(page) {
+                    result(seen, json!({"tools": tools}))
+                } else {
+                    result(
+                        seen,
+                        json!({"tools": tools, "nextCursor": format!("page-{}", page + 1)}),
+                    )
+                }
+            });
+            send(stream, &reply);
+        })
+    };
+    let lists = |vendor: &Vendor| {
+        vendor
+            .calls()
+            .iter()
+            .filter(|call| *call == "tools/list")
+            .count()
+    };
+    let vendor = paged(Some(64));
+    let mut session = open(&desk, &vendor.endpoint(), Access::Full).unwrap();
+    assert_eq!(names(&session.list_tools().unwrap()), ["search"]);
+    assert_eq!(lists(&vendor), 64);
+    let vendor = paged(None);
+    let mut session = open(&desk, &vendor.endpoint(), Access::Full).unwrap();
+    assert_eq!(
+        session.list_tools(),
+        Err(McpError::Refused("connector_tools_limit"))
+    );
+    assert_eq!(
+        lists(&vendor),
+        64,
+        "the 64th page's cursor is refused, not fetched"
+    );
+}
+
+#[test]
 fn a_vendor_error_a_wrong_reply_and_a_request_for_input_are_named() {
     let desk = desk();
     let vendor = Vendor::start(|seen, _, stream| {
