@@ -202,7 +202,10 @@ pub(super) async fn serve(
         if let Ok(executable) = executable
             && let Ok(pinned) = executable.verified_path()
         {
-            let listed = executable.entry().unwrap_or(pinned);
+            let listed = executable
+                .entry()
+                .filter(|entry| std::fs::canonicalize(entry).ok().as_deref() == Some(pinned))
+                .unwrap_or(pinned);
             search = search.with_registered(id, listed.to_path_buf());
         }
     }
