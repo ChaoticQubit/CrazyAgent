@@ -398,9 +398,9 @@ fn has_extension(name: &str) -> bool {
 }
 
 /// Judges one reference against what the check knows. A file is judged only under the
-/// project's folder, and only when its first part is there or, for a first part with no
-/// dot, its last part has an extension, so a branch name such as `feat/x` never counts; a
-/// file whose real place is outside the folder is not judged. Inputs: the span, what it
+/// project's folder, only when its first part is there or its last part has an extension,
+/// so `feat/x` never counts, and part by part without following links: a path through a
+/// link is not judged and nothing outside the folder is read. Inputs: the span, what it
 /// names and what the check knows. Output: the note for a missing one, else none.
 fn missing(span: &str, reference: Reference<'_>, known: &Known<'_>) -> Option<String> {
     match reference {
@@ -434,13 +434,23 @@ fn missing(span: &str, reference: Reference<'_>, known: &Known<'_>) -> Option<St
             if !there && (first.contains('.') || !has_extension(last)) {
                 return None;
             }
-            match folder.join(relative).canonicalize() {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    let note = format!("`{span}` is not a file or folder in this project.");
-                    Some(note)
+            let mut at = folder.to_path_buf();
+            for part in relative.split('/') {
+                if part.is_empty() || part == "." {
+                    continue;
                 }
-                _ => None,
+                at.push(part);
+                match std::fs::symlink_metadata(&at) {
+                    Ok(meta) if meta.file_type().is_symlink() => return None,
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        let note = format!("`{span}` is not a file or folder in this project.");
+                        return Some(note);
+                    }
+                    Err(_) => return None,
+                }
             }
+            None
         }
     }
 }
