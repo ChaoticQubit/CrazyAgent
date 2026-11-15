@@ -89,6 +89,44 @@ pub struct CloneReceipt {
     pub path: String,
 }
 
+/// One account a new repository can be made under: the signed-in owner's own account
+/// (`personal`) or an organization they are an active member of.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubOwner {
+    pub login: String,
+    pub personal: bool,
+}
+
+/// The accounts the publish form offers, the owner's own account first, and a plain
+/// sentence when the organizations could not be listed, such as a sign-in without
+/// `read:org`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubOwners {
+    pub owners: Vec<GitHubOwner>,
+    pub problem: Option<String>,
+}
+
+/// A repository to make on GitHub: the account it goes under, its name, the description
+/// and whether it is private.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubNewRepo {
+    pub owner: String,
+    pub name: String,
+    pub description: String,
+    pub private: bool,
+}
+
+/// A repository GitHub made: `owner/name` as GitHub spells it, GitHub's node id, which
+/// tells this repository apart from another of the same name, and whether it is private.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubCreated {
+    pub full_name: String,
+    pub node_id: String,
+    pub private: bool,
+}
+
 const SERVICE_LEAF: &str = "github";
 const TOKEN_ACCOUNT: &str = "token";
 const CLI_ENV: [&str; 3] = ["HOME", "XDG_CONFIG_HOME", "GH_CONFIG_DIR"];
@@ -512,5 +550,23 @@ impl GitHub {
             home,
             full_name,
         )
+    }
+
+    /// Lists the accounts a new repository can go under, the owner's own account first.
+    /// Output: the accounts and a problem sentence, or `github_not_signed_in`.
+    pub fn owners(&self) -> Result<GitHubOwners, EngineError> {
+        Err(failure("github_publish_unbuilt"))
+    }
+
+    /// Checks whether `owner/name` is still free on GitHub. Inputs: the account and the
+    /// name. Output: true when free, or `github_repo_name_invalid`, `github_not_signed_in`.
+    pub fn name_free(&self, _owner: &str, _name: &str) -> Result<bool, EngineError> {
+        Err(failure("github_publish_unbuilt"))
+    }
+
+    /// Makes an empty repository on GitHub with CrazyAgent's standard settings.
+    /// Input: the repository to make. Output: what GitHub made, or the refusal code.
+    pub fn create_repo(&self, _repo: &GitHubNewRepo) -> Result<GitHubCreated, EngineError> {
+        Err(failure("github_publish_unbuilt"))
     }
 }

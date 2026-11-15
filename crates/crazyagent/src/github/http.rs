@@ -22,10 +22,12 @@ pub(crate) struct Request<'a> {
     pub(crate) allow_http: bool,
 }
 
-/// What came back: the HTTP status and at most 4 MiB of body.
+/// What came back: the HTTP status, at most 4 MiB of body, and the scopes a classic
+/// GitHub token holds when GitHub named them in `X-OAuth-Scopes`.
 pub(crate) struct Reply {
     pub(crate) status: u16,
     pub(crate) body: Vec<u8>,
+    pub(crate) scopes: Option<Vec<String>>,
 }
 
 fn failure(code: &str) -> EngineError {
@@ -204,5 +206,6 @@ fn split(mut bytes: Vec<u8>) -> Result<Reply, EngineError> {
     Ok(Reply {
         status,
         body: bytes,
+        scopes: None,
     })
 }
