@@ -1738,3 +1738,91 @@ fn hooks_kept_while_an_entry_is_off_survive_a_second_new_pin() {
         "a hook switched off in one project stays off there across two pins"
     );
 }
+
+/// A plugin folder named caveman whose hooks file lists one SessionStart hook per script,
+/// in the order given, with each script in place. Inputs: the parent folder and the
+/// scripts. Output: the plugin folder.
+fn ordered_hook_plugin(parent: &Path, scripts: &[&str]) -> PathBuf {
+    let folder = parent.join("caveman");
+    std::fs::create_dir_all(folder.join("hooks")).unwrap();
+    let hooks: Vec<serde_json::Value> = scripts
+        .iter()
+        .map(|script| {
+            let command = format!("sh \"${{CLAUDE_PLUGIN_ROOT}}/hooks/{script}\"");
+            serde_json::json!({"type": "command", "command": command})
+        })
+        .collect();
+    let file = serde_json::json!({"hooks": {"SessionStart": [{"hooks": hooks}]}});
+    std::fs::write(folder.join("hooks/hooks.json"), file.to_string()).unwrap();
+    for script in scripts {
+        std::fs::write(folder.join("hooks").join(script), "exit 0\n").unwrap();
+    }
+    std::fs::create_dir_all(folder.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        folder.join(".claude-plugin/plugin.json"),
+        r#"{"name":"caveman"}"#,
+    )
+    .unwrap();
+    folder
+}
+
+/// RV-DS241-155: a new pin whose hooks file lists one event's hooks in another order keeps
+/// the owner's switch on the hook it was set on, known by what it runs, never on whichever
+/// hook took that hook's place in the list.
+#[test]
+fn a_new_pin_with_its_hooks_reordered_keeps_each_switch_on_the_same_hook() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let first = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@1",
+        vec![skill(first.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let plugin = ordered_hook_plugin(work.path(), &["start.sh", "other.sh"]);
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    let other = hook_views(&mut connection, root, None)
+        .into_iter()
+        .find(|view| view.command.contains("other.sh"))
+        .unwrap()
+        .id;
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetHook {
+            id: other,
+            enabled: false,
+        },
+    )
+    .unwrap();
+
+    let second = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@2",
+        vec![skill(second.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    let moved = tempfile::tempdir().unwrap();
+    let reordered = ordered_hook_plugin(moved.path(), &["other.sh", "start.sh"]);
+    seed(&mut connection, root, "caveman", &reordered).unwrap();
+    let views = hook_views(&mut connection, root, None);
+    assert_eq!(views.len(), 2);
+    let enabled = |script: &str| {
+        views
+            .iter()
+            .find(|view| view.command.contains(script))
+            .unwrap()
+            .enabled
+    };
+    assert!(!enabled("other.sh"), "the hook switched off stays off");
+    assert!(enabled("start.sh"), "the hook left on stays on");
+}
