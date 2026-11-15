@@ -2323,7 +2323,8 @@ fn only_a_proposal_request_is_served_past_the_owner_exchange() {
 
 /// SA vid 7 (leader 09:47): the import Process confirms takes the project text as it is, so
 /// text in a `.crazyagent/instructions.md` the project's git tracks, here the owner's with
-/// the Imported heading taken off, stays first and unlabelled after the import.
+/// the Imported heading taken off, stays first and unlabelled in the file after the import,
+/// while agents still get it labelled, as Process never saved it (SA vid 7 residual).
 #[test]
 fn process_import_never_labels_the_project_text() {
     let (_directory, root) = root();
@@ -2357,10 +2358,20 @@ fn process_import_never_labels_the_project_text() {
         assert!(done.status.success(), "{done:?}");
     }
     let project = with_project(&root, &folder);
-    run(&root, Action::ConfirmImport { project }, None).unwrap();
+    let action = Action::ConfirmImport {
+        project: project.clone(),
+    };
+    run(&root, action, None).unwrap();
     assert_eq!(
         crate::agent_home::read_project(&folder).unwrap(),
         "OWNER-TEXT-7\n\n### Imported from CLAUDE.md\n\nREPO-RULE-7\n"
+    );
+    assert!(read(&root, Some(project.clone())).unwrap().outside);
+    let shown = given(&root, &project).unwrap();
+    let heading = crate::instruction_files::CARRIED_HEADING;
+    assert!(
+        shown.contains(&format!("{heading}\n\nOWNER-TEXT-7\n")),
+        "text Process never saved keeps its label after an import (SA vid 7 residual): {shown}"
     );
 }
 
@@ -2391,4 +2402,28 @@ fn project_text_changed_after_a_process_save_reaches_agents_labelled_until_saved
         kept.ends_with("## Project instructions\n\n## Pulled\nRule.\n"),
         "{kept}"
     );
+}
+
+/// SA vid 7 residual (leader 14:22 A): Process says when the project file holds text it did
+/// not save there last, in a read and in a stale reply, never for the app text, and a save
+/// that lands clears it.
+#[test]
+fn process_says_when_the_project_text_changed_outside_until_a_save_lands() {
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    assert!(!read(&root, Some(project.clone())).unwrap().outside);
+    fs::write(folder.join(".crazyagent/instructions.md"), "Pulled rule.\n").unwrap();
+    assert!(read(&root, Some(project.clone())).unwrap().outside);
+    fs::write(root.join(crate::agent_home::APP_FILE), "App rule.\n").unwrap();
+    assert!(!read(&root, None).unwrap().outside, "never the app text");
+    let refused = save(&root, Some(project.clone()), "Mine.\n", 5).unwrap();
+    let SavedText::Stale { current, .. } = refused else {
+        panic!("a save at another version is stale");
+    };
+    assert!(current.outside, "{current:?}");
+    assert_eq!(current.text, "Pulled rule.\n");
+    save(&root, Some(project.clone()), "Pulled rule.\n", 0).unwrap();
+    assert!(!read(&root, Some(project)).unwrap().outside);
 }
