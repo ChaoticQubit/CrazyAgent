@@ -8,10 +8,10 @@ import { handOff, onEngine, startingWith } from "./codex-task-engine.mjs";
 
 /** The probe every sub-agent run of the stand-in Codex makes from its worktree before it
  * answers: it writes the arguments the engine started it with, one per line, to its own
- * retry-argv-<pid>.txt in its home. Runs outside an agent worktree write nothing. */
+ * retry-argv-<pid>.txt in .cache in its home. Runs outside an agent worktree write nothing. */
 const ARGV = String.raw`case "$1:$(/bin/pwd -P)" in
   app-server:*) ;;
-  */.crazyagent/worktrees/agent-*) for a in "$@"; do printf '%s\n' "$a"; done > "$CODEX_HOME/retry-argv-$$.txt" ;;
+  */.crazyagent/worktrees/agent-*) /bin/mkdir -p "$CODEX_HOME/.cache" && for a in "$@"; do printf '%s\n' "$a"; done > "$CODEX_HOME/.cache/retry-argv-$$.txt" ;;
 esac
 `;
 
@@ -52,7 +52,7 @@ async function until(what, wanted, read) {
 function retrySettings(runtime) {
   const agents = join(runtime, "team", "agents");
   if (!existsSync(agents)) return null;
-  const homes = readdirSync(agents).map((name) => join(agents, name, "home")).filter((home) => existsSync(home));
+  const homes = readdirSync(agents).map((name) => join(agents, name, "home", ".cache")).filter((home) => existsSync(home));
   const runs = homes.flatMap((home) => readdirSync(home).filter((name) => /^retry-argv-\d+\.txt$/.test(name))
     .map((name) => readFileSync(join(home, name), "utf8").split("\n")))
     .filter((argv) => argv.includes("-c"));
