@@ -421,7 +421,7 @@ test("a delete an engine stop cut short shows on the project with Keep the proje
   });
   assert.equal(await listed(id), true, "Keep the project keeps it");
   assert.ok(existsSync(join(folder, ".crazyagent")), "its folder stays where it is");
-  assert.equal(sql("SELECT count(*) FROM ledger_actions WHERE kind='project_delete' AND outcome IS NULL"), "0", "Keep the project clears the mark");
+  assert.equal(sql(`SELECT count(*) FROM ledger_actions WHERE kind='project_delete' AND action_key='${id}' AND outcome IS NULL`), "0", "Keep the project clears the mark");
 });
 
 test("a delete waits on Home for the project's agents to stop, refuses another project's delete naming it, is found again by the same project's start and a new window, and moves the folder to the Trash once they stopped (DEC-177)", { timeout: 300000 }, async () => {
