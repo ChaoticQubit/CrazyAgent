@@ -447,6 +447,10 @@ mod tests {
             "/work/project/.GIT",
             "/work/project/.Git/config",
             "/work/project/sub/.gIt",
+            "/work/project/sub/.git.",
+            "/work/project/sub/.g\u{200d}it/config",
+            "/work/project/.git.",
+            "/work/project/.git\u{200c}/hooks",
             "/work/project/worktrees/a1/deep/.git",
             "/work/project/worktrees/a2/.git",
             "/work/clone/teammates/.git",
@@ -470,13 +474,33 @@ mod tests {
     }
 
     #[test]
-    fn a_name_is_git_in_any_letter_case_and_nothing_longer_or_shorter_is() {
+    fn a_name_is_git_in_any_letter_case_and_in_every_form_a_filesystem_reads_as_it() {
         for name in [".git", ".GIT", ".Git", ".gIT"] {
             assert!(is_git(OsStr::new(name)), "{name}");
         }
-        for name in ["git", ".gi", ".gitignore", ".git ", " .git", ".git.", "..git", ""] {
-            assert!(!is_git(OsStr::new(name)), "{name}");
+        let aliases = [
+            ".git.",
+            ".git ",
+            ".git. .",
+            ".g\u{200d}it",
+            ".git\u{200c}",
+            "\u{feff}.git",
+            ".GI\u{ad}T.",
+            ".gi\u{e0001}t",
+            "\u{2060}.\u{fe0f}g\u{180e}i\u{3164}t\u{200b} ",
+        ];
+        for name in aliases {
+            assert!(is_git(OsStr::new(name)), "a name some filesystem reads as .git: {name:?}");
         }
+        let others = [
+            "git", ".gi", ".gitignore", " .git", "..git", "", ".", "x.git", "\u{65e5}.git", ".git2.",
+            ".g\u{131}t", ".gi\u{fffd}t", ".git\u{e9}", ". git",
+        ];
+        for name in others {
+            assert!(!is_git(OsStr::new(name)), "{name:?}");
+        }
+        let broken = std::os::unix::ffi::OsStrExt::from_bytes(b".gi\xfft");
+        assert!(!is_git(broken), "bytes that are no text are no alias");
     }
 
     #[test]
