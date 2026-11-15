@@ -1397,9 +1397,9 @@ mod tests {
     }
 
     /// rv-code2 b8 F1: a master turn whose home the owner chose outside the engine's data
-    /// root, as a configured RCLI home may be the owner's own HOME, keeps the links a dotfile
-    /// manager made at `.config` and `.cargo` and what they name, while a turn home below the
-    /// data root still gets both as real folders.
+    /// root, as a configured RCLI home may be one of the owner's own folders, keeps the links
+    /// a dotfile manager made at `.config` and `.cargo` and what they name, while a turn home
+    /// below the data root still gets both as real folders.
     #[test]
     fn a_master_turn_keeps_the_config_links_of_a_home_outside_the_engine_root() {
         let temporary = private_root();
@@ -1459,6 +1459,81 @@ mod tests {
         for name in [".config", ".cargo"] {
             let made = std::fs::symlink_metadata(below_base.join("profile-home").join(name));
             assert!(made.is_ok_and(|made| made.is_dir()), "{name}");
+        }
+    }
+
+    /// rv-code2 b8 R2-1: the engine root a turn names decides what install does to the config
+    /// folders, so this row fails if that anchor is dropped or turned around: an owner-chosen
+    /// home outside the data root with no `.config` or `.cargo` gets neither made in it, and a
+    /// turn home below the root with a link planted at each name gets real folders, while
+    /// what the links named stays as it was.
+    #[test]
+    fn a_master_turn_makes_no_config_folder_outside_the_root_and_clears_planted_links_below() {
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let owner_folder = private_root();
+        let home = owner_folder.path().canonicalize().unwrap().join("home");
+        private_directory(&home);
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _, _capture) = allocate_master_capture(&root).unwrap();
+
+        let outside = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+            &[],
+        );
+
+        assert!(outside.is_ok(), "the turn on the owner's home was refused");
+        for name in [".config", ".cargo"] {
+            let made = std::fs::symlink_metadata(home.join(name));
+            assert_eq!(
+                made.err().map(|error| error.kind()),
+                Some(std::io::ErrorKind::NotFound),
+                "{name} was made in the owner's home"
+            );
+        }
+        drop(outside);
+        let second = private_root();
+        let below_base = owner_generation(&second);
+        let turn_home = below_base.join("profile-home");
+        private_directory(&turn_home);
+        let planted_folder = private_root();
+        let planted = planted_folder.path().canonicalize().unwrap();
+        for name in ["config", "cargo"] {
+            private_directory(&planted.join(name));
+            std::fs::write(planted.join(name).join("kept"), name).unwrap();
+            std::os::unix::fs::symlink(planted.join(name), turn_home.join(format!(".{name}")))
+                .unwrap();
+        }
+
+        let below = master_in_generation(&below_base);
+
+        assert!(below.is_ok(), "the turn below the data root was refused");
+        for name in ["config", "cargo"] {
+            let made = std::fs::symlink_metadata(turn_home.join(format!(".{name}")));
+            assert!(
+                made.is_ok_and(|made| made.is_dir()),
+                "the planted .{name} link was kept"
+            );
+            assert_eq!(
+                std::fs::read_to_string(planted.join(name).join("kept")).ok(),
+                Some(name.to_owned())
+            );
         }
     }
 

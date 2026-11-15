@@ -2201,8 +2201,9 @@ impl ProjectSandbox {
     }
 
     /// Names the engine's data root the agent home is judged by, as a master turn's home may
-    /// be a configured RCLI home the owner chose, even the owner's own HOME: [`Self::install`]
-    /// makes and removes nothing in a home not strictly below it, so a link a dotfile manager
+    /// be a configured RCLI home the owner chose in one of their own folders (never HOME
+    /// itself or a folder holding it, which [`Self::new`] refuses): [`Self::install`] makes
+    /// and removes nothing in a home not strictly below the root, so a link a dotfile manager
     /// made there stays, and clears what holds a config folder's name in one that is
     /// (rv-code2 b8 F1). The profile keeps every deny either way. Input: the canonical data
     /// root. Output: the sandbox.
