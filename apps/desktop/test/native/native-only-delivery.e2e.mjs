@@ -25,11 +25,11 @@ const WAKE_TASK = "A message from your team woke you. It is at the end of this t
 
 /** The Codex stand-in the engine runs every team agent with, tools off: it keeps a
  * conversation file as Codex does, answers each turn with "Wrote fruit.md." and writes every
- * pasted line to `typed` in its home, so the test sees what the engine typed into it. */
+ * pasted line to `.cache/typed` in its home, so the test sees what the engine typed into it. */
 const TYPED_CODEX = String.raw`#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/11/05"
-/bin/mkdir -p "$d" || exit 1
+/bin/mkdir -p "$d" "$CODEX_HOME/.cache" || exit 1
 id=$(printf '%08x-0000-4000-8000-%012x' $$ $$)
 f="$d/rollout-2026-11-05T00-00-00-$id.jsonl"
 printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$(/bin/pwd -P)" > "$f"
@@ -38,9 +38,9 @@ e=$(printf '\033')
 open=0
 while IFS= read -r line; do
   case "$line" in
-    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CODEX_HOME/typed" ;;
-    *"$e[200~"*) open=1; printf '%s\n' "$line" >> "$CODEX_HOME/typed"; continue ;;
-    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CODEX_HOME/typed"; continue; } ;;
+    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CODEX_HOME/.cache/typed" ;;
+    *"$e[200~"*) open=1; printf '%s\n' "$line" >> "$CODEX_HOME/.cache/typed"; continue ;;
+    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CODEX_HOME/.cache/typed"; continue; } ;;
   esac
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
   /bin/sleep 0.3
@@ -81,7 +81,7 @@ function engineRows(runtime, project) {
     const agent = task.agent === null ? null : store.prepare("SELECT tools, status FROM team_agents WHERE id=?").get(task.agent) ?? null;
     const message = task.agent === null ? null
       : store.prepare("SELECT receipt FROM coord_messages WHERE project=? AND to_kind='agent' AND to_agent=? AND body=?").get(project, task.agent, NOTE) ?? null;
-    const typed = join(runtime, "team", "agents", `agent-${task.agent}`, "home", "typed");
+    const typed = join(runtime, "team", "agents", `agent-${task.agent}`, "home", ".cache", "typed");
     return {
       task: task.status,
       agent: task.agent,

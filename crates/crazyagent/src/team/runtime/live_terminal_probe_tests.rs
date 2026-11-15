@@ -176,8 +176,8 @@ fn count_retry_look() {
 const SILENT_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
-/bin/mkdir -p "$d" || exit 1
-printf '%s\n' "$*" >> "$CODEX_HOME/launches"
+/bin/mkdir -p "$d" "$CODEX_HOME/.cache" || exit 1
+printf '%s\n' "$*" >> "$CODEX_HOME/.cache/launches"
 id=""
 prev=""
 for a in "$@"; do
@@ -200,7 +200,7 @@ fn master_launches(fixture: &Fixture) -> usize {
         .into_iter()
         .flatten()
         .flatten()
-        .filter_map(|agent| std::fs::read_to_string(agent.path().join("home/launches")).ok())
+        .filter_map(|agent| std::fs::read_to_string(agent.path().join("home/.cache/launches")).ok())
         .map(|log| log.lines().count())
         .sum()
 }
