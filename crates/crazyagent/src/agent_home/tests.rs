@@ -1493,6 +1493,33 @@ fn a_kept_name_linked_to_a_file_outside_the_home_never_changes_that_file() {
         "a file outside the home lost its flag"
     );
 }
+/// On Linux the reset keeps a home's launch lock that an agent gave a second name in a kept
+/// folder, the same file the launch holds (RV-DS241-137 r3 code F2): Landlock and bubblewrap
+/// keep a confined agent from linking a file from outside its write roots, so only macOS,
+/// whose profile pins the lock, refuses a second link; removing the lock here would let a
+/// second launch into the home.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_reset_keeps_the_held_lock_whatever_its_links() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let claude = home(&root, "claude");
+    let lock = claude.join(crate::launch_context::LOCK);
+    fs::write(&lock, "").unwrap();
+    fs::create_dir(claude.join(".cache")).unwrap();
+    fs::hard_link(&lock, claude.join(".cache").join("x")).unwrap();
+    let inode = fs::symlink_metadata(&lock).unwrap().ino();
+
+    let reset = prepare(&claude, Harness::Claude, &project, &given);
+
+    assert_eq!(reset, Ok(()));
+    assert_eq!(
+        fs::symlink_metadata(&lock).map(|found| found.ino()).ok(),
+        Some(inode),
+        "the held lock stays"
+    );
+}
 
 /// A home folder whose ACLs deny listing two folders deep still goes at the next launch
 /// (RV-DS241-137 code r2 F3): each folder's ACL is cleared by its path before the walk reads
