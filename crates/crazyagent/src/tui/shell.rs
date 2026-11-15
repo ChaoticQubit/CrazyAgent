@@ -1,6 +1,7 @@
 use super::client::OwnerEvent;
 use super::client::app_setup::AppSetupEvent;
 use super::client::changes::{ChangesQuery, ChangesView};
+use super::client::intake::{IntakeEvent, IntakeQuery, IntakeView};
 use super::client::learning::{LearningEvent, LearningQuery, LearningReply};
 use super::client::notifications::{NoticesEvent, NoticesQuery, NoticesReply};
 use super::client::questions::{QuestionsEvent, QuestionsQuery, QuestionsReply};
@@ -11,6 +12,7 @@ use super::frame::{
     HINT_ROWS_MAX, Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, header, hint,
     strip_controls, too_small, wrapped_footer,
 };
+use super::glyphs::Glyphs;
 use super::keys::{Global, Key, global};
 use super::screens::intake::not_ready;
 use super::screens::new_project_page::kept_draft;
@@ -18,12 +20,14 @@ use super::screens::settings_accounts::settings_event;
 use super::screens::startup::Startup;
 use super::screens::usage::extras::{ResetWatch, reset_notice};
 use super::screens::{DRAFT_LOSS, Flow, Place, ProjectTab, Screen, SettingsSection, open};
+use super::screens::{intake, intake_job};
 use super::seam::{Arrival, ProjectCard, Request, account_labels};
-use super::text::{cells, join, list_row, pad, styled};
+use super::text::{cells, cut, join, list_row, pad, styled};
 use super::theme::{Role, Theme};
 use super::widgets::{TextField, buttons};
 use crate::harnesses::HarnessStatus;
 use crate::learning::MarkStep;
+use crate::projects_home::job::{JobState, JobView};
 use crate::terminal::TerminalFrame;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -39,6 +43,7 @@ const GO_TO_WIDTH: u16 = 58;
 const GO_TO_TOP: u16 = 5;
 const QUIT_WIDTH: u16 = 46;
 const QUIET: Duration = Duration::from_millis(150);
+const JOB_NOTE_CELLS_MAX: usize = 64;
 
 /// One Go to destination.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -274,11 +279,13 @@ impl Shell {
             .as_ref()
     }
 
-    /// Records a new window size.
+    /// Records a new window size, capped to the area the TUI draws, so screens size agent
+    /// terminals for what is shown and drawing never resizes them again.
     /// Inputs: width and height. Output: none.
     pub fn resize(&mut self, width: u16, height: u16) {
-        self.ctx.width = width;
-        self.ctx.height = height;
+        let area = super::bounded_area(width, height);
+        self.ctx.width = area.width;
+        self.ctx.height = area.height;
         let ctx = &mut self.ctx;
         self.stack
             .last_mut()
@@ -348,8 +355,39 @@ impl Shell {
             .request(Request::Changes(Box::new(ChangesQuery::Waiting {
                 project,
             })));
+        intake::ask(&mut self.ctx, IntakeQuery::JobStatus);
         self.watch_resets();
         self.refresh();
+    }
+
+    /// Keeps the engine's intake job in the store from a status read or a start, says once on
+    /// the message line when a running job ended and reads the found folders again so Home
+    /// lists the new one; a stop or a dismiss reads the status at once. A failed read keeps
+    /// the last view. Input: the intake reply. Output: none.
+    fn intake_job(&mut self, event: &IntakeEvent) {
+        let view = match (&event.query, &event.result) {
+            (IntakeQuery::JobStatus | IntakeQuery::JobStart { .. }, Ok(IntakeView::Job(view))) => {
+                view
+            }
+            (IntakeQuery::JobStop { .. } | IntakeQuery::JobDismiss { .. }, _) => {
+                intake::ask(&mut self.ctx, IntakeQuery::JobStatus);
+                return;
+            }
+            _ => return,
+        };
+        let said = intake_job::end_line(self.ctx.store.intake.as_ref(), view.as_ref());
+        self.ctx.store.intake = view.clone();
+        let Some(text) = said else {
+            return;
+        };
+        let landed = view.as_ref().map(|job| &job.state) == Some(&JobState::Done);
+        self.ctx.say(if landed {
+            Message::success(&text, "")
+        } else {
+            Message::warning(&text, "")
+        });
+        intake::ask(&mut self.ctx, IntakeQuery::Found);
+        assert!(self.ctx.store.intake.is_some());
     }
 
     /// Asks for the stored extras, never the detail rows, once the watch is due, with the
@@ -486,9 +524,10 @@ impl Shell {
         }
     }
 
-    /// Handles one key: overlays first, then a screen in raw mode takes every
-    /// key, then the global keys, then the top screen; an Esc the screen
-    /// ignores goes back.
+    /// Handles one key: below the smallest window only Ctrl+Q or Ctrl+C acts
+    /// ([`Self::small_key`]); otherwise overlays first, then a screen in raw mode
+    /// takes every key, then the global keys, then the top screen; an Esc the
+    /// screen ignores goes back.
     /// Input: the key. Output: none; check `quitting` afterwards.
     pub fn key(&mut self, key: Key) {
         self.take_key(key);
@@ -496,6 +535,9 @@ impl Shell {
     }
 
     fn take_key(&mut self, key: Key) {
+        if self.ctx.width < MIN_WIDTH || self.ctx.height < MIN_HEIGHT {
+            return self.small_key(&key);
+        }
         if let Some(overlay) = self.overlay.take() {
             self.overlay_key(overlay, &key);
             return;
@@ -550,6 +592,20 @@ impl Shell {
         match flow {
             Flow::Ignored if key == Key::Esc => self.apply(Flow::Back),
             other => self.apply(other),
+        }
+    }
+
+    /// The one key a window below [`MIN_WIDTH`] x [`MIN_HEIGHT`] acts on, where the shell
+    /// draws only the bigger-window notice and no screen or overlay: Ctrl+Q or Ctrl+C quits
+    /// as it does elsewhere, past a quit question already open, so no screen, overlay or raw
+    /// terminal takes a key it could not show (DS-99 r2). Input: the key. Output: none.
+    fn small_key(&mut self, key: &Key) {
+        if global(key, false) != Some(Global::Quit) {
+            return;
+        }
+        match self.overlay.take() {
+            Some(Overlay::Quit(_)) => self.quit = true,
+            _ => self.ask_quit(),
         }
     }
 
@@ -666,6 +722,9 @@ impl Shell {
                 Err(_) => {}
             },
             Arrival::Owner(_) => {
+                if let Some(event) = intake::event(&arrival) {
+                    self.intake_job(event);
+                }
                 if let Some(SettingsEvent::Harnesses(Ok(entries))) = settings_event(&arrival) {
                     let ready = entries
                         .iter()
@@ -1040,6 +1099,7 @@ impl Shell {
         let waiting = waiting_text(self.ctx.store.waiting.as_ref(), top.project().as_ref());
         let status = with_waiting(waiting, top.status(&self.ctx), &theme);
         let status = with_notices(self.ctx.store.notices.as_ref(), status, &theme);
+        let status = with_intake(self.ctx.store.intake.as_ref(), status, &theme, glyphs);
         let header_line = header(width, &top.crumbs(), status, &theme, glyphs);
         draw_lines(frame.buffer_mut(), head, &[header_line]);
         draw_lines(
@@ -1118,6 +1178,29 @@ fn with_waiting(waiting: Option<String>, status: Line<'static>, theme: &Theme) -
         return status;
     };
     let note = Line::from(Span::styled(text, theme.warning));
+    if status.width() == 0 {
+        return note;
+    }
+    join([note, Line::raw("  "), status])
+}
+
+/// The header status with the running intake job's brief in front, cut to a bounded width so
+/// a long folder name never hides the crumbs, so a folder being added shows on every screen;
+/// with no running job the status is unchanged. Inputs: the job, if any, the status, the
+/// theme and the glyphs. Output: the line.
+fn with_intake(
+    job: Option<&JobView>,
+    status: Line<'static>,
+    theme: &Theme,
+    glyphs: &Glyphs,
+) -> Line<'static> {
+    let Some(job) = job.filter(|job| intake_job::running(job)) else {
+        return status;
+    };
+    let brief = intake_job::brief(job, glyphs.ellipsis);
+    let text = cut(&brief, JOB_NOTE_CELLS_MAX, glyphs.ellipsis);
+    assert!(super::text::width(&text) <= JOB_NOTE_CELLS_MAX);
+    let note = Line::from(Span::styled(text, theme.accent));
     if status.width() == 0 {
         return note;
     }
@@ -1617,6 +1700,34 @@ mod tests {
         assert_eq!(shell.depth(), 2, "sections replace each other");
     }
 
+    /// DS-99 r2 (rv-sec2 F1): below 80x24 the shell draws no quit question, so one open there
+    /// takes no arrow or Enter, and Ctrl+Q or Ctrl+C still quits: at once when nothing runs,
+    /// past the hidden question when agents do.
+    #[test]
+    fn below_80x24_only_ctrl_q_acts_and_a_hidden_quit_question_takes_no_enter() {
+        let mut shell = at(Place::Home, ctx());
+        shell.resize(79, 24);
+        shell.key(Key::Ctrl('q'));
+        assert!(shell.quitting(), "nothing running, so no question");
+
+        let mut ctx = ctx();
+        ctx.store.projects = Load::Ready(vec![card("Tidepool", 1)]);
+        let mut shell = at(Place::Home, ctx);
+        shell.key(Key::Ctrl('q'));
+        assert!(matches!(shell.overlay, Some(Overlay::Quit(_))));
+        shell.resize(80, 23);
+        for key in [Key::Right, Key::Enter, Key::Esc, Key::Tab] {
+            shell.key(key);
+        }
+        assert!(!shell.quitting());
+        assert!(matches!(&shell.overlay, Some(Overlay::Quit(ask)) if !ask.quit_focused));
+        shell.key(Key::Ctrl('c'));
+        assert!(
+            shell.quitting(),
+            "a second Ctrl-C quits past the hidden question"
+        );
+    }
+
     #[test]
     fn quit_asks_only_when_agents_run_and_stay_is_the_default() {
         let mut shell = at(Place::Home, ctx());
@@ -1983,6 +2094,24 @@ mod tests {
         assert!(requests.contains(&"Pools".to_owned()), "{requests:?}");
     }
 
+    /// RV-DS241-134 r2: a stored profile the engine read back with its name left blank by
+    /// the hidden-character cleaning opens Welcome, not Home, so the owner names it again.
+    #[test]
+    fn a_stored_profile_read_back_with_a_blank_name_opens_welcome() {
+        let mut shell = Shell::new(ctx());
+        shell.arrive(Arrival::Connected(None));
+        let kept = OwnerProfile {
+            name: String::new(),
+            role: "Founder".into(),
+            bio: "Builds tools.".into(),
+            preferred_stack: vec!["Rust".into()],
+            working_style: Default::default(),
+        };
+        shell.arrive(Arrival::Profile(Ok(Some(kept.clone()))));
+        assert_eq!(shell.place(), Some(Place::Welcome));
+        assert_eq!(shell.ctx.store.profile, Load::Ready(Some(kept)));
+    }
+
     #[test]
     fn startup_opens_welcome_on_first_run_and_home_afterwards() {
         let mut shell = Shell::new(Ctx::new(
@@ -2037,6 +2166,7 @@ mod tests {
             resets_checked_ms: Some(gained_ms),
             credits_checked_ms: None,
             resets_gained_ms: Some(gained_ms),
+            resets_unread: None,
         };
         Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
             SettingsEvent::Extras(Ok(vec![crate::engine::owner::AccountExtras {
@@ -2138,5 +2268,183 @@ mod tests {
         drain(&mut shell);
         shell.tick();
         assert_eq!(watch_asks(&mut shell), (0, 0));
+    }
+
+    fn shop(state: JobState) -> JobView {
+        JobView {
+            id: crate::protocol::RequestId::new("add-1").unwrap(),
+            source: "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop".into(),
+            mode: crate::projects_home::AddMode::Move,
+            overrides: Vec::new(),
+            stopping: false,
+            state,
+        }
+    }
+
+    fn intake_arrival(query: IntakeQuery, result: Result<IntakeView, String>) -> Arrival {
+        Arrival::Owner(Box::new(OwnerEvent::Intake(Box::new(IntakeEvent {
+            query,
+            result,
+        }))))
+    }
+
+    fn status_arrival(job: Option<JobView>) -> Arrival {
+        intake_arrival(IntakeQuery::JobStatus, Ok(IntakeView::Job(job)))
+    }
+
+    fn intake_asks(shell: &mut Shell) -> Vec<String> {
+        use crate::tui::client::intake::IntakeJob;
+        std::iter::from_fn(|| shell.ctx.next_request())
+            .filter_map(|request| match request {
+                Request::Intake(job) => match *job {
+                    IntakeJob::Query(query) => Some(format!("{query:?}")),
+                    IntakeJob::GitHubToken(_) => Some("GitHubToken".to_owned()),
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// DEC-159 S7: the tick reads the engine's intake job, the store keeps the last view
+    /// through a failed read, and a running job's end is said once, in its tone, with the
+    /// found folders read again so Home lists the folder that landed.
+    #[test]
+    fn the_shell_keeps_the_intake_job_and_says_its_end_once_then_reads_found_again() {
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
+        drain(&mut shell);
+        shell.tick();
+        let asks = intake_asks(&mut shell);
+        assert_eq!(asks.len(), 1, "{asks:?}");
+        assert!(asks[0].contains("JobStatus"), "{asks:?}");
+
+        let running = shop(JobState::Copying {
+            copied: 3,
+            checked: 0,
+        });
+        shell.ctx.say(Message::success("Saved.", ""));
+        shell.arrive(status_arrival(Some(running.clone())));
+        assert_eq!(shell.ctx.store.intake.as_ref(), Some(&running));
+        assert_eq!(
+            shell.ctx.message().map(|said| said.lead.as_str()),
+            Some("Saved.")
+        );
+        assert!(intake_asks(&mut shell).is_empty());
+
+        let done = shop(JobState::Done);
+        shell.arrive(status_arrival(Some(done.clone())));
+        let said = shell.ctx.message().expect("the end is said");
+        assert_eq!(
+            (said.tone, said.lead.as_str()),
+            (
+                super::super::frame::Tone::Success,
+                "shop is in your projects folder. Set it up from Home."
+            )
+        );
+        let asks = intake_asks(&mut shell);
+        assert_eq!(asks.len(), 1, "{asks:?}");
+        assert!(asks[0].contains("Found"), "{asks:?}");
+
+        shell.ctx.say(Message::success("Saved.", ""));
+        shell.arrive(status_arrival(Some(done.clone())));
+        shell.arrive(intake_arrival(
+            IntakeQuery::JobStatus,
+            Err("owner_timeout".into()),
+        ));
+        assert_eq!(
+            shell.ctx.message().map(|said| said.lead.as_str()),
+            Some("Saved.")
+        );
+        assert_eq!(
+            shell.ctx.store.intake.as_ref(),
+            Some(&done),
+            "a failed read keeps it"
+        );
+        assert!(intake_asks(&mut shell).is_empty());
+
+        shell.arrive(intake_arrival(
+            IntakeQuery::JobDismiss {
+                id: done.id.clone(),
+            },
+            Ok(IntakeView::JobDismissed(true)),
+        ));
+        let asks = intake_asks(&mut shell);
+        assert_eq!(asks.len(), 1, "{asks:?}");
+        assert!(asks[0].contains("JobStatus"), "{asks:?}");
+        shell.arrive(status_arrival(None));
+        assert_eq!(shell.ctx.store.intake, None);
+    }
+
+    /// A job that ends failed, stopped or asking for an answer is said as a warning, and a
+    /// stop asked from any screen reads the job again at once.
+    #[test]
+    fn an_intake_job_that_did_not_land_is_said_as_a_warning_and_a_stop_reads_it_again() {
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
+        let running = shop(JobState::Downloading {
+            progress: crate::projects_home::icloud::Progress { total: 3, done: 1 },
+        });
+        shell.arrive(status_arrival(Some(running.clone())));
+        shell.arrive(intake_arrival(
+            IntakeQuery::JobStop {
+                id: running.id.clone(),
+            },
+            Ok(IntakeView::JobStopped(true)),
+        ));
+        drain(&mut shell);
+        let ended = [
+            JobState::Cancelled {
+                phase: crate::projects_home::job::Phase::Downloading,
+            },
+            JobState::NeedsAnswer {
+                code: "home_move_worktrees".into(),
+            },
+            JobState::Failed {
+                code: "home_move_source_left".into(),
+                phase: crate::projects_home::job::Phase::Clearing,
+            },
+        ];
+        for state in ended {
+            shell.arrive(status_arrival(Some(running.clone())));
+            shell.arrive(status_arrival(Some(shop(state.clone()))));
+            let said = shell.ctx.message().expect("the end is said");
+            assert_eq!(said.tone, super::super::frame::Tone::Warning, "{state:?}");
+        }
+    }
+
+    /// The header shows the running intake job's line in front of the screen's status on
+    /// every screen, and is left unchanged once the job ended or with none.
+    #[test]
+    fn the_header_shows_the_running_intake_job_and_nothing_once_it_ended() {
+        let theme = ctx().theme.clone();
+        let running = shop(JobState::Downloading {
+            progress: crate::projects_home::icloud::Progress {
+                total: 3000,
+                done: 12,
+            },
+        });
+        let shown = |job: Option<&JobView>, status: &str| {
+            let status = Line::raw(status.to_owned());
+            crate::tui::text::plain(&with_intake(job, status, &theme, &UNICODE))
+        };
+        assert_eq!(
+            shown(Some(&running), "Ready"),
+            "Downloading shop: 12 of 3000  Ready"
+        );
+        assert_eq!(shown(Some(&running), ""), "Downloading shop: 12 of 3000");
+        assert_eq!(shown(Some(&shop(JobState::Done)), "Ready"), "Ready");
+        assert_eq!(shown(None, "Ready"), "Ready");
+        assert_eq!(shown(None, ""), "");
+        let long = JobView {
+            source: format!("/Users/mira/{}", "a".repeat(200)),
+            ..running.clone()
+        };
+        let note = shown(Some(&long), "");
+        assert!(
+            crate::tui::text::width(&note) <= JOB_NOTE_CELLS_MAX,
+            "{note}"
+        );
+        assert!(note.starts_with("Downloading aaa"), "{note}");
+        assert!(note.ends_with(": 12 of 3000"), "{note}");
+        assert!(note.contains(UNICODE.ellipsis), "{note}");
+        assert!(shown(Some(&long), "Ready").ends_with("  Ready"));
     }
 }

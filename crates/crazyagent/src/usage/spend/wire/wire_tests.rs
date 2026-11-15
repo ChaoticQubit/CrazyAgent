@@ -151,9 +151,7 @@ fn codex_spend_failures_become_plain_codes() {
             codex_consume(consume_at(&server), &credential(&secret()), &key, true).unwrap_err();
         assert_eq!(problem.0, code, "status {status}");
     }
-    let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let port = closed.local_addr().unwrap().port();
-    drop(closed);
+    let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
     let gone = url::Url::parse(&format!(
         "http://127.0.0.1:{port}/backend-api/wham/rate-limit-reset-credits/consume"
     ))

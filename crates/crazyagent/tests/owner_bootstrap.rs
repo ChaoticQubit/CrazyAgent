@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -141,8 +141,12 @@ impl Drop for Process {
         if std::thread::panicking() {
             eprintln!(
                 "engine stdout: {}\nengine stderr: {}",
-                String::from_utf8_lossy(&self.stdout.lock().unwrap()),
-                String::from_utf8_lossy(&self.stderr.lock().unwrap()),
+                String::from_utf8_lossy(
+                    &self.stdout.lock().unwrap_or_else(PoisonError::into_inner)
+                ),
+                String::from_utf8_lossy(
+                    &self.stderr.lock().unwrap_or_else(PoisonError::into_inner)
+                ),
             );
         }
     }
@@ -729,6 +733,19 @@ fn cli_retires_only_recorded_stale_ordinary_socket() {
     drop(first);
     let second = Process::launch(root.path(), "engine.sock");
     second.ready();
+}
+
+/// An engine start with no delete cut short writes no count line to stderr, so the stderr
+/// of a start holds only what went wrong; the line is written only when a delete was cut
+/// short.
+#[test]
+fn an_engine_start_with_nothing_cut_short_writes_no_cut_short_line() {
+    let root = private_root();
+    let mut process = Process::launch(root.path(), "e.sock");
+    process.ready();
+    process.stop("TERM");
+    let stderr = String::from_utf8_lossy(&process.stderr.lock().unwrap()).into_owned();
+    assert!(!stderr.contains("project_delete_cut_short"), "{stderr}");
 }
 
 #[test]

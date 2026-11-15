@@ -52,6 +52,7 @@ fn skill(name: &str, scope: Scope, enabled: bool, on_here: Option<bool>) -> Skil
         enabled,
         on_here,
         source: format!("/Users/mira/Skills/{name}"),
+        origin: "Added by you".into(),
         folder: format!("/private/tmp/engine/skills/{name}"),
         version: 2,
         refused: None,
@@ -83,9 +84,11 @@ fn server(name: &str, scope: Scope, status: ServerStatus, on_here: Option<bool>)
 }
 
 fn lists() -> (Vec<SkillView>, Vec<ServerView>) {
+    let mut imported = skill("linear-method", Scope::Global, true, Some(false));
+    imported.origin = "Imported from Codex".into();
     let skills = vec![
         skill("frontend-design", Scope::Global, true, Some(true)),
-        skill("linear-method", Scope::Global, true, Some(false)),
+        imported,
         skill("release-notes", Scope::Global, false, Some(true)),
         skill("tidepool-style", here(), true, None),
     ];
@@ -112,7 +115,9 @@ fn frame(view: &ProjectPlugins, width: u16, height: u16) -> Vec<String> {
     let items = crate::tui::screens::project_view::tab_items(0, columns, &look);
     let mut rows: Vec<Row> = tab_strip(columns, &items, Tab::Settings as usize, &look).into();
     let room = usize::from(height) - 4 - 2;
+    view.painting(true);
     let (lines, help) = view.rows(columns - 4, room, &look);
+    view.painting(false);
     for line in lines.into_iter().take(room) {
         rows.push(Row::of("  ", Style::new()).cat(line).pad(columns));
     }
@@ -150,7 +155,12 @@ fn both_lists_draw_what_is_on_here_at_120_and_80_columns() {
     let design = find(&wide, "> frontend-design");
     assert!(design.contains("On") && design.contains("Every project"));
     assert!(design.contains("How to do frontend-design work."));
+    assert!(
+        design.contains("Added by you  How to do frontend-design work."),
+        "a wide row says where the skill came from before what it does: {design}"
+    );
     assert!(find(&wide, "linear-method").contains("Off here"));
+    assert!(find(&wide, "linear-method").contains("Imported from Codex  How to do"));
     assert!(find(&wide, "release-notes").contains("Off in Settings"));
     assert!(find(&wide, "tidepool-style").contains("This project only"));
     assert!(wide.iter().any(|row| row.contains("MCP servers  2")));
@@ -170,6 +180,10 @@ fn both_lists_draw_what_is_on_here_at_120_and_80_columns() {
     let narrow = frame(&view, 80, 24);
     let design = find(&narrow, "> frontend-design");
     assert!(design.contains("Every project") && !design.contains("How to do"));
+    assert!(
+        !design.contains("Added by you"),
+        "a narrow row drops the origin with the description: {design}"
+    );
     assert!(find(&narrow, "release-notes").contains("Off in Settings"));
     assert!(find(&narrow, "  postgres").contains("This project only"));
     assert!(narrow.iter().all(|row| row.chars().count() <= 80));
@@ -333,6 +347,7 @@ fn at_80x24_the_project_settings_tab_scrolls_a_long_command_and_y_waits_for_its_
     };
     let mut screen = ProjectScreen::new(project(), "Tidepool".into(), None);
     screen.open(Tab::Settings);
+    screen.plugins.painting(true);
     screen.plugins.next_job().unwrap();
     screen.plugins.apply(&read(&long));
     for _ in 0..5 {
@@ -455,10 +470,140 @@ fn at_80x24_the_project_settings_tab_scrolls_a_long_command_and_y_waits_for_its_
     );
 }
 
+/// RV-DS241-104: only the painted frame records that a command showed to its end; a layout
+/// that never reaches the screen, such as one at the full terminal height while the move
+/// banner takes rows, lets no y approve.
+#[test]
+fn only_the_painted_frame_lets_y_approve_a_command_it_showed_to_the_end() {
+    let look = Look::plain();
+    let mut view = loaded();
+    for _ in 0..5 {
+        view.key(press(KeyCode::Down));
+    }
+    view.key(press(KeyCode::Enter));
+    assert_eq!(view.confirm.as_deref(), Some("pl0xpostgres"));
+    view.rows(76, 40, &look);
+    assert!(
+        matches!(view.key(press(KeyCode::Char('y'))), PluginsReply::Handled),
+        "a layout never painted showed nothing"
+    );
+    assert_eq!(view.confirm.as_deref(), Some("pl0xpostgres"));
+    view.painting(true);
+    view.rows(76, 40, &look);
+    view.painting(false);
+    let PluginChange::Approve { id, .. } = sent(view.key(press(KeyCode::Char('y')))) else {
+        panic!("an approval expected");
+    };
+    assert_eq!(id, "pl0xpostgres");
+}
+
+/// An approval refused because a stored server holds hidden characters says so and that the
+/// way out is Remove, then add again, never the add form's wording; any other refusal keeps
+/// its own sentence (RV-DS241-151 r2).
+#[test]
+fn an_approval_refused_for_hidden_characters_says_remove_and_add_again() {
+    let look = Look::plain();
+    let approve = "This server's command or address holds hidden or control characters, so it can't be approved. Remove it, then add it again.";
+    for (code, shown) in [
+        ("server_command_invalid", approve),
+        ("server_args_invalid", approve),
+        ("server_url_invalid", approve),
+        ("server_changed", plugin_plain("server_changed")),
+    ] {
+        let mut view = loaded();
+        for _ in 0..5 {
+            view.key(press(KeyCode::Down));
+        }
+        view.key(press(KeyCode::Enter));
+        view.painting(true);
+        view.rows(76, 40, &look);
+        view.painting(false);
+        let PluginChange::Approve { id, .. } = sent(view.key(press(KeyCode::Char('y')))) else {
+            panic!("an approval expected");
+        };
+        assert_eq!(id, "pl0xpostgres");
+        view.apply(&SettingsEvent::PluginChanged(Err(code.into())));
+        assert_eq!(view.notice, Some(Notice::problem(shown)), "{code}");
+    }
+}
+
+/// RV-DS241-104: a taller layout that never reaches the screen does not hold the scroll back,
+/// so Down still brings the painted frame to the command's last line.
+#[test]
+fn a_taller_unpainted_layout_never_holds_the_scroll_short_of_the_end() {
+    let look = Look::plain();
+    let long = format!("{LONG_RUNS}{}", " --table notes_archive_2026".repeat(14));
+    let (skills, mut servers) = lists();
+    servers[1].runs = long.clone();
+    let mut view = ProjectPlugins::new(project());
+    view.next_job().unwrap();
+    view.apply(&SettingsEvent::ProjectPlugins(
+        project(),
+        Ok((skills, servers)),
+    ));
+    for _ in 0..5 {
+        view.key(press(KeyCode::Down));
+    }
+    view.key(press(KeyCode::Enter));
+    assert_eq!(view.confirm.as_deref(), Some("pl0xpostgres"));
+    let lines = exact_lines(&long, 74).len();
+    assert!(lines > 4, "the command needs more rows than either layout");
+    for _ in 0..lines + 2 {
+        view.key(press(KeyCode::Down));
+        view.rows(76, 8, &look);
+        view.painting(true);
+        view.rows(76, 6, &look);
+        view.painting(false);
+    }
+    view.painting(true);
+    let (rows, _) = view.rows(76, 6, &look);
+    view.painting(false);
+    let rows: Vec<String> = rows.iter().map(Row::text).collect();
+    let marker = rows
+        .iter()
+        .find(|row| row.trim_start().starts_with("Lines "))
+        .unwrap_or_else(|| panic!("a line marker shows: {rows:?}"));
+    assert!(marker.contains("the end"), "{rows:?}");
+}
+
+/// RV-DS241-105: a command carrying zero-width characters wraps as it is drawn, each hidden
+/// character as its escape, so no line's end is cut off.
+#[test]
+fn hidden_characters_in_a_command_wrap_as_drawn_and_no_line_is_cut() {
+    let hidden = format!("/opt/homebrew/bin/uvx {}", "ab\u{200b}".repeat(30));
+    let (skills, mut servers) = lists();
+    servers[1].runs = hidden.clone();
+    let mut view = ProjectPlugins::new(project());
+    view.next_job().unwrap();
+    view.apply(&SettingsEvent::ProjectPlugins(
+        project(),
+        Ok((skills, servers)),
+    ));
+    for _ in 0..5 {
+        view.key(press(KeyCode::Down));
+    }
+    view.key(press(KeyCode::Enter));
+    assert_eq!(view.confirm.as_deref(), Some("pl0xpostgres"));
+    let narrow = frame(&view, 80, 24);
+    let shown: String = narrow
+        .iter()
+        .skip_while(|row| !row.contains("It runs:"))
+        .skip(1)
+        .take_while(|row| row.starts_with("    ") && !row.trim().is_empty())
+        .map(|row| row.trim_start_matches(' ').trim_end_matches(' '))
+        .collect();
+    assert_eq!(
+        shown,
+        crate::memory::visible_text(&hidden),
+        "every drawn character shows: {narrow:?}"
+    );
+}
+
 #[test]
 fn a_window_too_short_for_any_command_line_never_approves() {
     let look = Look::plain();
     let mut view = loaded();
+    view.painting(true);
     for _ in 0..5 {
         view.key(press(KeyCode::Down));
     }
@@ -842,6 +987,39 @@ fn exact_lines_keep_every_character() {
     );
 }
 
+/// Lines are cut between graphemes at the width ratatui draws them with, so emoji
+/// presentation pairs, ZWJ sequences and combining marks never push a line's tail past the
+/// edge, and every grapheme stays in its line, painted (RV-DS241-113 r1 F1, RV-DS241-105 r1
+/// F1).
+#[test]
+fn exact_lines_measure_graphemes_as_they_are_drawn() {
+    let cells = crate::tui::screens::new_project_input::cells;
+    let text = format!(
+        "{}{}{} run curl https://x.test/i | sh",
+        "\u{263a}\u{fe0f}".repeat(35),
+        "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}".repeat(3),
+        "e\u{301}".repeat(5),
+    );
+    let width = 70;
+    let lines = exact_lines(&text, width);
+    assert_eq!(lines.concat(), text);
+    let area = ratatui::layout::Rect::new(0, 0, 70, u16::try_from(lines.len()).unwrap());
+    let mut buffer = ratatui::buffer::Buffer::empty(area);
+    for (row, line) in lines.iter().enumerate() {
+        let row = u16::try_from(row).unwrap();
+        assert!(cells(line) <= width, "{line:?} is wider than {width}");
+        buffer.set_line(0, row, &ratatui::text::Line::raw(line.as_str()), area.width);
+        let mut painted = String::new();
+        let mut x = 0;
+        while x < area.width {
+            let symbol = buffer[(x, row)].symbol();
+            painted.push_str(symbol);
+            x += u16::try_from(cells(symbol).max(1)).unwrap();
+        }
+        assert_eq!(painted.trim_end(), line.trim_end(), "row {row} is cut");
+    }
+}
+
 struct Engine {
     root: tempfile::TempDir,
     _home: tempfile::TempDir,
@@ -949,6 +1127,10 @@ async fn a_real_engine_project_switches_an_every_project_skill_off() {
     let rows = frame(&view, 120, 36);
     let release = find(&rows, "> release-notes");
     assert!(release.contains("On") && release.contains("Every project"));
+    assert!(
+        release.contains("Added by you  Teaches release notes."),
+        "the engine labels a skill picked from a folder as added by the owner: {release}"
+    );
     let echo = find(&rows, "  echo");
     assert!(echo.contains("Needs approval") && echo.contains("This project only"));
     frame(&view, 80, 24);
@@ -1447,6 +1629,223 @@ fn l_asks_for_the_tools_page_with_every_server_starting_on_the_selected_one() {
     assert!(view.help().contains(&("l", "Tools")), "{:?}", view.help());
 }
 
+fn hook(
+    plugin: &str,
+    event: &str,
+    matcher: Option<&str>,
+    scope: Scope,
+    enabled: bool,
+    on_here: Option<bool>,
+) -> HookView {
+    HookView {
+        id: format!("hook-{plugin}-{event}-{}", matcher.unwrap_or("all")),
+        name: format!("{plugin}/{event}/1"),
+        plugin: plugin.into(),
+        event: event.into(),
+        matcher: matcher.map(str::to_owned),
+        command: format!("node hooks/{}.mjs", event.to_lowercase()),
+        scope_label: scope.label().into(),
+        scope,
+        enabled,
+        on_here,
+        follows: Some(plugin.into()),
+        source: format!("/private/tmp/engine/setup/pack/{plugin}"),
+        version: 2,
+    }
+}
+
+fn project_hooks() -> Vec<HookView> {
+    let on = |plugin: &str, event: &str| hook(plugin, event, None, Scope::Global, true, Some(true));
+    vec![
+        on("caveman", "SessionStart"),
+        on("caveman", "UserPromptSubmit"),
+        on("caveman", "SubagentStart"),
+        on("caveman", "SessionEnd"),
+        hook(
+            "context-mode",
+            "PreToolUse",
+            Some("Bash"),
+            Scope::Global,
+            true,
+            Some(true),
+        ),
+        hook(
+            "context-mode",
+            "PreToolUse",
+            Some("Read"),
+            Scope::Global,
+            false,
+            Some(true),
+        ),
+        hook(
+            "context-mode",
+            "SessionStart",
+            None,
+            Scope::Global,
+            true,
+            Some(false),
+        ),
+    ]
+}
+
+fn with_hooks(hooks: Vec<HookView>) -> ProjectPlugins {
+    let mut view = ProjectPlugins::new(project());
+    assert!(matches!(
+        view.next_job(),
+        Some(SettingsJob::ProjectPlugins { .. })
+    ));
+    view.apply(&SettingsEvent::ProjectPlugins(
+        project(),
+        Ok((Vec::new(), Vec::new())),
+    ));
+    assert!(matches!(view.next_job(), Some(SettingsJob::Hooks { .. })));
+    view.apply(&SettingsEvent::Hooks(Some(project()), Ok(hooks)));
+    view
+}
+
+#[test]
+fn hooks_in_a_project_show_one_row_per_plugin_and_enter_shows_its_events() {
+    let mut view = with_hooks(project_hooks());
+    let wide = frame(&view, 120, 36);
+    assert!(wide.iter().any(|row| row.contains("Hooks  2")), "{wide:#?}");
+    let caveman = find(&wide, "> caveman");
+    assert!(caveman.contains("On") && caveman.contains("Every project"));
+    assert!(caveman.contains("4 events, runs while caveman is on"));
+    assert!(
+        find(&wide, "context-mode").contains("Partly on"),
+        "a hook off in Settings is not the project's, so one on and one off here reads Partly on"
+    );
+    assert!(
+        wide.iter().all(|row| !row.contains("SubagentStart")),
+        "events stay folded"
+    );
+    assert!(wide.last().unwrap().contains("Enter Events"));
+
+    assert!(matches!(
+        view.key(press(KeyCode::Down)),
+        PluginsReply::Handled
+    ));
+    assert!(matches!(
+        view.key(press(KeyCode::Enter)),
+        PluginsReply::Handled
+    ));
+    let opened = frame(&view, 120, 36);
+    assert!(find(&opened, "> context-mode").contains("Partly on"));
+    assert!(find(&opened, "Bash: node hooks/pretooluse.mjs").contains("On"));
+    assert!(find(&opened, "Read: node hooks/pretooluse.mjs").contains("Off in Settings"));
+    assert!(find(&opened, "SessionStart").contains("Off here"));
+    assert!(
+        opened.iter().all(|row| !row.contains("SubagentStart")),
+        "only the opened plugin shows its events"
+    );
+    view.key(press(KeyCode::Enter));
+    assert!(
+        frame(&view, 120, 36)
+            .iter()
+            .all(|row| !row.contains("Read: node")),
+        "Enter again folds them"
+    );
+}
+
+#[test]
+fn space_on_a_plugin_row_switches_its_hooks_here_and_never_one_off_in_settings() {
+    let mut view = with_hooks(project_hooks());
+    match sent(view.key(press(KeyCode::Char(' ')))) {
+        PluginChange::Switches {
+            project: asked,
+            items,
+            on,
+        } => {
+            assert_eq!(asked, project());
+            assert!(!on);
+            assert_eq!(
+                items.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+                [
+                    "hook-caveman-SessionStart-all",
+                    "hook-caveman-UserPromptSubmit-all",
+                    "hook-caveman-SubagentStart-all",
+                    "hook-caveman-SessionEnd-all",
+                ]
+            );
+            assert!(items.iter().all(|(_, version)| *version == 2));
+        }
+        _ => panic!("Space on a plugin row switches its hooks for this project"),
+    }
+    view.apply(&SettingsEvent::PluginChanged(Ok(None)));
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("caveman hooks are off for this project."))
+    );
+
+    let mut view = with_hooks(project_hooks());
+    view.key(press(KeyCode::Down));
+    let change = sent(view.key(press(KeyCode::Char(' '))));
+    assert!(
+        matches!(
+            change,
+            PluginChange::Switches { ref items, on: true, .. }
+                if items.as_slice() == [("hook-context-mode-SessionStart-all".to_owned(), 2)]
+        ),
+        "Partly on turns on only the hook off here, never the one off in Settings"
+    );
+
+    let mut view = with_hooks(project_hooks());
+    view.key(press(KeyCode::Down));
+    view.key(press(KeyCode::Enter));
+    view.key(press(KeyCode::Down));
+    let change = sent(view.key(press(KeyCode::Char(' '))));
+    assert!(matches!(
+        change,
+        PluginChange::Switch { ref id, on: false, .. } if id == "hook-context-mode-PreToolUse-Bash"
+    ));
+
+    let mut view = with_hooks(vec![hook(
+        "guard",
+        "PreToolUse",
+        Some("Bash"),
+        Scope::Global,
+        false,
+        Some(true),
+    )]);
+    assert!(matches!(
+        view.key(press(KeyCode::Char(' '))),
+        PluginsReply::Handled
+    ));
+    assert!(!view.busy());
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "guard is off in Settings for every project. Turn it on there first."
+        ))
+    );
+
+    let mut view = with_hooks(vec![
+        hook("tide", "PreToolUse", Some("Bash"), here(), true, None),
+        hook("tide", "SessionStart", None, here(), true, None),
+    ]);
+    let change = sent(view.key(press(KeyCode::Char(' '))));
+    assert!(matches!(
+        change,
+        PluginChange::SetHooks { ref ids, enabled: false } if ids.len() == 2
+    ));
+    view.apply(&SettingsEvent::PluginChanged(Ok(None)));
+    assert_eq!(view.notice, Some(Notice::plain("tide hooks are off.")));
+    assert!(matches!(
+        view.key(press(KeyCode::Char('d'))),
+        PluginsReply::Handled
+    ));
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "tide is a plugin's hooks. Press Space to turn them off."
+        ))
+    );
+    assert!(
+        view.removing.is_none(),
+        "a plugin's hooks are never removed here"
+    );
+}
+
 async fn drive_settings(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static str> {
     let mut sent = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(8);
@@ -1546,14 +1945,32 @@ fn shell_at(engine: &Engine, place: &Place) -> (Shell, Connection) {
 fn hook_row(shown: &str) -> &str {
     shown
         .lines()
-        .find(|line| line.contains("PreToolUse Bash:") || line.contains("  guard  "))
-        .unwrap_or_else(|| panic!("no hook row:\n{shown}"))
+        .find(|line| line.contains("guard") && line.contains("2 events"))
+        .unwrap_or_else(|| panic!("no guard plugin row:\n{shown}"))
+}
+
+fn event_row<'a>(shown: &'a str, event: &str) -> &'a str {
+    shown
+        .lines()
+        .find(|line| line.contains(event) && line.contains("hooks/guard.sh"))
+        .unwrap_or_else(|| panic!("no {event} row under guard:\n{shown}"))
+}
+
+fn enabled_by_event(hooks: &[HookView]) -> Vec<(String, bool)> {
+    let mut seen: Vec<(String, bool)> = hooks
+        .iter()
+        .map(|hook| (hook.event.clone(), hook.enabled))
+        .collect();
+    seen.sort();
+    seen
 }
 
 /// A real engine's hooks through the TUI: h in Settings, Plugins refuses a folder without
-/// plugin.json with its plain reason, then adds the folder's hooks for every project once it
-/// has one, Space turns the hook off and on again there, and a project's Settings tab
-/// switches that every-project hook off for the project only.
+/// plugin.json with its plain reason, then adds the folder's two hooks for every project once
+/// it has one as one plugin row. Space on that row turns both off, Enter opens its events,
+/// Space on one event turns only that hook on so the row reads Partly on, and Space on the row
+/// turns the other on. A project's Settings tab then switches both every-project hooks off for
+/// the project only, and one event back on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_through_the_engine() {
     let engine = engine().await;
@@ -1562,7 +1979,7 @@ async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_thr
     std::fs::write(plugin.join("hooks/guard.sh"), "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::write(
         plugin.join("hooks/hooks.json"),
-        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh\""}]}]}}"#,
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh\""}]}],"SessionStart":[{"hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh\""}]}]}}"#,
     )
     .unwrap();
     let global = || engine.controller.plugin_hooks(None);
@@ -1610,37 +2027,83 @@ async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_thr
     let sent = drive_settings(&mut shell, &mut connection).await;
     assert!(sent.contains(&"plugin change"), "{sent:?}");
     let hooks = global().await.unwrap();
-    assert_eq!(hooks.len(), 1, "{hooks:?}");
+    assert_eq!(hooks.len(), 2, "{hooks:?}");
+    let mut added: Vec<_> = hooks
+        .iter()
+        .map(|hook| {
+            (
+                hook.plugin.as_str(),
+                hook.event.as_str(),
+                hook.matcher.as_deref(),
+                hook.enabled,
+                &hook.scope,
+            )
+        })
+        .collect();
+    added.sort();
     assert_eq!(
-        (
-            hooks[0].plugin.as_str(),
-            hooks[0].event.as_str(),
-            hooks[0].matcher.as_deref(),
-            hooks[0].enabled,
-            &hooks[0].scope,
-        ),
-        ("guard", "PreToolUse", Some("Bash"), true, &Scope::Global)
+        added,
+        [
+            ("guard", "PreToolUse", Some("Bash"), true, &Scope::Global),
+            ("guard", "SessionStart", None, true, &Scope::Global),
+        ]
     );
+    let first = hooks[0].event.clone();
+    let second = hooks[1].event.clone();
     let shown = render(&mut shell, 120, 36);
     assert!(shown.contains("Hooks added for every project."), "{shown}");
     assert!(hook_row(&shown).contains("On"), "{shown}");
+    assert!(
+        !shown.contains("hooks/guard.sh"),
+        "the plugin's events stay folded:\n{shown}"
+    );
 
     shell.key(Key::Down);
     shell.key(Key::Char(' '));
     let sent = drive_settings(&mut shell, &mut connection).await;
     assert!(sent.contains(&"plugin change"), "{sent:?}");
-    assert!(
-        !global().await.unwrap()[0].enabled,
-        "Space turned the hook off"
+    assert_eq!(
+        enabled_by_event(&global().await.unwrap()),
+        [
+            ("PreToolUse".to_owned(), false),
+            ("SessionStart".to_owned(), false)
+        ],
+        "Space on the plugin row turned both hooks off"
     );
     let shown = render(&mut shell, 120, 36);
     assert!(hook_row(&shown).contains("Off"), "{shown}");
+
+    shell.key(Key::Enter);
+    drive_settings(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 36);
+    assert!(event_row(&shown, "Bash:").contains("Off"), "{shown}");
+    assert!(event_row(&shown, &second).contains("Off"), "{shown}");
+    shell.key(Key::Down);
     shell.key(Key::Char(' '));
     let sent = drive_settings(&mut shell, &mut connection).await;
     assert!(sent.contains(&"plugin change"), "{sent:?}");
-    assert!(
-        global().await.unwrap()[0].enabled,
-        "Space turned the hook on again"
+    let now = global().await.unwrap();
+    assert_eq!(
+        now.iter()
+            .map(|hook| (hook.event.as_str(), hook.enabled))
+            .collect::<Vec<_>>(),
+        [(first.as_str(), true), (second.as_str(), false)],
+        "Space on the first event row turned only its hook on"
+    );
+    let shown = render(&mut shell, 120, 36);
+    assert!(hook_row(&shown).contains("Partly on"), "{shown}");
+
+    shell.key(Key::Up);
+    shell.key(Key::Char(' '));
+    let sent = drive_settings(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"plugin change"), "{sent:?}");
+    assert_eq!(
+        enabled_by_event(&global().await.unwrap()),
+        [
+            ("PreToolUse".to_owned(), true),
+            ("SessionStart".to_owned(), true)
+        ],
+        "Space on a Partly on plugin row turned the other hook on"
     );
 
     let (mut shell, mut connection) = shell_at(
@@ -1658,17 +2121,46 @@ async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_thr
     shell.key(Key::Char(' '));
     let sent = drive_settings(&mut shell, &mut connection).await;
     assert!(sent.contains(&"plugin change"), "{sent:?}");
-    let here = engine
-        .controller
-        .plugin_hooks(Some(project()))
-        .await
-        .unwrap();
-    assert_eq!(here[0].on_here, Some(false), "{here:?}");
-    assert!(
-        global().await.unwrap()[0].enabled,
-        "every other project keeps it"
+    let here = || engine.controller.plugin_hooks(Some(project()));
+    assert_eq!(
+        here()
+            .await
+            .unwrap()
+            .iter()
+            .map(|hook| hook.on_here)
+            .collect::<Vec<_>>(),
+        [Some(false), Some(false)],
+        "Space on the plugin row switched both hooks off for this project"
+    );
+    assert_eq!(
+        enabled_by_event(&global().await.unwrap()),
+        [
+            ("PreToolUse".to_owned(), true),
+            ("SessionStart".to_owned(), true)
+        ],
+        "every other project keeps them"
     );
     let shown = render(&mut shell, 120, 36);
     assert!(hook_row(&shown).contains("Off here"), "{shown}");
-    assert!(shown.contains("is off for this project."), "{shown}");
+    assert!(
+        shown.contains("guard hooks are off for this project."),
+        "{shown}"
+    );
+
+    shell.key(Key::Enter);
+    drive_settings(&mut shell, &mut connection).await;
+    shell.key(Key::Down);
+    shell.key(Key::Char(' '));
+    let sent = drive_settings(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"plugin change"), "{sent:?}");
+    let now = here().await.unwrap();
+    assert_eq!(
+        now.iter()
+            .map(|hook| (hook.event.as_str(), hook.on_here))
+            .collect::<Vec<_>>(),
+        [(first.as_str(), Some(true)), (second.as_str(), Some(false))],
+        "Space on the first event row switched only its hook back on here"
+    );
+    let shown = render(&mut shell, 120, 36);
+    assert!(hook_row(&shown).contains("Partly on"), "{shown}");
 }

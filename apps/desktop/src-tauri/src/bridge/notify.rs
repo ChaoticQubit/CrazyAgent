@@ -2,6 +2,7 @@ use super::*;
 use crazyagent::notifications::{
     Notice as StoreNotice, NoticeFilter, NoticePage, NoticeQuery, NoticeTarget,
 };
+use crazyagent::projects_home::job::JobView;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, PoisonError};
 use tauri::Manager;
@@ -118,6 +119,54 @@ pub fn notice(project: Option<&str>, item: &StoreNotice) -> Notice {
     Notice { title, body }
 }
 
+/// The notification text for an intake job that ended, built from the engine's view: the
+/// folder's name and what happened in plain words, never an engine code. Input: the job.
+/// Output: the notice, or None while the job still runs.
+pub fn intake_notice(job: &JobView) -> Option<Notice> {
+    use crazyagent::projects_home::job::{JobState, Phase};
+    let folder = std::path::Path::new(&job.source)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = match plain_line(&folder, TITLE_CHARS_MAX - 40) {
+        shown if shown.is_empty() => "The folder".to_owned(),
+        shown => shown,
+    };
+    let way = match job.mode {
+        crazyagent::projects_home::AddMode::Move => "moved",
+        crazyagent::projects_home::AddMode::Copy => "copied",
+    };
+    let landed = format!("{name} is in your projects folder");
+    let (title, body) = match &job.state {
+        JobState::Done => (landed, "Set it up from Home.".to_owned()),
+        JobState::Failed {
+            phase: Phase::Clearing,
+            ..
+        } => (
+            landed,
+            "Part of its old place could not be removed. Check it on Home.".to_owned(),
+        ),
+        JobState::Failed { .. } => (
+            format!("Adding {name} failed"),
+            "Open Home in CrazyAgent to see why.".to_owned(),
+        ),
+        JobState::Cancelled { .. } => (
+            format!("Adding {name} stopped"),
+            "Nothing was moved or copied.".to_owned(),
+        ),
+        JobState::NeedsAnswer { .. } => (
+            format!("{name} needs your answer"),
+            format!("Open Home in CrazyAgent to decide before it is {way}."),
+        ),
+        JobState::Downloading { .. } | JobState::Copying { .. } | JobState::Clearing => {
+            return None;
+        }
+    };
+    assert!(title.chars().count() <= TITLE_CHARS_MAX);
+    assert!(body.chars().count() <= BODY_CHARS_MAX);
+    Some(Notice { title, body })
+}
+
 /// Where a clicked notification leads: its store item and the page it opens.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Clicked {
@@ -136,8 +185,23 @@ pub struct Notices {
 struct Shown {
     order: VecDeque<(i64, i32)>,
     targets: HashMap<i32, Clicked>,
+    jobs: VecDeque<(String, i32)>,
     clicked: Option<Clicked>,
     last: i32,
+}
+
+impl Shown {
+    fn next_id(&mut self) -> i32 {
+        self.last = if self.last == i32::MAX {
+            1
+        } else {
+            self.last + 1
+        };
+        assert!(self.last > 0);
+        assert!(!self.order.iter().any(|(_, id)| *id == self.last));
+        assert!(!self.jobs.iter().any(|(_, id)| *id == self.last));
+        self.last
+    }
 }
 
 impl Notices {
@@ -156,21 +220,43 @@ impl Notices {
         if shown.order.iter().any(|(known, _)| *known == item) {
             return Ok(None);
         }
-        if shown.order.len() >= SHOWN_MAX {
+        if shown.order.len() + shown.jobs.len() >= SHOWN_MAX {
             return Err(failure("notifications_full"));
         }
-        shown.last = if shown.last == i32::MAX {
-            1
-        } else {
-            shown.last + 1
-        };
-        let id = shown.last;
-        assert!(id > 0);
+        let id = shown.next_id();
         shown.order.push_back((item, id));
         shown.targets.insert(id, Clicked { id: item, target });
-        assert!(shown.order.len() <= SHOWN_MAX);
+        assert!(shown.order.len() + shown.jobs.len() <= SHOWN_MAX);
         assert_eq!(shown.targets.len(), shown.order.len());
         Ok(Some(id))
+    }
+
+    /// Claims the notification of one ended intake job, once, as [`Notices::claim`] does for
+    /// a store item, within the same `SHOWN_MAX`; a click on it only brings the window to the
+    /// front. Input: the job id. Output: the notification id, None when the job was already
+    /// notified, or `notifications_full`.
+    pub fn claim_job(&self, job: &str) -> Result<Option<i32>, BridgeError> {
+        let mut shown = self.shown();
+        if shown.jobs.iter().any(|(known, _)| known == job) {
+            return Ok(None);
+        }
+        if shown.order.len() + shown.jobs.len() >= SHOWN_MAX {
+            return Err(failure("notifications_full"));
+        }
+        let id = shown.next_id();
+        shown.jobs.push_back((job.to_owned(), id));
+        assert!(shown.order.len() + shown.jobs.len() <= SHOWN_MAX);
+        assert!(!shown.targets.contains_key(&id));
+        Ok(Some(id))
+    }
+
+    /// Gives a job claim back after its notification could not be shown. Inputs: the job id
+    /// and the notification id it claimed.
+    pub fn release_job(&self, job: &str, id: i32) {
+        let mut shown = self.shown();
+        shown
+            .jobs
+            .retain(|(known, claimed)| (known.as_str(), *claimed) != (job, id));
     }
 
     /// Gives a claim back after the notification could not be shown, so a later read may
@@ -184,10 +270,14 @@ impl Notices {
         assert_eq!(shown.targets.len(), shown.order.len());
     }
 
-    /// Records a click on a notification: its item becomes the one the window opens next.
+    /// Records a click on a notification: a store item becomes the one the window opens next;
+    /// an intake job's names none, so the window only comes to the front.
     /// Input: the notification id. Output: whether it was one of these notifications.
     pub fn clicked(&self, id: i32) -> bool {
         let mut shown = self.shown();
+        if shown.jobs.iter().any(|(_, claimed)| *claimed == id) {
+            return true;
+        }
         let Some(clicked) = shown.targets.get(&id).cloned() else {
             return false;
         };
@@ -457,5 +547,98 @@ mod tests {
         if !cfg!(target_os = "macos") {
             assert_eq!(available().unwrap_err().code, "notifications_unavailable");
         }
+    }
+
+    fn job(state: crazyagent::projects_home::job::JobState) -> JobView {
+        JobView {
+            id: crazyagent::protocol::RequestId::new("add-1").unwrap(),
+            source: "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop".into(),
+            mode: crazyagent::projects_home::AddMode::Move,
+            overrides: Vec::new(),
+            stopping: false,
+            state,
+        }
+    }
+
+    /// An ended intake job's notice names the folder and says what happened in plain words,
+    /// never the engine code; a running job has none.
+    #[test]
+    fn an_ended_intake_job_notice_names_the_folder_and_what_happened() {
+        use crazyagent::projects_home::job::{JobState, Phase};
+        let said = |state| intake_notice(&job(state)).map(|notice| (notice.title, notice.body));
+        let pair = |title: &str, body: &str| Some((title.to_owned(), body.to_owned()));
+        assert_eq!(
+            said(JobState::Done),
+            pair("shop is in your projects folder", "Set it up from Home.")
+        );
+        assert_eq!(
+            said(JobState::Cancelled {
+                phase: Phase::Copying
+            }),
+            pair("Adding shop stopped", "Nothing was moved or copied.")
+        );
+        let failed = said(JobState::Failed {
+            code: "home_copy_failed".into(),
+            phase: Phase::Copying,
+        });
+        assert_eq!(
+            failed,
+            pair("Adding shop failed", "Open Home in CrazyAgent to see why.")
+        );
+        let landed = said(JobState::Failed {
+            code: "home_move_source_left".into(),
+            phase: Phase::Clearing,
+        });
+        assert_eq!(
+            landed,
+            pair(
+                "shop is in your projects folder",
+                "Part of its old place could not be removed. Check it on Home."
+            )
+        );
+        let asked = said(JobState::NeedsAnswer {
+            code: "home_move_worktrees".into(),
+        });
+        assert_eq!(
+            asked,
+            pair(
+                "shop needs your answer",
+                "Open Home in CrazyAgent to decide before it is moved."
+            )
+        );
+        assert_eq!(said(JobState::Clearing), None);
+        assert_eq!(
+            said(JobState::Copying {
+                copied: 3,
+                checked: 0
+            }),
+            None
+        );
+    }
+
+    /// A job's notification is claimed once, shares the bound with store items, and a click on
+    /// it brings the window front without naming an item to open.
+    #[test]
+    fn an_intake_job_is_notified_once_and_its_click_opens_no_item() {
+        let notices = Notices::default();
+        let first = notices.claim_job("add-1").unwrap().unwrap();
+        assert_eq!(notices.claim_job("add-1").unwrap(), None);
+        let item = notices.claim(7, NoticeTarget::Home).unwrap().unwrap();
+        assert_ne!(first, item);
+        assert!(notices.clicked(first));
+        assert_eq!(notices.take(), None);
+        notices.release_job("add-1", first);
+        assert!(notices.claim_job("add-1").unwrap().is_some());
+        for job in 0..SHOWN_MAX {
+            let _ = notices.claim_job(&format!("job-{job}"));
+        }
+        assert_eq!(
+            notices.claim_job("one-more").unwrap_err().code,
+            "notifications_full"
+        );
+        assert_eq!(
+            notices.claim(8, NoticeTarget::Home).unwrap_err().code,
+            "notifications_full"
+        );
     }
 }

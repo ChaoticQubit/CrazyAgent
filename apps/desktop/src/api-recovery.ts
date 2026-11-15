@@ -6,7 +6,7 @@ import { failureCopy } from "./api-projects";
 export type RunShown = "interrupted" | "resuming" | "resumed" | "failed";
 
 /** The ledger actions a notice can be about; only the last three are shown today. */
-export type ActionKind = "message" | "dispatch" | "worktree_create" | "agent_spawn" | "landing_accept";
+export type ActionKind = "message" | "dispatch" | "worktree_create" | "agent_spawn" | "landing_accept" | "project_delete";
 
 /** One agent run an engine stop cut short, as the banner lists it. */
 export interface RecoveryRun {

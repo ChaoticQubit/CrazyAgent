@@ -21,6 +21,7 @@ env:
   ARTIFACT_SIGNING_CLIENT_SHA256: 7761e5d8f31e54b764da21d33cd8b0a2940e1b05526c7dfcb5e94b0431426f70
   BUN_DARWIN_X64_SHA256: 62660e6438eb872278877acca77e1152d5d031324df368d4a81b428211489d2d
   BUN_DARWIN_ARM64_SHA256: 80afd4c069b46a6fa8f3ec520bebc750a7843e4a8d5b9583d29ad436c00a3403
+  BUN_LINUX_X64_SHA256: 3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18
   NODE_DARWIN_ARM64_SHA256: 1901d539912c02afa10d1cc126943a8855a7eedebe830119463470db5e6c59e8
   RUSTC_DARWIN_ARM64_SHA256: 738e3f60114b20550fcf4f8a57c9cea0544239f214709f45594ff3fde327f577
   CARGO_DARWIN_ARM64_SHA256: de51d4fade4f31ad8ec405261cc96bedc000d905f98980027610d6e288dbe21b
@@ -104,6 +105,7 @@ jobs:
       CHANNEL: ${{ needs.prepare.outputs.channel }}
       TARGET: ${{ matrix.target }}
       PLATFORM: ${{ matrix.os }}
+      CRAZYAGENT_BUNDLES_TMUX: ${{ matrix.os != 'windows' && '1' || '0' }}
     steps:
       - name: Refuse to run under Rosetta
         if: matrix.os == 'macos'
@@ -130,10 +132,30 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
       - id: bun
-        if: runner.environment == 'github-hosted' && matrix.os != 'macos'
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
+        name: Install pinned x64 bun for Linux
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          [ "$(uname -s)/$(uname -m)" = Linux/x86_64 ] || { echo "::error::the Linux release runner must be x86_64"; exit 1; }
+          prefix="$RUNNER_TOOL_CACHE/crazyagent-release/bun/$BUN_VERSION/linux-x64"
+          work="$RUNNER_TEMP/bun-linux-x64"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work/bin"
+          if [ -f "$prefix/bun.zip" ]; then
+            cp "$prefix/bun.zip" "$work/bun.zip"
+          fi
+          if ! echo "$BUN_LINUX_X64_SHA256  $work/bun.zip" | sha256sum -c --status - 2>/dev/null; then
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/bun.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/bun-linux-x64.zip"
+            echo "$BUN_LINUX_X64_SHA256  $work/bun.zip" | sha256sum -c -
+            cp "$work/bun.zip" "$prefix/bun.zip.$$"
+            mv "$prefix/bun.zip.$$" "$prefix/bun.zip"
+          fi
+          unzip -q "$work/bun.zip" -d "$work"
+          install -m 0755 "$work/bun-linux-x64/bun" "$work/bin/bun"
+          test "$("$work/bin/bun" --version)" = "$BUN_VERSION"
+          test "$("$work/bin/bun" -e 'console.log(process.arch)')" = x64
+          echo "bun-path=$work/bin/bun" >> "$GITHUB_OUTPUT"
+          echo "$work/bin" >> "$GITHUB_PATH"
       - name: Install pinned Node on the owner's runner
         if: runner.environment != 'github-hosted'
         run: |
@@ -303,7 +325,7 @@ jobs:
             printf '%s\n' 'http://archive.ubuntu.com/ubuntu/' 'http://security.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
             sudo apt-get "${apt_options[@]}" update --error-on=any
           fi
-          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends build-essential file patchelf pkg-config libsqlite3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libfuse2
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends build-essential bison file musl-tools patchelf pkg-config libsqlite3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libfuse2
       - name: Install SQLite for Windows
         if: matrix.os == 'windows'
         run: |
@@ -352,8 +374,35 @@ jobs:
           mkdir -p "$RUNNER_TEMP/rcli"
           node scripts/release/rcli.mjs --sdk "$GITHUB_WORKSPACE/.local-state/tools/rcli-source" --bun "$BUN_PATH" --output "$RUNNER_TEMP/rcli/crazyagent-rcli$exe"
           echo "RCLI_HOST=$RUNNER_TEMP/rcli/crazyagent-rcli$exe" >> "$GITHUB_ENV"
+      - name: Install Rosetta for the x86_64 tmux start check
+        if: matrix.target == 'x86_64-apple-darwin'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          if [ "$(uname -m)" = arm64 ] && ! /usr/bin/arch -x86_64 /usr/bin/true 2> /dev/null; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::x86_64 cannot run on this Mac and CI installs nothing on a self-hosted runner; install Rosetta on the runner (softwareupdate --install-rosetta)"
+              exit 1
+            fi
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+          /usr/bin/arch -x86_64 /usr/bin/true
+      - name: Build bundled tmux
+        if: matrix.os != 'windows'
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/crazyagent-tmux"
+          rm -rf "$work"
+          mkdir -p "$work"
+          scripts/release/build-tmux.sh --target "$TARGET" --work "$work/build" --out "$work/crazyagent-tmux"
+          echo "TMUX_SIDECAR=$work/crazyagent-tmux" >> "$GITHUB_ENV"
       - name: Stage desktop sidecars
-        run: node scripts/release/assets.mjs stage --target "$TARGET" --cargo-dir "${CARGO_TARGET_DIR:-target}/$TARGET/release" --rcli "$RCLI_HOST" --tauri-dir apps/desktop/src-tauri
+        run: |
+          set -euo pipefail
+          tmux=()
+          if [ "$PLATFORM" != windows ]; then tmux=(--tmux "$TMUX_SIDECAR"); fi
+          node scripts/release/assets.mjs stage --target "$TARGET" --cargo-dir "${CARGO_TARGET_DIR:-target}/$TARGET/release" --rcli "$RCLI_HOST" ${tmux[@]+"${tmux[@]}"} --tauri-dir apps/desktop/src-tauri
       - name: Prepare Windows signing tools
         if: matrix.os == 'windows'
         run: |
@@ -483,9 +532,25 @@ jobs:
           if [ "$stale" = 1 ] && [ "${#search[@]}" -gt 0 ]; then security list-keychains -d user -s "${search[@]}"; fi
           keychain_unlock
           rm -f "$keychain"
-          if security list-keychains -d user | grep -qF "$keychain"; then echo "::error::the job keychain is still in the search list"; exit 1; fi
+          listed="$(security list-keychains -d user)"
+          if grep -qF "$keychain" <<< "$listed"; then echo "::error::the job keychain is still in the search list"; exit 1; fi
           if [ -e "$keychain" ] || [ -e "$RUNNER_TEMP/apple" ]; then echo "::error::signing material is still on disk"; exit 1; fi
           echo "signing keychain and Apple keys removed"
+      - name: Check the bundled tmux signature
+        if: matrix.os == 'macos'
+        env:
+          SIGNING_STATUS: ${{ steps.desktop.outputs.status }}
+        run: |
+          set -euo pipefail
+          tmux="${CARGO_TARGET_DIR:-target}/$TARGET/release/bundle/macos/CrazyAgent.app/Contents/MacOS/crazyagent-tmux"
+          test -f "$tmux" && test -x "$tmux"
+          case "$TARGET" in aarch64-apple-darwin) arch=arm64 ;; x86_64-apple-darwin) arch=x86_64 ;; *) echo "::error::no macOS architecture for $TARGET"; exit 1 ;; esac
+          test "$(lipo -archs "$tmux")" = "$arch"
+          if [ "$SIGNING_STATUS" = signed ]; then
+            codesign --verify --strict --verbose=2 "$tmux"
+            display="$(codesign --display --verbose=2 "$tmux" 2>&1)"
+            grep -E -q 'flags=.*runtime' <<< "$display" || { echo "::error::the bundled tmux is not signed with the hardened runtime"; exit 1; }
+          fi
       - name: Package release assets
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -527,7 +592,7 @@ jobs:
           free_gib() { df -Pk "$RUNNER_TOOL_CACHE" | awk 'NR == 2 { print int($4 / 1048576) }'; }
           echo "runner tool cache volume: $(free_gib) GiB free after the build"
           tools=(crazyagent-release)
-          temp=(crazyagent-release node-arm64 bun-arm64 bun-x64 rust rcli apple macos-tmp)
+          temp=(crazyagent-release node-arm64 bun-arm64 bun-x64 rust rcli apple macos-tmp crazyagent-tmux)
           made=()
           for name in "${tools[@]}"; do made+=("$RUNNER_TOOL_CACHE/$name"); done
           for name in "${temp[@]}"; do made+=("$RUNNER_TEMP/$name"); done

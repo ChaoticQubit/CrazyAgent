@@ -72,6 +72,41 @@ fn no_line_of_the_owners_text_can_close_the_prompts_fence() {
 }
 
 #[test]
+fn texts_with_long_tilde_runs_within_the_size_cap_still_get_a_prompt() {
+    let tildes = "~".repeat(TEXT_BYTES_MAX);
+    let run = "~".repeat(1000);
+    let filler = "- Keep it.\n".repeat((TEXT_BYTES_MAX - 1100) / 11);
+    let near_cap = format!("{filler}{run}\n");
+    assert!(near_cap.len() <= TEXT_BYTES_MAX);
+    for (scope, app, project, longest) in [
+        (Scope::App, tildes.as_str(), "", TEXT_BYTES_MAX),
+        (Scope::Project, near_cap.as_str(), near_cap.as_str(), 1000),
+        (
+            Scope::Project,
+            tildes.as_str(),
+            tildes.as_str(),
+            TEXT_BYTES_MAX,
+        ),
+    ] {
+        let text = prompt(scope, app, project);
+        let fence = "~".repeat(longest + 1);
+        let fenced_app = format!(
+            "{fence}\n{app}{}{fence}\n",
+            if app.ends_with('\n') { "" } else { "\n" }
+        );
+        assert!(text.contains(&fenced_app));
+        if scope == Scope::Project {
+            let fenced_project = format!(
+                "{fence}\n{project}{}{fence}\n",
+                if project.ends_with('\n') { "" } else { "\n" }
+            );
+            assert!(text.ends_with(&fenced_project));
+        }
+        assert!(text.contains(&format!("fenced by {fence} lines")));
+    }
+}
+
+#[test]
 fn a_proposal_is_the_fenced_reply_text_within_the_bound() {
     assert_eq!(
         proposal("Here it is.\n~~~markdown\n- Run make check.\n~~~\n").unwrap(),
@@ -288,4 +323,115 @@ fn old_run_folders_are_pruned_and_run_names_never_repeat() {
         run_name(i64::MAX, TRIES_MAX).len() <= 96,
         "the runner's name bound"
     );
+}
+
+/// Each reason the pool's model provider can't be reached ends the run with its own code,
+/// so each client says what to do: start a local provider, check a remote one's address, or
+/// check this computer's network (DEC-163 addendum 8).
+#[test]
+fn each_unreached_provider_ends_the_run_with_its_own_code() {
+    use crate::research::runner::Unreached;
+    let line = || "the engine's line".to_owned();
+    assert_eq!(
+        unreached_code(&Unreached::Loopback(line())),
+        PROVIDER_UNREACHABLE
+    );
+    assert_eq!(
+        unreached_code(&Unreached::Remote(line())),
+        REMOTE_PROVIDER_UNREACHABLE
+    );
+    assert_eq!(unreached_code(&Unreached::Offline(line())), NO_NETWORK);
+}
+
+/// An engine folder whose settings put one keyless loopback endpoint member per port, in
+/// port order, in `pool-a`, assigned to project alpha, with an engine database and alpha's
+/// folder, and the resolver over them. Input: the ports. Output: the folder guard and the
+/// resolver.
+#[cfg(target_os = "macos")]
+fn loopback_pool(
+    ports: &[u16],
+) -> (
+    tempfile::TempDir,
+    crate::research::accounts::SettingsResolver,
+) {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let accounts: Vec<String> = (0..ports.len())
+        .map(|n| format!("\"account-{n}\""))
+        .collect();
+    let members: Vec<String> = (0..ports.len())
+        .map(|n| format!("\"member-{n}\""))
+        .collect();
+    let mut text = format!(
+        "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [{}]\n",
+        accounts.join(", ")
+    );
+    for (n, port) in ports.iter().enumerate() {
+        text.push_str(&format!("\n[[model_access.connections]]\nid = \"member-{n}\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"account-{n}\"\nendpoint = {{ kind = \"http\", url = \"http://127.0.0.1:{port}/v1\" }}\nmodel = {{ id = \"local-model\", author = \"openai-compatible\" }}\nauth = {{ method = \"none\" }}\n"));
+    }
+    text.push_str(&format!("\n[[model_access.pools]]\nid = \"pool-a\"\nmembers = [{}]\nprojects = [\"alpha\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n", members.join(", ")));
+    std::fs::write(root.join("global.toml"), text).unwrap();
+    std::fs::write(root.join("project.toml"), "").unwrap();
+    std::fs::create_dir_all(root.join("projects").join("alpha")).unwrap();
+    let database = root.join("engine.db");
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute_batch("PRAGMA user_version=1")
+        .unwrap();
+    let resolver = crate::research::accounts::SettingsResolver::new(
+        &root.join("global.toml"),
+        &root.join("project.toml"),
+        &root.join("projects"),
+        &database,
+    )
+    .unwrap();
+    (temporary, resolver)
+}
+
+/// Edit with AI passes over a pool member whose loopback provider refuses connects and runs
+/// on the next one, for the app text's chosen pool and a project's own pool alike.
+#[cfg(target_os = "macos")]
+#[test]
+fn edit_with_ai_runs_on_the_next_member_when_the_first_ones_provider_refuses_connects() {
+    use crate::research::runner::{ResearchAccount, ResearchHarness};
+    let (_held, down) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let up = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let up_port = up.local_addr().unwrap().port();
+    let (_folder, resolver) = loopback_pool(&[down, up_port]);
+    let picked = pool("pool-a");
+    let project = ProjectId::new("alpha").unwrap();
+    let harnesses = [ResearchHarness::Codex];
+    let reachable = ResearchAccount::Endpoint {
+        base_url: format!("http://127.0.0.1:{up_port}/v1"),
+        model: "local-model".into(),
+        key: None,
+    };
+    for chosen in [CleanupPool::Chosen(&picked), CleanupPool::Project(&project)] {
+        assert_eq!(
+            super::run::account(&resolver, chosen, &harnesses, 1),
+            Ok(reachable.clone()),
+            "{chosen:?}"
+        );
+    }
+}
+
+/// Edit with AI with every member's loopback provider down keeps today's code, on every try.
+#[cfg(target_os = "macos")]
+#[test]
+fn edit_with_ai_with_every_members_provider_down_keeps_the_unreachable_code() {
+    use crate::research::runner::ResearchHarness;
+    let (_first, first) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let (_second, second) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let (_folder, resolver) = loopback_pool(&[first, second]);
+    let picked = pool("pool-a");
+    let project = ProjectId::new("alpha").unwrap();
+    for chosen in [CleanupPool::Chosen(&picked), CleanupPool::Project(&project)] {
+        for number in [1, 2] {
+            assert_eq!(
+                super::run::account(&resolver, chosen, &[ResearchHarness::Codex], number),
+                Err(PROVIDER_UNREACHABLE),
+                "{chosen:?} try {number}"
+            );
+        }
+    }
 }

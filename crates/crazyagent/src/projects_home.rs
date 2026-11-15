@@ -1,5 +1,7 @@
+pub(crate) mod delete_mark;
 pub mod icloud;
 mod intake;
+pub mod job;
 mod layout;
 mod move_project;
 #[cfg(all(test, unix))]
@@ -9,7 +11,7 @@ mod watch;
 
 pub use intake::{
     AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, Measured, MovePlan, OldSource, Placed,
-    copy_tree, folder_size, move_by_copy, verify_tree,
+    Tally, add_left, copy_tree, folder_size, move_by_copy, sweep_staging, verify_tree,
 };
 pub use layout::{
     CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
@@ -50,6 +52,14 @@ CREATE TABLE IF NOT EXISTS projects_home_project_move (
     origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
     target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),
     mode TEXT NOT NULL CHECK(mode IN ('move', 'copy'))
+);
+CREATE TABLE IF NOT EXISTS projects_home_add (
+    request TEXT PRIMARY KEY CHECK(length(request) BETWEEN 1 AND 128),
+    owner TEXT NOT NULL CHECK(length(owner) BETWEEN 1 AND 256),
+    source TEXT NOT NULL CHECK(length(CAST(source AS BLOB)) BETWEEN 1 AND 1024),
+    destination TEXT NOT NULL CHECK(length(CAST(destination AS BLOB)) BETWEEN 1 AND 1024),
+    mode TEXT NOT NULL CHECK(mode IN ('move', 'copy')),
+    ended TEXT CHECK(ended IS NULL OR length(ended) BETWEEN 1 AND 64)
 );
 CREATE TABLE IF NOT EXISTS projects_delete_pending (
     exchange INTEGER PRIMARY KEY CHECK(exchange > 0)
@@ -468,8 +478,38 @@ pub fn same_volume(folder: &Path, home: &Path) -> Option<bool> {
 /// a project uses, and a Copy of a folder that is itself a linked worktree or
 /// submodule checkout. Each override lifts exactly one soft refusal for this add:
 /// `worktrees` the git worktree links, `linked_checkout` the linked checkout, and
-/// `too_large` raises the copy bounds to [`FORCED_COPY_BOUNDS`].
+/// `too_large` raises the copy bounds to [`FORCED_COPY_BOUNDS`]. A Copy's linked checkout
+/// is checked again and a Move's git worktree links last, after every refusal of
+/// [`check_add`], so a source still only in iCloud is not copied or moved past them.
 pub fn plan_add(
+    home: &Path,
+    engine_root: &Path,
+    source: &str,
+    mode: AddMode,
+    overrides: &[AddOverride],
+    registered: &[Registered],
+) -> Result<AddPlan, EngineError> {
+    let plan = check_add(home, engine_root, source, mode, overrides, registered)?;
+    if copy_linked(plan.source(), mode, overrides) {
+        return Err(refused("home_copy_linked_checkout"));
+    }
+    let asked_past = overrides.contains(&AddOverride::Worktrees);
+    if mode == AddMode::Move && !asked_past && git_links(plan.source()) {
+        return Err(refused("home_move_worktrees"));
+    }
+    assert!(plan.source().is_absolute());
+    assert_eq!(plan.destination().parent(), Some(home));
+    Ok(plan)
+}
+
+/// Checks bringing an existing folder into the projects home without reading inside it, so
+/// it can run before the folder's iCloud files are on this Mac: every refusal of
+/// [`plan_add`] but a Move's git worktree links, which reads the folder's git data, and a
+/// Copy's linked checkout of a source that is itself an iCloud placeholder, whose entries
+/// only its download can read. It reads only the source's own path and metadata, its `.git`
+/// entry's type otherwise, and the home. Inputs: as [`plan_add`]. Output: the plan, or the
+/// refusal.
+pub fn check_add(
     home: &Path,
     engine_root: &Path,
     source: &str,
@@ -499,27 +539,42 @@ pub fn plan_add(
         return Err(refused("home_source_hidden"));
     }
     folder_name(name).map_err(|_| refused("home_source_name"))?;
-    if mode == AddMode::Move {
-        if !overrides.contains(&AddOverride::Worktrees) && git_links(&real) {
-            return Err(refused("home_move_worktrees"));
-        }
-        if registered.iter().any(|project| in_use(&real, project)) {
-            return Err(refused("home_move_project"));
-        }
+    if mode == AddMode::Move && registered.iter().any(|project| in_use(&real, project)) {
+        return Err(refused("home_move_project"));
     }
-    if mode == AddMode::Copy
-        && !overrides.contains(&AddOverride::LinkedCheckout)
-        && linked_checkout(&real)
-    {
+    let top = std::fs::symlink_metadata(&real);
+    let placeholder = top.is_ok_and(|metadata| icloud::dataless(&metadata));
+    if !placeholder && copy_linked(&real, mode, overrides) {
         return Err(refused("home_copy_linked_checkout"));
     }
+    let bounds = add_bounds(overrides);
+    let destination = destination(home, name)?;
+    assert!(real.is_absolute());
+    assert!(!destination.starts_with(&real));
+    Ok(AddPlan::new(real, destination, mode, bounds))
+}
+
+/// True when a Copy of `folder` is refused as a [`linked_checkout`] the owner did not go
+/// past. Inputs: the real folder, the mode and the add's overrides. Output: the answer.
+fn copy_linked(folder: &Path, mode: AddMode, overrides: &[AddOverride]) -> bool {
+    assert!(folder.is_absolute());
+    let asked_past = overrides.contains(&AddOverride::LinkedCheckout);
+    assert!(!asked_past || mode == AddMode::Copy);
+    mode == AddMode::Copy && !asked_past && linked_checkout(folder)
+}
+
+/// The bounds an add's download listing and copy work within: [`FORCED_COPY_BOUNDS`] once
+/// the owner went past `too_large`, else [`COPY_BOUNDS`]. Input: the add's overrides.
+/// Output: the bounds.
+pub fn add_bounds(overrides: &[AddOverride]) -> CopyBounds {
     let bounds = if overrides.contains(&AddOverride::TooLarge) {
         FORCED_COPY_BOUNDS
     } else {
         COPY_BOUNDS
     };
-    let destination = destination(home, name)?;
-    Ok(AddPlan::new(real, destination, mode, bounds))
+    assert!(bounds.entries >= COPY_BOUNDS.entries);
+    assert!(bounds.depth >= COPY_BOUNDS.depth);
+    bounds
 }
 
 /// Checks a name for a folder directly inside the projects home. This one rule
@@ -777,10 +832,10 @@ impl DeletePlan {
     }
 
     /// Names the engine's own files of this deleted project for the record its row removal
-    /// writes: each agent, each research run of its jobs, each roadmap status run and, on
-    /// macOS, the tool caches of its folders (T8), with the identity of the folder that
-    /// holds it. A folder that is no real run, or that is not there, is left out. Input: the
-    /// project's research jobs. Output: the records.
+    /// writes: each agent, each research run of its jobs, each roadmap status run, each
+    /// Overview writing run (RV-DS241-80) and, on macOS, the tool caches of its folders (T8),
+    /// with the identity of the folder that holds it. A folder that is no real run, or that
+    /// is not there, is left out. Input: the project's research jobs. Output: the records.
     pub fn engine_files(&self, research: &[i64]) -> Vec<RecordedFile> {
         let Some(root) = self.database.parent() else {
             return Vec::new();
@@ -799,6 +854,7 @@ impl DeletePlan {
                     .iter()
                     .any(|job| name.starts_with(&format!("job-{job}-")))
                     || crate::roadmap_status::names_run(&self.project, &name)
+                    || crate::project_overview::names_run(&self.project, &name)
                 {
                     names.push(name);
                 }
@@ -889,10 +945,17 @@ impl EngineFile {
 
 /// Reads a recorded name as an engine file, exact shapes only: `agent-<id>`, or
 /// `job-<id>-<attempt>` with an optional `-<launch>`, each number in its one plain spelling,
-/// or `roadmap-status-<project>-<time>`, or `tool-cache-<digest>` with 32 lowercase hex
-/// digits (T8). Input: the name. Output: what it names, or None for anything else.
+/// or `roadmap-status-<project>-<time>` or `overview-<project>-<time>`, a run whose folder
+/// and profile both go, or `tool-cache-<digest>` with 32 lowercase hex digits (T8). Input:
+/// the name. Output: what it names, or None for anything else.
 fn engine_file(name: &str) -> Option<EngineFile> {
-    if let Some(run) = name.strip_prefix(crate::roadmap_status::RUN_NAME_HEAD) {
+    let status_run = [
+        crate::roadmap_status::RUN_NAME_HEAD,
+        crate::project_overview::RUN_NAME_HEAD,
+    ]
+    .into_iter()
+    .find_map(|head| name.strip_prefix(head));
+    if let Some(run) = status_run {
         let (project, time) = run.rsplit_once('-')?;
         let plain = !project.is_empty()
             && project
@@ -1105,8 +1168,10 @@ pub fn found(
 }
 
 /// Creates the projects home table, the table that holds a home move recorded
-/// before its folders move and the table that holds each Delete everything planned
-/// and not yet settled, when the engine database opens.
+/// before its folders move, the table that holds each add from its plan until its record
+/// (or, after an engine stop cut it short, how it ended until the owner dismisses it) and
+/// the table that holds each Delete everything planned and not yet settled, when the
+/// engine database opens; a database from before gains the tables it lacks.
 /// Input: the engine connection. Output: any SQLite failure.
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {
@@ -1220,6 +1285,12 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "delete_research_running" => {
             "Its research is still queued or running. Cancel it or let it finish, then delete the project. Nothing was deleted."
         }
+        "delete_in_progress" => {
+            "This project is already being deleted. Wait for that to finish; nothing else was changed."
+        }
+        "delete_not_recorded" => {
+            "Nothing was deleted. CrazyAgent couldn't record the delete before starting it. Try again; if it keeps failing, restart CrazyAgent."
+        }
         "delete_platform_unqualified" => {
             "Delete everything is only on macOS for now. Remove the project from the dashboard instead."
         }
@@ -1263,9 +1334,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "home_copy_failed" | "home_move_failed" => {
             "The folder could not be added. Nothing was removed."
         }
-        "home_copy_unverified" => "The copy did not match the original, so the original was kept.",
+        "home_copy_unverified" => "The copy didn't match the original, so the original was kept.",
         "home_move_source_left" => {
-            "The folder was added, but some of the original could not be removed."
+            "The folder was added, but part of the original couldn't be removed. What's left there may be newer than the copy, so check it before you delete anything."
         }
         "home_icloud_not_downloaded" => {
             "Some files are still only in iCloud, so the folder was not added. Nothing was removed. Download them and try again."
@@ -1281,7 +1352,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "icloud_outcome_unknown" | "icloud_owner_unavailable" => {
             "CrazyAgent couldn't confirm the iCloud download. Nothing was moved or copied. Try again."
         }
-        "home_add_unverified" => "The folder did not arrive in your projects folder.",
+        "home_add_unverified" => {
+            "The folder didn't arrive in your projects folder. Check it and try again."
+        }
         "home_move_same" => "That is already your projects folder.",
         "home_move_nested" => "Pick a projects folder that is not inside the current one.",
         "home_move_too_many" => {
@@ -1322,7 +1395,7 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
             "A project is still being moved into your projects folder. Try again when it finishes."
         }
         "move_project_old_folder_left" => {
-            "The project moved, but part of its old folder couldn't be deleted. Check the old folder and delete it yourself."
+            "The project moved, but part of its old folder couldn't be deleted. What's left there may be newer than the copy, so check it before you delete anything."
         }
         "move_project_unavailable" => {
             "The engine could not check the project's agents. Nothing was moved."

@@ -7,7 +7,10 @@ use super::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use crate::engine::owner::OwnerResult;
 use crate::onboarding::{MappingTry, OnboardingView, Step};
 use crate::pools::PoolSummary;
-use crate::project_setup::{KeptFile, Platform, ResearchKind, SetupAction, SetupQuery, SetupView};
+use crate::project_setup::{
+    ABOUT_BYTES_MAX, KeptFile, Platform, ResearchKind, SetupAction, SetupQuery, SetupView,
+    TECH_ENTRIES_MAX, TECH_ENTRY_BYTES_MAX,
+};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::intake::{IntakeQuery, IntakeView};
@@ -24,9 +27,19 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 
 const PAGE_WIDTH: usize = 76;
-const ABOUT_CHARS_MAX: usize = 2_000;
-const STACK_CHARS_MAX: usize = 1_000;
-const STACK_ITEMS_MAX: usize = 32;
+/// The mark beside a setup field the mapping could not fill.
+const FILL_IN: &str = "Fill in";
+/// The words for each setup field the mapping can leave empty, as the desktop review says
+/// them (DEC-141).
+const MISSING_WORDS: [(&str, &str); 4] = [
+    ("name", "the project name"),
+    ("about", "what the project is about"),
+    ("tech_stack", "the tech stack"),
+    ("platforms", "the target platforms"),
+];
+/// The most characters the stack field holds: every entry the engine keeps, at its longest,
+/// with the comma and space between entries.
+const STACK_CHARS_MAX: usize = TECH_ENTRIES_MAX * (TECH_ENTRY_BYTES_MAX + 2);
 const PLATFORMS_PER_ROW: usize = 3;
 const LINKED_LABEL: &str = "Use these files";
 const LINKED_NOTE: &str = "CrazyAgent reads them from your repo; edits go to those files.";
@@ -78,6 +91,8 @@ struct Review {
     name: TextField,
     about: TextField,
     stack: TextField,
+    shown_about: String,
+    shown_stack: String,
     platforms: Vec<Platform>,
     platform: usize,
     roadmap: bool,
@@ -91,10 +106,12 @@ impl Review {
     fn new(onboarding: Box<OnboardingView>) -> Self {
         let mut name = TextField::new("Name", NAME_BYTES_MAX);
         name.set(&onboarding.name);
-        let mut about = TextField::new("About", ABOUT_CHARS_MAX);
+        let mut about = TextField::new("About", ABOUT_BYTES_MAX).multiline();
         about.set(&onboarding.draft.about);
         let mut stack = TextField::new("Tech stack", STACK_CHARS_MAX).note("Separate with commas.");
         stack.set(&onboarding.draft.tech_stack.join(", "));
+        let shown_about = about.value().to_owned();
+        let shown_stack = stack.value().to_owned();
         let platforms = onboarding.draft.platforms.clone();
         let roadmap = (!onboarding.finished && onboarding.facts.roadmap.is_empty())
             || onboarding
@@ -106,6 +123,8 @@ impl Review {
             name,
             about,
             stack,
+            shown_about,
+            shown_stack,
             platforms,
             platform: 0,
             roadmap,
@@ -185,7 +204,7 @@ impl Review {
             .split(',')
             .map(str::trim)
             .filter(|item| !item.is_empty())
-            .take(STACK_ITEMS_MAX)
+            .take(TECH_ENTRIES_MAX)
             .map(str::to_owned)
             .collect()
     }
@@ -206,26 +225,25 @@ impl Review {
                 .any(|missing| missing == field)
     }
 
-    fn missing_labels(&self) -> Vec<String> {
-        self.onboarding
-            .missing
-            .iter()
-            .filter(|field| self.still_missing(field))
-            .map(|field| {
-                let mut label = field.replace('_', " ");
-                if let Some(first) = label.get_mut(0..1) {
-                    first.make_ascii_uppercase();
-                }
-                label
-            })
-            .collect()
+    fn still_missing_line(&self) -> Option<String> {
+        missing_line(
+            self.onboarding
+                .missing
+                .iter()
+                .map(String::as_str)
+                .filter(|field| self.still_missing(field)),
+        )
     }
 
     fn action(&self, revision: u64) -> SetupAction {
         let name = self.name.value().trim().to_owned();
         let mut setup = self.onboarding.draft.clone();
-        setup.about = self.about.value().trim().to_owned();
-        setup.tech_stack = self.stack();
+        if self.about.value() != self.shown_about {
+            setup.about = self.about.value().trim().to_owned();
+        }
+        if self.stack.value() != self.shown_stack {
+            setup.tech_stack = self.stack();
+        }
         setup.platforms = self.platforms.clone();
         setup.documents = Vec::new();
         setup
@@ -702,6 +720,14 @@ impl OnboardingPage {
         let mut lines =
             Self::step_line("Build the code graph", &review.onboarding.graph, limit, ctx);
         lines.push(Line::default());
+        if review.onboarding.carried {
+            lines.extend(
+                wrap(crate::instruction_files::CARRIED_NOTICE, limit)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Warning, theme)),
+            );
+            lines.push(Line::default());
+        }
         if !review.onboarding.imported.is_empty() {
             lines.extend(
                 wrap(
@@ -753,22 +779,18 @@ impl OnboardingPage {
             );
             lines.push(Line::default());
         }
-        let missing = review.missing_labels();
+        let missing = review.still_missing_line();
         if review.onboarding.finished {
             lines.push(status("Saved", theme, ctx.glyphs));
             lines.push(Line::raw(
                 "This project is set up. Change anything, then save.",
             ));
-        } else if missing.is_empty() {
+        } else if let Some(missing) = missing {
+            lines.push(status("Needs you", theme, ctx.glyphs));
+            lines.extend(wrap(&missing, limit).into_iter().map(Line::raw));
+        } else {
             lines.push(status("Ready", theme, ctx.glyphs));
             lines.push(Line::raw("Check the setup and confirm it."));
-        } else {
-            lines.push(status("Needs you", theme, ctx.glyphs));
-            lines.extend(
-                wrap(&format!("Missing: {}.", missing.join(", ")), limit)
-                    .into_iter()
-                    .map(Line::raw),
-            );
         }
         lines.push(Line::default());
         let mut cursor = None;
@@ -788,7 +810,7 @@ impl OnboardingPage {
                 *first = row(
                     limit,
                     styled(label, role, theme),
-                    status("Missing", theme, ctx.glyphs),
+                    status(FILL_IN, theme, ctx.glyphs),
                     ctx.glyphs,
                 );
             }
@@ -812,7 +834,7 @@ impl OnboardingPage {
             row(
                 limit,
                 platforms_label,
-                status("Missing", theme, ctx.glyphs),
+                status(FILL_IN, theme, ctx.glyphs),
                 ctx.glyphs,
             )
         } else {
@@ -962,6 +984,12 @@ impl Screen for OnboardingPage {
                 Focus::Roadmap | Focus::Linked => vec![
                     hint("Space", "Turn on or off"),
                     hint("Tab", "Next"),
+                    hint("Esc", "Back"),
+                ],
+                Focus::About => vec![
+                    hint("Ctrl-J", "New line"),
+                    hint("Tab", "Next"),
+                    hint("Shift-Tab", "Previous"),
                     hint("Esc", "Back"),
                 ],
                 Focus::Confirm => {
@@ -1253,4 +1281,34 @@ fn try_line(progress: &MappingTry, now_ms: i64) -> String {
         ),
         None => head,
     }
+}
+
+/// The one line for the setup fields the mapping could not fill, in the desktop review's
+/// words (DEC-160, DEC-141): what CrazyAgent could not work out from the project's files,
+/// each once and in order, and what to do. A field the engine names that this screen does
+/// not know is engine text and goes through `sanitize`. Input: the field keys. Output: the
+/// line, or `None` when none is left.
+fn missing_line<'a>(fields: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let mut words: Vec<String> = Vec::new();
+    for field in fields {
+        let word = MISSING_WORDS
+            .iter()
+            .find(|(key, _)| *key == field)
+            .map_or_else(
+                || sanitize(&field.replace('_', " ")),
+                |(_, word)| (*word).to_owned(),
+            );
+        if !words.contains(&word) {
+            words.push(word);
+        }
+    }
+    let last = words.pop()?;
+    let (list, pronoun) = if words.is_empty() {
+        (last, "it")
+    } else {
+        (format!("{} and {last}", words.join(", ")), "them")
+    };
+    Some(format!(
+        "CrazyAgent couldn't work out {list} from the project's files. Fill {pronoun} in below."
+    ))
 }

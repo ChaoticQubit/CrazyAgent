@@ -524,3 +524,152 @@ async fn the_import_move_is_listed_committed_and_refused_again_through_the_owner
     );
     fixture.stop().await;
 }
+
+/// RV-DS241-66: a project move that is recorded but whose old folder could not be cleared
+/// reaches the client as its own code, which the TUI and the desktop show as moved with the
+/// old folder left, never as an outcome to reconcile; any other failed change stays unknown.
+#[test]
+fn a_move_whose_old_folder_was_left_reaches_the_client_as_its_code() {
+    let id = RequestId::new("move-1").unwrap();
+    let reply = |code: &str| {
+        let frame = owner_reply_frame(Err(failure(code)), id.clone(), true).unwrap();
+        serde_json::from_slice::<OwnerReply>(&frame[4..])
+            .unwrap()
+            .response
+    };
+    assert_eq!(
+        reply("move_project_old_folder_left"),
+        OwnerResponse::Rejected {
+            code: "move_project_old_folder_left".into()
+        }
+    );
+    assert_eq!(
+        reply("home_move_failed"),
+        OwnerResponse::OutcomeUnknown {
+            operation_id: id.clone()
+        }
+    );
+}
+
+/// RV-CODE combo-five r1 move F1: a grant found stale or revoked once a Delete everything's
+/// folders reached the Trash, or once a project move was recorded, never reaches the client
+/// as Rejected, which says nothing changed; it is an outcome to reconcile. A grant found
+/// stale before any change stays Rejected with its code, and a same grant passes.
+#[test]
+fn a_grant_found_stale_after_the_disk_changed_is_an_outcome_to_reconcile() {
+    let id = RequestId::new("delete-1").unwrap();
+    let admission = |owner_epoch| crate::engine::owner::Admission {
+        db_instance: "db".into(),
+        engine_epoch: "engine".into(),
+        owner_id: "owner".into(),
+        owner_epoch,
+    };
+    let answer = |checked: Result<crate::engine::owner::Admission, EngineError>, changed| {
+        let refused = projects_home::regranted(checked, &admission(1), changed).unwrap_err();
+        let frame = owner_reply_frame(Err(refused), id.clone(), true).unwrap();
+        serde_json::from_slice::<OwnerReply>(&frame[4..])
+            .unwrap()
+            .response
+    };
+    let unknown = OwnerResponse::OutcomeUnknown {
+        operation_id: id.clone(),
+    };
+    assert_eq!(answer(Ok(admission(2)), true), unknown);
+    assert_eq!(
+        answer(Err(failure("owner_grant_stale_or_revoked")), true),
+        unknown
+    );
+    assert_eq!(
+        answer(Ok(admission(2)), false),
+        OwnerResponse::Rejected {
+            code: "owner_grant_stale_or_revoked".into()
+        }
+    );
+    assert!(projects_home::regranted(Ok(admission(1)), &admission(1), true).is_ok());
+}
+
+/// RV-DS241-141: a Delete everything counts as having reached the Trash, so a project whose
+/// records stay shows "A delete was cut short" instead of Failed, when every folder moved,
+/// when some moved before a later one failed (`delete_trash_partial`), and when its admitted
+/// disk work ended with no answer (its blocking task panicked or was cancelled). A refusal
+/// with nothing moved, or no disk work run, counts as not reached.
+#[test]
+fn a_delete_that_moved_any_folder_or_lost_its_disk_work_counts_as_reaching_the_trash() {
+    use projects_home::reached_trash;
+    assert!(reached_trash(Some(Ok(())), true), "every folder moved");
+    assert!(
+        reached_trash(Some(Err("delete_trash_partial")), true),
+        "one folder moved, a later one failed"
+    );
+    assert!(
+        reached_trash(None, true),
+        "the admitted disk work panicked or was cancelled"
+    );
+    assert!(
+        !reached_trash(Some(Err("home_trash_failed")), true),
+        "the first move failed"
+    );
+    assert!(
+        !reached_trash(Some(Err("delete_agents_running")), true),
+        "refused before any move"
+    );
+    assert!(
+        !reached_trash(Some(Err("delete_in_progress")), false),
+        "refused at the plan"
+    );
+    assert!(!reached_trash(None, false), "no disk work ran");
+}
+
+/// RV-CODE combo-five r1 move F1 r1 (rv-code3 F1): the first grant check of an answer counts
+/// the disk as changed once a Delete reached the Trash or a move's disk work ran, for the
+/// projects home and for one project, so a grant found stale there is an outcome to
+/// reconcile, not Rejected, while the same request records the move. One case per path.
+#[test]
+fn the_first_grant_check_after_any_disk_work_counts_the_disk_as_changed() {
+    use projects_home::disk_changed;
+    let (trashed, moved, moved_project, ran) = (true, true, true, true);
+    assert!(
+        disk_changed(trashed, false, false, ran),
+        "Delete in the Trash"
+    );
+    assert!(
+        !disk_changed(!trashed, false, false, ran),
+        "Delete left out of the Trash"
+    );
+    assert!(
+        disk_changed(false, moved, false, ran),
+        "projects home moved"
+    );
+    assert!(
+        !disk_changed(false, moved, false, !ran),
+        "projects home move not run"
+    );
+    assert!(
+        disk_changed(false, false, moved_project, ran),
+        "project moved"
+    );
+    assert!(
+        !disk_changed(false, false, moved_project, !ran),
+        "project move not run"
+    );
+    assert!(
+        !disk_changed(false, false, false, ran),
+        "no Delete and no move"
+    );
+    let id = RequestId::new("move-1").unwrap();
+    let admission = |owner_epoch| crate::engine::owner::Admission {
+        db_instance: "db".into(),
+        engine_epoch: "engine".into(),
+        owner_id: "owner".into(),
+        owner_epoch,
+    };
+    let changed = disk_changed(false, false, moved_project, ran);
+    let refused = projects_home::regranted(Ok(admission(2)), &admission(1), changed).unwrap_err();
+    let frame = owner_reply_frame(Err(refused), id.clone(), true).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<OwnerReply>(&frame[4..])
+            .unwrap()
+            .response,
+        OwnerResponse::OutcomeUnknown { operation_id: id }
+    );
+}

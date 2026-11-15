@@ -5,6 +5,7 @@ use crate::master_step_limit::MasterStepSettings;
 use crate::master_time_limit::MasterTimeSettings;
 use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
+use crate::provider_retry::{ProviderRetry, ProviderRetryView};
 use crate::quit_settings::QuitSettings;
 use crate::sandbox_settings::SandboxSettings;
 
@@ -108,6 +109,32 @@ impl OwnerController {
         }
         self.read(OwnerRead::QuitSettings).await?;
         self.begin_mutation(OwnerMutation::SetQuitSettings { settings }, generation)?;
+        self.send_pending().await
+    }
+
+    /// Reads what harnesses do when a model provider can't be reached: the chosen option and
+    /// the line for every option and harness. Input: none. Output: the view, with Retry
+    /// briefly chosen before the first save.
+    pub async fn provider_retry(&mut self) -> Result<ProviderRetryView, EngineError> {
+        match self.read(OwnerRead::ProviderRetry).await?.data {
+            OwnerData::ProviderRetry { settings } => Ok(settings),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
+    /// Saves what harnesses do when a model provider can't be reached, as one retained owner
+    /// mutation. Input: the option and a nonzero client generation. Output: the engine
+    /// response.
+    pub async fn set_provider_retry(
+        &mut self,
+        choice: ProviderRetry,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        if self.pending.is_some() || self.pending_account_profile.is_some() {
+            return Err(EngineError("controller_pending_intent".into()));
+        }
+        self.read(OwnerRead::ProviderRetry).await?;
+        self.begin_mutation(OwnerMutation::SetProviderRetry { choice }, generation)?;
         self.send_pending().await
     }
 

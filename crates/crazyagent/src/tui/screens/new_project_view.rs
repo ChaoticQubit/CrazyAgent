@@ -6,6 +6,7 @@ use super::new_project_input::{TextInput, cells, char_cells};
 use super::project_access::FULL_ACCESS_WARNING;
 use super::project_markdown::sanitize;
 use crate::project_setup::ResearchKind;
+use crate::sandbox::LINUX_NESTED_GIT_LINE;
 use crate::sandbox::policy::AgentAccess;
 #[cfg(all(test, unix))]
 use ratatui::style::Modifier;
@@ -1270,6 +1271,10 @@ fn picker_box(
                 format!("{} Can't start", look.glyph("\u{2298}")),
                 look.warning,
             ),
+            HarnessState::CantRun => (
+                format!("{} Can't run", look.glyph("\u{2298}")),
+                look.warning,
+            ),
             HarnessState::MasterOnly => (
                 format!("{} Master only", look.glyph("\u{25e7}")),
                 look.warning,
@@ -1413,6 +1418,8 @@ fn review_summary(draw: &mut Draw) {
         ));
         if wizard.access == AgentAccess::Full {
             draw.note(FULL_ACCESS_WARNING, look.warning);
+        } else if wizard.linux {
+            draw.note(LINUX_NESTED_GIT_LINE, look.warning);
         }
     }
     draw.add(Row::default());

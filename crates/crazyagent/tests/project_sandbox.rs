@@ -1294,9 +1294,7 @@ fn listen(
 fn a_tools_on_agent_serves_on_loopback_but_never_listens_on_an_owner_tool_port() {
     let case = case();
     let open = sandbox(&case, SandboxNetwork::Open);
-    let free = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let port = free.local_addr().unwrap().port();
-    drop(free);
+    let port = crazyagent::spawn_gate::free_low_tcp_port().unwrap();
     assert_eq!(
         listen(&open, &case, "dev-server.sb", "127.0.0.1", port, true),
         ("hello".to_owned(), String::new()),
@@ -1415,7 +1413,7 @@ fn a_configured_local_model_port_stays_reachable_but_no_tools_on_agent_listens_o
     let open = sandbox(&case, SandboxNetwork::Open)
         .keep_ports(&ports)
         .unwrap();
-    let block: String = (41_300..=41_427)
+    let block: String = (41_300..=41_555)
         .map(|proxy| format!(" (local ip \"*:{proxy}\")"))
         .collect();
     for rule in ["network-bind", "network-inbound"] {
@@ -1612,6 +1610,7 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
         [
             case.project.join("context"),
             case.project.join(".crazyagent").join("context"),
+            case.project.join(".crazyagent").join("instructions.md"),
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),
@@ -1619,12 +1618,25 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
         ]
     );
     let text = sandbox.profile();
-    for path in sandbox.protected_paths() {
-        assert!(
-            text.contains(&format!("\"{}\")", path.display())),
-            "{}",
-            path.display()
-        );
+    let pattern = case.project.display().to_string().replace('.', "\\.");
+    let dot_git = "\\.[gG][iI][tT]";
+    let state = "\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]";
+    let context = "[cC][oO][nN][tT][eE][xX][tT](/.*)?";
+    let any_k = "(k|K|\u{212a})";
+    let any_s = "(s|S|\u{17f})";
+    for path in [
+        context.to_owned(),
+        format!("{state}/{context}"),
+        format!("{state}/[iI][nN]{any_s}[tT][rR][uU][cC][tT][iI][oO][nN]{any_s}\\.[mM][dD]"),
+        format!("{dot_git}/[hH][oO][oO]{any_k}{any_s}(/.*)?"),
+        format!("{dot_git}/[cC][oO][nN][fF][iI][gG]"),
+        format!("{dot_git}/[cC][oO][nN][fF][iI][gG]\\.[lL][oO][cC]{any_k}"),
+        format!(
+            "{dot_git}(/[wW][oO][rR]{any_k}[tT][rR][eE][eE]{any_s}/[^/]+)?/[mM][oO][dD][uU][lL][eE]{any_s}(/.*)?"
+        ),
+    ] {
+        let rule = format!("(regex #\"^{pattern}/{path}$\")");
+        assert!(text.contains(&rule), "{rule}\n{text}");
     }
     let installed = InstalledSandbox::install(sandbox, &case.profiles.join("seam.sb")).unwrap();
     let seam: &dyn Sandbox = &installed;

@@ -1,5 +1,5 @@
 use super::*;
-use crate::research::accounts::SettingsResolver;
+use crate::research::accounts::{Reach, SettingsResolver};
 use crate::research::service::ResearchService;
 use crate::team::runtime::live_failover_tests::OwnerAccount;
 use crate::terminal::FOLDER;
@@ -70,7 +70,7 @@ impl EngineResearch {
         let resolver = SettingsResolver::new(global, settings, &projects, &database).unwrap();
         let service = ResearchService::start(
             Arc::new(runner),
-            move |id: &str, harness: &str| resolver.resolve(id, harness),
+            move |id: &str, harness: &str, reach: Reach| resolver.resolve_with(id, harness, reach),
             TICK,
         );
         Self {

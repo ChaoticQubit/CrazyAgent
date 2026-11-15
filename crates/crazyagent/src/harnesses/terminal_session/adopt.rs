@@ -17,8 +17,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const RECORD_BYTES_MAX: usize = 4096;
+
+/// The most server keepers a native lead's record names: its own server's and its
+/// teammates' (DEC-158).
+pub const KEEPERS_MAX: usize = 2;
+
+/// The longest process start a keeper pin keeps, as `ps` shows it (DEC-158).
+pub const KEEPER_STARTED_MAX: usize = 64;
 const SETTLE_WAIT: Duration = Duration::from_secs(10);
 const REPLAY_READS_MAX: u64 = 4096;
+/// The longest an adoption reads a pane's record before the session exists: a live
+/// master's always, any other pane's when the launch's run time leaves longer (RV-DS241-72,
+/// RV-DS241-143).
+const REPLAY_WAIT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(100);
 const ESCAPE: &[u8] = b"\x1b";
 
@@ -37,9 +48,12 @@ pub enum RecordSource {
 /// project access level the agent started at, where its launch wrote the project context
 /// files that hold MCP secrets, the toolchains its sandbox granted, the loopback port of the
 /// model proxy its profile and variables name (S4b), the project network it started
-/// under (CS-2) and the owner's narrow grants its profile holds (F08). A record from an
-/// engine that did not keep the level, the files, the toolchains, the port, the network or
-/// the grants has none; no grants means none were held.
+/// under (CS-2) and the owner's narrow grants its profile holds (F08). For DEC-158 it also
+/// keeps whether the pane's keeper was given the engine's freeze record, when the pane was
+/// last frozen, how long it was frozen before, and for a native lead the keepers of its
+/// servers. A record from an engine that did not keep the level, the files, the
+/// toolchains, the port, the network, the grants or the freeze facts has none; no grants
+/// means none were held.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaneRecord {
@@ -65,6 +79,25 @@ pub struct PaneRecord {
     pub lineage: Option<LineageToken>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grants: Option<Vec<crate::sandbox::policy::AccessGrant>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeze: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_for_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepers: Option<Vec<KeeperPin>>,
+}
+
+/// One server keeper of a native lead that a quitting engine froze (DEC-158): its process
+/// id, its start as `ps` shows it, so a later engine signals that keeper and never a
+/// process that took its id, and whether it keeps the teammates' server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeeperPin {
+    pub pid: u32,
+    pub started: String,
+    pub mates: bool,
 }
 
 impl PaneRecord {
@@ -102,6 +135,10 @@ impl PaneRecord {
             network: None,
             lineage: None,
             grants: None,
+            freeze: None,
+            frozen_ms: None,
+            frozen_for_ms: None,
+            keepers: None,
         })
     }
 
@@ -149,6 +186,18 @@ impl PaneRecord {
                     .enumerate()
                     .all(|(at, toolchain)| !toolchains[..at].contains(toolchain))
         });
+        let keepers = record.keepers.as_ref().is_none_or(|keepers| {
+            keepers.len() <= KEEPERS_MAX
+                && keepers.iter().all(|keeper| {
+                    keeper.pid > 1
+                        && !keeper.started.is_empty()
+                        && keeper.started.len() <= KEEPER_STARTED_MAX
+                        && keeper
+                            .started
+                            .bytes()
+                            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+                })
+        });
         (path.is_absolute()
             && record.cwd.is_absolute()
             && record.pid > 1
@@ -157,6 +206,7 @@ impl PaneRecord {
             && context
             && toolchains
             && grants
+            && keepers
             && record.proxy != Some(0))
         .then_some(record)
     }
@@ -205,13 +255,28 @@ impl PaneRecord {
     }
 }
 
+/// What an adoption's read of a pane's record learned of the turn at the record's end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Replayed {
+    /// A turn is open there.
+    Open,
+    /// No turn is open there, or no fact says.
+    Idle,
+    /// The read was cut before the end and the rest passed over unread (see
+    /// `TranscriptReader::skip_to_end`), so whether a turn is open is unknown.
+    Cut,
+}
+
 /// Reads an adopted pane's record on to its end to learn whether a turn is open there.
 /// No byte count ends it (owner 11-11): it reads until a read finds nothing new, at most
-/// `REPLAY_READS_MAX` reads more than the record held when it was opened, and a harness
-/// that writes faster than that leaves the rest to the session's own polls. Takes the
-/// reader. Returns whether a turn is open, none when no fact says, or the reader's problem.
-fn replay(reader: &mut TranscriptReader) -> Result<Option<bool>, LaunchError> {
-    let mut open = None;
+/// `REPLAY_READS_MAX` reads more than the record held when it was opened, and never past
+/// `until`, so a record an agent grows without end cannot keep its pane from Stop and its
+/// run time (RV-DS241-72). A harness that writes faster, or a record longer than `until`
+/// allows, cuts the read: the rest of the record as it stands is passed over unread, so the
+/// session's polls never take an earlier turn for a new one (RV-DS241-143). Takes the reader
+/// and when to stop. Returns what the read learned, or the reader's problem.
+fn replay(reader: &mut TranscriptReader, until: Instant) -> Result<Replayed, LaunchError> {
+    let mut open = false;
     let mut reads_max: Option<u64> = None;
     let mut reads: u64 = 0;
     loop {
@@ -219,13 +284,13 @@ fn replay(reader: &mut TranscriptReader) -> Result<Option<bool>, LaunchError> {
         let facts = reader.read()?;
         reads += 1;
         if facts.is_empty() && reader.bytes() == before {
-            return Ok(open);
+            return Ok(if open { Replayed::Open } else { Replayed::Idle });
         }
         for fact in facts {
             match fact {
-                TranscriptEvent::TurnStarted => open = Some(true),
+                TranscriptEvent::TurnStarted => open = true,
                 TranscriptEvent::TurnFinished { .. } | TranscriptEvent::Interrupted => {
-                    open = Some(false);
+                    open = false;
                 }
                 _ => {}
             }
@@ -234,11 +299,26 @@ fn replay(reader: &mut TranscriptReader) -> Result<Option<bool>, LaunchError> {
             REPLAY_READS_MAX + reader.unread().unwrap_or(0) / READ_BYTES_MAX as u64
         });
         assert!(max >= REPLAY_READS_MAX);
-        if reads >= max {
+        if reads >= max || Instant::now() >= until {
             eprintln!("launch_adopt_replay_cut reads={reads}");
-            return Ok(open);
+            reader.skip_to_end()?;
+            return Ok(Replayed::Cut);
         }
     }
+}
+
+/// Whether a pane still runs the process its record names: it is alive and the host names
+/// the record's pid as its first process, as a thaw checks, so a number the system gave
+/// again is never taken for the pane's (RV-DS241-75). A failed look at the pid counts as
+/// not. Inputs: the host, the pane and the record. Output: the answer, or the host's
+/// failure to list its panes.
+fn still_recorded(
+    host: &dyn Host,
+    agent: &AgentId,
+    record: &PaneRecord,
+) -> Result<bool, LaunchError> {
+    Ok(host.alive().map_err(host_failure)?.contains(agent)
+        && host.pane_pid(agent).ok().flatten() == Some(record.pid))
 }
 
 impl TerminalSession {
@@ -278,7 +358,13 @@ impl TerminalSession {
     /// pane that does not count, a turn that does not end ends the pane, with
     /// `launch_adopt_unsettled` once its processes are confirmed gone and
     /// `launch_adopt_cleanup_uncertain` when they are not. The launch's run time and event
-    /// budget go on counting from its start. A Codex pane still on its folder access screen
+    /// budget go on counting from its start, and the record is read only while that run time
+    /// lasts, at most `REPLAY_WAIT`. A live master is not bound by the launch's run time (the
+    /// runtime's Master run time bounds it, F01): its pane gets no deadline and its record is
+    /// read for `REPLAY_WAIT`. A read cut short passes over the rest of the record unread;
+    /// nothing is typed, the pane is taken over idle and the unknown turn is dropped and told
+    /// by `took_none` (RV-DS241-143). A pane whose first process is not the record's, before
+    /// or after that read, is `launch_closed` and is left as it is. A Codex pane still on its folder access screen
     /// is not ready: it goes on with its launch's one Enter before any prompt is typed. A
     /// failed look at the screen counts as not on it, so it cannot end the pane. The
     /// key and context files are removed when the session stops, or at once when the pane
@@ -295,16 +381,23 @@ impl TerminalSession {
         if let Some(code) = super::agent_pane_unavailable(std::env::consts::OS) {
             return Err(failure(code));
         }
-        if !host.alive().map_err(host_failure)?.contains(&agent) {
+        if !still_recorded(host.as_ref(), &agent, record)? {
             return Err(failure("launch_closed"));
         }
+        let budget = if live {
+            REPLAY_WAIT
+        } else {
+            REPLAY_WAIT.min(record.run_time_left(limits.run_time))
+        };
+        let until = Instant::now() + budget;
         let mut reader = match &record.resumed {
             Some((file, from)) => {
                 TranscriptReader::resumed(record.transcript(), &record.cwd, file, Some(*from))?
             }
             None => TranscriptReader::adopted(record.transcript(), &record.cwd, record.since()),
         };
-        let open = replay(&mut reader)? == Some(true);
+        let mut replayed = replay(&mut reader, until)?;
+        let open = replayed == Replayed::Open;
         let stale = open
             && reader
                 .silent()
@@ -333,12 +426,16 @@ impl TerminalSession {
                 ));
             }
             if settled {
-                replay(&mut reader)?;
+                replayed = replay(&mut reader, until)?;
             }
         }
-        let took_none = open && !settled;
-        if took_none {
+        let dropped = open && !settled;
+        if dropped {
             reader.drop_turn();
+        }
+        let took_none = dropped || replayed == Replayed::Cut;
+        if !still_recorded(host.as_ref(), &agent, record)? {
+            return Err(failure("launch_closed"));
         }
         let unkept = host.unkept(&agent);
         let unconfined = !matches!(
@@ -356,7 +453,7 @@ impl TerminalSession {
             reader,
             queue: VecDeque::new(),
             limits,
-            deadline: Some(Instant::now() + record.run_time_left(limits.run_time)),
+            deadline: (!live).then(|| Instant::now() + record.run_time_left(limits.run_time)),
             checked: Instant::now(),
             ready: !on_menu,
             first: None,

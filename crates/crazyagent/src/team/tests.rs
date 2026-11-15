@@ -3204,6 +3204,256 @@ fn delivered_task_history_makes_room_while_undelivered_results_and_live_work_sta
     );
 }
 
+/// DEC-170 addendum 4 (RV-DS241-14): a finished result waiting for a recipient that cannot
+/// take it now, a master session that is not the live one or a lead that is not running,
+/// makes room only once no delivered or owner history is left, oldest first; results the
+/// live master or a running lead can take stay, and a window full of those refuses.
+#[test]
+fn waiting_results_make_room_at_the_task_cap_after_delivered_history() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-tasks",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 2,
+            tools: false,
+        }],
+    );
+    let pool = access("team-tasks", &["local-a"]);
+    connection
+        .execute_batch(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES
+               ('team-tasks','sub','codex',1,'stopped',1,1),
+               ('team-tasks','sub','codex',1,'working',1,1);",
+        )
+        .unwrap();
+    let insert = |tx: &Transaction<'_>,
+                  session: Option<&str>,
+                  parent: Option<i64>,
+                  delivered: i64| {
+        tx.execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,session,parent,created_ms) VALUES ('team-tasks','master','codex',0,'step','done',?1,?2,?3,0)",
+            params![delivered, session, parent],
+        )
+        .unwrap();
+        tx.last_insert_rowid()
+    };
+    let tx = connection.transaction().unwrap();
+    let parked = insert(&tx, Some("parked-session"), None, 0);
+    let stopped_lead = insert(&tx, None, Some(1), 0);
+    let running_lead = insert(&tx, None, Some(2), 0);
+    let live_master = insert(&tx, None, None, 0);
+    let delivered = insert(&tx, None, None, 1);
+    for _ in 5..TASKS_PER_PROJECT_MAX {
+        insert(&tx, None, None, 1);
+    }
+    let first = admit(
+        &tx,
+        &pool,
+        &setup,
+        None,
+        "first",
+        TaskSource::Owner,
+        None,
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    let rows = project_rows(&tx, "team_tasks", "team-tasks");
+    assert_eq!(rows.len() as i64, TASKS_PER_PROJECT_MAX);
+    assert_eq!(
+        rows[..4],
+        [parked, stopped_lead, running_lead, live_master],
+        "waiting results outlive newer delivered history"
+    );
+    assert!(
+        !rows.contains(&delivered),
+        "the oldest delivered row made room"
+    );
+    assert_eq!(rows.last(), Some(&first));
+
+    tx.execute(
+        "DELETE FROM team_tasks WHERE project='team-tasks' AND delivered=1",
+        [],
+    )
+    .unwrap();
+    while (project_rows(&tx, "team_tasks", "team-tasks").len() as i64) < TASKS_PER_PROJECT_MAX {
+        insert(&tx, Some("parked-session"), None, 0);
+    }
+    let second = admit(
+        &tx,
+        &pool,
+        &setup,
+        None,
+        "second",
+        TaskSource::Owner,
+        None,
+        2,
+    )
+    .unwrap()
+    .unwrap();
+    let rows = project_rows(&tx, "team_tasks", "team-tasks");
+    assert_eq!(rows.len() as i64, TASKS_PER_PROJECT_MAX);
+    assert!(
+        !rows.contains(&parked),
+        "the oldest waiting result made room"
+    );
+    assert!(rows.contains(&stopped_lead));
+    let third = admit(
+        &tx,
+        &pool,
+        &setup,
+        None,
+        "third",
+        TaskSource::Owner,
+        None,
+        3,
+    )
+    .unwrap()
+    .unwrap();
+    let rows = project_rows(&tx, "team_tasks", "team-tasks");
+    assert_eq!(rows.len() as i64, TASKS_PER_PROJECT_MAX);
+    assert!(
+        !rows.contains(&stopped_lead),
+        "a stopped lead's result waits like a parked session's"
+    );
+    assert_eq!(rows[..2], [running_lead, live_master]);
+    assert!(rows.ends_with(&[second, third]));
+
+    tx.execute(
+        "UPDATE team_tasks SET session=NULL, parent=NULL WHERE project='team-tasks' AND status='done' AND id>?1",
+        [live_master],
+    )
+    .unwrap();
+    assert_eq!(
+        admit(
+            &tx,
+            &pool,
+            &setup,
+            None,
+            "refused",
+            TaskSource::Owner,
+            None,
+            4
+        )
+        .unwrap(),
+        Err("team_task_limit")
+    );
+    assert_eq!(
+        project_rows(&tx, "team_tasks", "team-tasks"),
+        rows,
+        "results the live master or a running lead can take are never pruned"
+    );
+}
+
+/// DEC-170 addendum 4 with a live master session (RV-DS241-14): results bound to the live
+/// session stay at the task cap and a window full of them refuses, while a result bound to
+/// a parked session makes room for the new task.
+#[test]
+fn live_session_results_stay_at_the_task_cap_and_a_parked_sessions_make_room() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-tasks",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 2,
+            tools: false,
+        }],
+    );
+    let pool = access("team-tasks", &["local-a"]);
+    connection
+        .execute_batch(
+            "CREATE TABLE master_sessions(id TEXT PRIMARY KEY, project TEXT NOT NULL, phase TEXT NOT NULL);
+             INSERT INTO master_sessions VALUES
+               ('live-session','team-tasks','configured'),
+               ('parked-session','team-tasks','parked');",
+        )
+        .unwrap();
+    let tx = connection.transaction().unwrap();
+    let insert = |session: &str| {
+        tx.execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,session,created_ms) VALUES ('team-tasks','master','codex',0,'step','done',0,?1,0)",
+            [session],
+        )
+        .unwrap();
+        tx.last_insert_rowid()
+    };
+    let parked = insert("parked-session");
+    for _ in 1..TASKS_PER_PROJECT_MAX {
+        insert("live-session");
+    }
+    let live = project_rows(&tx, "team_tasks", "team-tasks");
+    let first = admit(
+        &tx,
+        &pool,
+        &setup,
+        None,
+        "first",
+        TaskSource::Owner,
+        None,
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    let rows = project_rows(&tx, "team_tasks", "team-tasks");
+    assert_eq!(rows.len() as i64, TASKS_PER_PROJECT_MAX);
+    assert!(
+        !rows.contains(&parked),
+        "the parked session's result made room"
+    );
+    assert_eq!(
+        rows[..rows.len() - 1],
+        live[1..],
+        "every live session result stays"
+    );
+    assert_eq!(rows.last(), Some(&first));
+    assert_eq!(
+        admit(
+            &tx,
+            &pool,
+            &setup,
+            None,
+            "refused",
+            TaskSource::Owner,
+            None,
+            2
+        )
+        .unwrap(),
+        Err("team_task_limit")
+    );
+    assert_eq!(project_rows(&tx, "team_tasks", "team-tasks"), rows);
+}
+
+/// The owner's Update at the task cap gets the plain limit refusal and changes nothing,
+/// where it used to trip the retention assert (RV-DS241-14).
+#[test]
+fn a_resolve_at_the_task_cap_is_refused_and_changes_nothing() {
+    let (_directory, mut connection) = database();
+    connection
+        .execute_batch(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES
+               ('team-full','sub','codex',1,'working',1,1);
+             INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES
+               (1,'team-full','/r','/r/a','/r/.git/worktrees/a');",
+        )
+        .unwrap();
+    let project = ProjectId::new("team-full").unwrap();
+    let tx = connection.transaction().unwrap();
+    for index in 0..TASKS_PER_PROJECT_MAX {
+        tx.execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,created_ms) VALUES ('team-full','master','codex',0,'step','done',0,?1)",
+            [index],
+        )
+        .unwrap();
+    }
+    let rows = project_rows(&tx, "team_tasks", "team-full");
+    assert_eq!(
+        admit_resolve(&tx, &project, 1, "Resolve the merge.", 5).unwrap(),
+        Err("team_task_limit")
+    );
+    assert_eq!(project_rows(&tx, "team_tasks", "team-full"), rows);
+}
+
 #[test]
 fn a_conversation_master_s_delegate_calls_reach_the_team_queue_and_refusals_leave_a_note() {
     let (directory, mut connection) = database();
@@ -3426,6 +3676,72 @@ fn a_resolve_reaches_the_team_master_as_an_engine_message_and_a_sub_agent_as_one
             "queued".to_owned(),
             2
         )]
+    );
+}
+
+/// Ask agent to update while other work waits queued for the sub-agent, pinned to it: the
+/// master's wake task (agent 2), the owner's task a hold put back in the queue (agent 3) and a
+/// task the runtime pinned to wake the agent for its messages (agent 4). Each waiting prompt
+/// stays exactly as it was and the resolve becomes a task of its own behind it, while a
+/// later update still replaces only the queued resolve (RV-DS241-123).
+#[test]
+fn ask_agent_to_update_never_rewrites_other_work_queued_for_the_agent() {
+    let (_directory, mut connection) = database();
+    connection
+        .execute_batch(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES
+               ('team-resolve','master','codex',1,'stopped',1,1),
+               ('team-resolve','sub','codex',1,'stopped',1,1),
+               ('team-resolve','sub','codex',1,'stopped',1,1),
+               ('team-resolve','sub','codex',1,'stopped',1,1);
+             INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES
+               (2,'team-resolve','/r','/r/b','/r/.git/worktrees/b'),
+               (3,'team-resolve','/r','/r/c','/r/.git/worktrees/c'),
+               (4,'team-resolve','/r','/r/d','/r/.git/worktrees/d');
+             INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES
+               ('team-resolve','master','codex',1,'Pick up the review notes.','queued',1),
+               ('team-resolve','owner','codex',1,'Fix the login form.','queued',2),
+               ('team-resolve','master','codex',1,'Read your new messages.','queued',3);
+             INSERT INTO team_task_pins(task,project,agent) VALUES (1,'team-resolve',2);
+             INSERT INTO team_task_pins(task,project,agent,held) VALUES (2,'team-resolve',3,1);
+             INSERT OR REPLACE INTO team_task_pins(task,project,agent) VALUES (3,'team-resolve',4);",
+        )
+        .unwrap();
+    let project = ProjectId::new("team-resolve").unwrap();
+    let tx = connection.transaction().unwrap();
+    for (agent, prompt, now) in [
+        (2, "Resolve the first merge for 2.", 5),
+        (3, "Resolve the merge for 3.", 6),
+        (4, "Resolve the merge for 4.", 7),
+        (2, "Resolve the newest merge for 2.", 8),
+    ] {
+        admit_resolve(&tx, &project, agent, prompt, now)
+            .unwrap()
+            .unwrap();
+    }
+    tx.commit().unwrap();
+    let tasks: Vec<(i64, String, String, i64)> = connection
+        .prepare(
+            "SELECT t.id,t.prompt,t.status,p.agent FROM team_tasks t JOIN team_task_pins p ON p.task=t.id
+             WHERE t.project='team-resolve' ORDER BY t.id",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let queued =
+        |id: i64, prompt: &str, agent: i64| (id, prompt.to_owned(), "queued".to_owned(), agent);
+    assert_eq!(
+        tasks,
+        vec![
+            queued(1, "Pick up the review notes.", 2),
+            queued(2, "Fix the login form.", 3),
+            queued(3, "Read your new messages.", 4),
+            queued(4, "Resolve the newest merge for 2.", 2),
+            queued(5, "Resolve the merge for 3.", 3),
+            queued(6, "Resolve the merge for 4.", 4),
+        ]
     );
 }
 
@@ -4364,7 +4680,7 @@ fn late_columns(connection: &Connection) -> Vec<(String, String)> {
         .prepare(
             "SELECT m.name,p.name FROM sqlite_schema m, pragma_table_info(m.name) p
              WHERE m.type='table' AND m.name IN ('team_agents','team_tasks','team_task_pins')
-             AND p.name IN ('pane','mode','hookless','held') ORDER BY 1,2",
+             AND p.name IN ('pane','mode','hookless','held','resolve') ORDER BY 1,2",
         )
         .unwrap();
     statement
@@ -4410,6 +4726,7 @@ fn an_engine_db_from_before_lead_modes_gains_its_late_columns_once() {
         ("team_agents", "mode"),
         ("team_agents", "pane"),
         ("team_task_pins", "held"),
+        ("team_task_pins", "resolve"),
         ("team_tasks", "mode"),
     ]
     .iter()
@@ -4436,6 +4753,14 @@ fn an_engine_db_from_before_lead_modes_gains_its_late_columns_once() {
         held, 0,
         "a pin from before the mark counts as its task's own"
     );
+    let resolve: i64 = connection
+        .query_row(
+            "SELECT resolve FROM team_task_pins WHERE task=7",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(resolve, 0, "a pin from before the mark is no resolve");
 }
 
 #[test]
@@ -7702,4 +8027,19 @@ fn an_owner_delegate_without_a_model_field_still_parses() {
     }))
     .unwrap();
     assert!(matches!(action, TeamAction::Delegate { model: None, .. }));
+}
+
+/// DEC-161 bug 1: when no account of the pool can run a team harness, the start line says
+/// which account kind to add, in the words of the Add account tiles, after the line clients
+/// already match.
+#[test]
+fn the_no_account_line_names_the_account_kind_the_harness_needs() {
+    assert_eq!(
+        no_account_line("codex", "codex"),
+        "No account in this project's pool can run codex. Add a ChatGPT sign-in or an OpenAI API key to the pool"
+    );
+    assert_eq!(
+        no_account_line("claude", "claude-code"),
+        "No account in this project's pool can run claude. Add a Claude sign-in or an Anthropic API key to the pool"
+    );
 }

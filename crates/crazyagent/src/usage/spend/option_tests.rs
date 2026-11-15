@@ -38,6 +38,7 @@ impl Case {
             SpendSettings {
                 confirm,
                 all_limited,
+                ..SpendSettings::default()
             },
         )
         .unwrap();
@@ -219,6 +220,7 @@ fn option_spend_confirmation_off_refuses_and_sends_nothing_to_the_loopback_usage
         SpendSettings {
             confirm: SpendConfirm::Off,
             all_limited: AllLimited::Notice,
+            ..SpendSettings::default()
         },
     )
     .unwrap();

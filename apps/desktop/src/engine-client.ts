@@ -144,7 +144,7 @@ export interface BaselineDetail extends BaselineRow {
 
 export interface ActionReceipt {
   baseline_id: string;
-  outcome: "applied" | "rejected" | "unavailable" | "unknown" | "not_recorded_at_barrier" | "uncertain";
+  outcome: "applied" | "rejected" | "unavailable" | "unknown" | "in_progress" | "not_recorded_at_barrier" | "uncertain";
   pending: boolean;
 }
 
@@ -156,7 +156,7 @@ export function status(): Promise<ConnectionStatus> {
   return invoke<ConnectionStatus>("desktop_status");
 }
 
-export type HarnessStatus = { kind: "ready" } | { kind: "not_installed" } | { kind: "limited"; reason: string };
+export type HarnessStatus = { kind: "ready" } | { kind: "not_installed" } | { kind: "limited"; reason: string } | { kind: "cant_run"; reason: string };
 
 export type ToolControl = { kind: "switchable" } | { kind: "limited"; reason: string };
 
@@ -241,7 +241,7 @@ export function errorMessage(error: unknown): string {
     pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
     pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
     pool_name_bounds: "Use a pool name of 1 to 64 characters, without control characters.",
-    owner_profile_name: "Enter your name, up to 100 characters.",
+    owner_profile_name: "Enter your name on one line, up to 100 bytes (about 100 English letters or 33 Chinese, Hindi or Thai ones), with no hidden characters.",
     skill_folder_not_found: "That folder was not found.",
     skill_not_a_folder: "Pick a folder, not a file.",
     skill_missing_skill_md: "This folder has no SKILL.md file.",
@@ -284,6 +284,13 @@ export function errorMessage(error: unknown): string {
     server_cant_start: "The server can't start.",
     server_exited: "The server stopped before answering.",
     server_check_timeout: "The server did not answer within 10 seconds.",
+    server_setting_up: "context-mode is still being set up. Check again in a minute.",
+    server_install_failed: "Setting up context-mode failed. Check again in 10 minutes.",
+    server_npm_missing: "context-mode needs npm and node in the same folder as npx. Install Node.js, then check again.",
+    server_version_unpinned: "This context-mode version is not the one the default pack pins, so CrazyAgent does not install it. Use the default pack's version.",
+    server_installs_busy: "Too many installs are running. Check again in a minute.",
+    server_node_too_old: "context-mode needs Node.js 22.5 or newer. Update Node.js, then check again.",
+    server_npx_not_found: "CrazyAgent did not find the npx this context-mode server runs on this computer, so it did not start it.",
     server_output_too_large: "The server sent too much output.",
     server_refused: "The server refused the request.",
     server_reply_invalid: "The server's answer was not valid MCP.",
@@ -328,9 +335,9 @@ export function errorMessage(error: unknown): string {
     agent_state_unavailable: "CrazyAgent can't write this agent's state folder.",
     agent_thread_unavailable: "CrazyAgent could not start watching this agent. Restart it.",
     agents_outcome_unknown: "The agent request did not finish. Refresh the list before trying again.",
-    owner_profile_role: "Keep the role on one line, up to 100 characters.",
-    owner_profile_bio: "Keep the bio under 1000 characters.",
-    owner_profile_stack: "List up to 12 different technologies, each up to 40 characters.",
+    owner_profile_role: "Keep your role on one line, up to 100 bytes (about 100 English letters or 33 Chinese, Hindi or Thai ones), with no hidden characters.",
+    owner_profile_bio: "Keep your bio to 1000 bytes (about 1000 English letters or 333 Chinese, Hindi or Thai ones), with no tabs, special or hidden characters.",
+    owner_profile_stack: "List up to 12 different technologies, each on one line, up to 40 bytes, with no hidden characters.",
     owner_profile_bounds: "The profile is too large. Shorten it and save again.",
     model_access_record_not_found: "That metadata identity was not found. Refresh the collection and choose a current record.",
     owner_revoked: "Desktop owner authority was revoked. The engine host must restore it before reconnecting.",
@@ -417,7 +424,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_agent_scope" | "memory_move" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "learning_mark" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "create_demo" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap" | "notifications";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_agent_scope" | "memory_move" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "provider_retry" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "learning_mark" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "install_dependency" | "fix_tool_permissions" | "refused_tool" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "create_demo" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap" | "notifications";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -1463,6 +1470,7 @@ export interface OnboardingView {
   folder_overview: string | null;
   finished: boolean;
   imported?: ImportFile[];
+  carried?: boolean;
   proposed?: ProjectSetup | null;
 }
 
@@ -1533,7 +1541,7 @@ export function cloneRepo(fullName: string): Promise<CloneReceipt> {
   return invoke<CloneReceipt>("desktop_clone_repo", { fullName });
 }
 
-export type DependencyName = "tmux" | "uv" | "graphify";
+export type DependencyName = "tmux" | "uv" | "graphify" | "node";
 
 export type DependencyState =
   | { state: "checking" }
@@ -1541,7 +1549,22 @@ export type DependencyState =
   | { state: "found"; version: string }
   | { state: "installing" }
   | { state: "installed"; version: string }
-  | { state: "failed"; reason: string };
+  | { state: "bundled"; version: string }
+  | { state: "system"; version: string; note: string }
+  | { state: "failed"; reason: string }
+  | { state: "unsupported" }
+  | { state: "refused"; line: string; file: string; part?: string | null; fix?: ToolFix | null; fix_failed?: string | null };
+
+/** The permission fix a refused tool's row offers (DEC-162): the folder or file it changes,
+ * whether it changes as a whole tree, and the command that makes the same change. */
+export interface ToolFix {
+  tree: string;
+  recursive: boolean;
+  command: string;
+}
+
+/** What setup offers for a tool found and passed over: the fix button or the command only. */
+export type RefusedTool = "fix_button" | "command_only";
 
 export interface Dependency {
   name: DependencyName;
@@ -1571,6 +1594,7 @@ export interface SetupStatus {
   running: boolean;
   notes?: string[];
   version: number;
+  refused_tool?: RefusedTool;
 }
 
 /** Reads the projects home folder and whether the engine watches it. Output: the home. */
@@ -1618,6 +1642,53 @@ export function icloudCancel(): Promise<boolean> {
   return invoke<boolean>("desktop_icloud_cancel");
 }
 
+/** The part of an intake job that was running when it ended. */
+export type IntakePhase = "downloading" | "copying" | "clearing";
+
+/** What the engine's intake job is doing, or how it ended. Copying counts the files copied,
+ * then the files checked; clearing removes a moved folder's old place and never stops. */
+export type IntakeJobState =
+  | { state: "downloading"; progress: IcloudProgress }
+  | { state: "copying"; copied: number; checked: number }
+  | { state: "clearing" }
+  | { state: "done" }
+  | { state: "failed"; code: string; phase: IntakePhase }
+  | { state: "cancelled"; phase: IntakePhase }
+  | { state: "needs_answer"; code: string };
+
+/** The engine's intake job, which adds one folder to the projects folder apart from the window:
+ * its id, the folder, move or copy, the soft refusals it goes past, whether a stop was asked and
+ * its state. */
+export interface IntakeJob {
+  id: string;
+  source: string;
+  mode: AddFolderMode;
+  overrides: AddOverride[];
+  stopping: boolean;
+  state: IntakeJobState;
+}
+
+/** Starts the engine's intake job for a folder, or attaches to the one adding it already.
+ * Inputs: the absolute folder, move or copy and the overrides. Output: the job. */
+export function intakeStart(path: string, mode: AddFolderMode, overrides: AddOverride[]): Promise<IntakeJob> {
+  return invoke<IntakeJob>("desktop_intake_start", { path, mode, overrides });
+}
+
+/** Reads the engine's intake job, running or last ended. Output: the job, or null. */
+export function intakeStatus(): Promise<IntakeJob | null> {
+  return invoke<IntakeJob | null>("desktop_intake_status");
+}
+
+/** Asks the running intake job to stop between files. Input: its id. Output: whether it ran. */
+export function intakeStop(id: string): Promise<boolean> {
+  return invoke<boolean>("desktop_intake_stop", { id });
+}
+
+/** Forgets an ended intake job. Input: its id. Output: whether it was forgotten. */
+export function intakeDismiss(id: string): Promise<boolean> {
+  return invoke<boolean>("desktop_intake_dismiss", { id });
+}
+
 /** Measures a folder before Copy and names its GitHub repository, if any.
  * Input: an absolute folder path. Output: its size and GitHub owner/name. */
 export function folderSize(path: string): Promise<FolderSize> {
@@ -1656,6 +1727,25 @@ export function setupStatus(): Promise<SetupStatus> {
  * Inputs: the ticked ids and a generation. Output: the status as the run starts. */
 export function runSetup(pack: string[], generation: number): Promise<SetupStatus> {
   return invoke<SetupStatus>("desktop_run_setup", { pack, generation });
+}
+
+/** Installs one missing tool alone, such as Node. Inputs: its name and a generation.
+ * Output: the status as the install starts. */
+export function installDependency(name: DependencyName, generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_install_dependency", { name, generation });
+}
+
+/** Removes group and other write from the tree the owner confirmed for one refused tool.
+ * Inputs: its name, the tree the confirm named and a generation. Output: the status as the
+ * fix starts. */
+export function fixToolPermissions(name: DependencyName, tree: string, recursive: boolean, generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_fix_tool_permissions", { name, tree, recursive, generation });
+}
+
+/** Saves what setup offers for a tool found and passed over. Inputs: the choice and a
+ * generation. Output: the new status. */
+export function setRefusedTool(choice: RefusedTool, generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_set_refused_tool", { choice, generation });
 }
 
 /** Switches one installed pack entry on or off. Inputs: its id, the state, the pack
@@ -2050,6 +2140,7 @@ export interface SkillView {
   on_here: boolean | null;
   version: number;
   source: string;
+  origin: string;
   folder: string;
   refused: string | null;
 }

@@ -386,7 +386,9 @@ mod run {
         };
         let account = match picked {
             AccountPick::NeedsPool => return Err(POOL_UNKNOWN),
-            AccountPick::NoUsableAccount => return pending(NotStarted::NoAccount),
+            AccountPick::NoUsableAccount | AccountPick::Unreached { .. } => {
+                return pending(NotStarted::NoAccount);
+            }
             AccountPick::Paused { .. } => return pending(NotStarted::Paused),
             AccountPick::Account { account, .. } => match *account {
                 ResearchAccount::ManagedCodex { connection, .. } => ResearchAccount::ManagedCodex {
@@ -432,7 +434,7 @@ mod run {
                 return pending(NotStarted::CouldNotStart);
             }
         };
-        let output = runner.read_only_output(&name, harness);
+        let output = runner.read_only_output(&name);
         runner.forget_read_only(&name);
         Ok(outcome(request.harness, ended, output.as_deref()))
     }

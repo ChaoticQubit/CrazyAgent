@@ -499,6 +499,23 @@ fn a_setup_run_already_going_refuses_another() {
 }
 
 #[test]
+fn the_owner_installs_one_dependency_alone_and_not_while_setup_runs() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let install = || SetupAction::Install {
+        name: crate::setup::Dependency::Node,
+    };
+    assert_eq!(owner(&mut connection, root, install()), Outcome::Applied);
+    assert!(!progress::snapshot(root).graph_tool);
+    progress::with(root, |state| state.running = true);
+    assert_eq!(
+        rejected_with(owner(&mut connection, root, install())),
+        "setup_busy"
+    );
+    progress::with(root, |state| state.running = false);
+}
+
+#[test]
 fn an_entry_whose_skill_name_is_taken_installs_nothing() {
     let (dir, mut connection) = database();
     let root = dir.path();
@@ -1032,7 +1049,7 @@ fn seed(
 fn effective_events(connection: &mut Connection, root: &Path, project: &str) -> Vec<String> {
     let project = crate::protocol::ProjectId::new(project).unwrap();
     let tx = connection.transaction().unwrap();
-    let hooks = plugins::effective_hooks(&tx, root, &project).unwrap();
+    let hooks = plugins::effective_hooks(&tx, root, &project, &[]).unwrap();
     for hook in &hooks {
         assert!(hook.folder.join("hooks/start.sh").is_file(), "{hook:?}");
     }
@@ -1149,7 +1166,7 @@ fn seeded_hooks_follow_their_entry_and_turn_off_per_hook_per_project_or_with_the
     let folders: Vec<PathBuf> = {
         let tx = connection.transaction().unwrap();
         let project = crate::protocol::ProjectId::new("project-2").unwrap();
-        plugins::effective_hooks(&tx, root, &project)
+        plugins::effective_hooks(&tx, root, &project, &[])
             .unwrap()
             .into_iter()
             .map(|hook| hook.folder)
@@ -1334,4 +1351,519 @@ fn hooks_seeded_for_an_adopted_owner_skill_follow_that_skill() {
     )
     .unwrap();
     assert!(effective_events(&mut connection, root, "project-1").is_empty());
+}
+
+/// DEC-162 Q1: the owner's choice for a tool found but not used reads Fix button before
+/// any save, then what was saved, with the setup status both clients read.
+#[test]
+fn the_refused_tool_setting_reads_fix_button_until_command_only_is_saved() {
+    let (root, mut connection) = database();
+    assert_eq!(
+        status_of(&mut connection, root.path()).refused_tool,
+        crate::setup::RefusedTool::FixButton
+    );
+    assert_eq!(
+        owner(
+            &mut connection,
+            root.path(),
+            SetupAction::SetRefusedTool {
+                choice: crate::setup::RefusedTool::CommandOnly,
+            },
+        ),
+        Outcome::Applied
+    );
+    assert_eq!(
+        status_of(&mut connection, root.path()).refused_tool,
+        crate::setup::RefusedTool::CommandOnly
+    );
+    assert_eq!(
+        owner(
+            &mut connection,
+            root.path(),
+            SetupAction::SetRefusedTool {
+                choice: crate::setup::RefusedTool::FixButton,
+            },
+        ),
+        Outcome::Applied
+    );
+    assert_eq!(
+        status_of(&mut connection, root.path()).refused_tool,
+        crate::setup::RefusedTool::FixButton
+    );
+}
+
+/// DEC-162 Q1: Show command only is enforced in the engine, inside the owner transaction
+/// so a replay answers the same: a fix request answers `tool_fix_off` while it is chosen,
+/// `setup_busy` while a setup run or another fix goes on, `tool_fix_changed` for a target
+/// that is no absolute bounded path, and is admitted otherwise.
+#[test]
+fn command_only_refuses_the_permission_fix_in_the_engine() {
+    let (root, mut connection) = database();
+    let fix = |tree: &str| SetupAction::FixPermissions {
+        name: crate::setup::Dependency::Graphify,
+        tree: tree.into(),
+        recursive: true,
+    };
+    let tree = "/Users/me/.local/share/uv/python/cpython-3.13.1";
+    assert_eq!(
+        owner(&mut connection, root.path(), fix(tree)),
+        Outcome::Applied
+    );
+    for bad in [
+        "",
+        "relative/tree",
+        "/with\0nul",
+        &format!("/{}", "a".repeat(4096)),
+    ] {
+        assert_eq!(
+            rejected_with(owner(&mut connection, root.path(), fix(bad))),
+            "tool_fix_changed",
+            "{bad:?}"
+        );
+    }
+    progress::with(root.path(), |state| state.running = true);
+    assert_eq!(
+        rejected_with(owner(&mut connection, root.path(), fix(tree))),
+        "setup_busy"
+    );
+    progress::with(root.path(), |state| state.running = false);
+    owner(
+        &mut connection,
+        root.path(),
+        SetupAction::SetRefusedTool {
+            choice: crate::setup::RefusedTool::CommandOnly,
+        },
+    );
+    assert_eq!(
+        rejected_with(owner(&mut connection, root.path(), fix(tree))),
+        "tool_fix_off"
+    );
+}
+
+/// RV-DS241-30: removing a pack item on the plugin screen takes it out of the entry's row,
+/// so an entry left with nothing reads not installed and a setup run installs it again, and
+/// an entry that keeps other items still reads installed without the removed one.
+#[test]
+fn a_plugin_screen_removal_updates_the_pack_row_so_setup_can_install_it_again() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let work = tempfile::tempdir().unwrap();
+    let graph = skill(work.path(), "graphify");
+    install(
+        &mut connection,
+        root,
+        GRAPH_ENTRY,
+        "https://example.invalid/graphify@1",
+        vec![graph.clone()],
+        None,
+    )
+    .unwrap();
+    assert!(graph_on(&mut connection));
+    let id = skills(&mut connection, root)[0].id.clone();
+    let version = plugins::plugin_version(&connection, &id).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::RemoveSkill { id, version },
+    )
+    .unwrap();
+    assert!(!graph_on(&mut connection));
+    let status = status_of(&mut connection, root);
+    assert_eq!(pack_state(&status, GRAPH_ENTRY), PackState::Available);
+    install(
+        &mut connection,
+        root,
+        GRAPH_ENTRY,
+        "https://example.invalid/graphify@1",
+        vec![graph],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        skills(&mut connection, root).len(),
+        1,
+        "setup installs it again"
+    );
+    assert!(graph_on(&mut connection));
+
+    let server_entry = "context-mode";
+    install(
+        &mut connection,
+        root,
+        server_entry,
+        "https://example.invalid/context-mode@1",
+        Vec::new(),
+        Some(("context-mode".into(), spec())),
+    )
+    .unwrap();
+    let server = servers(&mut connection, root)[0].id.clone();
+    let version = plugins::plugin_version(&connection, &server).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::RemoveServer {
+            id: server,
+            version,
+        },
+    )
+    .unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(entry_switch(&tx, server_entry).unwrap(), None);
+    drop(tx);
+
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/superpowers@1",
+        vec![skill(work.path(), "alpha"), skill(work.path(), "beta")],
+        None,
+    )
+    .unwrap();
+    let alpha = skills(&mut connection, root)
+        .into_iter()
+        .find(|view| view.name == "alpha")
+        .unwrap()
+        .id;
+    let version = plugins::plugin_version(&connection, &alpha).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::RemoveSkill {
+            id: alpha.clone(),
+            version,
+        },
+    )
+    .unwrap();
+    let tx = connection.transaction().unwrap();
+    let row = load_pack(&tx, "superpowers").unwrap().unwrap();
+    assert_eq!(entry_switch(&tx, "superpowers").unwrap(), Some(true));
+    assert!(!row.skills.contains(&alpha));
+    assert_eq!(row.skills.len(), 1);
+}
+
+/// RV-DS241-31: a new pin of a skill entry keeps each pack hook as the owner left it, off
+/// globally or off in one project, instead of seeding the new pin's hooks all on.
+#[test]
+fn a_new_pin_keeps_the_hooks_the_owner_switched_off() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    for project in ["project-1", "project-2"] {
+        connection
+            .execute("INSERT INTO projects(id, body) VALUES(?1, '{}')", [project])
+            .unwrap();
+    }
+    let work = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@1",
+        vec![skill(first.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    let plugin = hook_plugin(work.path(), "caveman");
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    let views = hook_views(&mut connection, root, None);
+    let id_of = |views: &[crate::plugins::HookView], event: &str| {
+        views
+            .iter()
+            .find(|view| view.event == event)
+            .unwrap()
+            .id
+            .clone()
+    };
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetHook {
+            id: id_of(&views, "SessionStart"),
+            enabled: false,
+        },
+    )
+    .unwrap();
+    let prompt = id_of(&views, "UserPromptSubmit");
+    let version = plugins::plugin_version(&connection, &prompt).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::Switch {
+            project: crate::protocol::ProjectId::new("project-1").unwrap(),
+            id: prompt,
+            on: false,
+            version,
+        },
+    )
+    .unwrap();
+    assert!(effective_events(&mut connection, root, "project-1").is_empty());
+    assert_eq!(
+        effective_events(&mut connection, root, "project-2"),
+        ["UserPromptSubmit"]
+    );
+
+    let second = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@2",
+        vec![skill(second.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    let views = hook_views(&mut connection, root, None);
+    assert_eq!(views.len(), 2);
+    assert!(
+        views
+            .iter()
+            .all(|view| view.follows.as_deref() == Some("caveman"))
+    );
+    let start = views
+        .iter()
+        .find(|view| view.event == "SessionStart")
+        .unwrap();
+    assert!(!start.enabled, "a hook switched off stays off");
+    assert!(
+        effective_events(&mut connection, root, "project-1").is_empty(),
+        "a hook switched off in one project stays off there"
+    );
+    assert_eq!(
+        effective_events(&mut connection, root, "project-2"),
+        ["UserPromptSubmit"]
+    );
+}
+
+/// RV-DS241-31: an entry left off across two new pins still keeps the hooks the owner switched
+/// off. No hooks are seeded while the entry is off, so the second pin carries what the first
+/// one kept, and the hooks come back off once the entry is on and its hooks are seeded.
+#[test]
+fn hooks_kept_while_an_entry_is_off_survive_a_second_new_pin() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    connection
+        .execute(
+            "INSERT INTO projects(id, body) VALUES('project-1', '{}')",
+            [],
+        )
+        .unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let pins: Vec<tempfile::TempDir> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let pin = |connection: &mut Connection, number: usize| {
+        install(
+            connection,
+            root,
+            "caveman",
+            &format!("https://example.invalid/caveman@{}", number + 1),
+            vec![skill(pins[number].path(), "caveman")],
+            None,
+        )
+        .unwrap();
+    };
+    let switch = |connection: &mut Connection, on: bool| {
+        let version = status_of(connection, root).version;
+        let action = SetupAction::Set {
+            id: "caveman".into(),
+            on,
+            version,
+        };
+        assert_eq!(owner(connection, root, action), Outcome::Applied);
+    };
+    pin(&mut connection, 0);
+    let plugin = hook_plugin(work.path(), "caveman");
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    let views = hook_views(&mut connection, root, None);
+    let id_of = |event: &str| {
+        views
+            .iter()
+            .find(|view| view.event == event)
+            .unwrap()
+            .id
+            .clone()
+    };
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetHook {
+            id: id_of("SessionStart"),
+            enabled: false,
+        },
+    )
+    .unwrap();
+    let prompt = id_of("UserPromptSubmit");
+    let version = plugins::plugin_version(&connection, &prompt).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::Switch {
+            project: crate::protocol::ProjectId::new("project-1").unwrap(),
+            id: prompt,
+            on: false,
+            version,
+        },
+    )
+    .unwrap();
+    switch(&mut connection, false);
+
+    pin(&mut connection, 1);
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    assert!(
+        hook_views(&mut connection, root, None).is_empty(),
+        "no hooks are seeded for an entry that is off"
+    );
+    pin(&mut connection, 2);
+    switch(&mut connection, true);
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+
+    let views = hook_views(&mut connection, root, None);
+    assert_eq!(views.len(), 2);
+    let start = views
+        .iter()
+        .find(|view| view.event == "SessionStart")
+        .unwrap();
+    assert!(
+        !start.enabled,
+        "a hook switched off stays off across two pins"
+    );
+    assert!(
+        views
+            .iter()
+            .any(|view| view.event == "UserPromptSubmit" && view.enabled),
+        "a hook switched off in one project only stays on everywhere else"
+    );
+    assert!(
+        effective_events(&mut connection, root, "project-1").is_empty(),
+        "a hook switched off in one project stays off there across two pins"
+    );
+}
+
+/// RV-DS241-154: removing the skill a pack entry's hooks follow, on the plugin screen, while
+/// the entry keeps other skills, keeps each hook as the owner left it. The hooks go with the
+/// skill, and the next seed adds them following the entry's next skill, off where they were.
+#[test]
+fn removing_the_skill_pack_hooks_follow_keeps_the_hooks_the_owner_switched_off() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    for project in ["project-1", "project-2"] {
+        connection
+            .execute("INSERT INTO projects(id, body) VALUES(?1, '{}')", [project])
+            .unwrap();
+    }
+    let work = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/superpowers@1",
+        vec![
+            skill(work.path(), "alpha"),
+            skill(work.path(), "beta"),
+            skill(work.path(), "gamma"),
+        ],
+        None,
+    )
+    .unwrap();
+    let plugin = hook_plugin(work.path(), "superpowers");
+    seed(&mut connection, root, "superpowers", &plugin).unwrap();
+    let views = hook_views(&mut connection, root, None);
+    assert_eq!(views.len(), 2);
+    assert!(
+        views
+            .iter()
+            .all(|view| view.follows.as_deref() == Some("alpha"))
+    );
+    let id_of = |event: &str| {
+        views
+            .iter()
+            .find(|view| view.event == event)
+            .unwrap()
+            .id
+            .clone()
+    };
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetHook {
+            id: id_of("SessionStart"),
+            enabled: false,
+        },
+    )
+    .unwrap();
+    let prompt = id_of("UserPromptSubmit");
+    let version = plugins::plugin_version(&connection, &prompt).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::Switch {
+            project: crate::protocol::ProjectId::new("project-1").unwrap(),
+            id: prompt,
+            on: false,
+            version,
+        },
+    )
+    .unwrap();
+    assert!(effective_events(&mut connection, root, "project-1").is_empty());
+    assert_eq!(
+        effective_events(&mut connection, root, "project-2"),
+        ["UserPromptSubmit"]
+    );
+
+    for name in ["alpha", "beta"] {
+        let id = skills(&mut connection, root)
+            .into_iter()
+            .find(|view| view.name == name)
+            .unwrap()
+            .id;
+        let version = plugins::plugin_version(&connection, &id).unwrap();
+        plugins::execute(
+            &mut connection,
+            root,
+            plugins::Command::RemoveSkill { id, version },
+        )
+        .unwrap();
+        assert!(
+            hook_views(&mut connection, root, None).is_empty(),
+            "the hooks go with the skill they follow"
+        );
+    }
+    seed(&mut connection, root, "superpowers", &plugin).unwrap();
+
+    let views = hook_views(&mut connection, root, None);
+    assert_eq!(views.len(), 2);
+    assert!(
+        views
+            .iter()
+            .all(|view| view.follows.as_deref() == Some("gamma")),
+        "the hooks follow the entry's next skill"
+    );
+    let start = views
+        .iter()
+        .find(|view| view.event == "SessionStart")
+        .unwrap();
+    assert!(
+        !start.enabled,
+        "a hook switched off stays off when the skill it follows is removed"
+    );
+    assert!(
+        views
+            .iter()
+            .any(|view| view.event == "UserPromptSubmit" && view.enabled),
+        "a hook switched off in one project only stays on everywhere else"
+    );
+    assert!(
+        effective_events(&mut connection, root, "project-1").is_empty(),
+        "a hook switched off in one project stays off there"
+    );
+    assert_eq!(
+        effective_events(&mut connection, root, "project-2"),
+        ["UserPromptSubmit"]
+    );
+    let tx = connection.transaction().unwrap();
+    let row = load_pack(&tx, "superpowers").unwrap().unwrap();
+    assert!(
+        row.hooks.is_empty(),
+        "what was kept is forgotten once applied"
+    );
 }

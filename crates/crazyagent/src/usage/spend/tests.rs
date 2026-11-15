@@ -99,6 +99,7 @@ fn settings(confirm: SpendConfirm, all_limited: AllLimited) -> SpendSettings {
     SpendSettings {
         confirm,
         all_limited,
+        resets_source: ResetsSource::ThroughClaudeCode,
     }
 }
 
@@ -118,7 +119,10 @@ fn the_defaults_are_confirm_each_spend_and_a_notice_when_a_pool_is_limited() {
     let (_root, db) = store();
     assert_eq!(
         read(&db).unwrap(),
-        settings(SpendConfirm::ConfirmEach, AllLimited::Notice)
+        SpendSettings {
+            resets_source: ResetsSource::Off,
+            ..settings(SpendConfirm::ConfirmEach, AllLimited::Notice)
+        }
     );
     assert!(read(&db).unwrap().spends());
     assert!(!read(&db).unwrap().auto_spends());
@@ -141,6 +145,110 @@ fn every_spend_option_is_stored_and_read_back() {
             assert_eq!(read(&db).unwrap(), settings(confirm, all_limited));
         }
     }
+}
+
+/// Nothing stored reads Don't read until the owner picks another source (owner answer
+/// 2026-11-14); each source is stored and read back beside the spend settings, which it
+/// never changes, and a stored source stays as stored when the store opens again.
+#[test]
+fn every_claude_free_resets_source_is_stored_and_read_back_and_nothing_stored_reads_dont_read() {
+    let (_root, db) = store();
+    assert_eq!(read(&db).unwrap().resets_source, ResetsSource::Off);
+    assert_eq!(ResetsSource::default(), ResetsSource::Off);
+    for source in [
+        ResetsSource::ThroughClaudeCode,
+        ResetsSource::AsClaudeCode,
+        ResetsSource::Off,
+        ResetsSource::ThroughClaudeCode,
+    ] {
+        let chosen = SpendSettings {
+            resets_source: source,
+            ..settings(SpendConfirm::OneClick, AllLimited::NoHint)
+        };
+        write(&db, chosen).unwrap();
+        assert_eq!(read(&db).unwrap(), chosen, "{source:?}");
+    }
+    crate::usage::initialize(&db).unwrap();
+    assert_eq!(
+        read(&db).unwrap().resets_source,
+        ResetsSource::ThroughClaudeCode,
+        "a stored Through Claude Code stays as stored"
+    );
+}
+
+/// A store made before the source column gains it on open as Don't read, the default, since
+/// no source was stored; it keeps the owner's spend settings and takes only the three source
+/// codes.
+#[test]
+fn a_spend_store_from_before_the_source_column_gains_it_as_dont_read() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("usage.db");
+    {
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE usage_spend (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                confirm TEXT NOT NULL CHECK(confirm IN ('confirm_each','one_click','off')),
+                all_limited TEXT NOT NULL CHECK(all_limited IN ('notice','no_hint','auto_spend'))
+            );
+            INSERT INTO usage_spend (singleton,confirm,all_limited) VALUES (1,'one_click','auto_spend');",
+        )
+        .unwrap();
+    }
+    let db = Connection::open(&path).unwrap();
+    crate::usage::initialize(&db).unwrap();
+    crate::usage::initialize(&db).unwrap();
+    let source: String = db
+        .query_row("SELECT resets_source FROM usage_spend", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(source, "off");
+    assert_eq!(
+        read(&db).unwrap(),
+        SpendSettings {
+            resets_source: ResetsSource::Off,
+            ..settings(SpendConfirm::OneClick, AllLimited::AutoSpend)
+        }
+    );
+    assert!(
+        db.execute("UPDATE usage_spend SET resets_source='maybe'", [])
+            .is_err()
+    );
+}
+
+/// A client from before the source sends the spend settings without it, which reads as Don't
+/// read, the default; the wire names each source in snake case and refuses any other.
+#[test]
+fn the_source_rides_the_spend_settings_on_the_wire_and_an_older_client_reads_dont_read() {
+    let older: SpendSettings =
+        serde_json::from_str(r#"{"confirm":"one_click","all_limited":"no_hint"}"#).unwrap();
+    assert_eq!(older.resets_source, ResetsSource::Off);
+    assert_eq!(SpendSettings::default().resets_source, ResetsSource::Off);
+    for (source, wire) in [
+        (ResetsSource::ThroughClaudeCode, "through_claude_code"),
+        (ResetsSource::AsClaudeCode, "as_claude_code"),
+        (ResetsSource::Off, "off"),
+    ] {
+        let sent = serde_json::to_value(SpendSettings {
+            resets_source: source,
+            ..SpendSettings::default()
+        })
+        .unwrap();
+        assert_eq!(sent["resets_source"], wire);
+        assert_eq!(
+            serde_json::from_value::<SpendSettings>(sent)
+                .unwrap()
+                .resets_source,
+            source
+        );
+    }
+    assert!(
+        serde_json::from_str::<SpendSettings>(
+            r#"{"confirm":"one_click","all_limited":"no_hint","resets_source":"maybe"}"#
+        )
+        .is_err()
+    );
 }
 
 #[test]

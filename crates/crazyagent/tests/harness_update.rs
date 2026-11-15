@@ -98,6 +98,8 @@ impl FakeNative {
             home: self.home(),
             brew_prefixes: Vec::new(),
             casks: true,
+            npm: None,
+            places: crazyagent::tools::Places::new(Vec::new(), Some(self.home())),
         }
     }
 
@@ -208,6 +210,11 @@ impl FakeBrew {
             home: self.home(),
             brew_prefixes: vec![self.prefix()],
             casks: true,
+            npm: None,
+            places: crazyagent::tools::Places::new(
+                vec![self.prefix().join("bin")],
+                Some(self.home()),
+            ),
         }
     }
 

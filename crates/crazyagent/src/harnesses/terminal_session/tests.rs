@@ -37,6 +37,23 @@ fn an_empty_prompt_is_still_one_paste() {
     assert_eq!(paste(""), vec!["\x1b[200~\x1b[201~".to_owned()]);
 }
 
+#[test]
+fn the_paste_end_marker_is_never_split_across_host_inputs() {
+    for over in 1..PASTE_END.len() {
+        let body = "a".repeat(INPUT_BYTES_MAX + over - PASTE_START.len() - PASTE_END.len());
+        let parts = paste(&body);
+        assert_eq!(parts.concat().len(), INPUT_BYTES_MAX + over);
+        assert!(parts.iter().all(|part| part.len() <= INPUT_BYTES_MAX));
+        assert!(
+            parts.last().is_some_and(|part| part.ends_with(PASTE_END)),
+            "framed length {} cuts the end marker: {:?}",
+            INPUT_BYTES_MAX + over,
+            parts.last()
+        );
+        assert_eq!(unframed(&parts), body);
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod own_turns {
     use super::super::{TerminalSession, TranscriptEvent};

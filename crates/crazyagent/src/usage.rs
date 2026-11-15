@@ -400,27 +400,35 @@ pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), Engin
 }
 
 /// Adds the usage tables to a database when missing, and to a store made before them the
-/// polled copies of the windows, filled from the rows a poll wrote last, and the marks of
-/// windows a poll left out. Input: the connection. Output: done, or `usage_unavailable`.
+/// polled copies of the windows, filled from the rows a poll wrote last, the marks of windows
+/// a poll left out, the Claude free resets source and the unread reason. Input: the
+/// connection. Output: done, or `usage_unavailable`.
 pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(storage)?;
-    add_columns(db, "weekly_polled_resets_ms", ADD_POLLED)?;
-    add_columns(db, "weekly_left_out", ADD_LEFT_OUT)?;
+    add_columns(db, "account_limits", "weekly_polled_resets_ms", ADD_POLLED)?;
+    add_columns(db, "account_limits", "weekly_left_out", ADD_LEFT_OUT)?;
     db.execute_batch(capture::SCHEMA).map_err(storage)?;
     health::upgrade(db)?;
     db.execute_batch(health::SCHEMA).map_err(storage)?;
     db.execute_batch(report::SCHEMA).map_err(storage)?;
     db.execute_batch(money::SCHEMA).map_err(storage)?;
     db.execute_batch(spend::SCHEMA).map_err(storage)?;
+    add_columns(db, "usage_spend", "resets_source", spend::ADD_SOURCE)?;
     db.execute_batch(turns::SCHEMA).map_err(storage)?;
     db.execute_batch(recount::SCHEMA).map_err(storage)?;
     db.execute_batch(activity::SCHEMA).map_err(storage)?;
     db.execute_batch(extras::SCHEMA).map_err(storage)?;
+    add_columns(
+        db,
+        "account_limit_extras",
+        "resets_unread",
+        extras::ADD_UNREAD,
+    )?;
     capture::count_rows(db)
 }
 
-fn add_columns(db: &Connection, last: &str, batch: &str) -> Result<(), EngineError> {
-    if has_column(db, last)? {
+fn add_columns(db: &Connection, table: &str, last: &str, batch: &str) -> Result<(), EngineError> {
+    if has_column(db, table, last)? {
         return Ok(());
     }
     db.execute_batch("SAVEPOINT usage_columns")
@@ -431,16 +439,16 @@ fn add_columns(db: &Connection, last: &str, batch: &str) -> Result<(), EngineErr
         Err(_) => db.execute_batch("ROLLBACK TO usage_columns; RELEASE usage_columns"),
     };
     closed.map_err(storage)?;
-    if added.is_err() && !has_column(db, last)? {
+    if added.is_err() && !has_column(db, table, last)? {
         return Err(failure("usage_unavailable"));
     }
     Ok(())
 }
 
-fn has_column(db: &Connection, name: &str) -> Result<bool, EngineError> {
+fn has_column(db: &Connection, table: &str, name: &str) -> Result<bool, EngineError> {
     db.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('account_limits') WHERE name=?1",
-        params![name],
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name=?2",
+        params![table, name],
         |row| row.get::<_, i64>(0),
     )
     .map(|count| count == 1)
@@ -448,12 +456,12 @@ fn has_column(db: &Connection, name: &str) -> Result<bool, EngineError> {
 }
 
 fn read_columns(db: &Connection) -> Result<String, EngineError> {
-    let polled = if has_column(db, "weekly_polled_resets_ms")? {
+    let polled = if has_column(db, "account_limits", "weekly_polled_resets_ms")? {
         POLLED_COLUMNS
     } else {
         POLLED_BEFORE_COPIES
     };
-    let left_out = if has_column(db, "weekly_left_out")? {
+    let left_out = if has_column(db, "account_limits", "weekly_left_out")? {
         LEFT_OUT_COLUMNS
     } else {
         "NULL,NULL"

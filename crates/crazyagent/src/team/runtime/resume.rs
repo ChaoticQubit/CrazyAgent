@@ -24,6 +24,7 @@ const RECORD_UNREADABLE: &str = "its session record can no longer be read";
 const NOT_RESUMABLE: &str = "its harness session has no id it can be resumed by";
 const NO_TERMINAL: &str = "its harness cannot resume in a terminal pane here";
 const STOPPED: &str = "it stopped before its session resumed";
+const STOP_HOLDS: &str = "it was stopped, so it waits for you to start it again";
 const NOTHING_WAITING: &str = "its task or message is no longer waiting";
 const TEAMMATE: &str = "a teammate starts only from its harness";
 const LIVE_OFF: &str = "the live master is turned off";
@@ -218,7 +219,9 @@ impl TeamRuntime {
     /// harness session its run recorded, then hands it the run's work. A sub-agent that
     /// still runs in the pane this engine took over gets its work there instead. Waits
     /// while any other agent still runs, the team has no room or an account still waits for
-    /// its sign-in re-check; fails the run when it cannot resume.
+    /// its sign-in re-check; fails the run when it cannot resume. An agent a stop holds is
+    /// neither started nor handed its work: its run fails for now with that reason and keeps
+    /// its task, so only a start from the owner runs it again (RV-DS241-125, AW-1).
     /// Takes the setup, live access, paused accounts and the run. Returns any SQLite failure.
     fn restart(
         &mut self,
@@ -228,6 +231,9 @@ impl TeamRuntime {
         run: &Interrupted,
     ) -> Result<(), EngineError> {
         let project = &stored.project_id;
+        if crate::team::stopped(&self.connection, run.agent)? {
+            return self.fail_for_now(run, RunState::Interrupted, STOP_HOLDS);
+        }
         if self.workers.contains_key(&run.agent) {
             return self.resume_in_pane(paused, run);
         }

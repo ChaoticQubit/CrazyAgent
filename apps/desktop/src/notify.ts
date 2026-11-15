@@ -155,6 +155,13 @@ export function notifyNotice(id: number): Promise<Result<void>> {
   return call<void>("desktop_notify_notice", { id });
 }
 
+/** Asks the app for one macOS notification that the intake job ended, shown only while the window
+ * is in the background. The app reads the job from the engine and writes the text itself; the
+ * window only names it. Input: the job id. Output: ok once handled, or the refusal. */
+export function notifyIntake(id: string): Promise<Result<void>> {
+  return call<void>("desktop_notify_intake", { id });
+}
+
 /** Takes the item whose notification the owner clicked, once. Output: the item and its
  * page, or null when no click waits. */
 export function takeNotificationTarget(): Promise<Result<Clicked | null>> {

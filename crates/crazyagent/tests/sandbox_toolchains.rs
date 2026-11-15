@@ -1183,6 +1183,51 @@ fn a_node_harness_reads_its_node_and_package_but_no_npm_credential_or_other_pack
 }
 
 #[test]
+fn a_node_harness_in_the_engine_prefix_runs_with_the_node_it_was_installed_with() {
+    let case = case();
+    let prefix = crazyagent::setup::harness_prefix(&case.tools.join("engine"));
+    let node = case.tools.join("setup-node/bin/node");
+    write(&node, "#!/bin/sh\necho \"linked node ran $1\"\n");
+    fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
+    crazyagent::setup::node::make_prefix(&prefix, &node).unwrap();
+    let script = prefix.join("lib/node_modules/@openai/codex/bin/codex.js");
+    write(&script, "#!/usr/bin/env node\n");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_read(script.parent().unwrap())
+    .unwrap()
+    .allow_exec(&script)
+    .unwrap()
+    .allow_node_for(&script)
+    .unwrap();
+    let profile = case.profiles.join("engine-node.sb");
+    sandbox.install(&profile).unwrap();
+    let mut harness = std::process::Command::new(&script);
+    harness.current_dir(&case.project);
+    let mut wrapped = sandbox.wrap(&profile, &harness).unwrap();
+    wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        format!("linked node ran {}", script.display())
+    );
+}
+
+#[test]
 fn a_node_prefix_in_the_project_an_agent_worktree_or_the_agent_home_gives_no_path_entry() {
     let case = case();
     for prefix in [
@@ -1395,6 +1440,64 @@ fn tmux_at(tmux: &Path, socket: &Path, args: &[&str]) -> Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crazyagent::spawn_gate::output(&mut command).unwrap()
+}
+
+/// The app ships tmux as `CrazyAgent.app/Contents/MacOS/crazyagent-tmux`, beside the engine
+/// and its other helpers, where no agent may start a program (DEC-157). A lead's tmux grant
+/// names that one file for reading and starting, never the folder, so the engine, rcli and
+/// runner beside it stay out of the profile.
+#[test]
+fn a_lead_may_read_and_start_only_the_bundled_tmux_file_never_its_app_folder() {
+    let case = case();
+    let macos = case
+        .project
+        .parent()
+        .unwrap()
+        .join("Applications/CrazyAgent.app/Contents/MacOS");
+    for name in [
+        "crazyagent",
+        "crazyagent-rcli",
+        "crazyagent-runner",
+        "crazyagent-tmux",
+    ] {
+        write(&macos.join(name), "#!/bin/sh\n");
+        fs::set_permissions(macos.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let tmux = macos.join("crazyagent-tmux");
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_scratch(&tmp)
+    .unwrap()
+    .allow_tmux_server(&tmp.join("tmux.sock"), &tmux)
+    .unwrap();
+    let text = sandbox.profile();
+    toolchains::remove_tmp(&case.home).unwrap();
+    let file = format!("(literal \"{}\")", tmux.display());
+    assert!(
+        text.contains(&format!("(allow process-exec\n  {file}")),
+        "the bundled tmux may be started past the app bundle exec deny: {text}"
+    );
+    assert!(
+        text.matches(&file).count() >= 2,
+        "the bundled tmux is readable as one file: {text}"
+    );
+    let macos = macos.display().to_string();
+    assert!(
+        !text.contains(&format!("(subpath \"{macos}\")")),
+        "the app folder is never granted: {text}"
+    );
+    for sibling in ["crazyagent\"", "crazyagent-rcli", "crazyagent-runner"] {
+        assert!(
+            !text.contains(&format!("{macos}/{sibling}")),
+            "{sibling} stays out of the profile: {text}"
+        );
+    }
 }
 
 #[test]
@@ -2447,4 +2550,267 @@ fn native_team_agents_still_send_a_call_and_remove_the_answer_they_read() {
         assert!(call.exists(), "{who}");
         assert!(!answer.exists(), "{who}");
     }
+}
+
+/// The agent profile keeps a confined agent from leaving in its own home what a later run
+/// executes or what trips the next launch (RV-DS241-137 code r1 F4, sec r1 F1, F2,
+/// DEC-173): no cargo or git config, cargo subcommand, npm or yarn config, in any letter
+/// case, no flag or ACL, no move, removal or link in place of a folder a launch walks or of
+/// the link to the owner's crates, and no link at a cargo cache name, while it still writes
+/// its own cache and `.gitconfig` and makes the cargo git cache the owner lacks. A later
+/// `cargo x` and `npm run` outside the sandbox then run nothing it planted. Needs npm and
+/// node on `PATH`.
+#[test]
+fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
+    use nix::sys::stat::FileFlag;
+    use std::os::macos::fs::MetadataExt;
+    use std::process::Command;
+    let case = case();
+    let homes = fake_tool_homes(&case.tools);
+    write(&case.project.join("Cargo.toml"), "[package]\n");
+    toolchains::prepare_cargo_home(&case.home, &homes).unwrap();
+    let registry = case.tools.join(".cargo/registry");
+    assert_eq!(
+        fs::read_link(case.home.join(".cargo/registry")).unwrap(),
+        registry
+    );
+    write(&case.home.join(".npm/_cacache/index"), "cache\n");
+    write(&case.home.join("f"), "plain\n");
+    let marker = case.profiles.join("ran.txt");
+    let required = case.profiles.join("npmrc.js");
+    write(
+        &required,
+        &format!(
+            "require('fs').appendFileSync({:?}, 'npmrc\\n');\n",
+            marker.to_str().unwrap()
+        ),
+    );
+    let elsewhere = case.project.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_tools(&Toolchains::detect(&case.project, &homes))
+    .unwrap();
+    let profile = case.profiles.join("plant.sb");
+    let home = |name: &str| quoted(&case.home.join(name));
+    let away = quoted(&elsewhere);
+    let subcommand = home(".cargo/bin/cargo-x");
+    let denied = [
+        ("flag", format!("/usr/bin/chflags uchg {}", home("f"))),
+        (
+            "acl",
+            format!("/bin/chmod +a 'everyone deny delete' {}", home("f")),
+        ),
+        (
+            "cargo_config",
+            format!("printf '[build]\\n' > {}", home(".cargo/config.toml")),
+        ),
+        (
+            "git_config",
+            format!(
+                "mkdir -p {} && printf '[core]\\n' > {}",
+                home(".config/git"),
+                home(".config/git/config")
+            ),
+        ),
+        (
+            "cargo_bin",
+            format!(
+                "mkdir -p {} && printf '#!/bin/sh\\necho cargo-x >> %s\\n' {} > {subcommand} && chmod +x {subcommand}",
+                home(".cargo/bin"),
+                quoted(&marker)
+            ),
+        ),
+        (
+            "cargo_bin_case",
+            format!(
+                "mkdir -p {} && printf x > {}",
+                home(".CARGO/BIN"),
+                home(".CARGO/BIN/cargo-y")
+            ),
+        ),
+        (
+            "npmrc",
+            format!(
+                "printf 'node-options=--require=%s\\n' {} > {}",
+                quoted(&required),
+                home(".npmrc")
+            ),
+        ),
+        ("npmrc_case", format!("printf x > {}", home(".NpmRc"))),
+        ("yarnrc", format!("printf x > {}", home(".yarnrc"))),
+        ("yarnrc_yml", format!("printf x > {}", home(".Yarnrc.YML"))),
+        (
+            "walked_move",
+            format!("mv {} {}", home(".cargo"), home(".moved")),
+        ),
+        ("walked_remove", format!("rm -r {}", home(".npm"))),
+        ("walked_link", format!("ln -s {away} {}", home(".claude"))),
+        ("registry_remove", format!("rm {}", home(".cargo/registry"))),
+        ("registry_case", format!("rm {}", home(".CARGO/Registry"))),
+        (
+            "registry_move",
+            format!("mv {} {}", home(".cargo/registry"), home(".cargo/moved")),
+        ),
+        (
+            "registry_swap",
+            format!("ln -sfn {away} {}", home(".cargo/registry")),
+        ),
+        ("git_link", format!("ln -s {away} {}", home(".cargo/git"))),
+    ];
+    let allowed = [
+        (
+            "cache",
+            format!(
+                "mkdir -p {} && printf ok > {}",
+                home(".cache/tool"),
+                home(".cache/tool/data")
+            ),
+        ),
+        ("git_cache", format!("mkdir -p {}", home(".cargo/git/db"))),
+        (
+            "gitconfig",
+            format!("printf '[core]\\n' > {}", home(".gitconfig")),
+        ),
+    ];
+    let mut problems = Vec::new();
+    for (name, script) in denied {
+        let output = run(&sandbox, &profile, &script);
+        if output.status.success() {
+            problems.push(format!("{name} ran: {script}"));
+        }
+    }
+    for (name, script) in allowed {
+        let output = run(&sandbox, &profile, &script);
+        if !output.status.success() {
+            problems.push(format!(
+                "{name} refused: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+    let listed = Command::new("/bin/ls")
+        .arg("-led")
+        .arg(case.home.join("f"))
+        .output()
+        .unwrap();
+    let flags = fs::symlink_metadata(case.home.join("f"))
+        .map(|metadata| FileFlag::from_bits_retain(metadata.st_flags()))
+        .unwrap();
+    let _ = Command::new("/usr/bin/chflags")
+        .args(["-R", "nouchg"])
+        .arg(&case.home)
+        .output();
+    let _ = Command::new("/bin/chmod")
+        .args(["-R", "-N"])
+        .arg(&case.home)
+        .output();
+    if String::from_utf8_lossy(&listed.stdout).contains("deny") {
+        problems.push("an ACL was set in the home".to_owned());
+    }
+    if flags.intersects(FileFlag::UF_IMMUTABLE) {
+        problems.push("a flag was set in the home".to_owned());
+    }
+    if fs::read_link(case.home.join(".cargo/registry")).ok() != Some(registry.clone()) {
+        problems.push("the link to the owner's crates changed".to_owned());
+    }
+    for entry in [".npm", ".cargo", ".cargo/git"] {
+        if !fs::symlink_metadata(case.home.join(entry))
+            .is_ok_and(|metadata| metadata.is_dir())
+        {
+            problems.push(format!("{entry} is no longer a real folder"));
+        }
+    }
+    for entry in [
+        ".claude",
+        ".cargo/bin",
+        ".cargo/config.toml",
+        ".config/git",
+        ".npmrc",
+        ".yarnrc",
+        ".yarnrc.yml",
+        ".moved",
+    ] {
+        if fs::symlink_metadata(case.home.join(entry)).is_ok() {
+            problems.push(format!("{entry} planted"));
+        }
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let npm = std::env::split_paths(&path)
+        .map(|folder| folder.join("npm"))
+        .find(|candidate| candidate.is_file())
+        .expect("the row needs npm on PATH");
+    let package = case.tmp.join("package");
+    write(
+        &package.join("package.json"),
+        "{\"name\":\"p\",\"version\":\"0.0.0\",\"scripts\":{\"x\":\"node -e 0\"}}\n",
+    );
+    let cargo = Command::new(env!("CARGO"))
+        .arg("x")
+        .current_dir(&case.tmp)
+        .env("CARGO_HOME", case.home.join(".cargo"))
+        .output()
+        .unwrap();
+    let npm = Command::new(npm)
+        .args(["--no-update-notifier", "run", "x"])
+        .current_dir(&package)
+        .env("HOME", &case.home)
+        .output()
+        .unwrap();
+    if marker.exists() {
+        problems.push(format!(
+            "a later run ran what the agent planted: {:?}\ncargo: {cargo:?}\nnpm: {npm:?}",
+            fs::read_to_string(&marker).unwrap_or_default()
+        ));
+    }
+    assert!(
+        problems.is_empty(),
+        "a confined agent left in its home what a later run executes or a launch trips on:\n{}",
+        problems.join("\n")
+    );
+}
+
+/// A confined agent can neither give its home's launch lock a second link, in its home or
+/// anywhere else it writes, nor remove or replace it (RV-DS241-137 r3): a launch refuses a
+/// lock with a second link, so one `ln` would refuse every later launch of that home.
+#[test]
+fn a_confined_agent_never_links_removes_or_replaces_its_homes_launch_lock() {
+    use std::os::unix::fs::MetadataExt;
+    let case = case();
+    let lock = case.home.join("crazyagent.lock");
+    write(&lock, "");
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
+    let profile = case.profiles.join("lock.sb");
+    let held = quoted(&lock);
+    let other = quoted(&case.home.join("other"));
+    let in_home = quoted(&case.home.join("x"));
+    let in_tmp = quoted(&case.tmp.join("x"));
+    let denied = [
+        ("link_home", format!("ln {held} {in_home}")),
+        ("link_tmp", format!("ln {held} {in_tmp}")),
+        ("remove", format!("rm -f {held}")),
+        (
+            "replace",
+            format!("printf x > {other} && mv -f {other} {held}"),
+        ),
+    ];
+    for (name, script) in denied {
+        let output = run(&sandbox, &profile, &script);
+        assert!(!output.status.success(), "{name} ran: {script}");
+    }
+    let metadata = fs::symlink_metadata(&lock).unwrap();
+    assert!(metadata.is_file());
+    assert_eq!(metadata.nlink(), 1);
+    assert_eq!(metadata.len(), 0);
 }

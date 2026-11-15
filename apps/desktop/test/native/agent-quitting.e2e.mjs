@@ -23,7 +23,7 @@ const SHOWN = `(() => {
   return [quit?.value ?? null, left?.value ?? null, hours?.value ?? null, hours?.disabled ?? null];
 })()`;
 const SAVE = 'form[aria-label="Quitting"] button[type=submit]';
-const KEEP_CARD = "Keep team agents running They go on with their work, and CrazyAgent takes them over when it opens again.";
+const KEEP_CARD = "Keep team agents running They go on with their work, and CrazyAgent takes them over when it opens again. An agent under network None is frozen instead, until CrazyAgent opens again.";
 const STOP_CARD = "Stop team agents Each agent stops as Stop would, and its task goes back to the queue.";
 const HOUR_S = 60 * 60;
 const TEN_YEARS_S = 10 * 365 * 24 * HOUR_S;

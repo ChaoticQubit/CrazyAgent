@@ -6,8 +6,8 @@ use crazyagent::credentials::{Keychain, SecretString, Store, reference};
 use crazyagent::model_gateway::relay::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use crazyagent::sandbox::toolchains::{self, ToolHomes};
 use crazyagent::sandbox::{
-    AGENT_GIT_ENV, AGENT_TLS_ENV, ProjectSandbox, SECRET_ROOT_REFUSED, SandboxError,
-    SandboxNetwork, agent_command, agent_env_refused, agent_variable_allowed,
+    AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, ProjectSandbox, SECRET_ROOT_REFUSED,
+    SandboxError, SandboxNetwork, agent_command, agent_env_refused, agent_variable_allowed,
 };
 use keychain_support::TemporaryKeychain;
 use std::collections::BTreeMap;
@@ -219,6 +219,13 @@ fn guarded_engine_runtime_secrets_stay_unreadable_and_no_read_root_may_hold_them
         &secret_text,
     )
     .unwrap();
+    let profile_home = case
+        .runtime
+        .join("native-profiles")
+        .join("a".repeat(64))
+        .join("home");
+    fs::create_dir_all(&profile_home).unwrap();
+    fs::write(profile_home.join(".credentials.json"), &secret_text).unwrap();
     walled(
         sandbox(&case)
             .allow_read(&case.runtime)
@@ -239,6 +246,7 @@ fn guarded_engine_runtime_secrets_stay_unreadable_and_no_read_root_may_hold_them
         case.runtime.join("engine.db"),
         case.runtime.join("engine.db-wal"),
         case.runtime.join("account-keys").join("key-a"),
+        profile_home.join(".credentials.json"),
     ] {
         let output = shell(&sandbox, &profile, &format!("cat {}", quoted(&secret)));
         assert!(!output.status.success(), "{}", secret.display());
@@ -280,6 +288,36 @@ fn guard_refuses_agent_roots_inside_engine_secrets() {
     )
     .unwrap();
     assert!(sandbox.guard_engine(&case.runtime).is_err());
+}
+
+/// CONFIGURED-HOMES-GUARD: an agent guarded on the engine root, as jobs, team agents,
+/// read-only runs and the IDE are, has the folder of configured SDK homes denied in its
+/// profile, so a real child cannot read or list a keyed account's config there.
+#[test]
+fn a_guarded_agent_cannot_read_a_configured_sdk_home() {
+    let case = case();
+    let secret_text = format!("rcli_test{}", random_hex(18));
+    let homes = case.runtime.join("configured-sdk-homes");
+    let config = homes
+        .join("c".repeat(64))
+        .join(".backboard")
+        .join("config.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(&config, &secret_text).unwrap();
+    let sandbox = sandbox(&case).guard_engine(&case.runtime).unwrap();
+    assert!(
+        sandbox
+            .profile()
+            .contains(&format!("\n  (subpath \"{}\")", homes.display()))
+    );
+    let profile = case.profiles.join("homes.sb");
+    let read = shell(&sandbox, &profile, &format!("cat {}", quoted(&config)));
+    assert!(!read.status.success());
+    assert!(!holds(&read.stdout, &secret_text));
+    assert!(String::from_utf8_lossy(&read.stderr).contains("Operation not permitted"));
+    let list = shell(&sandbox, &profile, &format!("ls {}", quoted(&homes)));
+    assert!(!list.status.success());
+    assert!(!holds(&list.stdout, &"c".repeat(64)));
 }
 
 #[test]
@@ -547,6 +585,7 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
     .into_iter()
     .chain(AGENT_GIT_ENV)
     .chain(AGENT_TLS_ENV)
+    .chain(AGENT_HOME_ENV)
     .map(|(name, value)| (name.to_owned(), value.to_owned()))
     .collect();
     expected.extend(
@@ -621,9 +660,7 @@ fn tools_on_agent_reaches_ip_endpoints_but_no_engine_unix_socket() {
         .collect();
     let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = endpoint.local_addr().unwrap().port();
-    let free = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let served = free.local_addr().unwrap().port();
-    drop(free);
+    let served = crazyagent::spawn_gate::free_low_tcp_port().unwrap();
     let open = ProjectSandbox::new(&case.project, &case.home, &case.tmp, SandboxNetwork::Open)
         .unwrap()
         .guard_engine(&case.runtime)
@@ -1033,4 +1070,56 @@ fn an_agent_git_never_opens_a_folder_laid_out_as_a_bare_repository() {
         project.join(".git"),
         "an agent's git still finds an ordinary repository from a subfolder"
     );
+}
+
+/// Every agent process, sandboxed or at Full access, reads no global git config, no Python
+/// user site and no npm user config, so a `.gitconfig`, `.config/git/config`, user-site
+/// `.pth` or `.npmrc` file an agent leaves in its home runs nothing in a later process
+/// (RV-DS241-137, sec r1 F1). A harness can neither point git at another global config nor
+/// turn the user site or the user `.npmrc` back on.
+#[test]
+fn every_agent_process_reads_no_global_git_config_and_no_python_user_site() {
+    let pinned = [
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("PYTHONNOUSERSITE", "1"),
+        ("NPM_CONFIG_USERCONFIG", "/dev/null"),
+    ];
+    let home = OsStr::new("/private/tmp/ca-agent-home");
+    let base = [("HOME", home)];
+    let reopened = [
+        (OsStr::new("PYTHONNOUSERSITE"), Some(OsStr::new("0"))),
+        (
+            OsStr::new("NPM_CONFIG_USERCONFIG"),
+            Some(OsStr::new("/private/tmp/ca-agent-home/.npmrc")),
+        ),
+    ];
+    let env = crazyagent::sandbox::agent_env(&base, reopened).unwrap();
+    for (name, value) in pinned {
+        let values: Vec<&OsStr> = env
+            .iter()
+            .filter(|(known, _)| known == name)
+            .map(|(_, value)| value.as_os_str())
+            .collect();
+        assert_eq!(values, [OsStr::new(value)], "{name}");
+    }
+    let elsewhere = [(
+        OsStr::new("GIT_CONFIG_GLOBAL"),
+        Some(OsStr::new("/private/tmp/ca-agent-home/.gitconfig")),
+    )];
+    assert!(crazyagent::sandbox::agent_env(&base, elsewhere).is_err());
+    let program = Path::new("/usr/bin/true");
+    let none = || std::iter::empty::<(&OsStr, Option<&OsStr>)>();
+    let full = crazyagent::sandbox::unconfined_command(program, &base, none()).unwrap();
+    let confined = agent_command(Path::new("/private/tmp/agent.sb"), program, &base, none())
+        .unwrap();
+    for (level, command) in [("full", &full), ("confined", &confined)] {
+        for (name, value) in pinned {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(known, set)| known == name && set == Some(OsStr::new(value))),
+                "{level}: {name}"
+            );
+        }
+    }
 }

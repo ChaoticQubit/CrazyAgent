@@ -38,15 +38,19 @@ function standInHarness(root) {
   return path;
 }
 
-/** Puts resting sub-agents in the engine's team table, each counted as running with a
- * terminal name and run by no worker. Inputs: the engine root, the project and how many.
- * Output: their ids. */
+/** The process group a resting agent's pane reported ready with: past every pid the system
+ * hands out, so no process holds it, and the engine only reads it. */
+const RESTING_GROUP = 2_000_000_000;
+
+/** Puts resting sub-agents in the engine's team table, each counted as running, with the
+ * process group its pane reported ready with so the graph names its terminal (DEC-161 3b),
+ * and run by no worker. Inputs: the engine root, the project and how many. Output: their ids. */
 function restingAgents(runtime, project, count) {
   const store = new DatabaseSync(join(runtime, "engine.db"));
   try {
     store.exec("PRAGMA busy_timeout = 5000");
     const now = Date.now();
-    const insert = store.prepare("INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,turns,parent) VALUES (?,'sub','codex',1,'idle',?,?,1,NULL)");
+    const insert = store.prepare(`INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,turns,parent,process_group) VALUES (?,'sub','codex',1,'idle',?,?,1,NULL,${RESTING_GROUP})`);
     const ids = Array.from({ length: count }, () => Number(insert.run(project, now, now).lastInsertRowid));
     assert.ok(ids.every((id) => Number.isSafeInteger(id) && id > 0), "the engine numbers each team agent");
     return ids;

@@ -215,6 +215,14 @@ export function linkedSignIn(accounts: Loaded<AccountView[]>, id: string): { acc
   return account && { account, signIn: accountActions(account).includes("sign_in") };
 }
 
+/** The drawer after a change an account's drawer reported: that account, as changed, while the
+ * drawer still shows it, and the drawer as it is otherwise, so a result that lands after the
+ * owner opened another account or closed the drawer never reopens its own. Inputs: the drawer
+ * now and the changed account. Output: the drawer to show. */
+export function openedAfterChange(now: { account: AccountView; signIn: boolean } | undefined, account: AccountView) {
+  return now?.account.id === account.id ? { account, signIn: false } : now;
+}
+
 /** Settings, Accounts: the account list with row and selection actions, the Delete
  * confirmation, the Add account dialog and the account drawer. While an account shows a
  * sign-in in progress the list is read again every few seconds.
@@ -293,8 +301,8 @@ export function Accounts({ adding, signingIn }: { adding: boolean; signingIn?: s
       setAdd(false);
       if (adding) navigate({ name: "settings", tab: "accounts" }, true);
     }} />
-    <AccountDrawer account={current} pools={known} signIn={opened?.signIn} onClose={() => setOpened(undefined)}
-      onChanged={(account) => { if (account) setOpened({ account, signIn: false }); refresh(); }} onDelete={(account) => setDeleting([account])} />
+    <AccountDrawer key={current?.id} account={current} pools={known} signIn={opened?.signIn} onClose={() => setOpened(undefined)}
+      onChanged={(account) => { if (account) setOpened((now) => openedAfterChange(now, account)); refresh(); }} onDelete={(account) => setDeleting([account])} />
     <ConfirmDialog open={Boolean(dialog)} pending={working} onCancel={() => setDeleting(undefined)} onConfirm={() => void remove()}
       title={dialog?.title ?? "Delete accounts?"} confirmLabel={dialog?.confirmLabel ?? "Delete"}>
       {dialog && <span className="stack-small">{dialog.lines.map((line) => <span key={line}>{line}</span>)}</span>}

@@ -420,6 +420,10 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
         network: None,
         lineage: None,
         grants: None,
+        freeze: None,
+        frozen_ms: None,
+        frozen_for_ms: None,
+        keepers: None,
     };
     let text = record.encode().unwrap();
     assert_eq!(PaneRecord::decode(&text), Some(record.clone()));
@@ -674,6 +678,10 @@ fn keyed(key: &std::path::Path) -> PaneRecord {
         network: None,
         lineage: None,
         grants: None,
+        freeze: None,
+        frozen_ms: None,
+        frozen_for_ms: None,
+        keepers: None,
     }
 }
 
@@ -734,4 +742,163 @@ fn a_pane_record_keeps_its_lineage_token_and_refuses_a_malformed_one() {
     let malformed = text.replace(token.as_str(), "not-a-token");
     assert_ne!(malformed, text);
     assert_eq!(PaneRecord::decode(&malformed), None);
+}
+
+/// A Claude Code record of `turns` finished turns, each a prompt and a 4 KiB answer, so it
+/// takes several reads. Takes the fixture and the count. Returns the record's path.
+#[cfg(target_os = "macos")]
+fn long_record(fixture: &Fixture, turns: usize) -> PathBuf {
+    let answer = format!(
+        r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Old {}"}}],"stop_reason":"end_turn"}}}}"#,
+        "x".repeat(4096)
+    );
+    let mut lines = Vec::new();
+    for _ in 0..turns {
+        lines.extend([TURN_OPEN, answer.as_str()]);
+    }
+    fixture.transcript(&lines)
+}
+
+/// RV-DS241-72 and -143: an agent can grow its record without end, so adoption reads it only
+/// while the launch's run time lasts, at most `REPLAY_WAIT`. A read cut short passes over the
+/// rest of the record as it stands, unread, so no earlier turn reaches the session as a new
+/// one; whether a turn is open there is unknown, so nothing is typed (the stand-in records
+/// every Escape), the turn is told as dropped and the next turn is followed alone.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_adoption_replay_cut_at_the_run_time_passes_over_the_rest_and_hands_the_session_no_old_turn() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(6).unwrap();
+    let file = long_record(&fixture, 1_024);
+    let length = std::fs::metadata(&file).unwrap().len();
+    assert!(length > 4 * READ_BYTES_MAX as u64);
+    let record = fixture.spawn(&host, &agent, ESCAPE_HARNESS, &file);
+    std::thread::sleep(Duration::from_millis(500));
+    let launched = PaneRecord {
+        since_ms: record.since_ms - 60_000,
+        ..record
+    };
+    let limits = LaunchLimits {
+        run_time: Duration::from_secs(30),
+        ..LaunchLimits::default()
+    };
+    assert!(launched.run_time_left(limits.run_time).is_zero());
+
+    let mut session =
+        TerminalSession::adopt(host.clone(), agent.clone(), &launched, limits).unwrap();
+    assert_eq!(
+        session.reader.bytes(),
+        length,
+        "a cut read passes over the rest of the record, so no poll reads it as new"
+    );
+    assert_eq!(session.reader.unread(), Some(0));
+    assert!(
+        session.ready && !session.turn && session.took_none(),
+        "a pane whose record was cut is taken over idle, its turn told as dropped"
+    );
+    assert_eq!(lines(&file), 2 * 1_024, "nothing was typed into the pane");
+    session.clear_deadline();
+    follows_a_typed_command(&mut session, &file);
+    drop(session);
+    assert!(host.alive().unwrap().is_empty());
+}
+
+/// RV-DS241-143: a live master is not bound by the launch's 24 h run time (the Master run
+/// time bounds it, F01), so a master pane that started 25 h ago, whose record takes more than
+/// three reads (all a cut adoption with an Escape could read), is still read to its record's
+/// end when a restarted engine adopts it: it is taken over idle with no turn dropped, and
+/// only the next turn typed in the pane reaches the session.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_older_than_the_launch_run_time_is_replayed_to_its_record_s_end() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(8).unwrap();
+    let file = long_record(&fixture, 1_024);
+    let length = std::fs::metadata(&file).unwrap().len();
+    assert!(length > 3 * READ_BYTES_MAX as u64);
+    let record = fixture.spawn(&host, &agent, ESCAPE_HARNESS, &file);
+    std::thread::sleep(Duration::from_millis(500));
+    let launched = PaneRecord {
+        since_ms: record.since_ms - 25 * 3_600_000,
+        ..record
+    };
+    let limits = LaunchLimits {
+        run_time: crate::harnesses::launch::RUN_TIME_MAX,
+        ..LaunchLimits::default()
+    };
+    assert!(launched.run_time_left(limits.run_time).is_zero());
+
+    let mut session =
+        TerminalSession::adopt_live(host.clone(), agent.clone(), &launched, limits).unwrap();
+    assert_eq!(
+        session.reader.bytes(),
+        length,
+        "the live master's whole record was replayed at adoption"
+    );
+    assert_eq!(session.reader.unread(), Some(0));
+    assert!(
+        session.ready && !session.turn && !session.took_none(),
+        "an idle live master read to its record's end is taken over idle, no turn dropped"
+    );
+    assert_eq!(lines(&file), 2 * 1_024, "nothing was typed into the pane");
+    session.clear_deadline();
+    follows_a_typed_command(&mut session, &file);
+    session.leave();
+    assert_eq!(
+        host.alive().unwrap(),
+        std::slice::from_ref(&agent),
+        "leaving keeps the live master's pane running"
+    );
+}
+
+/// RV-DS241-75: a pane whose first process is not the one its record names is not taken
+/// over, so no later stop signals a process group the system gave that number again; the
+/// recorded group and the pane are both left alone.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pane_whose_process_is_not_the_recorded_one_is_not_adopted_and_its_group_is_left_alone() {
+    use std::os::unix::process::CommandExt;
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(7).unwrap();
+    let file = fixture.transcript(&[TURN_OPEN, TURN_DONE]);
+    let record = fixture.spawn(&host, &agent, "exec cat", &file);
+    let mut other = crate::spawn_gate::spawn(
+        Command::new("/bin/sleep")
+            .arg("60")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let reused = PaneRecord {
+        pid: other.id(),
+        ..record
+    };
+
+    let refused = match TerminalSession::adopt(
+        host.clone(),
+        agent.clone(),
+        &reused,
+        LaunchLimits::default(),
+    ) {
+        Ok(session) => {
+            session.leave();
+            None
+        }
+        Err(problem) => Some(problem.0),
+    };
+    let untouched = other.try_wait().unwrap().is_none();
+    let _ = other.kill();
+    let _ = other.wait();
+    assert_eq!(refused.as_deref(), Some("launch_closed"));
+    assert!(untouched, "the recorded process group was never signalled");
+    assert_eq!(
+        host.alive().unwrap(),
+        std::slice::from_ref(&agent),
+        "a pane that is not the record's is left running"
+    );
 }

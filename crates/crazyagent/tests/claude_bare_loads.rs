@@ -74,11 +74,6 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-fn closed_port() -> u16 {
-    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
-}
-
 fn run(bare: bool) -> Run {
     let root = tempfile::Builder::new()
         .prefix("ca-bare-")
@@ -96,6 +91,7 @@ fn run(bare: bool) -> Run {
         &plugin,
     );
     let stream = base.join("stream.jsonl");
+    let (_held, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
 
     let mut command = Command::new(claude());
     command
@@ -110,10 +106,7 @@ fn run(bare: bool) -> Run {
         .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
         .env("CLAUDE_CODE_MAX_RETRIES", "0")
         .env("ANTHROPIC_API_KEY", PLACEHOLDER_KEY)
-        .env(
-            "ANTHROPIC_BASE_URL",
-            format!("http://127.0.0.1:{}", closed_port()),
-        )
+        .env("ANTHROPIC_BASE_URL", format!("http://127.0.0.1:{port}"))
         .current_dir(&work)
         .stdin(Stdio::null())
         .stdout(fs::File::create(&stream).unwrap())

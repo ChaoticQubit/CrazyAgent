@@ -13,6 +13,7 @@ import { useLearningVisits } from "./screens/dashboard/learn";
 import { Welcome } from "./screens/first-run";
 import { AddFolder } from "./screens/intake/add-folder";
 import { CloneFromGitHub } from "./screens/intake/clone";
+import { sidebarFolders } from "./screens/intake/intake";
 import { OnboardingReview } from "./screens/intake/onboarding";
 import { AppMetrics } from "./screens/metrics";
 import { useResetNotice } from "./screens/metrics/extras";
@@ -46,7 +47,13 @@ function UpdateLink() {
   </>;
 }
 
-function EngineDown({ onRetry }: { onRetry: () => void }) {
+/** The full-window state for an engine that isn't running: why the last start found none when
+ * it says more, Try again, Restart engine, which reinstalls the login service for this app's
+ * engine when it names a gone or temporary app path (RV-DS241-118), the support details and
+ * Check for updates. Inputs: the retry handler and the start's problem. */
+function EngineDown({ onRetry, problem }: { onRetry: () => void; problem: string | null }) {
+  const [restart, restartNow] = useEngineRestart(onRetry);
+  const update = useSyncExternalStore(updateStore.subscribe, updateStore.get, updateStore.get);
   const [copied, setCopied] = useState<"idle" | "copied" | { failed: string }>("idle");
   async function copy() {
     const details = supportDetails(window.innerWidth, window.innerHeight, new Date());
@@ -63,8 +70,10 @@ function EngineDown({ onRetry }: { onRetry: () => void }) {
       <Icon name="wifi-off" size={28} />
       <h1>CrazyAgent's engine isn't running</h1>
       <p className="secondary">Projects, accounts and agents live in the engine. Start it, then try again.</p>
+      {problem && <p role="alert">{displayText(problem)}</p>}
       <span className="row"><Button variant="primary" icon="refresh-cw" onClick={onRetry}>Try again</Button>
         <Button icon="copy" onClick={() => void copy()}>Copy details for support</Button></span>
+      <RestartEngine restart={restart} onRestart={restartNow} disabled={blocking(update)} />
       <UpdateLink />
       {copied === "copied" && <p className="secondary" role="status">Copied. Paste it into your message to support.</p>}
       {typeof copied === "object" && <><p className="secondary" role="alert">Couldn't copy. Select the details below and copy them.</p>
@@ -170,12 +179,13 @@ function ShellSidebar({ route, projects, profileName, session }: { route: Route;
 export function AppView({ session, route, alerts, working, under, back }: { session: Session; route: Route; alerts?: Map<string, number>; working?: ReadonlyMap<string, number>; under?: Route; back?: string }) {
   const open = useUserDialog();
   const updates = route.name === "settings" && route.tab === "updates" || open === "updates";
-  if (session.engine === "down") return updates ? <UpdatesAlone session={session} /> : <EngineDown onRetry={session.retry} />;
+  if (session.engine === "down") return updates ? <UpdatesAlone session={session} /> : <EngineDown onRetry={session.retry} problem={session.engineProblem ?? null} />;
   if (session.engine === "outdated") return updates ? <UpdatesAlone session={session} /> : <EngineOutdated onRetry={session.retry} />;
   if (session.engine === "connecting" || session.profile.kind === "loading") return updates ? <UpdatesAlone session={session} /> : <Launching />;
   const profile = session.profile.kind === "ok" ? session.profile.value : undefined;
-  if (session.profile.kind === "ok" && profile === null && updates) return <UpdatesAlone session={session} />;
-  if (session.profile.kind === "ok" && profile === null || route.name === "welcome") {
+  const firstRun = session.profile.kind === "ok" && (session.profile.value === null || !session.profile.value.name.trim());
+  if (firstRun && updates) return <UpdatesAlone session={session} />;
+  if (firstRun || route.name === "welcome") {
     return <SessionContext.Provider value={session}>
       <Welcome profile={profile} onSaved={(_, next, note) => { if (note) session.showToast(note); void session.refreshProfile().then(() => navigate(next ?? { name: "home" }, true)); }}
         onSkip={(next, note) => { if (note) session.showToast(note); navigate(next ?? { name: "home" }, true); }} />
@@ -184,17 +194,19 @@ export function AppView({ session, route, alerts, working, under, back }: { sess
   const asked = route.name === "settings" && isUserMenuTab(route.tab) ? route.tab : null;
   const page = asked === null ? route : under ?? { name: "home" };
   const toastOpen = session.toastOpen;
-  const projects = session.projects.kind === "ok" ? session.projects.value.map((project) => {
+  const projects = session.projects.kind === "ok" ? [...session.projects.value.map((project) => {
     const unseen = alerts?.get(project.id) ?? 0;
     return { id: project.id, name: displayText(project.name), flag: unseen > 0 ? String(unseen) : undefined, working: working?.get(project.id) };
-  }) : undefined;
+  }), ...sidebarFolders(session.found, session.intake, new Set(session.projects.value.map((project) => project.id)))
+    .map((folder) => ({ ...folder, name: displayText(folder.name) }))] : undefined;
   return <SessionContext.Provider value={session}>
     <AppShell toast={<Toast message={session.toast} onOpen={toastOpen ? () => navigate(toastOpen) : undefined} />}
       corner={<NoticeBell projects={session.projects.kind === "ok" ? session.projects.value : []} />}
       sidebar={<ShellSidebar route={page} projects={projects} profileName={profile?.name} session={session} />}>
       {session.unconfirmed && <Banner action={<span className="row">
         <Button size="small" pending={session.unconfirmed.busy} pendingLabel="Checking..." onClick={() => void session.checkUnconfirmed()}>Check again</Button>
-        <Button size="small" disabled={session.unconfirmed.busy} onClick={() => void session.retryUnconfirmed()}>Retry</Button>
+        {session.unconfirmed.outcome !== "in_progress" &&
+          <Button size="small" disabled={session.unconfirmed.busy} onClick={() => void session.retryUnconfirmed()}>Retry</Button>}
         {session.unconfirmed.outcome === "not_recorded_at_barrier" &&
           <Button size="small" disabled={session.unconfirmed.busy} onClick={() => void session.dropUnconfirmed()}>Dismiss</Button>}
       </span>}>
@@ -232,6 +244,17 @@ function useShortcuts() {
 export const ALERT_READ_MS = 10_000;
 
 const NONE_WORKING: ReadonlyMap<string, number> = new Map();
+
+/** Keeps the map shown when a look reads the same counts, so a look that changed nothing never
+ * renders the app's tree again (React skips a state set to the same object). Inputs: the map
+ * shown and the one read now. Output: the map to keep. */
+export function sameOrNext<M extends ReadonlyMap<string, number>>(shown: M, next: M): M {
+  if (shown.size !== next.size) return next;
+  for (const [key, value] of next) {
+    if (shown.get(key) !== value) return next;
+  }
+  return shown;
+}
 
 /** What the sidebar shows from the team alert read: each project's flag count and its agents
  * at work. */
@@ -272,8 +295,9 @@ export function useTeamAlerts(running: boolean, showToast: (message: string, ope
         last = next.last;
         const flags = withPendingQuestions(unseenByProject(result.value), unseenQuestionAlerts(result.value.projects), pending);
         const total = [...flags.values()].reduce((sum, count) => sum + count, 0);
-        setCounts(flags);
-        setWorking(workingByProject(result.value));
+        const busy = workingByProject(result.value);
+        setCounts((shown) => sameOrNext(shown, flags));
+        setWorking((shown) => sameOrNext(shown, busy));
         if (next.fresh[0]) toast.current(displayText(next.fresh[0].text), alertRoute(next.fresh[0]));
         if (next.fresh.length > 0 || total !== shown) void teamAttention(total, next.fresh.length > 0);
         shown = total;

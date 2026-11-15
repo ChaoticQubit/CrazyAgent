@@ -1,14 +1,14 @@
 import { nextGeneration, poolSummaries, setApplyHarnessSwitch } from "../../api";
 import type { HarnessEntry, Result } from "../../api";
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, loadTrust, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, saveTrust, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
+import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type HiddenPaths, type ReadPaths, loadTrust, saveTrust } from "../../api-projects";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope, Trust, TrustView } from "../../api-projects";
 import type { IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
 import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
 import { RAISE_WARNING, TRUST_STALE, TrustLevels, TrustRules, raises, trustLabel } from "./trust";
 import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
-import { Button, ConfirmDialog, Dialog, Segmented, Select } from "../../ui";
+import { Button, ConfirmDialog, Dialog, Segmented, Select, navigate } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
@@ -19,7 +19,7 @@ import type { TeamDraft } from "../new-project/wizard";
 import { folderLabel, projectFolder } from "./overview";
 import { changeOutcome } from "./research";
 import { MoveHome } from "./move-home";
-import { RemoveDialogView, deleteReady, removeTitle } from "./remove-dialog";
+import { RemoveDialogView, deleteReady, removeChoices, removeTitle } from "./remove-dialog";
 import type { RemoveChoice } from "./remove-dialog";
 import { PlanningLine } from "./planning";
 import { SessionContext, useHeld, useLoad } from "../../state";
@@ -248,9 +248,37 @@ export function removeLine(folder: string | null): string {
   return `Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk ${where}, with every file in it.`;
 }
 
+/** Takes the ask a route to Remove project carries, once: the choice the Remove dialog opens on,
+ * Remove from dashboard for `remove` and Delete everything for `delete`, and drops any ask from
+ * the address in place, so a later mount of the section never opens the dialog again. Input:
+ * the project id. Output: the choice, or null when the route asked for neither. */
+export function takeRemoveAsk(projectId: string): RemoveChoice | null {
+  const asked = hashParam("ask");
+  if (asked === null) return null;
+  navigate({ name: "project", id: projectId, tab: "settings", section: "remove" }, true);
+  return asked === "delete" ? "everything" : asked === "remove" ? "dashboard" : null;
+}
+
+/** Opens the Remove dialog for each ask a route carries: the one in the address when the
+ * section mounts and any a later route brings while it stays mounted, each taken once. Inputs:
+ * the project id and what to do with the asked choice. Output: the call that stops listening. */
+export function watchRemoveAsk(projectId: string, onAsk: (choice: RemoveChoice) => void): () => void {
+  const take = () => {
+    const asked = takeRemoveAsk(projectId);
+    if (asked !== null) onAsk(asked);
+  };
+  take();
+  window.addEventListener("hashchange", take);
+  return () => window.removeEventListener("hashchange", take);
+}
+
+/** Settings' Remove project: the section, and its dialog, opened by the button or by a route
+ * asking for it; a route asking for a delete again, after one an engine stop cut short, opens it
+ * on Delete everything once the preview offers it. Inputs: the project and its stored setup. */
 function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup | null }) {
   const session = useContext(SessionContext);
-  const [confirming, setConfirming] = useState(() => hashParam("ask") === "remove");
+  const wanted = useRef<RemoveChoice>("dashboard");
+  const [confirming, setConfirming] = useState(false);
   const [preview, setPreview] = useState<Result<RemovalPreview>>();
   const [choice, setChoice] = useState<RemoveChoice>("dashboard");
   const [typed, setTyped] = useState("");
@@ -258,17 +286,21 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
   const [note, setNote] = useState("");
   const line = removeLine(setup ? projectFolder(setup.folder) : null);
   const read = preview?.kind === "ok" ? preview.value : null;
+  useEffect(() => watchRemoveAsk(data.id, (asked) => {
+    wanted.current = asked;
+    setConfirming(true);
+  }), [data.id]);
   useEffect(() => {
     if (!confirming) return;
     let live = true;
     setPreview(undefined);
-    setChoice("dashboard");
+    setChoice(wanted.current);
     setTyped("");
     void loadRemovalPreview(data.id).then((result) => { if (live) setPreview(result); });
     return () => { live = false; };
   }, [confirming, data.id]);
   async function remove() {
-    const deleting = choice === "everything";
+    const deleting = choice === "everything" && removeChoices(read).includes("everything");
     if (deleting && !deleteReady(read, typed)) return;
     setBusy(true);
     const result = await removeProject(data.id, nextGeneration(), deleting ? typed : null);
@@ -290,7 +322,7 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
     <h2>Remove project</h2>
     <p>Remove {displayText(data.name)} from CrazyAgent? {displayText(line)}</p>
     {note && <p className="pj-note warn" role="status">{note}</p>}
-    <div><button type="button" className="btn danger" onClick={() => setConfirming(true)}>Remove project</button></div>
+    <div><button type="button" className="btn danger" onClick={() => { wanted.current = "dashboard"; setConfirming(true); }}>Remove project</button></div>
     <Dialog open={confirming} title={removeTitle(displayText(data.name))} onClose={() => setConfirming(false)} busy={busy} wide>
       {preview === undefined
         ? <p className="pj-muted" role="status">Reading what removing would do...</p>
@@ -371,6 +403,10 @@ export function addReadPath(paths: string[], typed: string): { paths: string[] }
 /** What the folders list says after a save refused because the folders changed since it read
  * them, once it shows the saved folders again. */
 export const READ_PATHS_STALE = "These folders changed since you opened them. The list now shows the saved folders; make your change again.";
+
+/** What the hidden folders list says after a save refused because the folders changed since
+ * it read them, once it shows the saved folders again. */
+export const HIDDEN_PATHS_STALE = "These hidden folders changed since you opened them. The list now shows the saved folders; make your change again.";
 
 /** What Agent access says after a save refused because the policy changed since the page read
  * it, once it shows the saved access again. */
@@ -476,7 +512,7 @@ function SandboxSection({ data }: { data: ProjectData }) {
 }
 
 function HiddenSection({ data }: { data: ProjectData }) {
-  const [saved, setSaved] = useState<string[] | null>(null);
+  const [saved, setSaved] = useState<HiddenPaths | null>(null);
   const [paths, setPaths] = useState<string[]>([]);
   const [typed, setTyped] = useState("");
   const [note, setNote] = useState("");
@@ -487,7 +523,7 @@ function HiddenSection({ data }: { data: ProjectData }) {
     let live = true;
     void loadHiddenPaths(data.id).then((result) => {
       if (!live) return;
-      if (result.kind === "ok") { setSaved(result.value); setPaths(result.value); }
+      if (result.kind === "ok") { setSaved(result.value); setPaths(result.value.paths); }
       else setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
     });
     void loadAgentPolicy(data.id).then((result) => {
@@ -505,19 +541,34 @@ function HiddenSection({ data }: { data: ProjectData }) {
     setNote("");
   }
 
+  async function reread(): Promise<boolean> {
+    const fresh = await loadHiddenPaths(data.id);
+    if (fresh.kind !== "ok") return false;
+    setSaved(fresh.value);
+    setPaths(fresh.value.paths);
+    return true;
+  }
+
   async function save() {
+    if (saved === null) return;
     setBusy(true);
-    const result = await saveHiddenPaths(data.id, paths, nextGeneration());
-    setBusy(false);
-    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    const result = await saveHiddenPaths(data.id, paths, saved.version, nextGeneration());
+    if (savedStale(result)) {
+      const shown = await reread();
+      setBusy(false);
+      return setNote(shown ? HIDDEN_PATHS_STALE : "These hidden folders changed since you opened them. Reopen this page to see them.");
+    }
+    if (result.kind !== "ok") { setBusy(false); return setNote(result.kind === "not_ready" ? notReady : failureCopy(result)); }
     const state = receiptState(result.value);
-    if (state.kind !== "applied") return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.");
-    setSaved(paths);
+    if (state.kind !== "applied") { setBusy(false); return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again."); }
+    const shown = await reread();
+    setBusy(false);
+    if (!shown) return setNote("Hidden folders saved. Reopen this page to change them again.");
     setNote("");
     data.notify("Hidden folders saved. Agents started from now on can't open them.");
   }
 
-  const changed = saved !== null && JSON.stringify(saved) !== JSON.stringify(paths);
+  const changed = saved !== null && JSON.stringify(saved.paths) !== JSON.stringify(paths);
   return <div className="pj-stack">
     <h2>Folders agents can't open</h2>
     <p className="pj-secondary">Folders inside the project that agents, the master and research jobs can't read, write or run while access is Sandboxed. Use it for a secrets folder or a vendored dump you don't want touched. Each must be a folder inside the project that git does not track.</p>

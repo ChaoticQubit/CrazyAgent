@@ -102,6 +102,26 @@ fn the_window_passes_only_ids_versions_and_the_choice() {
     );
 }
 
+/// A bulk dismissal far longer than `LISTED_MAX` is refused at once, before the check that
+/// scans its items for a question named twice, so a huge list never holds the bridge lock
+/// while that scan runs (RV-DS241-47).
+#[test]
+fn a_bulk_dismissal_longer_than_the_limit_is_refused_before_its_items_are_scanned() {
+    let bridge = NativeBridge::new(None);
+    let items: Vec<(u64, u64)> = (1..=40_000).map(|id| (id, 0)).collect();
+    let began = std::time::Instant::now();
+    let refused = bridge
+        .dismiss_questions(items)
+        .err()
+        .map(|error| error.code);
+    let took = began.elapsed();
+    assert_eq!(refused, Some("questions_bulk_invalid"));
+    assert!(
+        took < Duration::from_millis(100),
+        "the refusal took {took:?}"
+    );
+}
+
 async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
     assert!(bridge.connect().await?.connected);

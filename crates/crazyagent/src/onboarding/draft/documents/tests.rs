@@ -161,6 +161,9 @@ fn a_roadmap_in_a_hidden_folder_is_found_but_git_internals_and_the_engine_folder
         (".git/plan.md", plan),
         (".hidden.md", plan),
     ]);
+    let hfs_git = repo.path().join(".g\u{200c}it");
+    std::fs::create_dir(&hfs_git).unwrap();
+    std::fs::write(hfs_git.join("plan.md"), plan).unwrap();
     let (documents, unread) = read(repo.path(), None, &[]).unwrap();
     let paths: Vec<&str> = documents
         .iter()
@@ -231,7 +234,7 @@ fn the_prompt_shows_the_local_scan_first_inside_each_documents_fence() {
         kind,
         marks: marks.iter().map(|mark| (*mark).to_owned()).collect(),
     };
-    let text = section(
+    let text = crate::onboarding::draft::documents_section(
         &[
             document("a.md", FoundKind::Roadmap, &["M0 Start", "M1 Ship"]),
             document("b.md", FoundKind::Research, &[]),
@@ -354,4 +357,71 @@ fn an_answer_naming_all_six_setup_kinds_keeps_the_five_research_kinds_and_no_pla
     assert_eq!(merged.len(), 1);
     assert_eq!(merged[0].kind, ResearchKind::MarketResearch);
     assert_eq!(merged[0].files, ["docs/a.md", "docs/b.md"]);
+}
+
+fn fixture_git(repo: &Path, args: &[&str]) {
+    let mut command = std::process::Command::new(crate::research::runner::setup_git());
+    command
+        .args(args)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .current_dir(repo);
+    let status = crate::spawn_gate::status(&mut command);
+    assert!(status.is_ok_and(|status| status.success()), "git {args:?}");
+}
+
+#[test]
+fn a_listing_never_runs_the_promisor_remote_a_hostile_repository_names() {
+    let repo = repo_with(&[("notes.md", "# Notes\n")]);
+    let outside = tempfile::tempdir().unwrap();
+    let fetched = outside.path().join("fetched");
+    assert!(!fetched.display().to_string().contains(' '));
+    let remote = format!("ext::sh -c touch% {}% ;% false", fetched.display());
+    for (key, value) in [
+        ("core.repositoryformatversion", "1"),
+        ("extensions.partialClone", "origin"),
+        ("remote.origin.url", remote.as_str()),
+        ("remote.origin.promisor", "true"),
+        ("protocol.ext.allow", "always"),
+    ] {
+        fixture_git(repo.path(), &["config", key, value]);
+    }
+    let absent = format!("100644,{},.gitignore", "5".repeat(40));
+    fixture_git(
+        repo.path(),
+        &["update-index", "--add", "--cacheinfo", &absent],
+    );
+    fixture_git(
+        repo.path(),
+        &["update-index", "--skip-worktree", ".gitignore"],
+    );
+
+    let kept = kept_out(repo.path());
+    let listed = untracked(repo.path());
+
+    assert!(
+        !fetched.exists(),
+        "a listing ran the command the repository's promisor remote names"
+    );
+    assert_eq!(kept, Some(Vec::new()));
+    assert_eq!(listed, Some(vec!["notes.md".to_owned()]));
+}
+
+#[test]
+fn the_project_git_never_fetches_a_missing_object_and_allows_no_transport() {
+    let command = git(Path::new("/"), None, &["status"]);
+    let set: Vec<(String, Option<String>)> = command
+        .get_envs()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.map(|value| value.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+
+    assert!(set.contains(&("GIT_NO_LAZY_FETCH".into(), Some("1".into()))));
+    assert!(set.contains(&("GIT_ALLOW_PROTOCOL".into(), Some(String::new()))));
 }

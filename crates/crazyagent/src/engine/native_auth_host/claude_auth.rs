@@ -1,5 +1,6 @@
 use crate::adapters::claude::{
-    AuthMethod, AuthStatus, REFRESH_WINDOW, RENEWAL_TURN, decode_auth_status,
+    AuthMethod, AuthStatus, REFRESH_WINDOW, RENEWAL_TURN, auth_status_lacks_config_directory,
+    decode_auth_status,
 };
 use crate::engine::EngineError;
 use std::os::unix::process::CommandExt;
@@ -76,8 +77,16 @@ fn verified_claude_account(stdout: &[u8], home: &Path) -> Result<Option<AuthStat
         .to_str()
         .filter(|_| home.is_absolute())
         .ok_or_else(|| EngineError("native_auth_claude_profile_invalid".into()))?;
-    let account = decode_auth_status(stdout)
-        .map_err(|_| EngineError("native_auth_claude_status_invalid".into()))?;
+    let account = decode_auth_status(stdout).map_err(|_| {
+        EngineError(
+            if auth_status_lacks_config_directory(stdout) {
+                "native_auth_harness_too_old"
+            } else {
+                "native_auth_claude_status_invalid"
+            }
+            .into(),
+        )
+    })?;
     if account.config_directory.as_str() != expected {
         return Err(EngineError("native_auth_claude_profile_mismatch".into()));
     }
@@ -165,6 +174,7 @@ pub(in crate::engine) async fn finish_failure(
             | "native_auth_claude_status_exit_mismatch"
             | "native_auth_claude_logout_not_observed" => ClaudeAuthFailure::StatusInvalid,
             "native_auth_claude_credential_expiring" => ClaudeAuthFailure::CredentialExpiring,
+            "native_auth_harness_too_old" => ClaudeAuthFailure::HarnessTooOld,
             _ => ClaudeAuthFailure::OutputInvalid,
         };
         ClaudeAuthObservation::Failed { reason }

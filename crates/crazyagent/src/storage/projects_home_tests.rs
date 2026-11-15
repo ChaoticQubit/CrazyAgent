@@ -351,3 +351,157 @@ fn delete_everything_is_offered_only_on_macos_in_v2() {
         cfg!(target_os = "macos")
     );
 }
+
+/// An add holds the projects home from its plan until its record or settle: the home is not
+/// set or moved elsewhere while a running row exists. An engine start removes the staging an
+/// add cut short left, deletes nothing else, and keeps only the newest end for the owner,
+/// until it is forgotten.
+#[test]
+fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let home = base.join("home");
+    let (source, landed) = (base.join("source"), home.join("source"));
+    std::fs::create_dir_all(source.join("lib")).unwrap();
+    std::fs::write(source.join("lib/a.txt"), "a\n").unwrap();
+    let staging = home.join(".crazyagent-adding-00ff00ff00ff00ff");
+    std::fs::create_dir_all(staging.join("lib")).unwrap();
+    let mut connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    crate::projects_home::save(&connection, &home).unwrap();
+    let insert = |connection: &Connection, request: &str| {
+        connection
+            .execute(
+                "INSERT INTO projects_home_add(request, owner, source, destination, mode)
+                 VALUES (?1, 'owner', ?2, ?3, 'move')",
+                params![request, source.to_str().unwrap(), landed.to_str().unwrap()],
+            )
+            .unwrap();
+    };
+    insert(&connection, "add-1");
+    let elsewhere = crate::projects_home::HomeAction::SetHome {
+        path: base.join("elsewhere").to_str().unwrap().into(),
+    };
+    let held = {
+        let tx = connection.transaction().unwrap();
+        projects_home::execute(&tx, &base.join("engine.db"), &elsewhere).unwrap()
+    };
+    let held = format!("{held:?}");
+    assert!(held.contains("Rejected"), "{held}");
+    assert!(held.contains("home_add_in_progress"), "{held}");
+    let add_1 = RequestId::new("add-1").unwrap();
+    assert_eq!(
+        projects_home::add_settle(&mut connection, Some(&add_1)).unwrap(),
+        1
+    );
+    assert_eq!(projects_home::add_ended(&connection).unwrap(), None);
+
+    insert(&connection, "add-2");
+    assert_eq!(projects_home::add_settle(&mut connection, None).unwrap(), 1);
+    assert!(!staging.exists(), "the start removes the cut add's staging");
+    assert_eq!(
+        std::fs::read_to_string(source.join("lib/a.txt")).unwrap(),
+        "a\n"
+    );
+    let ended = projects_home::add_ended(&connection).unwrap().unwrap();
+    assert_eq!(ended.request.as_str(), "add-2");
+    assert_eq!(ended.ended, "home_add_interrupted");
+
+    std::fs::create_dir_all(landed.join("lib")).unwrap();
+    insert(&connection, "add-3");
+    assert_eq!(projects_home::add_settle(&mut connection, None).unwrap(), 1);
+    let ended = projects_home::add_ended(&connection).unwrap().unwrap();
+    assert_eq!(ended.request.as_str(), "add-3");
+    assert_eq!(ended.ended, "home_move_source_left");
+    assert_eq!(
+        std::fs::read_to_string(source.join("lib/a.txt")).unwrap(),
+        "a\n",
+        "a start deletes nothing of the old folder"
+    );
+    let rows: i64 = connection
+        .query_row("SELECT count(*) FROM projects_home_add", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 1, "only the newest end is kept");
+    let add_3 = RequestId::new("add-3").unwrap();
+    projects_home::add_forget(&connection, &add_3).unwrap();
+    assert_eq!(projects_home::add_ended(&connection).unwrap(), None);
+}
+
+/// A delete's mark outlives a settle that only shares its exchange number, since a new engine
+/// process numbers exchanges again: a start ends the mark of a project that went and turns
+/// the mark of a project still there into a notice that names no exchange, and a later settle
+/// ends only the live mark of its own number, failed when the project's records stayed.
+#[test]
+fn a_delete_mark_shown_to_the_owner_outlives_a_settle_of_a_reused_exchange() {
+    let root = tempfile::tempdir().unwrap();
+    let connection = Connection::open(root.path().join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    crate::ledger::initialize(&connection).unwrap();
+    let mark = |project: &str, exchange: i64| {
+        connection
+            .execute(
+                "INSERT INTO ledger_actions(kind,action_key,payload,started_ms)
+                 VALUES ('project_delete',?1,json_object('project',?1,'exchange',?2),1)",
+                params![project, exchange],
+            )
+            .unwrap();
+    };
+    let marks = || -> Vec<(String, String)> {
+        let mut statement = connection
+            .prepare(
+                "SELECT action_key,payload FROM ledger_actions
+                 WHERE kind='project_delete' AND outcome IS NULL ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let outcome = |project: &str| -> Option<String> {
+        connection
+            .query_row(
+                "SELECT outcome FROM ledger_actions WHERE action_key=?1 ORDER BY id DESC",
+                [project],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    connection
+        .execute_batch("INSERT INTO projects(id, body) VALUES ('kept','{}'),('next','{}')")
+        .unwrap();
+    mark("kept", 7);
+    mark("gone", 8);
+    projects_home::delete_settle(&connection, None, false).unwrap();
+    let shown = marks();
+    assert_eq!(
+        shown.len(),
+        1,
+        "a start ends the mark of a project that went: {shown:?}",
+    );
+    assert_eq!(shown[0].0, "kept");
+    assert_eq!(outcome("gone").as_deref(), Some("done"));
+    let payload: serde_json::Value = serde_json::from_str(&shown[0].1).unwrap();
+    assert_eq!(payload["unknown"], true, "the kept project's mark is shown");
+    assert!(
+        payload.get("exchange").is_none(),
+        "a shown mark names no exchange",
+    );
+    mark("next", 7);
+    projects_home::delete_settle(&connection, Some(7), false).unwrap();
+    let left = marks();
+    assert_eq!(
+        left.len(),
+        1,
+        "a settle ends only the live mark of its number: {left:?}",
+    );
+    assert_eq!(left[0].0, "kept");
+    assert_eq!(
+        outcome("next").as_deref(),
+        Some("failed"),
+        "its records stayed",
+    );
+}

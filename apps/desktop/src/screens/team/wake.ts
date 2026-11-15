@@ -122,11 +122,12 @@ export function freshAlerts(last: number | null, events: Pick<AppTeamEvents, "no
 }
 
 /** Where the toast for one notification leads: an urgent question opens the project's
- * Questions tab, where every owner question waits (F12), and an agent waiting in its terminal
+ * Questions tab, where every owner question waits (F12), at its urgent section so the
+ * keyboard goes to that question (S4-R1), and an agent waiting in its terminal
  * opens the Agents tab on Waiting on you (Q14, Q14b). Input: the notification. Output: the
  * route, or undefined for one that only informs. */
 export function alertRoute(item: Pick<TeamNotification, "kind" | "project_id">): Route | undefined {
-  if (item.kind === "urgent_question") return { name: "project", id: item.project_id, tab: "questions" };
+  if (item.kind === "urgent_question") return { name: "project", id: item.project_id, tab: "questions", section: "urgent" };
   if (item.kind === "waiting_on_you") return { name: "project", id: item.project_id, tab: "agents", section: "waiting" };
   return undefined;
 }

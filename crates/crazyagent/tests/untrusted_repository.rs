@@ -1318,7 +1318,7 @@ async fn agent_terminal_output_with_osc_52_never_reaches_the_owner_clipboard() {
     seen.extend(std::mem::take(&mut stream.screen));
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
-        while let Some(bytes) = stream.next_blocking() {
+        while let Some(terminal::buffer::Chunk::Output(bytes)) = stream.next_blocking() {
             if sender.send(bytes).is_err() {
                 break;
             }

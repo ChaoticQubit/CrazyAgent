@@ -135,26 +135,32 @@ type HarnessSlot =
     fn(&mut NativeAuthHostRegistration) -> &mut Option<Arc<RegisteredNativeAuthHost>>;
 
 /// The registered harness host in one slot, captured again from its PATH entry when its
-/// pinned file no longer verifies, as after a harness update; the fresh capture replaces
-/// the stale one unless another caller replaced it first. Inputs: the registration lock
+/// pinned file no longer verifies, as after a harness update, once the entry the launch now
+/// goes through passes the checks of engine start ([`start_trusted`]); the fresh capture
+/// replaces the stale one unless another caller replaced it first. Inputs: the authority
 /// and the slot. Output: the host, None when none is registered, or the refusal.
 fn current_harness(
-    registration: &Mutex<NativeAuthHostRegistration>,
+    authority: &Authority,
     slot: HarnessSlot,
 ) -> Result<Option<Arc<RegisteredNativeAuthHost>>, EngineError> {
-    let held = {
+    let registration = &authority.native_auth_host;
+    let (held, home) = {
         let mut guard = registration
             .lock()
             .map_err(|_| failure("native_auth_recovery_required"))?;
         if guard.disabled {
             return Err(failure("native_auth_host_unavailable"));
         }
-        slot(&mut guard).clone()
+        let home = guard
+            .search
+            .as_ref()
+            .and_then(|search| search.home().map(Path::to_path_buf));
+        (slot(&mut guard).clone(), home)
     };
     let Some(held) = held else {
         return Ok(None);
     };
-    let current = held.current()?;
+    let current = held.current(|used| start_trusted(authority, used, home.as_deref()))?;
     if Arc::ptr_eq(&current, &held) {
         return Ok(Some(current));
     }
@@ -170,6 +176,45 @@ fn current_harness(
     }
     assert!(kept.is_some());
     Ok(Some(current))
+}
+
+/// Checks a harness file a re-pin would use as engine start checks a found one: outside
+/// every folder agents can write, in folders no other user can change, and the rest of
+/// [`crate::harnesses::finding::check_file`]. Inputs: the authority, the entry used and HOME.
+/// Output: Ok, or the refusal code of engine start.
+fn start_trusted(
+    authority: &Authority,
+    used: &Path,
+    home: Option<&Path>,
+) -> Result<(), EngineError> {
+    use crate::harnesses::finding;
+    let root = super::changes::engine_root(authority)?;
+    let space = finding::AgentSpace::open(&root)?;
+    let checked = finding::check_file(used, &space, home)?;
+    assert_eq!(checked, used);
+    Ok(())
+}
+
+/// A step a row runs once between the check of an entry and the capture of its file.
+#[cfg(test)]
+type Step = Box<dyn FnOnce() + Send>;
+
+#[cfg(test)]
+static BETWEEN_CHECK_AND_CAPTURE: std::sync::Mutex<Vec<(PathBuf, Step)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Takes the step a row set to run between the check of an entry and the capture of its
+/// file: in [`OwnerRuntimeHandle::find_harness`] once the found entry passed its checks,
+/// and in [`OwnerRuntimeHandle::capture_found`] once the entry's file is resolved and before
+/// that file is checked, so a row can move a link in the entry's chain in that gap. Input:
+/// the entry. Output: the step, none for every other entry.
+#[cfg(test)]
+fn between_check_and_capture(entry: &Path) -> Option<Step> {
+    let mut steps = BETWEEN_CHECK_AND_CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let at = steps.iter().position(|(path, _)| path == entry)?;
+    Some(steps.remove(at).1)
 }
 
 pub(crate) struct NativeAuthDispatchHost {
@@ -249,7 +294,7 @@ impl NativeAuthDispatchHost {
         slot: HarnessSlot,
     ) -> Result<Option<Arc<RegisteredNativeAuthHost>>, EngineError> {
         let authority = self.authority()?;
-        if let Ok(Some(host)) = current_harness(&authority.native_auth_host, slot) {
+        if let Ok(Some(host)) = current_harness(&authority, slot) {
             return Ok(Some(host));
         }
         let owner = OwnerRuntimeHandle {
@@ -259,7 +304,7 @@ impl NativeAuthDispatchHost {
         if let Ok(Found::Refused { code, .. }) = owner.look_again(harness) {
             eprintln!("{harness} was found for sign-in but not used ({code})");
         }
-        current_harness(&authority.native_auth_host, slot)
+        current_harness(&authority, slot)
     }
 
     pub(crate) async fn prepare_native_auth_custody(
@@ -323,6 +368,35 @@ impl NativeAuthDispatchHost {
             .ok_or_else(|| failure("native_auth_recovery_required"))?
             .try_wait()
             .map_err(io_error)
+    }
+
+    /// Whether the harness this sign-in would run reads older than its sign-in minimum
+    /// (DEC-166), from the version Settings, Harnesses shows for it. An unknown version, a
+    /// harness with no minimum or a failed read is not too old, so the sign-in runs as before.
+    /// Inputs: the stored harness name and the real file the sign-in runs. Output: the answer.
+    pub(crate) async fn harness_too_old(&self, harness: &str, runs: &Path) -> bool {
+        let Some(id) = crate::harnesses::spec(harness).map(|spec| spec.id) else {
+            return false;
+        };
+        if crate::harnesses::sign_in_min(id).is_none() {
+            return false;
+        }
+        let Ok(authority) = self.authority() else {
+            return false;
+        };
+        let root = super::changes::engine_root(&authority);
+        let search = OwnerRuntimeHandle {
+            engine: self.engine.clone(),
+            authority,
+        }
+        .harness_search();
+        let (Ok(root), Ok(search)) = (root, search) else {
+            return false;
+        };
+        let installed =
+            super::harness_catalog::sign_in_version(&self.engine, root, search, id, runs.into())
+                .await;
+        crate::harnesses::sign_in_too_old(id, installed.as_deref())
     }
 
     /// Keeps the failure code the custodian named before it exited, for the release that
@@ -463,6 +537,27 @@ impl OwnerRuntimeHandle {
         Ok(())
     }
 
+    /// Captures a harness engine start chose or found as a re-pin captures one: once the
+    /// real file pinned passes the start checks ([`start_trusted`]) with the HOME engine
+    /// start checked the entry with, and the entry still leads to it, so a link moved after
+    /// engine start checked the entry never gets an agent's file pinned (RV-DS241-140). HOME
+    /// is read as the start search reads it, which is handed over only after registration.
+    /// Input: the absolute entry. Output: the host, or the refusal code.
+    pub(crate) fn capture_found(
+        &self,
+        entry: &Path,
+    ) -> Result<RegisteredNativeAuthHost, EngineError> {
+        assert!(entry.is_absolute());
+        let search = crate::harnesses::Search::from_environment();
+        RegisteredNativeAuthHost::capture_entry_checked(entry, |real| {
+            #[cfg(test)]
+            if let Some(step) = between_check_and_capture(entry) {
+                step();
+            }
+            start_trusted(&self.authority, real, search.home())
+        })
+    }
+
     pub(crate) fn register_codex_executable(
         &self,
         host: RegisteredNativeAuthHost,
@@ -529,9 +624,10 @@ impl OwnerRuntimeHandle {
 
     /// Looks for Codex or Claude Code again, for Check again, Choose file, a sign-in retry
     /// and the install pin: the chosen file, else the first search hit, that passes
-    /// [`finding::check`](crate::harnesses::finding::check), captured as at engine start. It fills
-    /// an empty slot or one whose pinned file is gone; no other pin is replaced, and a disabled
-    /// registration refuses. Inputs: the id, chosen file, search and PATH. Output: [`Found`].
+    /// [`finding::check`](crate::harnesses::finding::check), captured as at engine start once
+    /// the real file pinned passes the same checks. It fills an empty slot or one whose pinned
+    /// file is gone; no other pin is replaced, and a disabled registration refuses. Inputs:
+    /// the id, chosen file, search and PATH. Output: [`Found`].
     pub(crate) fn find_harness(
         &self,
         harness: &str,
@@ -565,27 +661,25 @@ impl OwnerRuntimeHandle {
         };
         if let Some(held) = held {
             let shown = held.entry().map(Path::to_path_buf);
-            return Ok(
-                match current_harness(&self.authority.native_auth_host, slot) {
-                    Ok(Some(host)) => Found::Ready {
-                        path: host.entry().map_or_else(
-                            || {
-                                host.verified_path()
-                                    .map(Path::to_path_buf)
-                                    .unwrap_or_default()
-                            },
-                            Path::to_path_buf,
-                        ),
-                    },
-                    Ok(None) => Found::Missing {
-                        looked: crate::harnesses::finding::looked(search, harness),
-                    },
-                    Err(error) => Found::Refused {
-                        path: shown.unwrap_or_default(),
-                        code: error.0,
-                    },
+            return Ok(match current_harness(&self.authority, slot) {
+                Ok(Some(host)) => Found::Ready {
+                    path: host.entry().map_or_else(
+                        || {
+                            host.verified_path()
+                                .map(Path::to_path_buf)
+                                .unwrap_or_default()
+                        },
+                        Path::to_path_buf,
+                    ),
                 },
-            );
+                Ok(None) => Found::Missing {
+                    looked: crate::harnesses::finding::looked(search, harness),
+                },
+                Err(error) => Found::Refused {
+                    path: shown.unwrap_or_default(),
+                    code: error.0,
+                },
+            });
         }
         let root = super::changes::engine_root(&self.authority)?;
         let space = {
@@ -614,10 +708,18 @@ impl OwnerRuntimeHandle {
             }
         };
         assert!(entry.is_absolute());
-        let captured = RegisteredNativeAuthHost::capture_entry(&entry).and_then(|host| {
-            host.verified_path()?;
-            Ok(host)
-        });
+        #[cfg(test)]
+        if let Some(step) = between_check_and_capture(&entry) {
+            step();
+        }
+        let checked = |real: &Path| {
+            crate::harnesses::finding::check_file(real, &space, search.home()).map(|_| ())
+        };
+        let captured =
+            RegisteredNativeAuthHost::capture_entry_checked(&entry, checked).and_then(|host| {
+                host.verified_path()?;
+                Ok(host)
+            });
         let host = match captured {
             Ok(host) => host,
             Err(error) => {
@@ -796,7 +898,7 @@ impl OwnerRuntimeHandle {
             return Err(failure("owner_runtime_stale"));
         }
         self.native_auth_owner_runtime_dir()?;
-        current_harness(&self.authority.native_auth_host, |registration| {
+        current_harness(&self.authority, |registration| {
             &mut registration.codex_executable
         })?
         .ok_or_else(|| failure("native_auth_host_unavailable"))
@@ -809,7 +911,7 @@ impl OwnerRuntimeHandle {
             return Err(failure("owner_runtime_stale"));
         }
         self.native_auth_owner_runtime_dir()?;
-        current_harness(&self.authority.native_auth_host, |registration| {
+        current_harness(&self.authority, |registration| {
             &mut registration.claude_executable
         })?
         .ok_or_else(|| failure("native_auth_host_unavailable"))
@@ -850,7 +952,7 @@ impl OwnerRuntimeHandle {
             return Err(failure("owner_runtime_stale"));
         }
         self.native_auth_owner_runtime_dir()?;
-        current_harness(&self.authority.native_auth_host, |registration| {
+        current_harness(&self.authority, |registration| {
             &mut registration.rcli_master_executable
         })?
         .ok_or_else(|| failure("native_auth_host_unavailable"))
@@ -867,7 +969,7 @@ impl OwnerRuntimeHandle {
             return Err(failure("owner_runtime_stale"));
         }
         self.native_auth_owner_runtime_dir()?;
-        current_harness(&self.authority.native_auth_host, |registration| {
+        current_harness(&self.authority, |registration| {
             &mut registration.rcli_private_key_executable
         })?
         .ok_or_else(|| failure("native_auth_host_unavailable"))

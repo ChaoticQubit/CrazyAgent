@@ -104,6 +104,40 @@ fn failures_retry_until_the_attempt_limit_then_stay_failed() {
     assert_eq!(job.error.as_deref(), Some("agent exited early"));
 }
 
+/// A failure line keeps every byte up to the 512-byte bound, so the reach line naming a host
+/// near the DNS length bound stays one whole sentence; a longer line is cut on a character
+/// boundary within the bound. Both hold for a spent and an unspent attempt.
+#[test]
+fn a_failure_line_keeps_every_byte_up_to_its_bound_and_a_longer_one_is_cut_on_a_character() {
+    let (_temp, path) = store();
+    let jobs = ResearchJobs::open(&path).unwrap();
+    let host = format!("{}.test", ["a".repeat(61).as_str(); 4].join("."));
+    let reach = format!(
+        "Can't reach the model provider at {host}:443. Check the address or the network, or pick another account in this pool, then try again."
+    );
+    assert!(reach.len() > 128 && reach.len() <= 512, "{}", reach.len());
+    let wide = "€".repeat(200);
+    assert!(!wide.is_char_boundary(512));
+    let rows = [(reach.clone(), reach.clone()), (wide, "€".repeat(170))];
+    for (index, (line, kept)) in rows.into_iter().enumerate() {
+        for unspent in [false, true] {
+            let kind = format!("kind-{index}-{unspent}");
+            let id = jobs.enqueue("project-a", &kind, "codex", true).unwrap();
+            let job = jobs.claim("project-a", "runner", 1).unwrap().unwrap();
+            assert_eq!(job.id, id);
+            let status = if unspent {
+                jobs.fail_unspent(&job, &line).unwrap()
+            } else {
+                jobs.fail(&job, &line, 1).unwrap()
+            };
+            assert_eq!(status, ResearchStatus::Failed);
+            let error = jobs.get(id).unwrap().unwrap().error.unwrap();
+            assert_eq!(error, kept, "unspent {unspent}");
+            assert!(error.len() <= 512);
+        }
+    }
+}
+
 #[test]
 fn a_claimer_cannot_finish_a_job_it_does_not_hold() {
     let (_temp, path) = store();
@@ -478,14 +512,17 @@ fn a_run_start_and_end_are_recorded_in_the_project_activity() {
         jobs.enqueue("project-a", kind, "codex", true).unwrap();
     }
     let saved = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
+    jobs.launched(&saved).unwrap();
     jobs.finish(&saved, "context/research/market_research.md")
         .unwrap();
     let failed = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
+    jobs.launched(&failed).unwrap();
     assert_eq!(
         jobs.fail(&failed, "harness_unavailable", 1).unwrap(),
         ResearchStatus::Failed
     );
     let cancelled = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
+    jobs.launched(&cancelled).unwrap();
     assert!(jobs.request_cancel(cancelled.id).unwrap());
     jobs.cancelled(&cancelled).unwrap();
 
@@ -544,12 +581,14 @@ fn a_requeued_run_records_no_stop_and_a_parked_run_says_it_waits_for_a_pool() {
         jobs.enqueue("project-a", kind, "codex", true).unwrap();
     }
     let first = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
+    jobs.launched(&first).unwrap();
     assert_eq!(
         jobs.fail(&first, "harness_unavailable", 2).unwrap(),
         ResearchStatus::Queued
     );
     let again = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
     assert_eq!(again.id, first.id);
+    jobs.launched(&again).unwrap();
     jobs.finish(&again, "context/research/market_research.md")
         .unwrap();
     let parked = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
@@ -574,10 +613,6 @@ fn a_requeued_run_records_no_stop_and_a_parked_run_says_it_waits_for_a_pool() {
             research(
                 ActivityKind::ResearchWaiting,
                 "Research waiting for a pool: Design research"
-            ),
-            research(
-                ActivityKind::ResearchStarted,
-                "Research started: Design research"
             ),
             research(
                 ActivityKind::ResearchSaved,

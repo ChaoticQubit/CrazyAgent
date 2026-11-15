@@ -45,6 +45,12 @@ pub const MESSAGES_WAITING_MAX: i64 = 64;
 const MESSAGE_HISTORY: &str = "state NOT IN ('pending','sent')";
 const TASK_HISTORY: &str =
     "status IN ('done','failed','cancelled') AND (source='owner' OR delivered=1)";
+/// Finished master results their recipient cannot take now (DEC-170 addendum 4): one bound
+/// to a session other than the live one, given as `?2`, or one for a lead that is not
+/// running. They make room once no `TASK_HISTORY` row is left.
+const TASK_WAITING: &str = "status IN ('done','failed','cancelled') AND source='master' AND delivered=0
+     AND CASE WHEN parent IS NULL THEN session IS NOT NULL AND session IS NOT ?2
+     ELSE parent NOT IN (SELECT id FROM team_agents WHERE status IN ('starting','idle','working')) END";
 pub const STATUS_TASKS_MAX: i64 = 100;
 pub const STATUS_MESSAGES_MAX: i64 = 50;
 pub const STATUS_AGENTS_MAX: i64 = 80;
@@ -367,6 +373,30 @@ pub fn launch_harness(harness: &str) -> Option<&'static str> {
     crate::harnesses::spec(harness)
         .map(|spec| spec.id)
         .filter(|id| matches!(*id, "codex" | "claude-code"))
+}
+
+/// Names the accounts that run a launch adapter, in the words of the Add account tiles
+/// (DEC-161): the sign-in's and the API key's provider, the one source of the account kind
+/// words the team start line and the default team status say.
+/// Takes the launch adapter `launch_harness` gives. Returns the two provider names.
+pub(crate) fn account_providers(launch: &str) -> (&'static str, &'static str) {
+    assert!(launch_harness(launch) == Some(launch));
+    match launch {
+        "codex" => ("ChatGPT", "OpenAI"),
+        "claude-code" => ("Claude", "Anthropic"),
+        other => unreachable!("{other} is not a launch adapter"),
+    }
+}
+
+/// The line a team start shows when no account of the project's pool can run its harness,
+/// naming the account kind to add in the words of the Add account tiles (DEC-161).
+/// Takes the harness as the plan names it and the launch adapter `launch_harness` gave it.
+/// Returns the plain line.
+pub(crate) fn no_account_line(harness: &str, launch: &str) -> String {
+    let (sign_in, key) = account_providers(launch);
+    format!(
+        "No account in this project's pool can run {harness}. Add a {sign_in} sign-in or an {key} API key to the pool"
+    )
 }
 
 /// What the Coordination rows of a harness kind no sub-agent runs on say instead of a live
@@ -1658,7 +1688,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 task INTEGER PRIMARY KEY,
                 project TEXT NOT NULL,
                 agent INTEGER NOT NULL,
-                held INTEGER NOT NULL DEFAULT 0
+                held INTEGER NOT NULL DEFAULT 0,
+                resolve INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS team_worktrees (
                 agent INTEGER PRIMARY KEY,
@@ -1973,27 +2004,13 @@ pub fn admit(
     if active_tasks(tx, &stored.project_id, None)? >= TASKS_ACTIVE_MAX {
         return Ok(Err("team_queue_full"));
     }
-    let kept: i64 = tx
-        .query_row(
-            &format!("SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND NOT ({TASK_HISTORY})"),
-            [stored.project_id.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(error)?;
-    if kept >= TASKS_PER_PROJECT_MAX {
-        return Ok(Err("team_task_limit"));
+    if let Err(code) = task_room(tx, &stored.project_id)? {
+        return Ok(Err(code));
     }
     let status = match eligible_accounts(access, &stored.project_id, launch) {
         Accounts::Usable(accounts) if !accounts.is_empty() => TaskStatus::Queued,
         _ => TaskStatus::NeedsPool,
     };
-    make_room(
-        tx,
-        "team_tasks",
-        TASK_HISTORY,
-        &stored.project_id,
-        TASKS_PER_PROJECT_MAX,
-    )?;
     tx.execute(
         "INSERT INTO team_tasks(project,source,turn,harness,tools,prompt,status,created_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
@@ -2023,11 +2040,14 @@ pub fn admit(
 /// Starts the work that resolves what an Ask agent to update merged into a team agent's
 /// worktree (DEC-095): a sub-agent gets a task pinned to it, so it runs in the same
 /// worktree and lands in the same change set; the team master gets an engine message. A
-/// sub-agent holds at most one queued resolve task, whose prompt the newest update
-/// replaces, so the global task cap never refuses a merge already made. The update is
+/// sub-agent holds at most one queued resolve task, marked so on its pin, whose prompt the
+/// newest update replaces, so the global task cap never refuses a merge already made; any
+/// other task queued for the agent keeps its prompt and the resolve waits behind it
+/// (RV-DS241-123). The update is
 /// the owner's, so it clears the owner stop of that sub-agent alone; the agents it leads
 /// stay stopped. Takes the transaction, project, agent, prompt and time. Returns Ok, or a
-/// plain refusal code.
+/// plain refusal code, `team_task_limit` when the task window holds only work it keeps;
+/// on a refusal the caller rolls the transaction back.
 pub fn admit_resolve(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -2068,7 +2088,7 @@ pub fn admit_resolve(
     let queued: Option<i64> = tx
         .query_row(
             "SELECT t.id FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
-             WHERE p.project=?1 AND p.agent=?2 AND t.status=?3",
+             WHERE p.project=?1 AND p.agent=?2 AND p.resolve=1 AND t.status=?3",
             params![project.as_str(), agent, TaskStatus::Queued.name()],
             |row| row.get(0),
         )
@@ -2082,13 +2102,9 @@ pub fn admit_resolve(
         .map_err(error)?;
         return Ok(Ok(()));
     }
-    make_room(
-        tx,
-        "team_tasks",
-        TASK_HISTORY,
-        project,
-        TASKS_PER_PROJECT_MAX,
-    )?;
+    if let Err(code) = task_room(tx, project)? {
+        return Ok(Err(code));
+    }
     tx.execute(
         "INSERT INTO team_tasks(project,source,turn,harness,tools,prompt,status,created_ms) VALUES (?1,?2,NULL,?3,?4,?5,?6,?7)",
         params![
@@ -2110,7 +2126,7 @@ pub fn admit_resolve(
     )
     .map_err(error)?;
     tx.execute(
-        "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+        "INSERT INTO team_task_pins(task,project,agent,resolve) VALUES (?1,?2,?3,1)",
         params![task, project.as_str(), agent],
     )
     .map_err(error)?;
@@ -2354,6 +2370,63 @@ fn make_room(
     }
     assert!(count(tx)? < max, "team_live_rows_fill_the_window");
     Ok(())
+}
+
+/// Makes room for one more task of a project within `TASKS_PER_PROJECT_MAX` (DEC-170
+/// addendum 4): the oldest `TASK_HISTORY` rows go first, then the oldest `TASK_WAITING`
+/// results; open tasks and results the live master or a running lead can take are kept.
+/// Takes the transaction and the project. Returns Ok, `team_task_limit` with nothing
+/// deleted when kept tasks fill the window, or any SQLite failure.
+fn task_room(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+) -> Result<Result<(), &'static str>, EngineError> {
+    let live = crate::master_sessions::live_session(tx, project)?;
+    let kept: i64 = tx
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND NOT ({TASK_HISTORY}) AND NOT ({TASK_WAITING})"
+            ),
+            params![project.as_str(), live],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if kept >= TASKS_PER_PROJECT_MAX {
+        return Ok(Err("team_task_limit"));
+    }
+    let excess = || -> Result<i64, EngineError> {
+        tx.query_row(
+            "SELECT COUNT(*) FROM team_tasks WHERE project=?1",
+            [project.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count + 1 - TASKS_PER_PROJECT_MAX)
+        .map_err(error)
+    };
+    let over = excess()?;
+    if over > 0 {
+        tx.execute(
+            &format!(
+                "DELETE FROM team_tasks WHERE id IN
+                 (SELECT id FROM team_tasks WHERE project=?1 AND ({TASK_HISTORY}) ORDER BY id LIMIT ?2)"
+            ),
+            params![project.as_str(), over],
+        )
+        .map_err(error)?;
+    }
+    let over = excess()?;
+    if over > 0 {
+        tx.execute(
+            &format!(
+                "DELETE FROM team_tasks WHERE id IN
+                 (SELECT id FROM team_tasks WHERE project=?1 AND ({TASK_WAITING}) ORDER BY id LIMIT ?3)"
+            ),
+            params![project.as_str(), live, over],
+        )
+        .map_err(error)?;
+    }
+    assert!(excess()? <= 0, "team_live_rows_fill_the_window");
+    Ok(Ok(()))
 }
 
 /// Appends one message to a project's team conversation, keeping its newest
@@ -4034,7 +4107,9 @@ pub(crate) const ENDED_TEAMMATE: &str = "a.status IN ('stopped','failed')
 /// `team_tasks.wait` (why it waits to start, F11), `team_agents.hookless` (1 when the agent's launch fires no hooks,
 /// DEC-104 bare-hooks), `team_agents.pane_pid` (the pane process a native teammate was
 /// first named by, PLC (b)), `team_task_pins.held` (1 when a hold pinned the task, not
-/// its own purpose), `team_owner_stops.stopped_by` (who made the stop; one from before
+/// its own purpose), `team_task_pins.resolve` (1 for the task an Ask agent to update
+/// queued, the only queued task a later update may rewrite, RV-DS241-123),
+/// `team_owner_stops.stopped_by` (who made the stop; one from before
 /// the column was the owner's), `team_owner_stops.last_by` (who made the latest stop, whose
 /// time the row holds; none from before the column, HB-S5-B-L2) and
 /// `team_teammate_names.save_refused` (why the engine last gave up saving a teammate's
@@ -4059,6 +4134,7 @@ fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
         ("team_agents", "hookless", "INTEGER NOT NULL DEFAULT 0"),
         ("team_agents", "pane_pid", "INTEGER"),
         ("team_task_pins", "held", "INTEGER NOT NULL DEFAULT 0"),
+        ("team_task_pins", "resolve", "INTEGER NOT NULL DEFAULT 0"),
         (
             "team_owner_stops",
             "stopped_by",
@@ -5128,6 +5204,26 @@ pub(crate) fn owner_start_alone(
     connection
         .execute(
             "DELETE FROM team_owner_stops WHERE agent=?1 AND project=?2",
+            params![agent, project.as_str()],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// Clears the master's or a lead's stop of one agent that starts again, never the owner's:
+/// an owner-stopped agent starts only through the owner's own Wake, restart or task, which
+/// clear that stop themselves, so a stop the owner makes while a start is under way stays
+/// and is applied again (AW-1, RV-DS241-125). Takes a connection, the project and the
+/// agent. Returns any SQLite failure.
+pub(crate) fn clear_stop_unless_owner(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<(), EngineError> {
+    assert!(agent > 0, "clear_stop_unless_owner_needs_a_stored_agent");
+    connection
+        .execute(
+            "DELETE FROM team_owner_stops WHERE agent=?1 AND project=?2 AND stopped_by<>'owner'",
             params![agent, project.as_str()],
         )
         .map_err(error)?;

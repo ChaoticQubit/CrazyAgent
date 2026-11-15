@@ -267,6 +267,49 @@ fn stop_and_scan(db: &Connection, root: &Path) -> BTreeMap<i64, i64> {
         .collect()
 }
 
+/// RV-DS241-64: a start notice whose agent is gone, as one a project removal left, is
+/// skipped, so every project's banner still lists; a teammate's start notice is shown with
+/// its label like a sub-agent's, so the owner can dismiss it.
+#[test]
+fn a_notice_of_a_gone_agent_is_skipped_and_a_teammate_s_is_shown_in_every_banner() {
+    let (_directory, root) = root();
+    let db = ledger::open(&root).unwrap();
+    crate::team::initialize(&db).unwrap();
+    let sub = working(&db, PROJECT, "sub", "Plan the page");
+    let mate = working(&db, PROJECT, "teammate", "Review the page");
+    let gone = sub + mate + 100;
+    let start = |agent: i64| {
+        ledger::begin(
+            &db,
+            ActionKind::AgentSpawn,
+            &format!("team-{agent}"),
+            &format!("{{\"team_agent\":{agent},\"pane\":false,\"unknown\":true}}"),
+        )
+        .unwrap()
+        .get()
+    };
+    let (sub_start, mate_start) = (start(sub), start(mate));
+    start(gone);
+
+    let banner = banner_of(&root, PROJECT);
+    assert_eq!(
+        banner
+            .notices
+            .iter()
+            .map(|notice| (notice.id, notice.agent, notice.label.clone()))
+            .collect::<Vec<_>>(),
+        [
+            (sub_start, Some(sub), Some(format!("Sub-agent {sub}"))),
+            (
+                mate_start,
+                Some(mate),
+                Some(names::label(AgentRole::Teammate, mate, None))
+            ),
+        ]
+    );
+    assert!(banner_of(&root, "other-project").notices.is_empty());
+}
+
 fn states(banner: &RecoveryBanner) -> Vec<(i64, RunShown, Option<&str>)> {
     banner
         .runs

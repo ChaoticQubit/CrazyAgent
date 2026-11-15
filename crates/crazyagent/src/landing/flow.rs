@@ -1,6 +1,9 @@
 use super::clone;
 use super::diff::{self, plain};
 use super::git::{Repo, Writes, failure, is_object_id, object_id};
+#[cfg(test)]
+pub(super) use super::hold::busy;
+pub(super) use super::hold::{Held, hold};
 use super::store::{self, Intent, Record};
 use super::{AgentKind, ChangeSetId, ChangeState, RESTORE_WINDOW_MS, TurnEnd, Workspace};
 use crate::agent_git::{self, Layout};
@@ -10,7 +13,6 @@ use crate::worktrees::TreeBounds;
 use rusqlite::Connection;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex, PoisonError};
 
 pub(super) const ENGINE: (&str, &str) = ("CrazyAgent", "engine@crazyagent.invalid");
 const TASK_SUFFIXES_MAX: usize = 64;
@@ -19,6 +21,7 @@ const PATH_BYTES_MAX: usize = 1024;
 const FOLDER_CHARS_MAX: usize = 128;
 const LAYOUT_NAMES: [&str; 4] = ["head", "objects", "refs", "commondir"];
 const LAYOUT_FOLDERS_MAX: usize = 64;
+const LAYOUT_LISTINGS_MAX: usize = 1024;
 const LINK_HEADER_BYTES_MAX: usize = 128;
 const NAME_BYTES_MAX: usize = 128;
 /// The most closed change sets holding claims one claims sweep releases.
@@ -30,33 +33,6 @@ const LINK_BYTES_MAX: usize = 4096;
 const HEAD_BYTES_MAX: usize = 512;
 const CONFLICTS_SHOWN_MAX: usize = 50;
 const INDEX_BYTES_MAX: u64 = 256 * 1024 * 1024;
-static BUSY: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
-static FREED: Condvar = Condvar::new();
-
-/// The engine's hold on one owner repository: landing work on it runs one at a time in
-/// this engine. Dropping it lets the next one start.
-#[derive(Debug)]
-pub(super) struct Held(PathBuf);
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        let mut busy = BUSY.lock().unwrap_or_else(PoisonError::into_inner);
-        assert!(busy.remove(&self.0));
-        FREED.notify_all();
-    }
-}
-
-/// Waits for and takes the engine's hold on one owner repository.
-/// Input: the repository root. Output: the hold.
-pub(super) fn hold(repository: &Path) -> Held {
-    let mut busy = BUSY.lock().unwrap_or_else(PoisonError::into_inner);
-    while busy.contains(repository) {
-        busy = FREED.wait(busy).unwrap_or_else(PoisonError::into_inner);
-    }
-    assert!(busy.insert(repository.to_path_buf()));
-    Held(repository.to_path_buf())
-}
-
 /// Takes the engine's hold on one owner repository for an owner's action, refusing at
 /// once while a project move is pending for it: the move keeps this hold for as long as
 /// its folder moves, and an action that waited that long would answer after its client
@@ -69,35 +45,6 @@ pub(super) fn hold_unmoved(db: &Connection, repository: &Path) -> Result<Held, E
         return Err(failure("move_project_in_progress"));
     }
     Ok(hold(repository))
-}
-
-/// Takes the engine's hold on one owner repository, waiting no longer than `wait` for
-/// landing work that has it. Inputs: the repository root and the wait. Output: the hold,
-/// or none when the work did not end within the wait.
-pub(super) fn hold_within(repository: &Path, wait: std::time::Duration) -> Option<Held> {
-    let deadline = std::time::Instant::now() + wait;
-    let mut busy = BUSY.lock().unwrap_or_else(PoisonError::into_inner);
-    while busy.contains(repository) {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            return None;
-        }
-        busy = FREED
-            .wait_timeout(busy, left)
-            .unwrap_or_else(PoisonError::into_inner)
-            .0;
-    }
-    assert!(busy.insert(repository.to_path_buf()));
-    Some(Held(repository.to_path_buf()))
-}
-
-/// Tells whether someone holds the engine's hold on one owner repository right now.
-/// Input: the repository root. Output: the answer.
-#[cfg(test)]
-pub(super) fn busy(repository: &Path) -> bool {
-    BUSY.lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .contains(repository)
 }
 
 fn invalid() -> EngineError {
@@ -1008,18 +955,22 @@ pub(super) fn reset_settling(agent: &Agent, from: &str, target: &str) -> Result<
 }
 
 /// Puts an agent worktree's index and files back after its reset did not hold, moving them
-/// from `target` to whatever HEAD now holds with the same two-tree read-tree, path by path:
+/// from `target` to whatever HEAD now holds, named by its id so the index the engine rebuilds
+/// after the step reads the same trees (SA vid 3), with the same two-tree read-tree, path by path:
 /// a path the agent committed meanwhile is at HEAD already and stays, so no reversal of
 /// that commit is staged, and the rest go back to the commit HEAD holds. An edit the agent
 /// made meanwhile is never overwritten: git refuses, writing nothing, and the refusal is
 /// logged. Inputs: the worktree and the reset's target. Output: none.
 fn files_back(agent: &Agent, target: &str) {
     assert!(is_object_id(target));
-    let back = agent
-        .repo
-        .confined(Writes::WorkTree)
-        .and_then(|repo| repo.exec(&["read-tree", "-u", "-m", target, "HEAD"], None, &[], 4096));
-    if !back.is_ok_and(|back| back.code == 0) {
+    let head = agent.repo.commit_of("HEAD").ok().flatten();
+    let back = head.as_deref().map(|head| {
+        agent
+            .repo
+            .confined(Writes::WorkTree)
+            .and_then(|repo| repo.exec(&["read-tree", "-u", "-m", target, head], None, &[], 4096))
+    });
+    if !back.is_some_and(|back| back.is_ok_and(|back| back.code == 0)) {
         eprintln!("landing_reset_files_back_refused");
     }
 }
@@ -1377,12 +1328,12 @@ fn new_folder_limit(db: &Connection, project: &ProjectId) -> Result<u32, EngineE
 }
 
 /// Adds the folders above each component of a path named like a part of a git folder
-/// (`LAYOUT_NAMES`, any case): the folders `repository_layout` lists.
-/// Inputs: the set and one added or changed path.
+/// (`LAYOUT_NAMES`, as a case-insensitive volume folds names, [`ascii_fold`]): the folders
+/// `repository_layout` lists. Inputs: the set and one added or changed path.
 fn layout_folders(folders: &mut BTreeSet<String>, path: &str) {
     let names: Vec<&str> = path.split('/').collect();
     for (at, name) in names.iter().enumerate() {
-        if LAYOUT_NAMES.contains(&name.to_ascii_lowercase().as_str()) {
+        if ascii_fold(name).is_some_and(|folded| LAYOUT_NAMES.contains(&folded.as_str())) {
             folders.insert(names[..at].join("/"));
         }
     }
@@ -1447,12 +1398,15 @@ pub(super) fn check_merged(
 }
 
 /// Tells whether a tree holds a folder git would open as a bare repository (SM-R1): a
-/// `HEAD` file or link beside a `commondir`, or beside both `objects` and `refs`, each
-/// name in any case, `objects` and `refs` of any type since git takes an executable file
-/// for either folder. The owner's own git run in that folder would read its config.
-/// Inputs: the repository, the tree and the folders a change put such a name in.
-/// Output: the answer, `changes_too_large` past `LAYOUT_FOLDERS_MAX` folders, else
-/// `changes_git_failed` when git cannot list one.
+/// `HEAD` file or link beside a `commondir`, or beside both `objects` and `refs`,
+/// `objects` and `refs` of any type since git takes an executable file for either folder.
+/// Names compare as a case-insensitive volume compares them ([`same_name`]): a folder
+/// holds the entries of every tree folder whose path the volume makes the same folder,
+/// such as `Evil/` beside `evil/`, and an entry counts by the layout name it folds onto,
+/// such as `refſ` (RV-DS241-70). The owner's own git run in that folder would read its
+/// config. Inputs: the repository, the tree and the folders a change put such a name in.
+/// Output: the answer, `changes_too_large` past `LAYOUT_FOLDERS_MAX` folders or spellings
+/// of one, else `changes_git_failed` when git cannot list one.
 fn repository_layout(
     repo: &Repo,
     tree: &str,
@@ -1461,7 +1415,60 @@ fn repository_layout(
     if folders.len() > LAYOUT_FOLDERS_MAX {
         return Err(failure("changes_too_large"));
     }
+    let mut listed = BTreeMap::new();
     for folder in folders {
+        let mut spellings = vec![String::new()];
+        for part in folder.split('/').filter(|part| !part.is_empty()) {
+            let mut next = Vec::new();
+            for spelled in &spellings {
+                for (name, file) in tree_folder(repo, tree, spelled, &mut listed)? {
+                    if !file && same_name(name, part) {
+                        next.push(if spelled.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{spelled}/{name}")
+                        });
+                    }
+                }
+            }
+            if next.len() > LAYOUT_FOLDERS_MAX {
+                return Err(failure("changes_too_large"));
+            }
+            spellings = next;
+        }
+        let mut entries: BTreeSet<(String, bool)> = BTreeSet::new();
+        for spelled in &spellings {
+            for (name, file) in tree_folder(repo, tree, spelled, &mut listed)? {
+                if let Some(folded) = ascii_fold(name) {
+                    entries.insert((folded, *file));
+                }
+            }
+        }
+        let has = |name: &str| entries.iter().any(|(entry, _)| entry == name);
+        let head = entries.contains(&("head".to_owned(), true));
+        if head && (has("commondir") || (has("objects") && has("refs"))) {
+            return Ok(true);
+        }
+    }
+    assert!(listed.len() <= LAYOUT_LISTINGS_MAX);
+    Ok(false)
+}
+
+/// Lists one folder of a tree for [`repository_layout`] once, keeping the listing for the
+/// folders that share it: each entry's name and whether it is no folder. Inputs: the
+/// repository, the tree, the folder's path in it, empty for its root, and the listings so
+/// far. Output: the entries, else `changes_too_large` past `LAYOUT_LISTINGS_MAX` folders or
+/// `changes_git_failed` when git cannot list it within `LISTING_BYTES_MAX`.
+fn tree_folder<'a>(
+    repo: &Repo,
+    tree: &str,
+    folder: &str,
+    listed: &'a mut BTreeMap<String, Vec<(String, bool)>>,
+) -> Result<&'a [(String, bool)], EngineError> {
+    if !listed.contains_key(folder) {
+        if listed.len() >= LAYOUT_LISTINGS_MAX {
+            return Err(failure("changes_too_large"));
+        }
         let spec = if folder.is_empty() {
             tree.to_owned()
         } else {
@@ -1483,17 +1490,13 @@ fn repository_layout(
                 .ok_or_else(|| failure("changes_git_failed"))?;
             let file = !entry[..tab].starts_with(b"040000 ");
             entries.push((
-                String::from_utf8_lossy(&entry[tab + 1..]).to_ascii_lowercase(),
+                String::from_utf8_lossy(&entry[tab + 1..]).into_owned(),
                 file,
             ));
         }
-        let has = |name: &str| entries.iter().any(|(entry, _)| entry == name);
-        let head = entries.iter().any(|(entry, file)| entry == "head" && *file);
-        if head && (has("commondir") || (has("objects") && has("refs"))) {
-            return Ok(true);
-        }
+        listed.insert(folder.to_owned(), entries);
     }
-    Ok(false)
+    Ok(listed[folder].as_slice())
 }
 
 /// Refuses a tree whose links an owner could follow out of the project or into a folder an
@@ -1737,11 +1740,16 @@ const ASCII_FOLDS: [(char, &str); 13] = [
 ];
 
 /// Folds one path part the way the volume compares names, when the result is ASCII.
-/// Input: the part. Output: the part in ASCII lower case with [`ASCII_FOLDS`] applied, or
-/// None when a code point stays outside ASCII.
+/// Input: the part. Output: the part in ASCII lower case with [`ASCII_FOLDS`] applied and
+/// the code points HFS+ ignores in names left out
+/// ([`crate::instruction_files::HFS_IGNORED`], RV-DS241-148), or None when a code point
+/// stays outside ASCII.
 fn ascii_fold(part: &str) -> Option<String> {
     let mut folded = String::with_capacity(part.len());
     for point in part.chars() {
+        if crate::instruction_files::HFS_IGNORED.contains(&point) {
+            continue;
+        }
         if point.is_ascii() {
             folded.push(point.to_ascii_lowercase());
         } else {
@@ -1753,20 +1761,28 @@ fn ascii_fold(part: &str) -> Option<String> {
     Some(folded)
 }
 
-/// Tells whether a walk may name a link path on a volume that folds names: every part
-/// folds onto the same ASCII name under [`ascii_fold`], or both stay outside ASCII, since
-/// the volume may still fold one onto the other. A part that stays outside ASCII never
-/// matches one that folds onto ASCII. Inputs: the link path and the walk's parts.
-/// Output: true when it may.
+/// Tells whether a walk may name a link path on a volume that folds names: every part of
+/// the one may name the same entry as the matching part of the other ([`same_name`]).
+/// Inputs: the link path and the walk's parts. Output: true when it may.
 fn folds_onto(link: &str, walk: &[&str]) -> bool {
     link.split('/').count() == walk.len()
-        && link.split('/').zip(walk).all(|(part, step)| {
-            match (ascii_fold(part), ascii_fold(step)) {
-                (Some(part), Some(step)) => part == step,
-                (None, None) => true,
-                _ => false,
-            }
-        })
+        && link
+            .split('/')
+            .zip(walk)
+            .all(|(part, step)| same_name(part, step))
+}
+
+/// Tells whether two path parts may name one entry on a volume that folds names, the one
+/// name compare of the landing checks: both fold onto the same ASCII name under
+/// [`ascii_fold`], or both stay outside ASCII, since the volume may still fold one onto
+/// the other. A part that stays outside ASCII never names the entry of one that folds onto
+/// ASCII. Inputs: the two parts. Output: true when they may.
+fn same_name(one: &str, other: &str) -> bool {
+    match (ascii_fold(one), ascii_fold(other)) {
+        (Some(one), Some(other)) => one == other,
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 /// Tells whether a walk starts with the agents' folder. A compared part that is not ASCII
@@ -1884,6 +1900,63 @@ fn ignores_any(checkout: &Path, paths: &[&str]) -> Result<bool, EngineError> {
     }
 }
 
+/// The pathspecs a turn end's `add -A` reads from its input, each ending in a NUL: the whole
+/// tree but the teammates' folder ([`teammates_left_out`]), less each untracked path only the
+/// owner's ignore file excludes: what this unconfined git lists as ignored under the owner's
+/// file, an ignored folder once with a closing `/`, but not under the add's own rules (no
+/// excludes file, [`super::git::NO_EXCLUDES`]). The confined add on Linux may not read that file,
+/// since a link swapped in during the add would copy it into the object store (SA vid 2), so
+/// it gets the file's patterns as names, which tell it nothing the agent's own listing does
+/// not; it still applies the work tree's `.gitignore` and `info/exclude` itself, and git's add
+/// exits 1 when a pathspec names a path it ignores (rv-code2 F1). Elsewhere the add still
+/// applies the owner's file itself, so no listing runs there. Input: the agent's repository.
+/// Output: the pathspecs, `changes_too_large` past the listing bound or `changes_git_failed`.
+#[cfg(target_os = "linux")]
+fn add_pathspecs(repo: &Repo) -> Result<Vec<u8>, EngineError> {
+    let teammates = teammates_left_out();
+    let args = [
+        "-c",
+        super::git::NO_EXCLUDES,
+        "ls-files",
+        "-z",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+        "--",
+        ":(top)",
+        teammates.as_str(),
+    ];
+    let ignored = |args: &[&str]| -> Result<Vec<u8>, EngineError> {
+        let listed = repo.exec(args, None, &[], LISTING_BYTES_MAX)?;
+        if listed.code != 0 {
+            return Err(failure("changes_git_failed"));
+        }
+        if listed.overflow {
+            return Err(failure("changes_too_large"));
+        }
+        Ok(listed.stdout)
+    };
+    let owners = ignored(&args[2..])?;
+    let own_rules = ignored(&args[..])?;
+    let own: BTreeSet<&[u8]> = own_rules.split(|byte| *byte == 0).collect();
+    let mut pathspecs = format!(":(top)\0{teammates}\0").into_bytes();
+    let mut left_out = 0;
+    for path in owners.split(|byte| *byte == 0) {
+        if !path.is_empty() && !own.contains(path) {
+            pathspecs.extend_from_slice(b":(exclude,top,literal)");
+            pathspecs.extend_from_slice(path);
+            pathspecs.push(0);
+            left_out += 1;
+        }
+    }
+    assert_eq!(
+        pathspecs.iter().filter(|byte| **byte == 0).count(),
+        left_out + 2
+    );
+    Ok(pathspecs)
+}
+
 /// Stages everything in an agent worktree and makes it a commit object above `head`
 /// without moving any ref, or nothing when the tree equals `head`'s. The whole change
 /// set from `above` must stay within the bounds, staged files included, and its own work
@@ -1902,6 +1975,20 @@ fn commit_worktree(
     message: &str,
 ) -> Result<Option<String>, EngineError> {
     check_bounds(repo, worktree, bounds)?;
+    #[cfg(target_os = "linux")]
+    {
+        let pathspecs = add_pathspecs(repo)?;
+        let added = repo.confined(Writes::Objects)?.exec(
+            &["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+            Some(&pathspecs),
+            &[],
+            4096,
+        )?;
+        if added.code != 0 || added.overflow {
+            return Err(failure("changes_git_failed"));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
     repo.confined(Writes::Objects)?
         .run(&["add", "-A", "--", ":(top)", &teammates_left_out()])?;
     let tree = object_id(&repo.run(&["write-tree"])?)?;

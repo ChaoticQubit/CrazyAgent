@@ -19,7 +19,7 @@ pub(in crate::ide::bridge) struct Desk {
     _shutdown: tokio::sync::watch::Sender<bool>,
     pub(in crate::ide::bridge) tui: Arc<OwnerClient>,
     pub(in crate::ide::bridge) desktop: Arc<OwnerClient>,
-    folders: Vec<PathBuf>,
+    pub(in crate::ide::bridge) folders: Vec<PathBuf>,
 }
 
 impl Desk {

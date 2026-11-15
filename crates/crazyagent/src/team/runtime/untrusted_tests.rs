@@ -113,6 +113,7 @@ fn untrusted_launch(runtime: &TeamRuntime, fixture: &Fixture, account: &TeamAcco
             account,
             false,
             crate::agent_git::Layout::Linked,
+            false,
         )
         .unwrap();
     assert!(plan.sandbox_profile.is_file());

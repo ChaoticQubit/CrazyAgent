@@ -211,6 +211,30 @@ fn sub_agent(
         .map_err(error)
 }
 
+/// The label of a sub-agent with a name kept in its project, as `label` words it, so a
+/// question it asked names it (S4-R1). Takes the connection, the project and the team agent
+/// id. Returns the label, or None when no name is kept there, so a client says its number.
+pub fn kept_label(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<Option<String>, EngineError> {
+    let name = connection
+        .query_row(
+            "SELECT persona,handle FROM team_names WHERE agent=?1 AND project=?2",
+            params![agent, project.as_str()],
+            |row| {
+                Ok(AgentName {
+                    persona: row.get(0)?,
+                    handle: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(name.map(|name| label(AgentRole::Sub, agent, Some(&name))))
+}
+
 /// Reads the persona and handle kept for one team agent.
 /// Takes the connection and team agent id. Returns the name, or None when it has none.
 pub fn name(connection: &Connection, agent: i64) -> Result<Option<AgentName>, EngineError> {

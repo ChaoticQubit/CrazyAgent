@@ -12,8 +12,6 @@ import {
   TextField,
 } from "../../ui";
 import { navigate } from "../../ui/router";
-import { MarkdownView } from "../project/markdown";
-import { useLinkOpener } from "../project/links";
 import { SkillTag } from "../skill-tag";
 import { displayText } from "../conversation";
 import { homePath } from "./harnesses";
@@ -34,6 +32,17 @@ const NOT_READY = "This change isn't ready in this build yet.";
  * version. Input: the refusal. Output: true to read again. */
 export function readsAgain(failure: Failure): boolean {
   return failure.kind === "error" && /changed|not_found|stale_revision/.test(failure.code);
+}
+
+const STORED_SPEC_CODES = new Set(["server_command_invalid", "server_args_invalid", "server_url_invalid"]);
+
+/** Says why Approve or Check refused a stored server. Both run its command or address through
+ * the add form's checks, which one stored before hidden characters were refused fails only for
+ * hidden or control characters, and this page can't edit a server, so the form's wording is
+ * replaced. Inputs: the reply and the action. Output: the reply, code kept, sentence replaced. */
+export function storedServerRefusal<T>(result: Result<T>, action: "approved" | "checked"): Result<T> {
+  if (result.kind !== "error" || !STORED_SPEC_CODES.has(result.code)) return result;
+  return { ...result, message: `This server's command or address holds hidden or control characters, so it can't be ${action}. Remove it, then add it again.` };
 }
 
 const WORDS: Record<McpServerView["status"], string> = {
@@ -123,7 +132,7 @@ function assert(condition: boolean, message: string): asserts condition {
 /** The review lines for an MCP server: where it runs or connects, its secrets and where it
  * applies. Input: the server. Output: the lines in display order. */
 export function serverFacts(server: McpServerView): string[] {
-  const where = server.spec.kind === "stdio" ? `Runs: ${server.runs}` : `Connects to: ${server.spec.url}`;
+  const where = server.spec.kind === "stdio" ? `Runs: ${displayText(server.runs)}` : `Connects to: ${displayText(server.spec.url)}`;
   const secrets = server.secrets.length
     ? server.secrets.map((secret) => `${secret.name} (${secret.saved ? "Key saved" : "Not saved"})`).join(", ") : "none";
   return [where, `Secrets: ${secrets}`, server.scope_label];
@@ -178,7 +187,7 @@ export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen
       const on = pluginSwitch(skill, projectId);
       return <SettingLine key={skill.id} label={skill.name} changed={pluginChanged(skill, projectId)}
         shown={<SkillTag name={skill.name} skills={[{ id: skill.id, name: skill.name, description: skill.line || skill.description }]} onOpen={() => onOpen(skill)} />}
-        help={<><span>{skill.description}</span><span className="mono small">{homePath(skill.source)}</span>
+        help={<><span>{skill.description}</span><span className="small">{skill.origin}</span><span className="mono small">{homePath(skill.source)}</span>
           {skill.refused && <span className="row"><StatusBadge word="Not given to agents" tone="danger" /><span>{skillUnused(skill.refused)}</span></span>}</>}>
         <Switch id={`skill-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
           disabledReason={on.project && !skill.enabled ? "Turned off for every project in Settings." : undefined} />
@@ -190,10 +199,11 @@ export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen
 }
 
 /** Drops the frontmatter block at the top of a SKILL.md: the detail view shows it as the
- * skill's name and description, plus any other header line agents read. Input: the file text.
- * Output: the Markdown body. */
+ * skill's name and description, plus any other header line agents read. CRLF line ends read
+ * as plain line ends, as the TUI shows them; a lone carriage return stays for the view to
+ * escape. Input: the file text. Output: the Markdown body. */
 export function skillBody(text: string): string {
-  const source = text.replace(/^\uFEFF/, "");
+  const source = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
   const lines = source.split("\n");
   if (lines[0]?.trimEnd() !== "---") return source;
   const end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
@@ -221,14 +231,13 @@ export function fileSize(bytes: number): string {
 }
 
 /** One skill's detail as a pure view of the engine read: description, where it applies and
- * comes from, its switch, the rendered SKILL.md and its files. Inputs: the read, the project id
- * when shown in a project, the last failure and the actions. */
-export function SkillDetailView({ detail, projectId, failure, onToggle, onOpenLink, onRetry }: {
+ * comes from, its switch, its SKILL.md body as agents read it and its files. Inputs: the
+ * read, the project id when shown in a project, the last failure and the actions. */
+export function SkillDetailView({ detail, projectId, failure, onToggle, onRetry }: {
   detail: Loaded<SkillDetail>;
   projectId?: string;
   failure: string;
   onToggle: (skill: SkillView, on: boolean) => void;
-  onOpenLink: (href: string) => void;
   onRetry: () => void;
 }) {
   if (detail.kind === "loading") return <Skeleton shape="row" count={6} />;
@@ -243,12 +252,12 @@ export function SkillDetailView({ detail, projectId, failure, onToggle, onOpenLi
     {extra.length > 0 && <Notice tone="warn"><span>Agents also read these lines of its SKILL.md header:</span>
       <pre className="mono small" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{extra.map(displayText).join("\n")}</pre></Notice>}
     <div className="row between">
-      <span className="stack-small"><span className="secondary">{skill.scope_label}</span><span className="mono muted small">{homePath(skill.source)}</span></span>
+      <span className="stack-small"><span className="secondary">{skill.scope_label}</span><span className="muted small">{skill.origin}</span><span className="mono muted small">{homePath(skill.source)}</span></span>
       <Switch id="skill-detail-on" label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
         disabledReason={on.project && !skill.enabled ? "Turned off for every project in Settings." : undefined} />
     </div>
     {failure && <Notice tone="danger" alert>{failure}</Notice>}
-    <Panel title="SKILL.md"><MarkdownView source={skillBody(text)} onOpenLink={onOpenLink} /></Panel>
+    <Panel title="SKILL.md"><pre className="mono small" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{displayText(skillBody(text))}</pre></Panel>
     <Panel title={`Files (${files.length + files_more})`} padded={false}><div className="rows">
       {files.map((file) => <div className="item-row" key={file.path}><span className="mono small">{file.path}</span><span className="muted small">{fileSize(file.bytes)}</span></div>)}
       {files_more > 0 && <div className="item-row"><span className="secondary">And {files_more} more</span></div>}
@@ -265,7 +274,6 @@ export function SkillDetailDialog({ id, projectId, onClose, onChanged }: {
   onChanged: () => void;
 }) {
   const session = useAppSession();
-  const openLink = useLinkOpener(session.showToast);
   const [detail, reload] = useLoad(() => skillDetail(id, projectId), [id, projectId], "skill-detail");
   const [failure, setFailure] = useState("");
   const toggle = async (skill: SkillView, on: boolean) => {
@@ -280,7 +288,7 @@ export function SkillDetailDialog({ id, projectId, onClose, onChanged }: {
   };
   const title = detail.kind === "ok" ? detail.value.skill.name : "Skill";
   return <Dialog open title={title} onClose={onClose} wide footer={<Button onClick={onClose}>Close</Button>}>
-    <SkillDetailView detail={detail} projectId={projectId} failure={failure} onRetry={reload} onOpenLink={openLink}
+    <SkillDetailView detail={detail} projectId={projectId} failure={failure} onRetry={reload}
       onToggle={(skill, on) => void toggle(skill, on)} />
   </Dialog>;
 }
@@ -419,9 +427,9 @@ export function ServersView({ servers, projectId, failure, busy, onAdd, onToggle
     const open = expanded === server.id;
     return <Fragment key={server.id}>
       <SettingLine label={server.name} changed={pluginChanged(server, projectId)} shown={<>{server.name} <StatusBadge word={serverWord(server.status)} /></>} help={<>
-        {!waiting && <span className="mono small">{server.runs}</span>}
-        {waiting && (command ? <span>Runs: <span className="mono">{server.runs}</span></span>
-          : <span>Connects to: <span className="mono">{server.spec.kind === "http" ? server.spec.url : ""}</span></span>)}
+        {!waiting && <span className="mono small">{displayText(server.runs)}</span>}
+        {waiting && (command ? <span>Runs: <span className="mono">{displayText(server.runs)}</span></span>
+          : <span>Connects to: <span className="mono">{server.spec.kind === "http" ? displayText(server.spec.url) : ""}</span></span>)}
         {waiting && serverFacts(server).slice(1).map((fact) => <span key={fact}>{fact}</span>)}
         {broken && <span className="field-error">Can't start: {server.problem ?? "the server didn't answer."}</span>}
         {server.tools.length > 0 && <span><Button size="small" variant="quiet" icon={open ? "chevron-down" : "chevron-right"} aria-expanded={open} onClick={() => setExpanded(open ? null : server.id)}>
@@ -451,17 +459,85 @@ export function hookTrigger(hook: HookView): string {
   return hook.matcher ? `${hook.event}, matching ${hook.matcher}` : hook.event;
 }
 
-/** The hooks list as a pure view of the engine read: each hook with its plugin, event,
- * command and switch. Inputs: the read, the project id when shown in a project, the last
- * failure and the actions. */
-export function HooksView({ hooks, projectId, failure, onAdd, onToggle, onRetry }: {
+/** One plugin's hooks as the Hooks list groups them: a key for the plugin and scope, the
+ * plugin's name, how many distinct events it runs on, the skills or servers it runs with
+ * and its hooks in the engine's order. */
+export type HookGroup = { key: string; plugin: string; events: number; follows: string[]; hooks: HookView[] };
+
+/** Groups hooks per plugin and scope in the order the engine lists them, so a plugin with
+ * several events reads as one plugin and not as several installs. Input: the hooks.
+ * Output: the groups, together holding every hook once. */
+export function hookGroups(hooks: HookView[]): HookGroup[] {
+  const groups = new Map<string, HookGroup>();
+  for (const hook of hooks) {
+    const key = `${hook.plugin}\n${hook.scope.kind === "project" ? hook.scope.project_id : ""}`;
+    const group = groups.get(key) ?? { key, plugin: hook.plugin, events: 0, follows: [], hooks: [] };
+    if (!group.hooks.some((seen) => seen.event === hook.event)) group.events += 1;
+    if (hook.follows && !group.follows.includes(hook.follows)) group.follows.push(hook.follows);
+    group.hooks.push(hook);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+}
+
+/** The name a plugin's hooks row shows: the plugin and how many events it runs on.
+ * Input: the group. Output: the name, such as "caveman - 4 events". */
+export function hookGroupName(group: HookGroup): string {
+  return `${group.plugin} - ${group.events} ${group.events === 1 ? "event" : "events"}`;
+}
+
+/** What a plugin's hooks switch shows: on when every hook it can switch is on, "Partly on"
+ * when only some are. In a project, hooks turned off for every project in Settings are not
+ * the project's to switch and are left out. Inputs: the group and the project id, if any.
+ * Output: checked, label and whether the project switch applies. */
+export function hookGroupSwitch(group: HookGroup, projectId?: string): { checked: boolean; label: string; project: boolean } {
+  const first = pluginSwitch(group.hooks[0], projectId);
+  const each = group.hooks.map((hook) => pluginSwitch(hook, projectId)).filter((one, at) => !(one.project && !group.hooks[at].enabled));
+  const on = each.filter((one) => one.checked).length;
+  return { checked: each.length > 0 && on === each.length, label: on > 0 && on < each.length ? "Partly on" : first.label, project: first.project };
+}
+
+/** The hooks a plugin row's switch changes: those not already in the new state, leaving
+ * out, in a project, hooks turned off for every project in Settings. Inputs: the group,
+ * the new state and the project id, if any. Output: the hooks to set, in order. */
+export function hooksToSet(group: HookGroup, on: boolean, projectId?: string): HookView[] {
+  return group.hooks.filter((hook) => {
+    const target = pluginSwitch(hook, projectId);
+    return target.checked !== on && !(target.project && !hook.enabled);
+  });
+}
+
+/** The events of one plugin's hooks, each with its trigger, command and own switch.
+ * Inputs: the group, its place in the list, the project id when shown in a project and
+ * the action that turns one hook on or off. */
+export function HookEvents({ group, index, projectId, onToggle }: {
+  group: HookGroup;
+  index: number;
+  projectId?: string;
+  onToggle: (hook: HookView, on: boolean) => void;
+}) {
+  return <div className="review">{group.hooks.map((hook, at) => {
+    const on = pluginSwitch(hook, projectId);
+    return <SettingLine key={hook.id} label={hookTrigger(hook)} changed={pluginChanged(hook, projectId)} help={<span className="mono small">{hook.command}</span>}>
+      <Switch id={`hook-on-${index}-${at}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(hook, next)}
+        disabledReason={on.project && !hook.enabled ? "Turned off for every project in Settings." : undefined} />
+    </SettingLine>;
+  })}</div>;
+}
+
+/** The hooks list as a pure view of the engine read: one row per plugin with its events
+ * count, follow note and switch, and its events under the row once opened. Inputs: the
+ * read, the project id when shown in a project, the last failure and the actions. */
+export function HooksView({ hooks, projectId, failure, onAdd, onToggle, onToggleGroup, onRetry }: {
   hooks: Loaded<HookView[]>;
   projectId?: string;
   failure: string;
   onAdd: () => void;
   onToggle: (hook: HookView, on: boolean) => void;
+  onToggleGroup: (group: HookGroup, on: boolean) => void;
   onRetry: () => void;
 }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
   if (hooks.kind === "loading") return <Skeleton shape="row" count={4} />;
   if (hooks.kind === "not_ready") return <NotReady what="Hooks" compact />;
   if (hooks.kind === "error") return <LoadError message="Couldn't load hooks." onRetry={onRetry} />;
@@ -469,13 +545,20 @@ export function HooksView({ hooks, projectId, failure, onAdd, onToggle, onRetry 
   return <SettingSection title="Hooks" actions={hooks.value.length > 0 ? add : undefined}
     about={`Hooks are commands Claude Code and Codex agents run on events such as session start or a tool call. ${CODEX_HOOK_EVENTS_ONLY} ${BARE_NO_HOOKS} ${RCLI_NO_HOOKS} They run inside the agent's sandbox. A hook that came with a skill or MCP server runs only while that item is on.`}>
     {failure && <div className="set-body"><Notice tone="danger" alert>{failure}</Notice></div>}
-    {hooks.value.length === 0 ? <div className="set-body"><EmptyState icon="zap" title="No hooks yet" compact action={add} /></div> : hooks.value.map((hook, index) => {
-      const on = pluginSwitch(hook, projectId);
-      return <SettingLine key={hook.id} label={hook.plugin} changed={pluginChanged(hook, projectId)}
-        help={<><span>{hookTrigger(hook)}</span><span className="mono small">{hook.command}</span>{hook.follows && <span>Runs while {hook.follows} is on.</span>}</>}>
-        <Switch id={`hook-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(hook, next)}
-          disabledReason={on.project && !hook.enabled ? "Turned off for every project in Settings." : undefined} />
-      </SettingLine>;
+    {hooks.value.length === 0 ? <div className="set-body"><EmptyState icon="zap" title="No hooks yet" compact action={add} /></div> : hookGroups(hooks.value).map((group, index) => {
+      const on = hookGroupSwitch(group, projectId);
+      const open = expanded === group.key;
+      return <Fragment key={group.key}>
+        <SettingLine label={hookGroupName(group)} changed={group.hooks.some((hook) => pluginChanged(hook, projectId))} help={<>
+          {group.follows.length > 0 && <span>Runs while {group.follows.join(", ")} is on.</span>}
+          <span><Button size="small" variant="quiet" icon={open ? "chevron-down" : "chevron-right"} aria-expanded={open} aria-label={`${open ? "Hide" : "Show"} ${group.plugin} events`}
+            onClick={() => setExpanded(open ? null : group.key)}>{open ? "Hide events" : "Show events"}</Button></span>
+        </>}>
+          <Switch id={`hook-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggleGroup(group, next)}
+            disabledReason={on.project && group.hooks.every((hook) => !hook.enabled) ? "Turned off for every project in Settings." : undefined} />
+        </SettingLine>
+        {open && <HookEvents group={group} index={index} projectId={projectId} onToggle={onToggle} />}
+      </Fragment>;
     })}
   </SettingSection>;
 }
@@ -737,10 +820,20 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
     if (folder === null) return;
     await act(folder, () => addHooks(scope, folder), (added) => `Added ${added.length} ${added.length === 1 ? "hook" : "hooks"}.`, reloadHooks);
   };
+  const setHook = (hook: HookView, on: boolean): Promise<Result<unknown>> =>
+    pluginSwitch(hook, projectId).project && projectId ? switchPlugin(projectId, hook.id, on, hook.version) : setHookEnabled(hook.id, on);
   const toggleHook = (hook: HookView, on: boolean) => {
-    const target = pluginSwitch(hook, projectId);
-    void act<unknown>(hook.id, () => target.project && projectId ? switchPlugin(projectId, hook.id, on, hook.version) : setHookEnabled(hook.id, on),
-      () => on ? "Hook turned on." : "Hook turned off.", reloadHooks);
+    void act<unknown>(hook.id, () => setHook(hook, on), () => on ? "Hook turned on." : "Hook turned off.", reloadHooks);
+  };
+  const toggleHookGroup = (group: HookGroup, on: boolean) => {
+    const changing = hooksToSet(group, on, projectId);
+    void act<unknown>(group.key, async () => {
+      for (const [at, hook] of changing.entries()) {
+        const result = await setHook(hook, on);
+        if (result.kind !== "ok") { if (at > 0) reloadHooks(); return result; }
+      }
+      return { kind: "ok", value: null };
+    }, () => `${group.plugin} hooks turned ${on ? "on" : "off"}.`, reloadHooks);
   };
   const toggleServer = (server: McpServerView, on: boolean) => {
     const target = pluginSwitch(server, projectId);
@@ -761,14 +854,15 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
   return <div className="stack">
     {projectId ? picker : <div className="settings-top"><h2>Plugins and skills</h2>{picker}</div>}
     {section === "tools" && <ToolsSection projectId={projectId} onAddTool={() => setAdding({ kind: "server" })} />}
-    {section === "hooks" && <HooksView hooks={hooks} projectId={projectId} failure={failure} onRetry={reloadHooks} onAdd={() => void addHooksFromChooser()} onToggle={toggleHook} />}
+    {section === "hooks" && <HooksView hooks={hooks} projectId={projectId} failure={failure} onRetry={reloadHooks} onAdd={() => void addHooksFromChooser()} onToggle={toggleHook} onToggleGroup={toggleHookGroup} />}
     {section === "hooks" || section === "tools" ? null : section === "skills"
       ? <SkillsView skills={skills} projectId={projectId} failure={failure} onRetry={reloadSkills} onAdd={() => void addSkillFromChooser()}
         onImport={projectId ? undefined : () => setImporting(true)} onOpen={(item) => open(item.id)} onToggle={toggleSkill} onRemove={(skill) => setRemoving({ kind: "skill", skill })} />
       : <ServersView servers={servers} projectId={projectId} failure={failure} busy={busy} onRetry={reloadServers} onAdd={() => setAdding({ kind: "server" })}
         onToggle={toggleServer} onSecrets={setSecrets} onRemove={(server) => setRemoving({ kind: "server", server })}
-        onApprove={(server) => void act(server.id, () => approveMcpServer(server.id, server.spec), () => "Server approved.", reloadServers)}
-        onCheck={(server) => void act(`check:${server.id}`, () => checkMcpServer(server.id),
+        onApprove={(server) => void act(server.id, () => approveMcpServer(server.id, server.spec).then((result) => storedServerRefusal(result, "approved")),
+          () => "Server approved.", reloadServers)}
+        onCheck={(server) => void act(`check:${server.id}`, () => checkMcpServer(server.id).then((result) => storedServerRefusal(result, "checked")),
           (checked) => checked.status === "cant_start" ? `${checked.name} can't start.` : `${checked.name} answered with ${checked.tools.length} ${checked.tools.length === 1 ? "tool" : "tools"}.`,
           reloadServers)} />}
     <AddSkillDialog open={adding?.kind === "skill"} scope={scope} message={adding?.kind === "skill" ? adding.message : undefined} onClose={() => setAdding(undefined)}

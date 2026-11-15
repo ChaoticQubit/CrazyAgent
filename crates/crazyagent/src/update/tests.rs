@@ -323,6 +323,31 @@ fn a_signed_archive_verifies_and_tampered_or_mismatched_ones_are_refused() {
     );
 }
 
+/// A trusted comment that names a field twice is refused before its version is read, so the
+/// updater and the release asset check can never read different versions from one signature
+/// (RV-DS241-35).
+#[test]
+fn a_trusted_comment_that_names_a_field_twice_is_refused() {
+    let folder = tempfile::tempdir().unwrap();
+    let archive = folder.path().join("crazyagent.tar.gz");
+    let bytes = b"release archive bytes".to_vec();
+    std::fs::write(&archive, &bytes).unwrap();
+    let owner = signer();
+    let sha = sha256_hex(&bytes);
+    for trusted in [
+        "timestamp:1761400000\tfile:crazyagent.tar.gz\tversion:0.2.0\tversion:0.3.0",
+        "timestamp:1761400000\tfile:crazyagent.tar.gz\tversion:0.3.0\tversion:0.2.0",
+        "timestamp:1761400000\tfile:crazyagent.tar.gz\tfile:other.tar.gz\tversion:0.2.0",
+    ] {
+        let signed = owner.sign(&bytes, trusted);
+        assert_eq!(
+            code(verify_file(&archive, &sha, &signed, &owner.key, "0.2.0")),
+            "update_signature_ambiguous",
+            "{trusted}"
+        );
+    }
+}
+
 #[test]
 fn the_desktop_config_names_only_the_stable_manifest_and_each_channel_has_its_own() {
     let config: serde_json::Value = serde_json::from_str(DESKTOP_CONFIG).unwrap();
@@ -528,9 +553,8 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
     );
     server.join().unwrap();
 
-    let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let address = closed.local_addr().unwrap();
-    drop(closed);
+    let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let address = format!("127.0.0.1:{port}");
     let mut received = Vec::new();
     assert_eq!(
         said(

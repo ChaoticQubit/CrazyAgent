@@ -4,7 +4,7 @@
   CrazyAgent's engine isn't running                                                                                     
                                                                                                                         
   Projects, accounts and agents live in the engine.                                                                     
-  Start it, then press r to try again.                                                                                  
+  Start it with crazyagent service start, then press r to try again.                                                    
                                                                                                                         
   Looked for it at  ~/.crazyagent/engine.sock                                                                           
                                                                                                                         

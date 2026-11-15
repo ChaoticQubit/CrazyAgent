@@ -46,7 +46,7 @@ export const DEMO_REFUSALS: Readonly<Record<string, string>> = {
   demo_name_taken: "Your projects folder already holds a project or folder named CrazyAgent demo. Rename or move it, then try again.",
   demo_project_id_invalid: "This app sent a demo request the engine does not take. Update CrazyAgent, then try again.",
   demo_pool_missing: "That pool is gone. Pick another pool.",
-  demo_pool_not_ready: "No account in that pool is ready for agents. Sign one in, or pick another pool.",
+  demo_pool_not_ready: "No account in that pool is ready for agents. Add a ChatGPT or Claude sign-in, or an OpenAI or Anthropic API key, or pick another pool.",
   demo_harness_unavailable: "That pool's accounts run only on rcli, which has no live terminal or team agents yet. Pick a pool with an account that runs Claude Code or Codex.",
   demo_platform_unqualified: "The demo runs only on macOS in this version.",
   demo_seed_failed: "CrazyAgent couldn't write the demo's files into your projects folder. Check that it can be written to, then try again.",

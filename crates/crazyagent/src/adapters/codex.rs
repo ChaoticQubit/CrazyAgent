@@ -7,6 +7,10 @@ use super::claude::SeenIds;
 use super::{LINE_BYTES_MAX, clip_text};
 
 pub const FRAME_BYTES_MAX: usize = 65_536;
+
+/// The oldest Codex that signs in from CrazyAgent: 0.56.0 is the first release whose
+/// app-server has the `account/login/start` request the sign-in sends (DEC-166 floor).
+pub const SIGN_IN_MIN: &str = "0.56.0";
 const APPROVALS_MAX: usize = 16;
 const TURNS_MAX: usize = 128;
 const ID_BYTES_MAX: usize = 256;

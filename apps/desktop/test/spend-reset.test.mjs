@@ -11,7 +11,7 @@ const section = await import("../src/screens/settings/spend-settings.tsx");
 const poolsScreen = await import("../src/screens/settings/pools.tsx");
 
 const NOW = Date.UTC(2026, 10, 12, 13, 0);
-const settings = (confirm, all_limited = "notice") => ({ confirm, all_limited });
+const settings = (confirm, all_limited = "notice", resets_source = "off") => ({ confirm, all_limited, resets_source });
 const attempt = (patch = {}) => ({ account: "codex-a", origin: "owner", state: "settled", outcome: "reset", requested_ms: NOW - 1000, settled_ms: NOW, ...patch });
 const view = (patch = {}) => ({ settings: settings("confirm_each"), attempts: [], limited_pools: [], ...patch });
 const noop = () => {};
@@ -67,6 +67,37 @@ test("both spend settings show every option, the defaults first and unchanged", 
   assert.match(markup, /aria-label="When every pool account is limited"/);
   for (const option of [...section.CONFIRM_OPTIONS, ...section.ALL_LIMITED_OPTIONS]) assert.match(markup, new RegExp(`>${option.label}<`));
   assert.doesNotMatch(markup, /changed/);
+});
+
+test("the Claude free resets setting shows its three options, Don't read first as the default, each with its own help line", () => {
+  assert.deepEqual(section.RESETS_SOURCE_OPTIONS.map((option) => [option.value, option.label]), [
+    ["off", "Don't read"],
+    ["through_claude_code", "Through Claude Code"],
+    ["as_claude_code", "As Claude Code"],
+  ]);
+  assert.equal(client.SPEND_DEFAULTS.resets_source, "off");
+  assert.equal(section.resetsSourceHelp("through_claude_code"), "Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code. Anthropic may treat this as against its terms, and the risk falls on your Claude accounts.");
+  assert.equal(section.resetsSourceHelp("as_claude_code"), "CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks. Anthropic may treat this as against its terms, and the risk falls on your Claude accounts.");
+  assert.equal(section.resetsSourceHelp("off"), "CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings. Don't read is the default.");
+  const escaped = (text) => text.replaceAll("'", "&#x27;");
+  const markup = renderToStaticMarkup(createElement(section.SpendSettingsView, { settings: client.SPEND_DEFAULTS, refused: "", onChange: noop }));
+  assert.match(markup, /aria-label="Claude free resets"/);
+  for (const option of section.RESETS_SOURCE_OPTIONS) assert.ok(markup.includes(`>${escaped(option.label)}<`), option.label);
+  assert.ok(markup.includes(escaped(section.resetsSourceHelp("off"))), "the default shows the Don't read help line");
+  assert.doesNotMatch(markup, /changed/);
+  for (const source of ["through_claude_code", "as_claude_code"]) {
+    const picked = renderToStaticMarkup(createElement(section.SpendSettingsView, { settings: settings("confirm_each", "notice", source), refused: "", onChange: noop }));
+    assert.match(picked, /changed/, source);
+    assert.ok(picked.includes(escaped(section.resetsSourceHelp(source))), source);
+  }
+});
+
+test("settings from an engine that sends no Claude free resets source read as Don't read, never as a Claude Code option", () => {
+  const older = renderToStaticMarkup(createElement(section.SpendSettingsView, { settings: { confirm: "confirm_each", all_limited: "notice" }, refused: "", onChange: noop }));
+  assert.ok(older.includes(section.resetsSourceHelp("off").replaceAll("'", "&#x27;")), "the help line is Don't read's");
+  assert.doesNotMatch(older, /changed/);
+  const source = readFileSync(new URL("../src/screens/settings/spend-settings.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /\?\? "through_claude_code"|\?\? "as_claude_code"/);
 });
 
 test("each option has its own help line, and auto-spend says it does nothing while spending is off", () => {
@@ -150,4 +181,73 @@ test("each Pools row holds its own Spend for an account with a free reset, whate
   assert.doesNotMatch(draw(view({ settings: settings("one_click", "no_hint") }), read({ count: 2, kinds: [], next_expiry_ms: NOW })), /spend-reset/, "resets expired");
   assert.doesNotMatch(draw(view({ settings: settings("one_click", "no_hint") }), new Map()), /spend-reset/, "extras not read");
   assert.doesNotMatch(draw(undefined, two), /spend-reset/, "spend view not read");
+});
+
+test("Free resets shows no choice while the usage read loads, failed or has no spend part, never the defaults as stored", () => {
+  const draw = (usage) => renderToStaticMarkup(createElement(section.SpendSettingsSection, { usage, onDone: noop, onRetry: noop }));
+  const loading = draw({ kind: "loading" });
+  assert.doesNotMatch(loading, /role="radiogroup"/);
+  assert.match(loading, /role="status"[^>]*>Loading your free resets settings\.\.\.</);
+  const failed = draw({ kind: "error", code: "usage_unavailable", message: "Usage couldn't be read. Try again." });
+  assert.doesNotMatch(failed, /role="radiogroup"/);
+  assert.match(failed, /Usage couldn&#x27;t be read\. Try again\./);
+  assert.match(failed, />Try again</);
+  for (const missing of [draw({ kind: "not_ready" }), draw({ kind: "ok", value: {} })]) {
+    assert.doesNotMatch(missing, /role="radiogroup"/);
+    assert.match(missing, /role="status"[^>]*>The free resets settings aren&#x27;t in this build yet\.</);
+    assert.doesNotMatch(missing, /<h2/);
+  }
+  const stored = draw({ kind: "ok", value: { spend: view({ settings: settings("off", "no_hint", "as_claude_code") }) } });
+  for (const label of ["Off", "No hint", "As Claude Code"]) assert.match(stored, new RegExp(`aria-checked="true"[^>]*>${label}<`), label);
+  for (const label of ["Confirm each", "Notice", "Don&#x27;t read"]) assert.match(stored, new RegExp(`aria-checked="false"[^>]*>${label}<`), label);
+});
+
+test("spend one: free resets saves go one at a time, every pick sent in the order picked, each answered on its own", async () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  const sent = [];
+  const answers = [];
+  const push = section.inOrder((value) => { sent.push(value); return new Promise((resolve) => answers.push(resolve)); });
+  const done = { kind: "ok", value: undefined };
+  const refused = { kind: "error", code: "usage_unavailable", message: "Usage couldn't be read. Try again." };
+  const confirm = push({ field: "confirm", value: "off" });
+  const asClaudeCode = push({ field: "resets_source", value: "as_claude_code" });
+  const dontRead = push({ field: "resets_source", value: "off" });
+  await tick();
+  assert.deepEqual(sent.map((choice) => choice.value), ["off"]);
+  answers[0](refused);
+  assert.deepEqual(await confirm, refused);
+  await tick();
+  assert.deepEqual(sent.map((choice) => choice.value), ["off", "as_claude_code"]);
+  answers[1](done);
+  assert.deepEqual(await asClaudeCode, done);
+  await tick();
+  assert.deepEqual(sent.map((choice) => choice.value), ["off", "as_claude_code", "off"]);
+  answers[2](done);
+  assert.deepEqual(await dontRead, done);
+});
+
+test("spend one: each Free resets control sends only its own setting, and the bridge carries just that choice", async () => {
+  const { isValidElement } = await import("react");
+  const { Segmented } = await import("../src/ui/index.ts");
+  const walk = (node, found = []) => {
+    if (Array.isArray(node)) for (const child of node) walk(child, found);
+    else if (isValidElement(node)) { found.push(node); walk(node.props.children, found); }
+    return found;
+  };
+  const picked = [];
+  const tree = section.SpendSettingsView({ settings: settings("one_click", "no_hint", "as_claude_code"), refused: "", onChoice: (choice) => picked.push(choice), onChange: (all) => picked.push(all) });
+  const controls = new Map(walk(tree).filter((element) => element.type === Segmented).map((element) => [element.props.label, element.props]));
+  controls.get("Spend confirmation").onValue("off");
+  controls.get("When every pool account is limited").onValue("auto_spend");
+  controls.get("Claude free resets").onValue("off");
+  assert.deepEqual(picked, [{ field: "confirm", value: "off" }, { field: "all_limited", value: "auto_spend" }, { field: "resets_source", value: "off" }]);
+  const calls = [];
+  const before = globalThis.window;
+  globalThis.window = { __TAURI_INTERNALS__: { async invoke(command, args) { calls.push([command, args]); return null; } } };
+  try {
+    assert.deepEqual(await client.setSpendOne({ field: "resets_source", value: "off" }), { kind: "ok", value: null });
+  } finally {
+    globalThis.window = before;
+  }
+  assert.deepEqual(calls, [["desktop_usage_set_spend", { choice: { field: "resets_source", value: "off" } }]]);
 });

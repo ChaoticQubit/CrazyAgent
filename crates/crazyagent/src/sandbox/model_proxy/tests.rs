@@ -214,19 +214,6 @@ fn a_port_search_with_every_port_taken_refuses_plainly() {
     }
 }
 
-/// A port the system just handed out on 127.0.0.1 and freed again, other than any of `not`,
-/// for a port search that needs a free port. Input: the ports it must not be. Output: the
-/// port.
-fn loose_port(not: &[u16]) -> u16 {
-    loop {
-        let listener = spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        if !not.contains(&port) {
-            return port;
-        }
-    }
-}
-
 /// S4B-2W1 r1 (rv-code L1, rv-secreview L2): a port search skips a port this user holds on
 /// 127.0.0.1, ::1, 0.0.0.0 or ::, each bound as `std` binds, with `SO_REUSEADDR`, and takes
 /// the next one, so a proxy never sits beside an owner's wildcard listener and takes its
@@ -236,7 +223,7 @@ fn a_port_search_skips_a_port_held_on_any_address_of_this_user() {
     for holder in ["127.0.0.1:0", "[::1]:0", "0.0.0.0:0", "[::]:0"] {
         let held = spawn_gate::bind_tcp_std(holder).unwrap();
         let taken = held.local_addr().unwrap().port();
-        let free = loose_port(&[taken]);
+        let free = spawn_gate::free_low_tcp_port().unwrap();
         let bound = free_pair(&[taken, free], &[], 0).unwrap();
         for (listener, address) in bound.iter().zip(["127.0.0.1", "::1"]) {
             let local = listener.local_addr().unwrap();
@@ -251,8 +238,8 @@ fn a_port_search_skips_a_port_held_on_any_address_of_this_user() {
 /// server starts on, and refuses plainly when they are the only ports it has.
 #[test]
 fn a_port_search_leaves_the_owner_model_ports_alone_even_while_free() {
-    let kept = loose_port(&[]);
-    let free = loose_port(&[kept]);
+    let kept = spawn_gate::free_low_tcp_port().unwrap();
+    let free = spawn_gate::free_low_tcp_port().unwrap();
     let bound = free_pair(&[kept, free], &[kept], 0).unwrap();
     assert_eq!(bound[0].local_addr().unwrap().port(), free);
     drop(bound);

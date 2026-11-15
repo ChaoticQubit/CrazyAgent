@@ -163,11 +163,23 @@ pub(crate) enum Job {
     HomeAddPlan(
         Admission,
         Cursor,
+        RequestId,
         String,
         crate::projects_home::AddMode,
         Vec<crate::projects_home::AddOverride>,
         oneshot::Sender<Result<crate::projects_home::AddPlan, EngineError>>,
     ),
+    HomeAddCheck(
+        Admission,
+        RequestId,
+        String,
+        crate::projects_home::AddMode,
+        Vec<crate::projects_home::AddOverride>,
+        oneshot::Sender<Result<(), EngineError>>,
+    ),
+    HomeAddSettle(RequestId, oneshot::Sender<Result<(), EngineError>>),
+    HomeAddEnded(oneshot::Sender<Result<Option<projects_home::AddEnded>, EngineError>>),
+    HomeAddForget(RequestId, oneshot::Sender<Result<(), EngineError>>),
     HomeMovePlan(
         Admission,
         Cursor,
@@ -204,7 +216,7 @@ pub(crate) enum Job {
         u64,
         oneshot::Sender<Result<projects_home::DeletePlanned, EngineError>>,
     ),
-    DeleteSettle(u64, oneshot::Sender<Result<(), EngineError>>),
+    DeleteSettle(u64, bool, oneshot::Sender<Result<(), EngineError>>),
     DeleteFilesClear(Vec<String>, oneshot::Sender<Result<(), EngineError>>),
     DeleteRecord(
         Admission,
@@ -354,11 +366,17 @@ impl Storage {
                     if let Err(e) = projects_home::settle_pending(&mut connection, &path, None, true) {
                         eprintln!("projects_home_move_not_settled cause={}", e.0);
                     }
+                    if let Err(e) = projects_home::add_settle(&mut connection, None) {
+                        eprintln!("home_add_not_settled cause={}", e.0);
+                    }
                     if let Err(e) = projects_home::project_move_settle(&mut connection, None, true) {
                         eprintln!("project_move_not_settled cause={}", e.0);
                     }
-                    if let Err(e) = projects_home::delete_settle(&connection, None) {
+                    if let Err(e) = projects_home::delete_settle(&connection, None, false) {
                         eprintln!("project_delete_not_settled cause={}", e.0);
+                    }
+                    if let Err(e) = projects_home::sweep_home(&connection) {
+                        eprintln!("home_staging_not_swept cause={}", e.0);
                     }
                     if let Some(jobs) = delete_files_jobs
                         && let Err(e) =
@@ -617,11 +635,38 @@ impl Storage {
                                 &control,
                             ));
                         }
-                        Job::HomeAddPlan(admission, expected, source, mode, overrides, reply) => {
+                        Job::HomeAddPlan(admission, expected, request, source, mode, overrides, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::add_plan(&mut connection, &path, &admission, &expected, &source, mode, &overrides)
+                                projects_home::add_plan(&mut connection, &path, &admission, &expected, &request, &source, mode, &overrides)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeAddCheck(admission, request, source, mode, overrides, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::add_check(&mut connection, &path, &admission, &request, &source, mode, &overrides)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeAddSettle(request, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::add_settle(&mut connection, Some(&request)).map(drop)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeAddEnded(reply) => {
+                            let _ = reply.send(projects_home::add_ended(&connection));
+                        }
+                        Job::HomeAddForget(request, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::add_forget(&connection, &request)
                             };
                             let _ = reply.send(result);
                         }
@@ -693,11 +738,11 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
-                        Job::DeleteSettle(exchange, reply) => {
+                        Job::DeleteSettle(exchange, trashed, reply) => {
                             let result = if readonly {
                                 Err(error("project_setup_readonly"))
                             } else {
-                                projects_home::delete_settle(&connection, Some(exchange))
+                                projects_home::delete_settle(&connection, Some(exchange), trashed)
                             };
                             let _ = reply.send(result);
                         }
@@ -1100,6 +1145,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::sandbox_settings::initialize(connection)?;
     crate::cleanup_settings::initialize(connection)?;
     crate::quit_settings::initialize(connection)?;
+    crate::provider_retry::initialize(connection)?;
     crate::master_step_limit::initialize(connection)?;
     crate::master_time_limit::initialize(connection)?;
     crate::master_frame_limit::initialize(connection)?;
@@ -1115,6 +1161,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::instruction_files::initialize(connection).map_err(error)?;
     crate::scheduling::initialize(connection)?;
     crate::roadmap_status::initialize(connection)?;
+    crate::project_overview::initialize(connection)?;
     plugins::initialize(connection)?;
     accounts::initialize(connection)?;
     trash::initialize(connection)?;
@@ -1471,6 +1518,7 @@ fn apply(
             | Command::OwnerSandbox { .. }
             | Command::OwnerAgentCleanup { .. }
             | Command::OwnerAgentQuit { .. }
+            | Command::OwnerProviderRetry { .. }
             | Command::OwnerMasterSteps { .. }
             | Command::OwnerMasterTime { .. }
             | Command::OwnerMasterFrames { .. }
@@ -1664,6 +1712,7 @@ fn execute(
         Command::OwnerSandbox { settings } => crate::sandbox_settings::save(tx, settings),
         Command::OwnerAgentCleanup { settings } => crate::cleanup_settings::save(tx, settings),
         Command::OwnerAgentQuit { settings } => crate::quit_settings::save(tx, settings),
+        Command::OwnerProviderRetry { choice } => crate::provider_retry::save(tx, *choice),
         Command::OwnerMasterSteps { settings } => crate::master_step_limit::save(tx, settings),
         Command::OwnerMasterTime { settings } => crate::master_time_limit::save(tx, settings),
         Command::OwnerMasterFrames { settings } => crate::master_frame_limit::save(tx, settings),
@@ -1830,6 +1879,7 @@ pub(crate) fn create_project(
     assert_eq!(count, 1);
     crate::activity::note_created(tx, project_id, &spec.name, created_ms());
     plugins::remove_project(tx, project_id)?;
+    crate::memory::forget_project(tx, project_id)?;
     if let Some(root) = tx.path().map(Path::new).and_then(Path::parent) {
         plugins::remove_skill_project_folder(root, project_id.as_str())?;
     }
@@ -2542,11 +2592,10 @@ fn owner_apply_with(
     assert_eq!(next > revision, changed);
     if changed
         && let OwnerOperation::Apply {
-            mutation: OwnerMutation::CreateDemo { .. },
+            mutation: OwnerMutation::CreateDemo { project_id, .. },
         } = &request.operation
-        && let Err(e) = crate::demo::plant_question(db)
     {
-        eprintln!("demo_question_not_planted cause={}", e.0);
+        crate::questions::refresh_page(db, project_id);
     }
     Ok(OwnerApplied {
         result,
@@ -2745,6 +2794,7 @@ fn owner_read(
                 .into_iter()
                 .map(|path| path.display().to_string())
                 .collect(),
+            version: versioned::current(&tx, &versioned::hidden_paths_item(project_id))?.version,
         },
         OwnerRead::ProjectAgentPolicy { project_id } => {
             let Some(setup) = crate::project_setup::load_setup(&tx, project_id)? else {
@@ -2871,6 +2921,7 @@ fn owner_read(
         OwnerRead::SandboxSettings => crate::sandbox_settings::read(&tx)?,
         OwnerRead::CleanupSettings => crate::cleanup_settings::read(&tx)?,
         OwnerRead::QuitSettings => crate::quit_settings::read(&tx)?,
+        OwnerRead::ProviderRetry => crate::provider_retry::read(&tx)?,
         OwnerRead::MasterStepSettings => crate::master_step_limit::read(&tx)?,
         OwnerRead::MasterTimeSettings => crate::master_time_limit::read(&tx)?,
         OwnerRead::MasterFrameSettings => crate::master_frame_limit::read(&tx)?,

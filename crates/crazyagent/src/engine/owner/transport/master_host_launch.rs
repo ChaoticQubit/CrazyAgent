@@ -237,6 +237,7 @@ impl OwnerRuntimeHandle {
                 &prepared.tools_off,
                 prepared.steps,
                 &settings,
+                prepared.provider_retry,
             )?
         } else {
             codex_master_turn(
@@ -247,6 +248,7 @@ impl OwnerRuntimeHandle {
                 wall_time,
                 delegate,
                 &prepared.tools_off,
+                prepared.provider_retry,
             )?
         };
         require_master_delegate(
@@ -386,8 +388,9 @@ pub(super) struct MasterTurnLaunch {
 /// stays denied and the managed home is never given to the master. Inputs: where the turn runs, the
 /// account lease, the registered executable, the attempt's connection, the instruction text, the
 /// turn's time limit (none for no limit), the engine executable for tools on, the team tools
-/// switched off and the owner's master step limit, which only a tools-on command carries
-/// (OB-5b). Output: the launch parts with the copy, or the refusal of the part that failed,
+/// switched off, the owner's master step limit, which only a tools-on command carries
+/// (OB-5b), and the connection-retry choice, set as the agents' Claude Code variable
+/// (DEC-163 Q7). Output: the launch parts with the copy, or the refusal of the part that failed,
 /// `native_profile_renewal_failed`, a transient refusal, when the token still lapses within a
 /// minute after a renewal. The owner's Claude Code settings go into its `--settings`.
 #[allow(clippy::too_many_arguments)]
@@ -402,11 +405,12 @@ pub(super) fn claude_master_turn(
     tools_off: &[String],
     steps: StepLimit,
     settings: &crate::harness_settings::apply::Applied,
+    retry: crate::provider_retry::ProviderRetry,
 ) -> Result<MasterTurnLaunch, EngineError> {
     let instructions = write_master_instructions(place.root, place.runtime_ref, instructions)?;
     let home = master_turn_home(place.root, place.runtime_ref)?;
     let credential = profile.hand_to_turn(&home, wall_time, executable)?;
-    let (command, sandbox, tool_record) = match engine {
+    let (mut command, sandbox, tool_record) = match engine {
         None => (
             crate::engine::claude_host::launch_command(
                 executable,
@@ -466,6 +470,7 @@ pub(super) fn claude_master_turn(
             (command, sandbox, Some(drop))
         }
     };
+    crate::engine::claude_host::limit_retries(&mut command, retry);
     Ok(MasterTurnLaunch {
         command,
         sandbox,
@@ -495,8 +500,10 @@ fn master_connection(connection: &ModelConnection, model: Option<&str>) -> Model
 /// macOS refuses a Seatbelt profile inside the master's, which keeps writes to the leased worktree
 /// and the turn's own folders, and only the engine's team server, as for Claude Code. Inputs: where
 /// the turn runs, the account lease, the registered executable, the attempt's connection, the
-/// turn's time limit (none for no limit), the engine executable for tools on and the team tools
-/// switched off. Output: the launch parts with the copy, or the refusal of the part that failed.
+/// turn's time limit (none for no limit), the engine executable for tools on, the team tools
+/// switched off and the owner's connection-retry choice (DEC-163 Q7). Output: the launch parts
+/// with the copy, or the refusal of the part that failed.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn codex_master_turn(
     place: &MasterTurnPlace<'_>,
     profile: &NativeProfileUse,
@@ -505,13 +512,14 @@ pub(super) fn codex_master_turn(
     wall_time: Option<Duration>,
     engine: Option<&Path>,
     tools_off: &[String],
+    retry: crate::provider_retry::ProviderRetry,
 ) -> Result<MasterTurnLaunch, EngineError> {
     let model = &connection.model.id;
     let home = master_turn_home(place.root, place.runtime_ref)?;
     let credential = profile.hand_to_turn(&home, wall_time, executable)?;
     let Some(engine) = engine else {
         return Ok(MasterTurnLaunch {
-            command: master_command(executable, &home, place.worktree, model, None)?,
+            command: master_command(executable, &home, place.worktree, model, None, retry)?,
             sandbox: master_sandbox(
                 place.root,
                 place.runtime_ref,
@@ -557,6 +565,7 @@ pub(super) fn codex_master_turn(
             mailbox: &mailbox,
             off: tools_off,
         }),
+        retry,
     )?;
     Ok(MasterTurnLaunch {
         command,
@@ -770,7 +779,8 @@ fn require_master_tool_policy(
             }
             _ if fixed.contains(setting)
                 || setting.starts_with("model=\"")
-                || *setting == trust => {}
+                || *setting == trust
+                || *setting == crate::provider_retry::CODEX_UNBOUNDED_OFF => {}
             _ => return Err(refused()),
         }
     }
@@ -920,8 +930,9 @@ fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineEr
 
 /// Builds the Codex master app-server command: tools off with the fixed read-only settings,
 /// or with `tools` the tools-on settings and one `mcp_servers` entry for the engine's
-/// `delegate` server. Inputs: the registered executable, the home, the working directory, the
-/// model and the tools-on parts. Output: the command, or `master_runtime_binding`.
+/// `delegate` server, plus the built-in provider's settings for `retry` (DEC-163 Q7). Inputs:
+/// the registered executable, the home, the working directory, the model, the tools-on parts
+/// and the connection-retry choice. Output: the command, or `master_runtime_binding`.
 #[cfg(unix)]
 fn master_command(
     executable: &Path,
@@ -929,6 +940,7 @@ fn master_command(
     cwd: &Path,
     model: &str,
     tools: Option<crate::engine::claude_host::MasterTools<'_>>,
+    retry: crate::provider_retry::ProviderRetry,
 ) -> Result<Command, EngineError> {
     if !executable.is_absolute()
         || !home.is_absolute()
@@ -954,6 +966,9 @@ fn master_command(
     };
     for config in fixed {
         command.arg("-c").arg(config);
+    }
+    for setting in retry.codex_settings(crate::provider_retry::CodexProvider::BuiltIn) {
+        command.arg("-c").arg(setting);
     }
     let trust = crate::harnesses::codex_folder::untrusted(cwd)
         .map_err(|_| failure("master_runtime_binding"))?;
@@ -981,8 +996,8 @@ fn master_command(
 }
 
 /// Refuses the master app-server command where the engine cannot give it its own
-/// process group to stop as a whole. Takes the executable, home, working directory and
-/// model, all unused. Returns `master_host_unavailable`.
+/// process group to stop as a whole. Takes the executable, home, working directory, model,
+/// tools-on parts and retry choice, all unused. Returns `master_host_unavailable`.
 #[cfg(not(unix))]
 fn master_command(
     _executable: &Path,
@@ -990,6 +1005,7 @@ fn master_command(
     _cwd: &Path,
     _model: &str,
     _tools: Option<crate::engine::claude_host::MasterTools<'_>>,
+    _retry: crate::provider_retry::ProviderRetry,
 ) -> Result<Command, EngineError> {
     Err(failure("master_host_unavailable"))
 }
@@ -1024,14 +1040,11 @@ fn delegate_servers(
     Ok(setting)
 }
 
-/// Builds and installs the Seatbelt boundary for one master turn with its tools off. The
-/// master writes only in its leased worktree, the account's managed home, the turn's own
-/// temp folder and, on macOS, the tool cache its policy gives a linked worktree (T8); it
-/// reads the project repository, never writing its refs, reflogs or other worktrees' admin
-/// folders, since the engine makes every ref move, and it reads the harness install folder
-/// and the turn directory, and reaches only its model endpoint's port, on loopback for a
-/// local model, otherwise on any host (443 for a native account). Output: the installed
-/// sandbox, or `master_sandbox_unavailable` on a refusal.
+/// Builds and installs the Seatbelt boundary of one tools-off master turn. The master writes
+/// only in its leased worktree, its turn home that holds a copy of the account's sign-in (an
+/// rcli master: its profile's home), its temp folder and, on macOS, its tool cache (T8); it
+/// reads the repository without writing refs or admin folders, the harness install and the
+/// turn folder, and reaches only its model endpoint. Output: the sandbox, or the refusal.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn master_sandbox(
@@ -1295,7 +1308,7 @@ fn turn_sandbox(
 /// the owner generation, without writing to it. Input: the generation's root. Output: the
 /// settings, or `master_sandbox_unavailable` when they cannot be read, so the turn fails
 /// closed rather than start under another option.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn stored_sandbox_settings(
     root: &Root,
 ) -> Result<crate::sandbox_settings::SandboxSettings, EngineError> {
@@ -1521,6 +1534,7 @@ fn default_master_tool_caches(runtime: &Path, repository: &Path) -> Vec<PathBuf>
 mod tests {
     use super::super::Root;
     use super::*;
+    use crate::provider_retry::{CODEX_UNBOUNDED_OFF, ProviderRetry};
     use std::collections::BTreeMap;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::{Path, PathBuf};
@@ -1679,6 +1693,7 @@ mod tests {
             &worktree,
             "admitted-model",
             None,
+            ProviderRetry::RetryBriefly,
         )
         .unwrap();
         let args: Vec<String> = command
@@ -1718,6 +1733,60 @@ mod tests {
         assert!(require_master_tool_policy(&rebuilt(Some(&trusted)), None).is_err());
     }
 
+    /// The Codex master takes the connection-retry setting like every other Codex launch
+    /// (DEC-163 Q7). It runs on the built-in openai provider, so Stop at once and Retry briefly
+    /// add only the setting that ends Codex's endless network wait, Harness default adds
+    /// nothing, no option writes a `model_providers` key, and the master policy accepts each
+    /// command with tools off and on.
+    #[test]
+    fn master_command_takes_the_retry_setting_and_its_policy_allows_it() {
+        let scratch = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+        let worktree = scratch.path().canonicalize().unwrap().join("repo");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        let off: Vec<String> = Vec::new();
+        let tools = crate::engine::claude_host::MasterTools {
+            engine: Path::new("/registered/crazyagent"),
+            drop: Path::new("/turn/tmp/drop"),
+            mailbox: Path::new("/turn/tmp/mailbox"),
+            off: &off,
+        };
+        for retry in ProviderRetry::ALL {
+            for tools in [None, Some(tools)] {
+                let command = master_command(
+                    Path::new("/registered/codex"),
+                    Path::new("/private/profile"),
+                    &worktree,
+                    "admitted-model",
+                    tools,
+                    retry,
+                )
+                .unwrap();
+                let args: Vec<&str> = command
+                    .get_args()
+                    .map(|arg| arg.to_str().unwrap())
+                    .collect();
+                assert_eq!(
+                    args.windows(2)
+                        .filter(|pair| *pair == ["-c", CODEX_UNBOUNDED_OFF])
+                        .count(),
+                    usize::from(retry != ProviderRetry::HarnessDefault),
+                    "{retry:?} tools {}: {args:?}",
+                    tools.is_some()
+                );
+                assert!(
+                    !args.iter().any(|arg| arg.contains("model_providers")),
+                    "{retry:?}: {args:?}"
+                );
+                assert_eq!(
+                    require_master_tool_policy(&command, tools),
+                    Ok(()),
+                    "{retry:?} tools {}",
+                    tools.is_some()
+                );
+            }
+        }
+    }
+
     #[test]
     fn master_command_pins_model_and_read_only_stdio_without_spawning() {
         let command = master_command(
@@ -1726,6 +1795,7 @@ mod tests {
             Path::new("/leased/worktree"),
             "admitted-model",
             None,
+            ProviderRetry::RetryBriefly,
         )
         .unwrap();
         assert_eq!(command.get_program(), "/registered/codex");
@@ -1765,6 +1835,7 @@ mod tests {
             Path::new("/leased/worktree"),
             ACCOUNT_DEFAULT_MODEL,
             None,
+            ProviderRetry::RetryBriefly,
         )
         .unwrap();
         let args = command
@@ -1790,6 +1861,7 @@ mod tests {
             Path::new("/leased/worktree"),
             "admitted-model",
             None,
+            ProviderRetry::RetryBriefly,
         )
         .unwrap();
         let environment = command
@@ -1822,7 +1894,8 @@ mod tests {
                     Path::new("/private/profile"),
                     Path::new("/leased/worktree"),
                     model,
-                    None
+                    None,
+                    ProviderRetry::RetryBriefly
                 )
                 .is_err()
             );
@@ -1838,7 +1911,8 @@ mod tests {
                     Path::new(home),
                     Path::new(cwd),
                     "model",
-                    None
+                    None,
+                    ProviderRetry::RetryBriefly
                 )
                 .is_err()
             );
@@ -2187,7 +2261,15 @@ mod tests {
             std::fs::canonicalize(&executable).unwrap().display()
         )));
 
-        let master = master_command(&executable, &home, &worktree, "admitted-model", None).unwrap();
+        let master = master_command(
+            &executable,
+            &home,
+            &worktree,
+            "admitted-model",
+            None,
+            ProviderRetry::RetryBriefly,
+        )
+        .unwrap();
         let wrapped = sandbox.wrap(&master).unwrap();
         assert_eq!(wrapped.get_program(), crate::sandbox::SANDBOX_EXEC);
         let args = wrapped
@@ -2218,6 +2300,7 @@ mod tests {
         ]);
         expected.extend(crate::sandbox::AGENT_GIT_ENV);
         expected.extend(crate::sandbox::AGENT_TLS_ENV);
+        expected.extend(crate::sandbox::AGENT_HOME_ENV);
         let prefix = crate::sandbox::shell_tmp_prefix(&tmp);
         expected.insert("TMPPREFIX", prefix.to_str().unwrap());
         let tools = crate::sandbox::toolchains::agent_env(&home, &ToolHomes::owner().unwrap());
@@ -2285,6 +2368,7 @@ mod tests {
         ]);
         expected_claude.extend(crate::sandbox::AGENT_GIT_ENV);
         expected_claude.extend(crate::sandbox::AGENT_TLS_ENV);
+        expected_claude.extend(crate::sandbox::AGENT_HOME_ENV);
         expected_claude.insert("TMPPREFIX", prefix.to_str().unwrap());
         expected_claude.extend(
             tools
@@ -2413,6 +2497,109 @@ mod tests {
         assert!(text.contains("(allow network-outbound (remote ip \"localhost:11434\"))"));
         assert!(!text.contains("*:443"));
         assert!(!text.contains("(allow network*)"));
+    }
+
+    /// CONFIGURED-HOMES-GUARD: an rcli master whose home is one configured SDK home in the
+    /// engine root reads, writes and resolves that home and keeps its launch denies there,
+    /// while the folder of homes stays denied, so a real child can neither list it nor read
+    /// another keyed account's config. The profile denies the folder and allows the own home
+    /// right after that deny, naming no other home. Runs on macOS only: it checks Seatbelt.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_rcli_master_reaches_its_own_configured_home_and_no_other() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let engine = root.engine_root().unwrap().to_path_buf();
+        let homes = engine.join("configured-sdk-homes");
+        let own = homes.join("a".repeat(64));
+        let other = homes.join("b".repeat(64));
+        let own_text = "configured-homes-guard-dummy-own-config";
+        let other_text = "configured-homes-guard-dummy-other-config";
+        for (home, text) in [(&own, own_text), (&other, other_text)] {
+            private_directory(&home.join(".backboard"));
+            std::fs::write(home.join(".backboard").join("config.json"), text).unwrap();
+        }
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let install = base.join("install").join("bin");
+        for directory in [&homes, &repository, &worktree, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("rcli");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _capture_ref, _capture) = allocate_master_capture(&root).unwrap();
+        let sandbox = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &own,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+            crate::trust::Trust::Reviewed,
+            &[],
+        )
+        .unwrap();
+        let text = sandbox.sandbox().profile();
+        let deny = text
+            .find(&format!("\n  (subpath \"{}\")", homes.display()))
+            .expect("the profile denies the configured homes");
+        let allow = text
+            .find(&format!(
+                "(allow file-read* file-write*\n  (subpath \"{}\"))",
+                own.display()
+            ))
+            .expect("the profile allows the master's own home");
+        assert!(deny < allow, "{text}");
+        assert!(!text.contains(&other.display().to_string()), "{text}");
+        let run = |script: &str| {
+            let mut harness = Command::new("/bin/sh");
+            harness.arg("-c").arg(script).current_dir(&worktree);
+            let mut child = sandbox.wrap(&harness).unwrap();
+            child
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            crate::spawn_gate::output(&mut child).unwrap()
+        };
+        let quoted = |path: &Path| format!("'{}'", path.display());
+        let own_config = own.join(".backboard").join("config.json");
+        let read = run(&format!("cat {}", quoted(&own_config)));
+        assert!(read.status.success(), "{read:?}");
+        assert_eq!(String::from_utf8_lossy(&read.stdout), own_text);
+        let resolved = run(&format!(
+            "/bin/realpath {} && cd {} && pwd -P",
+            quoted(&own_config),
+            quoted(&own)
+        ));
+        assert!(resolved.status.success(), "{resolved:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&resolved.stdout),
+            format!("{}\n{}\n", own_config.display(), own.display())
+        );
+        let write = run(&format!("echo turn > {}", quoted(&own.join("turn.txt"))));
+        assert!(write.status.success(), "{write:?}");
+        assert_eq!(
+            std::fs::read_to_string(own.join("turn.txt")).unwrap(),
+            "turn\n"
+        );
+        let launch = run(&format!("echo x > {}", quoted(&own.join("settings.json"))));
+        assert!(!launch.status.success());
+        assert!(!own.join("settings.json").exists());
+        let other_config = other.join(".backboard").join("config.json");
+        let stolen = run(&format!("cat {}", quoted(&other_config)));
+        assert!(!stolen.status.success());
+        assert!(!String::from_utf8_lossy(&stolen.stdout).contains(other_text));
+        let planted = run(&format!("echo x > {}", quoted(&other.join("planted"))));
+        assert!(!planted.status.success());
+        assert!(!other.join("planted").exists());
+        let listed = run(&format!("ls {}", quoted(&homes)));
+        assert!(!listed.status.success());
+        assert!(!String::from_utf8_lossy(&listed.stdout).contains(&"b".repeat(64)));
     }
 
     /// A hidden folder inside the project reaches the master's own boundary: the installed
@@ -3229,6 +3416,7 @@ mod tests {
                 Path::new("/leased/worktree"),
                 "admitted-model",
                 tools,
+                crate::provider_retry::ProviderRetry::RetryBriefly,
             )
             .unwrap();
             let args: Vec<&str> = command

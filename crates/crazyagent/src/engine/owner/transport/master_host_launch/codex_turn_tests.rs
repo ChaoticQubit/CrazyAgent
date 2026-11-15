@@ -172,6 +172,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         Some(Duration::from_secs(3600)),
         None,
         &[],
+        crate::provider_retry::ProviderRetry::RetryBriefly,
     )
     .unwrap();
     let off_turn = runtime.join(format!("master-runtime-{}", off_ref.as_str()));
@@ -184,7 +185,15 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     assert!(identity.ends_with(".unexchangeable"), "{identity}");
     assert!(!identity.contains("unit-identity-signature"), "{identity}");
     assert!(tool_record.is_none());
-    let today = master_command(&codex, &home, &worktree, "unit-model", None).unwrap();
+    let today = master_command(
+        &codex,
+        &home,
+        &worktree,
+        "unit-model",
+        None,
+        crate::provider_retry::ProviderRetry::RetryBriefly,
+    )
+    .unwrap();
     assert!(command.get_args().eq(today.get_args()));
     assert!(command.get_envs().eq(today.get_envs()));
     assert!(
@@ -242,6 +251,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         Some(Duration::from_secs(3600)),
         Some(&engine),
         &[crate::team::tool::RECALL_TOOL.to_owned()],
+        crate::provider_retry::ProviderRetry::RetryBriefly,
     )
     .unwrap();
     let turn = runtime.join(format!("master-runtime-{}", tools_ref.as_str()));
@@ -635,7 +645,15 @@ fn the_installed_codex_reads_a_tools_on_master_with_its_own_sub_agents_off() {
         mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
         off: &[],
     };
-    let command = master_command(&codex, &home, &base, ACCOUNT_DEFAULT_MODEL, Some(tools)).unwrap();
+    let command = master_command(
+        &codex,
+        &home,
+        &base,
+        ACCOUNT_DEFAULT_MODEL,
+        Some(tools),
+        crate::provider_retry::ProviderRetry::RetryBriefly,
+    )
+    .unwrap();
     let mut features = Command::new(&codex);
     features
         .args(
@@ -731,7 +749,15 @@ fn a_codex_master_home_gets_the_owner_settings_its_command_does_not_set() {
         &catalog,
         crate::harness_settings::resolve(&catalog, Some("0.50.0"), &app, None),
     );
-    let command = master_command(&codex, &home, &worktree, "unit-model", None).unwrap();
+    let command = master_command(
+        &codex,
+        &home,
+        &worktree,
+        "unit-model",
+        None,
+        crate::provider_retry::ProviderRetry::RetryBriefly,
+    )
+    .unwrap();
     assert!(settings(&command).contains(&PROJECT_DOCS_OFF.to_owned()));
     write_master_settings(&home, &command, &owner).unwrap();
     let file = home.join("config.toml");

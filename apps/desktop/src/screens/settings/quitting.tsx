@@ -14,7 +14,7 @@ export const QUIT_DEFAULT: QuitSettings = { on_quit: "keep_running", left_runnin
 /** The quit options in the order Settings lists them, each with its title and what it does,
  * the same words in the TUI. */
 export const ON_QUIT_CHOICES: { choice: OnQuit; title: string; help: string }[] = [
-  { choice: "keep_running", title: "Keep team agents running", help: "They go on with their work, and CrazyAgent takes them over when it opens again." },
+  { choice: "keep_running", title: "Keep team agents running", help: "They go on with their work, and CrazyAgent takes them over when it opens again. An agent under network None is frozen instead, until CrazyAgent opens again." },
   { choice: "stop", title: "Stop team agents", help: "Each agent stops as Stop would, and its task goes back to the queue." },
 ];
 

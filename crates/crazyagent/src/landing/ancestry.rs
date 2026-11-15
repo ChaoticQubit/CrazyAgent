@@ -1,5 +1,6 @@
-use super::flow::{self, hold_within};
+use super::flow;
 use super::git::{Repo, failure};
+use super::hold::hold_within;
 use super::{AgentKind, ChangeAgent, Workspace, clone, owner, store, subagent};
 use crate::agent_git::Layout;
 use crate::engine::EngineError;
