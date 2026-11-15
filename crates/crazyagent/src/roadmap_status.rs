@@ -1135,8 +1135,9 @@ pub(crate) fn names_run(project: &ProjectId, name: &str) -> bool {
 
 /// Closes every run an engine that stopped left open: a run lives on a thread of its
 /// engine, so at engine start none can still report, and each is closed with `UNFINISHED`
-/// without a new try. Input: the connection. Output: how many runs were closed, or
-/// `roadmap_status_unavailable`.
+/// without a new try. Then forgets the status rows and settings of projects no longer
+/// recorded, which removals from before they went with their project left (RV-DS241-80/81).
+/// Input: the connection. Output: how many runs were closed, or `roadmap_status_unavailable`.
 pub fn close_orphans(db: &Connection) -> Result<usize, EngineError> {
     let closed = db
         .execute(
@@ -1152,6 +1153,7 @@ pub fn close_orphans(db: &Connection) -> Result<usize, EngineError> {
         )
         .map_err(unavailable)?;
     assert_eq!(open, 0, "no run stays open once every open one is closed");
-    crate::project_setup::forget_removed(db, &["roadmap_status", "roadmap_status_settings"])?;
+    crate::project_setup::forget_removed(db, &["roadmap_status", "roadmap_status_settings"])
+        .map_err(unavailable)?;
     Ok(closed)
 }
