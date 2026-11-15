@@ -168,6 +168,7 @@ const NOT_OPEN: &[&str] = &[
     "ide_request_timeout",
     "ide_request_unavailable",
     "ide_server_group_unrecorded",
+    "ide_server_tmp_left",
     "ide_session_required",
     "ide_session_taken",
     "ide_show_all_agents_outcome_unknown",
