@@ -597,7 +597,8 @@ impl GitHub {
         facts: &GitHubRepoFacts,
     ) -> Result<Vec<GitHubRuleOutcome>, EngineError> {
         let token = self.store.get(&self.saved()?.credential)?;
-        rules::apply(&self.endpoints, &token, full_name, on, facts)
+        let mut made = rules::RepoRecord::default();
+        rules::apply(&self.endpoints, &token, full_name, on, facts, &mut made)
     }
 
     /// Sets one rule on a repository, as `apply_rules` does for each. Inputs:
@@ -610,6 +611,15 @@ impl GitHub {
         facts: &GitHubRepoFacts,
     ) -> Result<GitHubRuleOutcome, EngineError> {
         let token = self.store.get(&self.saved()?.credential)?;
-        rules::set(&self.endpoints, &token, full_name, rule, on, facts)
+        let mut made = rules::RepoRecord::default();
+        rules::set(
+            &self.endpoints,
+            &token,
+            full_name,
+            rule,
+            on,
+            facts,
+            &mut made,
+        )
     }
 }

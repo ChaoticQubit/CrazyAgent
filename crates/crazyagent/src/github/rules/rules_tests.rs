@@ -14,6 +14,7 @@ struct Stand {
     rulesets: Value,
     refuse: Vec<(&'static str, String)>,
     keep_wiki: bool,
+    security_reply: Option<Value>,
 }
 
 fn stand(rulesets: Value) -> Stand {
@@ -21,11 +22,12 @@ fn stand(rulesets: Value) -> Stand {
         rulesets,
         refuse: Vec::new(),
         keep_wiki: false,
+        security_reply: None,
     }
 }
 
 fn github(stand: Stand) -> Server {
-    Server::start(move |seen, _| {
+    Server::start(move |seen, index| {
         if stand
             .refuse
             .iter()
@@ -37,9 +39,12 @@ fn github(stand: Stand) -> Server {
         let rulesets = format!("{REPO}/rulesets");
         match seen.method.as_str() {
             "GET" if seen.path == rulesets => Answer::json(200, stand.rulesets.clone()),
-            "POST" if seen.path == rulesets => Answer::json(201, json!({ "id": 41 })),
+            "POST" if seen.path == rulesets => Answer::json(201, json!({ "id": 100 + index })),
             "PUT" if seen.path.starts_with(&format!("{rulesets}/")) => {
                 Answer::json(200, json!({ "id": 7 }))
+            }
+            "PATCH" if seen.path == REPO && body.get("security_and_analysis").is_some() => {
+                Answer::json(200, stand.security_reply.clone().unwrap_or(body))
             }
             "PATCH" if seen.path == REPO => {
                 let mut repository = body;
@@ -84,14 +89,39 @@ fn applied(
     on: &BTreeSet<GitHubRule>,
     facts: &GitHubRepoFacts,
 ) -> Vec<GitHubRuleOutcome> {
+    applied_on(server, on, facts, &mut RepoRecord::default())
+}
+
+fn applied_on(
+    server: &Server,
+    on: &BTreeSet<GitHubRule>,
+    facts: &GitHubRepoFacts,
+    made: &mut RepoRecord,
+) -> Vec<GitHubRuleOutcome> {
     apply(
         &Endpoints::loopback(server.port),
         &token(),
         "octo-cat/tool",
         on,
         facts,
+        made,
     )
     .unwrap()
+}
+
+fn state_of(outcomes: &[GitHubRuleOutcome], rule: GitHubRule) -> GitHubRuleState {
+    outcomes
+        .iter()
+        .find(|outcome| outcome.rule == rule)
+        .unwrap()
+        .state
+        .clone()
+}
+
+fn recorded(rules: &[(GitHubRule, u64)]) -> RepoRecord {
+    RepoRecord {
+        rulesets: rules.iter().copied().collect(),
+    }
 }
 
 #[test]
@@ -359,27 +389,33 @@ fn a_refused_rule_is_listed_with_githubs_reason_and_the_others_still_apply() {
 }
 
 #[test]
-fn a_second_apply_updates_crazyagents_own_rulesets_by_name_and_posts_none_twice() {
+fn a_second_apply_updates_the_rulesets_crazyagent_recorded_and_posts_none_twice() {
     let r = REPO;
     let server = github(stand(json!([
         { "id": 7, "name": "CrazyAgent pull requests", "source_type": "Repository" },
-        { "id": 8, "name": "CrazyAgent no force push", "source_type": "Repository" },
+        { "id": 8, "name": "Team linear history", "source_type": "Repository" },
         { "id": 9, "name": "CrazyAgent signed commits", "source_type": "Repository" },
         { "id": 10, "name": "CrazyAgent no branch deletion", "source_type": "Organization" },
     ])));
-    let outcomes = applied(&server, &GitHubRule::defaults(), &private());
-    let made: Vec<String> = calls(&server)
+    let mut made = recorded(&[
+        (GitHubRule::PullRequest, 7),
+        (GitHubRule::NoForcePush, 12),
+        (GitHubRule::LinearHistory, 8),
+        (GitHubRule::SignedCommits, 9),
+    ]);
+    let outcomes = applied_on(&server, &GitHubRule::defaults(), &private(), &mut made);
+    let made_calls: Vec<String> = calls(&server)
         .into_iter()
         .filter(|call| call.contains("/rulesets"))
         .collect();
     assert_eq!(
-        made,
+        made_calls,
         [
             format!("GET {r}/rulesets"),
             format!("PUT {r}/rulesets/7"),
+            format!("POST {r}/rulesets"),
+            format!("POST {r}/rulesets"),
             format!("PUT {r}/rulesets/8"),
-            format!("POST {r}/rulesets"),
-            format!("POST {r}/rulesets"),
             format!("DELETE {r}/rulesets/9"),
             format!("POST {r}/rulesets"),
         ]
@@ -388,12 +424,34 @@ fn a_second_apply_updates_crazyagents_own_rulesets_by_name_and_posts_none_twice(
         body(&server, "PUT", &format!("{r}/rulesets/7"), 0)["name"],
         "CrazyAgent pull requests"
     );
+    assert_eq!(
+        body(&server, "PUT", &format!("{r}/rulesets/8"), 0)["name"],
+        "CrazyAgent linear history"
+    );
     let signed = outcomes
         .iter()
         .find(|outcome| outcome.rule == GitHubRule::SignedCommits)
         .unwrap();
     assert!(!signed.on);
     assert_eq!(signed.state, GitHubRuleState::Applied);
+    let posted: Vec<u64> = server
+        .seen()
+        .iter()
+        .enumerate()
+        .filter(|(_, seen)| seen.method == "POST")
+        .map(|(index, _)| 100 + index as u64)
+        .collect();
+    assert_eq!(posted.len(), 3);
+    assert_eq!(
+        made,
+        recorded(&[
+            (GitHubRule::PullRequest, 7),
+            (GitHubRule::NoForcePush, posted[0]),
+            (GitHubRule::NoDeletion, posted[1]),
+            (GitHubRule::LinearHistory, 8),
+            (GitHubRule::TagProtection, posted[2]),
+        ])
+    );
 }
 
 #[test]
@@ -404,6 +462,7 @@ fn a_rule_set_later_sends_only_that_rule_and_checks_what_it_needs_first() {
     ])));
     let endpoints = Endpoints::loopback(server.port);
     let facts = private();
+    let mut made = recorded(&[(GitHubRule::PullRequest, 7)]);
     let mut on = GitHubRule::defaults();
     on.remove(&GitHubRule::ConversationResolution);
     let outcome = set(
@@ -413,6 +472,7 @@ fn a_rule_set_later_sends_only_that_rule_and_checks_what_it_needs_first() {
         GitHubRule::ConversationResolution,
         &on,
         &facts,
+        &mut made,
     )
     .unwrap();
     assert_eq!(
@@ -439,6 +499,7 @@ fn a_rule_set_later_sends_only_that_rule_and_checks_what_it_needs_first() {
         GitHubRule::DependabotAlerts,
         &on,
         &facts,
+        &mut made,
     )
     .unwrap();
     assert_eq!(alerts.state, GitHubRuleState::Applied);
@@ -462,7 +523,16 @@ fn a_rule_set_later_sends_only_that_rule_and_checks_what_it_needs_first() {
             "a file in the project, written when it is published",
         ),
     ] {
-        let outcome = set(&endpoints, &token(), "octo-cat/tool", rule, &on, &facts).unwrap();
+        let outcome = set(
+            &endpoints,
+            &token(),
+            "octo-cat/tool",
+            rule,
+            &on,
+            &facts,
+            &mut made,
+        )
+        .unwrap();
         assert_eq!(
             outcome.state,
             GitHubRuleState::NotApplicable {
@@ -479,7 +549,8 @@ fn a_rule_set_later_sends_only_that_rule_and_checks_what_it_needs_first() {
             "octo-cat/../tool",
             GitHubRule::PullRequest,
             &on,
-            &facts
+            &facts,
+            &mut made,
         )
         .unwrap_err()
         .0,
@@ -503,6 +574,7 @@ fn required_checks_wait_for_the_first_ci_run_and_a_public_repository_gets_its_ow
             private: false,
             ci: GitHubCi::Waiting,
         },
+        &mut RepoRecord::default(),
     )
     .unwrap();
     assert_eq!(
@@ -521,6 +593,7 @@ fn required_checks_wait_for_the_first_ci_run_and_a_public_repository_gets_its_ow
             private: false,
             ci: GitHubCi::Checks(Vec::new()),
         },
+        &mut RepoRecord::default(),
     )
     .unwrap();
     assert_eq!(unnamed.state, waiting.state);
@@ -570,8 +643,311 @@ fn a_sign_in_github_no_longer_accepts_stops_the_rules_with_its_refusal() {
         "octo-cat/tool",
         &GitHubRule::defaults(),
         &private(),
+        &mut RepoRecord::default(),
     )
     .unwrap_err();
     assert_eq!(refused.0, "github_token_refused");
     assert_eq!(server.seen().len(), 1);
+}
+
+#[test]
+fn secret_scanning_github_does_not_confirm_is_refused_never_applied() {
+    let shapes = [
+        json!({ "name": "tool" }),
+        json!({ "security_and_analysis": {} }),
+        json!({ "security_and_analysis": {
+            "secret_scanning": {},
+            "secret_scanning_push_protection": {}
+        } }),
+        json!({ "security_and_analysis": {
+            "secret_scanning": { "status": null },
+            "secret_scanning_push_protection": { "status": null }
+        } }),
+        json!({ "security_and_analysis": {
+            "secret_scanning": { "status": 1 },
+            "secret_scanning_push_protection": { "status": 1 }
+        } }),
+    ];
+    for shape in shapes {
+        let server = github(Stand {
+            security_reply: Some(shape.clone()),
+            ..stand(json!([]))
+        });
+        let endpoints = Endpoints::loopback(server.port);
+        for (rule, feature) in [
+            (GitHubRule::SecretScanning, "secret_scanning"),
+            (
+                GitHubRule::PushProtection,
+                "secret_scanning_push_protection",
+            ),
+        ] {
+            let outcome = set(
+                &endpoints,
+                &token(),
+                "octo-cat/tool",
+                rule,
+                &GitHubRule::defaults(),
+                &private(),
+                &mut RepoRecord::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                outcome.state,
+                GitHubRuleState::Refused {
+                    status: 200,
+                    message: format!("GitHub did not say whether {feature} is now enabled."),
+                },
+                "{shape}"
+            );
+        }
+        let outcomes = applied(&server, &GitHubRule::defaults(), &private());
+        assert!(matches!(
+            state_of(&outcomes, GitHubRule::SecretScanning),
+            GitHubRuleState::Refused { .. }
+        ));
+        assert_eq!(
+            state_of(&outcomes, GitHubRule::CodeqlDefaultSetup),
+            GitHubRuleState::Applied
+        );
+    }
+    let server = github(Stand {
+        security_reply: Some(
+            json!({ "security_and_analysis": { "secret_scanning": { "status": "disabled" } } }),
+        ),
+        ..stand(json!([]))
+    });
+    let kept = set(
+        &Endpoints::loopback(server.port),
+        &token(),
+        "octo-cat/tool",
+        GitHubRule::SecretScanning,
+        &GitHubRule::defaults(),
+        &private(),
+        &mut RepoRecord::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        kept.state,
+        GitHubRuleState::Refused {
+            status: 200,
+            message: "GitHub kept secret_scanning disabled.".into(),
+        }
+    );
+}
+
+#[test]
+fn a_ruleset_crazyagent_did_not_make_is_left_alone_and_reported() {
+    let r = REPO;
+    let server = github(stand(json!([
+        { "id": 7, "name": "CrazyAgent pull requests", "source_type": "Repository" },
+        { "id": 9, "name": "CrazyAgent signed commits", "source_type": "Repository" },
+    ])));
+    let mut made = RepoRecord::default();
+    let outcomes = applied_on(&server, &GitHubRule::defaults(), &private(), &mut made);
+    let foreign = GitHubRuleState::Refused {
+        status: 0,
+        message: "a ruleset with this name exists that CrazyAgent did not make".into(),
+    };
+    for rule in [
+        GitHubRule::PullRequest,
+        GitHubRule::ConversationResolution,
+        GitHubRule::SignedCommits,
+    ] {
+        assert_eq!(state_of(&outcomes, rule), foreign, "{rule:?}");
+    }
+    let changed: Vec<String> = calls(&server)
+        .into_iter()
+        .filter(|call| call.contains("/rulesets/"))
+        .collect();
+    assert!(changed.is_empty(), "{changed:?}");
+    let posted: Vec<u64> = server
+        .seen()
+        .iter()
+        .enumerate()
+        .filter(|(_, seen)| seen.method == "POST" && seen.path == format!("{r}/rulesets"))
+        .map(|(index, _)| 100 + index as u64)
+        .collect();
+    let names: Vec<Value> = (0..posted.len())
+        .map(|nth| body(&server, "POST", &format!("{r}/rulesets"), nth)["name"].clone())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "CrazyAgent no force push",
+            "CrazyAgent no branch deletion",
+            "CrazyAgent linear history",
+            "CrazyAgent release tags"
+        ]
+    );
+    assert_eq!(
+        made,
+        recorded(&[
+            (GitHubRule::NoForcePush, posted[0]),
+            (GitHubRule::NoDeletion, posted[1]),
+            (GitHubRule::LinearHistory, posted[2]),
+            (GitHubRule::TagProtection, posted[3]),
+        ])
+    );
+}
+
+#[test]
+fn check_names_that_cannot_be_sent_refuse_only_required_checks() {
+    let r = REPO;
+    let unsendable = GitHubRuleState::Refused {
+        status: 0,
+        message: "the check names from the CI run cannot be sent: each needs 1 to 255 bytes with no control character, and there can be at most 100".into(),
+    };
+    let bad: [Vec<String>; 6] = [
+        vec!["build".into(), "te\u{7f}st".into()],
+        vec!["line\nbreak".into()],
+        vec!["c1\u{85}control".into()],
+        vec![String::new()],
+        vec!["x".repeat(256)],
+        (0..101).map(|n| format!("check-{n}")).collect(),
+    ];
+    for checks in bad {
+        let server = github(stand(json!([])));
+        let facts = GitHubRepoFacts {
+            private: true,
+            ci: GitHubCi::Checks(checks.clone()),
+        };
+        let outcomes = applied(&server, &GitHubRule::defaults(), &facts);
+        assert_eq!(
+            state_of(&outcomes, GitHubRule::RequiredChecks),
+            unsendable,
+            "{checks:?}"
+        );
+        for rule in [
+            GitHubRule::TagProtection,
+            GitHubRule::SecretScanning,
+            GitHubRule::CodeqlDefaultSetup,
+        ] {
+            assert_eq!(
+                state_of(&outcomes, rule),
+                GitHubRuleState::Applied,
+                "{rule:?}"
+            );
+        }
+        let posts = calls(&server)
+            .iter()
+            .filter(|call| **call == format!("POST {r}/rulesets"))
+            .count();
+        let names: Vec<Value> = (0..posts)
+            .map(|nth| body(&server, "POST", &format!("{r}/rulesets"), nth)["name"].clone())
+            .collect();
+        assert!(!names.contains(&json!("CrazyAgent required checks")));
+        let set_alone = set(
+            &Endpoints::loopback(server.port),
+            &token(),
+            "octo-cat/tool",
+            GitHubRule::RequiredChecks,
+            &GitHubRule::defaults(),
+            &facts,
+            &mut RepoRecord::default(),
+        )
+        .unwrap();
+        assert_eq!(set_alone.state, unsendable);
+    }
+    let server = github(stand(json!([])));
+    let mut widest: Vec<String> = (0..99).map(|n| format!("check-{n}")).collect();
+    widest.push("x".repeat(255));
+    let outcome = set(
+        &Endpoints::loopback(server.port),
+        &token(),
+        "octo-cat/tool",
+        GitHubRule::RequiredChecks,
+        &GitHubRule::defaults(),
+        &GitHubRepoFacts {
+            private: true,
+            ci: GitHubCi::Checks(widest),
+        },
+        &mut RepoRecord::default(),
+    )
+    .unwrap();
+    assert_eq!(outcome.state, GitHubRuleState::Applied);
+    let sent = body(&server, "POST", &format!("{r}/rulesets"), 0);
+    assert_eq!(
+        sent["rules"][0]["parameters"]["required_status_checks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        100
+    );
+}
+
+#[test]
+fn required_checks_go_when_ci_is_removed_and_stay_while_waiting_for_new_names() {
+    let r = REPO;
+    let on = GitHubRule::defaults();
+    let required = |server: &Server, ci: GitHubCi, made: &mut RepoRecord| {
+        set(
+            &Endpoints::loopback(server.port),
+            &token(),
+            "octo-cat/tool",
+            GitHubRule::RequiredChecks,
+            &on,
+            &GitHubRepoFacts { private: true, ci },
+            made,
+        )
+        .unwrap()
+    };
+    let mut made = RepoRecord::default();
+    let published = github(stand(json!([])));
+    let with_ci = required(
+        &published,
+        GitHubCi::Checks(vec!["build".into()]),
+        &mut made,
+    );
+    assert_eq!(with_ci.state, GitHubRuleState::Applied);
+    assert_eq!(
+        calls(&published),
+        [format!("GET {r}/rulesets"), format!("POST {r}/rulesets")]
+    );
+    let id = made.rulesets[&GitHubRule::RequiredChecks];
+    assert_eq!(id, 101);
+    let listing =
+        json!([{ "id": id, "name": "CrazyAgent required checks", "source_type": "Repository" }]);
+    let renamed = github(stand(listing.clone()));
+    let waiting = required(&renamed, GitHubCi::Waiting, &mut made);
+    assert_eq!(
+        waiting.state,
+        GitHubRuleState::Waiting {
+            reason: "waiting for the first CI run to name its checks; the checks named before stay required".into(),
+        }
+    );
+    assert_eq!(calls(&renamed), [format!("GET {r}/rulesets")]);
+    assert_eq!(made.rulesets.get(&GitHubRule::RequiredChecks), Some(&id));
+    let refusing = github(Stand {
+        refuse: vec![("DELETE", format!("{r}/rulesets/{id}"))],
+        ..stand(listing.clone())
+    });
+    let kept = required(&refusing, GitHubCi::None, &mut made);
+    assert_eq!(
+        kept.state,
+        GitHubRuleState::Refused {
+            status: 403,
+            message: PLAN.into(),
+        }
+    );
+    assert_eq!(made.rulesets.get(&GitHubRule::RequiredChecks), Some(&id));
+    let removed = github(stand(listing));
+    let gone = required(&removed, GitHubCi::None, &mut made);
+    assert_eq!(
+        gone.state,
+        GitHubRuleState::NotApplicable {
+            reason: "no CI workflows in this repository".into(),
+        }
+    );
+    assert_eq!(
+        calls(&removed),
+        [
+            format!("GET {r}/rulesets"),
+            format!("DELETE {r}/rulesets/{id}")
+        ]
+    );
+    assert!(made.rulesets.is_empty());
+    let after = github(stand(json!([])));
+    let none = required(&after, GitHubCi::None, &mut made);
+    assert_eq!(none.state, gone.state);
+    assert!(after.seen().is_empty());
 }

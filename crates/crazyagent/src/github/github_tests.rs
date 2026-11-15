@@ -1337,3 +1337,113 @@ fn namespaces_differ_per_engine_root_and_stay_short() {
     assert_eq!(first.len(), "dev.crazyagent.e".len() + 12);
     assert!(crate::credentials::checked_name(&format!("{first}.github")).is_ok());
 }
+
+#[test]
+fn the_rulesets_crazyagent_made_are_remembered_for_the_next_pass() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let made: Arc<Mutex<Vec<(u64, String)>>> = Arc::default();
+    let rulesets = Arc::clone(&made);
+    let expected = secret_text.clone();
+    let list = "/repos/octo-cat/tool/rulesets";
+    let server = Server::start(move |seen, index| {
+        if seen.path == "/user" {
+            return user(seen, &expected);
+        }
+        if !bearer(seen, &expected) {
+            return Answer::json(401, serde_json::json!({ "message": "Bad credentials" }));
+        }
+        match seen.method.as_str() {
+            "GET" if seen.path == list => {
+                let listed: Vec<serde_json::Value> = rulesets
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(id, name)| {
+                        serde_json::json!({ "id": id, "name": name, "source_type": "Repository" })
+                    })
+                    .collect();
+                Answer::json(200, serde_json::Value::Array(listed))
+            }
+            "POST" if seen.path == list => {
+                let body: serde_json::Value = serde_json::from_slice(&seen.body).unwrap();
+                let id = 500 + index as u64;
+                rulesets
+                    .lock()
+                    .unwrap()
+                    .push((id, body["name"].as_str().unwrap().to_owned()));
+                Answer::json(201, serde_json::json!({ "id": id }))
+            }
+            "PUT" if seen.path.starts_with(&format!("{list}/")) => {
+                Answer::json(200, serde_json::json!({}))
+            }
+            "PATCH" if seen.path == "/repos/octo-cat/tool" => Answer::json(
+                200,
+                serde_json::from_slice::<serde_json::Value>(&seen.body).unwrap(),
+            ),
+            "PATCH" => Answer::json(202, serde_json::json!({})),
+            _ => Answer::bytes(204, Vec::new()),
+        }
+    });
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let facts = GitHubRepoFacts {
+        private: true,
+        ci: GitHubCi::None,
+    };
+    let first = account
+        .apply_rules("octo-cat/tool", &GitHubRule::defaults(), &facts)
+        .unwrap();
+    assert!(
+        first
+            .iter()
+            .all(|outcome| !matches!(outcome.state, GitHubRuleState::Refused { .. })),
+        "{first:?}"
+    );
+    let folder = scratch.root.path().join("github-repos");
+    let files: Vec<PathBuf> = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        std::fs::metadata(&files[0]).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::metadata(&folder).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+    let mut recorded: Vec<u64> = record["rulesets"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|id| id.as_u64().unwrap())
+        .collect();
+    recorded.sort_unstable();
+    let ids: Vec<u64> = made.lock().unwrap().iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids.len(), 5);
+    assert_eq!(recorded, ids);
+    let before = server.seen().len();
+    let second = account
+        .apply_rules("octo-cat/tool", &GitHubRule::defaults(), &facts)
+        .unwrap();
+    assert_eq!(second, first);
+    let again: Vec<String> = server.seen()[before..]
+        .iter()
+        .filter(|seen| seen.path.contains("/rulesets"))
+        .map(|seen| format!("{} {}", seen.method, seen.path))
+        .collect();
+    assert!(
+        again.iter().all(|call| !call.starts_with("POST")),
+        "{again:?}"
+    );
+    assert_eq!(
+        again.iter().filter(|call| call.starts_with("PUT")).count(),
+        5
+    );
+    assert_eq!(made.lock().unwrap().len(), 5);
+}

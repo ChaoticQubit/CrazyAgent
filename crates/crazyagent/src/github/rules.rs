@@ -4,7 +4,7 @@ use crate::credentials::SecretString;
 use crate::engine::EngineError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(all(test, target_os = "macos"))]
 mod rules_tests;
@@ -146,6 +146,15 @@ pub struct GitHubRepoFacts {
     pub ci: GitHubCi,
 }
 
+/// What CrazyAgent remembers about one repository it set rules on: the id of each ruleset
+/// it made, by the rule the ruleset holds, so a pass only ever changes CrazyAgent's own.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RepoRecord {
+    #[serde(default)]
+    pub(super) rulesets: BTreeMap<GitHubRule, u64>,
+}
+
 fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
 }
@@ -177,15 +186,17 @@ fn refused(reply: &Reply) -> GitHubRuleState {
 
 /// Sets every rule GitHub holds on one repository in `ALL`'s order: each rule in `on` is
 /// turned on and every other one off, and one refusal never stops the rest.
-/// Inputs: endpoints, token, `owner/name`, the rules on and the facts. Output: one
-/// outcome per rule, or `github_token_refused`, `github_unreachable`.
+/// Inputs: endpoints, token, `owner/name`, the rules on, the facts and the repository's
+/// record. Output: one outcome per rule, or `github_token_refused`, `github_unreachable`.
 pub(super) fn apply(
     endpoints: &Endpoints,
     token: &SecretString,
     full_name: &str,
     on: &BTreeSet<GitHubRule>,
     facts: &GitHubRepoFacts,
+    made: &mut RepoRecord,
 ) -> Result<Vec<GitHubRuleOutcome>, EngineError> {
+    assert!(made.rulesets.len() <= GitHubRule::ALL.len());
     let mut pass = Pass::new(endpoints, token, full_name, on, facts)?;
     let mut outcomes: Vec<GitHubRuleOutcome> = Vec::new();
     for rule in GitHubRule::ALL.into_iter().filter(|rule| rule.on_github()) {
@@ -216,8 +227,8 @@ pub(super) fn apply(
 }
 
 /// Sets one rule on one repository, as `apply` does for each. Inputs: endpoints, token,
-/// `owner/name`, the rule, the rules on and the facts. Output: the rule's outcome, or
-/// `github_token_refused`, `github_unreachable`.
+/// `owner/name`, the rule, the rules on, the facts and the repository's record.
+/// Output: the rule's outcome, or `github_token_refused`, `github_unreachable`.
 pub(super) fn set(
     endpoints: &Endpoints,
     token: &SecretString,
@@ -225,7 +236,9 @@ pub(super) fn set(
     rule: GitHubRule,
     on: &BTreeSet<GitHubRule>,
     facts: &GitHubRepoFacts,
+    made: &mut RepoRecord,
 ) -> Result<GitHubRuleOutcome, EngineError> {
+    assert!(made.rulesets.len() <= GitHubRule::ALL.len());
     let mut pass = Pass::new(endpoints, token, full_name, on, facts)?;
     Ok(GitHubRuleOutcome {
         rule,
