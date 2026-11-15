@@ -1794,14 +1794,22 @@ pub(crate) fn unpin_home_entry<P: rustix::path::Arg + Copy>(
     if let Some(step) = BEFORE_HOME_ENTRY_CHFLAGS.with(|step| step.borrow_mut().take()) {
         step();
     }
-    let _ = crate::spawn_gate::status(
-        std::process::Command::new("/usr/bin/chflags")
-            .args(["-h", "nouchg,nouappnd", "--"])
-            .arg(&entry)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()),
-    );
+    let _ = crate::spawn_gate::status(&mut flag_clear(&entry));
+}
+
+/// The `/usr/bin/chflags` run that clears the immutable and append-only flags of one entry,
+/// a link itself rather than what it names, with no input or output. Input: the entry.
+/// Output: the command, not started.
+#[cfg(target_os = "macos")]
+fn flag_clear(entry: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("/usr/bin/chflags");
+    command
+        .args(["-h", "nouchg,nouappnd", "--"])
+        .arg(entry)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
 }
 
 /// Leaves flags alone where no flag an agent may set keeps an entry from going. Inputs:

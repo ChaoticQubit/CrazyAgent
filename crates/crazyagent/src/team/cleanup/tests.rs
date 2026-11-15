@@ -1374,6 +1374,21 @@ fn a_home_entry_that_will_not_open_is_unpinned_by_its_inode_never_through_a_swap
     );
 }
 
+/// rv-sec3 r2 F2 (B12): `/usr/bin/chflags` stops reading options at its flags word, so the
+/// flag clear ends its options before that word; a `--` after it is read as a file and
+/// clears the flags of an entry of that name in the engine's working folder.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_entry_flag_clear_ends_the_chflags_options_before_its_flags_word() {
+    let command = flag_clear(Path::new("/.vol/1/2"));
+    assert_eq!(command.get_program().to_str(), Some("/usr/bin/chflags"));
+    let arguments: Vec<&str> = command
+        .get_args()
+        .map(|argument| argument.to_str().unwrap())
+        .collect();
+    assert_eq!(arguments, ["-h", "--", "nouchg,nouappnd", "/.vol/1/2"]);
+}
+
 /// RV-DS241-182: removing an agent's tree of many folders that one read-only folder keeps
 /// from a plain delete starts no child process: the read-only folder opens up through its
 /// handle, and no ACL clear runs for a folder that opens.
