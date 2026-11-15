@@ -139,7 +139,7 @@ impl Drop for PrivateInput {
     }
 }
 
-pub(super) struct ChildOutput {
+pub(in crate::engine) struct ChildOutput {
     pub(super) stdout: Vec<u8>,
     pub(super) exit: Option<i32>,
 }
@@ -235,7 +235,7 @@ async fn drive(
     }
 }
 
-pub(super) async fn run_child(
+pub(in crate::engine) async fn run_child(
     session: &mut CustodySession,
     channel: &mut NativeAuthCustodyChannel,
     executable: &RegisteredNativeAuthHost,

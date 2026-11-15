@@ -7,7 +7,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-mod process;
+pub(in crate::engine) mod process;
 mod transcript;
 pub(crate) mod types;
 
@@ -25,7 +25,7 @@ const CHECK_TIME: Duration = Duration::from_secs(9);
 const RENEWAL_TIME: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ClaudeAuthCommand {
+pub(in crate::engine) enum ClaudeAuthCommand {
     Login,
     Status,
     Logout,
