@@ -408,7 +408,7 @@ fn a_listing_never_runs_the_promisor_remote_a_hostile_repository_names() {
 
 #[test]
 fn the_project_git_never_fetches_a_missing_object_and_allows_no_transport() {
-    let command = git(Path::new("/"), &["status"]);
+    let command = git(Path::new("/"), None, &["status"]);
     let set: Vec<(String, Option<String>)> = command
         .get_envs()
         .map(|(name, value)| {

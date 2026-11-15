@@ -3638,11 +3638,12 @@ fn listing_keeps_out_only(repo: &Path, name: &str) {
     );
 }
 
-/// RV-DS241-145: the onboarding listing keeps git's ignore precedence, so a repository's own
-/// `core.excludesFile` wins over the owner's global ignore file, which is present: a .txt
-/// file only the repository's file names is kept out of the graph and never read.
+/// RV-DS241-145: the onboarding listing honours a repository's own `core.excludesFile` while
+/// the owner's global ignore file is present, which since r2 applies beside it: a .txt file
+/// only the repository's file names is kept out of the graph and never read.
 #[test]
-fn the_onboarding_listing_keeps_a_repositorys_own_excludes_file_over_the_owners_global_one() {
+fn the_onboarding_listing_keeps_out_what_a_repositorys_own_excludes_file_names_beside_the_owners_global_one()
+ {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let (home, repo) = (root.join("home"), root.join("repo"));

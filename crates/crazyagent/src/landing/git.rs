@@ -309,11 +309,13 @@ fn lookup(command: &mut Command) -> Option<(i32, Vec<u8>)> {
 }
 
 /// The `core.excludesFile=<path>` setting naming the ignore file the owner's own git applies
-/// in the repository ([`owner_excludes`]), for an engine git that clears its environment yet
-/// must keep out what the owner's own git ignores (RV-DS241-73). It names the same file git
-/// would pick there, so the `-c` it rides on never replaces a repository's own value with
-/// the owner's (RV-DS241-145). Takes where the repository is. Returns the setting, none when
-/// there is no usable ignore file or its path is not UTF-8.
+/// where it is asked ([`owner_excludes`]), for an engine git that clears its environment yet
+/// must keep out what the owner's own git ignores (RV-DS241-73). Asked in a repository, it
+/// names the file git would pick there, a repository's own value first (RV-DS241-145), as
+/// landing applies it; asked outside any repository, as onboarding does from `/`, it names
+/// the owner's unscoped global file, which onboarding applies beside a repository's own
+/// (RV-DS241-145 r2). Takes where to look. Returns the setting, none when there is no usable
+/// ignore file or its path is not UTF-8.
 #[cfg(unix)]
 pub(crate) fn owner_excludes_setting(within: super::Within<'_>) -> Option<String> {
     let (home, xdg) = owner_folders();
