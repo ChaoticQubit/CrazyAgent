@@ -72,7 +72,32 @@ pub(crate) const STEPS: &[Step] = &[
         to: 10,
         run: usage_counts_by_model,
     },
+    Step {
+        to: 11,
+        run: widen_delete_file_names,
+    },
 ];
+
+/// Step 11 (RV-DS241-152): a delete records Overview and roadmap status run names of up to
+/// [`crate::projects_home::RECORDED_NAME_BYTES_MAX`] bytes, so `projects_delete_files` must
+/// hold them. An existing table is rebuilt with the wider check, keeping its rows; a missing
+/// one gets the current schema when the engine opens it. Input: the open upgrade
+/// transaction. Output: any SQLite failure.
+fn widen_delete_file_names(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    if !has_table(tx, "projects_delete_files")? {
+        return Ok(());
+    }
+    tx.execute_batch(
+        "CREATE TABLE projects_delete_files_new (
+            name TEXT PRIMARY KEY CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 96),
+            inode INTEGER NOT NULL
+         );
+         INSERT INTO projects_delete_files_new SELECT name, inode FROM projects_delete_files;
+         DROP TABLE projects_delete_files;
+         ALTER TABLE projects_delete_files_new RENAME TO projects_delete_files;",
+    )
+    .map_err(error)
+}
 
 /// Step 10 (CODEBURN-COUNT): usage rows gain the model and estimated dollars. A database that
 /// never opened the usage store gets the new shape when the store first opens.

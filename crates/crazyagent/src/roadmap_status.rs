@@ -1077,6 +1077,7 @@ pub(crate) const RUN_NAME_HEAD: &str = "roadmap-status-";
 const RUN_NAME_BYTES_MAX: usize = 96;
 const RUN_TIME_DIGITS_MAX: usize = 19;
 const RUN_ID_HASH_BYTES: usize = 8;
+const _: () = assert!(RUN_NAME_BYTES_MAX <= crate::projects_home::RECORDED_NAME_BYTES_MAX);
 
 /// The bytes of a run's state name that stand for its project: the project id with every
 /// byte outside ASCII letters, digits, `-` and `_` written as `_` and cut to fit `room`, then
@@ -1151,5 +1152,6 @@ pub fn close_orphans(db: &Connection) -> Result<usize, EngineError> {
         )
         .map_err(unavailable)?;
     assert_eq!(open, 0, "no run stays open once every open one is closed");
+    crate::project_setup::forget_removed(db, &["roadmap_status", "roadmap_status_settings"])?;
     Ok(closed)
 }

@@ -1168,6 +1168,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
     crate::worktrees::reconcile(connection)?;
+    crate::project_setup::forget_removed(connection, &["repository_admissions"])?;
     worker_dispatch::initialize(connection)?;
     model_gateway::initialize(connection)?;
     master_session::initialize(connection)?;
@@ -2513,7 +2514,11 @@ fn owner_apply_with(
         (Some(Effect::NewProject(_)), _) => return Err(error("setup_record_invalid")),
         (Some(Effect::Delete(outcome)), Command::ProjectSetup { action }) => {
             crate::learning::latch(&tx);
-            crate::project_setup::record_delete(&tx, action, outcome, revision)?
+            let recorded = crate::project_setup::record_delete(&tx, action, outcome, revision)?;
+            if let (Outcome::Applied, Ok(files)) = (&recorded, outcome) {
+                projects_home::record_files(&tx, files)?;
+            }
+            recorded
         }
         (Some(Effect::Delete(_)), _) => return Err(error("delete_record_invalid")),
         (None, _) if request.expected_revision.value() != revision => Outcome::Rejected {

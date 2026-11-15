@@ -525,5 +525,6 @@ pub fn close_orphans(db: &Connection) -> Result<usize, EngineError> {
         )
         .map_err(unavailable)?;
     assert_eq!(open, 0, "no run stays open once every open one is closed");
+    crate::project_setup::forget_removed(db, &["project_overview", "project_overview_tabs"])?;
     Ok(closed)
 }

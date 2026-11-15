@@ -1078,7 +1078,7 @@ fn step_11_lets_the_delete_record_hold_run_names_up_to_96_bytes_keeping_its_rows
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(kept, [("agent-a1b2c3".to_owned(), 41)]);
-    let name = format!("roadmap-{}-1794000000000", "a".repeat(74));
+    let name = format!("roadmap-status-{}-1794000000000", "a".repeat(67));
     assert_eq!(name.len(), 96);
     let insert = "INSERT INTO projects_delete_files VALUES (?1, 42)";
     assert!(

@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS projects_delete_pending (
     exchange INTEGER PRIMARY KEY CHECK(exchange > 0)
 );
 CREATE TABLE IF NOT EXISTS projects_delete_files (
-    name TEXT PRIMARY KEY CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64),
+    name TEXT PRIMARY KEY CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 96),
     inode INTEGER NOT NULL
 )";
 
@@ -911,6 +911,11 @@ fn recorded(root: &Path, names: Vec<String>) -> Vec<RecordedFile> {
 /// One engine file a delete recorded: its exact name and the identity of the folder that held
 /// it when the project's rows were dropped.
 pub type RecordedFile = (String, i64);
+
+/// The longest engine file name a delete records, an Overview or roadmap status run of the
+/// longest project id (RV-DS241-152); the record's check in [`TABLE`] and migration step 11
+/// hold names this long.
+pub(crate) const RECORDED_NAME_BYTES_MAX: usize = 96;
 
 /// The folder under the engine root that holds every project's tool caches (T8).
 const TOOL_CACHE_FOLDER: &str = "tool-cache";
