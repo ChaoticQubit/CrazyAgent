@@ -1632,12 +1632,28 @@ fn write_staged(
         file.write_all(bytes)?;
         file.sync_all()
     });
+    #[cfg(test)]
+    WHILE_STAGED.with(|step| {
+        if let Some(step) = step.borrow().as_ref() {
+            step();
+        }
+    });
     let renamed = written.and_then(|()| fs::rename(&temporary, folder.join(name)));
     if renamed.is_err() {
         let _ = fs::remove_file(&temporary);
         return Err(failure("process_text_unwritable"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A step a test runs in [`write_staged`] each time a temporary file is written and
+    /// synced and before it is renamed, standing in for a process an earlier run left that
+    /// changes what it can reach meanwhile. Runs at every write while set; None runs
+    /// nothing.
+    pub(super) static WHILE_STAGED: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The `count`-th temporary file a save of `name` writes in `staging`, named after the

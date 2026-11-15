@@ -1163,6 +1163,54 @@ fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
     }
 }
 
+/// A launch never renames text an agent chose into its home's instruction file
+/// (RV-DS241-184): the file is written in a folder of the engine's own before it is moved
+/// into the home, so a process an earlier run left, which writes only where the agent does,
+/// finds no temporary file in the home to swap between the write and the rename. The step
+/// stands in for that process: it replaces every temporary file of the instruction file's
+/// name it finds in the home.
+#[cfg(unix)]
+#[test]
+fn a_launch_never_stages_an_instruction_file_where_its_agent_writes() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    for (name, harness) in [("claude", Harness::Claude), ("codex", Harness::Codex)] {
+        let home = home(&root, name);
+        let file = harness.instruction_file();
+        let staged_here = move |folder: &Path| -> Vec<PathBuf> {
+            let prefix = format!(".{file}.");
+            fs::read_dir(folder)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+                })
+                .collect()
+        };
+        let reached = home.clone();
+        WHILE_STAGED.with(|step| {
+            *step.borrow_mut() = Some(Box::new(move || {
+                for staged in staged_here(&reached) {
+                    fs::remove_file(&staged).unwrap();
+                    fs::write(&staged, "The agent's text.\n").unwrap();
+                }
+            }));
+        });
+
+        let prepared = prepare(&home, harness, &project, &given("The owner's text.\n"));
+        WHILE_STAGED.with(|step| *step.borrow_mut() = None);
+
+        assert_eq!(prepared.map_err(|error| error.0), Ok(()), "{name}");
+        assert_eq!(
+            fs::read_to_string(home.join(file)).unwrap(),
+            "The owner's text.\n",
+            "{name}"
+        );
+        assert_eq!(staged_here(&home), Vec::<PathBuf>::new(), "{name}");
+    }
+}
+
 /// A native lead's teammates' home keeps no `skills` an earlier run left: the teammates are
 /// Claude Code processes, which would load each skill found there, and the engine's own
 /// skills reach them through the plugin folder. Their transcripts stay.
