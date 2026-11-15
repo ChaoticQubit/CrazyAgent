@@ -4,7 +4,7 @@ import {
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntentReceipt, MasterInputs, MasterMessages, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntakeJob, IntentReceipt, MasterInputs, MasterMessages, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
   WakeRule, WakeRuleTarget,
 } from "./engine-client";
 
@@ -794,12 +794,13 @@ export async function removeProject(id: string, generation: number, deleteName: 
   return result;
 }
 
-/** Moves or copies a project kept where it is into the projects folder. The engine waits for
- * its team to stop, moves the folder and points the project and its agents' copies at the new
- * place. Inputs: the project id, move or copy, the soft refusals the owner chose to go past and a
- * generation. Output: the receipt. */
-export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddOverride[], generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_move_project_home", { id, mode, overrides, generation });
+/** Starts the engine's job that moves or copies a project kept where it is into the projects
+ * folder, followed on Home: it downloads what is only in iCloud, waits for the project's agents
+ * to stop, moves the folder and points the project and its agents' copies at the new place
+ * (DEC-177). Inputs: the project id, move or copy and the soft refusals the owner chose to go
+ * past. Output: the started job, or the move's refusal. */
+export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddOverride[]): Promise<Result<IntakeJob>> {
+  return call<IntakeJob>("desktop_move_project_home", { id, mode, overrides });
 }
 
 export const PAGES_MAX = 50;

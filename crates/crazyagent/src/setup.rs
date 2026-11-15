@@ -1229,7 +1229,9 @@ mod tests {
         let codes = &bridge[start..];
         let codes = &codes[..codes.find("];").unwrap()];
         let window = read("src/api-intake.ts");
-        let start = window.find("const COPY: Record<string, string> = {").unwrap();
+        let start = window
+            .find("const COPY: Record<string, string> = {")
+            .unwrap();
         let words = &window[start..];
         let words = &words[..words.find("\n};").unwrap()];
         for (code, _) in REASONS {

@@ -39,7 +39,7 @@ test("the intake job has a client call for each command and its own sentences", 
   assert.match(client, /return invoke<IntakeJob \| null>\("desktop_intake_status"\)/);
   assert.match(client, /return invoke<boolean>\("desktop_intake_stop", \{ id \}\)/);
   assert.match(client, /return invoke<boolean>\("desktop_intake_dismiss", \{ id \}\)/);
-  assert.equal(api.intakeCopy("intake_busy"), "Another folder is being added. Wait for it to finish on Home.");
+  assert.equal(api.intakeCopy("job_busy"), "Another job is running. Wait for it to finish on Home.");
   assert.equal(api.intakeCopy("home_add_in_progress"), "A folder is being added to your projects folder. Try again when it finishes.");
   assert.equal(api.intakeCopy("home_add_cancelled"), "Adding the folder stopped. Nothing was moved or copied.");
   assert.equal(api.intakeCopy("intake_failed"), "Adding the folder failed. Check your projects folder before trying again.");

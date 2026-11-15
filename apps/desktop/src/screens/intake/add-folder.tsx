@@ -8,7 +8,7 @@ import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
 import { SetUpDialog } from "./found";
 import {
-  addWay, anywayIssues, anywayOverrides, anywayWarnings, folderName, icloudCountLine, icloudMoveLine,
+  addWay, anywayIssues, anywayOverrides, anywayWarnings, busyLine, folderName, icloudCountLine, icloudMoveLine,
   icloudPlaceholders, icloudProgressLine, joinPath, pickedFolderProblem, sizeLine, startReached, waysOffered, waysWithheld, worktreesLine, type AddWay, type AnywayIssue, type AnywayWarning,
 } from "./intake";
 import "../project/projects.css";
@@ -104,9 +104,10 @@ function AddWarnings({ blocks }: { blocks: AnywayWarning[] }) {
  * first, then "Move anyway?" or "Copy anyway?". It starts on Use where it is; Move anyway or Copy
  * anyway is the danger button; closing it changes nothing. Inputs: whether it is open, the way,
  * the folder name, its read, the engine refusal it follows, if any, the issues when the caller
- * already knows them (Home's answer to a job), a busy flag, the two answers and the close
- * handler. Output: the dialog, or nothing. */
-export function AnywayDialog({ open, way, name, size, refused, issues, busy, onUseHere, onAnyway, onCancel }: {
+ * already knows them (Home's answer to a job), a busy flag, the first button's words when it
+ * keeps a set up project where it is instead, the two answers and the close handler. Output: the
+ * dialog, or nothing. */
+export function AnywayDialog({ open, way, name, size, refused, issues, busy, keepLabel, onUseHere, onAnyway, onCancel }: {
   open: boolean;
   way: AddFolderMode;
   name: string;
@@ -114,6 +115,7 @@ export function AnywayDialog({ open, way, name, size, refused, issues, busy, onU
   refused: string | null;
   issues?: AnywayIssue[];
   busy: boolean;
+  keepLabel?: string;
   onUseHere: () => void;
   onAnyway: () => void;
   onCancel?: () => void;
@@ -121,7 +123,7 @@ export function AnywayDialog({ open, way, name, size, refused, issues, busy, onU
   const verb = way === "move" ? "Move" : "Copy";
   const blocks = anywayWarnings(way, issues ?? anywayIssues(way, size, refused), size);
   return <Dialog open={open} title={`${verb} ${name} anyway?`} onClose={onCancel ?? onUseHere} busy={busy}
-    footer={<><Button disabled={busy} onClick={onUseHere} data-autofocus>Use where it is</Button>
+    footer={<><Button disabled={busy} onClick={onUseHere} data-autofocus>{keepLabel ?? "Use where it is"}</Button>
       <Button variant="danger" pending={busy} onClick={onAnyway}>{`${verb} anyway`}</Button></>}>
     <AddWarnings blocks={blocks} />
   </Dialog>;
@@ -240,7 +242,7 @@ export function AddFolder() {
     if (result.kind === "not_ready") { setProblem("Adding a folder isn't in this build."); return; }
     const same = running?.kind === "ok" ? running.value : null;
     const attached = startReached(source, same, before);
-    if (result.kind === "error" && !attached) { setProblem(result.message); return; }
+    if (result.kind === "error" && !attached) { setProblem(result.code === "job_busy" ? busyLine(same) : result.message); return; }
     session.refreshIntake(result.kind === "ok" ? result.value : undefined);
     session.showToast(`Adding ${folderName(source)}. Follow it on Home; you can keep working.`, { name: "home" });
     navigate({ name: "home" });

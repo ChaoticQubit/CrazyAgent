@@ -78,7 +78,7 @@ test("each refusal of a project move reads as a plain sentence", () => {
   const codes = [...new Set([...engine.matchAll(/"(move_project_[a-z_]+)"/g)].map((match) => match[1]))]
     .filter((code) => !["move_project_copy_not_repointed", "move_project_record_invalid"].includes(code));
   assert.ok(codes.length >= 6, `only ${codes.length} codes read from the engine`);
-  for (const code of [...codes, "home_move_project", "move_project_interrupted", view.OLD_FOLDER_LEFT]) {
+  for (const code of [...codes, "home_move_project", "move_project_interrupted", "move_project_old_folder_left"]) {
     const line = view.moveCopy(code);
     assert.match(line, /^[A-Z][^_]*\.$/, code);
     assert.ok(!line.includes(code), code);
@@ -87,33 +87,28 @@ test("each refusal of a project move reads as a plain sentence", () => {
   assert.match(view.moveCopy("home_icloud_not_downloaded"), /iCloud/);
 });
 
-test("a move that left part of the old folder is told as moved, with the old folder to check", () => {
-  assert.equal(view.OLD_FOLDER_LEFT, "move_project_old_folder_left");
-  const transport = read("../../crates/crazyagent/src/engine/owner/transport/projects_home.rs");
-  assert.ok(transport.includes(`"${view.OLD_FOLDER_LEFT}"`), "the engine answers this code");
-  const clean = view.movedNotice("TessyAI", "move", "/Users/o/Desktop/TessyAI", false);
-  assert.equal(clean, "TessyAI is now in your CrazyAgent folder. The team is stopped; start it again from Team.");
-  const left = view.movedNotice("TessyAI", "move", "/Users/o/Desktop/TessyAI", true);
-  assert.match(left, /^TessyAI is now in your CrazyAgent folder\. Some items in the old folder couldn't be deleted and may be newer than the copy: check .*Desktop\/TessyAI before you delete anything\. The team/);
-  assert.doesNotMatch(left, /yourself|delete it|remove it/, "what a move leaves may be the only copy of newer edits (RV-DS241-102)");
-  assert.match(left, /start it again from Team\.$/);
-  assert.match(view.movedNotice("TessyAI", "copy", "/Users/o/Desktop/TessyAI", false), /now uses the copy/);
+test("a move is the engine's job, followed on Home; the dialog only starts it after the team stopped (DEC-177)", () => {
   const source = read("src/screens/project/move-home.tsx");
-  assert.match(source, /const left = code === OLD_FOLDER_LEFT;/);
-  assert.match(source, /result\.kind === "error" && !left/);
-  assert.match(source, /data\.notify\(movedNotice\(name, chosen, folder, left\)\)/);
+  assert.match(source, /session\?\.refreshIntake\(result\.value\)/, "the started job shows on Home at once");
+  assert.match(source, /Follow it on Home; you can keep working\./);
+  assert.doesNotMatch(source, /ICloudDialog|downloadFromIcloud/, "the job downloads what is only in iCloud first (DEC-177 answer 5)");
+  assert.doesNotMatch(source, /nextGeneration|receiptState/, "the move is not a pending change of the window");
+  assert.match(source, /data\.reload\(\)/, "the settings page reads the project again once its move ended");
+  const state = read("src/state.ts");
+  assert.match(state, /kind === "move_project"[^;]*refreshProjects\(\)/, "a move that ended reads the projects again");
 });
 
-test("the move command is wired from the settings page to the engine mutation", () => {
-  assert.match(read("src/api-projects.ts"), /call<IntentReceipt>\("desktop_move_project_home", \{ id, mode, overrides, generation \}\)/);
-  assert.match(read("src/engine-client.ts"), /invoke<IntentReceipt>\("desktop_move_project_home", \{ id, mode, overrides, generation \}\)/);
+test("the move command is wired from the settings page to the engine's job", () => {
+  assert.match(read("src/api-projects.ts"), /call<IntakeJob>\("desktop_move_project_home", \{ id, mode, overrides \}\)/);
+  assert.match(read("src/engine-client.ts"), /invoke<IntakeJob>\("desktop_move_project_home", \{ id, mode, overrides \}\)/);
   const lib = read("src-tauri/src/lib.rs");
   const start = lib.indexOf("fn desktop_move_project_home(");
   assert.ok(start >= 0);
   const signature = lib.slice(start, lib.indexOf(")", start));
-  for (const param of ["id: String", "mode: AddMode", "overrides: Vec<AddOverride>", "generation: u64"]) assert.ok(signature.includes(param), param);
-  assert.match(read("src-tauri/src/bridge/project_setup.rs"), /OwnerMutation::MoveProjectHome \{\s*project_id,\s*mode,\s*overrides,\s*\}/);
-  assert.match(read("src-tauri/src/bridge.rs"), /OwnerMutation::MoveProjectHome \{ project_id, \.\. \} => \(\s*"project_move_home"/);
+  for (const param of ["id: String", "mode: AddMode", "overrides: Vec<AddOverride>"]) assert.ok(signature.includes(param), param);
+  assert.ok(!signature.includes("generation"), "a job start carries no window generation");
+  assert.match(read("src-tauri/src/bridge/intake.rs"), /JobSubject::MoveProject \{ project_id \}/);
+  assert.doesNotMatch(read("src-tauri/src/bridge/project_setup.rs"), /OwnerMutation::MoveProjectHome/);
   const settings = read("src/screens/project/settings.tsx");
   assert.match(settings, /<MoveHome data=\{data\} setup=\{setup\} \/>\}\s*<RemoveSection/);
 });

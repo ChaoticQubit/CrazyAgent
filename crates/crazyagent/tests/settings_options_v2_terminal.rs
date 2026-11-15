@@ -423,7 +423,10 @@ async fn ide_terminal_tasks_run_the_owner_shell_inside_the_ide_sandbox_with_no_n
         .expect("the profile binds sockets in the server's own temp folder")
         + bind.len();
     let tmp = PathBuf::from(&text[at..at + text[at..].find('"').unwrap()]);
-    assert!(tmp.is_dir(), "the IDE start made the server's short temp folder");
+    assert!(
+        tmp.is_dir(),
+        "the IDE start made the server's short temp folder"
+    );
     let mut command = ide::sandbox::command(&started.profile, Path::new(&shell));
     command
         .args(&arguments)

@@ -166,16 +166,6 @@ impl NativeOwner {
                     .map_err(problem)?;
                 SetupView::OverviewAsked
             }
-            SetupQuery::MoveHome {
-                project,
-                mode,
-                generation,
-            } => SetupView::Changed(owner_result(
-                controller
-                    .move_project_home(project, mode, Vec::new(), generation)
-                    .await
-                    .map_err(problem)?,
-            )?),
             SetupQuery::Library(query) => SetupView::Library(match query {
                 LibraryQuery::Page {
                     scope,

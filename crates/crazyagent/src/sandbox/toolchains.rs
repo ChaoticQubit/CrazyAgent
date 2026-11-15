@@ -1161,12 +1161,17 @@ impl Drop for ScopedTmp {
 
 /// Makes the agent's own cargo home, `.cargo` in its home with mode 0700, and links its
 /// `registry` and `git` to the owner's, which the sandbox grants read-only, so offline
-/// builds reuse the owner's crates and never change them. A link or folder the agent
-/// already has stays as it is. Inputs: the agent home and the owner's tool homes. Output:
-/// the cargo home, or a refusal when `.cargo` is not a plain folder.
+/// builds reuse the owner's crates and never change them. Those names hold only that link
+/// (DEC-173): where the owner has the cache, whatever else is there, a folder or a link
+/// elsewhere, gives way to it; where the owner has none, a link there goes, and a folder an
+/// agent made goes at its launch's reset ([`crate::agent_home::prepare`]), while a folder in
+/// the owner's IDE terminal home stays. Inputs: the agent home and the owner's tool homes.
+/// Output: the cargo home, or a refusal when `.cargo` is not a plain folder or a name will
+/// not give way.
 #[cfg(unix)]
 pub fn prepare_cargo_home(home: &Path, homes: &ToolHomes) -> io::Result<PathBuf> {
     use rustix::fs::{CWD, Mode, OFlags};
+    use std::os::unix::ffi::OsStrExt;
     let cargo = home.join(".cargo");
     match fs::DirBuilder::new().mode(0o700).create(&cargo) {
         Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
@@ -1178,14 +1183,24 @@ pub fn prepare_cargo_home(home: &Path, homes: &ToolHomes) -> io::Result<PathBuf>
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
+    let remove = |name: &str| {
+        crate::agent_home::remove_entry(&cargo.join(name))
+            .map_err(|_| io::Error::other("cargo cache name will not give way"))
+    };
     for name in CARGO_SHARED {
+        let found = rustix::fs::readlinkat(&folder, *name, Vec::new());
         let Some(shared) = existing(&homes.cargo.join(name), true) else {
+            if found.is_ok() {
+                remove(name)?;
+            }
             continue;
         };
-        match rustix::fs::symlinkat(&shared, &folder, *name) {
-            Err(rustix::io::Errno::EXIST) | Ok(()) => {}
-            Err(error) => return Err(error.into()),
+        match found {
+            Ok(target) if target.as_bytes() == shared.as_os_str().as_bytes() => continue,
+            Err(rustix::io::Errno::NOENT) => {}
+            _ => remove(name)?,
         }
+        rustix::fs::symlinkat(&shared, &folder, *name)?;
     }
     Ok(cargo)
 }

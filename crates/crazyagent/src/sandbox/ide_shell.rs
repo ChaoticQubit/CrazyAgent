@@ -135,8 +135,8 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
 pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
     use super::toolchains::{self, ToolHomes, Toolchains};
     use super::{
-        ProjectSandbox, SANDBOX_EXEC, agent_env, agent_variable_allowed, borrowed, canonical,
-        clean_absolute, invalid,
+        ProjectSandbox, SANDBOX_EXEC, agent_variable_allowed, borrowed, canonical, clean_absolute,
+        invalid, owner_terminal_env,
     };
     if launch.level == AgentAccess::Full {
         return Err(invalid("a Full access terminal runs in the IDE server"));
@@ -184,7 +184,7 @@ pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
             .map(|(_, value)| value.as_os_str());
         (OsStr::new(*name), value)
     });
-    let env = agent_env(&borrowed(&base), terminal)?;
+    let env = owner_terminal_env(&borrowed(&base), terminal)?;
     let login = [OsString::from("-l")];
     let arguments = if launch.arguments.is_empty() {
         &login[..]

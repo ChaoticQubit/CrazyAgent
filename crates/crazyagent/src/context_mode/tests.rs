@@ -632,7 +632,10 @@ fn the_node_version_check_runs_inside_a_boundary_with_a_cleared_environment() {
         ForCheck::SettingUp,
         "the check ran inside the boundary and read a supported version"
     );
-    assert!(!outside.exists(), "the version check wrote outside a boundary");
+    assert!(
+        !outside.exists(),
+        "the version check wrote outside a boundary"
+    );
 }
 
 /// RV-DS241-150: the engine's own `setup/bin` is a folder the tool resolver looks in, so an
