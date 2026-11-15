@@ -627,19 +627,20 @@ impl Repo {
     /// Runs one confined Linux step on the copy of the worktree's index in the engine's step
     /// folder, holding the worktree's `index.lock` the whole time as git would. The lock holds
     /// [`step_lock_text`] for this engine process, so the start sweep removes only a lock the
-    /// engine took ([`clear_step_locks`]); where the process cannot be named, as for process
-    /// 1, the lock is taken empty and the sweep keeps it. A step that does not take the lock
-    /// removes its step folder when empty and leaves one holding another step's copy to that
-    /// step (RV-DS241-135). A step whose folder holds a git `index.lock`, as a git an earlier
-    /// engine started can, lets the worktree's lock go and answers [`INDEX_LOCKED`] without
-    /// touching that folder (RV-DS241-142). The folder starts empty and is emptied after, and
-    /// the index is copied only from a plain file with one link, opened without following a
-    /// link or waiting on a FIFO. Once git exits 0 having rewritten the copy, the copy takes
-    /// the index's place only when it too is a plain file with one link, so whatever a raced
-    /// step leaves there is never taken, and a step that only reads leaves the index as it
-    /// was; the step itself never writes the git folder ([`Self::confined`]). Input: the step.
-    /// Output: its output, git's [`INDEX_LOCKED`] exit when the lock is already held, or
-    /// `changes_git_failed` when the index cannot be locked, copied or put back.
+    /// engine took ([`clear_step_locks`]); where the process cannot be named, as for process 1, the
+    /// lock is taken empty and the sweep keeps it. A step that does not take the lock removes its
+    /// step folder when empty and leaves one holding another step's copy to that step
+    /// (RV-DS241-135). A step whose folder holds a git `index.lock`, as a git an earlier engine
+    /// started can, lets the worktree's lock go and answers [`INDEX_LOCKED`] without touching that
+    /// folder (RV-DS241-142). The folder starts empty and is emptied before the worktree's lock
+    /// goes, so a git the step killed never leaves a lock there that no sweep removes, and the
+    /// index is copied only from a plain file with one link, opened without following a link or
+    /// waiting on a FIFO. Once git exits 0 having rewritten the copy, the copy takes the index's
+    /// place only when it too is a plain file with one link, so whatever a raced step leaves there
+    /// is never taken, and a step that only reads leaves the index as it was; the step itself never
+    /// writes the git folder ([`Self::confined`]). Input: the step. Output: its output, git's
+    /// [`INDEX_LOCKED`] exit when the lock is already held, or `changes_git_failed` when the index
+    /// cannot be locked, copied or put back.
     #[cfg(target_os = "linux")]
     pub(super) fn swapped(
         &self,
@@ -736,10 +737,10 @@ impl Repo {
             && left.as_ref().is_some_and(plain)
             && std::fs::rename(copy, &lock).is_ok()
             && std::fs::rename(&lock, &index).is_ok();
+        let _ = std::fs::remove_dir_all(folder);
         if !kept {
             let _ = std::fs::remove_file(&lock);
         }
-        let _ = std::fs::remove_dir_all(folder);
         match ran {
             Ok(_) if rewritten && !kept => Err(failed()),
             ran => ran.map(|(_, output)| output),
