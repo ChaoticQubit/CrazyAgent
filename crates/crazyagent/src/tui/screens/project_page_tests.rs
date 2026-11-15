@@ -1115,7 +1115,7 @@ async fn a_master_saved_from_the_team_screen_is_read_again_by_the_project_page()
     );
     let shown = render(&mut shell, 100, 40);
     assert!(
-        shown.contains("Master  rcli"),
+        shown.contains("Master  RCLI"),
         "the console names the saved master:\n{shown}"
     );
 
