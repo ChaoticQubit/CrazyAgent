@@ -246,6 +246,20 @@ test("team validation mirrors the engine agent range", () => {
   assert.equal(wizard.teamValid({ ...ok, max_agents: 2 }, catalog), false);
 });
 
+test("a removed harness is shown by its product name wherever a harness is named", async () => {
+  const { harnessName } = await import("../src/screens/new-project/team-editor.tsx");
+  for (const [gone, name] of [["antigravity", "Antigravity"], ["cursor-agent", "Cursor CLI"], ["amp", "Amp"], ["kiro", "Kiro CLI"], ["auggie", "Auggie"]]) {
+    assert.equal(wizard.harnessLabel(catalog, gone), name);
+    assert.equal(wizard.harnessLabel(null, gone), name, "the removed list needs no catalog");
+    assert.equal(harnessName(catalog, gone), name);
+    assert.equal(harnessName(null, gone), name, "the removed list needs no catalog");
+  }
+  assert.equal(wizard.harnessLabel(catalog, "claude"), "Claude Code");
+  assert.equal(harnessName(null, "claude"), "Claude Code");
+  assert.equal(wizard.harnessLabel(catalog, "made-up"), "made-up");
+  assert.equal(harnessName(null, "made-up"), "made-up");
+});
+
 test("adding and removing agent rows keeps the agent range valid", () => {
   let team = engineTeam("codex", 1);
   team = wizard.addHarnessRow(team, catalog);
