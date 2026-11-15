@@ -4816,6 +4816,7 @@ fn every_harness_kind_says_what_its_delivery_choices_do() {
                 "Native only never types: with tools off, a Codex agent gets its messages as a task of their own once it is idle."
             }
             HarnessKind::Rcli => "rcli runs no team agents, so no message goes to one here.",
+            HarnessKind::Listed(id) => unreachable!("{id} is not a native kind"),
         };
         assert!(said.contains(native), "{kind:?}: {said}");
     }
@@ -5360,4 +5361,16 @@ fn hold_rows_stay_in_view_while_the_settings_scroll() {
     assert!(find(&bottom, "Keep warm").contains("Keep warm  Off"));
     assert!(find(&bottom, "Left running  End them").contains("Left running  End them"));
     assert!(find(&bottom, "leads.").contains("Codex leads."));
+}
+
+/// DEC-180 Phase 1: a listed harness kind says what the Delivery choices do there: with no
+/// channel of its own, every message is typed in, and Native only never types.
+#[test]
+fn a_listed_harness_kind_says_what_its_delivery_choices_do() {
+    let said = delivery_scope(HarnessKind::Listed("opencode"));
+    assert_eq!(
+        said,
+        "This harness has no channel of its own: Auto and Typing only type every message in, and Native only never types."
+    );
+    assert!(!said.contains('\u{2014}'), "{said}");
 }

@@ -1853,6 +1853,7 @@ fn every_harness_kind_maps_background_commands_at_task_end() {
                 assert!(reader.reports_background());
             }
             HarnessKind::Rcli => assert_eq!(crate::team::launch_harness("rcli"), None),
+            HarnessKind::Listed(id) => unreachable!("{id} is not a native kind"),
         }
     }
 }

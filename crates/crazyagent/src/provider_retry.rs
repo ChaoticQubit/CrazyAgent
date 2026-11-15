@@ -43,6 +43,11 @@ pub enum CodexProvider<'a> {
     BuiltIn,
 }
 
+/// The line every option shows for a listed harness: the engine has no retry switch for
+/// it, so each option leaves its own retries.
+pub const LISTED_OWN_RETRIES: &str =
+    "This harness: its own retries. CrazyAgent sets no retry count for it.";
+
 /// One line the setting shows for one option and one harness, saying what the option does
 /// to that harness (DEC-141 decision 3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +115,7 @@ impl ProviderRetry {
             (Self::HarnessDefault, HarnessKind::Codex) => {
                 "Codex: its own retries. A provider that refuses connections keeps it waiting for the network without end."
             }
+            (_, HarnessKind::Listed(_)) => LISTED_OWN_RETRIES,
         }
     }
 }

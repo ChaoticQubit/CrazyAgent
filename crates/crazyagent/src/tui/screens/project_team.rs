@@ -4212,6 +4212,9 @@ fn delivery_scope(kind: HarnessKind) -> &'static str {
         HarnessKind::Rcli => {
             "rcli runs no team agents, so no message goes to one here. A master on any harness hears its messages through the engine under every choice."
         }
+        HarnessKind::Listed(_) => {
+            "This harness has no channel of its own: Auto and Typing only type every message in, and Native only never types."
+        }
     }
 }
 

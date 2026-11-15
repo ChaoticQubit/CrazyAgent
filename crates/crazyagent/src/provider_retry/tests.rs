@@ -144,6 +144,7 @@ fn every_harness_has_a_line_for_every_option_in_the_owner_view() {
                 HarnessKind::ClaudeCode => "Claude Code",
                 HarnessKind::Codex => "Codex",
                 HarnessKind::Rcli => "RCLI",
+                HarnessKind::Listed(id) => unreachable!("{id} is not a native kind"),
             };
             assert!(
                 line.starts_with(&format!("{name}: ")),
