@@ -506,18 +506,22 @@ fn a_delete_mark_shown_to_the_owner_outlives_a_settle_of_a_reused_exchange() {
     );
 }
 
-/// RV-DS241-152: a delete records every engine file name the engine makes, up to the 96
-/// bytes of an Overview or roadmap status run of a long project id, and a name the record
-/// cannot hold fails the write instead of going unrecorded, so no run folder of a deleted
-/// project is left unfound. A name recorded twice stays one record.
+/// RV-DS241-152: a delete records every engine file name the engine makes, up to the
+/// `RECORDED_NAME_BYTES_MAX` bytes of an Overview or roadmap status run of a long project
+/// id, and a name the record cannot hold fails the write instead of going unrecorded, so no
+/// run folder of a deleted project is left unfound. A name recorded twice stays one record.
+/// The name is built from that constant, so a wider one fails here until the record's
+/// check follows it (G1 code r1 F1).
 #[test]
-fn a_delete_records_run_names_up_to_96_bytes_and_refuses_a_longer_one() {
+fn a_delete_records_run_names_up_to_the_recorded_width_and_refuses_a_longer_one() {
     let root = tempfile::tempdir().unwrap();
     let base = root.path().canonicalize().unwrap();
     let mut connection = Connection::open(base.join("engine.db")).unwrap();
     initialize_authority_schemas(&connection).unwrap();
-    let name = format!("overview-{}-1794000000000", "a".repeat(73));
-    assert_eq!(name.len(), 96);
+    let width = projects_home::RECORDED_NAME_BYTES_MAX;
+    let pad = width - "overview--1794000000000".len();
+    let name = format!("overview-{}-1794000000000", "a".repeat(pad));
+    assert_eq!(name.len(), width);
     let count = |connection: &Connection, name: &str| -> i64 {
         connection
             .query_row(
@@ -540,7 +544,7 @@ fn a_delete_records_run_names_up_to_96_bytes_and_refuses_a_longer_one() {
     assert_eq!(
         count(&connection, &name),
         1,
-        "a 96-byte run name is recorded once"
+        "a run name of the recorded width is recorded once"
     );
     assert!(
         refused.is_err(),

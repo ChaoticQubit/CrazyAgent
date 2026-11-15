@@ -1050,11 +1050,12 @@ fn step_10_gives_usage_rows_a_model_through_the_upgrade() {
 }
 
 /// Step 11 through the real upgrade (RV-DS241-152): the delete record of an older store
-/// holds engine file names up to the 96 bytes of a long project's run folder and keeps
-/// the names it held, still refusing a longer one; a store that never made the record is
-/// stamped with no record made.
+/// holds engine file names up to the `RECORDED_NAME_BYTES_MAX` bytes of a long project's
+/// run folder and keeps the names it held, still refusing a longer one; a store that never
+/// made the record is stamped with no record made. The name is built from that constant, so
+/// a wider one fails here until a later step widens the record too (G1 code r1 F1).
 #[test]
-fn step_11_lets_the_delete_record_hold_run_names_up_to_96_bytes_keeping_its_rows() {
+fn step_11_lets_the_delete_record_hold_run_names_of_the_recorded_width_keeping_its_rows() {
     let root = Root::new();
     let mut db = root.connection();
     db.execute_batch(
@@ -1078,12 +1079,14 @@ fn step_11_lets_the_delete_record_hold_run_names_up_to_96_bytes_keeping_its_rows
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(kept, [("agent-a1b2c3".to_owned(), 41)]);
-    let name = format!("roadmap-status-{}-1794000000000", "a".repeat(67));
-    assert_eq!(name.len(), 96);
+    let width = crate::projects_home::RECORDED_NAME_BYTES_MAX;
+    let pad = width - "roadmap-status--1794000000000".len();
+    let name = format!("roadmap-status-{}-1794000000000", "a".repeat(pad));
+    assert_eq!(name.len(), width);
     let insert = "INSERT INTO projects_delete_files VALUES (?1, 42)";
     assert!(
         db.execute(insert, [&name]).is_ok(),
-        "a 96-byte run name is held"
+        "a run name of the recorded width is held"
     );
     assert!(
         db.execute(insert, [format!("{name}0")]).is_err(),
