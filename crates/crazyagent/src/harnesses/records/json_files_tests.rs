@@ -154,3 +154,85 @@ fn a_typed_prompt_is_found_in_the_first_object_that_holds_it_whole() {
     ];
     assert_eq!(typed_at(&objects, "  fix the parser "), Some(1));
 }
+
+#[test]
+fn a_record_path_outside_the_home_or_not_plain_is_refused_naming_the_setting() {
+    let home = Home::new();
+    let paths = [
+        "/tmp/{session}.jsonl",
+        "{home}",
+        "{home}/../{session}.jsonl",
+        "{home}/a/./{session}.jsonl",
+        "{home}//{session}.jsonl",
+        "{home}/{model}/{session}.jsonl",
+        "{home}/**/**/{session}.jsonl",
+        "{home}/sessions/**",
+        "{home}/a**/{session}.jsonl",
+        "{home}/1/2/3/4/5/6/7/8/{session}.jsonl",
+    ];
+    for path in paths {
+        let refused = pattern(&home, path).expect_err(path);
+        assert_eq!(refused.code, VALUE, "{path}");
+        let named = refused.message.starts_with("terminal.record.path: ");
+        assert!(named, "{path}");
+    }
+}
+
+#[test]
+fn a_reader_with_no_record_path_or_a_path_that_is_no_text_is_refused() {
+    let home = Home::new();
+    let line = format!("    path: \"{STANDIN_PATH}\"\n");
+    assert!(STANDIN.contains(&line));
+    let none = STANDIN.replace(&line, "");
+    let none = manifest::parse(none.as_bytes()).unwrap();
+    let refused = Pattern::read(&none, &home.path(), SESSION_ID).unwrap_err();
+    assert_eq!(refused.code, MISSING);
+    let number = STANDIN.replace(&line, "    path: 7\n");
+    let number = manifest::parse(number.as_bytes()).unwrap();
+    let refused = Pattern::read(&number, &home.path(), SESSION_ID).unwrap_err();
+    assert_eq!(refused.code, TYPE);
+}
+
+#[test]
+fn a_session_id_that_is_no_plain_word_is_refused_before_it_reaches_a_path() {
+    let home = Home::new();
+    let standin = manifest_with(STANDIN_PATH);
+    let long = "a".repeat(SESSION_BYTES_MAX + 1);
+    for session in ["", "../x", "a/b", "a*", "a.b", "{home}", long.as_str()] {
+        let refused = Pattern::read(&standin, &home.path(), session).unwrap_err();
+        assert_eq!(refused.code, VALUE, "{session}");
+    }
+    let longest = "a".repeat(SESSION_BYTES_MAX);
+    assert!(Pattern::read(&standin, &home.path(), &longest).is_ok());
+}
+
+#[test]
+fn a_wildcard_stands_for_any_run_of_characters_within_one_name() {
+    assert!(fits("*_s.jsonl", "2026-11-15_s.jsonl"));
+    assert!(fits("a*b*c", "abc"));
+    assert!(fits("a*b*c", "aXbYbZc"));
+    assert!(!fits("a*b*c", "aXbYcZ"));
+    assert!(!fits("*_s.jsonl", "_s.json"));
+}
+
+#[test]
+fn a_blank_prompt_or_one_only_inside_longer_text_or_past_the_depth_bound_is_not_found() {
+    let objects = [json!({"text": "please fix the parser now"})];
+    assert_eq!(typed_at(&objects, "fix the parser"), None);
+    assert_eq!(typed_at(&objects, "  \n"), None);
+    let mut deep = json!("fix the parser");
+    for _ in 0..TYPED_DEPTH_MAX {
+        deep = json!([deep]);
+    }
+    assert_eq!(typed_at(&[deep.clone()], "fix the parser"), Some(0));
+    assert_eq!(typed_at(&[json!([deep])], "fix the parser"), None);
+}
+
+#[test]
+fn a_typed_prompt_past_the_value_bound_of_one_object_is_not_found() {
+    let mut many = vec![json!("x"); TYPED_VALUES_MAX];
+    many.push(json!("fix the parser"));
+    assert_eq!(typed_at(&[json!(many.clone())], "fix the parser"), None);
+    many.swap(0, TYPED_VALUES_MAX);
+    assert_eq!(typed_at(&[json!(many)], "fix the parser"), Some(0));
+}
