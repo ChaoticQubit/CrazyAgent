@@ -13299,9 +13299,8 @@ fn commands_left(by: &HoldBy) -> Result<(), LaunchError> {
 /// hold, so a held process never reads a fresh credential there (rv-code2 B2P2-1). Inputs:
 /// who starts and the hand-off. Output: what the hand-off gave, or [`COMMANDS_LEFT`].
 fn hand_after_check<T>(by: &HoldBy, hand: impl FnOnce() -> T) -> Result<T, LaunchError> {
-    let handed = hand();
     commands_left(by)?;
-    Ok(handed)
+    Ok(hand())
 }
 
 /// Starts an agent's harness as [`AgentSession::start_resuming`] does, once
