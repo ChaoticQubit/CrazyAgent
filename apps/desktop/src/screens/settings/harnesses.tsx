@@ -13,7 +13,6 @@ import { choosable, chooseHarnessPath, findHarness, harnessFileName, isPathCode,
 import { useLoad, type Loaded } from "../../state";
 import { Button, Dialog, Icon, LoadError, NotReady, ProviderMark, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge, formatRoute } from "../../ui";
 import { SettingRow } from "../../ui/setting";
-import { displayText } from "../conversation";
 import { HarnessPage } from "./harness-page";
 import { ModelsSection } from "./models-section";
 import { ProviderRetrySettings } from "./provider-retry";
