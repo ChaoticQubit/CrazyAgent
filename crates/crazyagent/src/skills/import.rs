@@ -1,6 +1,7 @@
 use super::{SkillInfo, one_line};
+use crate::app_plugins::yaml::Value;
 use crate::engine::EngineError;
-use crate::harnesses::manifest::{Manifest, Refused};
+use crate::harnesses::manifest::{self, Manifest, Refused};
 use crate::harnesses::registry::{HARNESSES_MAX, Harness, Registry, registry};
 use crate::plugins::skill_folder::{self, IMPORTED, PlannedFile};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ pub const LIST_BYTES_MAX: usize = 48 * 1024;
 pub const FOLDER_NAME_BYTES_MAX: usize = 255;
 const ROOT_ENTRIES_MAX: usize = 1024;
 const DIGEST_ENTRIES_MAX: usize = 4096;
+const IMPORT_KEYS: [&str; 1] = ["skills"];
 
 /// Where a found skill lives: the owner's Claude Code or Codex skills folder, or the skills
 /// folder a listed harness's manifest names in `import.skills`, with that harness's catalog
@@ -59,8 +61,15 @@ impl ImportFrom {
     /// folders are the two built-in ones, and none for a manifest without `import.skills`.
     /// Input: a harness of a built registry. Output: the source, or none.
     pub fn of(harness: &'static Harness) -> Option<Self> {
-        let _ = harness;
-        None
+        if Self::BUILT_IN.iter().any(|from| harness.named(from.id())) {
+            return None;
+        }
+        let manifest = harness.manifest();
+        Some(Self::Listed {
+            id: harness.id(),
+            folder: skills_folder(manifest)?,
+            label: manifest.name.as_str(),
+        })
     }
 
     /// Finds a source by the name it has on the wire. Inputs: the name and the registry
@@ -130,8 +139,64 @@ impl<'de> Deserialize<'de> for ImportFrom {
 /// an import at another harness's folders or anything else in the owner's home.
 /// Input: a parsed manifest. Output: Ok, or a refusal that names the setting.
 pub fn check(manifest: &Manifest) -> Result<(), Refused> {
-    let _ = manifest;
+    let Some(import) = manifest.block("import") else {
+        return Ok(());
+    };
+    let Value::Map(entries) = import else {
+        return Ok(());
+    };
+    if let Some((key, _)) = entries
+        .iter()
+        .find(|(key, _)| !IMPORT_KEYS.contains(&key.as_str()))
+    {
+        return Err(Refused {
+            code: manifest::UNKNOWN_KEY,
+            message: format!("import.{key}: this key is not one an import block has."),
+        });
+    }
+    let folder = match import.get("skills") {
+        None | Some(Value::Null) => return Ok(()),
+        Some(Value::Str(folder)) => folder,
+        Some(_) => {
+            return Err(Refused {
+                code: manifest::TYPE,
+                message: "import.skills: this must be text in quotes.".to_owned(),
+            });
+        }
+    };
+    if !under_home(folder) {
+        return Err(Refused {
+            code: manifest::VALUE,
+            message: "import.skills: this must be a folder under the home folder, written \
+                      without ~, . or .. parts or a leading /."
+                .to_owned(),
+        });
+    }
+    if !manifest
+        .owner_folders
+        .iter()
+        .any(|owner| Path::new(folder).starts_with(owner))
+    {
+        return Err(Refused {
+            code: manifest::VALUE,
+            message: "import.skills: this must be inside one of home.owner_folders.".to_owned(),
+        });
+    }
     Ok(())
+}
+
+fn skills_folder(manifest: &Manifest) -> Option<&str> {
+    match manifest.block("import")?.get("skills")? {
+        Value::Str(folder) => Some(folder.as_str()),
+        _ => None,
+    }
+}
+
+fn under_home(folder: &str) -> bool {
+    folder.len() <= manifest::SENTENCE_BYTES_MAX
+        && !folder.chars().any(char::is_control)
+        && manifest::relative(folder)
+        && !folder.split('/').any(|part| part.starts_with('~'))
 }
 
 /// How a found skill compares with the app's skills: not there yet, already added with the
