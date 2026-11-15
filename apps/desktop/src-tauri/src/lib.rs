@@ -2247,13 +2247,9 @@ async fn desktop_remove_project(
     state: State<'_, NativeState>,
     id: String,
     generation: u64,
-    delete_name: Option<String>,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
-    lock(&state)
-        .await?
-        .remove_project(&id, generation, delete_name)
-        .await
+    lock(&state).await?.remove_project(&id, generation).await
 }
 
 #[tauri::command]
