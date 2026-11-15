@@ -299,7 +299,7 @@ fn a_tools_off_codex_runs_its_app_without_the_shared_app_server() {
             built.cwd.display()
         ),
     ]));
-    argv.extend(strings(&["-c", "tui.alternate_screen=\"never\""]));
+    argv.extend(strings(&["-c", "tui.alternate_screen=\"always\""]));
     assert_eq!(built.argv, argv);
     let home = case.home().to_str().unwrap().to_owned();
     assert_eq!(
@@ -703,10 +703,8 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_owned(),
                 "1".to_owned()
             ),
-            (
-                "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
-                "1".to_owned()
-            ),
+            ("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned()),
+            ("CLAUDE_CODE_NO_FLICKER".to_owned(), "1".to_owned()),
         ])
     );
     let folder = claude_project_folder(&case.path().join("work")).unwrap();
@@ -1191,11 +1189,48 @@ fn display_variables(built: &InteractiveCommand) -> Vec<(String, String)> {
         .collect()
 }
 
-/// A Claude Code terminal at the Classic display, the default and the display of a launch
-/// without a project context, turns Claude Code's alternate screen off (N-D9), so Claude
-/// Code draws on the normal screen and leaves the wheel and a plain drag to the terminal,
-/// and never asks for Claude Code's fullscreen renderer. A native lead's teammates get the
-/// same variables through their script.
+/// A terminal whose project never chose a display, and a launch without a project context,
+/// starts at Fullscreen, the default (DEC-174 add. 2): Claude Code asks for its fullscreen
+/// renderer at 3 rows a notch and keeps its alternate screen, so a resize of the pane leaves
+/// no repainted copy of a reply in the pane's history; Codex starts its own view with
+/// `tui.alternate_screen="always"` on both launch shapes.
+#[test]
+fn a_terminal_without_a_chosen_display_starts_fullscreen() {
+    use crate::coord::settings::TerminalDisplay;
+    assert_eq!(TerminalDisplay::default(), TerminalDisplay::Fullscreen);
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let fullscreen = [
+        ("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned()),
+        ("CLAUDE_CODE_NO_FLICKER".to_owned(), "1".to_owned()),
+    ];
+    let bare = command(&request, None, &run(None)).unwrap();
+    assert_eq!(display_variables(&bare), fullscreen, "{:?}", bare.env);
+    let plain = project_context(&case, "plain")
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&plain), &run(None)).unwrap();
+    assert_eq!(display_variables(&built), fullscreen, "{:?}", built.env);
+    drop(plain);
+
+    let always = ["\"always\"".to_owned()];
+    for tools in [false, true] {
+        let request = case.request("codex", case.subscription(), tools);
+        let bare = command(&request, None, &run(None)).unwrap();
+        assert_eq!(codex_screen(&bare), always, "{tools}: {:?}", bare.argv);
+        let plain = project_context(&case, &format!("codex-plain-{tools}"))
+            .install("codex", &case.home(), tools)
+            .unwrap();
+        let built = command(&request, Some(&plain), &run(None)).unwrap();
+        assert_eq!(codex_screen(&built), always, "{tools}: {:?}", built.argv);
+    }
+}
+
+/// A Claude Code terminal at the Classic display, which the owner chose for the project,
+/// turns Claude Code's alternate screen off (N-D9), so Claude Code draws on the normal screen
+/// and leaves the wheel and a plain drag to the terminal, and never asks for Claude Code's
+/// fullscreen renderer. A native lead's teammates get the same variables through their
+/// script.
 #[test]
 fn a_classic_claude_code_terminal_turns_the_alternate_screen_off() {
     let case = Case::new();
@@ -1204,15 +1239,13 @@ fn a_classic_claude_code_terminal_turns_the_alternate_screen_off() {
         "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
         "1".to_owned(),
     )];
-    let bare = command(&request, None, &run(None)).unwrap();
-    assert_eq!(display_variables(&bare), classic, "{:?}", bare.env);
-
-    let plain = project_context(&case, "plain")
+    let chosen = project_context(&case, "chosen")
+        .with_terminal_display(crate::coord::settings::TerminalDisplay::Classic)
         .install("claude-code", &case.home(), true)
         .unwrap();
-    let built = command(&request, Some(&plain), &run(None)).unwrap();
+    let built = command(&request, Some(&chosen), &run(None)).unwrap();
     assert_eq!(display_variables(&built), classic, "{:?}", built.env);
-    drop(plain);
+    drop(chosen);
 
     let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
     let lead = project_context(&case, "lead")
@@ -1773,7 +1806,7 @@ fn every_harness_kind_maps_every_terminal_display() {
         TerminalDisplay::ALL,
         [TerminalDisplay::Classic, TerminalDisplay::Fullscreen]
     );
-    assert_eq!(TerminalDisplay::default(), TerminalDisplay::Classic);
+    assert_eq!(TerminalDisplay::default(), TerminalDisplay::Fullscreen);
     let starts = |switches: DisplaySwitches| (switches.variables, switches.arguments);
     let case = Case::new();
     let mut launched = 0;
@@ -1869,21 +1902,17 @@ fn the_displays_of_each_harness_kind_are_named_for_the_settings() {
     assert_eq!(displays(HarnessKind::Rcli), [TerminalDisplay::Classic]);
 }
 
-/// OB-8: a Codex terminal at the Classic display, the default and the display of a launch
-/// without a project context, starts with `tui.alternate_screen="never"`, so Codex draws on
-/// the normal screen with no mouse reporting and a plain drag in the app's terminal view
-/// selects text. The setting is a `-c` setting among the others, ahead of `resume`, because
-/// the bridge script hands the same arguments to `codex app-server`, which takes `-c` and
-/// exits on `--no-alt-screen`.
+/// OB-8: a Codex terminal at the Classic display, which the owner chose for the project,
+/// starts with `tui.alternate_screen="never"`, so Codex draws on the normal screen with no
+/// mouse reporting and a plain drag in the app's terminal view selects text. The setting is a
+/// `-c` setting among the others, ahead of `resume`, because the bridge script hands the same
+/// arguments to `codex app-server`, which takes `-c` and exits on `--no-alt-screen`.
 #[test]
 fn a_classic_codex_terminal_draws_on_the_normal_screen_on_both_launch_shapes() {
     use crate::coord::settings::TerminalDisplay;
     let case = Case::new();
     let never = ["\"never\"".to_owned()];
     for tools in [false, true] {
-        let request = case.request("codex", case.subscription(), tools);
-        let bare = command(&request, None, &run(None)).unwrap();
-        assert_eq!(codex_screen(&bare), never, "{tools}: {:?}", bare.argv);
         for resume in [false, true] {
             let name = format!("classic-{tools}-{resume}");
             let built = codex_at(&case, &name, TerminalDisplay::Classic, tools, resume);

@@ -23817,26 +23817,27 @@ fn team_terminal_display(fixture: &Fixture, runtime: &TeamRuntime) -> Vec<(Strin
         .collect()
 }
 
-/// A team Claude Code terminal of a project that never chose a display starts Classic
-/// (N-D9): Claude Code's alternate screen is off, so the app's view scrolls with the wheel.
+/// A team Claude Code terminal of a project that never chose a display starts Fullscreen
+/// (DEC-174 add. 2): Claude Code's fullscreen renderer at 3 rows a notch on its alternate
+/// screen, so a resize of the pane leaves no repainted copy of a reply in its history.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_team_claude_code_terminal_starts_classic_by_default() {
+fn a_team_claude_code_terminal_starts_fullscreen_by_default() {
     let fixture = Fixture::new(1);
     let mut runtime = exiting_claude_runtime(&fixture);
     assert_eq!(
         team_terminal_display(&fixture, &runtime),
-        [(
-            "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
-            "1".to_owned()
-        )]
+        [
+            ("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned()),
+            ("CLAUDE_CODE_NO_FLICKER".to_owned(), "1".to_owned())
+        ]
     );
     runtime.shutdown().unwrap();
 }
 
-/// The display is read when each agent is prepared (N-D9): after the owner picks Fullscreen
-/// the next team Claude Code terminal asks for Claude Code's fullscreen renderer at 3 rows a
-/// notch (R8-FS), and after Classic again the next one turns the alternate screen off.
+/// The display is read when each agent is prepared (N-D9): after the owner picks Classic the
+/// next team Claude Code terminal turns the alternate screen off, and after Fullscreen again
+/// the next one asks for Claude Code's fullscreen renderer at 3 rows a notch (R8-FS).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_team_claude_code_terminal_gets_the_display_the_owner_chose_last() {
@@ -23855,14 +23856,6 @@ fn a_team_claude_code_terminal_gets_the_display_the_owner_chose_last() {
         )
         .unwrap();
     };
-    choose(TerminalDisplay::Fullscreen);
-    assert_eq!(
-        team_terminal_display(&fixture, &runtime),
-        [
-            ("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned()),
-            ("CLAUDE_CODE_NO_FLICKER".to_owned(), "1".to_owned())
-        ]
-    );
     choose(TerminalDisplay::Classic);
     assert_eq!(
         team_terminal_display(&fixture, &runtime),
@@ -23870,6 +23863,14 @@ fn a_team_claude_code_terminal_gets_the_display_the_owner_chose_last() {
             "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
             "1".to_owned()
         )]
+    );
+    choose(TerminalDisplay::Fullscreen);
+    assert_eq!(
+        team_terminal_display(&fixture, &runtime),
+        [
+            ("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned()),
+            ("CLAUDE_CODE_NO_FLICKER".to_owned(), "1".to_owned())
+        ]
     );
     runtime.shutdown().unwrap();
 }

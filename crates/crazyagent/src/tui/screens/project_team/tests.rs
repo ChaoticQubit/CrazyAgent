@@ -3731,21 +3731,22 @@ fn the_task_start_reminder_shows_on_by_default_and_space_flips_it() {
     }
 }
 
-/// The one Terminal display of every harness shows Classic in the coordination editor of a
-/// project with no saved settings, read from a real engine database, on row 6 under every
-/// harness kind's rows (N-D9, DEC-141), and Space on the row flips it to Fullscreen and back:
-/// each press sends the whole settings with the other display, the engine's answer names it
-/// and the row shows the stored one. Fullscreen says rcli stays Classic, as the engine's view
-/// lists no Fullscreen for it; Classic says nothing more.
+/// The one Terminal display of every harness shows Fullscreen, the default (DEC-174 add. 2),
+/// in the coordination editor of a project with no saved settings, read from a real engine
+/// database, on row 6 under every harness kind's rows (N-D9, DEC-141), as the desktop shows
+/// it, and Space on the row flips it to Classic and back: each press sends the whole settings
+/// with the other display, the engine's answer names it and the row shows the stored one.
+/// Fullscreen says rcli stays Classic, as the engine's view lists no Fullscreen for it;
+/// Classic says nothing more.
 #[test]
-fn the_terminal_display_shows_classic_by_default_and_space_flips_it() {
+fn the_terminal_display_shows_fullscreen_by_default_and_space_flips_it() {
     let folder = tempfile::tempdir().unwrap();
     let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
     crate::storage::initialize_authority_schemas(&connection).unwrap();
     let coordination = crate::team::coordination(&connection, &project()).unwrap();
     assert_eq!(
         coordination.settings.terminal_display,
-        TerminalDisplay::Classic
+        TerminalDisplay::Fullscreen
     );
     let mut view = TeamView::new(project());
     let query = view.next_query(NOW).unwrap();
@@ -3754,8 +3755,11 @@ fn the_terminal_display_shows_classic_by_default_and_space_flips_it() {
     view.apply(&query, Ok(SetupView::Team(Box::new(stored.clone()))));
     assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
     let display = |view: &TeamView| find(&frame(view, 120, 40), "Terminal display").to_owned();
-    assert!(display(&view).contains("Classic"), "{}", display(&view));
-    assert!(!display(&view).contains("stays"), "{}", display(&view));
+    assert!(
+        display(&view).contains("Fullscreen. rcli stays Classic"),
+        "{}",
+        display(&view)
+    );
     assert!(
         !frame(&view, 120, 40)
             .iter()
@@ -3768,11 +3772,11 @@ fn the_terminal_display_shows_classic_by_default_and_space_flips_it() {
     assert_eq!(view.coord.as_ref().unwrap().row, 6);
     let mut at = NOW;
     for (next, words) in [
+        (TerminalDisplay::Classic, "Classic"),
         (
             TerminalDisplay::Fullscreen,
             "Fullscreen. rcli stays Classic",
         ),
-        (TerminalDisplay::Classic, "Classic"),
     ] {
         let mut settings = coordination.settings.clone();
         settings.terminal_display = next;
