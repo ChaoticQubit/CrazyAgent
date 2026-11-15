@@ -14,11 +14,13 @@ pub const SESSION_BYTES_MAX: usize = 256;
 pub const MODEL_BYTES_MAX: usize = 256;
 
 /// The piped settings of a harness on the `jsonl-turn` driver, read from its manifest: the
-/// arguments of every turn, the ones added to continue a session, the ones added with tools
-/// off, and the rules that turn its output lines into facts.
+/// arguments of every turn and where its first `--` entry stands, the ones added to continue
+/// a session, the ones added with tools off, and the rules that turn its output lines into
+/// facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     argv: Vec<String>,
+    positional: usize,
     resume: Vec<String>,
     tools_off: Option<Vec<String>>,
     rules: Vec<Rule>,
@@ -27,8 +29,10 @@ pub struct Config {
 impl Config {
     /// Reads the settings of one manifest. Input: a manifest whose `piped.driver` is
     /// `jsonl-turn`. Output: the settings, or a refusal that names the setting: `piped.argv`
-    /// missing or without `{prompt}`, `piped.resume` without `{session}`, an argument that is
-    /// not 1 to `ARG_BYTES_MAX` bytes of text, `piped.rules` missing, or a refused rule.
+    /// missing or without `{prompt}`, a `{prompt}` that begins an argument before any `--`
+    /// entry, `piped.resume` without `{session}`, `{prompt}` in `piped.resume` or
+    /// `piped.tools_off`, an argument that is not 1 to `ARG_BYTES_MAX` bytes of text,
+    /// `piped.rules` missing, or a refused rule.
     pub fn read(manifest: &Manifest) -> Result<Self, Refused> {
         let Some(piped) = manifest
             .block("piped")
@@ -52,6 +56,21 @@ impl Config {
                 "piped.argv: {prompt} is needed, so each turn's prompt reaches the harness.".into(),
             );
         }
+        let positional = argv
+            .iter()
+            .position(|argument| argument == "--")
+            .unwrap_or(argv.len());
+        if argv[..positional]
+            .iter()
+            .any(|argument| argument.starts_with("{prompt}"))
+        {
+            return refuse(
+                manifest::VALUE,
+                "piped.argv: {prompt} begins an argument; write it after text such as \
+                 --prompt= or after a -- entry, so a prompt is never read as an option."
+                    .into(),
+            );
+        }
         let resume = arguments(piped, "resume")?.unwrap_or_default();
         if !resume.is_empty() && !resume.iter().any(|argument| argument.contains("{session}")) {
             return refuse(
@@ -60,6 +79,20 @@ impl Config {
             );
         }
         let tools_off = arguments(piped, "tools_off")?;
+        for (key, added) in [
+            ("resume", resume.as_slice()),
+            ("tools_off", tools_off.as_deref().unwrap_or_default()),
+        ] {
+            if added.iter().any(|argument| argument.contains("{prompt}")) {
+                return refuse(
+                    manifest::VALUE,
+                    format!(
+                        "piped.{key}: {{prompt}} belongs in piped.argv only, so a prompt is \
+                         never read as an option."
+                    ),
+                );
+            }
+        }
         let set = match piped.get("rules") {
             None | Some(Yaml::Null) => {
                 return refuse(
@@ -76,8 +109,10 @@ impl Config {
             }
         };
         let rules = rules::read(manifest, set)?;
+        assert!(positional <= argv.len());
         Ok(Self {
             argv,
+            positional,
             resume,
             tools_off,
             rules,
@@ -187,8 +222,10 @@ impl JsonlTurn {
     }
 
     /// Starts a turn. Input: the prompt. Output: the turn's arguments, each placeholder
-    /// filled once and never again inside a filled value: `piped.argv`, then `piped.resume`
-    /// when a session id is known, then `piped.tools_off` with tools off. Refusals:
+    /// filled once and never again inside a filled value: `piped.argv` up to its first `--`
+    /// entry, then `piped.resume` when a session id is known, then `piped.tools_off` with
+    /// tools off, then the rest of `piped.argv` from that `--` on, so a prompt after it can
+    /// neither end nor add an option. Refusals:
     /// `launch_prompt_invalid` for an empty prompt, one with a NUL byte or one over
     /// `PROMPT_BYTES_MAX`, `launch_busy` during a turn, `launch_protocol_failed` once failed,
     /// `launch_model_unsupported` for `{model}` with no model, `launch_session_id_invalid`
@@ -215,15 +252,18 @@ impl JsonlTurn {
         } else {
             self.config.tools_off.as_deref().unwrap_or_default()
         };
-        let argv = self
-            .config
-            .argv
+        let (options, positional) = self.config.argv.split_at(self.config.positional);
+        let argv = options
             .iter()
             .chain(resume)
             .chain(off)
+            .chain(positional)
             .map(|argument| self.fill(argument, prompt))
             .collect::<Result<Vec<String>, LaunchError>>()?;
-        assert!(argv.len() >= self.config.argv.len());
+        assert_eq!(
+            argv.len(),
+            self.config.argv.len() + resume.len() + off.len()
+        );
         self.phase = Phase::Running;
         self.turn = Turn::default();
         self.assert_consistent();
@@ -258,6 +298,8 @@ impl JsonlTurn {
         if let Some(id) = found.session {
             if !plain_session(&id) {
                 self.phase = Phase::Failed;
+                self.turn = Turn::default();
+                self.assert_consistent();
                 return Err(failure("launch_session_id_invalid"));
             }
             self.session = Some(id);
@@ -380,6 +422,7 @@ impl JsonlTurn {
         assert!(Path::new(&self.home).is_absolute() && Path::new(&self.cwd).is_absolute());
         assert!(self.session.as_deref().is_none_or(plain_session));
         assert!(!self.config.argv.is_empty() && !self.config.rules.is_empty());
+        assert!(self.config.positional <= self.config.argv.len());
         assert!(self.tools || self.config.tools_off.is_some());
         assert!(!self.tools || !self.turn.breached);
         assert!(self.phase == Phase::Running || self.turn == Turn::default());
