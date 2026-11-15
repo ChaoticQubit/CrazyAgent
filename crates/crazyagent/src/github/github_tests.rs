@@ -1498,7 +1498,10 @@ fn a_repository_record_is_found_in_any_case_and_a_tampered_one_is_refused() {
         .unwrap();
     assert_eq!(outcome.state, GitHubRuleState::Applied);
     assert_eq!(server.seen().last().unwrap().method, "PUT");
-    assert_eq!(server.seen().last().unwrap().path, "/repos/Octo-Cat/Tool/rulesets/7");
+    assert_eq!(
+        server.seen().last().unwrap().path,
+        "/repos/Octo-Cat/Tool/rulesets/7"
+    );
     for tampered in [
         r#"{"rulesets":{"squash_only":7}}"#,
         r#"{"rulesets":{"conversation_resolution":7}}"#,

@@ -12,6 +12,18 @@ mod rules_tests;
 const RULESETS_PER_PAGE: usize = 100;
 const MESSAGE_SHOWN_MAX: usize = 300;
 const HELD_SHOWN_MAX: usize = 40;
+const CHECKS_MAX: usize = 100;
+const CHECK_NAME_BYTES_MAX: usize = 255;
+const NOT_SENT: u16 = 0;
+const FOREIGN: &str = "a ruleset with this name exists that CrazyAgent did not make";
+const UNSENDABLE: &str = "CrazyAgent could not send this setting to GitHub";
+const CHECKS_UNSENDABLE: &str = "the check names from the CI run cannot be sent: each needs 1 to 255 bytes with no control character, and there can be at most 100";
+const NO_CI: &str = "no CI workflows in this repository";
+const WAITING: &str = "waiting for the first CI run to name its checks";
+const WAITING_KEPT: &str =
+    "waiting for the first CI run to name its checks; the checks named before stay required";
+const ID_UNSAID: &str =
+    "GitHub made the ruleset but did not say its id, so CrazyAgent will not change it later";
 
 /// One rule of CrazyAgent's standard secure setup for a published repository (DEC-182).
 /// Each is a switch on the GitHub settings page, and all start on except signed commits.
@@ -108,9 +120,9 @@ impl GitHubRule {
     }
 }
 
-/// What became of one rule: applied, refused by GitHub with its status and message, not
-/// applicable to this repository with the reason, or waiting for something first, such as
-/// the first CI run.
+/// What became of one rule: applied, refused with GitHub's status and message (status 0
+/// when CrazyAgent itself sent nothing), not applicable to this repository with the
+/// reason, or waiting for something first, such as the first CI run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GitHubRuleState {
@@ -155,6 +167,14 @@ pub(super) struct RepoRecord {
     pub(super) rulesets: BTreeMap<GitHubRule, u64>,
 }
 
+impl RepoRecord {
+    /// Tells whether every recorded rule is one a CrazyAgent ruleset holds, as a record
+    /// read from disk must be before a pass uses it. Output: true for a usable record.
+    pub(super) fn valid(&self) -> bool {
+        self.rulesets.keys().all(|rule| rule.ruleset().is_some())
+    }
+}
+
 fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
 }
@@ -163,6 +183,25 @@ fn not_applicable(reason: &str) -> GitHubRuleState {
     GitHubRuleState::NotApplicable {
         reason: reason.to_owned(),
     }
+}
+
+fn not_sent(message: &str) -> GitHubRuleState {
+    GitHubRuleState::Refused {
+        status: NOT_SENT,
+        message: message.to_owned(),
+    }
+}
+
+/// Tells whether the check names a CI run reported can go into a ruleset: at most
+/// `CHECKS_MAX` names, each 1 to `CHECK_NAME_BYTES_MAX` bytes with no control character.
+/// Input: the names. Output: true when they can be sent.
+fn sendable(checks: &[String]) -> bool {
+    checks.len() <= CHECKS_MAX
+        && checks.iter().all(|check| {
+            !check.is_empty()
+                && check.len() <= CHECK_NAME_BYTES_MAX
+                && !check.chars().any(char::is_control)
+        })
 }
 
 /// The refused state for a reply outside a call's success statuses: GitHub's status and
@@ -196,8 +235,7 @@ pub(super) fn apply(
     facts: &GitHubRepoFacts,
     made: &mut RepoRecord,
 ) -> Result<Vec<GitHubRuleOutcome>, EngineError> {
-    assert!(made.rulesets.len() <= GitHubRule::ALL.len());
-    let mut pass = Pass::new(endpoints, token, full_name, on, facts)?;
+    let mut pass = Pass::new(endpoints, token, full_name, on, facts, made)?;
     let mut outcomes: Vec<GitHubRuleOutcome> = Vec::new();
     for rule in GitHubRule::ALL.into_iter().filter(|rule| rule.on_github()) {
         let state = match outcomes.last() {
@@ -238,8 +276,7 @@ pub(super) fn set(
     facts: &GitHubRepoFacts,
     made: &mut RepoRecord,
 ) -> Result<GitHubRuleOutcome, EngineError> {
-    assert!(made.rulesets.len() <= GitHubRule::ALL.len());
-    let mut pass = Pass::new(endpoints, token, full_name, on, facts)?;
+    let mut pass = Pass::new(endpoints, token, full_name, on, facts, made)?;
     Ok(GitHubRuleOutcome {
         rule,
         on: on.contains(&rule),
@@ -256,13 +293,15 @@ struct Listed {
     source_type: Option<String>,
 }
 
-/// One pass of setting rules on one repository, which reads its rulesets at most once.
+/// One pass of setting rules on one repository, which reads its rulesets at most once and
+/// keeps the repository's record of CrazyAgent's rulesets current as it goes.
 struct Pass<'a> {
     endpoints: &'a Endpoints,
     token: &'a SecretString,
     full_name: &'a str,
     on: &'a BTreeSet<GitHubRule>,
     facts: &'a GitHubRepoFacts,
+    made: &'a mut RepoRecord,
     rulesets: Option<Result<Vec<Listed>, GitHubRuleState>>,
 }
 
@@ -275,6 +314,7 @@ impl<'a> Pass<'a> {
         full_name: &'a str,
         on: &'a BTreeSet<GitHubRule>,
         facts: &'a GitHubRepoFacts,
+        made: &'a mut RepoRecord,
     ) -> Result<Self, EngineError> {
         super::clone::full_name(full_name)?;
         Ok(Self {
@@ -283,6 +323,7 @@ impl<'a> Pass<'a> {
             full_name,
             on,
             facts,
+            made,
             rulesets: None,
         })
     }
@@ -392,19 +433,32 @@ impl<'a> Pass<'a> {
         }
     }
 
-    /// Sends one settings call. Inputs: the method, the path below the repository and the
-    /// JSON body. Output: the reply, or `github_token_refused` on a 401.
-    fn call(&self, verb: Verb, tail: &str, body: Option<&Value>) -> Result<Reply, EngineError> {
+    /// Sends one settings call. A body curl cannot carry, such as one holding a control
+    /// character, refuses only this rule, so the pass goes on. Inputs: the method, the path
+    /// below the repository and the JSON body. Output: the reply or the rule's refusal, or
+    /// `github_token_refused` on a 401.
+    fn call(
+        &self,
+        verb: Verb,
+        tail: &str,
+        body: Option<&Value>,
+    ) -> Result<Result<Reply, GitHubRuleState>, EngineError> {
         let url = self.endpoints.api(&self.path(tail))?;
         let text = body.map(Value::to_string);
-        let reply = self
+        let sent = self
             .endpoints
             .request(url, api::API_JSON, Some(self.token), None)
-            .send_body(verb, text.as_deref())?;
+            .send_body(verb, text.as_deref());
+        let reply = match sent {
+            Err(error) if error.0 == "github_request_invalid" => {
+                return Ok(Err(not_sent(UNSENDABLE)));
+            }
+            sent => sent?,
+        };
         if reply.status == 401 {
             return Err(failure("github_token_refused"));
         }
-        Ok(reply)
+        Ok(Ok(reply))
     }
 
     /// Sends one settings call and reads its state from the status. Inputs: as `call`,
@@ -417,7 +471,10 @@ impl<'a> Pass<'a> {
         ok: &[u16],
     ) -> Result<GitHubRuleState, EngineError> {
         assert!(!ok.is_empty());
-        let reply = self.call(verb, tail, body)?;
+        let reply = match self.call(verb, tail, body)? {
+            Ok(reply) => reply,
+            Err(refusal) => return Ok(refusal),
+        };
         Ok(if ok.contains(&reply.status) {
             GitHubRuleState::Applied
         } else {
@@ -436,7 +493,10 @@ impl<'a> Pass<'a> {
     /// policy can hold a field without refusing the call. Input: the fields.
     /// Output: the state.
     fn fields(&self, fields: &Value) -> Result<GitHubRuleState, EngineError> {
-        let reply = self.call(Verb::Patch, "", Some(fields))?;
+        let reply = match self.call(Verb::Patch, "", Some(fields))? {
+            Ok(reply) => reply,
+            Err(refusal) => return Ok(refusal),
+        };
         if reply.status != 200 {
             return Ok(refused(&reply));
         }
@@ -458,12 +518,15 @@ impl<'a> Pass<'a> {
     }
 
     /// Turns a security and analysis feature on or off and checks the status GitHub
-    /// answers with, when it answers with one. Inputs: the feature and whether it is on.
-    /// Output: the state.
+    /// answers with; a reply that does not name the status confirms nothing, so it is
+    /// refused, never applied. Inputs: the feature and whether it is on. Output: the state.
     fn security(&self, feature: &str, wanted: bool) -> Result<GitHubRuleState, EngineError> {
         let status = if wanted { "enabled" } else { "disabled" };
         let body = json!({ "security_and_analysis": { feature: { "status": status } } });
-        let reply = self.call(Verb::Patch, "", Some(&body))?;
+        let reply = match self.call(Verb::Patch, "", Some(&body))? {
+            Ok(reply) => reply,
+            Err(refusal) => return Ok(refusal),
+        };
         if reply.status != 200 {
             return Ok(refused(&reply));
         }
@@ -472,14 +535,18 @@ impl<'a> Pass<'a> {
             .pointer(&format!("/security_and_analysis/{feature}/status"))
             .and_then(Value::as_str);
         Ok(match held {
-            Some(held) if held != status => GitHubRuleState::Refused {
+            Some(held) if held == status => GitHubRuleState::Applied,
+            Some(held) => GitHubRuleState::Refused {
                 status: reply.status,
                 message: format!(
                     "GitHub kept {feature} {}.",
                     api::shown(held, HELD_SHOWN_MAX)
                 ),
             },
-            _ => GitHubRuleState::Applied,
+            None => GitHubRuleState::Refused {
+                status: reply.status,
+                message: format!("GitHub did not say whether {feature} is now {status}."),
+            },
         })
     }
 
@@ -552,9 +619,11 @@ impl<'a> Pass<'a> {
         )
     }
 
-    /// Makes, updates or deletes the CrazyAgent ruleset that holds a rule, found by name
-    /// among the repository's own rulesets, so applying twice never makes a second one.
-    /// Input: the rule. Output: its state.
+    /// Makes, updates or deletes the CrazyAgent ruleset that holds a rule. CrazyAgent's
+    /// own is the one whose id the record holds and GitHub still lists; a listed ruleset
+    /// with the same name and another id is someone else's, left alone and reported.
+    /// Required checks with no CI delete CrazyAgent's ruleset, and keep it while waiting
+    /// for a CI run to name new checks. Input: the rule. Output: its state.
     fn ruleset(&mut self, rule: GitHubRule) -> Result<GitHubRuleState, EngineError> {
         let name = rule.ruleset().expect("a rule a ruleset holds");
         let on = self.on;
@@ -564,32 +633,107 @@ impl<'a> Pass<'a> {
             GitHubCi::Checks(checks) => checks,
             GitHubCi::None | GitHubCi::Waiting => &[],
         };
-        if rule == GitHubRule::RequiredChecks && wanted {
+        let required = rule == GitHubRule::RequiredChecks && wanted;
+        let recorded = self.made.rulesets.get(&rule).copied();
+        if required && recorded.is_none() {
             if facts.ci == GitHubCi::None {
-                return Ok(not_applicable("no CI workflows in this repository"));
+                return Ok(not_applicable(NO_CI));
             }
             if checks.is_empty() {
                 return Ok(GitHubRuleState::Waiting {
-                    reason: "waiting for the first CI run to name its checks".into(),
+                    reason: WAITING.into(),
                 });
             }
         }
-        let found = match self.listed()? {
-            Ok(listed) => listed
-                .iter()
-                .find(|listed| listed.name == name)
-                .map(|listed| listed.id),
+        if required && !checks.is_empty() && !sendable(checks) {
+            return Ok(not_sent(CHECKS_UNSENDABLE));
+        }
+        let (ours, foreign) = match self.listed()? {
+            Ok(listed) => {
+                let ours = recorded.filter(|id| listed.iter().any(|listed| listed.id == *id));
+                let foreign = ours.is_none() && listed.iter().any(|listed| listed.name == name);
+                (ours, foreign)
+            }
             Err(refusal) => return Ok(refusal),
         };
+        if ours.is_none() {
+            self.made.rulesets.remove(&rule);
+        }
+        if required && facts.ci == GitHubCi::None {
+            let Some(id) = ours else {
+                return Ok(not_applicable(NO_CI));
+            };
+            let state = self.drop_ruleset(rule, id)?;
+            return Ok(if state == GitHubRuleState::Applied {
+                not_applicable(NO_CI)
+            } else {
+                state
+            });
+        }
+        if required && checks.is_empty() {
+            let reason = if ours.is_some() {
+                WAITING_KEPT
+            } else {
+                WAITING
+            };
+            return Ok(GitHubRuleState::Waiting {
+                reason: reason.into(),
+            });
+        }
+        if foreign {
+            return Ok(not_sent(FOREIGN));
+        }
         let body = ruleset_body(rule, name, on, checks);
-        match (wanted, found) {
-            (true, None) => self.send(Verb::Post, "rulesets", Some(&body), &[201]),
+        match (wanted, ours) {
+            (true, None) => self.make_ruleset(rule, &body),
             (true, Some(id)) => {
                 self.send(Verb::Put, &format!("rulesets/{id}"), Some(&body), &[200])
             }
-            (false, Some(id)) => self.send(Verb::Delete, &format!("rulesets/{id}"), None, &[204]),
+            (false, Some(id)) => self.drop_ruleset(rule, id),
             (false, None) => Ok(GitHubRuleState::Applied),
         }
+    }
+
+    /// Posts a new CrazyAgent ruleset and records the id GitHub gives it. Inputs: the rule
+    /// and the body. Output: applied once the id is recorded, or the refusal.
+    fn make_ruleset(
+        &mut self,
+        rule: GitHubRule,
+        body: &Value,
+    ) -> Result<GitHubRuleState, EngineError> {
+        #[derive(Deserialize)]
+        struct Made {
+            id: u64,
+        }
+        assert!(!self.made.rulesets.contains_key(&rule));
+        let reply = match self.call(Verb::Post, "rulesets", Some(body))? {
+            Ok(reply) => reply,
+            Err(refusal) => return Ok(refusal),
+        };
+        if reply.status != 201 {
+            return Ok(refused(&reply));
+        }
+        Ok(match serde_json::from_slice::<Made>(&reply.body) {
+            Ok(made) => {
+                self.made.rulesets.insert(rule, made.id);
+                GitHubRuleState::Applied
+            }
+            Err(_) => GitHubRuleState::Refused {
+                status: reply.status,
+                message: ID_UNSAID.into(),
+            },
+        })
+    }
+
+    /// Deletes CrazyAgent's ruleset for a rule and forgets its id once GitHub deleted it.
+    /// Inputs: the rule and the recorded id. Output: the state of the delete.
+    fn drop_ruleset(&mut self, rule: GitHubRule, id: u64) -> Result<GitHubRuleState, EngineError> {
+        assert_eq!(self.made.rulesets.get(&rule), Some(&id));
+        let state = self.send(Verb::Delete, &format!("rulesets/{id}"), None, &[204])?;
+        if state == GitHubRuleState::Applied {
+            self.made.rulesets.remove(&rule);
+        }
+        Ok(state)
     }
 }
 

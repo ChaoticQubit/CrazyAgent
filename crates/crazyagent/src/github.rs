@@ -140,6 +140,7 @@ struct Pending {
 }
 
 static PENDING: Mutex<BTreeMap<PathBuf, Pending>> = Mutex::new(BTreeMap::new());
+static RECORDS: Mutex<()> = Mutex::new(());
 
 fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
@@ -597,8 +598,25 @@ impl GitHub {
         facts: &GitHubRepoFacts,
     ) -> Result<Vec<GitHubRuleOutcome>, EngineError> {
         let token = self.store.get(&self.saved()?.credential)?;
-        let mut made = rules::RepoRecord::default();
-        rules::apply(&self.endpoints, &token, full_name, on, facts, &mut made)
+        self.with_record(full_name, |made| {
+            rules::apply(&self.endpoints, &token, full_name, on, facts, made)
+        })
+    }
+
+    /// Runs one rules pass on a repository's record of CrazyAgent's rulesets, one pass at
+    /// a time, and saves the record afterwards even when the pass stopped part way, so a
+    /// ruleset made before the stop stays CrazyAgent's. Inputs: `owner/name` and the
+    /// pass. Output: the pass's result, or the record's load or save failure.
+    fn with_record<T>(
+        &self,
+        full_name: &str,
+        pass: impl FnOnce(&mut rules::RepoRecord) -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        let _held = RECORDS.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut made = state::load_record(&self.root, full_name)?;
+        let result = pass(&mut made);
+        state::save_record(&self.root, full_name, &made)?;
+        result
     }
 
     /// Sets one rule on a repository, as `apply_rules` does for each. Inputs:
@@ -611,15 +629,8 @@ impl GitHub {
         facts: &GitHubRepoFacts,
     ) -> Result<GitHubRuleOutcome, EngineError> {
         let token = self.store.get(&self.saved()?.credential)?;
-        let mut made = rules::RepoRecord::default();
-        rules::set(
-            &self.endpoints,
-            &token,
-            full_name,
-            rule,
-            on,
-            facts,
-            &mut made,
-        )
+        self.with_record(full_name, |made| {
+            rules::set(&self.endpoints, &token, full_name, rule, on, facts, made)
+        })
     }
 }
