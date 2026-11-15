@@ -74,7 +74,7 @@ fn the_stand_in_manifest_gives_each_turn_its_arguments_and_resumes_the_reported_
     let mut turns = begin(Some("m-1"), true, None);
     assert_eq!(
         turns.start("hi there").unwrap(),
-        ["--home", HOME, "--model", "m-1", "--prompt", "hi there"]
+        ["--home", HOME, "--model", "m-1", "--prompt=hi there"]
     );
     assert!(events_of(&mut turns, json!({"type": "session", "id": "s-9"})).is_empty());
     assert_eq!(turns.session(), Some("s-9"));
@@ -83,7 +83,13 @@ fn the_stand_in_manifest_gives_each_turn_its_arguments_and_resumes_the_reported_
     assert_eq!(
         turns.start("again").unwrap(),
         [
-            "--home", HOME, "--model", "m-1", "--prompt", "again", "--resume", "s-9"
+            "--home",
+            HOME,
+            "--model",
+            "m-1",
+            "--prompt=again",
+            "--resume",
+            "s-9"
         ]
     );
 
@@ -302,7 +308,7 @@ fn placeholders_are_filled_once_and_unknown_values_are_refused() {
     let mut turns = begin(Some("m-1"), true, None);
     let prompt = "say {model} and {session} at {home} {\"a\": 1}";
     let argv = turns.start(prompt).unwrap();
-    assert_eq!(argv[5], prompt);
+    assert_eq!(argv[4], format!("--prompt={prompt}"));
 
     let mut off = begin(Some("m-1"), false, None);
     assert_eq!(off.start("x").unwrap().last().unwrap(), "--no-tools");
@@ -400,7 +406,10 @@ fn each_refused_turn_setting_names_its_setting() {
             "piped.rules: this setting is needed.",
         ),
         (
-            STANDIN.replace("    - \"{prompt}\"\n", "    - \"hello\"\n"),
+            STANDIN.replace(
+                "    - \"--prompt={prompt}\"\n",
+                "    - \"--prompt=hello\"\n",
+            ),
             manifest::VALUE,
             "piped.argv: {prompt} is needed, so each turn's prompt reaches the harness.",
         ),
@@ -425,5 +434,124 @@ fn each_refused_turn_setting_names_its_setting() {
     ];
     for (text, code, message) in cases {
         assert_eq!(refused(&text), (code, message.to_owned()), "{message}");
+    }
+}
+
+/// rv-code2 T11-1: a session id that is not plain, reported after the turn already gave a
+/// turn error, gave its end or was interrupted, fails the conversation for good as it does on
+/// a fresh turn: every later call is refused and none panics.
+#[test]
+fn a_session_id_refused_after_a_turn_error_an_end_or_an_interrupt_fails_closed() {
+    let before: [(&str, fn(&mut JsonlTurn)); 3] = [
+        ("turn error", |turns| {
+            drop(events_of(
+                turns,
+                json!({"type": "error", "message": "boom"}),
+            ));
+        }),
+        ("end", |turns| {
+            drop(events_of(turns, json!({"type": "done", "ok": true})));
+        }),
+        ("interrupt", |turns| turns.interrupt().unwrap()),
+    ];
+    for (case, step) in before {
+        let mut turns = running(Some("m-1"));
+        step(&mut turns);
+        let bad = turns.receive(&line(json!({"type": "session", "id": "-rf"})));
+        assert_eq!(code(bad), "launch_session_id_invalid", "{case}");
+        assert_eq!(turns.phase(), Phase::Failed, "{case}");
+        assert!(!turns.breached(), "{case}");
+        assert_eq!(code(turns.start("x")), "launch_protocol_failed", "{case}");
+        assert_eq!(code(turns.interrupt()), "launch_not_running", "{case}");
+        assert_eq!(code(turns.exited(Some(0))), "launch_not_running", "{case}");
+        assert_eq!(
+            code(turns.receive(&line(json!({"type": "started"})))),
+            "launch_protocol_failed",
+            "{case}"
+        );
+        assert_eq!(turns.session(), None, "{case}");
+    }
+}
+
+/// rv-secreview F2 and rv-code2 T11-2: a `{prompt}` that begins an argument before any `--`
+/// entry is refused, as a prompt such as `--` or `--flag=value` there could end the harness's
+/// options or add one; it is read behind text such as `--prompt=` or after `--`. A
+/// `{prompt}` in `piped.resume` or `piped.tools_off` is refused, as those come before `--`.
+#[test]
+fn a_prompt_that_begins_an_argument_is_refused_unless_it_comes_after_a_double_dash() {
+    let argv = |entries: &str| STANDIN.replace("    - \"--prompt={prompt}\"\n", entries);
+    let refused = |text: &str| {
+        Config::read(&manifest_of(text))
+            .err()
+            .map(|refusal| (refusal.code, refusal.message))
+    };
+    let alone = "piped.argv: {prompt} begins an argument; write it after text such as \
+                 --prompt= or after a -- entry, so a prompt is never read as an option.";
+    for entries in [
+        "    - \"--prompt\"\n    - \"{prompt}\"\n",
+        "    - \"{prompt}\"\n    - \"--\"\n",
+        "    - \"{prompt} and more\"\n",
+    ] {
+        assert_eq!(
+            refused(&argv(entries)),
+            Some((manifest::VALUE, alone.to_owned())),
+            "{entries}"
+        );
+    }
+    for entries in [
+        "    - \"-p{prompt}\"\n",
+        "    - \"--\"\n    - \"{prompt}\"\n",
+        "    - \"--prompt={prompt}\"\n    - \"--\"\n    - \"x\"\n    - \"{prompt}\"\n",
+    ] {
+        assert_eq!(refused(&argv(entries)), None, "{entries}");
+    }
+    let cases = [
+        (
+            STANDIN.replace("    - \"--resume\"\n", "    - \"--resume={prompt}\"\n"),
+            "piped.resume: {prompt} belongs in piped.argv only, so a prompt is never read as \
+             an option.",
+        ),
+        (
+            STANDIN.replace("    - \"--no-tools\"\n", "    - \"{prompt}\"\n"),
+            "piped.tools_off: {prompt} belongs in piped.argv only, so a prompt is never read \
+             as an option.",
+        ),
+    ];
+    for (text, message) in cases {
+        assert_eq!(
+            refused(&text),
+            Some((manifest::VALUE, message.to_owned())),
+            "{message}"
+        );
+    }
+}
+
+/// rv-secreview F2: with a `--` entry in `piped.argv`, `piped.resume` and `piped.tools_off`
+/// go before it, so a prompt of `--` or `--x=y` after it can neither end nor add an option,
+/// and tools off still reaches the harness as an option.
+#[test]
+fn resume_and_tools_off_come_before_the_double_dash_so_a_prompt_cannot_end_them() {
+    let ended = STANDIN.replace(
+        "    - \"--prompt={prompt}\"\n",
+        "    - \"--\"\n    - \"{prompt}\"\n",
+    );
+    let mut turns = begin_with(config_of(&ended), Some("m-1"), false, Some("s-9"));
+    for prompt in ["--", "--x=y"] {
+        assert_eq!(
+            turns.start(prompt).unwrap(),
+            [
+                "--home",
+                HOME,
+                "--model",
+                "m-1",
+                "--resume",
+                "s-9",
+                "--no-tools",
+                "--",
+                prompt
+            ],
+            "{prompt}"
+        );
+        assert_eq!(turns.exited(Some(0)).unwrap(), [finished(true)]);
     }
 }
