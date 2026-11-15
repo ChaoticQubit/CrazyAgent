@@ -1217,6 +1217,95 @@ fn removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_
     }
 }
 
+/// RV-DS241-204: the owner's IDE terminal home is reset with no warden, so a process left in
+/// a terminal may keep swapping the folders its own cargo `git` cache holds, each at mode
+/// 000, for links to owner folders while the next terminal's launch gives that cache's name
+/// to the owner's ([`crate::sandbox::toolchains::prepare_cargo_home`]). No ACL or mode of an
+/// owner folder changes, since each clear goes through an entry read from the walk's own
+/// handles (ds181), and a launch with nothing swapping still links the owner's cache.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_folder_points_to() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let account = root.join("account");
+    std::fs::create_dir_all(account.join(".cargo/git/db")).unwrap();
+    std::fs::create_dir_all(account.join(".cargo/registry/cache")).unwrap();
+    let owner = root.join("owner");
+    let git = root.join("ide/home/.cargo/git");
+    let names: Vec<String> = (0..16).map(|index| format!("c{index:02}")).collect();
+    let parents: Vec<String> = (0..8).map(|index| format!("p{index:02}")).collect();
+    let owned: Vec<PathBuf> = names.iter().map(|name| owner.join(name)).collect();
+    for folder in &owned {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let _owned: Vec<AclCleared> = owned.iter().cloned().map(AclCleared).collect();
+    add_acl("everyone deny delete", &owned);
+    for parent in &parents {
+        for name in &names {
+            let shut = git.join(parent).join(name);
+            write(&shut.join("f"), b"left by a terminal\n");
+            std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+    }
+    for folder in &owned {
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let (stop, git, owner, parents, names) = (
+            Arc::clone(&stop),
+            git.clone(),
+            owner.clone(),
+            parents.clone(),
+            names.clone(),
+        );
+        std::thread::spawn(move || {
+            let pause = std::time::Duration::from_micros(100);
+            while !stop.load(Ordering::Relaxed) {
+                for parent in &parents {
+                    for name in &names {
+                        let real = git.join(parent).join(name);
+                        let held = git.join(parent).join(format!("{name}.held"));
+                        if std::fs::rename(&real, &held).is_err() {
+                            continue;
+                        }
+                        if std::os::unix::fs::symlink(owner.join(name), &real).is_ok() {
+                            std::thread::sleep(pause);
+                            let _ = std::fs::remove_file(&real);
+                        }
+                        let _ = std::fs::rename(&held, &real);
+                    }
+                    std::thread::sleep(pause);
+                }
+            }
+        })
+    };
+    let homes = crate::sandbox::toolchains::ToolHomes::at(&account);
+    let home = root.join("ide/home");
+
+    let _ = crate::sandbox::toolchains::prepare_cargo_home(&home, &homes);
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    let cargo = crate::sandbox::toolchains::prepare_cargo_home(&home, &homes).unwrap();
+
+    assert_eq!(
+        std::fs::read_link(cargo.join("git")).unwrap(),
+        account.join(".cargo/git")
+    );
+    for folder in &owned {
+        let mode = std::fs::symlink_metadata(folder)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert!(denies(folder), "{folder:?} lost its ACL");
+        assert_eq!(mode & 0o777, 0o500, "{folder:?} was opened up");
+    }
+}
+
 /// RV-DS241-182: removing an agent's tree of many folders that one read-only folder keeps
 /// from a plain delete starts no child process: the read-only folder opens up through its
 /// handle, and no ACL clear runs for a folder that opens.
