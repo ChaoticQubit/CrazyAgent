@@ -810,6 +810,32 @@ pub(super) fn secret_findings(
     )
 }
 
+/// Reports whether the scan of a project with no history may pass over a listed file it
+/// could not open: one gone since the listing, or one reached through a link in any part,
+/// which `add -A` takes as the link alone. Input: the open error. Output: true for those,
+/// false for any other error, such as a full descriptor table, which stops the scan.
+fn passed_over(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ELOOP)
+    }
+    #[cfg(windows)]
+    {
+        error.kind() == std::io::ErrorKind::PermissionDenied
+            && error.get_ref().is_some_and(|inner| {
+                let reason = inner.to_string();
+                reason == crate::platform::BENEATH_PATH_LINKED
+                    || reason == crate::platform::BENEATH_FOLDER_LINKED
+            })
+    }
+}
+
 /// Finds the secret lines as [`secret_findings`] does, within the given bounds.
 /// Inputs: git, its empty home, the project, its history, the most files and the most
 /// bytes read. Output: the findings, or `github_publish_too_large`, `github_publish_failed`.
@@ -898,12 +924,12 @@ fn findings_within(
         }
         for path in paths {
             let relative = listed_path(path).ok_or_else(failed)?;
-            let Ok(file) = crate::platform::open_plain_beneath(project, &relative) else {
-                continue;
+            let file = match crate::platform::open_plain_beneath(project, &relative) {
+                Ok(file) => file,
+                Err(error) if passed_over(&error) => continue,
+                Err(_) => return Err(failed()),
             };
-            let Ok(metadata) = file.metadata() else {
-                continue;
-            };
+            let metadata = file.metadata().map_err(|_| failed())?;
             if !metadata.is_file() {
                 continue;
             }
@@ -1409,7 +1435,8 @@ pub(super) fn has_workflows(
 /// runs from a private staging repository in git's empty home that borrows the project's
 /// objects and holds one branch, so no setting of the project's own, such as a URL
 /// rewrite, an extra header or a credential helper, ever meets the token. The project
-/// gets its origin, upstream and remote branch only after the push landed. Inputs: the
+/// gets its remote branch and then its origin and upstream only after the push landed,
+/// so no project git runs once a config include keyed on the origin can apply. Inputs: the
 /// endpoints, the store's helper, git, its empty home, the project, `owner/name` and the
 /// commit. Output: `()`, or `github_repo_name_invalid`, `github_publish_head_moved` when
 /// HEAD is no longer that branch and commit, `github_publish_push_failed`,
@@ -1489,6 +1516,15 @@ pub(super) fn push(
         "github_publish_push_failed",
         "github_publish_push_timed_out",
     )?;
+    let tracking = format!("refs/remotes/origin/{branch}");
+    let tracked = run(project_git(git, home, project).args([
+        "update-ref",
+        tracking.as_str(),
+        commit.as_str(),
+    ]))?;
+    if !tracked.status.success() {
+        return Err(failed());
+    }
     let settings = [
         ("remote.origin.url".to_owned(), remote.as_str()),
         ("remote.origin.fetch".to_owned(), FETCH),
@@ -1506,19 +1542,13 @@ pub(super) fn push(
             return Err(failed());
         }
     }
-    let tracking = format!("refs/remotes/origin/{branch}");
-    let tracked = run(project_git(git, home, project).args([
-        "update-ref",
-        tracking.as_str(),
-        commit.as_str(),
-    ]))?;
     let origin = run(clone::git_command(git, home)
         .args(["config", "--file"])
         .arg(&config)
         .args(["--no-includes", "--get-all", "remote.origin.url"])
         .stdin(Stdio::null())
         .stderr(Stdio::null()))?;
-    if !tracked.status.success() || origin.stdout != format!("{remote}\n").as_bytes() {
+    if origin.stdout != format!("{remote}\n").as_bytes() {
         return Err(failed());
     }
     Ok(())
