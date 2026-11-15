@@ -3173,6 +3173,24 @@ fallback_allowed = false
         .unwrap();
     }
 
+    /// RV-DS241-55: a logout's custody outlasts a `claude auth logout` and the status check
+    /// after it, each allowed the whole 9 s account check bound under build load, plus the
+    /// exchanges around them, so the slot never ends a logout the host still runs.
+    #[tokio::test]
+    async fn native_auth_logout_custody_outlasts_a_logout_and_a_status_check_at_their_bounds() {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let case = Case::open(NativeAuthAction::Logout).await;
+            let bound = operation_bound(&case.fact);
+            assert!(
+                bound >= Duration::from_secs(2 * 9) + READ_BOUND,
+                "{bound:?}"
+            );
+            case.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn native_auth_observation_logout_waits_for_account_read_then_retires() {
         tokio::time::timeout(Duration::from_secs(20), async {

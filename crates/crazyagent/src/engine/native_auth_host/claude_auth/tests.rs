@@ -205,7 +205,8 @@ fn a_claude_status_without_its_config_directory_reads_as_too_old_to_sign_in() {
 
 /// v2.4.0 owner update: an account check's `claude auth status` ended
 /// `native_auth_claude_deadline` while the machine was under build load, at a 2 s bound inside
-/// the check's own 9 s. A status may now use the whole check bound; logout keeps its short one.
+/// the check's own 9 s. A status may now use the whole check bound, and so may a logout, which
+/// starts the same cold `claude` and was cut at 2 s partway through (RV-DS241-55).
 #[test]
 fn a_status_command_may_use_the_whole_account_check_bound() {
     assert_eq!(
@@ -215,7 +216,7 @@ fn a_status_command_may_use_the_whole_account_check_bound() {
     assert!(process::command_bound(ClaudeAuthCommand::Status) > Duration::from_secs(2));
     assert_eq!(
         process::command_bound(ClaudeAuthCommand::Logout),
-        Duration::from_secs(2)
+        CHECK_TIME
     );
     assert_eq!(
         process::command_bound(ClaudeAuthCommand::Renew),
