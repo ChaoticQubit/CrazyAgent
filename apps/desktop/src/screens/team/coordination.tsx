@@ -28,7 +28,7 @@ export const COORD_DEFAULTS: CoordSettings = {
   nudges: "off",
   counted_tools: ["start_work", "inspect_work", "update_work", "transfer_work", "finish_work", "ctx_*", "graphify", "Skill"],
   role_skills: { master: null, lead: null, worker: null },
-  terminal_display: "classic",
+  terminal_display: "fullscreen",
   task_start: "on",
   heavy_lane: "one",
   shared_resources: [],
@@ -158,7 +158,8 @@ export function modeHelper(harness: CoordHarness, native: boolean): string {
   return reason ?? NATIVE_HELPERS[harness];
 }
 
-/** The Terminal display choices of every harness, Classic first as the default. */
+/** The Terminal display choices of every harness, in the engine's order; Fullscreen is the
+ * default (DEC-174 add. 2). */
 export const DISPLAY_OPTIONS: SelectOption[] = [
   { value: "classic", label: "Classic" },
   { value: "fullscreen", label: "Fullscreen" },

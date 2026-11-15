@@ -288,7 +288,7 @@ pub fn for_project(
         relay: None,
         model_proxy: None,
         freeze_record: None,
-        terminal_display: TerminalDisplay::Classic,
+        terminal_display: TerminalDisplay::default(),
         catch_up_main,
     })
 }

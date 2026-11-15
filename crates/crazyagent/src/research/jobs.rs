@@ -711,8 +711,8 @@ impl ResearchJobs {
     }
 
     /// Reads the terminal display the owner chose for a project's terminals
-    /// (N-D9), Classic when none is saved. Takes the project. Returns the display, or
-    /// `coord_settings_invalid` for a stored row this build cannot read.
+    /// (N-D9), the default Fullscreen when none is saved. Takes the project. Returns the
+    /// display, or `coord_settings_invalid` for a stored row this build cannot read.
     pub fn terminal_display(
         &self,
         project: &crate::protocol::ProjectId,
