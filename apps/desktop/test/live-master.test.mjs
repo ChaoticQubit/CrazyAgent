@@ -26,6 +26,21 @@ test("Shift+Enter types a new line once and never reaches xterm as a second Ente
   assert.deepEqual([...io.encodeTyped(io.NEW_LINE)], [0x0a]);
 });
 
+/** Builds one catalog entry as the engine serves it. Inputs: the id and what the manifest
+ * says the harness can do. Output: the entry, which can do nothing unless told. */
+const listed = (id, can = {}) => ({ id, name: id, status: { kind: "ready" }, status_label: "Ready", executable: null, headless: "", tools: { kind: "switchable" },
+  model_selection: false, account_kinds: [], team: { kind: "available" }, aliases: [], terminal: false, master: false, research: false, sub_agents: "app",
+  account_protocols: [], ...can });
+
+test("a master runs live when the catalog says its harness is read in a terminal and runs a master, whatever its id", () => {
+  assert.equal(live.runsLive(listed("newcomer", { terminal: true, master: true })), true);
+  assert.equal(live.runsLive(listed("claude-code", { terminal: true, master: true })), true);
+  assert.equal(live.runsLive(listed("codex", { terminal: false, master: true })), false);
+  assert.equal(live.runsLive(listed("codex", { terminal: true, master: false })), false);
+  assert.equal(live.runsLive(listed("rcli", { master: true })), false);
+  assert.equal(live.runsLive(undefined), false);
+});
+
 test("only Codex and Claude Code masters run live, and the master is found by kind", () => {
   assert.equal(live.runsLive("codex"), true);
   assert.equal(live.runsLive("claude-code"), true);
