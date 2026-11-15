@@ -787,11 +787,6 @@ pub enum SetupQuery {
         project: ProjectId,
         generation: u64,
     },
-    MoveHome {
-        project: ProjectId,
-        mode: crate::projects_home::AddMode,
-        generation: u64,
-    },
     Library(crate::memory::library::LibraryQuery),
     Overview {
         project: ProjectId,
@@ -2542,7 +2537,7 @@ const DELETE_NAME_BYTES_MAX: usize = 1024;
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 62] = [
+const REMOVED_WITH_PROJECT: [&str; 63] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2605,7 +2600,39 @@ const REMOVED_WITH_PROJECT: [&str; 62] = [
     "team_master_retries",
     "team_master_turns",
     "team_master_conversations",
+    "repository_admissions",
 ];
+
+/// Forgets the rows an engine keeps, in the given tables of [`REMOVED_WITH_PROJECT`], for
+/// projects it no longer records, which removals from before those tables went with their
+/// project left behind (RV-DS241-80/81, RV-DS241-149). Run as the engine starts. Inputs:
+/// the database and the tables. Output: the rows forgotten; none when it has no projects.
+pub(crate) fn forget_removed(db: &Connection, tables: &[&str]) -> Result<usize, EngineError> {
+    let recorded: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='projects')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !recorded {
+        return Ok(0);
+    }
+    let mut forgotten = 0;
+    for table in tables {
+        assert!(
+            REMOVED_WITH_PROJECT.contains(table),
+            "{table} goes with its project"
+        );
+        forgotten += db
+            .execute(
+                &format!("DELETE FROM {table} WHERE project NOT IN (SELECT id FROM projects)"),
+                [],
+            )
+            .map_err(error)?;
+    }
+    Ok(forgotten)
+}
 
 /// Saves a project's extra read-only folders once each passes
 /// [`crate::sandbox::extra_paths::checked`] and the owner's screen showed the current ones.
@@ -2864,9 +2891,9 @@ fn finish_removed_agent_notices(
 
 /// Records a Delete everything once the owner transport finished its disk work: the
 /// project's records go as in Remove from dashboard when every folder reached the Trash, the
-/// exact names and folder identities of its engine files recorded in the same write, and
-/// otherwise the refusal is kept with nothing removed. Inputs: the transaction, the action,
-/// the transport's outcome and the revision. Output: the outcome to record.
+/// caller recording the exact names and folder identities of its engine files in the same
+/// write, and otherwise the refusal is kept with nothing removed. Inputs: the transaction,
+/// the action, the transport's outcome and the revision. Output: the outcome to record.
 pub(crate) fn record_delete(
     tx: &Transaction<'_>,
     action: &SetupAction,
@@ -2876,21 +2903,10 @@ pub(crate) fn record_delete(
     let SetupAction::Delete { project_id, .. } = action else {
         return Err(failure("delete_record_invalid"));
     };
-    let files = match outcome {
-        Ok(files) => files,
-        Err(code) => return Ok(rejected(code)),
-    };
-    let recorded = remove(tx, project_id, revision)?;
-    if matches!(recorded, Outcome::Applied) {
-        for (name, inode) in files {
-            tx.execute(
-                "INSERT OR IGNORE INTO projects_delete_files(name,inode) VALUES (?1,?2)",
-                params![name, inode],
-            )
-            .map_err(error)?;
-        }
+    if let Err(code) = outcome {
+        return Ok(rejected(code));
     }
-    Ok(recorded)
+    remove(tx, project_id, revision)
 }
 
 /// The team a New Project gets and the folder it lands in, after the checks

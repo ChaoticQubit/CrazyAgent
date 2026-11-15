@@ -77,7 +77,11 @@ fn delete_everything_moves_folders_only_after_the_projects_agents_stop() {
         Ok(())
     };
     assert_eq!(
-        plan.run_with(std::time::Duration::from_millis(300), &record),
+        plan.run_with(
+            std::time::Duration::from_millis(300),
+            &record,
+            &crate::projects_home::Tally::default()
+        ),
         Err("delete_agents_running".to_owned())
     );
     assert!(
@@ -122,7 +126,11 @@ fn delete_everything_moves_folders_only_after_the_projects_agents_stop() {
         Ok(())
     };
     assert_eq!(
-        plan.run_with(std::time::Duration::from_secs(10), &stopped_first),
+        plan.run_with(
+            std::time::Duration::from_secs(10),
+            &stopped_first,
+            &crate::projects_home::Tally::default()
+        ),
         Ok(())
     );
     stopper.join().unwrap();
@@ -131,7 +139,11 @@ fn delete_everything_moves_folders_only_after_the_projects_agents_stop() {
     let first_fails =
         |_: &Path| -> Result<(), EngineError> { Err(EngineError("home_trash_failed".into())) };
     assert_eq!(
-        plan.run_with(std::time::Duration::from_secs(1), &first_fails),
+        plan.run_with(
+            std::time::Duration::from_secs(1),
+            &first_fails,
+            &crate::projects_home::Tally::default()
+        ),
         Err("home_trash_failed".to_owned())
     );
     let calls = std::cell::Cell::new(0);
@@ -144,7 +156,11 @@ fn delete_everything_moves_folders_only_after_the_projects_agents_stop() {
         }
     };
     assert_eq!(
-        plan.run_with(std::time::Duration::from_secs(1), &second_fails),
+        plan.run_with(
+            std::time::Duration::from_secs(1),
+            &second_fails,
+            &crate::projects_home::Tally::default()
+        ),
         Err("delete_trash_partial".to_owned())
     );
     assert_eq!(calls.get(), 2);
@@ -153,13 +169,109 @@ fn delete_everything_moves_folders_only_after_the_projects_agents_stop() {
     std::os::unix::fs::symlink(&base, &api).unwrap();
     moved.borrow_mut().clear();
     assert_eq!(
-        plan.run_with(std::time::Duration::from_secs(1), &record),
+        plan.run_with(
+            std::time::Duration::from_secs(1),
+            &record,
+            &crate::projects_home::Tally::default()
+        ),
         Err("delete_outside_home".to_owned())
     );
     assert!(
         moved.borrow().is_empty(),
         "a folder swapped for a link after the first check refuses before any move"
     );
+}
+
+/// A Delete everything's two folders and the plan over them, with agent 4 of the project
+/// still working. Input: the temp root. Output: the database and the plan.
+fn delete_with_agent(base: &Path) -> (std::path::PathBuf, crate::projects_home::DeletePlan) {
+    let home = base.join("home");
+    let (web, api) = (home.join("web"), home.join("api"));
+    std::fs::create_dir_all(&web).unwrap();
+    std::fs::create_dir_all(&api).unwrap();
+    let database = base.join("engine.db");
+    let connection = Connection::open(&database).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO team_paused_projects(project,since_ms) VALUES ('demo',1);
+             INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (4,'demo','team','codex',1,'working',0,0);",
+        )
+        .unwrap();
+    let plan = crate::projects_home::DeletePlan {
+        database: database.clone(),
+        project: ProjectId::new("demo").unwrap(),
+        home,
+        folders: vec![web, api],
+        agents: vec![4],
+    };
+    (database, plan)
+}
+
+/// DEC-177 step 2: a Stop asked while a Delete everything waits for its agents ends it with
+/// `home_add_cancelled` and nothing moved, and the tally showed the agents it waited for.
+#[test]
+fn a_stop_while_a_delete_waits_for_its_agents_moves_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let (_database, plan) = delete_with_agent(&base);
+    let tally = std::sync::Arc::new(crate::projects_home::Tally::default());
+    let moved = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let running = {
+        let (tally, moved) = (std::sync::Arc::clone(&tally), std::sync::Arc::clone(&moved));
+        std::thread::spawn(move || {
+            let record = |_: &Path| -> Result<(), EngineError> {
+                moved.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            };
+            plan.run_with(std::time::Duration::from_secs(20), &record, &tally)
+        })
+    };
+    let started = std::time::Instant::now();
+    while tally.waiting_for() != Some(1) {
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(tally.stop(), "a stop before the first Trash move is taken");
+    assert_eq!(
+        running.join().unwrap(),
+        Err("home_add_cancelled".to_owned())
+    );
+    assert_eq!(moved.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(tally.trashing(), None);
+}
+
+/// DEC-177 step 2: once a Delete everything commits to its first Trash move a Stop is
+/// refused, even one asked from inside that move, and every folder moves, each counted.
+#[test]
+fn a_stop_asked_during_the_first_trash_move_is_refused_and_every_folder_moves() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let (database, plan) = delete_with_agent(&base);
+    Connection::open(&database)
+        .unwrap()
+        .execute("UPDATE team_agents SET status='stopped' WHERE id=4", [])
+        .unwrap();
+    let tally = crate::projects_home::Tally::default();
+    let refused = std::cell::Cell::new(None);
+    let moved = std::cell::RefCell::new(Vec::<std::path::PathBuf>::new());
+    let record = |folder: &Path| -> Result<(), EngineError> {
+        if refused.get().is_none() {
+            assert_eq!(tally.trashing(), Some((0, 2)), "committed before the move");
+            refused.set(Some(!tally.stop()));
+        }
+        moved.borrow_mut().push(folder.to_path_buf());
+        Ok(())
+    };
+    assert_eq!(
+        plan.run_with(std::time::Duration::from_secs(1), &record, &tally),
+        Ok(())
+    );
+    assert_eq!(refused.get(), Some(true), "the stop was refused");
+    assert!(!tally.stopped());
+    assert_eq!(moved.borrow().len(), 2);
+    assert_eq!(tally.trashing(), Some((2, 2)));
 }
 
 /// Delete everything refuses what can change while it waits, in the plan and again after the
@@ -226,7 +338,7 @@ fn delete_everything_refuses_a_shared_folder_open_research_and_a_pending_move_be
         refusal.reason
     );
     assert_eq!(
-        plan.run_with(wait, &record),
+        plan.run_with(wait, &record, &crate::projects_home::Tally::default()),
         Err("delete_shared_folder".to_owned()),
         "a project registered during the wait refuses before any move"
     );
@@ -246,7 +358,7 @@ fn delete_everything_refuses_a_shared_folder_open_research_and_a_pending_move_be
         assert_eq!(refusal.code, "delete_research_running", "{status}");
         assert!(refusal.reason.contains("research"), "{}", refusal.reason);
         assert_eq!(
-            plan.run_with(wait, &record),
+            plan.run_with(wait, &record, &crate::projects_home::Tally::default()),
             Err("delete_research_running".to_owned()),
             "{status}"
         );
@@ -271,7 +383,7 @@ fn delete_everything_refuses_a_shared_folder_open_research_and_a_pending_move_be
         "home_move_in_progress"
     );
     assert_eq!(
-        plan.run_with(wait, &record),
+        plan.run_with(wait, &record, &crate::projects_home::Tally::default()),
         Err("home_move_in_progress".to_owned())
     );
     assert!(
@@ -281,7 +393,10 @@ fn delete_everything_refuses_a_shared_folder_open_research_and_a_pending_move_be
     connection
         .execute("DELETE FROM projects_home_move", [])
         .unwrap();
-    assert_eq!(plan.run_with(wait, &record), Ok(()));
+    assert_eq!(
+        plan.run_with(wait, &record, &crate::projects_home::Tally::default()),
+        Ok(())
+    );
     assert_eq!(*moved.borrow(), vec![web.clone()]);
 }
 
@@ -425,7 +540,7 @@ fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
         .unwrap();
     assert_eq!(rows, 1, "only the newest end is kept");
     let add_3 = RequestId::new("add-3").unwrap();
-    projects_home::add_forget(&connection, &add_3).unwrap();
+    projects_home::job_forget(&connection, &add_3).unwrap();
     assert_eq!(projects_home::add_ended(&connection).unwrap(), None);
 }
 
@@ -504,4 +619,162 @@ fn a_delete_mark_shown_to_the_owner_outlives_a_settle_of_a_reused_exchange() {
         Some("failed"),
         "its records stayed",
     );
+}
+
+/// DEC-177 add.1: a delete's mark carries its job's request, the project's name and how many
+/// folders it moves, and keeps them when a settle after a Trash move or an engine start shows
+/// it as cut short, so the start can show the delete as the engine's job. A mark from 2.4.1
+/// that names no request shows on the banner only.
+#[test]
+fn a_delete_mark_keeps_its_request_name_and_count_when_it_shows_cut_short() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    connection
+        .execute_batch("INSERT INTO projects(id, body) VALUES ('meals','{}'),('older','{}')")
+        .unwrap();
+    let meals = ProjectId::new("meals").unwrap();
+    let request = crate::protocol::RequestId::new("delete-7").unwrap();
+    let mark = crate::projects_home::delete_mark::begin(
+        &connection,
+        &meals,
+        7,
+        &request,
+        "Meal planner",
+        2,
+    )
+    .unwrap();
+    assert_eq!(mark, Ok(()));
+    assert_eq!(
+        crate::projects_home::delete_mark::cut_short(&connection).unwrap(),
+        None,
+        "a live delete is not cut short"
+    );
+    assert_eq!(
+        crate::projects_home::delete_mark::settle(&connection, 7, true).unwrap(),
+        1
+    );
+    let shown = crate::projects_home::delete_mark::CutShort {
+        project: meals.clone(),
+        request: request.clone(),
+        name: "Meal planner".into(),
+        total: 2,
+    };
+    assert_eq!(
+        crate::projects_home::delete_mark::cut_short(&connection).unwrap(),
+        Some(shown.clone())
+    );
+    assert_eq!(
+        crate::projects_home::delete_mark::start(&connection).unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::projects_home::delete_mark::cut_short(&connection).unwrap(),
+        Some(shown),
+        "an engine start keeps what the job needs"
+    );
+    assert!(crate::projects_home::delete_mark::forget(&connection, &meals).unwrap());
+    let _older = crate::ledger::begin(
+        &connection,
+        crate::ledger::ActionKind::ProjectDelete,
+        "older",
+        r#"{"project":"older","exchange":8}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        crate::projects_home::delete_mark::start(&connection).unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::projects_home::delete_mark::cut_short(&connection).unwrap(),
+        None,
+        "a 2.4.1 mark names no job"
+    );
+}
+
+/// RV-DS241-152: a delete records every engine file name the engine makes, up to the
+/// `RECORDED_NAME_BYTES_MAX` bytes of an Overview or roadmap status run of a long project
+/// id, and a name the record cannot hold fails the write instead of going unrecorded, so no
+/// run folder of a deleted project is left unfound. A name recorded twice stays one record.
+/// The name is built from that constant, so a wider one fails here until the record's
+/// check follows it (G1 code r1 F1).
+#[test]
+fn a_delete_records_run_names_up_to_the_recorded_width_and_refuses_a_longer_one() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let mut connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    let width = crate::projects_home::RECORDED_NAME_BYTES_MAX;
+    let pad = width - "overview--1794000000000".len();
+    let name = format!("overview-{}-1794000000000", "a".repeat(pad));
+    assert_eq!(name.len(), width);
+    let count = |connection: &Connection, name: &str| -> i64 {
+        connection
+            .query_row(
+                "SELECT count(*) FROM projects_delete_files WHERE name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+
+    let twice = [(name.clone(), 7), (name.clone(), 7)];
+    let tx = connection.transaction().unwrap();
+    projects_home::record_files(&tx, &twice).unwrap();
+    tx.commit().unwrap();
+    let longer = format!("{name}0");
+    let tx = connection.transaction().unwrap();
+    let refused = projects_home::record_files(&tx, &[(longer.clone(), 8)]);
+    drop(tx);
+
+    assert_eq!(
+        count(&connection, &name),
+        1,
+        "a run name of the recorded width is recorded once"
+    );
+    assert!(
+        refused.is_err(),
+        "a name the record cannot hold fails the write"
+    );
+    assert_eq!(count(&connection, &longer), 0);
+}
+
+/// RV-DS241-149: an engine start forgets the repository admissions of projects that are no
+/// longer recorded, which removals before the fix left behind, so a project added again
+/// under such an id admits its repository afresh; a recorded project keeps its admission.
+#[test]
+fn an_engine_start_forgets_the_admissions_of_projects_that_are_gone() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    let kept = serde_json::to_string(&crate::protocol::StoredProject {
+        project_id: ProjectId::new("kept").unwrap(),
+        spec: crate::protocol::ProjectSpec {
+            name: "Kept".into(),
+            repositories: vec![],
+        },
+    })
+    .unwrap();
+    connection
+        .execute("INSERT INTO projects(id, body) VALUES('kept', ?1)", [kept])
+        .unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO repository_admissions(project,repository,body) VALUES
+               ('kept','/repos/kept','{}'), ('gone','/repos/gone','{}');",
+        )
+        .unwrap();
+
+    initialize_authority_schemas(&connection).unwrap();
+
+    let left: Vec<String> = connection
+        .prepare("SELECT project FROM repository_admissions ORDER BY project")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(left, ["kept"]);
 }

@@ -1,24 +1,52 @@
 use crate::engine::EngineError;
 use crate::ledger::{self, Action, ActionKind, Outcome};
-use crate::protocol::ProjectId;
+use crate::protocol::{ProjectId, RequestId};
 use rusqlite::Connection;
+
+/// The fields of a mark the engine's Delete everything job needs to show it again after an
+/// engine start: its request, the project's name and how many folders it moves.
+const JOB_FIELDS: [&str; 3] = ["request", "name", "total"];
+
+/// A Delete everything an engine stop, or a record that never came after its Trash moves, cut
+/// short, as its mark names it: the project, the job's request, the project's name and how
+/// many folders the delete moves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CutShort {
+    pub project: ProjectId,
+    pub request: RequestId,
+    pub name: String,
+    pub total: u64,
+}
 
 /// Marks one Delete everything in the action ledger before it moves anything, so an engine
 /// stop that cuts it short is shown to the owner on the next start, never forgotten. A mark
 /// of the same project the owner was shown is closed first, since this delete replaces it, and
 /// the new mark carries that it was cut short, so this delete keeps the notice if it moves
 /// nothing either (RV-DS241-141 r2); a live mark means another Delete everything of the project
-/// still runs, which refuses this one. Call it inside the plan's write, after every other
-/// refusal. Inputs: the plan's transaction, the project and the plan's exchange. Output:
-/// Ok(Ok), Ok(Err) with `delete_in_progress`, or the ledger's failure.
+/// still runs, which refuses this one. The mark names the delete's request, the project's name
+/// and how many folders it moves, so an engine start can show it as the engine's job (DEC-177
+/// addendum 1). Call it inside the plan's write, after every other refusal. Inputs: the
+/// plan's transaction, the project, the plan's exchange, the request, the project's name and
+/// the folder count. Output: Ok(Ok), Ok(Err) with `delete_in_progress`, or the ledger's
+/// failure.
 pub(crate) fn begin(
     tx: &Connection,
     project: &ProjectId,
     exchange: i64,
+    request: &RequestId,
+    name: &str,
+    total: u64,
 ) -> Result<Result<(), &'static str>, EngineError> {
     assert!(exchange > 0);
+    assert!(!name.is_empty());
     ledger::initialize(tx)?;
-    let mut payload = serde_json::json!({ "project": project.as_str(), "exchange": exchange });
+    let mut payload = serde_json::json!({
+        "project": project.as_str(),
+        "exchange": exchange,
+        "request": request.as_str(),
+        "name": name,
+        "total": total,
+    });
     if let Some(earlier) = ledger::pending_key(tx, ActionKind::ProjectDelete, project.as_str())? {
         assert_eq!(earlier.key, project.as_str());
         if ledger::notice(&earlier).is_none() {
@@ -60,8 +88,7 @@ pub(crate) fn settle(tx: &Connection, exchange: i64, trashed: bool) -> Result<us
         if !exists(tx, &action.key)? {
             ledger::finish(tx, action.id, Outcome::Done)?;
         } else if trashed || replaced_cut_short(&action) {
-            let payload = serde_json::json!({ "project": action.key, "unknown": true });
-            ledger::note(tx, action.id, &payload.to_string())?;
+            ledger::note(tx, action.id, &shown(&action).to_string())?;
         } else {
             ledger::finish(tx, action.id, Outcome::Failed)?;
         }
@@ -88,11 +115,86 @@ pub(crate) fn start(tx: &Connection) -> Result<usize, EngineError> {
         }
         shown += 1;
         if ledger::notice(&action).is_none() {
-            let payload = serde_json::json!({ "project": action.key, "unknown": true });
-            ledger::note(tx, action.id, &payload.to_string())?;
+            ledger::note(tx, action.id, &self::shown(&action).to_string())?;
         }
     }
     Ok(shown)
+}
+
+/// The newest delete the owner is shown as cut short whose mark names its job, for an engine
+/// start to show as the engine's job. A mark of a project whose records went, or one a 2.4.1
+/// delete left without the job's fields, gives none. Input: the connection. Output: the
+/// delete, or None.
+pub(crate) fn cut_short(tx: &Connection) -> Result<Option<CutShort>, EngineError> {
+    ledger::initialize(tx)?;
+    let marks = ledger::pending(tx, ActionKind::ProjectDelete)?;
+    assert!(marks.len() <= ledger::PENDING_MAX);
+    let mut newest: Option<((i64, i64), CutShort)> = None;
+    for action in marks {
+        if ledger::notice(&action).is_none() || !exists(tx, &action.key)? {
+            continue;
+        }
+        let Some(found) = job_of(&action) else {
+            continue;
+        };
+        let order = (action.started_ms, action.id.get());
+        if newest.as_ref().is_none_or(|(seen, _)| order > *seen) {
+            newest = Some((order, found));
+        }
+    }
+    Ok(newest.map(|(_, found)| found))
+}
+
+/// Keeps the project of a delete the owner is shown as cut short, named by its job's request:
+/// ends its mark with the outcome it showed, as the banner's Dismiss does. Inputs: the
+/// transaction and the request. Output: whether a mark ended; false for a live delete or none.
+pub(crate) fn keep(tx: &Connection, request: &RequestId) -> Result<bool, EngineError> {
+    ledger::initialize(tx)?;
+    let marks = ledger::pending(tx, ActionKind::ProjectDelete)?;
+    assert!(marks.len() <= ledger::PENDING_MAX);
+    let named = marks.into_iter().find(|action| {
+        ledger::notice(action).is_some()
+            && job_of(action).is_some_and(|job| &job.request == request)
+    });
+    let Some(action) = named else {
+        return Ok(false);
+    };
+    let shown = ledger::dismiss(tx, ActionKind::ProjectDelete, action.id.get())?;
+    assert_eq!(shown, Outcome::Unknown);
+    Ok(true)
+}
+
+/// The payload a mark gets when the owner is shown it as cut short: its project, the unknown
+/// outcome and the job's fields it carried, with its exchange dropped. Input: the mark.
+/// Output: the payload.
+fn shown(action: &Action) -> serde_json::Value {
+    assert_eq!(action.kind, ActionKind::ProjectDelete);
+    let mut payload = serde_json::json!({ "project": action.key, "unknown": true });
+    let old = serde_json::from_str::<serde_json::Value>(&action.payload).unwrap_or_default();
+    for field in JOB_FIELDS {
+        if let Some(value) = old.get(field) {
+            payload[field] = value.clone();
+        }
+    }
+    assert!(payload.get("exchange").is_none());
+    payload
+}
+
+/// The job a mark names, read back from its payload. Input: the mark. Output: the delete, or
+/// None for a payload that names no request, name or count.
+fn job_of(action: &Action) -> Option<CutShort> {
+    assert_eq!(action.kind, ActionKind::ProjectDelete);
+    let payload: serde_json::Value = serde_json::from_str(&action.payload).ok()?;
+    let request = RequestId::new(payload.get("request")?.as_str()?).ok()?;
+    let name = payload.get("name")?.as_str()?.to_owned();
+    let total = payload.get("total")?.as_u64()?;
+    let project = ProjectId::new(&action.key).ok()?;
+    (!name.is_empty()).then_some(CutShort {
+        project,
+        request,
+        name,
+        total,
+    })
 }
 
 /// Ends the mark of a project whose records are removed, by Remove from dashboard or by the

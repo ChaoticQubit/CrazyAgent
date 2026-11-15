@@ -48,12 +48,12 @@ const CODEX = codex();
 /** The stand-in for the landed change set case: as CODEX, but a team sub-agent's turn, run
  * in its own worktree (<project>/.crazyagent/worktrees/agent-<id>), also writes fruit.md as
  * the handed-off task asks and commits it on its branch, as an agent in its own clone must,
- * since only its commits land; the commit's outcome goes to $CODEX_HOME/wrote. The master,
+ * since only its commits land; the commit's outcome goes to $CODEX_HOME/.cache/wrote. The master,
  * the owner's folder and the writing runs write nothing. Output: the script. */
 function landingCodex() {
   const started = String.raw`  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"` + "\n";
   assert.equal(CODEX.split(started).length, 2, "the stand-in marks each turn started once");
-  const write = String.raw`  case "$(/bin/pwd -P)" in */worktrees/agent-[0-9]*) printf '%s\n' 'Apples are crisp.' > fruit.md || exit 1; git add fruit.md && GIT_AUTHOR_NAME=Agent GIT_AUTHOR_EMAIL=agent@example.invalid GIT_COMMITTER_NAME=Agent GIT_COMMITTER_EMAIL=agent@example.invalid git commit -q -m 'Write fruit.md' > "$CODEX_HOME/wrote" 2>&1; printf 'exit %s\n' "$?" >> "$CODEX_HOME/wrote" ;; esac` + "\n";
+  const write = String.raw`  case "$(/bin/pwd -P)" in */worktrees/agent-[0-9]*) printf '%s\n' 'Apples are crisp.' > fruit.md || exit 1; /bin/mkdir -p "$CODEX_HOME/.cache"; git add fruit.md && GIT_AUTHOR_NAME=Agent GIT_AUTHOR_EMAIL=agent@example.invalid GIT_COMMITTER_NAME=Agent GIT_COMMITTER_EMAIL=agent@example.invalid git commit -q -m 'Write fruit.md' > "$CODEX_HOME/.cache/wrote" 2>&1; printf 'exit %s\n' "$?" >> "$CODEX_HOME/.cache/wrote" ;; esac` + "\n";
   return CODEX.replace(started, write + started);
 }
 
@@ -179,7 +179,7 @@ test("Overview tabs, After each landed change set: a landed change set brings a 
     await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
     assert.equal(await handOff(me, page, project, runtime), "done", "the sub-agent finished its task");
     const agents = join(runtime, "team", "agents");
-    const wrote = readdirSync(agents).map((agent) => join(agents, agent, "home", "wrote")).filter((trace) => existsSync(trace)).map((trace) => readFileSync(trace, "utf8"));
+    const wrote = readdirSync(agents).map((agent) => join(agents, agent, "home", ".cache", "wrote")).filter((trace) => existsSync(trace)).map((trace) => readFileSync(trace, "utf8"));
     assert.deepEqual(wrote.map((trace) => trace.trim().split("\n").at(-1)), ["exit 0"], `the sub-agent committed fruit.md on its branch: ${JSON.stringify(wrote)}`);
     await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/changes` });
     await me.waitFor("the agent's change set", (seen) => /Ready to review/.test(seen));

@@ -262,7 +262,11 @@ fn stored(tx: &Transaction<'_>) -> Result<Option<OwnerProfile>, EngineError> {
 /// (RV-DS241-134). Input: the transaction. Output: a profile that validates, None, or a code.
 pub(crate) fn load(tx: &Transaction<'_>) -> Result<Option<OwnerProfile>, EngineError> {
     let profile = stored(tx)?.filter(|profile| !profile.name.is_empty());
-    assert!(profile.as_ref().is_none_or(|profile| profile.validate().is_ok()));
+    assert!(
+        profile
+            .as_ref()
+            .is_none_or(|profile| profile.validate().is_ok())
+    );
     Ok(profile)
 }
 

@@ -170,8 +170,10 @@ impl Work {
         }
     }
 
-    /// Runs the disk work. Input: the tally an add reports into and obeys. Output: the step
-    /// to record and, for a project move, what it leaves for after the record.
+    /// Runs the disk work. Input: the tally an add, a project move or a delete reports into
+    /// and obeys.
+    /// Output: the step to record and, for a project move, what it leaves for after the
+    /// record.
     fn run(self, tally: &Tally) -> (Step, After) {
         let step = match self {
             Self::Add(plan) => {
@@ -185,7 +187,7 @@ impl Work {
             Self::Move(plan) => Step::Record(plan.run().map(|()| None).map_err(|e| e.0)),
             Self::MoveProject(plan) => {
                 let source = plan.source().to_path_buf();
-                return match plan.run().map(Moved::into_parts) {
+                return match plan.run(tally).map(Moved::into_parts) {
                     Ok((placed, landing)) => (
                         Step::Record(Ok(Some(source))),
                         After {
@@ -201,7 +203,7 @@ impl Work {
             }
             Self::New(plan) => Step::Staged(plan.run()),
             Self::Demo(plan) => Step::Staged(plan.run().and_then(seeded)),
-            Self::Delete(plan, research) => Step::Deleted(plan.run().map(|()| {
+            Self::Delete(plan, research) => Step::Deleted(plan.run(tally).map(|()| {
                 let files = plan.engine_files(&research);
                 (plan.database, files)
             })),
@@ -301,10 +303,13 @@ pub(super) fn disk_changed(trashed: bool, moving: bool, moving_project: bool, ra
     trashed || ((moving || moving_project) && ran)
 }
 
-/// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, SetupProject, CreateDemo
-/// and FolderSize for one owner. A client's change claims its request id first: a resend of
-/// one this engine still runs answers `InProgress` and plans nothing (DEC-159); the intake
-/// job holds its own claim. Input: the sink (the client's stream, or the intake job, which
+/// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, DeleteProject, SetupProject,
+/// CreateDemo and FolderSize for one owner. A client's change claims its request id first: a
+/// resend of one this engine still runs answers `InProgress` and plans nothing (DEC-159); the
+/// intake job holds its own claim. A client's AddExistingFolder, MoveProjectHome or
+/// DeleteProject then holds the job slot until it ends, so no job starts beside it; while a
+/// job runs it answers its record when the request was already recorded, else `job_busy`,
+/// and plans nothing. Input: the sink (the client's stream, or the intake job, which
 /// keeps the reply and lends its tally to the copy), engine, authority, owner packet and
 /// admission, the validated request and the exchange deadline. Output: the
 /// reply written under the owner egress barrier. The exchange deadline bounds
@@ -360,9 +365,36 @@ pub(super) async fn serve(
         },
         false => None,
     };
-    let planned = tokio::time::timeout_at(deadline, plan(engine, a, &request, deadline, exchange))
-        .await
-        .unwrap_or_else(|_| Err(failure(UNKNOWN)));
+    let folder = matches!(
+        &request.operation,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::AddExistingFolder { .. }
+                | OwnerMutation::MoveProjectHome { .. }
+                | OwnerMutation::DeleteProject { .. }
+        }
+    );
+    let (_direct, recorded) = match client && folder {
+        true => match authority.intake.direct() {
+            Ok(direct) => (Some(direct), None),
+            Err(busy) => {
+                let replay = tokio::time::timeout_at(deadline, replayed(engine, a, &request))
+                    .await
+                    .unwrap_or_else(|_| Err(failure(UNKNOWN)));
+                match replay {
+                    Ok(Some(step)) => (None, Some(step)),
+                    Ok(None) => return sink.reply(Err(busy), id, mutation).await,
+                    Err(e) => return sink.reply(Err(e), id, mutation).await,
+                }
+            }
+        },
+        false => (None, None),
+    };
+    let planned = match recorded {
+        Some(step) => Ok(Planned::Step(step)),
+        None => tokio::time::timeout_at(deadline, plan(engine, a, &request, deadline, exchange))
+            .await
+            .unwrap_or_else(|_| Err(failure(UNKNOWN))),
+    };
     let moving = matches!(
         &request.operation,
         OwnerOperation::Apply {
@@ -391,6 +423,7 @@ pub(super) async fn serve(
     #[cfg(unix)]
     let mut _moved_ide = None;
     let mut after = After::default();
+    let tally = sink.tally();
     let (step, deadline, ran) = match planned {
         Ok(Planned::Work(work)) => {
             let admitted = tokio::time::timeout_at(deadline, async {
@@ -427,8 +460,8 @@ pub(super) async fn serve(
                             Some(authority.ide_servers.hold_for_delete(plan.project()).await);
                     }
                     let interrupted = work.interrupted();
-                    let tally = sink.tally();
-                    let step = tokio::task::spawn_blocking(move || work.run(&tally))
+                    let tallied = Arc::clone(&tally);
+                    let step = tokio::task::spawn_blocking(move || work.run(&tallied))
                         .await
                         .map_err(|_| failure(interrupted))
                         .map(|(step, left)| {
@@ -473,6 +506,7 @@ pub(super) async fn serve(
             )
         {
             drop(barrier.take());
+            tally.mark_clearing();
             let cleared = tokio::task::spawn_blocking(move || old.clear()).await;
             barrier = Some(engine.owner_egress.write().await);
             result = match regranted(authority.authenticate(packet), a, true) {
@@ -501,6 +535,7 @@ pub(super) async fn serve(
     };
     let answered = tokio::time::timeout_at(deadline, answer).await;
     if let (Ok((_, true, _)), Some((database, files))) = (&answered, deleted) {
+        tally.mark_clearing();
         let done = tokio::task::spawn_blocking(move || {
             crate::projects_home::remove_engine_files(&database, &files)
         })

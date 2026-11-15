@@ -683,3 +683,60 @@ fn the_xcode_select_link_names_only_an_xcode_app_developer_folder() {
         None
     );
 }
+
+/// RV-DS241-137 code r2 F4: a cargo home's crate caches hold only the links to the owner's
+/// own (DEC-173). Where the owner has the caches, a folder an agent made at one name and a
+/// link to elsewhere at the other give way to those links, the owner's crates and the place
+/// the link named stay as they were, and the exact link stays the same entry; where the
+/// owner has none, a link there goes and a folder stays for the launch's reset.
+#[cfg(unix)]
+#[test]
+fn a_cargo_home_holds_only_links_to_the_owners_caches_and_never_changes_them() {
+    let scratch = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(scratch.path()).unwrap();
+    let owner = root.join("owner");
+    let crate_file = owner.join(".cargo/registry/cache/x.crate");
+    fs::create_dir_all(crate_file.parent().unwrap()).unwrap();
+    fs::write(&crate_file, "the owner's crate\n").unwrap();
+    let checkout = owner.join(".cargo/git/db/x/HEAD");
+    fs::create_dir_all(checkout.parent().unwrap()).unwrap();
+    fs::write(&checkout, "the owner's checkout\n").unwrap();
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let with = root.join("with");
+    fs::create_dir_all(with.join(".cargo/registry/src/index/x-1.0.0")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, with.join(".cargo/git")).unwrap();
+    let homes = ToolHomes::at(&owner);
+
+    let cargo = prepare_cargo_home(&with, &homes).unwrap();
+
+    for name in CARGO_SHARED {
+        assert_eq!(
+            fs::read_link(cargo.join(name)).unwrap(),
+            owner.join(".cargo").join(name)
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&crate_file).unwrap(),
+        "the owner's crate\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&checkout).unwrap(),
+        "the owner's checkout\n"
+    );
+    assert!(fs::read_dir(&elsewhere).unwrap().next().is_none());
+    let link = fs::symlink_metadata(cargo.join("registry")).unwrap().ino();
+    assert_eq!(prepare_cargo_home(&with, &homes).unwrap(), cargo);
+    let again = fs::symlink_metadata(cargo.join("registry")).unwrap().ino();
+    assert_eq!(again, link, "the exact link was made again");
+
+    let bare = ToolHomes::at(&root.join("bare"));
+    let without = root.join("without");
+    fs::create_dir_all(without.join(".cargo/git/db")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, without.join(".cargo/registry")).unwrap();
+
+    prepare_cargo_home(&without, &bare).unwrap();
+
+    assert!(fs::symlink_metadata(without.join(".cargo/registry")).is_err());
+    assert!(without.join(".cargo/git/db").is_dir());
+}

@@ -1,7 +1,9 @@
 use super::*;
 use crate::credentials::{SECRET_BYTES_MAX, SecretString};
 use crate::engine::owner::AccountSecret;
-use crate::github::{CloneReceipt, GitHub, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
+use crate::github::{
+    CloneReceipt, GitHub, GitHubDeviceCode, GitHubOwners, GitHubRepoPage, GitHubStatus,
+};
 use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +21,7 @@ enum Action {
     SignOut,
     Repos { page: u32 },
     Clone { full_name: String },
+    Owners,
 }
 
 impl Action {
@@ -44,6 +47,7 @@ enum Reply {
     Code { code: GitHubDeviceCode },
     Repos { page: GitHubRepoPage },
     Cloned { receipt: CloneReceipt },
+    Owners { owners: GitHubOwners },
     Rejected { code: String },
 }
 
@@ -108,6 +112,15 @@ impl OwnerClient {
             .await?
         {
             Reply::Cloned { receipt } => Ok(receipt),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Lists the accounts a published project's repository can go under, the owner's own
+    /// account first. Output: the accounts and a problem sentence, if any.
+    pub async fn github_owners(&self) -> Result<GitHubOwners, EngineError> {
+        match self.github_exchange(Action::Owners, None).await? {
+            Reply::Owners { owners } => Ok(owners),
             _ => Err(unknown()),
         }
     }
@@ -281,6 +294,9 @@ async fn handle(
             Action::Clone { full_name } => Reply::Cloned {
                 receipt: account.clone_repo(&home.ok_or_else(unknown)?, &full_name)?,
             },
+            Action::Owners => Reply::Owners {
+                owners: account.owners()?,
+            },
         })
     })
     .await
@@ -349,6 +365,7 @@ fn read_kind(action: &Action) -> Option<&'static str> {
     match action {
         Action::Status => Some("github.status"),
         Action::Repos { .. } => Some("github.repos"),
+        Action::Owners => Some("github.owners"),
         _ => None,
     }
 }

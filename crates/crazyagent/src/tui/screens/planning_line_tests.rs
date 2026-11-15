@@ -456,3 +456,33 @@ fn a_queued_planning_job_shows_why_it_waits() {
         );
     }
 }
+
+/// RV-DS241-133 r2 (DEC-141): a planning job parked on a rate limit reads Rate limited until
+/// its local end with the plain reason, as the desktop planning line and a research row do,
+/// never the waiting-for-a-pool words; a job that only needs a pool keeps them.
+#[test]
+fn a_rate_limited_planning_job_reads_rate_limited_until_its_local_end() {
+    const DETAIL: &str = "rate_limited until 2026-10-23 04:32 UTC: Usage limit reached";
+    let parked = job(
+        7,
+        ResearchKind::RoadmapPlanning,
+        ResearchStatus::NeedsPool,
+        Some(DETAIL),
+    );
+    let (until, _) = parked.rate_limited().unwrap();
+    let local = super::project_time::clock(until, super::project_time::local_offset(until));
+    assert_eq!(
+        planning_value(&planning(&[parked]), &Look::plain()).text(),
+        format!("! Rate limited until {local}  Usage limit reached")
+    );
+    let pool = planning(&[job(
+        8,
+        ResearchKind::RoadmapPlanning,
+        ResearchStatus::NeedsPool,
+        None,
+    )]);
+    assert_eq!(
+        planning_value(&pool, &Look::plain()).text(),
+        "Planning, waiting for a pool"
+    );
+}

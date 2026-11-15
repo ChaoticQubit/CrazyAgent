@@ -9,7 +9,7 @@ use crate::github::{GitHubMethod, GitHubRepo, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::{FoundResearch, MappingFacts, MappingTry, OnboardingView, Step};
 use crate::project_setup::{KeptFile, ProjectSetup, ResearchKind, SetupAction, SetupQuery};
 use crate::projects_home::icloud::Progress;
-use crate::projects_home::job::{JobState, JobView, Phase};
+use crate::projects_home::job::{JobKind, JobState, JobSubject, JobView, Phase};
 use crate::projects_home::{AddMode, AddOverride, Measured};
 use crate::protocol::{ProjectId, RequestId};
 use crate::tui::client::Connection;
@@ -570,7 +570,7 @@ fn git_in(folder: &Path, args: &[&str]) {
     assert!(done.status.success(), "{done:?}");
 }
 
-fn repo_with_worktree(source: &Path, linked: &Path) {
+pub(super) fn repo_with_worktree(source: &Path, linked: &Path) {
     std::fs::create_dir_all(source).unwrap();
     std::fs::write(source.join("README.md"), "shop\n").unwrap();
     git_in(source, &["init", "-q", "-b", "main"]);
@@ -2792,20 +2792,32 @@ fn started(shell: &mut Shell, folder: &str) -> Vec<(AddMode, Vec<AddOverride>)> 
         .into_iter()
         .filter_map(|job| match job.query() {
             IntakeQuery::JobStart {
-                source,
+                subject: JobSubject::Add { path },
                 mode,
                 overrides,
                 ..
-            } if source == folder => Some((mode, overrides)),
+            } if path == folder => Some((mode, overrides)),
             _ => None,
         })
         .collect()
 }
 
 fn start(folder: &str, mode: AddMode, overrides: Vec<AddOverride>) -> IntakeQuery {
+    start_of(
+        JobSubject::Add {
+            path: folder.to_owned(),
+        },
+        mode,
+        overrides,
+    )
+}
+
+/// A start of the engine's job for `subject`, with the id [`with_start_id`] sets. Takes the
+/// subject, the way and the overrides. Returns the ask.
+fn start_of(subject: JobSubject, mode: AddMode, overrides: Vec<AddOverride>) -> IntakeQuery {
     IntakeQuery::JobStart {
         id: RequestId::new("start-1").unwrap(),
-        source: folder.to_owned(),
+        subject,
         mode,
         overrides,
     }
@@ -2817,13 +2829,13 @@ fn with_start_id(query: IntakeQuery) -> IntakeQuery {
     match query {
         IntakeQuery::JobStart {
             id,
-            source,
+            subject,
             mode,
             overrides,
         } => {
             assert_eq!(id.as_str().len(), 64, "{id:?}");
             assert!(id.as_str().bytes().all(|b| b.is_ascii_hexdigit()), "{id:?}");
-            start(&source, mode, overrides)
+            start_of(subject, mode, overrides)
         }
         other => other,
     }
@@ -2832,6 +2844,8 @@ fn with_start_id(query: IntakeQuery) -> IntakeQuery {
 fn job_for(folder: &str, mode: AddMode, state: JobState) -> JobView {
     JobView {
         id: RequestId::new("add-2").unwrap(),
+        kind: JobKind::Add,
+        project_id: None,
         source: folder.to_owned(),
         mode,
         overrides: Vec::new(),
@@ -2971,7 +2985,7 @@ fn a_failed_start_reads_the_job_and_goes_home_only_when_this_folder_is_being_add
         let sent = sent.clone();
         let compared: Vec<_> = asks.iter().cloned().map(with_start_id).collect();
         assert_eq!(compared, [start(&typed, AddMode::Copy, Vec::new())]);
-        let code = if home { "owner_timeout" } else { "intake_busy" };
+        let code = if home { "owner_timeout" } else { "job_busy" };
         shell.arrive(intake(asks[0].clone(), Err(code.into())));
         assert_eq!(job_asks(&mut shell), [IntakeQuery::JobStatus], "{read:?}");
         let read_job = read.clone().map(|(state, ours)| {
@@ -2989,15 +3003,51 @@ fn a_failed_start_reads_the_job_and_goes_home_only_when_this_folder_is_being_add
         }
         assert_eq!(shell.place(), Some(Place::AddFolder), "{before:?} {read:?}");
         let rows = render(&mut shell, 80, 40);
-        let refusal = "Another folder is being added. Wait for it to finish on Home.";
+        let refusal = "Another job is running. Wait for it to finish on Home.";
         assert!(shows(&rows, refusal), "{rows:#?}");
         assert!(job_asks(&mut shell).is_empty(), "{read:?}");
     }
 }
 
+/// DEC-177 (QUESTION-13:08 Q2 B): a start refused `job_busy` names the job the read after
+/// it finds running, here another project's move, and the page stays for another try.
+#[test]
+fn a_busy_start_names_the_job_the_read_after_it_finds_running() {
+    let user = tempfile::tempdir().unwrap();
+    let (mut shell, _typed) = measured(user.path(), AddMode::Copy, 0, None);
+    let asks: Vec<_> = intake_jobs(&mut shell)
+        .iter()
+        .map(IntakeJob::query)
+        .filter(|query| matches!(query, IntakeQuery::JobStart { .. }))
+        .collect();
+    let [asked] = <[IntakeQuery; 1]>::try_from(asks).unwrap();
+    shell.arrive(intake(asked, Err("job_busy".into())));
+    assert_eq!(job_asks(&mut shell), [IntakeQuery::JobStatus]);
+    let running = reading_job(
+        "/Users/mira/Code/reading-list",
+        JobState::Stopping { agents_left: 1 },
+    );
+    shell.arrive(intake(
+        IntakeQuery::JobStatus,
+        Ok(IntakeView::Job(Some(running))),
+    ));
+    assert_eq!(shell.place(), Some(Place::AddFolder));
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(
+            &rows,
+            "Moving reading-list is running. Wait for it to finish on Home."
+        ),
+        "{rows:#?}"
+    );
+    assert!(job_asks(&mut shell).is_empty());
+}
+
 fn shop_job(state: JobState) -> JobView {
     JobView {
         id: RequestId::new("add-1").unwrap(),
+        kind: JobKind::Add,
+        project_id: None,
         source: "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop".into(),
         mode: AddMode::Move,
         overrides: vec![AddOverride::TooLarge],
@@ -3073,14 +3123,14 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
     let compared: Vec<_> = asks.iter().cloned().map(with_start_id).collect();
     assert_eq!(compared, [again]);
     let [asked] = <[IntakeQuery; 1]>::try_from(asks).unwrap();
-    shell.arrive(intake(asked, Err("intake_busy".into())));
+    shell.arrive(intake(asked, Err("job_busy".into())));
     let said = shell.ctx.message().expect("a refused start is said");
     assert_eq!(
         (said.tone, said.lead.as_str(), said.rest.as_str()),
         (
             Tone::Error,
             "Adding the folder did not start again.",
-            "Another folder is being added. Wait for it to finish on Home."
+            "Another job is running. Wait for it to finish on Home."
         )
     );
 
@@ -3097,9 +3147,394 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
     assert!(!shows(&rows, "shop"), "{rows:#?}");
 }
 
+/// A job that moves the registered project `reading` into the projects home, in `state`.
+fn reading_job(source: &str, state: JobState) -> JobView {
+    JobView {
+        id: RequestId::new("move-1").unwrap(),
+        kind: JobKind::MoveProject,
+        project_id: Some(ProjectId::new("reading").unwrap()),
+        source: source.to_owned(),
+        mode: AddMode::Move,
+        overrides: Vec::new(),
+        stopping: false,
+        state,
+    }
+}
+
+/// DEC-177: Enter on a project move that failed starts it again as a move of that project,
+/// never as an add of its folder, and a refused start is said in the move's words.
+#[test]
+fn home_starts_a_failed_project_move_again_by_its_project_and_says_a_refusal_in_its_words() {
+    let mut ctx = ctx(120, 30);
+    ctx.store.projects = Load::Ready(Vec::new());
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let failed = reading_job(
+        "/Users/mira/Code/reading-list",
+        JobState::Failed {
+            code: "move_project_busy".into(),
+            phase: Phase::Stopping,
+        },
+    );
+    job_read(&mut shell, Some(failed));
+    let rows = render(&mut shell, 120, 30);
+    assert!(
+        shows(&rows, "reading-list: The project is still working"),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Enter Try again"), "{rows:#?}");
+    shell.key(Key::Enter);
+    let asks = job_asks(&mut shell);
+    let moving = JobSubject::MoveProject {
+        project_id: ProjectId::new("reading").unwrap(),
+    };
+    let compared: Vec<_> = asks.iter().cloned().map(with_start_id).collect();
+    assert_eq!(compared, [start_of(moving, AddMode::Move, Vec::new())]);
+    let [asked] = <[IntakeQuery; 1]>::try_from(asks).unwrap();
+    shell.arrive(intake(asked, Err("job_busy".into())));
+    let said = shell.ctx.message().expect("a refused start is said");
+    assert_eq!(
+        (said.tone, said.lead.as_str(), said.rest.as_str()),
+        (
+            Tone::Error,
+            "Moving the project did not start again.",
+            "Another job is running. Wait for it to finish on Home."
+        )
+    );
+}
+
+/// DEC-177: answering a project move's soft refusal asks that question with Keep it here in
+/// place of Use where it is, since the project is set up already. Keep it here and Esc go
+/// Home and send nothing; Move anyway starts the move of that project again with the new
+/// override and says so.
+#[test]
+fn answering_a_project_move_s_soft_refusal_moves_that_project_or_keeps_it_where_it_is() {
+    let user = tempfile::tempdir().unwrap();
+    let outside = user.path().canonicalize().unwrap().join("outside");
+    let source = outside.join("reading-list");
+    repo_with_worktree(&source, &outside.join("reading-side"));
+    let waiting = reading_job(
+        source.to_str().unwrap(),
+        JobState::NeedsAnswer {
+            code: "home_move_worktrees".into(),
+        },
+    );
+    let home = user.path().join("Projects").to_str().unwrap().to_owned();
+    let answer = || {
+        let mut ctx = screen_ctx(user.path());
+        ctx.store.projects = Load::Ready(Vec::new());
+        let screen = open(&Place::Home, &mut ctx);
+        let mut shell = Shell::with(ctx, screen);
+        job_read(&mut shell, Some(waiting.clone()));
+        shell.key(Key::Enter);
+        let answering = Place::AnswerAdd {
+            job: waiting.id.clone(),
+        };
+        assert_eq!(shell.place(), Some(answering));
+        shell.arrive(intake(
+            IntakeQuery::Home,
+            Ok(IntakeView::Home(crate::projects_home::ProjectsHome {
+                path: Some(home.clone()),
+                watching: true,
+            })),
+        ));
+        job_asks(&mut shell);
+        shell
+    };
+
+    let mut shell = answer();
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Move reading-list anyway?"), "{rows:#?}");
+    let buttons = row_of(&rows, "Move anyway");
+    assert!(
+        rows[buttons].find("Keep it here") < rows[buttons].find("Move anyway"),
+        "{rows:#?}"
+    );
+    assert!(
+        !shows(&rows, "Use where it is"),
+        "a set up project is never set up again where it is: {rows:#?}"
+    );
+    shell.key(Key::Enter);
+    assert_eq!(shell.place(), Some(Place::Home));
+    assert!(
+        job_asks(&mut shell).is_empty(),
+        "Keep it here sends nothing"
+    );
+
+    let mut shell = answer();
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), Some(Place::Home));
+    assert!(job_asks(&mut shell).is_empty(), "Esc sends nothing");
+
+    let mut shell = answer();
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
+    let moving = JobSubject::MoveProject {
+        project_id: ProjectId::new("reading").unwrap(),
+    };
+    let overrides = vec![AddOverride::Worktrees];
+    let asks = job_asks(&mut shell);
+    let compared: Vec<_> = asks.iter().cloned().map(with_start_id).collect();
+    assert_eq!(
+        compared,
+        [start_of(moving, AddMode::Move, overrides.clone())]
+    );
+    let [asked] = <[IntakeQuery; 1]>::try_from(asks).unwrap();
+    let again = JobView {
+        overrides,
+        state: JobState::Copying {
+            copied: 0,
+            checked: 0,
+        },
+        ..waiting.clone()
+    };
+    shell.arrive(intake(asked, Ok(IntakeView::Job(Some(again)))));
+    assert_eq!(shell.place(), Some(Place::Home));
+    let said = shell.ctx.message().expect("the start is said");
+    assert_eq!(
+        (said.lead.as_str(), said.rest.as_str()),
+        (
+            "Moving reading-list.",
+            "Follow it on Home; you can keep working."
+        )
+    );
+}
+
 /// The picked card stays the same when the job card comes first or goes: a project picked
 /// before a job starts is still the one Enter opens, and still picked after the job is
 /// dismissed.
+/// A delete job of the project "notes", whose name labels its card whole.
+fn notes_delete(state: JobState) -> JobView {
+    JobView {
+        id: RequestId::new("delete-1").unwrap(),
+        kind: JobKind::Delete,
+        project_id: Some(ProjectId::new("notes").unwrap()),
+        source: "Notes/2026 plans".into(),
+        mode: AddMode::Move,
+        overrides: Vec::new(),
+        stopping: false,
+        state,
+    }
+}
+
+/// DEC-177 add.1, QUESTION-13:55 Q1 A: a delete cut short reads its count on Home; Enter
+/// (Finish delete) opens the project's remove ask on Delete everything, where the exact name
+/// is typed again, and sends nothing; d (Keep the project) dismisses the job. While folders
+/// go to the Trash the card offers no Stop.
+#[test]
+fn finish_delete_on_home_opens_the_project_s_remove_ask_and_d_keeps_the_project() {
+    let mut ctx = ctx(120, 30);
+    ctx.store.projects = Load::Ready(Vec::new());
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let trashing = notes_delete(JobState::Trashing { done: 1, total: 2 });
+    job_read(&mut shell, Some(trashing));
+    let rows = render(&mut shell, 120, 30);
+    assert!(
+        shows(
+            &rows,
+            "Moving Notes/2026 plans to the Trash: 1 of 2 folders"
+        ),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(&rows, "It can't stop now. Wait for it to finish."),
+        "{rows:#?}"
+    );
+    shell.key(Key::Enter);
+    assert!(job_asks(&mut shell).is_empty(), "no Stop once folders move");
+
+    let cut = notes_delete(JobState::CutShort {
+        trashed: 1,
+        total: 2,
+    });
+    job_read(&mut shell, Some(cut.clone()));
+    let rows = render(&mut shell, 120, 30);
+    let badge = format!("{} Cut short", shell.ctx.glyphs.status(Status::Needs));
+    assert!(shows(&rows, &badge), "{rows:#?}");
+    assert!(
+        shows(&rows, "Enter finishes the delete. d keeps the project."),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Enter Finish delete"), "{rows:#?}");
+    assert!(shows(&rows, "d Keep the project"), "{rows:#?}");
+    shell.key(Key::Char('d'));
+    let keep = IntakeQuery::JobDismiss { id: cut.id.clone() };
+    assert_eq!(job_asks(&mut shell), [keep]);
+
+    shell.key(Key::Enter);
+    assert!(
+        job_asks(&mut shell).is_empty(),
+        "nothing deletes in one click"
+    );
+    assert_eq!(
+        shell.place(),
+        Some(Place::Project {
+            id: ProjectId::new("notes").unwrap(),
+            name: "Notes/2026 plans".into(),
+            tab: ProjectTab::Settings,
+        })
+    );
+    let rows = render(&mut shell, 120, 30);
+    assert!(
+        shows(&rows, "Reading what removing would do..."),
+        "the remove ask is open and reads what deleting would remove first: {rows:#?}"
+    );
+}
+
+/// Opens the notes project's Settings, opens its remove ask, answers the page's read of what
+/// removing would do with a delete it allows, then picks Delete everything and types the exact
+/// name and Enter. Takes nothing. Returns the shell and every request the Enter queued.
+fn delete_everything_on_notes() -> (Shell, Vec<Request>) {
+    let mut ctx = ctx(120, 30);
+    ctx.store.projects = Load::Ready(Vec::new());
+    let notes = ProjectId::new("notes").unwrap();
+    let place = Place::Project {
+        id: notes.clone(),
+        name: "Notes/2026 plans".into(),
+        tab: ProjectTab::Settings,
+    };
+    let screen = open(&place, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    shell.key(Key::Char('x'));
+    let removal = SetupQuery::Removal {
+        project: notes.clone(),
+    };
+    let reads: Vec<_> = std::iter::from_fn(|| shell.ctx.next_request())
+        .filter_map(|request| match request {
+            Request::Setup(query) => Some(query),
+            _ => None,
+        })
+        .collect();
+    assert!(reads.contains(&removal), "{reads:?}");
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        SetupEvent {
+            query: removal,
+            result: Ok(crate::project_setup::SetupView::Removal(Box::new(
+                crate::team::cleanup::RemovalPreview {
+                    name: "Notes/2026 plans".into(),
+                    folders: vec!["/Users/owner/CrazyAgent/notes".into()],
+                    can_delete: true,
+                    blocked: None,
+                    running: Vec::new(),
+                    open_change_sets: 0,
+                    losses: Vec::new(),
+                },
+            ))),
+        },
+    )))));
+    shell.key(Key::Down);
+    keys(&mut shell, "Notes/2026 plans");
+    shell.key(Key::Enter);
+    let requests = std::iter::from_fn(|| shell.ctx.next_request()).collect();
+    (shell, requests)
+}
+
+/// DEC-177 add.1: Delete everything on the project page, once the exact name is typed, starts
+/// the engine's delete job, never a direct change; the page then says to follow it on Home and
+/// goes Home. A refused start is said with the words that name the running job.
+#[test]
+fn delete_everything_on_the_project_page_starts_the_engine_s_job_and_goes_home() {
+    let (mut shell, requests) = delete_everything_on_notes();
+    assert!(
+        !requests
+            .iter()
+            .any(|request| matches!(request, Request::Setup(SetupQuery::Change { .. }))),
+        "no direct delete: {requests:?}"
+    );
+    let sent: Vec<IntakeQuery> = requests
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::Intake(job) => Some(job.query()),
+            _ => None,
+        })
+        .collect();
+    let started = start_of(
+        JobSubject::Delete {
+            project_id: ProjectId::new("notes").unwrap(),
+            name: "Notes/2026 plans".into(),
+        },
+        AddMode::Move,
+        Vec::new(),
+    );
+    let compared: Vec<_> = sent.iter().cloned().map(with_start_id).collect();
+    assert_eq!(compared, [started]);
+    let [sent] = <[IntakeQuery; 1]>::try_from(sent).unwrap();
+    let running = notes_delete(JobState::Stopping { agents_left: 1 });
+    shell.arrive(intake(sent, Ok(IntakeView::Job(Some(running)))));
+    let said = shell.ctx.message().expect("the start is said");
+    assert_eq!(
+        (said.lead.as_str(), said.rest.as_str()),
+        (
+            "Deleting Notes/2026 plans.",
+            "Follow it on Home; you can keep working."
+        )
+    );
+    assert_eq!(shell.place(), Some(Place::Home));
+
+    let (mut shell, requests) = delete_everything_on_notes();
+    let [sent] = <[IntakeQuery; 1]>::try_from(
+        requests
+            .into_iter()
+            .filter_map(|request| match request {
+                Request::Intake(job) => Some(job.query()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    job_read(
+        &mut shell,
+        Some(reading_job(
+            "/Users/mira/Code/reading-list",
+            JobState::Copying {
+                copied: 2,
+                checked: 0,
+            },
+        )),
+    );
+    shell.arrive(intake(sent, Err("job_busy".into())));
+    let said = shell.ctx.message().expect("a refused start is said");
+    assert_eq!(
+        (said.tone, said.lead.as_str()),
+        (
+            Tone::Error,
+            "Moving reading-list is running. Wait for it to finish on Home."
+        )
+    );
+    assert!(matches!(shell.place(), Some(Place::Project { .. })));
+}
+
+/// DEC-177 add.1: a delete that ended is said once in its own words and the shell reads the
+/// projects again, so the deleted project leaves every list.
+#[test]
+fn a_delete_that_ended_is_said_and_the_projects_are_read_again() {
+    let mut ctx = ctx(120, 30);
+    ctx.store.projects = Load::Ready(Vec::new());
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    job_read(
+        &mut shell,
+        Some(notes_delete(JobState::Trashing { done: 1, total: 2 })),
+    );
+    shell.arrive(intake(
+        IntakeQuery::JobStatus,
+        Ok(IntakeView::Job(Some(notes_delete(JobState::Done)))),
+    ));
+    let said = shell.ctx.message().expect("the end is said");
+    assert_eq!(
+        said.lead,
+        "Notes/2026 plans is deleted. Its files are in the Trash."
+    );
+    let requests: Vec<_> = std::iter::from_fn(|| shell.ctx.next_request()).collect();
+    assert!(
+        requests
+            .iter()
+            .any(|request| matches!(request, Request::Projects)),
+        "{requests:?}"
+    );
+}
+
 #[test]
 fn home_keeps_the_picked_project_when_the_job_card_comes_and_goes() {
     let mut ctx = ctx(120, 30);
