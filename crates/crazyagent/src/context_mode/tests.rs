@@ -577,6 +577,34 @@ fn a_pinned_shaped_npx_the_resolver_does_not_find_is_left_out_and_nothing_of_its
     assert!(!case.npm().join(PROFILE).exists(), "npm never started");
 }
 
+/// RV-DS241-150 r2: while the first background folder probe is going, which may still add
+/// its folder, a pinned-shaped spec whose npx the resolver does not find is being set up, and
+/// once it ended it is an npx CrazyAgent did not find; an npx the resolver finds is the
+/// pinned launch either way, and any other spec is not that launch.
+#[test]
+fn a_pinned_shaped_npx_not_found_while_the_first_folder_probe_runs_is_being_set_up() {
+    let case = case("/usr/bin/false");
+    let tools = case.root.parent().unwrap().join("repo").join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(tools.join("npx"), "#!/bin/sh\nexit 3\n").unwrap();
+    fs::set_permissions(tools.join("npx"), fs::Permissions::from_mode(0o755)).unwrap();
+    let shaped = ServerSpec::Stdio {
+        command: tools.join("npx").to_str().unwrap().to_owned(),
+        args: vec!["-y".into(), format!("context-mode@{VERSION}")],
+    };
+    let places = crate::tools::Places::from_environment(Some(&case.root));
+    let on = |spec: &ServerSpec, pending| {
+        crate::plugins::context_mode_on(spec, &places, pending).map(|found| found.is_some())
+    };
+    assert_eq!(on(&shaped, true), Err(ContextModeOff::SettingUp));
+    assert_eq!(on(&shaped, false), Err(ContextModeOff::NpxNotFound));
+    let pinned_launch = npx_in(&case, VERSION);
+    for pending in [true, false] {
+        assert_eq!(on(&pinned_launch, pending), Ok(true), "pending {pending}");
+        assert_eq!(on(&npx("other-server@1.0.0"), pending), Ok(false));
+    }
+}
+
 /// RV-DS241-150: the Node.js version check of the pinned launch's `node` runs inside a
 /// boundary with a cleared environment, so even a `node` in a folder the resolver looks in
 /// writes nothing outside it and never sees the engine's HOME, while the version it reports
