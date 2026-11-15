@@ -22,6 +22,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 /// The Landlock helper's file name. It ships next to the engine's own executable.
 pub const HELPER_NAME: &str = "crazyagent-landlock";
@@ -45,6 +47,9 @@ const DIE_WITH: &str = "--die-with";
 const NEST: &str = "--nest";
 const NESTED: &str = "--nested";
 const SCOPED: &str = "--scoped";
+/// How long [`host_now`] keeps what it read: a policy view asks on every read, and each
+/// answer starts the helper twice.
+const HOST_AGE_MAX: Duration = Duration::from_secs(60);
 /// The bubblewrap arguments a nested agent starts under, before its working folder: user,
 /// process, IPC and host-name namespaces of its own and a fresh `/proc`, with the whole
 /// root bound through, devices too, so the helper's Landlock rules stay the only file
@@ -286,9 +291,21 @@ impl HelperRequest {
     /// [`LandlockPolicy::args`] then `--`, an absolute program and its arguments, or
     /// `--probe` with an optional `--limit-network`, `--open-sockets` and `--keep-free`
     /// with a port, or `--filter-sockets` alone then `--` and the harness, or `--nest`
-    /// alone then `--` and what [`nest_request`] takes. `--open-sockets` needs
-    /// `--limit-network`. Output: the request, or the reason the arguments are refused.
+    /// alone then `--` and what [`nest_request`] takes, or `--scoped` with nothing else.
+    /// `--open-sockets` needs `--limit-network`. Output: the request, or the reason the
+    /// arguments are refused.
     pub fn parse(args: Vec<OsString>) -> Result<Self, String> {
+        if args.first().is_some_and(|flag| flag == SCOPED) {
+            return (args.len() == 1)
+                .then_some(Self::Scoped)
+                .ok_or_else(|| format!("{SCOPED} takes no other argument"));
+        }
+        Self::flagged(args)
+    }
+
+    /// Parses every request but the scope question, as [`HelperRequest::parse`] describes
+    /// them. Input: the helper arguments. Output: the request, or the reason.
+    fn flagged(args: Vec<OsString>) -> Result<Self, String> {
         let mut policy = LandlockPolicy::default();
         let mut probe = false;
         let mut filter = false;
@@ -703,7 +720,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     let (policy, launch) = match request {
         HelperRequest::Filter { program, args } => return filtered(&program, args),
         HelperRequest::Nest { bwrap, args } => return nest(&bwrap, &args),
-        HelperRequest::Scoped => return ExitCode::from(2),
+        HelperRequest::Scoped => return scoped(),
         HelperRequest::Probe {
             limit_network,
             open_sockets,
@@ -771,6 +788,16 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         program.display()
     );
     ExitCode::from(126)
+}
+
+/// Answers the scope question through the exit code: the scope layer applied to this
+/// process alone. Output: 0 when the kernel keeps an agent's signals inside its own
+/// Landlock domain (Linux 6.12 or newer), 1 when the layer holds nothing or only in part.
+fn scoped() -> ExitCode {
+    match scope_signals() {
+        Ok(status) if accepted(&status.ruleset, status.no_new_privs) => ExitCode::SUCCESS,
+        _ => ExitCode::from(1),
+    }
 }
 
 /// Starts bubblewrap for a nested agent, from outside its namespaces. It takes the session
@@ -1045,18 +1072,36 @@ fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
         )
 }
 
-/// Reads what this machine holds for an agent beyond its Landlock rules. Input: the
-/// helper. Output: the facts, each false when it cannot be read.
+/// Reads what this machine holds for an agent beyond its Landlock rules: whether the
+/// kernel scopes signals (the helper's `--scoped`) and whether the helper's plain probe
+/// passes inside bubblewrap's namespaces ([`nests`]), as a launch asks it. Input: the
+/// helper. Output: the facts, each false when its question cannot be asked.
 pub fn read_host(helper: &Path) -> super::LinuxHost {
-    let (nested, scoped) = (false, helper.as_os_str() == SCOPED);
+    let usable = clean_absolute(helper) && helper.is_file();
+    let scoped = usable && passes(Command::new(helper).arg(SCOPED));
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file());
+    let nested = usable && bwrap.is_some_and(|bwrap| nests(bwrap, helper, &[PROBE.into()]));
     super::LinuxHost { nested, scoped }
 }
 
-/// [`read_host`] for the helper beside this executable. No input. Output: the facts, each
-/// false when this executable's path cannot be read.
+/// [`read_host`] for the helper beside this executable, read again once what it holds is
+/// older than [`HOST_AGE_MAX`]. No input. Output: the facts, each false when this
+/// executable's path cannot be read.
 pub(crate) fn host_now() -> super::LinuxHost {
+    static READ: Mutex<Option<(Instant, super::LinuxHost)>> = Mutex::new(None);
+    let mut read = READ.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((at, host)) = *read
+        && at.elapsed() < HOST_AGE_MAX
+    {
+        return host;
+    }
     let helper = std::env::current_exe().map(|engine| engine.with_file_name(HELPER_NAME));
-    read_host(&helper.unwrap_or_default())
+    let host = read_host(&helper.unwrap_or_default());
+    *read = Some((Instant::now(), host));
+    host
 }
 
 /// Refuses a policy neither Linux backend starts: one confined to its own worktree, or a

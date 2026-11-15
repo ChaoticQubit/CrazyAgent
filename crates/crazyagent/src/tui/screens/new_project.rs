@@ -314,7 +314,7 @@ type CatalogKey = (Option<CredentialRef>, Vec<ResearchKind>);
 /// The New project wizard: every field, the focused control and the creation phase.
 /// Takes keys and engine results; produces a validated project request on Create.
 /// The draft lives here until the project exists, so Esc keeps it. `linux` is whether
-/// Review shows what the Linux sandbox cannot hold.
+/// Review shows what the Linux sandbox cannot hold, `host` what this Linux holds for it.
 pub(in crate::tui) struct Wizard {
     pub step: Step,
     pub done: [bool; 7],

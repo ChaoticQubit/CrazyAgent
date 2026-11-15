@@ -285,6 +285,13 @@ impl AccessEdit {
                     .map(|line| Row::of(line, look.warning)),
             );
         }
+        for gap in level.map(|level| level.gaps.as_slice()).unwrap_or_default() {
+            body.extend(
+                wrap_words(gap, TEXT_WIDTH)
+                    .into_iter()
+                    .map(|line| Row::of(line, look.warning)),
+            );
+        }
         body.extend(
             wrap_words(LOWERING_STOPS_AGENTS, TEXT_WIDTH)
                 .into_iter()

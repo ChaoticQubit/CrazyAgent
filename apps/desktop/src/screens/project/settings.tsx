@@ -630,7 +630,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     <h2>Agent access</h2>
     <p className="pj-secondary">What this project's agents may touch. It applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.</p>
     {view === null && !note && <p className="pj-muted" role="status">Loading...</p>}
-    {view && <AccessLevels name="ps-access" value={access} unavailable={(level) => view.levels.find((item) => item.access === level)?.unavailable ?? null} onChange={setAccess} />}
+    {view && <AccessLevels name="ps-access" value={access} unavailable={(level) => view.levels.find((item) => item.access === level)?.unavailable ?? null} gaps={(level) => view.levels.find((item) => item.access === level)?.gaps ?? []} onChange={setAccess} />}
     {view && <p className="pj-help">{LOWERING_STOPS_AGENTS}</p>}
     {view && <p className="pj-help">{POLICY_RESTARTS_IDE}</p>}
     {view && <NetworkChoices name="ps-network" value={network} access={access} onChange={setNetwork} />}

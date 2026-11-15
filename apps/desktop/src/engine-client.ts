@@ -501,7 +501,7 @@ export interface ProjectCatalog {
   document_bytes_max: number;
   project_document_bytes_max: number;
   default_team: TeamPlan;
-  agent_access?: { access: "sandboxed" | "own_branch" | "full"; label: string; unavailable: string | null }[];
+  agent_access?: { access: "sandboxed" | "own_branch" | "full"; label: string; unavailable: string | null; gaps?: string[] }[];
 }
 
 export interface StoredSetup {

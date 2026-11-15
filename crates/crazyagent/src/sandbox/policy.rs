@@ -787,14 +787,25 @@ impl LevelView {
 }
 
 /// What a Linux cannot hold for agents at one access level, as plain lines both clients
-/// show under the level. Inputs: the level and what this Linux holds, none on another
-/// system. Output: the lines, none where nothing is open.
+/// show under the level: nothing where agents run in a process namespace of their own, the
+/// process list where only the kernel's signal scope holds, signals too where neither does.
+/// Inputs: the level and what this Linux holds, none on another system. Output: the lines,
+/// none under Full access, which has no sandbox to speak of.
 pub fn linux_gaps(
     access: AgentAccess,
     host: Option<crate::sandbox::LinuxHost>,
 ) -> Vec<&'static str> {
-    let _ = (access, host);
-    Vec::new()
+    let Some(host) = host else {
+        return Vec::new();
+    };
+    if access == AgentAccess::Full || host.nested {
+        return Vec::new();
+    }
+    if host.scoped {
+        vec![crate::sandbox::LINUX_PROCESS_LIST_LINE]
+    } else {
+        vec![crate::sandbox::LINUX_SIGNALS_LINE]
+    }
 }
 
 /// One toolchain family: whether the owner has it, the project uses it and agents may

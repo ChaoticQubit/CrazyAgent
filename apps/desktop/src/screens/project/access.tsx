@@ -265,11 +265,12 @@ function toolchainNote(row: PolicyView["toolchains"][number]): string {
 }
 
 /** The access level choice as radio cards, with the reason a level can't run here, the Full
- * access warning when it is chosen and, on Linux below Full access, the nested git gap. Inputs:
- * the radio group name, the chosen level, the reason each level is unavailable (null when it
- * runs), the change handler and this desktop's platform. Output: the fieldset. */
-export function AccessLevels({ name, value, unavailable, onChange, platform = desktopPlatform() }: {
-  name: string; value: AgentAccess; unavailable: (access: AgentAccess) => string | null; onChange: (access: AgentAccess) => void; platform?: string;
+ * access warning when it is chosen and, on Linux below Full access, the nested git gap and
+ * the lines the engine gives for what this Linux can't hold at the chosen level. Inputs: the
+ * radio group name, the chosen level, each level's unavailable reason (null when it runs) and
+ * gap lines, the change handler and this desktop's platform. Output: the fieldset. */
+export function AccessLevels({ name, value, unavailable, gaps, onChange, platform = desktopPlatform() }: {
+  name: string; value: AgentAccess; unavailable: (access: AgentAccess) => string | null; gaps?: (access: AgentAccess) => string[]; onChange: (access: AgentAccess) => void; platform?: string;
 }) {
   return <fieldset className="pj-field">
     <legend>Agent access</legend>
@@ -288,6 +289,7 @@ export function AccessLevels({ name, value, unavailable, onChange, platform = de
     </div>
     {value === "full" && <p className="pj-note warn" role="alert">{FULL_ACCESS_WARNING} {FULL_ACCESS_IDE}</p>}
     {value !== "full" && platform === "linux" && <p className="pj-note" role="note">{LINUX_NESTED_GIT}</p>}
+    {(gaps?.(value) ?? []).map((gap) => <p className="pj-note" role="note" key={gap}>{gap}</p>)}
   </fieldset>;
 }
 

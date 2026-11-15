@@ -164,11 +164,13 @@ export interface ContextChunk {
 export type AgentAccess = "sandboxed" | "own_branch" | "full";
 
 /** One access level as the engine names it, with the reason it can't run agents on this
- * computer, null when it runs. */
+ * computer, null when it runs, and the lines for what this Linux can't hold at that level,
+ * absent from an older engine. */
 export interface AccessLevel {
   access: AgentAccess;
   label: string;
   unavailable: string | null;
+  gaps?: string[];
 }
 
 /** How far a project's tools-on agents and the plugin check may reach on the network: open is
