@@ -544,6 +544,94 @@ fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
     assert_eq!(projects_home::add_ended(&connection).unwrap(), None);
 }
 
+/// RV-DS241-198: an add whose folder landed in the projects home but whose record never
+/// came, as when its grant was found stale after the disk changed, is not forgotten by its
+/// exchange's settle: its running row ends with what its disk shows, as after an engine stop,
+/// so the owner reads where the folder went and nothing is deleted. An add that landed
+/// nothing is forgotten as before, and a settle after a record leaves the kept end alone.
+#[test]
+fn an_add_whose_folder_landed_before_a_record_that_never_came_is_kept_as_ended() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let home = base.join("home");
+    let (source, landed) = (base.join("source"), home.join("source"));
+    std::fs::create_dir_all(source.join("lib")).unwrap();
+    std::fs::write(source.join("lib/a.txt"), "a\n").unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let mut connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    crate::projects_home::save(&connection, &home).unwrap();
+    let insert = |connection: &Connection, request: &str, mode: &str| {
+        connection
+            .execute(
+                "INSERT INTO projects_home_add(request, owner, source, destination, mode)
+                 VALUES (?1, 'owner', ?2, ?3, ?4)",
+                params![
+                    request,
+                    source.to_str().unwrap(),
+                    landed.to_str().unwrap(),
+                    mode
+                ],
+            )
+            .unwrap();
+    };
+    let settle = |connection: &mut Connection, request: &str| {
+        let request = RequestId::new(request).unwrap();
+        projects_home::add_settle(connection, Some(&request)).unwrap()
+    };
+
+    insert(&connection, "add-unlanded", "move");
+    assert_eq!(settle(&mut connection, "add-unlanded"), 1);
+    assert_eq!(
+        projects_home::add_ended(&connection).unwrap(),
+        None,
+        "an add that landed nothing is forgotten"
+    );
+
+    std::fs::create_dir_all(landed.join("lib")).unwrap();
+    insert(&connection, "add-copied", "copy");
+    assert_eq!(settle(&mut connection, "add-copied"), 1);
+    let ended = projects_home::add_ended(&connection)
+        .unwrap()
+        .expect("a landed add whose record never came was forgotten");
+    assert_eq!(
+        (ended.request.as_str(), ended.mode, ended.ended.as_str()),
+        ("add-copied", crate::projects_home::AddMode::Copy, "done")
+    );
+
+    insert(&connection, "add-moved", "move");
+    assert_eq!(settle(&mut connection, "add-moved"), 1);
+    let ended = projects_home::add_ended(&connection).unwrap().unwrap();
+    assert_eq!(
+        (ended.request.as_str(), ended.mode, ended.ended.as_str()),
+        (
+            "add-moved",
+            crate::projects_home::AddMode::Move,
+            "home_move_source_left"
+        )
+    );
+    let rows: i64 = connection
+        .query_row("SELECT count(*) FROM projects_home_add", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 1, "only the newest end is kept");
+    assert_eq!(
+        std::fs::read_to_string(source.join("lib/a.txt")).unwrap(),
+        "a\n",
+        "a settle deletes nothing of the old folder"
+    );
+    assert!(landed.join("lib").is_dir(), "nor of the landed folder");
+
+    assert_eq!(
+        settle(&mut connection, "add-moved"),
+        0,
+        "a recorded or settled add has no running row"
+    );
+    let kept = projects_home::add_ended(&connection).unwrap().unwrap();
+    assert_eq!(kept.request.as_str(), "add-moved");
+}
+
 /// A delete's mark outlives a settle that only shares its exchange number, since a new engine
 /// process numbers exchanges again: a start ends the mark of a project that went and turns
 /// the mark of a project still there into a notice that names no exchange, and a later settle
