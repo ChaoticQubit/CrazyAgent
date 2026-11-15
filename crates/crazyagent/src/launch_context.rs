@@ -2266,10 +2266,8 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
         open()
     });
     let file = File::from(opened.map_err(|_| failure("launch_context_unsafe"))?);
-    let metadata = file
-        .metadata()
-        .map_err(|_| failure("launch_context_unsafe"))?;
-    if !lock_kept(&metadata) {
+    let found = rustix::fs::fstat(&file).map_err(|_| failure("launch_context_unsafe"))?;
+    if !lock_kept(&found) {
         return Err(failure("launch_context_unsafe"));
     }
     rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
@@ -2281,12 +2279,14 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
 /// second link, which may be the owner's file an agent linked in and which the profile keeps
 /// a confined agent from making (r3, `sandbox::launch_denies`). On Linux Landlock and
 /// bubblewrap refuse a link from outside an agent's write roots and holding the lock changes
-/// no file, so a second name there stays harmless (code r3 F2). Input: its metadata.
+/// no file, so a second name there stays harmless (code r3 F2). The launch's open and an
+/// agent home's reset both judge it here, so the reset keeps exactly the lock the launch
+/// holds. Input: what was read of it without following a link. Output: the answer.
 #[cfg(unix)]
-pub(crate) fn lock_kept(metadata: &fs::Metadata) -> bool {
-    metadata.is_file()
-        && metadata.uid() == rustix::process::geteuid().as_raw()
-        && (cfg!(not(target_os = "macos")) || metadata.nlink() == 1)
+pub(crate) fn lock_kept(found: &rustix::fs::Stat) -> bool {
+    rustix::fs::FileType::from_raw_mode(found.st_mode) == rustix::fs::FileType::RegularFile
+        && found.st_uid == rustix::process::geteuid().as_raw()
+        && (cfg!(not(target_os = "macos")) || found.st_nlink == 1)
 }
 
 /// Keeps a home's launch lock where it is a plain file, on systems with no owner-only lock,

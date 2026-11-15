@@ -45,6 +45,10 @@ pub(crate) const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-
 /// each removing what the last left: a second finds what a listing skipped as entries went,
 /// and only a process still adding entries outlasts them all, which refuses the launch.
 const HOME_PASSES_MAX: usize = 8;
+/// How many lists deep [`HOME_KEPT`] nests below the home's own, `Library/Preferences` being
+/// the deepest folder a launch keeps only part of.
+#[cfg(unix)]
+const KEPT_DEPTH_MAX: usize = 2;
 /// What a launch keeps in an agent home (RV-DS241-137), every other entry going: the
 /// engine's launch state, lock, relay plugin and key file; both harnesses' instruction and
 /// Codex config files, which the launch rewrites, and the skills; Claude Code's sign-in,
@@ -1098,15 +1102,31 @@ fn real_folder(folder: &Path) -> Result<(), AgentHomeError> {
     Ok(())
 }
 
-/// Removes one entry of an agent home without following a link in its last part, so a link
-/// goes and what it names stays. An entry an agent pinned with the immutable or append-only
-/// flag, in a folder it may have pinned too, or a folder it left without write, is first
-/// made removable: the flags of its parent, of the entry and of all it holds are cleared and
-/// its folders opened up, each through a handle that follows no link, or by path where an
-/// entry will not open (RV-DS241-138, -137 code r1 F2), and the ACLs of the parent, the
-/// entry and all it holds go (sec r1 F2), by their paths, so one that denies listing or
-/// reading goes too (code r2 F3). Input: the entry. Output: unit, or
+/// Removes one entry of an agent home, or of an engine folder no agent writes, with all it
+/// holds and without following a link, so a link goes and what it names stays. Its parent
+/// is opened by path without following a link in its last part ([`open_real_folder`]), so
+/// the folders above the parent must be ones no agent can change, and the entry goes through
+/// handles from there ([`crate::team::cleanup::remove_home_entry`]), with the flags, modes
+/// and ACLs an agent set cleared on the way (RV-DS241-138, -137 code r1 F2, sec r1 F2, code
+/// r2 F3, sec F1 ds137-lock-linux). Input: the entry. Output: unit, or
 /// `agent_home_unwritable` when it stays, refusing the launch.
+#[cfg(unix)]
+pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(failure("agent_home_unwritable"));
+    };
+    let folder = match open_real_folder(parent) {
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        opened => opened.map_err(|_| failure("agent_home_unwritable"))?,
+    };
+    crate::team::cleanup::remove_home_entry(&folder, name)
+        .map_err(|_| failure("agent_home_unwritable"))
+}
+
+/// Removes one entry of an agent home without following a link in its last part, where no
+/// agent sandbox runs and no handle walk is built ([`crate::team::cleanup::remove_agent_tree`]
+/// once a plain removal stops). Input: the entry. Output: unit, or `agent_home_unwritable`.
+#[cfg(not(unix))]
 pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
     let folder = match fs::symlink_metadata(path) {
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1121,32 +1141,150 @@ pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
     if removed.is_ok() {
         return Ok(());
     }
-    let parent = path.parent();
-    if let Some(parent) = parent {
-        unpin(parent);
-    }
-    if !folder {
-        unpin(path);
-    }
-    crate::team::cleanup::release_acls(parent.into_iter().chain([path]));
     if folder {
-        return crate::team::cleanup::remove_home_tree(path)
+        return crate::team::cleanup::remove_agent_tree(path)
             .map_err(|_| failure("agent_home_unwritable"));
     }
     fs::remove_file(path).map_err(|_| failure("agent_home_unwritable"))
 }
 
+/// Opens a real folder by its path without following a link in its last part, clearing its
+/// ACL by its path and opening it once more when an ACL an earlier run left denies listing
+/// it (code r2 F3). Input: the folder. Output: its handle, or the error.
+#[cfg(unix)]
+fn open_real_folder(folder: &Path) -> rustix::io::Result<std::os::fd::OwnedFd> {
+    use rustix::fs::{CWD, Mode, OFlags};
+    let flags =
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    let open = || rustix::fs::openat(CWD, folder, flags, Mode::empty());
+    open().or_else(|_| {
+        crate::team::cleanup::release_acls([folder]);
+        open()
+    })
+}
+
+/// Removes from an agent home every entry `kept` does not name with its kind, and does the
+/// same in each kept folder that has its own list ([`keep_in`]), never following a link
+/// (RV-DS241-137). The home is opened once, by its path without following a link in its last
+/// part, and each folder below it is opened, listed and changed only through handles opened
+/// relative to its parent's, so a process an agent left that swaps a folder for a link
+/// meanwhile never leads the reset outside the home (sec F1 ds137-lock-linux). Flags an agent
+/// set on the home are cleared first (RV-DS241-138). Inputs: the home, what stays in it and
+/// the entries held so far. Output: unit, or `agent_home_unwritable` when a folder will not
+/// open or list, one entry stays or a folder still changes after [`HOME_PASSES_MAX`] passes.
+#[cfg(unix)]
+fn keep_only(
+    home: &Path,
+    kept: &[(&str, Kept)],
+    held: &mut Vec<PathBuf>,
+) -> Result<(), AgentHomeError> {
+    use std::os::fd::AsFd;
+    assert!(home.is_absolute());
+    unpin_at(rustix::fs::CWD, home);
+    let folder = open_real_folder(home).map_err(|_| failure("agent_home_unwritable"))?;
+    keep_in(folder.as_fd(), home, kept, held, 0)
+}
+
+/// Removes from one open real folder of an agent home, at `at`, every entry `kept` does not
+/// name with its kind, and does the same in each kept folder that has its own list. A kept
+/// file stays only as this user's file with one link, so a name an agent linked to the
+/// owner's file goes as a plain unlink and that file never changes (V231-ACL, r3). Flags an
+/// agent set on an entry it keeps are cleared (RV-DS241-138), and the folder and every entry
+/// it keeps are added to `held`, whose ACLs the caller clears in one step (sec r1 F2). The
+/// folder is listed as it goes, in passes until one removes nothing and leaves each kept
+/// folder it walked under its name; a listing that stops clears the folder's ACL by its path
+/// and tries once more (code r2 F3). Inputs: the folder, its path, what stays in it, the
+/// entries held so far and how many lists deep it is. Output: as [`keep_only`].
+#[cfg(unix)]
+fn keep_in(
+    folder: std::os::fd::BorrowedFd<'_>,
+    at: &Path,
+    kept: &[(&str, Kept)],
+    held: &mut Vec<PathBuf>,
+    depth: usize,
+) -> Result<(), AgentHomeError> {
+    use rustix::fs::{AtFlags, FileType};
+    use std::os::fd::AsFd;
+    use std::os::unix::ffi::OsStrExt;
+    assert!(depth <= KEPT_DEPTH_MAX);
+    assert!(!kept.is_empty());
+    let unwritable = |_| failure("agent_home_unwritable");
+    let remove = |name: &std::ffi::CStr| {
+        crate::team::cleanup::remove_home_entry(folder, name)
+            .map_err(|_| failure("agent_home_unwritable"))
+    };
+    let before = held.len();
+    for _ in 0..HOME_PASSES_MAX {
+        held.truncate(before);
+        held.push(at.to_path_buf());
+        let mut removed = false;
+        let listed = rustix::fs::Dir::read_from(folder).or_else(|_| {
+            crate::team::cleanup::release_acls([at]);
+            rustix::fs::Dir::read_from(folder)
+        });
+        for entry in listed.map_err(unwritable)? {
+            let entry = entry.map_err(unwritable)?;
+            let name = entry.file_name();
+            if matches!(name.to_bytes(), b"." | b"..") {
+                continue;
+            }
+            let found = match rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Err(rustix::io::Errno::NOENT) => continue,
+                Err(_) => return Err(failure("agent_home_unwritable")),
+                Ok(found) => found,
+            };
+            let form = FileType::from_raw_mode(found.st_mode);
+            let path = at.join(std::ffi::OsStr::from_bytes(name.to_bytes()));
+            let wanted = kept
+                .iter()
+                .find(|(known, _)| name.to_bytes() == known.as_bytes())
+                .map(|(_, kind)| *kind);
+            match wanted {
+                Some(Kept::File) if form == FileType::RegularFile && sole_own(&found) => {
+                    unpin_at(folder, name)
+                }
+                Some(Kept::Lock) if crate::launch_context::lock_kept(&found) => {
+                    unpin_at(folder, name)
+                }
+                Some(Kept::Folder) if form == FileType::Directory => unpin_at(folder, name),
+                Some(Kept::Link) if form == FileType::Symlink => unpin_at(folder, name),
+                Some(Kept::Only(inner)) if form == FileType::Directory => {
+                    #[cfg(all(test, unix))]
+                    before_home_step(&path);
+                    unpin_at(folder, name);
+                    let opened = crate::team::cleanup::open_home_folder(folder, name);
+                    let Some(inside) = opened.map_err(unwritable)? else {
+                        remove(name)?;
+                        removed = true;
+                        continue;
+                    };
+                    keep_in(inside.as_fd(), &path, inner, held, depth + 1)?;
+                    removed |= !same_entry(folder, name, &inside);
+                    continue;
+                }
+                _ => {
+                    #[cfg(all(test, unix))]
+                    before_home_step(&path);
+                    remove(name)?;
+                    removed = true;
+                    continue;
+                }
+            }
+            held.push(path);
+        }
+        if !removed {
+            return Ok(());
+        }
+    }
+    Err(failure("agent_home_unwritable"))
+}
+
 /// Removes from one real folder of an agent home every entry `kept` does not name with its
-/// kind, and does the same in each kept folder that has its own list, never following a
-/// link (RV-DS241-137). A kept file stays only as this user's file with one link, so a name
-/// an agent linked to the owner's file goes as a plain unlink and that file never changes
-/// (V231-ACL, r3). Flags an agent set on the folder or on an entry it keeps are cleared
-/// (RV-DS241-138), and the folder and every entry it keeps are added to `held`, whose ACLs
-/// the caller clears in one step (sec r1 F2). The folder is listed as it goes, in passes
-/// until one removes nothing; a listing that stops clears the folder's ACL by its path and
-/// tries once more (code r2 F3). Inputs: the folder, what stays in it and the entries held so
-/// far. Output: unit, or `agent_home_unwritable` when it cannot be listed, one entry stays
-/// or it still changes after [`HOME_PASSES_MAX`] passes.
+/// kind, and does the same in each kept folder that has its own list, by path, where no
+/// agent sandbox runs and no handle walk is built. Inputs: the folder, what stays in it and
+/// the entries held so far. Output: unit, or `agent_home_unwritable` when it cannot be
+/// listed, one entry stays or it still changes after [`HOME_PASSES_MAX`] passes.
+#[cfg(not(unix))]
 fn keep_only(
     folder: &Path,
     kept: &[(&str, Kept)],
@@ -1154,17 +1292,13 @@ fn keep_only(
 ) -> Result<(), AgentHomeError> {
     assert!(folder.is_absolute());
     assert!(!kept.is_empty());
-    unpin(folder);
     let before = held.len();
     for _ in 0..HOME_PASSES_MAX {
         held.truncate(before);
         held.push(folder.to_path_buf());
         let mut removed = false;
-        let listed = fs::read_dir(folder).or_else(|_| {
-            crate::team::cleanup::release_acls([folder]);
-            fs::read_dir(folder)
-        });
-        for entry in listed.map_err(|_| failure("agent_home_unwritable"))? {
+        let listed = fs::read_dir(folder).map_err(|_| failure("agent_home_unwritable"))?;
+        for entry in listed {
             let name = entry
                 .map_err(|_| failure("agent_home_unwritable"))?
                 .file_name();
@@ -1180,19 +1314,15 @@ fn keep_only(
                 .find(|(known, _)| name == *known)
                 .map(|(_, kind)| *kind);
             match wanted {
-                Some(Kept::File) if metadata.is_file() && sole_own_link(&metadata) => unpin(&path),
-                Some(Kept::Lock) if crate::launch_context::lock_kept(&metadata) => unpin(&path),
-                Some(Kept::Folder) if metadata.is_dir() => unpin(&path),
-                Some(Kept::Link) if link => unpin(&path),
+                Some(Kept::File) if metadata.is_file() && sole_own_link(&metadata) => {}
+                Some(Kept::Lock) if crate::launch_context::lock_kept(&metadata) => {}
+                Some(Kept::Folder) if metadata.is_dir() => {}
+                Some(Kept::Link) if link => {}
                 Some(Kept::Only(inner)) if metadata.is_dir() => {
-                    #[cfg(all(test, unix))]
-                    before_home_step(&path);
                     keep_only(&path, inner, held)?;
                     continue;
                 }
                 _ => {
-                    #[cfg(all(test, unix))]
-                    before_home_step(&path);
                     remove_entry(&path)?;
                     removed = true;
                     continue;
@@ -1205,6 +1335,29 @@ fn keep_only(
         }
     }
     Err(failure("agent_home_unwritable"))
+}
+
+/// Whether `name` in an open folder still names the open entry `held`, judged by device and
+/// inode without following a link. Inputs: the folder, the name and the entry. Output: the
+/// answer, false when either cannot be read.
+#[cfg(unix)]
+fn same_entry(
+    folder: std::os::fd::BorrowedFd<'_>,
+    name: &std::ffi::CStr,
+    held: &std::os::fd::OwnedFd,
+) -> bool {
+    let named = rustix::fs::statat(folder, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW);
+    match (named, rustix::fs::fstat(held)) {
+        (Ok(named), Ok(held)) => named.st_dev == held.st_dev && named.st_ino == held.st_ino,
+        _ => false,
+    }
+}
+
+/// Whether an entry, read without following a link, is this user's with one link. Input:
+/// what was read. Output: the answer.
+#[cfg(unix)]
+fn sole_own(found: &rustix::fs::Stat) -> bool {
+    found.st_nlink == 1 && found.st_uid == rustix::process::geteuid().as_raw()
 }
 
 #[cfg(all(test, unix))]
@@ -1295,16 +1448,17 @@ fn pin_below(prefix: &str, kept: &[(&str, Kept)], pinned: &mut Vec<String>) {
 /// Clears the immutable and append-only flags an agent may set on one entry of its home,
 /// without following a link ([`crate::team::cleanup::unpin_home_entry`]), so they keep
 /// nothing from going or being rewritten, also on an entry that will not open (RV-DS241-138,
-/// -137 code r1 F2). Input: the entry.
+/// -137 code r1 F2). Inputs: the entry's open parent and its name there, absolute when the
+/// parent is the working folder.
 #[cfg(target_os = "macos")]
-fn unpin(path: &Path) {
-    crate::team::cleanup::unpin_home_entry(rustix::fs::CWD, path);
+fn unpin_at<P: rustix::path::Arg + Copy>(parent: std::os::fd::BorrowedFd<'_>, name: P) {
+    crate::team::cleanup::unpin_home_entry(parent, name);
 }
 
-/// Leaves flags alone where no flag an agent may set keeps an entry from going. Input:
+/// Leaves flags alone where no flag an agent may set keeps an entry from going. Inputs:
 /// unused.
-#[cfg(not(target_os = "macos"))]
-fn unpin(_path: &Path) {}
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unpin_at<P: rustix::path::Arg + Copy>(_: std::os::fd::BorrowedFd<'_>, _: P) {}
 
 /// Clears a directory planted where a file is about to be written; a file or link stays
 /// for the rename to replace atomically, so a reader never finds the name missing.
