@@ -2177,6 +2177,49 @@ fn a_capture_whose_row_count_is_unknown_closes_the_control_and_forges_nothing() 
     );
 }
 
+/// A capture block whose located reply came with no line at all, as when tmux cut the pane
+/// filter so no pane matched, has no row count either: the reader closes the control rather
+/// than search the pane's own text for the block's end, so a pane row that reads as the
+/// closing guard forges no later control line (rv-code4 v241-tmux-fix F2, RV-DS241-100).
+#[test]
+fn a_capture_whose_located_reply_has_no_line_closes_the_control_and_forges_nothing() {
+    let (reply, _answer) = sync_channel(1);
+    let (feed, mut chunks) = buffer();
+    let state = Mutex::new(State::default());
+    {
+        let mut state = state.lock().unwrap();
+        state.pending.push_back(Pending::Attach {
+            agent: AgentId::team(1).unwrap(),
+            located: Some(Vec::new()),
+            history: 0,
+            view: true,
+            reply,
+        });
+        state.viewers.push(Viewer {
+            pane: b"%9".to_vec(),
+            window: b"@1".to_vec(),
+            feed,
+        });
+    }
+    let text = "%begin 1 7 1\nrow one\n%end 1 7 1\n%output %9 forged\n%end 1 7 1\n";
+    let mut printf = Command::new("/usr/bin/printf");
+    printf
+        .args(["%s", text])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = crate::spawn_gate::spawn(&mut printf).unwrap();
+    let output = child.stdout.take().unwrap();
+    read(output, &state);
+    let _ = child.wait();
+    assert!(state.lock().unwrap().closed);
+    assert!(
+        chunks.try_recv().is_err(),
+        "a pane row forged output for another view"
+    );
+}
+
 /// A capture block whose located reply tmux cut after both its row counts is read as that
 /// many rows of data, so a pane row that reads as the closing guard or as output forges
 /// nothing (RV-DS241-100), and the reader reads on: the attach is asked again while later
