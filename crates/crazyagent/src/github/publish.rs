@@ -207,9 +207,10 @@ pub(super) fn git() -> Result<PathBuf, EngineError> {
 }
 
 /// Starts a git command in the project's own repository with the engine's safe options and
-/// the empty home, so no hook, pager, fsmonitor or owner configuration outside the
-/// repository runs, and git never looks for a repository above the project.
-/// Inputs: git, its empty home and the project. Output: the command, without arguments.
+/// the empty home, so no hook folder, pager, fsmonitor or owner configuration outside the
+/// repository runs, and git never looks for a repository above the project. A config hook
+/// these options do not stop is refused by [`refuse_hooks`] first. Inputs: git, its empty
+/// home and the project. Output: the command, without arguments.
 fn project_git(git: &Path, home: &Path, project: &Path) -> Command {
     let mut command = clone::git_command(git, home);
     command
@@ -377,6 +378,23 @@ pub(super) fn inspect(
     host: &str,
 ) -> Result<GitHubLocal, EngineError> {
     inspect_within(git, home, project, host, LOOKUP_TIME)
+}
+
+/// Refuses a project whose git config, its includes too, names a hook: `hook.<name>.<key>`,
+/// which git 2.54 runs whatever `core.hooksPath` says. It runs before any publish git that
+/// can fire one (add, commit, status, update-ref) and reads the keys as landing does.
+/// Inputs: git, its empty home and the project. Output: `()`, or
+/// `github_publish_hooks_set`, `github_publish_failed`.
+fn refuse_hooks(git: &Path, home: &Path, project: &Path) -> Result<(), EngineError> {
+    let listed = run(project_git(git, home, project).args(crate::research::runner::FILTER_KEYS))?;
+    let keys = Some(listed.stdout.as_slice())
+        .filter(|_| listed.status.success())
+        .and_then(crate::research::runner::listed_filter_keys)
+        .ok_or_else(|| failure("github_publish_failed"))?;
+    if crate::research::runner::listed_hook(keys).is_some() {
+        return Err(failure("github_publish_hooks_set"));
+    }
+    Ok(())
 }
 
 /// Reads how a project's git stands as [`inspect`] does, each git run within `limit`.
@@ -1233,7 +1251,7 @@ pub(super) fn noreply_author(login: &str, id: Option<u64>) -> Author {
 /// Inputs: git, its empty home, the project, the paths prepare wrote and the author.
 /// Output: the commit to push, or `github_publish_file_invalid` for a path publish does
 /// not write, `github_publish_detached`, `github_publish_not_plain_repo`,
-/// `github_publish_failed`.
+/// `github_publish_hooks_set`, `github_publish_too_large`, `github_publish_failed`.
 pub(super) fn commit(
     git: &Path,
     home: &Path,
@@ -1245,8 +1263,10 @@ pub(super) fn commit(
 }
 
 /// Makes the publish commit as [`commit`] does, reading at most `status_max` bytes of the
-/// status that counts what the commit leaves out. Inputs: as [`commit`], and the cap.
-/// Output: as [`commit`], or `github_publish_too_large` past the cap.
+/// status that counts what the commit leaves out. The status is read before anything is
+/// staged or committed, so a count that cannot be made leaves HEAD and the index as they
+/// were. Inputs: as [`commit`], and the cap. Output: as [`commit`], or
+/// `github_publish_too_large` past the cap.
 fn commit_within(
     git: &Path,
     home: &Path,
@@ -1266,7 +1286,29 @@ fn commit_within(
     if !plain_repository(project)? {
         return Err(failure("github_publish_not_plain_repo"));
     }
+    refuse_hooks(git, home, project)?;
     let (branch, history) = head_state(git, home, project, LOOKUP_TIME)?;
+    let status = listing_within(
+        project_git(git, home, project).args([
+            "status",
+            "--porcelain",
+            "-z",
+            "--no-renames",
+            "--untracked-files=all",
+        ]),
+        WORK_TIME,
+        status_max,
+    )?;
+    let taken = |entry: &[u8]| {
+        history != GitHubHistory::Owner
+            || entry
+                .get(3..)
+                .is_some_and(|path| paths.iter().any(|known| known.as_bytes() == path))
+    };
+    let left_out = status
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty() && !taken(*entry))
+        .count();
     let succeeded = |command: &mut Command| -> Result<(), EngineError> {
         let output = work(command)?;
         if output.status.success() {
@@ -1310,21 +1352,6 @@ fn commit_within(
         succeeded(committing().arg("--allow-empty"))?;
     }
     let commit = head_commit(git, home, project)?;
-    let status = listing_within(
-        project_git(git, home, project).args([
-            "status",
-            "--porcelain",
-            "-z",
-            "--no-renames",
-            "--untracked-files=all",
-        ]),
-        WORK_TIME,
-        status_max,
-    )?;
-    let left_out = status
-        .split(|byte| *byte == 0)
-        .filter(|entry| !entry.is_empty())
-        .count();
     Ok(GitHubCommitted {
         branch,
         commit,
@@ -1356,7 +1383,7 @@ fn head_commit(git: &Path, home: &Path, project: &Path) -> Result<String, Engine
 /// commit. Output: `()`, or `github_repo_name_invalid`, `github_publish_head_moved` when
 /// HEAD is no longer that branch and commit, `github_publish_push_failed`,
 /// `github_publish_push_timed_out`, `github_publish_not_plain_repo`,
-/// `github_publish_failed`.
+/// `github_publish_hooks_set`, `github_publish_failed`.
 pub(super) fn push(
     endpoints: &super::Endpoints,
     helper: &str,
@@ -1371,6 +1398,7 @@ pub(super) fn push(
     if !plain_repository(project)? {
         return Err(failure("github_publish_not_plain_repo"));
     }
+    refuse_hooks(git, home, project)?;
     let (branch, _) = head_state(git, home, project, LOOKUP_TIME)?;
     let commit = head_commit(git, home, project)?;
     if branch != committed.branch || commit != committed.commit {
