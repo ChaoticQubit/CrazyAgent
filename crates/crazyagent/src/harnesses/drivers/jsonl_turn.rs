@@ -56,21 +56,6 @@ impl Config {
                 "piped.argv: {prompt} is needed, so each turn's prompt reaches the harness.".into(),
             );
         }
-        let positional = argv
-            .iter()
-            .position(|argument| argument == "--")
-            .unwrap_or(argv.len());
-        if argv[..positional]
-            .iter()
-            .any(|argument| argument.starts_with("{prompt}"))
-        {
-            return refuse(
-                manifest::VALUE,
-                "piped.argv: {prompt} begins an argument; write it after text such as \
-                 --prompt= or after a -- entry, so a prompt is never read as an option."
-                    .into(),
-            );
-        }
         let resume = arguments(piped, "resume")?.unwrap_or_default();
         if !resume.is_empty() && !resume.iter().any(|argument| argument.contains("{session}")) {
             return refuse(
@@ -79,20 +64,8 @@ impl Config {
             );
         }
         let tools_off = arguments(piped, "tools_off")?;
-        for (key, added) in [
-            ("resume", resume.as_slice()),
-            ("tools_off", tools_off.as_deref().unwrap_or_default()),
-        ] {
-            if added.iter().any(|argument| argument.contains("{prompt}")) {
-                return refuse(
-                    manifest::VALUE,
-                    format!(
-                        "piped.{key}: {{prompt}} belongs in piped.argv only, so a prompt is \
-                         never read as an option."
-                    ),
-                );
-            }
-        }
+        let positional =
+            super::positional(&argv, &resume, tools_off.as_deref().unwrap_or_default())?;
         let set = match piped.get("rules") {
             None | Some(Yaml::Null) => {
                 return refuse(
@@ -252,12 +225,7 @@ impl JsonlTurn {
         } else {
             self.config.tools_off.as_deref().unwrap_or_default()
         };
-        let (options, positional) = self.config.argv.split_at(self.config.positional);
-        let argv = options
-            .iter()
-            .chain(resume)
-            .chain(off)
-            .chain(positional)
+        let argv = super::ordered(&self.config.argv, self.config.positional, resume, off)
             .map(|argument| self.fill(argument, prompt))
             .collect::<Result<Vec<String>, LaunchError>>()?;
         assert_eq!(

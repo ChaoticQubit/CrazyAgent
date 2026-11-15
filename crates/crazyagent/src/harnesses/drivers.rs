@@ -1,5 +1,5 @@
 use super::launch::{LaunchError, failure};
-use super::manifest::{DriverKind, PLACEHOLDERS};
+use super::manifest::{self, DriverKind, PLACEHOLDERS, Refused};
 use super::registry::{Harness, registry};
 
 pub mod acp;
@@ -80,6 +80,57 @@ fn fill<'a>(
     }
     filled.push_str(rest);
     Ok(filled)
+}
+
+/// Where a per-turn driver puts `piped.resume` and `piped.tools_off` among the arguments of
+/// `piped.argv`: before its first `--` entry, or at its end with none, checked so a prompt is
+/// never read as an option. Inputs: the `piped.argv`, `piped.resume` and `piped.tools_off`
+/// of one manifest. Output: that index, or a refusal for a `{prompt}` that begins an argument
+/// before it, or for `{prompt}` in `piped.resume` or `piped.tools_off`.
+fn positional(argv: &[String], resume: &[String], tools_off: &[String]) -> Result<usize, Refused> {
+    let positional = argv
+        .iter()
+        .position(|argument| argument == "--")
+        .unwrap_or(argv.len());
+    if argv[..positional]
+        .iter()
+        .any(|argument| argument.starts_with("{prompt}"))
+    {
+        return Err(Refused {
+            code: manifest::VALUE,
+            message: "piped.argv: {prompt} begins an argument; write it after text such as \
+                      --prompt= or after a -- entry, so a prompt is never read as an option."
+                .into(),
+        });
+    }
+    for (key, added) in [("resume", resume), ("tools_off", tools_off)] {
+        if added.iter().any(|argument| argument.contains("{prompt}")) {
+            return Err(Refused {
+                code: manifest::VALUE,
+                message: format!(
+                    "piped.{key}: {{prompt}} belongs in piped.argv only, so a prompt is never \
+                     read as an option."
+                ),
+            });
+        }
+    }
+    assert!(positional <= argv.len());
+    Ok(positional)
+}
+
+/// The arguments of one turn in order, before their placeholders are filled: `piped.argv` up
+/// to `positional`, then `resume`, then `off`, then the rest of `piped.argv` from its `--`
+/// entry on, so a prompt after that entry can neither end nor add an option. Inputs:
+/// `piped.argv`, the index [`positional`] gave for it and this turn's added arguments.
+/// Output: the arguments.
+fn ordered<'a>(
+    argv: &'a [String],
+    positional: usize,
+    resume: &'a [String],
+    off: &'a [String],
+) -> impl Iterator<Item = &'a String> {
+    let (options, rest) = argv.split_at(positional);
+    options.iter().chain(resume).chain(off).chain(rest)
 }
 
 #[cfg(test)]

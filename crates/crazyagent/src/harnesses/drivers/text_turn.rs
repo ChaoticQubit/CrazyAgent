@@ -2,6 +2,7 @@ use super::super::launch::{LaunchError, LaunchEvent, PROMPT_BYTES_MAX, failure};
 use super::super::manifest::{self, DriverKind, Manifest, Refused};
 use super::jsonl_turn::{MODEL_BYTES_MAX, Phase, arguments, plain_session};
 use super::rules;
+use crate::adapters::FIELD_BYTES_MAX;
 use serde_json::Value;
 use std::path::Path;
 
@@ -9,12 +10,14 @@ use std::path::Path;
 pub const OUTPUT_BYTES_MAX: usize = 1024 * 1024;
 
 /// The piped settings of a harness on the `text-turn` driver, read from its manifest: the
-/// arguments of every turn, the ones added to continue a session, the ones added with tools
-/// off, and, for a harness that ends its output with one JSON object, the paths of the
-/// reply and of the session id in it. With no reply path, the reply is the whole output.
+/// arguments of every turn and the index of their first `--` entry, the ones added to
+/// continue a session, the ones added with tools off, and, for a harness that ends its
+/// output with one JSON object, the paths of the reply and of the session id in it. With no
+/// reply path, the reply is the whole output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     argv: Vec<String>,
+    positional: usize,
     resume: Vec<String>,
     tools_off: Option<Vec<String>>,
     reply: Option<String>,
@@ -24,9 +27,11 @@ pub struct Config {
 impl Config {
     /// Reads the settings of one manifest. Input: a manifest whose `piped.driver` is
     /// `text-turn`. Output: the settings, or a refusal that names the setting: `piped.argv`
-    /// missing or without `{prompt}`, `piped.resume` without `{session}`, an argument that is
-    /// not 1 to `ARG_BYTES_MAX` bytes of text, a `piped.reply` or `piped.session` that is not
-    /// a plain dotted path, or `piped.session` without `piped.reply`.
+    /// missing or without `{prompt}`, `piped.resume` without `{session}`, a `{prompt}` that
+    /// begins an argument before any `--` entry or sits in `piped.resume` or
+    /// `piped.tools_off`, an argument that is not 1 to `ARG_BYTES_MAX` bytes of text, a
+    /// `piped.reply` or `piped.session` that is not a plain dotted path, or `piped.session`
+    /// without `piped.reply`.
     pub fn read(manifest: &Manifest) -> Result<Self, Refused> {
         let Some(piped) = manifest
             .block("piped")
@@ -55,6 +60,8 @@ impl Config {
             );
         }
         let tools_off = arguments(piped, "tools_off")?;
+        let positional =
+            super::positional(&argv, &resume, tools_off.as_deref().unwrap_or_default())?;
         let reply = rules::path_of(piped, "reply", "piped.reply")?;
         let session = rules::path_of(piped, "session", "piped.session")?;
         if session.is_some() && reply.is_none() {
@@ -63,8 +70,10 @@ impl Config {
                 "piped.session: a session id is read only from the final JSON a reply path names.",
             );
         }
+        assert!(positional <= argv.len());
         Ok(Self {
             argv,
+            positional,
             resume,
             tools_off,
             reply,
@@ -83,7 +92,8 @@ struct Turn {
 /// One conversation with a harness that runs one process per turn and gives no event
 /// stream, without any IO: it gives each turn's arguments, keeps the turn's output within
 /// [`OUTPUT_BYTES_MAX`], and when the process exits gives the reply, the whole output or one
-/// field of its final JSON object, and the turn's end. It never reports usage, so a run on
+/// field of its final JSON object, as text events within `FIELD_BYTES_MAX`, and the turn's
+/// end. It never reports usage, so a run on
 /// it reads "not reported". A session id the final JSON gives is passed to the next turn
 /// through `piped.resume`.
 #[derive(Debug)]
@@ -164,8 +174,10 @@ impl TextTurn {
     }
 
     /// Starts a turn. Input: the prompt. Output: the turn's arguments, each placeholder
-    /// filled once and never again inside a filled value: `piped.argv`, then `piped.resume`
-    /// when a session id is known, then `piped.tools_off` with tools off. Refusals: as on
+    /// filled once and never again inside a filled value: `piped.argv` up to its first `--`
+    /// entry, then `piped.resume` when a session id is known, then `piped.tools_off` with
+    /// tools off, then the rest of `piped.argv` from that `--` on, so a prompt after it can
+    /// neither end nor add an option and tools off always reaches the harness. Refusals: as on
     /// jsonl-turn, `launch_prompt_invalid`, `launch_busy`, `launch_protocol_failed` once
     /// failed, `launch_model_unsupported`, `launch_session_id_invalid` and
     /// `launch_harness_unsupported` for an account value this driver does not hand out yet.
@@ -190,15 +202,13 @@ impl TextTurn {
         } else {
             self.config.tools_off.as_deref().unwrap_or_default()
         };
-        let argv = self
-            .config
-            .argv
-            .iter()
-            .chain(resume)
-            .chain(off)
+        let argv = super::ordered(&self.config.argv, self.config.positional, resume, off)
             .map(|argument| super::fill(argument, |name| self.value(name, prompt)))
             .collect::<Result<Vec<String>, LaunchError>>()?;
-        assert!(argv.len() >= self.config.argv.len());
+        assert_eq!(
+            argv.len(),
+            self.config.argv.len() + resume.len() + off.len()
+        );
         self.phase = Phase::Running;
         self.turn = Turn::default();
         self.assert_consistent();
@@ -255,7 +265,8 @@ impl TextTurn {
     /// unsuccessful end; for an exit code other than 0 or a signal, a `TurnError` and an
     /// unsuccessful end, with no reply; else the reply, when it is not empty, and a
     /// successful end, or a `TurnError` and an unsuccessful end when the final JSON holds no
-    /// text at the reply path. Input: the exit code, none when a signal ended the process.
+    /// text at the reply path. A reply comes as text events of at most `FIELD_BYTES_MAX`
+    /// bytes each. Input: the exit code, none when a signal ended the process.
     /// Output: the events, `launch_not_running` with no turn, or `launch_session_id_invalid`
     /// for a session id that is not plain, which fails the conversation for good.
     pub fn exited(&mut self, code: Option<i32>) -> Result<Vec<LaunchEvent>, LaunchError> {
@@ -275,7 +286,7 @@ impl TextTurn {
             events.extend([LaunchEvent::Interrupted, unsuccessful]);
         } else if turn.over {
             if self.config.reply.is_none() {
-                events.extend(text(plain(&output)));
+                events.extend(texts(&plain(&output)));
             }
             events.extend([error, unsuccessful]);
         } else if code != Some(0) {
@@ -289,7 +300,7 @@ impl TextTurn {
                 }
                 Some((reply, session)) => {
                     self.session = session.or(self.session.take());
-                    events.extend(text(reply));
+                    events.extend(texts(&reply));
                     events.push(LaunchEvent::TurnFinished { success: true });
                 }
                 None => events.extend([error, unsuccessful]),
@@ -347,6 +358,7 @@ impl TextTurn {
         assert!(Path::new(&self.home).is_absolute() && Path::new(&self.cwd).is_absolute());
         assert!(self.session.as_deref().is_none_or(plain_session));
         assert!(!self.config.argv.is_empty());
+        assert!(self.config.positional <= self.config.argv.len());
         assert!(self.config.session.is_none() || self.config.reply.is_some());
         assert!(self.tools || self.config.tools_off.is_some());
         assert!(self.output.len() <= OUTPUT_BYTES_MAX);
@@ -357,9 +369,22 @@ impl TextTurn {
     }
 }
 
-/// The text event of a reply, none for an empty one. Input: the reply. Output: the event.
-fn text(reply: String) -> Option<LaunchEvent> {
-    (!reply.is_empty()).then_some(LaunchEvent::Text { text: reply })
+/// The text events of a reply in order, each 1 to `FIELD_BYTES_MAX` bytes cut at a character
+/// boundary, so a reply longer than one protocol frame is kept whole as chunks, the way a
+/// streamed reply comes on the other drivers; none for an empty reply. Input: the reply.
+/// Output: the events.
+fn texts(reply: &str) -> Vec<LaunchEvent> {
+    let mut events = Vec::with_capacity(reply.len().div_ceil(FIELD_BYTES_MAX));
+    let mut rest = reply;
+    while !rest.is_empty() {
+        let end = rest.floor_char_boundary(FIELD_BYTES_MAX);
+        assert!(end > 0 && end <= FIELD_BYTES_MAX);
+        events.push(LaunchEvent::Text {
+            text: rest[..end].to_owned(),
+        });
+        rest = &rest[end..];
+    }
+    events
 }
 
 /// The reply of a turn whose whole output is its reply: the output with bytes that are not
