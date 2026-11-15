@@ -15,11 +15,11 @@ function keys(value, found = []) {
   return found;
 }
 
-test("Linux bundles build a deb and an AppImage that carry their own tmux, so the deb depends on no distro tmux (DEC-157)", () => {
+test("Linux bundles build a deb and an AppImage that carry their own tmux, so the deb depends on no distro tmux, and the deb brings bubblewrap so agents can run nested (DEC-157, DEC-179 T5)", () => {
   const linux = config("tauri.linux.conf.json");
   assert.equal(linux.bundle.active, true);
   assert.deepEqual(linux.bundle.targets, ["deb", "appimage"]);
-  assert.deepEqual(linux.bundle.linux.deb.depends, ["xdg-utils"]);
+  assert.deepEqual(linux.bundle.linux.deb.depends, ["xdg-utils", "bubblewrap"]);
   assert.equal(linux.bundle.linux.appimage.bundleMediaFramework, false);
 });
 

@@ -69,6 +69,14 @@ pub fn record_engine_root(root: &Path) {
     assert_eq!(kept, root, "one engine root per process");
 }
 
+/// The data root this process's engine recorded at its start ([`record_engine_root`]),
+/// none in a process that runs no engine. No input. Output: the absolute root.
+pub(crate) fn engine_root() -> Option<&'static Path> {
+    let root = ENGINE_ROOT.get().map(PathBuf::as_path);
+    assert!(root.is_none_or(Path::is_absolute));
+    root
+}
+
 /// The owner line when tmux is found nowhere the resolver looks, with how to install it.
 /// The live master's problem line, its team note and the setup row show it word for word.
 #[cfg(target_os = "macos")]

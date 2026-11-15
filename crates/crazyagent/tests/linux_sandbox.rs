@@ -1,9 +1,9 @@
 #![cfg(target_os = "linux")]
-use crazyagent::sandbox::linux::{BWRAP_PATHS, HelperRequest, LinuxBackend, LinuxSandbox};
+use crazyagent::sandbox::linux::{BWRAP_PATHS, HelperRequest, LinuxBackend, LinuxSandbox, NEST_ARGS};
 
 use crazyagent::sandbox::{
-    InstalledSandbox, LinuxSockets, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork,
-    SandboxRemote,
+    InstalledSandbox, LinuxSockets, LinuxSupervisor, ProjectSandbox, Sandbox, SandboxError,
+    SandboxNetwork, SandboxRemote,
 };
 
 use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, Scope};
@@ -12,11 +12,13 @@ use std::ffi::{OsStr, OsString};
 
 use std::fs;
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
 
 use std::path::{Path, PathBuf};
 
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Output, Stdio};
+
+use std::time::{Duration, Instant};
 
 const HELPER: &str = env!("CARGO_BIN_EXE_crazyagent-landlock");
 
@@ -64,6 +66,13 @@ fn case() -> Case {
 
 fn policy(case: &Case, network: SandboxNetwork) -> ProjectSandbox {
     ProjectSandbox::new(&case.project, &case.home, &case.tmp, network).unwrap()
+}
+
+/// The plain Landlock backend for a policy: detection with no bubblewrap to look for, so a
+/// row about that backend holds on a machine that would otherwise nest the agent. Input:
+/// the policy. Output: the sandbox, which each row then asserts is Landlock.
+fn pinned(sandbox: ProjectSandbox) -> LinuxSandbox {
+    LinuxSandbox::detect_among(sandbox, Path::new(HELPER), &[]).unwrap()
 }
 
 fn quoted(path: &Path) -> String {
@@ -233,8 +242,7 @@ fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
 #[test]
 fn landlock_holds_the_project_boundary_on_this_kernel() {
     let case = case();
-    let sandbox =
-        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    let sandbox = pinned(policy(&case, SandboxNetwork::Open));
     assert!(
         matches!(sandbox.backend(), LinuxBackend::Landlock { .. }),
         "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
@@ -277,8 +285,7 @@ fn neither_backend_lets_an_agent_truncate_a_file_it_may_only_read() {
     let own = case.project.join("worktrees").join("own.txt");
     let brief = case.project.join("context").join("brief.md");
     let fixture = case.outside.join("fixture.txt");
-    let landlock =
-        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    let landlock = pinned(policy(&case, SandboxNetwork::Open));
     assert!(
         matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
         "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
@@ -443,8 +450,7 @@ fn no_agent_signals_an_outside_process_where_the_kernel_can_scope_signals() {
         "delivered\n",
         "the unsandboxed control must reach the outside process"
     );
-    let landlock =
-        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    let landlock = pinned(policy(&case, SandboxNetwork::Open));
     assert!(
         matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
         "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
@@ -522,8 +528,7 @@ fn no_agent_opens_a_terminal_the_owner_holds_outside_its_boundary() {
         "opened\n",
         "the unsandboxed control must open the held terminal"
     );
-    let landlock =
-        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    let landlock = pinned(policy(&case, SandboxNetwork::Open));
     assert!(
         matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
         "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
@@ -564,8 +569,7 @@ fn every_agent_leads_a_session_of_its_own_without_the_engine_terminal() {
     harness
         .args(["-c", SESSION])
         .current_dir(case.project.join("worktrees"));
-    let landlock =
-        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    let landlock = pinned(policy(&case, SandboxNetwork::Open));
     assert!(
         matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
         "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
@@ -638,7 +642,7 @@ fn an_agent_adds_top_level_entries_to_its_own_worktree_but_not_to_the_project_fo
         top = quoted(&case.project.join("new.txt")),
         top_folder = quoted(&case.project.join("src3")),
     );
-    let landlock = LinuxSandbox::detect(leased(SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    let landlock = pinned(leased(SandboxNetwork::Open));
     assert!(
         matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
         "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
@@ -694,7 +698,7 @@ fn landlock_limits_a_tools_off_agent_to_its_model_endpoint_port() {
     let allowed_port = allowed.local_addr().unwrap().port();
     let denied_port = denied.local_addr().unwrap().port();
     let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(allowed_port)]);
-    let sandbox = LinuxSandbox::detect(policy(&case, network.clone()), Path::new(HELPER)).unwrap();
+    let sandbox = pinned(policy(&case, network.clone()));
     assert!(
         matches!(sandbox.backend(), LinuxBackend::Landlock { .. }),
         "Linux test machines need Landlock network rules (Linux 6.7 or newer): {:?}",
@@ -842,6 +846,7 @@ fn an_installed_sandbox_on_linux_launches_through_the_linux_boundary() {
     let installed = InstalledSandbox::install(
         policy(&case, SandboxNetwork::Open),
         &profiles.join("agent.sb"),
+        LinuxSupervisor::On,
     )
     .unwrap();
     let launcher = installed.launcher().to_path_buf();
@@ -958,7 +963,7 @@ fn a_linux_agent_reaches_ip_endpoints_but_no_unix_socket_in_the_engine_runtime()
         "pair=ok\nunix=ok\ntcp=ok\nruntime=present\n",
         "the unsandboxed control must reach the socket"
     );
-    let landlock = LinuxSandbox::detect(guarded(SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    let landlock = pinned(guarded(SandboxNetwork::Open));
     assert!(
         matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
         "Linux test machines need Landlock and seccomp: {:?}",
@@ -1207,7 +1212,7 @@ fn an_open_network_agent_listens_on_no_owner_model_or_proxy_port() {
             .keep_ports(&[kept])
             .unwrap()
     };
-    let landlock = LinuxSandbox::detect(open(), Path::new(HELPER)).unwrap();
+    let landlock = pinned(open());
     assert!(
         matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
         "Linux test machines need Landlock network rules (Linux 6.7 or newer): {:?}",
@@ -1252,7 +1257,7 @@ fn a_port_linux_picks_for_an_open_network_agent_is_never_a_kept_port() {
     let open = policy(&case, SandboxNetwork::Open)
         .keep_ports(&[kept])
         .unwrap();
-    let landlock = LinuxSandbox::detect(open, Path::new(HELPER)).unwrap();
+    let landlock = pinned(open);
     let mut ports: Vec<u16> = vec![1455, 11434, kept];
     ports.extend(29_300..=29_427);
     assert_eq!(
@@ -1415,7 +1420,7 @@ fn a_limited_network_agent_with_kept_ports_outside_the_picked_ones_keeps_its_lis
             .unwrap()
     };
     for sockets in [LinuxSockets::TcpOnly, LinuxSockets::TcpPorts] {
-        let landlock = LinuxSandbox::detect(limited(sockets), Path::new(HELPER)).unwrap();
+        let landlock = pinned(limited(sockets));
         assert!(
             matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
             "Linux test machines need Landlock network rules (Linux 6.7 or newer): {:?}",
@@ -1624,8 +1629,7 @@ fn no_agent_plants_the_git_metadata_git_follows_on_either_backend() {
         .map(|target| format!("{target}=refused\n"))
         .chain(["object=written\n".to_owned()])
         .collect();
-    let landlock =
-        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    let landlock = pinned(policy(&case, SandboxNetwork::Open));
     assert!(
         matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
         "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
@@ -1731,7 +1735,7 @@ fn a_tcp_only_agent_sends_no_datagram_and_may_ask_names_on_tcp_port_53() {
         SandboxRemote::Loopback(port),
         SandboxRemote::AnyHost(443),
     ]);
-    let landlock = LinuxSandbox::detect(policy(&case, named), Path::new(HELPER)).unwrap();
+    let landlock = pinned(policy(&case, named));
     assert!(
         matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
         "Linux test machines need Landlock network rules (Linux 6.7 or newer): {:?}",
@@ -1754,7 +1758,7 @@ fn a_tcp_only_agent_sends_no_datagram_and_may_ask_names_on_tcp_port_53() {
         ]
     );
     let loopback = SandboxNetwork::Only(vec![SandboxRemote::Loopback(port)]);
-    let landlock = LinuxSandbox::detect(policy(&case, loopback), Path::new(HELPER)).unwrap();
+    let landlock = pinned(policy(&case, loopback));
     assert_eq!(
         datagrams(Some(&landlock), &case, port),
         [
@@ -1772,8 +1776,7 @@ fn a_tcp_only_agent_sends_no_datagram_and_may_ask_names_on_tcp_port_53() {
         ],
         "an agent with no remote on another host gets no resolver port"
     );
-    let unlimited =
-        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    let unlimited = pinned(policy(&case, SandboxNetwork::Open));
     let reached = datagrams(Some(&unlimited), &case, port);
     assert!(
         reached.contains(&"udp=ok".to_owned()) && reached.contains(&"resolver=".to_owned()),
@@ -1790,11 +1793,7 @@ fn a_tcp_ports_agent_keeps_its_port_limit_but_opens_datagrams_and_asks_names_its
         SandboxRemote::Loopback(port),
         SandboxRemote::AnyHost(443),
     ]);
-    let landlock = LinuxSandbox::detect(
-        policy(&case, named).limit_sockets(LinuxSockets::TcpPorts),
-        Path::new(HELPER),
-    )
-    .unwrap();
+    let landlock = pinned(policy(&case, named).limit_sockets(LinuxSockets::TcpPorts));
     assert!(
         matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
         "Linux test machines need Landlock network rules (Linux 6.7 or newer): {:?}",
@@ -1957,8 +1956,7 @@ fn no_agent_reads_the_environment_of_a_process_outside_its_boundary() {
         "outside=marker\nown=read\n",
         "the unsandboxed control must read the outside environment"
     );
-    let landlock =
-        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    let landlock = pinned(policy(&case, SandboxNetwork::Open));
     assert!(
         matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
         "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
@@ -1988,4 +1986,1062 @@ fn no_agent_reads_the_environment_of_a_process_outside_its_boundary() {
     );
     outside.kill().unwrap();
     outside.wait().unwrap();
+}
+
+/// The bubblewrap this machine nests an agent in, by a control that owes the engine
+/// nothing: bubblewrap alone making the namespaces of [`NEST_ARGS`]. Output: none, with the
+/// reason printed, on a machine that refuses them (Ubuntu 24.04 without a profile, most
+/// containers), where every nested row is skipped.
+fn nesting_bwrap() -> Option<PathBuf> {
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let made = crazyagent::spawn_gate::status(
+        Command::new(bwrap)
+            .args(NEST_ARGS)
+            .args(["--unshare-net", "--", "/bin/true"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .is_ok_and(|status| status.success());
+    if !made {
+        eprintln!("skipped: this machine makes no user and process namespaces for bubblewrap");
+    }
+    made.then(|| bwrap.to_path_buf())
+}
+
+/// The nested backend for a policy, on a machine whose control says it can nest, where
+/// detection must pick it. Input: the policy. Output: the sandbox, or none where the
+/// machine cannot nest and the row is skipped.
+fn nested(sandbox: ProjectSandbox) -> Option<LinuxSandbox> {
+    nesting_bwrap()?;
+    let sandbox = LinuxSandbox::detect(sandbox, Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(sandbox.backend(), LinuxBackend::Nested { .. }),
+        "this machine makes the namespaces, so detection nests the agent: {:?}",
+        sandbox.backend()
+    );
+    Some(sandbox)
+}
+
+/// Starts a wrapped `/bin/sh -c script` with its input and output piped and waits for its
+/// first line. Inputs: the sandbox, the case and the script, which prints `ready` first.
+/// Output: the running first process and the reader of the rest of its output.
+fn started(sandbox: &dyn Sandbox, case: &Case, script: &str) -> (Child, BufReader<ChildStdout>) {
+    let mut harness = Command::new("/bin/sh");
+    harness
+        .args(["-c", script])
+        .current_dir(case.project.join("worktrees"));
+    let mut child = crazyagent::spawn_gate::spawn(
+        sandbox
+            .wrap(&harness)
+            .unwrap()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    (child, output)
+}
+
+/// Sends a signal with `/bin/kill`. Inputs: the signal's name and the target as kill takes
+/// it, a process id, or a process group as its id after a minus sign. Output: none.
+fn send(signal: &str, target: &str) {
+    let status = crazyagent::spawn_gate::status(
+        Command::new("/bin/kill")
+            .arg(format!("-{signal}"))
+            .args(["--", target])
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    assert!(status.success(), "kill -{signal} {target}");
+}
+
+/// Waits for a child to exit. Inputs: the child and the longest wait. Output: its exit
+/// status, or none when it still runs at the deadline.
+fn exit_within(child: &mut Child, wait: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + wait;
+    loop {
+        match child.try_wait().unwrap() {
+            Some(status) => return Some(status),
+            None if Instant::now() >= deadline => return None,
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+}
+
+/// Tells whether a process whose command line holds `token` runs on this machine, in any
+/// process namespace. Input: the token. Output: true while `/proc` lists one.
+fn running(token: &str) -> bool {
+    fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            fs::read(entry.path().join("cmdline"))
+                .is_ok_and(|line| String::from_utf8_lossy(&line).contains(token))
+        })
+}
+
+/// Waits up to five seconds for every process whose command line holds `token` to end.
+/// Input: the token. Output: whether none is left.
+fn ended(token: &str) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while running(token) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    !running(token)
+}
+
+/// The fields of `/proc/<pid>/stat` after the name, as this test process sees them. Input:
+/// the process id. Output: state, parent, process group, session and controlling terminal.
+fn host_stat(pid: u32) -> Vec<String> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let fields = stat.rsplit_once(") ").unwrap().1;
+    fields.split(' ').take(5).map(str::to_owned).collect()
+}
+
+/// DEC-179: where this machine makes user and process namespaces, detection nests the agent
+/// in bubblewrap under the same Landlock policy, on an open network and on a limited one,
+/// and the nested agent is held to the project boundary as a plain Landlock agent is.
+#[test]
+fn a_nested_agent_holds_the_project_boundary() {
+    for network in [
+        SandboxNetwork::Open,
+        SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
+    ] {
+        let case = case();
+        let Some(sandbox) = nested(policy(&case, network)) else {
+            return;
+        };
+        assert_boundary(&case, &run(&sandbox, &case, &boundary_script(&case)));
+    }
+}
+
+/// With no bubblewrap to look for, detection keeps the plain Landlock backend, as on a
+/// machine that has none installed or refuses its namespaces.
+#[test]
+fn without_a_bubblewrap_to_look_for_detection_keeps_the_plain_landlock_backend() {
+    let case = case();
+    let sandbox = pinned(policy(&case, SandboxNetwork::Open));
+    assert!(
+        matches!(sandbox.backend(), LinuxBackend::Landlock { .. }),
+        "{:?}",
+        sandbox.backend()
+    );
+}
+
+const UNSEEN: &str = "kill -0 \"$1\" 2>/dev/null && echo delivered || echo refused; \
+     test -e \"/proc/$1\" && echo listed || echo unlisted; echo $$";
+
+/// DEC-089, RV-DS241-86: a nested agent runs in a process namespace of its own, so on every
+/// kernel, also one before Linux 6.12 with no Landlock signal scope, it neither signals a
+/// process outside nor finds it in `/proc`, and it is among the first processes there.
+#[test]
+fn a_nested_agent_neither_signals_nor_lists_a_process_outside_its_own() {
+    let case = case();
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    let mut outside = crazyagent::spawn_gate::spawn(
+        Command::new("/bin/sleep")
+            .arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let target = outside.id().to_string();
+    let seen = |boundary: Option<&dyn Sandbox>| {
+        let mut harness = Command::new("/bin/sh");
+        harness
+            .args(["-c", UNSEEN, "sh", target.as_str()])
+            .current_dir(case.project.join("worktrees"));
+        agent_stdout(boundary, harness)
+    };
+    let control = seen(None);
+    assert!(
+        control.starts_with("delivered\nlisted\n"),
+        "the unsandboxed control must reach and list the outside process: {control}"
+    );
+    let boundary: &dyn Sandbox = &sandbox;
+    let inside = seen(Some(boundary));
+    let lines: Vec<&str> = inside.lines().collect();
+    assert_eq!(lines.len(), 3, "{inside}");
+    assert_eq!(lines[..2], ["refused", "unlisted"], "{inside}");
+    let own: u32 = lines[2].parse().unwrap();
+    assert!(
+        own < 16,
+        "the harness is not among the first processes: {own}"
+    );
+    outside.kill().unwrap();
+    outside.wait().unwrap();
+}
+
+/// A nested agent started with pipes shares no session or terminal with the engine: the
+/// first process, bubblewrap's outer one, leads a group and a session of its own with no
+/// controlling terminal, and the harness, inside the namespace, reads both as 0.
+#[test]
+fn a_nested_agent_shares_no_session_or_terminal_with_the_engine() {
+    let case = case();
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    let script = format!("echo ready; {SESSION}; read -r line");
+    let (mut child, mut output) = started(&sandbox, &case, &script);
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    let inside: Vec<&str> = line.split_whitespace().collect();
+    assert_eq!(inside.len(), 4, "{line}");
+    assert_eq!(
+        inside[1..],
+        ["0", "0", "0"],
+        "group and session are led from outside the namespace, with no terminal: {line}"
+    );
+    let first = child.id().to_string();
+    let outside = host_stat(child.id());
+    assert_eq!(
+        outside[2..],
+        [first.as_str(), first.as_str(), "0"],
+        "the first process leads its group and session, with no terminal: {outside:?}"
+    );
+    drop(child.stdin.take());
+    let status = exit_within(&mut child, Duration::from_secs(5));
+    assert_eq!(status.and_then(|status| status.code()), Some(0));
+}
+
+const PANE: &str = "import os, pty, sys
+pid, primary = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[1], sys.argv[1:])
+shown = b''
+while True:
+    try:
+        chunk = os.read(primary, 1024)
+    except OSError:
+        break
+    if not chunk:
+        break
+    shown += chunk
+os.waitpid(pid, 0)
+sys.stdout.write(shown.decode(errors='replace'))
+";
+
+/// A nested agent started as the first process of a terminal pane keeps that pane as its
+/// controlling terminal, as a plain Landlock agent does: the session is taken outside the
+/// namespace, where the helper can see that it already leads one.
+#[test]
+fn a_nested_pane_agent_keeps_its_pane_as_its_terminal() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    let mut harness = Command::new("/usr/bin/python3");
+    harness
+        .args(["-I", "-c", OPEN_TERMINAL, "/dev/tty"])
+        .current_dir(case.project.join("worktrees"));
+    let wrapped = sandbox.wrap(&harness).unwrap();
+    let mut pane = Command::new("/usr/bin/python3");
+    pane.args(["-I", "-c", PANE])
+        .arg(wrapped.get_program())
+        .args(wrapped.get_args())
+        .env_clear()
+        .envs(
+            wrapped
+                .get_envs()
+                .filter_map(|(name, value)| value.map(|value| (name, value))),
+        )
+        .current_dir(wrapped.get_current_dir().unwrap())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crazyagent::spawn_gate::output(&mut pane).unwrap();
+    let shown = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        shown.contains("opened"),
+        "the pane is not the agent's terminal: {shown} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+const HANDLES_TERM: &str =
+    "trap 'echo stopped; exit 7' TERM; echo ready; while :; do sleep 0.1; done";
+
+/// The engine stops an agent by a TERM to its group, a grace wait on the first process, then
+/// a KILL to the group. The first nested process is bubblewrap's outer one, which the TERM
+/// must not end: the harness handles it inside its grace and its own exit code comes back.
+#[test]
+fn a_nested_harness_that_handles_the_stop_signal_gets_its_grace_and_its_own_exit_code() {
+    let case = case();
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    let (mut child, mut output) = started(&sandbox, &case, HANDLES_TERM);
+    send("TERM", &format!("-{}", child.id()));
+    let mut rest = String::new();
+    output.read_to_string(&mut rest).unwrap();
+    assert_eq!(rest, "stopped\n", "the harness handled the stop signal");
+    let status = exit_within(&mut child, Duration::from_secs(5));
+    assert_eq!(
+        status.and_then(|status| status.code()),
+        Some(7),
+        "the first process ends with the harness's own exit code: {status:?}"
+    );
+}
+
+/// A harness that ignores TERM runs on through the grace with its first process, and the
+/// group KILL then ends everything the agent started, also a process that left its group
+/// and session, since the KILL reaches the first process of its process namespace.
+#[test]
+fn a_nested_harness_that_ignores_the_stop_signal_ends_at_the_group_kill_with_all_it_started() {
+    let case = case();
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    let token = format!("601.{}", std::process::id());
+    let script =
+        format!("trap '' TERM; setsid sleep {token} & echo ready; while :; do sleep 1; done");
+    let (mut child, _output) = started(&sandbox, &case, &script);
+    let group = format!("-{}", child.id());
+    send("TERM", &group);
+    assert_eq!(
+        exit_within(&mut child, Duration::from_millis(300)),
+        None,
+        "the stop signal ended the first process of a harness that ignores it"
+    );
+    assert!(running(&token), "the control: the agent's processes run");
+    send("KILL", &group);
+    assert!(
+        exit_within(&mut child, Duration::from_secs(5)).is_some(),
+        "the group kill did not end the first process"
+    );
+    assert!(
+        ended(&token),
+        "a process that left the agent's group and session outlived the group kill"
+    );
+}
+
+/// A KILL of the first process alone, with no signal to the group, ends the whole nested
+/// agent: its namespace is tied to that process, so the engine never reads an agent as
+/// ended while a process of it runs on.
+#[test]
+fn a_kill_of_the_first_process_alone_ends_the_whole_nested_agent() {
+    let case = case();
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    let token = format!("602.{}", std::process::id());
+    let script = format!("setsid sleep {token} & echo ready; while :; do sleep 1; done");
+    let (mut child, _output) = started(&sandbox, &case, &script);
+    assert!(running(&token), "the control: the agent's processes run");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(
+        ended(&token),
+        "a process of the agent outlived its first process"
+    );
+}
+
+/// The first nested process ends only with the harness or by KILL: a signal sent to it
+/// alone, as a terminal or another program of the owner's may send, leaves the agent running.
+#[test]
+fn the_first_nested_process_outlives_every_signal_but_kill() {
+    let case = case();
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    let (mut child, mut output) = started(&sandbox, &case, "echo ready; read -r line; echo done");
+    let first = child.id().to_string();
+    for signal in ["TERM", "HUP", "INT", "QUIT", "USR1", "USR2"] {
+        send(signal, &first);
+    }
+    assert_eq!(
+        exit_within(&mut child, Duration::from_millis(300)),
+        None,
+        "a signal other than KILL ended the first process"
+    );
+    drop(child.stdin.take());
+    let mut rest = String::new();
+    output.read_to_string(&mut rest).unwrap();
+    assert_eq!(rest, "done\n");
+    let status = exit_within(&mut child, Duration::from_secs(5));
+    assert_eq!(status.and_then(|status| status.code()), Some(0));
+}
+
+/// SA vid 4: the lines both clients show about this Linux follow what it holds. The
+/// helper's scope question agrees with the kernel, and the host report agrees with it and
+/// with the control that says whether this machine nests an agent.
+#[test]
+fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
+    let scoped = Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .scope(Scope::Signal)
+        .is_ok();
+    let asked = crazyagent::spawn_gate::status(
+        Command::new(HELPER)
+            .arg("--scoped")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert_eq!(asked.code(), Some(if scoped { 0 } else { 1 }));
+    let temp = tempfile::tempdir().unwrap();
+    let data = Some(temp.path());
+    let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER), data);
+    assert_eq!(host.scoped, scoped);
+    assert_eq!(host.nested, nesting_bwrap().is_some());
+    assert!(host.supervised, "the call supervisor probe row needs the same of this machine");
+    assert!(!host.root, "the gate runs as its own user, where the supervisor starts");
+    let absent = crazyagent::sandbox::linux::read_host(Path::new("/nonexistent/helper"), data);
+    assert!(!absent.scoped && !absent.nested, "{absent:?}");
+    assert!(!absent.supervised, "{absent:?}");
+}
+
+#[test]
+fn a_host_whose_landlock_does_not_hold_reports_the_process_namespace_bubblewrap_gives() {
+    let refusing = Path::new("/bin/false");
+    assert!(refusing.is_file(), "the row needs /bin/false as a helper that holds nothing");
+    let bwrap = BWRAP_PATHS.iter().any(|path| Path::new(path).is_file());
+    assert!(bwrap, "Linux test machines need bubblewrap installed");
+    let data = tempfile::tempdir().unwrap();
+    let host = crazyagent::sandbox::linux::read_host(refusing, Some(data.path()));
+    assert!(!host.scoped, "{host:?}");
+    assert!(host.nested, "{host:?}");
+    assert!(!host.supervised, "bubblewrap alone runs no call supervisor: {host:?}");
+}
+
+/// The supervisor probe never runs in a folder another process names: folders planted
+/// where the old probe made its own, in the shared temp folder for the nested probe's pid
+/// and a range after the helper's, leave it holding, as read for the page and as a plain
+/// launch starts it, and two reads at once both hold (rv-secreview linux-t4c F1).
+#[test]
+fn planted_or_concurrent_probe_folders_never_turn_the_call_supervisor_off() {
+    let next = std::process::id();
+    let planted: Vec<PathBuf> = [2]
+        .into_iter()
+        .chain(next..next + 512)
+        .map(|pid| Path::new("/tmp").join(format!("crazyagent-probe-{pid}")))
+        .filter(|folder| fs::create_dir(folder).is_ok())
+        .collect();
+    assert!(Path::new("/tmp/crazyagent-probe-2").is_dir());
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().canonicalize().unwrap();
+    let read = || crazyagent::sandbox::linux::read_host(Path::new(HELPER), Some(data.as_path()));
+    let alone = read();
+    let both = std::thread::scope(|scope| {
+        let one = scope.spawn(read);
+        let two = scope.spawn(read);
+        [one.join().unwrap(), two.join().unwrap()]
+    });
+    let case = case();
+    let sandbox = pinned(policy(&case, SandboxNetwork::Only(Vec::new())))
+        .supervise(LinuxSupervisor::On, Some(data.as_path()));
+    let folder = case.project.join("worktrees").join("nested");
+    let nested = quoted(&folder);
+    let script = format!("mkdir {nested} && (mkdir {nested}/.git || true)");
+    let output = run(&sandbox, &case, &script);
+    for planted in &planted {
+        fs::remove_dir(planted).unwrap();
+    }
+    assert!(alone.supervised, "{alone:?}");
+    assert!(both.iter().all(|host| host.supervised), "{both:?}");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(!folder.join(".git").exists(), "the plain probe held with the folders planted");
+    assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "every probe folder removed");
+}
+
+/// This computer's address on its default route, which is never loopback. No input.
+/// Output: the address; it panics on a machine with no route, where the rows that ask for
+/// another host prove nothing.
+fn outward_address() -> std::net::IpAddr {
+    let socket = crazyagent::spawn_gate::bind_udp_std("0.0.0.0:0").unwrap();
+    socket
+        .connect("192.0.2.1:9")
+        .expect("Linux test machines need a default route");
+    let address = socket.local_addr().unwrap().ip();
+    assert!(!address.is_loopback() && !address.is_unspecified(), "{address}");
+    address
+}
+
+#[test]
+fn a_loopback_only_nested_agent_reaches_its_port_on_this_computer_and_on_no_other_host() {
+    let case = case();
+    let served = crazyagent::spawn_gate::bind_tcp_std("0.0.0.0:0").unwrap();
+    let port = served.local_addr().unwrap().port();
+    let other = outward_address();
+    std::thread::spawn(move || {
+        for mut asked in served.incoming().flatten().take(16) {
+            let _ = asked.write_all(b"pong\n");
+        }
+    });
+    let script = format!(
+        "read -r line </dev/tcp/127.0.0.1/{port}; echo \"loopback=$line\"; \
+         (exec 4<>/dev/tcp/{other}/{port}) 2>/dev/null && echo other=reached || echo other=refused"
+    );
+    let reach = |sandbox: &dyn Sandbox| {
+        let mut harness = Command::new("/bin/bash");
+        harness
+            .args(["-c", script.as_str()])
+            .current_dir(case.project.join("worktrees"));
+        agent_stdout(Some(sandbox), harness)
+    };
+    let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(port)]);
+    let shared = pinned(policy(&case, network.clone()));
+    assert_eq!(
+        reach(&shared),
+        "loopback=pong\nother=reached\n",
+        "on the shared network the port is open on every host (RV-DS241-83)"
+    );
+    let Some(bridged) = nested(policy(&case, network)) else {
+        return;
+    };
+    assert_eq!(reach(&bridged), "loopback=pong\nother=refused\n");
+}
+
+#[test]
+fn the_bridge_leaves_no_descriptor_in_the_harness() {
+    let case = case();
+    let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(18_080)]);
+    let Some(bridged) = nested(policy(&case, network.clone())) else {
+        return;
+    };
+    let shared = pinned(policy(&case, network));
+    let open = |sandbox: &dyn Sandbox| {
+        String::from_utf8(run(sandbox, &case, "ls /proc/self/fd").stdout).unwrap()
+    };
+    assert_eq!(open(&bridged), "0\n1\n2\n3\n");
+    assert_eq!(open(&bridged), open(&shared));
+}
+
+/// Tells whether a broker that carries a port runs on this machine, by its arguments.
+/// Input: the port. Output: true when one does.
+fn broker_runs(port: u16) -> bool {
+    let wanted = port.to_string();
+    fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            fs::read(entry.path().join("cmdline")).is_ok_and(|line| {
+                let words: Vec<&[u8]> = line.split(|byte| *byte == 0).collect();
+                words.contains(&b"--broker".as_slice()) && words.contains(&wanted.as_bytes())
+            })
+        })
+}
+
+#[test]
+fn the_broker_runs_while_the_agent_does_and_ends_with_it() {
+    let case = case();
+    let held = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = held.local_addr().unwrap().port();
+    let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(port)]);
+    let Some(bridged) = nested(policy(&case, network)) else {
+        return;
+    };
+    assert!(!broker_runs(port));
+    let (mut child, _output) = started(&bridged, &case, "echo ready; read -r line");
+    assert!(broker_runs(port), "a bridged agent runs with its broker");
+    drop(child.stdin.take());
+    assert!(exit_within(&mut child, Duration::from_secs(5)).is_some());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while broker_runs(port) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!broker_runs(port), "the broker ends with the agent");
+}
+
+/// A guard: bubblewrap's outer process, the first process of a nested agent, runs with no
+/// new privileges, so a set-user-ID bubblewrap gains nothing from the engine (rv-sec3 F1).
+/// Bubblewrap sets the flag itself once it runs, so only a set-user-ID one tells the two
+/// apart.
+#[test]
+fn bubblewrap_starts_for_a_nested_agent_with_no_new_privileges() {
+    let case = case();
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    let (mut child, _output) = started(&sandbox, &case, "echo ready; read -r line");
+    let status = fs::read_to_string(format!("/proc/{}/status", child.id())).unwrap();
+    drop(child.stdin.take());
+    assert!(exit_within(&mut child, Duration::from_secs(5)).is_some());
+    let held = status
+        .lines()
+        .find_map(|line| line.strip_prefix("NoNewPrivs:"))
+        .map(str::trim);
+    assert_eq!(held, Some("1"), "{status}");
+}
+
+/// A gate row for a bubblewrap fact taken from memory: `--die-with-parent` must tie the
+/// namespace to bubblewrap's outer process only. Were that outer process tied to the thread
+/// that started it, an agent would end when an engine thread does.
+#[test]
+fn a_nested_agent_outlives_the_thread_that_started_it() {
+    let case = case();
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    let script = "echo ready; read -r line; echo \"got $line\"";
+    let (mut child, mut output) = std::thread::scope(|scope| {
+        scope
+            .spawn(|| started(&sandbox, &case, script))
+            .join()
+            .unwrap()
+    });
+    assert!(
+        exit_within(&mut child, Duration::from_millis(500)).is_none(),
+        "the agent ended with the thread that started it"
+    );
+    child.stdin.take().unwrap().write_all(b"on\n").unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "got on\n");
+    let status = exit_within(&mut child, Duration::from_secs(5));
+    assert_eq!(status.and_then(|status| status.code()), Some(0));
+}
+
+/// A gate row for a bubblewrap fact taken from memory: its outer process exits with the
+/// harness, at once and with its code, and the namespace then ends with everything the
+/// harness left behind, a process in a session of its own too.
+#[test]
+fn a_nested_agent_ends_with_its_harness_and_leaves_nothing_it_started() {
+    let case = case();
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    let token = format!("603.{}", std::process::id());
+    let mut harness = Command::new("/bin/sh");
+    harness
+        .arg("-c")
+        .arg(format!("setsid sleep {token} & exit 5"))
+        .current_dir(case.project.join("worktrees"));
+    let mut child = crazyagent::spawn_gate::spawn(
+        sandbox
+            .wrap(&harness)
+            .unwrap()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let status = exit_within(&mut child, Duration::from_secs(5));
+    assert_eq!(
+        status.and_then(|status| status.code()),
+        Some(5),
+        "the first process waits for more than the harness"
+    );
+    assert!(ended(&token), "a process the harness left outlived it");
+}
+
+/// A launch behind the helper with a hand-written policy and the call supervisor's flags,
+/// as the engine writes them for a host with no namespaces to nest an agent in: it reads
+/// every file and writes the devices and the case's folders. Inputs: the case, the policy
+/// and guard flags, the program and its arguments. Output: the launch, not yet started.
+fn supervised(case: &Case, flags: &[&str], program: &str, args: &[&str]) -> Command {
+    let root = case.project.parent().unwrap();
+    let mut command = Command::new(HELPER);
+    command
+        .args(["--read", "/", "--write", "/dev", "--write"])
+        .arg(root)
+        .args(flags)
+        .arg("--")
+        .arg(program)
+        .args(args)
+        .current_dir(&case.project)
+        .stdin(Stdio::null());
+    command
+}
+
+/// Runs a launch to its end. Input: the launch. Output: what it wrote and how it ended.
+fn finished(mut command: Command) -> Output {
+    crazyagent::spawn_gate::output(command.stdout(Stdio::piped()).stderr(Stdio::piped())).unwrap()
+}
+
+/// What a finished launch wrote to its output, after it ended well. Input: the output.
+fn told(output: &Output) -> String {
+    assert!(
+        output.status.success(),
+        "{:?}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Rows about the call supervisor need a kernel that runs it: seccomp user notification
+/// whose wait only a fatal signal cuts (Linux 5.19) and a ptrace scope that lets a parent
+/// read the programs it started. The check itself fails where nothing supervises it.
+#[test]
+fn the_call_supervisor_probe_holds_on_this_machine_and_fails_with_nothing_supervising() {
+    let quiet = |command: &mut Command| {
+        let silenced = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crazyagent::spawn_gate::status(silenced).unwrap()
+    };
+    let probe = quiet(Command::new(HELPER).arg("--probe-supervisor"));
+    assert!(
+        probe.success(),
+        "Linux test machines need Linux 5.19 or newer and a ptrace scope below 2: {probe:?}"
+    );
+    let case = case();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let mut check = Command::new(HELPER);
+    check.arg("--probe-supervised").arg(&port).arg(&case.tmp);
+    assert_eq!(
+        quiet(&mut check).code(),
+        Some(1),
+        "the check passes with no supervisor, so it checks nothing"
+    );
+}
+
+const GUARDED_REACH: &str = "import ctypes, socket, sys
+port = int(sys.argv[1])
+def said(call):
+    try:
+        call()
+        return 'ok'
+    except OSError as error:
+        return str(error.errno)
+def reach(family, host, wait):
+    def call():
+        link = socket.socket(family, socket.SOCK_STREAM)
+        link.settimeout(wait)
+        link.connect((host, port))
+    return said(call)
+print('here=' + reach(socket.AF_INET, '127.0.0.1', 2))
+print('there=' + reach(socket.AF_INET, '192.0.2.1', 2))
+print('mapped-here=' + reach(socket.AF_INET6, '::ffff:127.0.0.1', 2))
+print('mapped-there=' + reach(socket.AF_INET6, '::ffff:192.0.2.1', 2))
+print('blocking-here=' + reach(socket.AF_INET, '127.0.0.1', None))
+fast = socket.socket()
+print('fast-open=' + said(lambda: fast.sendto(b'x', 0x20000000, ('192.0.2.1', port))))
+libc = ctypes.CDLL(None, use_errno=True)
+wide = socket.socket()
+refused = libc.connect(wide.fileno(), ctypes.create_string_buffer(200), 200)
+print('wide=' + (str(ctypes.get_errno()) if refused else 'ok'))
+";
+
+/// Landlock limits an agent's ports, not its hosts. The call supervisor connects for the
+/// agent after it read the address itself, so a guarded port is reached on this machine
+/// only, in every address form, a send that would open a connection is refused whole, and
+/// an address longer than any the kernel takes is refused as the kernel refuses it.
+#[test]
+fn a_supervised_agent_reaches_a_guarded_port_on_this_machine_and_on_no_other_host() {
+    let case = case();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let limited = ["--limit-network", "--connect", &port];
+    let guarded = [&limited[..], &["--guard-loopback", &port][..]].concat();
+    let script = ["-I", "-u", "-c", GUARDED_REACH, &port];
+    let held = finished(supervised(&case, &guarded, "/usr/bin/python3", &script));
+    assert_eq!(
+        told(&held),
+        "here=ok\nthere=13\nmapped-here=ok\nmapped-there=13\nblocking-here=ok\n\
+         fast-open=95\nwide=22\n"
+    );
+    let open = finished(supervised(&case, &limited, "/usr/bin/python3", &script));
+    let open = told(&open);
+    assert!(open.contains("here=ok\n"), "{open}");
+    assert!(!open.contains("there=13\n"), "the port limit alone names no host: {open}");
+}
+
+const GIT_ENTRIES: &str = r#"said() {
+    name=$1
+    shift
+    if "$@" 2>/dev/null; then echo "$name=made"; else echo "$name=refused"; fi
+}
+mkdir sub sub/plain
+: > sub/kept
+ln -s .git sub/dangling
+said folder mkdir sub/.git
+said file sh -c ': > sub/.git'
+said link ln -s elsewhere sub/.git
+said hard-link ln sub/kept sub/.git
+said rename mv sub/plain sub/.git
+said upper-case mkdir sub/.GIT
+said dotted mkdir 'sub/.git.'
+said through-link sh -c ': > sub/dangling'
+said below mkdir -p sub/.git/objects
+said init git init -q sub/repo
+said own-file sh -c ': > .git/objects/made'
+said own-rename mv .git/objects/made .git/objects/moved
+said own-folder mkdir .git/refs
+said own-nested mkdir .git/refs/.git
+said plain-file sh -c ': > sub/file'
+said plain-rename mv sub/file sub/plain/file
+said own-away mv "$PWD" "$PWD.away"
+"#;
+
+/// With no namespace to hide a git folder behind, the call supervisor makes each new
+/// entry for the agent after it resolved where the entry lands: a `.git` in any spelling
+/// and by any call is refused, also through a link, while the working tree's own `.git`
+/// and every other name work, and the folder that holds the own `.git` stays where it is.
+#[test]
+fn a_supervised_agent_makes_no_git_entry_but_inside_its_own_git_folder() {
+    let case = case();
+    let project = case.project.to_str().unwrap();
+    let guard = ["--guard-git", "--own-tree", project];
+    let held = finished(supervised(&case, &guard, "/bin/sh", &["-c", GIT_ENTRIES]));
+    assert_eq!(
+        told(&held),
+        "folder=refused\nfile=refused\nlink=refused\nhard-link=refused\nrename=refused\n\
+         upper-case=refused\ndotted=refused\nthrough-link=refused\nbelow=refused\n\
+         init=refused\nown-file=made\nown-rename=made\nown-folder=made\nown-nested=refused\n\
+         plain-file=made\nplain-rename=made\nown-away=refused\n"
+    );
+    let sub = case.project.join("sub");
+    for absent in [".git", ".GIT", ".git.", "repo/.git"] {
+        assert!(fs::symlink_metadata(sub.join(absent)).is_err(), "{absent}");
+    }
+    assert!(case.project.join(".git/objects/moved").is_file());
+    assert!(sub.join("plain/file").is_file());
+    let plain = finished(supervised(&case, &[], "/bin/sh", &["-c", "mkdir sub/.git"]));
+    assert!(plain.status.success(), "the control makes the folder with no guard");
+}
+
+const OPENS: &str = "import ctypes, os
+libc = ctypes.CDLL(None, use_errno=True)
+refused = libc.syscall(437, -100, b'never', ctypes.create_string_buffer(24), 24)
+print('openat2=' + str(ctypes.get_errno() if refused < 0 else 0))
+os.umask(0o027)
+os.close(os.open('made', os.O_CREAT | os.O_WRONLY, 0o666))
+os.mkdir('folder', 0o777)
+modes = [os.stat(name).st_mode & 0o777 for name in ('made', 'folder')]
+print('modes=%o %o' % tuple(modes))
+with open('/proc/self/fd/1', 'w') as out:
+    out.write('proc=written\\n')
+with open('/dev/stderr', 'w') as err:
+    err.write('piped\\n')
+";
+
+/// A call made for the agent behaves as the agent's own: `openat2`, whose flags lie in
+/// memory, is answered as missing so tools fall back to `openat`; a new file and folder
+/// take the agent's file mode mask; `/proc/self` names the agent, not the supervisor, so
+/// its own output and a piped `/dev/stderr` open as before.
+#[test]
+fn a_call_made_for_a_supervised_agent_keeps_its_mask_its_proc_names_and_its_pipes() {
+    let case = case();
+    let project = case.project.to_str().unwrap();
+    let guard = ["--guard-git", "--own-tree", project];
+    let script = ["-I", "-u", "-c", OPENS];
+    let held = finished(supervised(&case, &guard, "/usr/bin/python3", &script));
+    assert_eq!(told(&held), "openat2=38\nmodes=640 750\nproc=written\n");
+    assert_eq!(String::from_utf8_lossy(&held.stderr), "piped\n");
+    assert!(!case.project.join("never").exists());
+}
+
+const THREAD_PLACES: &str = "import ctypes, os, threading
+libc = ctypes.CDLL(None, use_errno=True)
+os.mkdir('own')
+os.mkdir('table')
+def own_folder():
+    assert libc.unshare(0x200) == 0, ctypes.get_errno()
+    os.chdir('own')
+    os.close(os.open('made', os.O_CREAT | os.O_WRONLY))
+def own_table():
+    assert libc.unshare(0x400) == 0, ctypes.get_errno()
+    folder = os.open('table', os.O_RDONLY | os.O_DIRECTORY)
+    os.close(os.open('made', os.O_CREAT | os.O_WRONLY, dir_fd=folder))
+for work in (own_folder, own_table):
+    worker = threading.Thread(target=work)
+    worker.start()
+    worker.join()
+print(' '.join(str(os.path.exists(path)) for path in ('own/made', 'table/made', 'made')))
+";
+
+/// A call made for a thread is made where that thread is: a thread with a working folder
+/// of its own makes a relative entry there, and one with a descriptor table of its own
+/// makes an entry at its own folder descriptor, not the first thread's (rv-sec2 linux-t4b
+/// F1).
+#[test]
+fn a_call_made_for_a_supervised_thread_starts_at_that_threads_folder_and_descriptors() {
+    let case = case();
+    let project = case.project.to_str().unwrap();
+    let guard = ["--guard-git", "--own-tree", project];
+    let script = ["-I", "-u", "-c", THREAD_PLACES];
+    let held = finished(supervised(&case, &guard, "/usr/bin/python3", &script));
+    assert_eq!(told(&held), "True True False\n");
+}
+
+const GUARDED_SIGNALS: &str = "import fcntl, os, signal, socket, subprocess, sys
+outside = int(sys.argv[1])
+def said(call):
+    try:
+        call()
+        return 'ok'
+    except OSError as error:
+        return str(error.errno)
+child = subprocess.Popen(['/bin/sleep', '30'])
+link = socket.socket()
+print('outside=' + said(lambda: os.kill(outside, 0)))
+print('everyone=' + said(lambda: os.kill(-1, 0)))
+print('own-group=' + said(lambda: os.kill(0, 0)))
+print('self=' + said(lambda: os.kill(os.getpid(), 0)))
+print('child=' + said(lambda: os.kill(child.pid, signal.SIGTERM)))
+print('owner-outside=' + said(lambda: fcntl.fcntl(link, fcntl.F_SETOWN, outside)))
+print('owner-self=' + said(lambda: fcntl.fcntl(link, fcntl.F_SETOWN, os.getpid())))
+print('ended=' + str(child.wait()))
+";
+
+/// Before Linux 6.12 Landlock scopes no signal. The call supervisor lets a signal through
+/// only to the programs the agent started, its own group among them, on every kernel, and
+/// a descriptor's signals may be owned by those programs alone.
+#[test]
+fn a_supervised_agent_signals_only_the_programs_it_started() {
+    let case = case();
+    let mut outside = crazyagent::spawn_gate::spawn(
+        Command::new("/bin/sleep")
+            .arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let target = outside.id().to_string();
+    let script = ["-I", "-u", "-c", GUARDED_SIGNALS, &target];
+    let guard = ["--guard-signals"];
+    let held = finished(supervised(&case, &guard, "/usr/bin/python3", &script));
+    assert_eq!(
+        told(&held),
+        "outside=1\neveryone=1\nown-group=ok\nself=ok\nchild=ok\nowner-outside=1\n\
+         owner-self=ok\nended=-15\n"
+    );
+    assert_eq!(outside.try_wait().unwrap(), None, "the outside process still runs");
+    outside.kill().unwrap();
+    outside.wait().unwrap();
+}
+
+/// The owner setting "Linux call supervisor", one row per option (DEC-179 add.2 Q1): On
+/// puts a launch under the supervisor, which keeps a new `.git` out of every folder the
+/// agent may change but its working tree's own; Off starts the agent as before, where
+/// Landlock alone cannot stop one (RV-DS241-85b).
+#[test]
+fn the_call_supervisor_setting_on_guards_a_launch_and_off_keeps_it_as_before() {
+    for (calls, made) in [(LinuxSupervisor::On, false), (LinuxSupervisor::Off, true)] {
+        let case = case();
+        let data = tempfile::tempdir().unwrap();
+        let sandbox = pinned(policy(&case, SandboxNetwork::Only(Vec::new())))
+            .supervise(calls, Some(data.path()));
+        let folder = case.project.join("worktrees").join("nested");
+        let nested = quoted(&folder);
+        let script = format!("mkdir {nested} && (mkdir {nested}/.git || true)");
+        let output = run(&sandbox, &case, &script);
+        assert!(
+            output.status.success(),
+            "{calls:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(folder.is_dir(), "{calls:?}");
+        assert_eq!(folder.join(".git").exists(), made, "{calls:?}");
+    }
+}
+
+const TRACED_SUPERVISOR: &str = "import ctypes, os
+libc = ctypes.CDLL(None, use_errno=True)
+parent = os.getppid()
+memory = '/proc/%d/mem' % parent
+def said(result):
+    return 'ok' if result != -1 else str(ctypes.get_errno())
+class Span(ctypes.Structure):
+    _fields_ = [('base', ctypes.c_void_p), ('size', ctypes.c_size_t)]
+held = ctypes.create_string_buffer(8)
+span = Span(ctypes.cast(held, ctypes.c_void_p), 8)
+own = ctypes.byref(span)
+print('attach=' + said(libc.ptrace(0x4206, parent, None, None)))
+try:
+    os.close(os.open(memory, os.O_RDWR))
+    print('memory=ok')
+except OSError as error:
+    print('memory=' + str(error.errno))
+print('memory-owner=' + ('agent' if os.stat(memory).st_uid == os.getuid() else 'other'))
+print('read=' + said(libc.process_vm_readv(parent, own, 1, own, 1, 0)))
+handle = os.pidfd_open(parent)
+taken = {said(libc.syscall(438, handle, number, 0)) for number in range(64)}
+print('taken=' + ','.join(sorted(taken)))
+";
+
+/// The call supervisor is not dumpable, so whatever ptrace scope the machine has, no
+/// program of the agent can trace it, read or write its memory or take its seccomp
+/// listener and answer its own calls; the harness is dumpable again from its own program
+/// on, so the supervisor still reads the agent's calls (rv-sec3 linux-t4b F1).
+#[test]
+fn a_supervised_agent_cannot_trace_its_supervisor_or_take_its_descriptors() {
+    let case = case();
+    let project = case.project.to_str().unwrap();
+    let guard = ["--guard-signals", "--guard-git", "--own-tree", project];
+    let script = ["-I", "-u", "-c", TRACED_SUPERVISOR];
+    let held = finished(supervised(&case, &guard, "/usr/bin/python3", &script));
+    assert_eq!(
+        told(&held),
+        "attach=1\nmemory=13\nmemory-owner=other\nread=1\ntaken=1\n"
+    );
+}
+
+/// The helper stays as the harness's parent under the call supervisor, so the engine sees
+/// the harness through it: its exit code, 128 plus the signal that ended it, and a stop
+/// sent to the launch's group, which the harness handles while the helper waits for it.
+#[test]
+fn a_supervised_agent_ends_with_its_harness_code_and_stops_with_its_group() {
+    let case = case();
+    let guard = ["--guard-signals"];
+    let code = |script: &str| {
+        let done = finished(supervised(&case, &guard, "/bin/sh", &["-c", script]));
+        done.status.code()
+    };
+    assert_eq!(code("exit 7"), Some(7));
+    assert_eq!(code("kill -KILL $$"), Some(137));
+    let token = format!("611.{}", std::process::id());
+    let script = format!("trap 'echo stopped; exit 9' TERM; echo ready; sleep {token} & wait");
+    let mut child = crazyagent::spawn_gate::spawn(
+        supervised(&case, &guard, "/bin/sh", &["-c", &script])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    send("TERM", &format!("-{}", child.id()));
+    line.clear();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "stopped\n");
+    let status = exit_within(&mut child, Duration::from_secs(5));
+    assert_eq!(status.and_then(|status| status.code()), Some(9));
+    assert!(ended(&token), "a process the harness started outlived the stop");
+}
+
+const STORM: &str = "import os, signal
+signal.signal(signal.SIGALRM, lambda number, frame: None)
+signal.setitimer(signal.ITIMER_REAL, 0.001, 0.001)
+for number in range(300):
+    os.close(os.open('storm-%d' % number, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    os.mkdir('storm-folder-%d' % number)
+signal.setitimer(signal.ITIMER_REAL, 0)
+print('made=' + str(len([name for name in os.listdir('.') if name.startswith('storm-')])))
+";
+
+/// A signal that lands while the supervisor makes an entry must not run the call twice:
+/// the second run would find the entry the first one made. The trapped call waits for its
+/// answer through every signal but a fatal one.
+#[test]
+fn a_signal_storm_runs_no_supervised_call_twice() {
+    let case = case();
+    let project = case.project.to_str().unwrap();
+    let guard = ["--guard-git", "--own-tree", project];
+    let script = ["-I", "-u", "-c", STORM];
+    let held = finished(supervised(&case, &guard, "/usr/bin/python3", &script));
+    assert_eq!(told(&held), "made=600\n");
 }

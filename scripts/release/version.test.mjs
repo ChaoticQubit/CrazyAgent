@@ -41,7 +41,7 @@ test("applying a version rewrites every manifest and lock entry and nothing else
     const changed = await applyVersion(root, version);
     assert.deepEqual(changed.sort(), [...FILES].sort());
     assert.equal(await workspaceVersion(root), version);
-    const expected = { "Cargo.toml": 1, "Cargo.lock": 3, "apps/desktop/package.json": 1, "apps/desktop/package-lock.json": 2, "apps/desktop/src-tauri/tauri.conf.json": 1 };
+    const expected = { "Cargo.toml": 1, "Cargo.lock": 4, "apps/desktop/package.json": 1, "apps/desktop/package-lock.json": 2, "apps/desktop/src-tauri/tauri.conf.json": 1 };
     for (const file of FILES) {
       const was = before[file].split("\n");
       const now = (await readFile(join(root, file), "utf8")).split("\n");
@@ -51,7 +51,7 @@ test("applying a version rewrites every manifest and lock entry and nothing else
       for (const [a, b] of changedLines) assert.equal(b, a.replace(old, version), file);
     }
     const lock = await readFile(join(root, "Cargo.lock"), "utf8");
-    for (const name of ["crazyagent", "crazyagent-desktop", "crazyagent-win-sandbox"]) {
+    for (const name of ["crazyagent", "crazyagent-desktop", "crazyagent-linux-supervisor", "crazyagent-win-sandbox"]) {
       assert.match(lock, new RegExp(`\\[\\[package\\]\\]\\nname = "${name}"\\nversion = "${version.replaceAll(".", "\\.")}"\\n`));
     }
     const pkg = JSON.parse(await readFile(join(root, "apps/desktop/package-lock.json"), "utf8"));

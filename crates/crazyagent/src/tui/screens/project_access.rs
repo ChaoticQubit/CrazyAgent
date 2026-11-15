@@ -6,7 +6,6 @@ use crate::sandbox::policy::{
 use crate::sandbox::shared_folders::{
     CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope, UNREACHABLE_SECRETS_LINE,
 };
-use crate::sandbox::{LINUX_NESTED_GIT_LINE, LINUX_PORTS_ANY_HOST_LINE};
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// The plain warning the owner confirms before giving a project's agents Full access.
@@ -71,8 +70,8 @@ const SECRETS_SHOWN_BYTES_MAX: usize = 256;
 /// 0 is the level, each next row one toolchain, then the network, hooks, agent folders and
 /// shared folders rows, one row per top-level folder while Chosen folders is picked, the
 /// Read-only or Read-write row, and last the caches row. Busy while the engine saves; a
-/// refusal keeps the choices with the reason. `linux` is whether the box shows what the Linux
-/// sandbox cannot hold.
+/// refusal keeps the choices with the reason. What this Linux cannot hold, for the level and
+/// the network, comes with the engine's view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct AccessEdit {
     pub view: PolicyView,
@@ -88,7 +87,6 @@ pub(in crate::tui) struct AccessEdit {
     pub confirm_full: bool,
     pub busy: bool,
     pub error: Option<String>,
-    pub linux: bool,
 }
 
 /// What one key in the Agent access box asks the screen to do.
@@ -117,8 +115,18 @@ impl AccessEdit {
             confirm_full: false,
             busy: false,
             error: None,
-            linux: cfg!(target_os = "linux"),
         }
+    }
+
+    /// Gives the line the engine sends for the chosen network: what that choice cannot
+    /// hold on this Linux. Input: the box. Output: the line, or none when the engine sent
+    /// none for it.
+    fn network_gap(&self) -> Option<&str> {
+        self.view
+            .networks
+            .iter()
+            .find(|choice| choice.network == self.network)
+            .and_then(|choice| choice.gap.as_deref())
     }
 
     /// Handles one key: Up and Down move, Left, Right and Space change the row, Enter
@@ -287,9 +295,9 @@ impl AccessEdit {
                     .map(|line| Row::of(line, look.warning)),
             );
         }
-        if self.linux && self.access != AgentAccess::Full {
+        for gap in level.map(|level| level.gaps.as_slice()).unwrap_or_default() {
             body.extend(
-                wrap_words(LINUX_NESTED_GIT_LINE, TEXT_WIDTH)
+                wrap_words(gap, TEXT_WIDTH)
                     .into_iter()
                     .map(|line| Row::of(line, look.warning)),
             );
@@ -372,9 +380,9 @@ impl AccessEdit {
                     .into_iter()
                     .map(|line| Row::of(line, look.warning)),
             );
-        } else if self.linux {
+        } else if let Some(gap) = self.network_gap() {
             body.extend(
-                wrap_words(LINUX_PORTS_ANY_HOST_LINE, TEXT_WIDTH)
+                wrap_words(gap, TEXT_WIDTH)
                     .into_iter()
                     .map(|line| Row::of(line, look.warning)),
             );

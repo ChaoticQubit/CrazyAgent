@@ -1,0 +1,13 @@
+[package]
+name = "crazyagent-linux-supervisor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "=0.2.191"
+rustix = { version = "=1.1.5", features = ["fs", "net", "process", "thread"] }

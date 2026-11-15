@@ -31,6 +31,7 @@ fn view() -> PolicyView {
                 access,
                 label: access.label().to_owned(),
                 unavailable: access.unavailable().map(str::to_owned),
+                gaps: Vec::new(),
             })
             .collect(),
         networks: AgentNetwork::ALL
@@ -38,6 +39,7 @@ fn view() -> PolicyView {
             .map(|network| NetworkView {
                 network,
                 label: network.label().to_owned(),
+                gap: None,
             })
             .collect(),
         toolchains: vec![
@@ -676,19 +678,52 @@ fn the_access_box_keeps_shared_back_secrets_and_says_what_stays_closed() {
 }
 
 #[test]
-fn only_on_linux_does_the_box_say_ports_hold_no_host_and_nested_git_is_not_blocked() {
-    let mut edit = AccessEdit::of(&view());
-    assert_eq!(edit.linux, cfg!(target_os = "linux"));
-    edit.linux = false;
+fn the_box_shows_the_ports_line_the_engine_sends_for_the_chosen_network() {
+    let told = "a line the engine sends for None";
+    let mut view = view();
+    for choice in &mut view.networks {
+        choice.gap = (choice.network == AgentNetwork::None).then(|| told.to_owned());
+    }
+    let mut edit = AccessEdit::of(&view);
+    edit.network = AgentNetwork::None;
     let words = shown_words(&edit);
+    assert!(words.contains(told), "{words}");
     assert!(!words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
-    assert!(!words.contains(LINUX_NESTED_GIT_LINE), "{words}");
-    edit.linux = true;
+    assert!(!words.contains(LINUX_NESTED_GIT_LINE), "only the engine names it: {words}");
+    edit.network = AgentNetwork::Open;
     let words = shown_words(&edit);
-    assert!(words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
-    assert!(words.contains(LINUX_NESTED_GIT_LINE), "{words}");
+    assert!(!words.contains(told), "{words}");
+    assert!(!words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
+    edit.network = AgentNetwork::None;
     edit.access = AgentAccess::Full;
     let words = shown_words(&edit);
-    assert!(!words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
-    assert!(!words.contains(LINUX_NESTED_GIT_LINE), "{words}");
+    assert!(!words.contains(told), "{words}");
+}
+
+#[test]
+fn the_box_names_nested_git_once_and_only_as_the_engine_sends_it_for_the_level() {
+    let mut told = view();
+    assert_eq!(told.levels[0].access, AgentAccess::Sandboxed);
+    told.levels[0].gaps.clear();
+    let quiet = shown_words(&AccessEdit::of(&told));
+    assert!(!quiet.contains(LINUX_NESTED_GIT_LINE), "{quiet}");
+    told.levels[0].gaps = vec![LINUX_NESTED_GIT_LINE.to_owned()];
+    let words = shown_words(&AccessEdit::of(&told));
+    assert_eq!(words.matches(LINUX_NESTED_GIT_LINE).count(), 1, "{words}");
+}
+
+#[test]
+fn the_box_shows_what_the_engine_says_this_linux_cannot_hold_for_the_level() {
+    use crate::sandbox::LINUX_SIGNALS_LINE;
+    let mut told = view();
+    assert_eq!(told.levels[0].access, AgentAccess::Sandboxed);
+    told.levels[0].gaps = vec![LINUX_SIGNALS_LINE.to_owned()];
+    let mut edit = AccessEdit::of(&told);
+    let words = shown_words(&edit);
+    assert!(words.contains(LINUX_SIGNALS_LINE), "{words}");
+    edit.access = AgentAccess::Full;
+    let words = shown_words(&edit);
+    assert!(!words.contains(LINUX_SIGNALS_LINE), "{words}");
+    let words = shown_words(&AccessEdit::of(&view()));
+    assert!(!words.contains(LINUX_SIGNALS_LINE), "{words}");
 }

@@ -525,7 +525,10 @@ mod tests {
             (4, crate::sandbox::LinuxSockets::Refuse),
             (5, crate::sandbox::LinuxSockets::TcpOnly),
         ] {
-            let settings = SandboxSettings { linux_sockets };
+            let settings = SandboxSettings {
+                linux_sockets,
+                ..SandboxSettings::default()
+            };
             let set = ask(
                 &mut native,
                 AppSetupJob::SetSandbox {

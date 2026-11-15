@@ -610,6 +610,11 @@ pub fn request(
     if grown.validate().is_err() {
         return Err("grant_full".into());
     }
+    let settings = crate::sandbox_settings::load(db).ok();
+    let calls = settings.map(|settings| settings.linux_supervisor);
+    let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
+    let sockets = settings.map(|settings| settings.linux_sockets);
+    let gap = super::policy::linux_network_gap(policy.network, host, sockets, &grown.grants);
     let body = serde_json::to_string(&grant).map_err(|_| "grant_requests_unavailable")?;
     requests_table(db).map_err(|_| "grant_requests_unavailable")?;
     let waiting: i64 = db
@@ -640,7 +645,7 @@ pub fn request(
         recommended: Some(DONT_ALLOW.to_owned()),
         context: Some(format!(
             "{} Its reason, in its own words: {}. Allow only if you trust it. Allowing adds it to this project's Agent access, where you can remove it; running agents restart at their next pause to use it.",
-            asked_meaning(&grant, cfg!(target_os = "linux")),
+            asked_meaning(&grant, gap.as_deref()),
             serde_json::to_string(&reason).map_err(|_| "grant_requests_unavailable")?
         )),
     };
@@ -792,16 +797,12 @@ pub fn meaning(grant: &AccessGrant) -> &'static str {
 }
 
 /// What one grant lets agents do as its access question says it: [`meaning`], and for a
-/// port on Linux, where Landlock limits ports and not hosts, that the port is open to agents
-/// on every host ([`crate::sandbox::LINUX_PORTS_ANY_HOST_LINE`]). Inputs: the grant and
-/// whether the engine runs on Linux. Output: the sentences.
-pub fn asked_meaning(grant: &AccessGrant, linux: bool) -> String {
-    match grant {
-        AccessGrant::Port { .. } if linux => format!(
-            "{} {}",
-            meaning(grant),
-            crate::sandbox::LINUX_PORTS_ANY_HOST_LINE
-        ),
+/// port the line that says what this Linux cannot hold for it, when there is one
+/// ([`super::policy::linux_network_gap`]). Inputs: the grant and that line, if any.
+/// Output: the sentences.
+pub fn asked_meaning(grant: &AccessGrant, gap: Option<&str>) -> String {
+    match (grant, gap) {
+        (AccessGrant::Port { .. }, Some(gap)) => format!("{} {gap}", meaning(grant)),
         _ => meaning(grant).to_owned(),
     }
 }
