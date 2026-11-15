@@ -186,6 +186,7 @@ fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell 
     shell.arrive(event(AppSetupEvent::GitHub(Ok(signed_in()))));
     shell.arrive(event(AppSetupEvent::Sandbox(Ok(SandboxSettings {
         linux_sockets,
+        ..SandboxSettings::default()
     }))));
     shell.arrive(event(AppSetupEvent::Cleanup(
         Ok(CleanupSettings::default()),

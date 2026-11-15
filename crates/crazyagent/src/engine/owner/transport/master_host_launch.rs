@@ -1331,6 +1331,7 @@ mod tests {
             &connection,
             &crate::sandbox_settings::SandboxSettings {
                 linux_sockets: crate::sandbox::LinuxSockets::TcpPorts,
+                ..Default::default()
             },
         )
         .unwrap();

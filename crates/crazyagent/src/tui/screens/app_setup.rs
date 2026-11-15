@@ -994,7 +994,10 @@ impl AppSetup {
         }
         let done = format!("Linux sockets: {}.", sockets_words(linux_sockets).0);
         let job = AppSetupJob::SetSandbox {
-            settings: SandboxSettings { linux_sockets },
+            settings: SandboxSettings {
+                linux_sockets,
+                ..SandboxSettings::default()
+            },
             generation: ctx.next_generation(),
         };
         self.change(job, Sent::Done(done), ctx);

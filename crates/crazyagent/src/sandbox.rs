@@ -859,6 +859,19 @@ pub enum LinuxSockets {
     TcpPorts,
 }
 
+/// Whether a Linux agent runs under the call supervisor where this Linux holds it, the
+/// owner's setting "Linux call supervisor" (DEC-179 addendum 2). `On` (the default) adds
+/// the guards a launch needs: ports on this computer only, no new `.git` outside the
+/// agent's own git folders, signals only to programs it started. `Off` keeps the launch
+/// and every line as they were before the supervisor. Other systems ignore it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinuxSupervisor {
+    #[default]
+    On,
+    Off,
+}
+
 /// The launch refusal when the Linux sockets setting starts no limited-network agent.
 pub const LINUX_LIMITED_NETWORK_OFF: &str = "linux_limited_network_off";
 

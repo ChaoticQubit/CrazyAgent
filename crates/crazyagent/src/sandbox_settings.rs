@@ -1,7 +1,7 @@
 use crate::engine::EngineError;
 use crate::engine::owner::OwnerData;
 use crate::protocol::Outcome;
-use crate::sandbox::LinuxSockets;
+use crate::sandbox::{LinuxSockets, LinuxSupervisor};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -12,12 +12,15 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS sandbox_settings (
 )";
 
 /// The owner's app-wide sandbox settings: how a limited-network agent's sockets are held
-/// on Linux ("Linux limited-network sockets"). Before the first save every value is its
-/// default.
+/// on Linux ("Linux limited-network sockets") and whether Linux agents run under the call
+/// supervisor ("Linux call supervisor"). Before the first save every value is its default;
+/// a client that sends no supervisor choice gets the default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxSettings {
     pub linux_sockets: LinuxSockets,
+    #[serde(default)]
+    pub linux_supervisor: LinuxSupervisor,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -69,7 +72,10 @@ pub fn load(connection: &Connection) -> Result<SandboxSettings, EngineError> {
     };
     let linux_sockets = serde_json::from_value(serde_json::Value::String(sockets))
         .map_err(|_| error("sandbox_settings_invalid"))?;
-    Ok(SandboxSettings { linux_sockets })
+    Ok(SandboxSettings {
+        linux_sockets,
+        linux_supervisor: LinuxSupervisor::default(),
+    })
 }
 
 /// The owner read of the sandbox settings. Input: the open transaction. Output: the
@@ -99,7 +105,10 @@ mod tests {
             LinuxSockets::TcpPorts,
             LinuxSockets::TcpOnly,
         ] {
-            let settings = SandboxSettings { linux_sockets };
+            let settings = SandboxSettings {
+                linux_sockets,
+                ..SandboxSettings::default()
+            };
             assert_eq!(save(&connection, &settings).unwrap(), Outcome::Applied);
             assert_eq!(load(&connection).unwrap(), settings);
             let reader = Connection::open_with_flags(
@@ -131,11 +140,85 @@ mod tests {
                 .is_err(),
             "the table refuses a value outside the three options"
         );
+        for row in ["'open','on'", "'tcp_only','maybe'"] {
+            connection
+                .execute_batch(&format!(
+                    "DROP TABLE sandbox_settings; CREATE TABLE sandbox_settings (singleton INTEGER PRIMARY KEY, linux_sockets TEXT NOT NULL, linux_supervisor TEXT NOT NULL); INSERT INTO sandbox_settings VALUES(1,{row});"
+                ))
+                .unwrap();
+            assert_eq!(load(&connection).unwrap_err().0, "sandbox_settings_invalid");
+        }
+    }
+
+    #[test]
+    fn each_call_supervisor_option_is_saved_and_read_back_beside_the_sockets_choice() {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = Connection::open(folder.path().join("engine.db")).unwrap();
+        initialize(&connection).unwrap();
+        assert_eq!(load(&connection).unwrap().linux_supervisor, LinuxSupervisor::On);
+        for linux_supervisor in [LinuxSupervisor::Off, LinuxSupervisor::On] {
+            let settings = SandboxSettings {
+                linux_sockets: LinuxSockets::TcpPorts,
+                linux_supervisor,
+            };
+            assert_eq!(save(&connection, &settings).unwrap(), Outcome::Applied);
+            assert_eq!(load(&connection).unwrap(), settings);
+        }
+        assert!(
+            connection
+                .execute(
+                    "UPDATE sandbox_settings SET linux_supervisor='maybe' WHERE singleton=1",
+                    [],
+                )
+                .is_err(),
+            "the table refuses a value outside the two options"
+        );
+    }
+
+    #[test]
+    fn an_engine_database_from_before_the_supervisor_setting_reads_on_and_keeps_its_sockets() {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = Connection::open(folder.path().join("engine.db")).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE sandbox_settings; CREATE TABLE sandbox_settings (singleton INTEGER PRIMARY KEY, linux_sockets TEXT NOT NULL); INSERT INTO sandbox_settings VALUES(1,'open');",
+                "CREATE TABLE sandbox_settings (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), linux_sockets TEXT NOT NULL CHECK(linux_sockets IN ('tcp_only', 'refuse', 'tcp_ports'))); INSERT INTO sandbox_settings VALUES(1,'tcp_ports');",
             )
             .unwrap();
-        assert_eq!(load(&connection).unwrap_err().0, "sandbox_settings_invalid");
+        initialize(&connection).unwrap();
+        initialize(&connection).unwrap();
+        let columns: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('sandbox_settings') WHERE name='linux_supervisor'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 1);
+        let kept = SandboxSettings {
+            linux_sockets: LinuxSockets::TcpPorts,
+            linux_supervisor: LinuxSupervisor::On,
+        };
+        assert_eq!(load(&connection).unwrap(), kept);
+        let off = SandboxSettings {
+            linux_supervisor: LinuxSupervisor::Off,
+            ..kept
+        };
+        save(&connection, &off).unwrap();
+        assert_eq!(load(&connection).unwrap(), off);
+    }
+
+    #[test]
+    fn a_client_that_sends_no_supervisor_choice_gets_on_and_each_choice_has_one_word() {
+        let old: SandboxSettings = serde_json::from_str(r#"{"linux_sockets":"refuse"}"#).unwrap();
+        assert_eq!(old.linux_sockets, LinuxSockets::Refuse);
+        assert_eq!(old.linux_supervisor, LinuxSupervisor::On);
+        let off = SandboxSettings {
+            linux_supervisor: LinuxSupervisor::Off,
+            ..SandboxSettings::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&off).unwrap(),
+            r#"{"linux_sockets":"tcp_only","linux_supervisor":"off"}"#
+        );
     }
 }
