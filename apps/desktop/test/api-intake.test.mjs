@@ -95,6 +95,22 @@ test("setup takes at most 64 pack entries and its failures read as plain sentenc
   assert.equal(api.intakeCopy("owner_outcome_unknown_reconcile_same_identity"), "CrazyAgent didn't answer in time. Try again.");
 });
 
+test("a setup refusal for an unsafe download, an unlocked pin, a missing app data folder, an unsupported system or missing Command Line Tools reads as its own sentence (DEC-141)", () => {
+  const words = {
+    setup_archive_unsafe: "The download held a file it shouldn't, so it wasn't installed.",
+    setup_pin_unlocked: "Setup has no locked list of this tool's files, so it wasn't installed.",
+    setup_local_app_data_missing: "Windows didn't say where your local app data folder is, so setup can't install here.",
+    setup_platform_unsupported: "Setup can't install this on this system yet. Install it yourself, then check again.",
+    agent_git_needs_tools: "Agent git needs the Command Line Tools: run xcode-select --install.",
+  };
+  const bridge = readFileSync(new URL("../src-tauri/src/bridge/intake.rs", import.meta.url), "utf8");
+  const listed = bridge.slice(bridge.indexOf("const SETUP_CODES"), bridge.indexOf("];", bridge.indexOf("const SETUP_CODES")));
+  for (const [code, sentence] of Object.entries(words)) {
+    assert.equal(api.intakeCopy(code), sentence, code);
+    assert.ok(listed.includes(`"${code}",`), `${code} reaches the window by name, never as setup_failed`);
+  }
+});
+
 test("every refusal code the native bridge can return has a plain sentence", () => {
   const bridge = readFileSync(new URL("../src-tauri/src/bridge/intake.rs", import.meta.url), "utf8");
   const codes = new Set();
