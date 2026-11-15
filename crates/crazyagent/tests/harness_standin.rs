@@ -125,8 +125,7 @@ fn a_filled_piped_argv_from_the_manifest_runs_the_stand_in_as_written() {
             home.as_str(),
             "--model",
             "m-1",
-            "--prompt",
-            "hi there",
+            "--prompt=hi there",
             "--resume",
             "s-2",
         ]
