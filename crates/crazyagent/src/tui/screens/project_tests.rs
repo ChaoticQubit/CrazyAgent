@@ -2188,10 +2188,8 @@ fn remove_preselects_the_dashboard_choice_and_deletes_only_after_the_exact_name(
     screen.key(key(KeyCode::Backspace));
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
-        ProjectReply::Change(Box::new(SetupAction::Delete {
-            project_id: project.clone(),
-            name: "Gone app".into(),
-        }))
+        ProjectReply::DeleteEverything("Gone app".into()),
+        "Delete everything starts the engine's job (DEC-177 add.1)"
     );
     assert!(!screen.confirm_remove);
 

@@ -1175,6 +1175,50 @@ mod tests {
         }
     }
 
+    /// DEC-177 add.1: every code a delete job is refused or ends with reaches the window as
+    /// itself, so the window says its own sentence, and a stop refused once the delete moves
+    /// folders to the Trash is not read as a failed read.
+    #[test]
+    fn a_delete_job_reaches_the_window_with_its_own_codes() {
+        for code in [
+            "delete_cannot_stop",
+            "delete_name_mismatch",
+            "delete_agents_running",
+            "delete_trash_partial",
+            "home_trash_failed",
+            "project_delete_interrupted",
+            "delete_in_progress",
+            "delete_not_recorded",
+            "delete_unavailable",
+            "delete_shared_folder",
+            "delete_research_running",
+            "delete_platform_unqualified",
+            "delete_outside_home",
+            "invalid_project",
+        ] {
+            assert_eq!(intake_code(code), Some(code), "{code}");
+            assert_eq!(
+                intake_failure(EngineError(code.into())).code,
+                code,
+                "{code}"
+            );
+        }
+        let view = JobView {
+            id: RequestId::new("delete-1").unwrap(),
+            kind: crazyagent::projects_home::job::JobKind::Delete,
+            project_id: Some(crazyagent::protocol::ProjectId::new("notes").unwrap()),
+            source: "Notes".into(),
+            mode: AddMode::Move,
+            overrides: Vec::new(),
+            stopping: false,
+            state: JobState::Failed {
+                code: "delete_trash_partial".into(),
+                phase: crazyagent::projects_home::job::Phase::Trashing,
+            },
+        };
+        assert_eq!(shown(view.clone()), view);
+    }
+
     #[test]
     fn a_refused_setup_or_pack_change_reaches_the_window_with_its_own_code() {
         let refused = |code: &str| {

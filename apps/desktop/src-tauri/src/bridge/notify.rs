@@ -708,6 +708,55 @@ mod tests {
         assert_eq!(moved(JobState::Stopping { agents_left: 1 }), None);
     }
 
+    /// DEC-177 add.1: an ended delete's notice names the project whole and says its files are
+    /// in the Trash, a stopped or failed delete says Deleting, and a delete still moving folders
+    /// to the Trash or one an engine stop cut short, shown again at start, sends none.
+    #[test]
+    fn an_ended_delete_notice_names_the_project_and_speaks_of_the_trash() {
+        use crazyagent::projects_home::job::{JobKind, JobState, Phase};
+        let deleted = |state| {
+            let view = JobView {
+                kind: JobKind::Delete,
+                project_id: Some(crazyagent::protocol::ProjectId::new("notes").unwrap()),
+                source: "Notes/2026 plans".into(),
+                ..job(state)
+            };
+            intake_notice(&view).map(|notice| (notice.title, notice.body))
+        };
+        let pair = |title: &str, body: &str| Some((title.to_owned(), body.to_owned()));
+        assert_eq!(
+            deleted(JobState::Done),
+            pair("Notes/2026 plans is deleted", "Its files are in the Trash.")
+        );
+        assert_eq!(
+            deleted(JobState::Cancelled {
+                phase: Phase::Stopping
+            }),
+            pair(
+                "Deleting Notes/2026 plans stopped",
+                "Nothing was moved to the Trash."
+            )
+        );
+        assert_eq!(
+            deleted(JobState::Failed {
+                code: "delete_trash_partial".into(),
+                phase: Phase::Trashing
+            }),
+            pair(
+                "Deleting Notes/2026 plans failed",
+                "Open Home in CrazyAgent to see why."
+            )
+        );
+        assert_eq!(deleted(JobState::Trashing { done: 1, total: 2 }), None);
+        assert_eq!(
+            deleted(JobState::CutShort {
+                trashed: 1,
+                total: 2
+            }),
+            None
+        );
+    }
+
     /// A job's notification is claimed once, shares the bound with questions, and a click on
     /// it brings the window front without naming a project to open.
     #[test]
