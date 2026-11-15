@@ -936,6 +936,10 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         .ok()
         .filter(|_| entry.is_absolute())
         .ok_or_else(not_there)?;
+    #[cfg(test)]
+    if let Some(step) = between_program_and_check(entry) {
+        step();
+    }
     match check_candidate(places, entry) {
         Some(Ok(())) => {}
         Some(Err(why)) => {
@@ -1004,6 +1008,28 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
             by_name: shebang.by_name.is_some() || through_shim,
         },
     })
+}
+
+/// A step a row runs once in `entry_at` between reading an entry's real file and checking
+/// the entry.
+#[cfg(test)]
+type Step = Box<dyn FnOnce() + Send>;
+
+/// The steps rows set, each by the entry whose resolution runs it.
+#[cfg(test)]
+static BETWEEN_PROGRAM_AND_CHECK: std::sync::Mutex<Vec<(PathBuf, Step)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Takes the step a row set for this entry, to run in `entry_at` once the entry's real file
+/// was read and before the entry is checked, so a row can move a link of its chain in that
+/// gap. Input: the entry. Output: the step, none for every other entry.
+#[cfg(test)]
+fn between_program_and_check(entry: &Path) -> Option<Step> {
+    let mut steps = BETWEEN_PROGRAM_AND_CHECK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let at = steps.iter().position(|(path, _)| path == entry)?;
+    Some(steps.remove(at).1)
 }
 
 /// Finds the interpreter a script's first line asks `env` for by name: for `node`, first the

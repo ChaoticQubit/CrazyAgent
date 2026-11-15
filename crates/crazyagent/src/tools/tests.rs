@@ -1427,3 +1427,49 @@ fn unread_projects_make_every_place_under_home_but_the_engine_agent_writable() {
     };
     assert!(!read.agent_writable(&home.join(".local/bin")));
 }
+
+/// rv-code2 r1 F1, vid 1's race in the shared resolver: `entry_at` reads the entry's real file
+/// before it checks the entry, so the file it hands back must pass the check itself. An owner
+/// entry whose chain passes through a link in a project agents can write leads to a planted
+/// file when the real file is read, and back to the owner's file when the entry is checked:
+/// the planted file is refused, never handed back. Once the chain holds still it resolves.
+#[test]
+fn an_entry_never_resolves_to_a_file_its_check_did_not_see() {
+    let (_folder, root) = scratch();
+    let work = root.join("proj");
+    std::fs::create_dir_all(work.join(".crazyagent")).unwrap();
+    let sh = "#!/bin/sh\necho ran\n";
+    let owned = program(&root.join("owner/codex"), sh);
+    let planted = program(&work.join("tools/planted/codex"), sh);
+    let middle = work.join("tools/codex");
+    std::os::unix::fs::symlink(&planted, &middle).unwrap();
+    let entry = root.join("bin/codex");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&middle, &entry).unwrap();
+    let places = Places::new(Vec::new(), Some(root.join("home")));
+    let (moved, to) = (middle.clone(), owned.clone());
+    let step: Step = Box::new(move || {
+        std::fs::remove_file(&moved).unwrap();
+        std::os::unix::fs::symlink(&to, &moved).unwrap();
+    });
+    BETWEEN_PROGRAM_AND_CHECK
+        .lock()
+        .unwrap()
+        .push((entry.clone(), step));
+    let resolved = resolve_entry(&entry, &places);
+    let moved_to = std::fs::read_link(&middle).unwrap();
+    assert_eq!(moved_to, owned, "the step ran");
+    let refused = resolved.unwrap_err();
+    assert_eq!(refused.reason, Reason::Refused, "{}", refused.line());
+    assert_eq!(
+        refused.refused,
+        Some(Box::new(Refused {
+            file: planted,
+            why: Refusal::AgentsCanWrite,
+        }))
+    );
+    assert!(
+        resolve_entry(&entry, &places).is_ok(),
+        "the owner's chain resolves once it holds still"
+    );
+}
