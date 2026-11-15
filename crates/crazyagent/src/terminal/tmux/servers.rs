@@ -813,6 +813,17 @@ impl Host for Servers {
             .collect()
     }
 
+    #[cfg(test)]
+    fn sever_lifelines(&self, agent: &AgentId) {
+        for kept in [&self.keepers, &self.mates_keepers] {
+            if let Ok(mut keepers) = kept.lock()
+                && let Some(keeper) = keepers.get_mut(agent)
+            {
+                drop(keeper.stdin.take());
+            }
+        }
+    }
+
     fn end_kept_server(&self, agent: &AgentId) -> Option<bool> {
         let mut keeper = self.keepers.lock().ok()?.remove(agent)?;
         let ended = end_keeper(&mut keeper);

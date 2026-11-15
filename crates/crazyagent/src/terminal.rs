@@ -414,6 +414,11 @@ pub trait Host: Send + Sync {
         Vec::new()
     }
 
+    /// Closes the engine's end of the lifelines this host's server keepers hold for an agent,
+    /// as the engine's death does, for rows only (B6b). Takes the name.
+    #[cfg(test)]
+    fn sever_lifelines(&self, _agent: &AgentId) {}
+
     /// Lists the agent terminals still running, reconnecting to the host first when needed.
     /// Takes nothing; after an engine restart this maps surviving terminals back to their agents.
     /// Returns the names in order.
@@ -519,6 +524,11 @@ impl Host for OwnServer {
 
     fn server_keepers(&self, agent: &AgentId) -> Vec<(u32, bool)> {
         self.0.server_keepers(agent)
+    }
+
+    #[cfg(test)]
+    fn sever_lifelines(&self, agent: &AgentId) {
+        self.0.sever_lifelines(agent);
     }
 
     fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {

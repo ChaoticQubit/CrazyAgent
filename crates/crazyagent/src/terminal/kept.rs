@@ -288,6 +288,11 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.server_keepers(agent)
     }
 
+    #[cfg(test)]
+    fn sever_lifelines(&self, agent: &AgentId) {
+        self.inner.sever_lifelines(agent);
+    }
+
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
         self.inner.alive()
     }
