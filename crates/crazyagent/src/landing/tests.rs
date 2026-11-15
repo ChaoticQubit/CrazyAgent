@@ -15261,6 +15261,29 @@ fn a_confined_git_step_writes_only_what_it_names_and_never_the_git_folder() {
     assert!(folder.join("objects/ok/README").is_file());
 }
 
+/// SA vid 3 option A (leader 14:22): on Linux a step that may write the work tree has no
+/// writable folder outside it, the engine's step folder included, where it would otherwise
+/// write the index copy the step adopts, so no link swapped in can turn its writes there. Its
+/// git answers the refusal, since the step empties that folder after.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_step_that_fills_the_work_tree_cannot_write_the_step_folder() {
+    let case = Case::new();
+    let step = case.workspace.git_dir.join("crazyagent-step");
+    let checkout = |into: &Path| {
+        let prefix = format!("--prefix={}/", into.display());
+        confined_agent(&case, git::Writes::WorkTree)
+            .exec(&["checkout-index", "-a", "-f", &prefix], None, &[], 4096)
+            .unwrap()
+    };
+    let planted = checkout(&step.join("planted"));
+    assert_ne!(planted.code, 0, "the step wrote in its step folder");
+    assert!(std::fs::symlink_metadata(step.join("planted")).is_err());
+    let worktree = case.workspace.worktree.clone();
+    assert_eq!(checkout(&worktree.join("ok")).code, 0);
+    assert!(worktree.join("ok/README").is_file());
+}
+
 /// SECAUDIT unconfined-git-add-reads-through-raced-symlink: a file an agent keeps swapping for
 /// a link while its turn ends leaves no blob of what the link points at.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
