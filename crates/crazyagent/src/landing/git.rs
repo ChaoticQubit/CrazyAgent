@@ -47,11 +47,18 @@ const INDEX_LOCKED: i32 = 128;
 #[cfg(target_os = "linux")]
 const STEP_LOCK_FOLDERS_MAX: usize = 512;
 
+/// The most bytes the start sweep reads of an `index.lock`: more than the longest text a
+/// confined Linux step writes there ([`step_lock_text`]), so a longer lock is never the
+/// engine's.
+#[cfg(target_os = "linux")]
+const STEP_LOCK_TEXT_MAX: u64 = 128;
+
 /// Removes the `index.lock` a confined Linux step of a stopped engine left: only in a linked
-/// worktree's git folder that holds the engine's step folder, only a plain file, and never
-/// through a link. The engine runs it once at start, before any landing step, so no step of
-/// its own holds such a lock then. Input: the repository's canonical root. Output: how many
-/// locks it removed.
+/// worktree's git folder, only a plain file read without following a link, and only one
+/// whose whole text names an engine process that is gone ([`left_by_gone_step`]), so a lock
+/// another git took, or one a running engine holds, stays (RV-DS241-135). The engine runs it
+/// once at start, before any landing step. Input: the repository's canonical root. Output:
+/// how many locks it removed.
 #[cfg(target_os = "linux")]
 pub(super) fn clear_step_locks(root: &Path) -> usize {
     let real = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
@@ -67,8 +74,8 @@ pub(super) fn clear_step_locks(root: &Path) -> usize {
         let private = folder.path();
         let lock = private.join("index.lock");
         if real(&private)
-            && real(&private.join(STEP_FOLDER))
             && std::fs::symlink_metadata(&lock).is_ok_and(|meta| meta.is_file())
+            && left_by_gone_step(&lock)
             && std::fs::remove_file(&lock).is_ok()
         {
             removed += 1;
@@ -76,6 +83,57 @@ pub(super) fn clear_step_locks(root: &Path) -> usize {
     }
     assert!(removed <= STEP_LOCK_FOLDERS_MAX);
     removed
+}
+
+/// The text a confined Linux step writes in the `index.lock` it takes, naming the engine
+/// process by its id and start, so the start sweep can tell that lock from one another git
+/// took. Inputs: the process id and its start identity. Output: the text.
+#[cfg(target_os = "linux")]
+fn step_lock_text(pid: i32, started: &str) -> String {
+    format!("{STEP_FOLDER} {pid} {started}\n")
+}
+
+/// Tells whether an `index.lock` is one a confined Linux step of an engine process that is
+/// gone took: a plain file, opened without following a link or waiting on a FIFO, whose
+/// whole text is [`step_lock_text`] for a process id and start that no running process has.
+/// Input: the lock. Output: false for any other lock, one a running process took, or one
+/// whose process cannot be read.
+#[cfg(target_os = "linux")]
+fn left_by_gone_step(lock: &Path) -> bool {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut text = String::new();
+    let read = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(lock)
+        .and_then(|file| {
+            if !file.metadata()?.is_file() {
+                return Err(std::io::ErrorKind::InvalidInput.into());
+            }
+            file.take(STEP_LOCK_TEXT_MAX).read_to_string(&mut text)
+        });
+    let named = text
+        .strip_prefix(STEP_FOLDER)
+        .and_then(|rest| rest.strip_prefix(' '))
+        .and_then(|rest| rest.strip_suffix('\n'))
+        .and_then(|rest| rest.split_once(' '))
+        .and_then(|(pid, started)| Some((pid.parse::<i32>().ok()?, started)));
+    let Some((pid, started)) = named else {
+        return false;
+    };
+    if read.is_err()
+        || pid <= 1
+        || started.is_empty()
+        || !started.bytes().all(|byte| byte.is_ascii_digit())
+        || step_lock_text(pid, started) != text
+    {
+        return false;
+    }
+    match crate::storage::harness_groups::start_identity(pid) {
+        Ok(None) => true,
+        Ok(Some(now)) => now != started,
+        Err(_) => false,
+    }
 }
 
 /// The Landlock helper a confined Linux step starts: the one shipped beside the engine, or
@@ -563,15 +621,19 @@ impl Repo {
     }
 
     /// Runs one confined Linux step on the copy of the worktree's index in the engine's step
-    /// folder, holding the worktree's `index.lock` the whole time as git would. The folder
-    /// starts empty and is emptied after, and the index is copied only from a plain file with
-    /// one link, opened without following a link or waiting on a FIFO. Once git exits 0
-    /// having rewritten the copy, the copy takes the index's place only when it too is a
-    /// plain file with one link, so whatever a raced step leaves there is never taken, and a
-    /// step that only reads leaves the index as it was; the step itself never writes the git
-    /// folder ([`Self::confined`]). Input: the step. Output: its output, git's
-    /// [`INDEX_LOCKED`] exit when the lock is already held, or `changes_git_failed` when the
-    /// index cannot be locked, copied or put back.
+    /// folder, holding the worktree's `index.lock` the whole time as git would. The lock holds
+    /// [`step_lock_text`] for this engine process, so the start sweep removes only a lock the
+    /// engine took ([`clear_step_locks`]); where the process cannot be named, as for process
+    /// 1, the lock is taken empty and the sweep keeps it. A step that does not take the lock
+    /// removes its step folder when empty and leaves one holding another step's copy to that
+    /// step (RV-DS241-135). The folder starts empty and is emptied after, and the index is copied
+    /// only from a plain file with one link, opened without following a link or waiting on a
+    /// FIFO. Once git exits 0 having rewritten the copy, the copy takes the index's place only
+    /// when it too is a plain file with one link, so whatever a raced step leaves there is
+    /// never taken, and a step that only reads leaves the index as it was; the step itself
+    /// never writes the git folder ([`Self::confined`]). Input: the step. Output: its output,
+    /// git's [`INDEX_LOCKED`] exit when the lock is already held, or `changes_git_failed` when
+    /// the index cannot be locked, copied or put back.
     #[cfg(target_os = "linux")]
     pub(super) fn swapped(
         &self,
@@ -589,22 +651,42 @@ impl Repo {
         let index = self.git_dir.join("index");
         let lock = self.git_dir.join("index.lock");
         let failed = || failure("changes_git_failed");
+        let folder = copy.parent().expect("the copy sits in the step folder");
+        let own = i32::try_from(std::process::id())
+            .ok()
+            .and_then(|pid| {
+                crate::storage::harness_groups::start_identity(pid)
+                    .ok()
+                    .flatten()
+                    .map(|started| step_lock_text(pid, &started))
+            })
+            .unwrap_or_default();
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&lock)
         {
-            Ok(_) => {}
+            Ok(mut taken) => {
+                if taken.write_all(own.as_bytes()).is_err() {
+                    drop(taken);
+                    let _ = std::fs::remove_file(&lock);
+                    let _ = std::fs::remove_dir_all(folder);
+                    return Err(failed());
+                }
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = std::fs::remove_dir(folder);
                 return Ok(Output {
                     code: INDEX_LOCKED,
                     stdout: Vec::new(),
                     overflow: false,
                 });
             }
-            Err(_) => return Err(failed()),
+            Err(_) => {
+                let _ = std::fs::remove_dir(folder);
+                return Err(failed());
+            }
         }
-        let folder = copy.parent().expect("the copy sits in the step folder");
         let plain = |meta: &std::fs::Metadata| meta.file_type().is_file() && meta.nlink() == 1;
         let renewed = std::fs::remove_dir_all(folder)
             .err()
