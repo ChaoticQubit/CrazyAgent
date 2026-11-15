@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 mod api;
 mod clone;
 pub(crate) mod http;
+mod publish;
 mod rules;
 mod state;
 #[cfg(all(test, target_os = "macos"))]
@@ -21,6 +22,9 @@ pub(crate) mod test_server;
 mod tests;
 
 pub use api::Endpoints;
+pub use publish::{
+    GitHubHistory, GitHubLocal, GitHubPrepare, GitHubSecretFinding, GitHubSecretKind,
+};
 pub use rules::{GitHubCi, GitHubRepoFacts, GitHubRule, GitHubRuleOutcome, GitHubRuleState};
 
 pub const CLIENT_ID: &str = "Ov23liHICPRkMyS5sNMV";
@@ -632,5 +636,46 @@ impl GitHub {
         self.with_record(full_name, |made| {
             rules::set(&self.endpoints, &token, full_name, rule, on, facts, made)
         })
+    }
+
+    /// Reads how a project's git stands before it is published: whether it is a
+    /// repository, its branch and what its history holds. Needs no sign-in. Input: the
+    /// project folder. Output: the state, or the refusal for a remote, a detached HEAD or
+    /// a `.git` that is not a plain folder.
+    pub fn publish_inspect(&self, project: &Path) -> Result<GitHubLocal, EngineError> {
+        let home = publish::GitHome::new(&self.root)?;
+        publish::inspect(
+            &publish::git()?,
+            home.path(),
+            project,
+            self.endpoints.web_host(),
+        )
+    }
+
+    /// Gets a project ready for its first publish commit: git init on main when it has no
+    /// repository, CrazyAgent's folders hidden from git, the docs and approved .gitignore
+    /// lines added, and the security policy and Dependabot files written where missing.
+    /// Inputs: the project folder, its state and the owner's choices. Output: the paths
+    /// publish wrote.
+    pub fn publish_prepare(
+        &self,
+        project: &Path,
+        local: &GitHubLocal,
+        choices: &GitHubPrepare,
+    ) -> Result<Vec<String>, EngineError> {
+        let home = publish::GitHome::new(&self.root)?;
+        publish::prepare(&publish::git()?, home.path(), project, local, choices)
+    }
+
+    /// Finds the lines a publish would push that hold a secret, by file and line.
+    /// Inputs: the project folder and its history. Output: the findings, or
+    /// `github_publish_too_large`.
+    pub fn publish_secrets(
+        &self,
+        project: &Path,
+        history: GitHubHistory,
+    ) -> Result<Vec<GitHubSecretFinding>, EngineError> {
+        let home = publish::GitHome::new(&self.root)?;
+        publish::secret_findings(&publish::git()?, home.path(), project, history)
     }
 }

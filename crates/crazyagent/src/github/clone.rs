@@ -47,7 +47,7 @@ pub(super) fn full_name(value: &str) -> Result<(&str, &str), EngineError> {
 /// Finds the git the engine runs: first in the engine's own PATH, never an agent's, then
 /// in the platform's fixed folder. Input: the engine's PATH value. Output: the executable
 /// with links resolved, or none when neither holds one.
-fn git_program(path: Option<&OsStr>) -> Option<PathBuf> {
+pub(super) fn git_program(path: Option<&OsStr>) -> Option<PathBuf> {
     crate::paths::find_in_path("git", path).or_else(|| {
         let folder = fixed_git_folder()?;
         crate::paths::find_in_path("git", Some(folder.as_os_str()))
@@ -206,14 +206,14 @@ pub(super) fn clone_repo(
 /// Creates a folder only this user can open (mode 0700). Input: the path. Output: the
 /// io result.
 #[cfg(unix)]
-fn private_folder(path: &Path) -> std::io::Result<()> {
+pub(super) fn private_folder(path: &Path) -> std::io::Result<()> {
     std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700).create(path)
 }
 
 /// Creates a folder with the access the projects home passes down to new folders on
 /// Windows. Input: the path. Output: the io result.
 #[cfg(not(unix))]
-fn private_folder(path: &Path) -> std::io::Result<()> {
+pub(super) fn private_folder(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir(path)
 }
 
