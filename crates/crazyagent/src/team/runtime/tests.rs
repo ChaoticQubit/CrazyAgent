@@ -33034,6 +33034,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
             &account,
             false,
             Layout::Linked,
+            false,
         )
         .unwrap();
     let home = agent_home(&runtime.state, id);

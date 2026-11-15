@@ -74,6 +74,19 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
     spawn(command)?.wait_with_output()
 }
 
+/// Starts a child through the gate with the stdio `Command::output` defaults: no input,
+/// stdout and stderr collected, whatever the command had set. Input: the configured
+/// command. Output: status, stdout and stderr.
+pub fn collected(command: &mut Command) -> io::Result<Output> {
+    use std::process::Stdio;
+    output(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+}
+
 /// Accepts one connection on a Tokio Unix listener, taking the gate only for
 /// each accept attempt, never while waiting. A failure a later accept outlives,
 /// such as an aborted peer or a full descriptor table, is logged and retried
