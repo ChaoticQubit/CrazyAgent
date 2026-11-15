@@ -644,9 +644,10 @@ impl TerminalSession {
         true
     }
 
-    /// Says whether taking this pane over dropped an open turn as none, so the caller that
-    /// follows a live master holds engine input as after any dropped turn. Takes the session.
-    /// Returns the answer, no for a session the engine started.
+    /// Says whether taking this pane over dropped an open turn as none, or a turn it could
+    /// not tell was open because its record's read was cut, so the caller that follows a live
+    /// master holds engine input as after any dropped turn. Takes the session. Returns the
+    /// answer, no for a session the engine started.
     pub fn took_none(&self) -> bool {
         self.took_none
     }

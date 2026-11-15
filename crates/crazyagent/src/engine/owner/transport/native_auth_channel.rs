@@ -195,6 +195,28 @@ fn start_trusted(
     Ok(())
 }
 
+/// A step a row runs once between the check of an entry and the capture of its file.
+#[cfg(test)]
+type Step = Box<dyn FnOnce() + Send>;
+
+#[cfg(test)]
+static BETWEEN_CHECK_AND_CAPTURE: std::sync::Mutex<Vec<(PathBuf, Step)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Takes the step a row set to run between the check of an entry and the capture of its
+/// file: in [`OwnerRuntimeHandle::find_harness`] once the found entry passed its checks,
+/// and in [`OwnerRuntimeHandle::capture_found`] once the entry's file is resolved and before
+/// that file is checked, so a row can move a link in the entry's chain in that gap. Input:
+/// the entry. Output: the step, none for every other entry.
+#[cfg(test)]
+fn between_check_and_capture(entry: &Path) -> Option<Step> {
+    let mut steps = BETWEEN_CHECK_AND_CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let at = steps.iter().position(|(path, _)| path == entry)?;
+    Some(steps.remove(at).1)
+}
+
 pub(crate) struct NativeAuthDispatchHost {
     #[cfg(unix)]
     engine: Arc<Engine>,
@@ -515,6 +537,27 @@ impl OwnerRuntimeHandle {
         Ok(())
     }
 
+    /// Captures a harness engine start chose or found as a re-pin captures one: once the
+    /// real file pinned passes the start checks ([`start_trusted`]) with the HOME engine
+    /// start checked the entry with, and the entry still leads to it, so a link moved after
+    /// engine start checked the entry never gets an agent's file pinned (RV-DS241-140). HOME
+    /// is read as the start search reads it, which is handed over only after registration.
+    /// Input: the absolute entry. Output: the host, or the refusal code.
+    pub(crate) fn capture_found(
+        &self,
+        entry: &Path,
+    ) -> Result<RegisteredNativeAuthHost, EngineError> {
+        assert!(entry.is_absolute());
+        let search = crate::harnesses::Search::from_environment();
+        RegisteredNativeAuthHost::capture_entry_checked(entry, |real| {
+            #[cfg(test)]
+            if let Some(step) = between_check_and_capture(entry) {
+                step();
+            }
+            start_trusted(&self.authority, real, search.home())
+        })
+    }
+
     pub(crate) fn register_codex_executable(
         &self,
         host: RegisteredNativeAuthHost,
@@ -581,9 +624,10 @@ impl OwnerRuntimeHandle {
 
     /// Looks for Codex or Claude Code again, for Check again, Choose file, a sign-in retry
     /// and the install pin: the chosen file, else the first search hit, that passes
-    /// [`finding::check`](crate::harnesses::finding::check), captured as at engine start. It fills
-    /// an empty slot or one whose pinned file is gone; no other pin is replaced, and a disabled
-    /// registration refuses. Inputs: the id, chosen file, search and PATH. Output: [`Found`].
+    /// [`finding::check`](crate::harnesses::finding::check), captured as at engine start once
+    /// the real file pinned passes the same checks. It fills an empty slot or one whose pinned
+    /// file is gone; no other pin is replaced, and a disabled registration refuses. Inputs:
+    /// the id, chosen file, search and PATH. Output: [`Found`].
     pub(crate) fn find_harness(
         &self,
         harness: &str,
@@ -664,10 +708,18 @@ impl OwnerRuntimeHandle {
             }
         };
         assert!(entry.is_absolute());
-        let captured = RegisteredNativeAuthHost::capture_entry(&entry).and_then(|host| {
-            host.verified_path()?;
-            Ok(host)
-        });
+        #[cfg(test)]
+        if let Some(step) = between_check_and_capture(&entry) {
+            step();
+        }
+        let checked = |real: &Path| {
+            crate::harnesses::finding::check_file(real, &space, search.home()).map(|_| ())
+        };
+        let captured =
+            RegisteredNativeAuthHost::capture_entry_checked(&entry, checked).and_then(|host| {
+                host.verified_path()?;
+                Ok(host)
+            });
         let host = match captured {
             Ok(host) => host,
             Err(error) => {

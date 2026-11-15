@@ -721,3 +721,102 @@ fn a_chosen_file_in_the_shared_temp_folder_is_refused_as_changeable() {
         Err(finding::PATH_CHANGEABLE.to_owned())
     );
 }
+
+/// RV-DS241-140 r2: a chain is judged by every link in it, each where it sits, so a link an
+/// agent can move, a folder link placed where agents write, a link whose `..` leaves a folder
+/// agents write, or a link in a folder other users can change refuses the entry while both
+/// ends of the chain pass. A chain of links the owner alone can move passes, relative links
+/// and an nvm-style `current` folder link included.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_chosen_or_found_codex_whose_chain_has_a_link_others_can_move_is_refused() {
+    let case = Case::new();
+    let real = case.file("tools/codex-0.167.1", 0o755);
+    let agent = case
+        .root
+        .join("projects/harbor/.crazyagent/worktrees/agent-3/bin");
+    let owned = case.root.join("tools/links");
+    let shared = case.root.join("shared");
+    for folder in [&agent, &owned, &shared] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let chain = |entry: &str, middle: &Path, target: &Path| {
+        std::os::unix::fs::symlink(target, middle).unwrap();
+        let entry = case.root.join(entry);
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(middle, &entry).unwrap();
+        entry
+    };
+    let kept = chain("kept/codex", &owned.join("codex"), &real);
+    assert_eq!(case.check("codex", &kept), Ok(kept.clone()));
+    let relative = case.root.join("relative/codex");
+    std::fs::create_dir_all(relative.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("../tools/codex-0.167.1", &relative).unwrap();
+    assert_eq!(case.check("codex", &relative), Ok(relative.clone()));
+    case.file("nvm/versions/v22/lib/codex.js", 0o755);
+    std::os::unix::fs::symlink("versions/v22", case.root.join("nvm/current")).unwrap();
+    std::fs::create_dir_all(case.root.join("nvm/versions/v22/bin")).unwrap();
+    std::os::unix::fs::symlink(
+        "../lib/codex.js",
+        case.root.join("nvm/versions/v22/bin/codex"),
+    )
+    .unwrap();
+    let current = case.root.join("nvm/current/bin/codex");
+    assert_eq!(case.check("codex", &current), Ok(current.clone()));
+    let dotted = case.root.join("dotted/.crazyagent/step");
+    std::fs::create_dir_all(&dotted).unwrap();
+    let stepped = case.root.join("stepped/codex");
+    std::fs::create_dir_all(stepped.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(dotted.join("../../../tools/codex-0.167.1"), &stepped).unwrap();
+    assert_eq!(case.check("codex", &stepped), Err(PATH_AGENT_SPACE.into()));
+    let moved = chain("moved/codex", &agent.join("codex"), &real);
+    assert_eq!(case.check("codex", &moved), Err(PATH_AGENT_SPACE.into()));
+    let folder = agent.join("tools");
+    std::os::unix::fs::symlink(case.root.join("tools"), &folder).unwrap();
+    let through = case.root.join("through/codex");
+    std::fs::create_dir_all(through.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(folder.join("codex-0.167.1"), &through).unwrap();
+    assert_eq!(case.check("codex", &through), Err(PATH_AGENT_SPACE.into()));
+    let open = chain("open/codex", &shared.join("codex"), &real);
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(
+        case.check("codex", &open),
+        Err(finding::PATH_CHANGEABLE.into())
+    );
+    let space = finding::AgentSpace::open(&case.engine).unwrap();
+    let found = Search::new(
+        vec![moved.parent().unwrap().to_path_buf()],
+        Some(case.home.clone()),
+        Vec::new(),
+    );
+    assert_eq!(
+        finding::pick("codex", &found, None, &space)
+            .map(|picked| picked.map_err(|(path, error)| (path, error.0))),
+        Some(Err((moved, PATH_AGENT_SPACE.into())))
+    );
+}
+
+/// RV-DS241-140 r4: a chain whose link target passes through /private/var/run, the
+/// root:daemon 775 folder nix-darwin's /run link leads to, and leaves it by `..` passes, so
+/// a harness in /run/current-system/sw/bin is kept as before the hop walk.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_chain_through_the_system_run_folder_passes_as_a_nix_darwin_profile_does() {
+    use std::os::unix::fs::MetadataExt;
+    let run = Path::new("/private/var/run");
+    let premise = std::fs::metadata(run).unwrap();
+    assert_eq!(
+        (premise.uid(), premise.gid(), premise.mode() & 0o7777),
+        (0, 1, 0o775),
+        "/private/var/run is root:daemon 775"
+    );
+    let case = Case::new();
+    let real = case.file("tools/codex-0.167.1", 0o755);
+    let up = "../".repeat(run.components().count() - 1);
+    let target = run.join(up).join(real.strip_prefix("/").unwrap());
+    let entry = case.root.join("system/codex");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&target, &entry).unwrap();
+    assert_eq!(std::fs::canonicalize(&entry).unwrap(), real);
+    assert_eq!(case.check("codex", &entry), Ok(entry.clone()));
+}

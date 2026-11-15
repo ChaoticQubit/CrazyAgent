@@ -56,9 +56,11 @@ const STEP_LOCK_TEXT_MAX: u64 = 128;
 /// Removes the `index.lock` a confined Linux step of a stopped engine left: only in a linked
 /// worktree's git folder, only a plain file read without following a link, and only one
 /// whose whole text names an engine process that is gone ([`left_by_gone_step`]), so a lock
-/// another git took, or one a running engine holds, stays (RV-DS241-135). The engine runs it
-/// once at start, before any landing step. Input: the repository's canonical root. Output:
-/// how many locks it removed.
+/// another git took, or one a running engine holds, stays (RV-DS241-135). With such a lock,
+/// or with no `index.lock` at all, the step folder goes too, where a step's git, killed with
+/// its engine, can have left its own lock (RV-DS241-142). The engine runs it once at start,
+/// before any landing step. Input: the repository's canonical root. Output: how many locks it
+/// removed.
 #[cfg(target_os = "linux")]
 pub(super) fn clear_step_locks(root: &Path) -> usize {
     let real = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
@@ -73,9 +75,17 @@ pub(super) fn clear_step_locks(root: &Path) -> usize {
     for folder in folders.take(STEP_LOCK_FOLDERS_MAX).flatten() {
         let private = folder.path();
         let lock = private.join("index.lock");
-        if real(&private)
+        let unlocked = std::fs::symlink_metadata(&lock)
+            .err()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        if real(&private) && unlocked {
+            let _ = std::fs::remove_dir_all(private.join(STEP_FOLDER));
+        } else if real(&private)
             && std::fs::symlink_metadata(&lock).is_ok_and(|meta| meta.is_file())
             && left_by_gone_step(&lock)
+            && std::fs::remove_dir_all(private.join(STEP_FOLDER))
+                .err()
+                .is_none_or(|error| error.kind() == std::io::ErrorKind::NotFound)
             && std::fs::remove_file(&lock).is_ok()
         {
             removed += 1;
@@ -623,17 +633,22 @@ impl Repo {
     /// Runs one confined Linux step on the copy of the worktree's index in the engine's step
     /// folder, holding the worktree's `index.lock` the whole time as git would. The lock holds
     /// [`step_lock_text`] for this engine process, so the start sweep removes only a lock the
-    /// engine took ([`clear_step_locks`]); where the process cannot be named, as for process
-    /// 1, the lock is taken empty and the sweep keeps it. A step that does not take the lock
-    /// removes its step folder when empty and leaves one holding another step's copy to that
-    /// step (RV-DS241-135). The folder starts empty and is emptied after, and the index is copied
-    /// only from a plain file with one link, opened without following a link or waiting on a
-    /// FIFO. Once git exits 0 having rewritten the copy, the copy takes the index's place only
-    /// when it too is a plain file with one link, so whatever a raced step leaves there is
-    /// never taken, and a step that only reads leaves the index as it was; the step itself
-    /// never writes the git folder ([`Self::confined`]). Input: the step. Output: its output,
-    /// git's [`INDEX_LOCKED`] exit when the lock is already held, or `changes_git_failed` when
-    /// the index cannot be locked, copied or put back.
+    /// engine took ([`clear_step_locks`]); where the process cannot be named, as for process 1, the
+    /// lock is taken empty and the sweep keeps it. A step that does not take the lock removes its
+    /// step folder when empty and leaves one holding another step's copy to that step
+    /// (RV-DS241-135). A step whose folder holds a git `index.lock`, as a git an earlier engine
+    /// started can, lets the worktree's lock go and answers [`INDEX_LOCKED`] without touching that
+    /// folder (RV-DS241-142). The folder starts empty and is emptied after, before the worktree's
+    /// lock goes when the copy is not put back, so a git the step killed never leaves a lock there
+    /// that no sweep removes, and the index is copied only from a plain file with one link, opened
+    /// without following a link or waiting on a FIFO, and keeps the index's modified time, so an
+    /// entry racy against the index stays racy and git still reads its file (RV-DS241-147). Once
+    /// git exits 0 having rewritten the copy, the copy takes the index's place only when it too is
+    /// a plain file with one link, so whatever a raced step leaves there is never taken, and a step
+    /// that only reads leaves the index as it was; the step itself never writes the git folder
+    /// ([`Self::confined`]). Input: the step. Output: its output, git's [`INDEX_LOCKED`] exit when
+    /// the lock is already held, or `changes_git_failed` when the index cannot be locked, copied or
+    /// put back.
     #[cfg(target_os = "linux")]
     pub(super) fn swapped(
         &self,
@@ -687,6 +702,14 @@ impl Repo {
                 return Err(failed());
             }
         }
+        if std::fs::symlink_metadata(folder.join("index.lock")).is_ok() {
+            let _ = std::fs::remove_file(&lock);
+            return Ok(Output {
+                code: INDEX_LOCKED,
+                stdout: Vec::new(),
+                overflow: false,
+            });
+        }
         let plain = |meta: &std::fs::Metadata| meta.file_type().is_file() && meta.nlink() == 1;
         let renewed = std::fs::remove_dir_all(folder)
             .err()
@@ -699,12 +722,16 @@ impl Repo {
                 .open(&index)
             {
                 Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-                Ok(mut real) => {
-                    real.metadata().is_ok_and(|meta| plain(&meta))
-                        && std::fs::File::create_new(copy)
-                            .and_then(|mut written| std::io::copy(&mut real, &mut written))
-                            .is_ok()
-                }
+                Ok(mut real) => match real.metadata() {
+                    Ok(meta) if plain(&meta) => std::fs::File::create_new(copy)
+                        .and_then(|mut written| {
+                            std::io::copy(&mut real, &mut written)?;
+                            let modified = std::fs::FileTimes::new().set_modified(meta.modified()?);
+                            written.set_times(modified)
+                        })
+                        .is_ok(),
+                    _ => false,
+                },
             };
         let identity = |meta: &std::fs::Metadata| (meta.dev(), meta.ino());
         let ran = if copied {
@@ -722,10 +749,10 @@ impl Repo {
             && left.as_ref().is_some_and(plain)
             && std::fs::rename(copy, &lock).is_ok()
             && std::fs::rename(&lock, &index).is_ok();
+        let _ = std::fs::remove_dir_all(folder);
         if !kept {
             let _ = std::fs::remove_file(&lock);
         }
-        let _ = std::fs::remove_dir_all(folder);
         match ran {
             Ok(_) if rewritten && !kept => Err(failed()),
             ran => ran.map(|(_, output)| output),

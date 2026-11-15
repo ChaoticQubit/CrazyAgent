@@ -275,6 +275,14 @@ const INTENT_REFUSED: &str = "fatal: CrazyAgent does not mark files as intent to
 const NO_FORWARDER: &str = "fatal: CrazyAgent carries git index changes through the IDE's Source Control, which this process cannot reach. Use Source Control or your own terminal.";
 const NOT_COPIED: &str =
     "fatal: CrazyAgent could not copy the project's git index for this command.";
+/// The `touch` that gives the shim's copy of the index the index's own times and nothing
+/// else (RV-DS241-147): where macOS keeps it, and on Linux the `/bin` path both a merged and
+/// an unmerged `/usr` have.
+const TOUCH: &str = if cfg!(target_os = "macos") {
+    "/usr/bin/touch"
+} else {
+    "/bin/touch"
+};
 
 /// A folder as the text of a single-quoted shell word. Input: the folder. Output: the text,
 /// or `ide_settings_invalid` for one that is not absolute, not UTF-8 or holds a quote or a
@@ -295,6 +303,7 @@ fn shell_folder(folder: &Path) -> Result<&str, EngineError> {
 /// longer, or any prefix
 /// of `--intent-to-add` from `--i` for reset and from `--int` for apply, which git reads as
 /// it) stops with a plain line, since the carry has no form for that mark. Anything else runs on a throwaway copy of the index,
+/// given the index's times and nothing else ([`TOUCH`]), so git's racy-entry check holds,
 /// and when its bytes changed the engine carries the difference across through git's own
 /// path check. Inputs: the project folder, the private folder and the word that runs git.
 /// Output: the text, or `ide_settings_invalid` for a folder [`shell_folder`] refuses.
@@ -312,7 +321,7 @@ shim_check() {{\n  shim_skip \"$@\"\n  shift $(($# - shim_rest))\n  \
 shim_check \"$@\"\n\
 if [ -z \"$CRAZYAGENT_IDE_GIT_NODE\" ] || [ -z \"$CRAZYAGENT_IDE_GIT_FORWARD\" ] || [ -z \"$secret\" ]; then\n  echo \"{NO_FORWARDER}\" >&2\n  exit 128\nfi\n\
 private='{private}'\nbase=\"$private/$$.base\"\nwork=\"$private/$$.work\"\n\
-if [ -e .git/index ]; then\n  if ! /bin/cp .git/index \"$base\" || ! /bin/cp .git/index \"$work\"; then\n    /bin/rm -f \"$base\" \"$work\"\n    echo \"{NOT_COPIED}\" >&2\n    exit 128\n  fi\nfi\n\
+if [ -e .git/index ]; then\n  if ! /bin/cp .git/index \"$base\" || ! /bin/cp .git/index \"$work\" || ! {TOUCH} -r .git/index \"$work\"; then\n    /bin/rm -f \"$base\" \"$work\"\n    echo \"{NOT_COPIED}\" >&2\n    exit 128\n  fi\nfi\n\
 GIT_INDEX_FILE=\"$work\" {runner} \"$@\"\ncode=$?\nstep=0\n\
 if ! /usr/bin/cmp -s \"$base\" \"$work\"; then\n  CRAZYAGENT_IDE_GIT_SECRET=\"$secret\" \"$CRAZYAGENT_IDE_GIT_NODE\" \"$CRAZYAGENT_IDE_GIT_FORWARD\" {verb} \"$$\" </dev/null\n  step=$?\nfi\n\
 /bin/rm -f \"$base\" \"$work\" \"$work.lock\"\n\

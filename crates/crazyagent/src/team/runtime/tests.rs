@@ -33545,6 +33545,123 @@ fn a_restarted_engine_gives_the_adopted_live_master_a_fresh_run_time() {
     again.shutdown().unwrap();
 }
 
+/// What the engine keeps of a live master's turns and their effects: the project's turn
+/// count and whether one is open, the master's own turn count, the project's tasks and the
+/// rows of session s-one that hold an earlier turn's reply. Takes the fixture and the master.
+/// Returns them.
+#[cfg(target_os = "macos")]
+fn live_master_effects(fixture: &Fixture, id: i64) -> ((i64, bool), i64, i64, i64) {
+    let connection = &fixture.connection;
+    let turns: i64 = connection
+        .query_row("SELECT turns FROM team_agents WHERE id=?1", [id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let tasks: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_tasks WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let earlier: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_messages WHERE session=?1 AND text LIKE '%Earlier reply%'",
+            ["s-one"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    (live_turns(connection), turns, tasks, earlier)
+}
+
+/// RV-DS241-143: a restarted engine that adopts a live master older than the launch's 24 h
+/// run time, whose record holds more than three reads of turns the engine never followed, takes
+/// that backlog as already passed: no earlier turn is counted against the round budget,
+/// landed, written as the owner's reply or read for task blocks, and the master is taken
+/// over idle and stays live.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_adopted_live_master_past_a_day_with_a_long_record_takes_no_earlier_turn_as_new() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let limits = TeamLimits {
+        master_idle_stop: Duration::from_secs(3600),
+        ..TeamLimits::default()
+    };
+    let (mut team, id) = idle_live_master(&fixture, &host, limits.master_idle_stop);
+    assert_eq!(team.shutdown().unwrap(), names(&[id]));
+    assert_eq!(host.alive().unwrap(), names(&[id]));
+    let before = live_master_effects(&fixture, id);
+    assert_eq!(before.0, (1, false));
+    assert_eq!(before.3, 0);
+    let (_, rollout) = kept_conversation(&fixture.connection, "s-one").unwrap();
+    let mut backlog = String::new();
+    for turn in 0..1_024 {
+        let reply = format!(
+            "Earlier reply {turn}\n```crazyagent-task\n{{\"task\": \"Write earlier-{turn}.txt\"}}\n```\n{}",
+            "x".repeat(4096)
+        );
+        backlog.push_str(r#"{"type":"event_msg","payload":{"type":"task_started"}}"#);
+        backlog.push('\n');
+        backlog.push_str(&format!(
+            r#"{{"type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":{}}}]}}}}"#,
+            serde_json::to_string(&reply).unwrap()
+        ));
+        backlog.push('\n');
+        backlog.push_str(r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#);
+        backlog.push('\n');
+    }
+    assert!(backlog.len() > 3 * crate::harnesses::transcript::READ_BYTES_MAX);
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        file.write_all(backlog.as_bytes()).unwrap();
+    }
+    let kept: String = fixture
+        .connection
+        .query_row(
+            "SELECT record FROM team_panes WHERE agent=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut record = PaneRecord::decode(&kept).unwrap();
+    record.since_ms -= 25 * 3_600_000;
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_panes SET record=?2 WHERE agent=?1",
+            params![id, record.encode().unwrap()],
+        )
+        .unwrap();
+    let access = fixture.access.clone();
+    let mut again = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", fixture.base.join("bin").join("codex"))]),
+        Box::new(move || Some(access.clone())),
+        limits,
+    )
+    .unwrap()
+    .with_terminal(host.clone())
+    .unwrap();
+    fixture.until(&mut again, "the next engine adopts the live master", |f| {
+        f.agent_status(id) == (AgentStatus::Idle, None) && f.recorded(id)
+    });
+    tick_for(&mut again, Duration::from_secs(3));
+    assert_eq!(
+        live_master_effects(&fixture, id),
+        before,
+        "no earlier turn was counted, written as the owner's reply or read for task blocks"
+    );
+    assert_eq!(fixture.agent_status(id).0, AgentStatus::Idle);
+    assert!(super::super::master::live(&fixture.connection, &fixture.setup.project_id).unwrap());
+    again.shutdown().unwrap();
+}
+
 /// A restarted engine taking over the live master's pane marks it starting with no process
 /// group until that pane reports ready again, so the team graph names no terminal for a
 /// master still being taken over, as for a fresh start, and names it once the pane runs

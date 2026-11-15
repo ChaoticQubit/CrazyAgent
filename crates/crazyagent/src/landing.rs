@@ -1857,10 +1857,10 @@ pub fn sweep_regenerations(db: &Connection) -> Result<usize, EngineError> {
     }
 }
 
-/// Removes the index locks confined Linux steps of a stopped engine left in agent worktrees
-/// (`git::clear_step_locks`), so those agents land again. The engine runs it once at start,
-/// before any landing step; elsewhere no step takes such a lock. Input: the store. Output:
-/// how many locks it removed.
+/// Removes the index locks confined Linux steps of a stopped engine left in agent worktrees,
+/// with the step folders their git can have left (`git::clear_step_locks`), so those agents
+/// land again. The engine runs it once at start, before any landing step; elsewhere no step
+/// takes such a lock. Input: the store. Output: how many locks it removed.
 pub fn clear_step_locks(db: &Connection) -> Result<usize, EngineError> {
     #[cfg(target_os = "linux")]
     return Ok(crate::worktrees::known_repositories(db)?
