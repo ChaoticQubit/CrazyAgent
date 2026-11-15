@@ -777,6 +777,7 @@ name = "crazyagent"
 version = "2.3.0"
 dependencies = [
  "base64 0.22.1",
+ "crazyagent-linux-supervisor",
  "crazyagent-win-sandbox",
  "crossterm",
  "getrandom 0.4.3",

@@ -2573,3 +2573,309 @@ fn a_nested_agent_ends_with_its_harness_and_leaves_nothing_it_started() {
     );
     assert!(ended(&token), "a process the harness left outlived it");
 }
+
+/// A launch behind the helper with a hand-written policy and the call supervisor's flags,
+/// as the engine writes them for a host with no namespaces to nest an agent in: it reads
+/// every file and writes the devices and the case's folders. Inputs: the case, the policy
+/// and guard flags, the program and its arguments. Output: the launch, not yet started.
+fn supervised(case: &Case, flags: &[&str], program: &str, args: &[&str]) -> Command {
+    let root = case.project.parent().unwrap();
+    let mut command = Command::new(HELPER);
+    command
+        .args(["--read", "/", "--write", "/dev", "--write"])
+        .arg(root)
+        .args(flags)
+        .arg("--")
+        .arg(program)
+        .args(args)
+        .current_dir(&case.project)
+        .stdin(Stdio::null());
+    command
+}
+
+/// Runs a launch to its end. Input: the launch. Output: what it wrote and how it ended.
+fn finished(mut command: Command) -> Output {
+    crazyagent::spawn_gate::output(command.stdout(Stdio::piped()).stderr(Stdio::piped()))
+        .unwrap()
+}
+
+/// What a finished launch wrote to its output, after it ended well. Input: the output.
+fn told(output: &Output) -> String {
+    assert!(
+        output.status.success(),
+        "{:?}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Rows about the call supervisor need a kernel that runs it: seccomp user notification
+/// whose wait only a fatal signal cuts (Linux 5.19) and a ptrace scope that lets a parent
+/// read the programs it started. The check itself fails where nothing supervises it.
+#[test]
+fn the_call_supervisor_probe_holds_on_this_machine_and_fails_with_nothing_supervising() {
+    let quiet = |command: &mut Command| {
+        let silenced = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crazyagent::spawn_gate::status(silenced).unwrap()
+    };
+    let probe = quiet(Command::new(HELPER).arg("--probe-supervisor"));
+    assert!(
+        probe.success(),
+        "Linux test machines need Linux 5.19 or newer and a ptrace scope below 2: {probe:?}"
+    );
+    let case = case();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let mut check = Command::new(HELPER);
+    check.arg("--probe-supervised").arg(&port).arg(&case.tmp);
+    assert_eq!(
+        quiet(&mut check).code(),
+        Some(1),
+        "the check passes with no supervisor, so it checks nothing"
+    );
+}
+
+const GUARDED_REACH: &str = "import ctypes, socket, sys
+port = int(sys.argv[1])
+def said(call):
+    try:
+        call()
+        return 'ok'
+    except OSError as error:
+        return str(error.errno)
+def reach(family, host, wait):
+    def call():
+        link = socket.socket(family, socket.SOCK_STREAM)
+        link.settimeout(wait)
+        link.connect((host, port))
+    return said(call)
+print('here=' + reach(socket.AF_INET, '127.0.0.1', 2))
+print('there=' + reach(socket.AF_INET, '192.0.2.1', 2))
+print('mapped-here=' + reach(socket.AF_INET6, '::ffff:127.0.0.1', 2))
+print('mapped-there=' + reach(socket.AF_INET6, '::ffff:192.0.2.1', 2))
+print('blocking-here=' + reach(socket.AF_INET, '127.0.0.1', None))
+fast = socket.socket()
+print('fast-open=' + said(lambda: fast.sendto(b'x', 0x20000000, ('192.0.2.1', port))))
+libc = ctypes.CDLL(None, use_errno=True)
+wide = socket.socket()
+refused = libc.connect(wide.fileno(), ctypes.create_string_buffer(200), 200)
+print('wide=' + (str(ctypes.get_errno()) if refused else 'ok'))
+";
+
+/// Landlock limits an agent's ports, not its hosts. The call supervisor connects for the
+/// agent after it read the address itself, so a guarded port is reached on this machine
+/// only, in every address form, a send that would open a connection is refused whole, and
+/// an address longer than any the kernel takes is refused as the kernel refuses it.
+#[test]
+fn a_supervised_agent_reaches_a_guarded_port_on_this_machine_and_on_no_other_host() {
+    let case = case();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let limited = ["--limit-network", "--connect", &port];
+    let guarded = [&limited[..], &["--guard-loopback", &port][..]].concat();
+    let script = ["-I", "-u", "-c", GUARDED_REACH, &port];
+    let held = finished(supervised(&case, &guarded, "/usr/bin/python3", &script));
+    assert_eq!(
+        told(&held),
+        "here=ok\nthere=13\nmapped-here=ok\nmapped-there=13\nblocking-here=ok\n\
+         fast-open=95\nwide=22\n"
+    );
+    let open = finished(supervised(&case, &limited, "/usr/bin/python3", &script));
+    let open = told(&open);
+    assert!(open.contains("here=ok\n"), "{open}");
+    assert!(!open.contains("there=13\n"), "the port limit alone names no host: {open}");
+}
+
+const GIT_ENTRIES: &str = r#"said() {
+    name=$1
+    shift
+    if "$@" 2>/dev/null; then echo "$name=made"; else echo "$name=refused"; fi
+}
+mkdir sub sub/plain
+: > sub/kept
+ln -s .git sub/dangling
+said folder mkdir sub/.git
+said file sh -c ': > sub/.git'
+said link ln -s elsewhere sub/.git
+said hard-link ln sub/kept sub/.git
+said rename mv sub/plain sub/.git
+said upper-case mkdir sub/.GIT
+said dotted mkdir 'sub/.git.'
+said through-link sh -c ': > sub/dangling'
+said below mkdir -p sub/.git/objects
+said init git init -q sub/repo
+said own-file sh -c ': > .git/objects/made'
+said own-rename mv .git/objects/made .git/objects/moved
+said own-folder mkdir .git/refs
+said own-nested mkdir .git/refs/.git
+said plain-file sh -c ': > sub/file'
+said plain-rename mv sub/file sub/plain/file
+said own-away mv "$PWD" "$PWD.away"
+"#;
+
+/// With no namespace to hide a git folder behind, the call supervisor makes each new
+/// entry for the agent after it resolved where the entry lands: a `.git` in any spelling
+/// and by any call is refused, also through a link, while the working tree's own `.git`
+/// and every other name work, and the folder that holds the own `.git` stays where it is.
+#[test]
+fn a_supervised_agent_makes_no_git_entry_but_inside_its_own_git_folder() {
+    let case = case();
+    let project = case.project.to_str().unwrap();
+    let guard = ["--guard-git", "--own-tree", project];
+    let held = finished(supervised(&case, &guard, "/bin/sh", &["-c", GIT_ENTRIES]));
+    assert_eq!(
+        told(&held),
+        "folder=refused\nfile=refused\nlink=refused\nhard-link=refused\nrename=refused\n\
+         upper-case=refused\ndotted=refused\nthrough-link=refused\nbelow=refused\n\
+         init=refused\nown-file=made\nown-rename=made\nown-folder=made\nown-nested=refused\n\
+         plain-file=made\nplain-rename=made\nown-away=refused\n"
+    );
+    let sub = case.project.join("sub");
+    for absent in [".git", ".GIT", ".git.", "repo/.git"] {
+        assert!(fs::symlink_metadata(sub.join(absent)).is_err(), "{absent}");
+    }
+    assert!(case.project.join(".git/objects/moved").is_file());
+    assert!(sub.join("plain/file").is_file());
+    let plain = finished(supervised(&case, &[], "/bin/sh", &["-c", "mkdir sub/.git"]));
+    assert!(plain.status.success(), "the control makes the folder with no guard");
+}
+
+const OPENS: &str = "import ctypes, os
+libc = ctypes.CDLL(None, use_errno=True)
+refused = libc.syscall(437, -100, b'never', ctypes.create_string_buffer(24), 24)
+print('openat2=' + str(ctypes.get_errno() if refused < 0 else 0))
+os.umask(0o027)
+os.close(os.open('made', os.O_CREAT | os.O_WRONLY, 0o666))
+os.mkdir('folder', 0o777)
+modes = [os.stat(name).st_mode & 0o777 for name in ('made', 'folder')]
+print('modes=%o %o' % tuple(modes))
+with open('/proc/self/fd/1', 'w') as out:
+    out.write('proc=written\\n')
+with open('/dev/stderr', 'w') as err:
+    err.write('piped\\n')
+";
+
+/// A call made for the agent behaves as the agent's own: `openat2`, whose flags lie in
+/// memory, is answered as missing so tools fall back to `openat`; a new file and folder
+/// take the agent's file mode mask; `/proc/self` names the agent, not the supervisor, so
+/// its own output and a piped `/dev/stderr` open as before.
+#[test]
+fn a_call_made_for_a_supervised_agent_keeps_its_mask_its_proc_names_and_its_pipes() {
+    let case = case();
+    let project = case.project.to_str().unwrap();
+    let guard = ["--guard-git", "--own-tree", project];
+    let script = ["-I", "-u", "-c", OPENS];
+    let held = finished(supervised(&case, &guard, "/usr/bin/python3", &script));
+    assert_eq!(told(&held), "openat2=38\nmodes=640 750\nproc=written\n");
+    assert_eq!(String::from_utf8_lossy(&held.stderr), "piped\n");
+    assert!(!case.project.join("never").exists());
+}
+
+const GUARDED_SIGNALS: &str = "import fcntl, os, signal, socket, subprocess, sys
+outside = int(sys.argv[1])
+def said(call):
+    try:
+        call()
+        return 'ok'
+    except OSError as error:
+        return str(error.errno)
+child = subprocess.Popen(['/bin/sleep', '30'])
+link = socket.socket()
+print('outside=' + said(lambda: os.kill(outside, 0)))
+print('everyone=' + said(lambda: os.kill(-1, 0)))
+print('own-group=' + said(lambda: os.kill(0, 0)))
+print('self=' + said(lambda: os.kill(os.getpid(), 0)))
+print('child=' + said(lambda: os.kill(child.pid, signal.SIGTERM)))
+print('owner-outside=' + said(lambda: fcntl.fcntl(link, fcntl.F_SETOWN, outside)))
+print('owner-self=' + said(lambda: fcntl.fcntl(link, fcntl.F_SETOWN, os.getpid())))
+print('ended=' + str(child.wait()))
+";
+
+/// Before Linux 6.12 Landlock scopes no signal. The call supervisor lets a signal through
+/// only to the programs the agent started, its own group among them, on every kernel, and
+/// a descriptor's signals may be owned by those programs alone.
+#[test]
+fn a_supervised_agent_signals_only_the_programs_it_started() {
+    let case = case();
+    let mut outside = crazyagent::spawn_gate::spawn(
+        Command::new("/bin/sleep")
+            .arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let target = outside.id().to_string();
+    let script = ["-I", "-u", "-c", GUARDED_SIGNALS, &target];
+    let guard = ["--guard-signals"];
+    let held = finished(supervised(&case, &guard, "/usr/bin/python3", &script));
+    assert_eq!(
+        told(&held),
+        "outside=1\neveryone=1\nown-group=ok\nself=ok\nchild=ok\nowner-outside=1\n\
+         owner-self=ok\nended=-15\n"
+    );
+    assert_eq!(outside.try_wait().unwrap(), None, "the outside process still runs");
+    outside.kill().unwrap();
+    outside.wait().unwrap();
+}
+
+/// The helper stays as the harness's parent under the call supervisor, so the engine sees
+/// the harness through it: its exit code, 128 plus the signal that ended it, and a stop
+/// sent to the launch's group, which the harness handles while the helper waits for it.
+#[test]
+fn a_supervised_agent_ends_with_its_harness_code_and_stops_with_its_group() {
+    let case = case();
+    let guard = ["--guard-signals"];
+    let code = |script: &str| {
+        let done = finished(supervised(&case, &guard, "/bin/sh", &["-c", script]));
+        done.status.code()
+    };
+    assert_eq!(code("exit 7"), Some(7));
+    assert_eq!(code("kill -KILL $$"), Some(137));
+    let token = format!("611.{}", std::process::id());
+    let script = format!("trap 'echo stopped; exit 9' TERM; echo ready; sleep {token} & wait");
+    let mut child = crazyagent::spawn_gate::spawn(
+        supervised(&case, &guard, "/bin/sh", &["-c", &script])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    send("TERM", &format!("-{}", child.id()));
+    line.clear();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "stopped\n");
+    let status = exit_within(&mut child, Duration::from_secs(5));
+    assert_eq!(status.and_then(|status| status.code()), Some(9));
+    assert!(ended(&token), "a process the harness started outlived the stop");
+}
+
+const STORM: &str = "import os, signal
+signal.signal(signal.SIGALRM, lambda number, frame: None)
+signal.setitimer(signal.ITIMER_REAL, 0.001, 0.001)
+for number in range(300):
+    os.close(os.open('storm-%d' % number, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    os.mkdir('storm-folder-%d' % number)
+signal.setitimer(signal.ITIMER_REAL, 0)
+print('made=' + str(len([name for name in os.listdir('.') if name.startswith('storm-')])))
+";
+
+/// A signal that lands while the supervisor makes an entry must not run the call twice:
+/// the second run would find the entry the first one made. The trapped call waits for its
+/// answer through every signal but a fatal one.
+#[test]
+fn a_signal_storm_runs_no_supervised_call_twice() {
+    let case = case();
+    let project = case.project.to_str().unwrap();
+    let guard = ["--guard-git", "--own-tree", project];
+    let script = ["-I", "-u", "-c", STORM];
+    let held = finished(supervised(&case, &guard, "/usr/bin/python3", &script));
+    assert_eq!(told(&held), "made=600\n");
+}

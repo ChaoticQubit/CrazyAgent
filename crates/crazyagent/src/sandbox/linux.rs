@@ -5,6 +5,8 @@ use super::{
     LinuxSockets, OWNER_PORTS, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork,
     SandboxRemote, agent_env, clean_absolute, invalid,
 };
+use crazyagent_linux_supervisor::rules::GitOwn;
+use crazyagent_linux_supervisor::serve::Supervised;
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
     RulesetCreatedAttr, RulesetError, RulesetStatus, Scope, path_beneath_rules,
@@ -53,6 +55,14 @@ const DIE_WITH: &str = "--die-with";
 const NEST: &str = "--nest";
 const NESTED: &str = "--nested";
 const SCOPED: &str = "--scoped";
+const GUARD_LOOPBACK: &str = "--guard-loopback";
+const GUARD_GIT: &str = "--guard-git";
+const OWN_TREE: &str = "--own-tree";
+const OWN_KIDS: &str = "--own-kids";
+const OWN_GIT: &str = "--own-git";
+const GUARD_SIGNALS: &str = "--guard-signals";
+const PROBE_SUPERVISOR: &str = "--probe-supervisor";
+const PROBE_SUPERVISED: &str = "--probe-supervised";
 /// How long [`host_now`] keeps what it read: a policy view asks on every read, and each
 /// answer starts the helper twice.
 const HOST_AGE_MAX: Duration = Duration::from_secs(60);
@@ -172,7 +182,8 @@ const LANDLOCK_DEVICES: &[&str] = &[
 /// `keep_free`: the helper starts no agent while Linux could hand one of them out by
 /// itself, and an open-network agent binds any TCP port but those. `die_with` names the
 /// process the helper and the program it becomes are killed with (an engine git step).
-/// `nested` tells the helper it runs inside bubblewrap's namespaces ([`NEST_ARGS`]). The
+/// `nested` tells the helper it runs inside bubblewrap's namespaces ([`NEST_ARGS`]).
+/// `guard` names what the helper's call supervisor holds ([`Guard`]). The
 /// engine renders it as helper arguments and the helper parses it back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LandlockPolicy {
@@ -184,6 +195,33 @@ pub struct LandlockPolicy {
     pub keep_free: Vec<u16>,
     pub die_with: Option<u32>,
     pub nested: bool,
+    pub guard: Guard,
+}
+
+/// What the helper's call supervisor holds for an agent on a host with no namespaces to
+/// nest it in (DEC-179): `loopback` names the connect ports it reaches on this machine
+/// only, `git` its own git folders, the only `.git` entries it may make, and `signals`
+/// keeps its signals inside the programs it started. With none of them the helper becomes
+/// the harness; with any it stays as the harness's parent and answers its guarded calls.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Guard {
+    pub loopback: Vec<u16>,
+    pub git: Option<GitOwn>,
+    pub signals: bool,
+}
+
+impl Guard {
+    /// The helper arguments for this guard, in the order the helper reads them back.
+    fn args(&self) -> Vec<OsString> {
+        Vec::new()
+    }
+
+    /// What the supervisor holds for this guard. Input: the policy's connect ports.
+    /// Output: the guarded ports reached on this machine only and the others anywhere.
+    fn supervised(&self, connect: &[u16]) -> Supervised {
+        assert!(connect.len() <= usize::from(u16::MAX));
+        Supervised::default()
+    }
 }
 
 impl LandlockPolicy {
@@ -298,6 +336,11 @@ pub enum HelperRequest {
     Broker {
         parent: u32,
         ports: Vec<u16>,
+    },
+    Supervisor,
+    Supervised {
+        port: u16,
+        folder: PathBuf,
     },
 }
 
@@ -747,6 +790,9 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         HelperRequest::Nest { bwrap, args } => return nest(&bwrap, &args, bridge.as_ref()),
         HelperRequest::Scoped => return scoped(),
         HelperRequest::Broker { parent, ports } => return bridge::broker(parent, &ports),
+        HelperRequest::Supervisor | HelperRequest::Supervised { .. } => {
+            return ExitCode::from(2);
+        }
         HelperRequest::Probe {
             limit_network,
             open_sockets,
@@ -1453,6 +1499,7 @@ fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy 
         keep_free,
         die_with: None,
         nested: false,
+        guard: Guard::default(),
     }
 }
 
@@ -2294,6 +2341,142 @@ mod tests {
         assert!(parse(&[NESTED, DIE_WITH, "4242", "--", "/bin/true"]).is_err());
         assert!(parse(&[PROBE, NESTED]).is_err());
         assert!(parse(&[FILTER_SOCKETS, NESTED, "--", "/bin/true"]).is_err());
+    }
+
+    fn guarded() -> LandlockPolicy {
+        LandlockPolicy {
+            read: vec![PathBuf::from("/usr")],
+            connect: vec![443, 8080],
+            limit_network: true,
+            guard: Guard {
+                loopback: vec![8080],
+                git: Some(GitOwn {
+                    trees: vec![PathBuf::from("/p")],
+                    kids: vec![PathBuf::from("/p/worktrees")],
+                    exact: vec![PathBuf::from("/p/modules/.git")],
+                }),
+                signals: true,
+            },
+            ..LandlockPolicy::default()
+        }
+    }
+
+    #[test]
+    fn a_guarded_policy_reads_back_from_its_own_arguments() {
+        let policy = guarded();
+        let mut words = policy.args();
+        let guard: Vec<OsString> = [
+            GUARD_LOOPBACK,
+            "8080",
+            GUARD_GIT,
+            OWN_TREE,
+            "/p",
+            OWN_KIDS,
+            "/p/worktrees",
+            OWN_GIT,
+            "/p/modules/.git",
+            GUARD_SIGNALS,
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        assert!(words.ends_with(&guard), "{words:?}");
+        words.extend(["--".into(), "/bin/true".into()]);
+        assert_eq!(
+            HelperRequest::parse(words),
+            Ok(HelperRequest::Run {
+                policy,
+                program: PathBuf::from("/bin/true"),
+                args: Vec::new(),
+            })
+        );
+        assert!(LandlockPolicy::default().guard.args().is_empty());
+    }
+
+    #[test]
+    fn each_guard_stands_alone_and_a_guard_that_does_not_fit_its_policy_is_refused() {
+        let parse =
+            |words: &[&str]| HelperRequest::parse(words.iter().map(OsString::from).collect());
+        let held = |words: &[&str]| match parse(words) {
+            Ok(HelperRequest::Run { policy, .. }) => Some(policy.guard),
+            _ => None,
+        };
+        let signals = Guard {
+            signals: true,
+            ..Guard::default()
+        };
+        let git = Guard {
+            git: Some(GitOwn::default()),
+            ..Guard::default()
+        };
+        assert_eq!(held(&[GUARD_SIGNALS, "--", "/bin/true"]), Some(signals));
+        assert_eq!(held(&[GUARD_GIT, "--", "/bin/true"]), Some(git));
+        assert_eq!(held(&["--", "/bin/true"]), Some(Guard::default()));
+        for refused in [
+            &[OWN_TREE, "/p", "--", "/bin/true"][..],
+            &[OWN_KIDS, "/p", GUARD_GIT, "--", "/bin/true"],
+            &[GUARD_GIT, OWN_GIT, "p/.git", "--", "/bin/true"],
+            &[GUARD_GIT, GUARD_GIT, "--", "/bin/true"],
+            &[GUARD_LOOPBACK, "8080", "--", "/bin/true"],
+            &[LIMIT_NETWORK, GUARD_LOOPBACK, "8080", "--", "/bin/true"],
+            &[GUARD_SIGNALS, DIE_WITH, "4242", "--", "/bin/true"],
+            &[PROBE, GUARD_SIGNALS],
+            &[PROBE, GUARD_GIT],
+            &[FILTER_SOCKETS, GUARD_SIGNALS, "--", "/bin/true"],
+        ] {
+            assert!(parse(refused).is_err(), "{refused:?}");
+        }
+        let limited = [LIMIT_NETWORK, CONNECT, "8080", GUARD_LOOPBACK];
+        let ported = |more: &[&str]| [&limited[..], more, &["--", "/bin/true"][..]].concat();
+        for refused in [&["0"][..], &["8081"], &["8080", OPEN_SOCKETS]] {
+            assert!(parse(&ported(refused)).is_err(), "{refused:?}");
+        }
+        let fits = held(&ported(&["8080"]));
+        assert_eq!(fits.map(|guard| guard.loopback), Some(vec![8080]));
+    }
+
+    #[test]
+    fn a_guard_keeps_its_ports_on_this_machine_and_leaves_the_others_to_every_host() {
+        let policy = guarded();
+        let held = policy.guard.supervised(&policy.connect);
+        let reach = held.reach.as_ref().expect("a guarded port is a guarded connect");
+        assert_eq!(reach.any, [443]);
+        assert_eq!(reach.loopback, [8080]);
+        assert_eq!(held.git, policy.guard.git);
+        assert!(held.signals);
+        let alone = Guard {
+            signals: true,
+            ..Guard::default()
+        };
+        let held = alone.supervised(&policy.connect);
+        assert_eq!((held.reach, held.git, held.signals), (None, None, true));
+    }
+
+    #[test]
+    fn the_call_supervisor_probes_stand_alone() {
+        let parse =
+            |words: &[&str]| HelperRequest::parse(words.iter().map(OsString::from).collect());
+        assert_eq!(parse(&[PROBE_SUPERVISOR]), Ok(HelperRequest::Supervisor));
+        assert_eq!(
+            parse(&[PROBE_SUPERVISED, "8080", "/tmp/probe"]),
+            Ok(HelperRequest::Supervised {
+                port: 8080,
+                folder: PathBuf::from("/tmp/probe"),
+            })
+        );
+        for refused in [
+            &[PROBE_SUPERVISOR, GUARD_SIGNALS][..],
+            &[PROBE_SUPERVISOR, "--", "/bin/true"],
+            &[PROBE, PROBE_SUPERVISOR],
+            &[PROBE_SUPERVISED],
+            &[PROBE_SUPERVISED, "8080"],
+            &[PROBE_SUPERVISED, "0", "/tmp/probe"],
+            &[PROBE_SUPERVISED, "8080", "probe"],
+            &[PROBE_SUPERVISED, "8080", "/tmp/probe", "more"],
+        ] {
+            assert!(parse(refused).is_err(), "{refused:?}");
+        }
+        assert_eq!(Bridge::fits(None, &HelperRequest::Supervisor), Ok(()));
     }
 
     #[test]
