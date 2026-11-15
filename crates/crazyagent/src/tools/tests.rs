@@ -517,12 +517,14 @@ fn a_shim_named_by_path_through_a_link_agents_can_move_is_refused() {
 /// rv-sec2 F2 (B11): a script whose first line the resolver cannot read the way the system and
 /// `env` run it is refused, never taken for a program with no interpreter: `env` with a
 /// setting or a flag other than -S, an `env` other than /usr/bin/env, a relative interpreter,
-/// one with a `..` part, a line that is not UTF-8 and a line longer than the part read.
+/// one with a `..` part, a line that is not UTF-8, a line longer than the part read, and
+/// `/usr/bin/env` reached as the program `env` runs or through a link of another name.
 /// `env -S` still resolves (`shebang_flags_and_absolute_interpreters_are_kept`).
 #[test]
 fn a_first_line_the_resolver_cannot_read_as_the_system_runs_it_is_refused() {
     let (_folder, home) = scratch();
     program(&home.join(".local/bin/node"), NODE);
+    std::os::unix::fs::symlink("/usr/bin/env", home.join(".local/bin/e")).unwrap();
     let places = home_only(&home);
     let lines: Vec<(&str, Vec<u8>)> = vec![
         ("assigned", b"#!/usr/bin/env PATH=/tmp/x node\n".to_vec()),
@@ -532,6 +534,11 @@ fn a_first_line_the_resolver_cannot_read_as_the_system_runs_it_is_refused() {
             format!("#!{}/env node\n", home.join(".local/bin").display()).into_bytes(),
         ),
         ("relative", b"#!node\n".to_vec()),
+        ("env-twice", b"#!/usr/bin/env /usr/bin/env node\n".to_vec()),
+        (
+            "env-link",
+            format!("#!{}/e node\n", home.join(".local/bin").display()).into_bytes(),
+        ),
         ("dotted", b"#!/usr/bin/../bin/sh\n".to_vec()),
         ("not-utf8", b"#!/bin/\xffsh\n".to_vec()),
         (
