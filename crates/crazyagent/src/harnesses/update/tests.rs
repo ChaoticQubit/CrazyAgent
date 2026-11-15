@@ -2196,6 +2196,58 @@ fn a_harness_the_resolver_refuses_as_changeable_or_in_temp_is_never_asked_its_ve
     }
 }
 
+/// security-audit vid 1, leader 03:14 (a): a version read runs the real file the resolver
+/// checked, not the entry's chain a second time. An owner entry whose chain passes through a
+/// link in a project agents can write, which the resolver does not judge, has that link moved
+/// to a planted Codex between the check and the run: the owner's file still answers, and the
+/// planted one never starts.
+#[test]
+fn a_version_read_runs_the_file_it_checked_when_a_middle_link_moves_before_the_run() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    std::fs::create_dir_all(&roots.home).unwrap();
+    let at = machine.root.path();
+    let work = at.join("proj");
+    std::fs::create_dir_all(work.join(".crazyagent")).unwrap();
+    let text = |ran: &Path, version: &str| {
+        format!(
+            "#!/bin/sh\necho ran >> {}\necho 'codex-cli {version}'\n",
+            ran.display()
+        )
+    };
+    let (owner_ran, planted_ran) = (at.join("owner-ran"), at.join("planted-ran"));
+    let owned = at.join("owner/lib/node_modules/@openai/codex/bin/codex.js");
+    let planted = work.join("tools/planted/codex");
+    let middle = work.join("tools/codex");
+    let link = at.join("bin/codex");
+    executable(&owned, &text(&owner_ran, "0.167.1"));
+    executable(&planted, &text(&planted_ran, "6.6.6"));
+    std::os::unix::fs::symlink(&owned, &middle).unwrap();
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&middle, &link).unwrap();
+    assert!(matches!(method("codex", &owned, &roots), Method::Npm { .. }));
+    assert!(crate::tools::resolve_entry(&link, &roots.places).is_ok());
+    let (moved, to) = (middle.clone(), planted.clone());
+    let step: super::state::Step = Box::new(move || {
+        std::fs::remove_file(&moved).unwrap();
+        std::os::unix::fs::symlink(&to, &moved).unwrap();
+    });
+    super::state::BETWEEN_VETTED_AND_RUN
+        .lock()
+        .unwrap()
+        .push((link.clone(), step));
+    let case = Case::new(machine, entry("codex", Some(link)), None);
+    let versions = case.versions(false);
+    let moved_to = std::fs::read_link(&middle).unwrap();
+    assert_eq!(moved_to, planted, "the step ran");
+    assert_eq!(versions.installed.as_deref(), Some("0.167.1"));
+    assert!(
+        !planted_ran.exists(),
+        "a link moved after the check never reaches the run"
+    );
+    assert!(owner_ran.exists(), "the file the resolver checked answers");
+}
+
 fn listed(ids: &[&str]) -> Vec<String> {
     ids.iter().map(|id| (*id).to_owned()).collect()
 }

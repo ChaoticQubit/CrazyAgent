@@ -358,7 +358,31 @@ pub(super) fn version_if_runs(
 ) -> Option<String> {
     let fixed = version_command(executable)?;
     super::vetted(&fixed, places).ok()?;
+    #[cfg(test)]
+    if let Some(step) = between_vetted_and_run(executable) {
+        step();
+    }
     version_ran(&fixed, home)
+}
+
+/// A step a row runs once between the check of a version command and its run.
+#[cfg(test)]
+pub(super) type Step = Box<dyn FnOnce() + Send>;
+
+/// The steps rows set, each by the entry whose version read runs it.
+#[cfg(test)]
+pub(super) static BETWEEN_VETTED_AND_RUN: Mutex<Vec<(PathBuf, Step)>> = Mutex::new(Vec::new());
+
+/// Takes the step a row set for this entry, to run in `version_if_runs` once its command
+/// passed `vetted` and before it runs, so a row can move a link in the entry's chain in that
+/// gap. Input: the entry. Output: the step, none for every other entry.
+#[cfg(test)]
+fn between_vetted_and_run(entry: &Path) -> Option<Step> {
+    let mut steps = BETWEEN_VETTED_AND_RUN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let at = steps.iter().position(|(path, _)| path == entry)?;
+    Some(steps.remove(at).1)
 }
 
 /// Runs one install, then looks for the harness with the caller's search and reads its
