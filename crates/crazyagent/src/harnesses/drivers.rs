@@ -5,8 +5,8 @@ use super::registry::{Harness, registry};
 pub mod acp;
 
 /// The piped drivers the engine runs: its own adapters for Codex and Claude Code, and the
-/// Agent Client Protocol client for any harness whose manifest names `acp`. Each other shared
-/// driver kind a manifest names joins this list when its task lands.
+/// Agent Client Protocol client ([`acp::Acp`]) for any harness whose manifest names `acp`.
+/// Each other shared driver kind a manifest names joins this list when its task lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Piped {
     Codex,
@@ -17,13 +17,14 @@ pub enum Piped {
 /// The one dispatch point of piped launches: the driver the engine runs for a driver kind.
 /// Input: the kind a manifest names. Output: the driver, or `launch_harness_unsupported`
 /// for RCLI, which runs only through its master host, and for every kind whose driver has
-/// not landed.
+/// not landed. An ACP harness gets its driver here, while its launch arguments land with
+/// its own task, so a launch of one is still refused when it is built.
 pub fn of(kind: DriverKind) -> Result<Piped, LaunchError> {
     match kind {
         DriverKind::CodexAppServer => Ok(Piped::Codex),
         DriverKind::ClaudeStreamJson => Ok(Piped::Claude),
         DriverKind::Rcli => Err(failure("launch_harness_unsupported")),
-        DriverKind::Acp => Err(failure("launch_harness_unsupported")),
+        DriverKind::Acp => Ok(Piped::Acp),
         DriverKind::JsonlTurn => Err(failure("launch_harness_unsupported")),
         DriverKind::JsonlRpc => Err(failure("launch_harness_unsupported")),
         DriverKind::TextTurn => Err(failure("launch_harness_unsupported")),
