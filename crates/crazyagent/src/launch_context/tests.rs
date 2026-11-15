@@ -3647,7 +3647,7 @@ fn a_fresh_agent_home_starts_context_mode_from_the_engine_install_not_npx() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let root = private_folder(&base.join("engine"));
-    let bin = private_folder(&base.join("bin"));
+    let bin = private_folder(&root.join("setup").join("bin"));
     for program in ["npx", "node"] {
         fs::write(bin.join(program), "").unwrap();
         fs::set_permissions(bin.join(program), fs::Permissions::from_mode(0o755)).unwrap();

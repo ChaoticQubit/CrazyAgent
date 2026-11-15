@@ -18,14 +18,15 @@ struct Case {
     bin: PathBuf,
 }
 
-/// Makes a private engine root with its `setup/npm` folder and a folder holding an `npm`
-/// link to a real system program, so npm never reaches a registry, and a `node` that reports
-/// a supported version. Input: the program `npm` runs. Output: the case, removed when dropped.
+/// Makes a private engine root with its `setup/npm` folder and its own `setup/bin`, a folder
+/// the engine's tool resolver looks in, holding an `npx`, an `npm` link to a real system
+/// program, so npm never reaches a registry, and a `node` that reports a supported version.
+/// Input: the program `npm` runs. Output: the case, removed when dropped.
 fn case(npm: &str) -> Case {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let root = base.join("engine");
-    let bin = base.join("bin");
+    let bin = root.join("setup").join("bin");
     for folder in [root.join("setup").join("npm"), bin.clone()] {
         fs::DirBuilder::new()
             .recursive(true)
@@ -34,6 +35,8 @@ fn case(npm: &str) -> Case {
             .unwrap();
     }
     std::os::unix::fs::symlink(npm, bin.join("npm")).unwrap();
+    fs::write(bin.join("npx"), "#!/bin/sh\nexit 3\n").unwrap();
+    fs::set_permissions(bin.join("npx"), fs::Permissions::from_mode(0o755)).unwrap();
     node_reports(&bin, "v24.0.0");
     Case {
         _directory: directory,
@@ -530,6 +533,69 @@ fn a_check_while_the_install_runs_says_it_is_being_set_up() {
     assert_eq!(during, ForCheck::SettingUp);
     assert!(!case.npm().join(PROFILE).exists(), "npm never started");
     assert!(!registered(&case.folder()));
+}
+
+/// RV-DS241-150: a spec shaped like the default pack's pinned context-mode launch whose npx
+/// lies in a folder the engine's tool resolver never looks in, as a repository's own tools
+/// folder shipping `node` and `npm`, is not that launch: a check and an agent launch hand it
+/// back as approved, to run inside their boundary, and no file of that folder runs here.
+#[test]
+fn a_pinned_shaped_npx_the_resolver_does_not_find_runs_as_approved_and_its_node_never_runs() {
+    let case = case("/usr/bin/false");
+    let tools = case.root.parent().unwrap().join("repo").join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    let ran = tools.join("ran");
+    for name in ["npx", "node", "npm"] {
+        fs::write(
+            tools.join(name),
+            format!("#!/bin/sh\n: > '{}'\necho v24.0.0\n", ran.display()),
+        )
+        .unwrap();
+        fs::set_permissions(tools.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let spec = ServerSpec::Stdio {
+        command: tools.join("npx").to_str().unwrap().to_owned(),
+        args: vec!["-y".into(), format!("context-mode@{VERSION}")],
+    };
+    assert!(pinned(&spec).is_some(), "shaped like the pinned launch");
+    assert_eq!(
+        for_check(&case.root, spec.clone()),
+        ForCheck::Run(spec.clone())
+    );
+    assert_eq!(for_launch(&case.root, spec.clone()), Ok(spec));
+    assert!(!ran.exists(), "a file of that folder ran outside a boundary");
+    assert!(!registered(&case.folder()));
+    assert!(!case.npm().join(PROFILE).exists(), "npm never started");
+}
+
+/// RV-DS241-150: the Node.js version check of the pinned launch's `node` runs inside a
+/// boundary with a cleared environment, so even a `node` in a folder the resolver looks in
+/// writes nothing outside it and never sees the engine's HOME, while the version it reports
+/// still lets the install start.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_node_version_check_runs_inside_a_boundary_with_a_cleared_environment() {
+    let case = case("/usr/bin/false");
+    let outside = case.root.join("node-ran");
+    let home = std::env::var("HOME").unwrap_or_default();
+    let node = case.bin.join("node");
+    fs::remove_file(&node).unwrap();
+    fs::write(
+        &node,
+        format!(
+            "#!/bin/sh\n: > '{}' 2>/dev/null\n\
+             if [ \"$HOME\" = '{home}' ]; then echo v1.0.0; else echo v24.0.0; fi\n",
+            outside.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        for_check(&case.root, npx_in(&case, VERSION)),
+        ForCheck::SettingUp,
+        "the check ran inside the boundary and read a supported version"
+    );
+    assert!(!outside.exists(), "the version check wrote outside a boundary");
 }
 
 #[test]

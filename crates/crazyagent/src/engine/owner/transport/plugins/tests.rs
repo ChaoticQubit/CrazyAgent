@@ -88,7 +88,7 @@ fn the_context_mode_check_names_why_no_shared_install_can_run_and_never_starts_n
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let root = base.join("engine");
-    let bin = base.join("bin");
+    let bin = root.join("setup").join("bin");
     let npm = root.join("setup").join("npm");
     for folder in [&npm, &bin] {
         std::fs::DirBuilder::new()
@@ -153,7 +153,7 @@ fn the_context_mode_check_on_a_node_older_than_22_5_says_so_and_never_starts_npx
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let root = base.join("engine");
-    let bin = base.join("bin");
+    let bin = root.join("setup").join("bin");
     let npm = root.join("setup").join("npm");
     for folder in [&npm, &bin] {
         std::fs::DirBuilder::new()
@@ -229,7 +229,7 @@ fn the_context_mode_check_runs_the_shared_install_agents_launch_and_never_npx() 
             .unwrap();
     };
     let root = base.join("engine");
-    let bin = base.join("bin");
+    let bin = root.join("setup").join("bin");
     let npm = root.join("setup").join("npm");
     private(&npm);
     private(&bin);
