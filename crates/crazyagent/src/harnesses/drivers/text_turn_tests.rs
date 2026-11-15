@@ -1,4 +1,5 @@
 use super::*;
+use crate::adapters::FIELD_BYTES_MAX;
 use crate::harnesses::launch::PROMPT_BYTES_MAX;
 
 const STANDIN: &str = include_str!("../../../tests/fixtures/harness/standin-text-turn.yaml");
@@ -75,6 +76,25 @@ fn text(reply: &str) -> LaunchEvent {
     LaunchEvent::Text { text: reply.into() }
 }
 
+/// Joins the text events of a reply, each of which must be 1 to `FIELD_BYTES_MAX` bytes.
+/// Input: events that are all `Text`. Output: the joined reply.
+fn joined(events: &[LaunchEvent]) -> String {
+    events
+        .iter()
+        .map(|event| match event {
+            LaunchEvent::Text { text } => {
+                assert!(
+                    !text.is_empty() && text.len() <= FIELD_BYTES_MAX,
+                    "{}",
+                    text.len()
+                );
+                text.as_str()
+            }
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
 /// DEC-180 Task 13: each turn gets the manifest's arguments with its prompt and model, and
 /// tools off adds `piped.tools_off`; with no session id known, `piped.resume` is left out.
 #[test]
@@ -90,8 +110,7 @@ fn the_stand_in_manifest_gives_each_turn_its_arguments() {
             HOME,
             "--model",
             "m-1",
-            "--prompt",
-            "hi there",
+            "--prompt=hi there",
             "--no-tools"
         ]
     );
@@ -217,13 +236,12 @@ fn output_over_the_bound_stops_the_turn_and_keeps_what_fit() {
 
     let events = plain.exited(None).unwrap();
 
-    assert_eq!(events.len(), 3, "{:?}", events.get(1..));
-    let LaunchEvent::Text { text } = &events[0] else {
-        panic!("{:?}", events[0]);
-    };
-    assert!(text.len() <= OUTPUT_BYTES_MAX && text.len() + line.len() > OUTPUT_BYTES_MAX);
-    assert!(!text.contains("after"));
-    assert_eq!(events[1..], failed());
+    assert!(events.len() > 2, "{}", events.len());
+    let (texts, end) = events.split_at(events.len() - 2);
+    let kept = joined(texts);
+    assert!(kept.len() <= OUTPUT_BYTES_MAX && kept.len() + line.len() > OUTPUT_BYTES_MAX);
+    assert!(!kept.contains("after"));
+    assert_eq!(end, failed());
     assert_eq!(json.exited(None).unwrap(), failed());
     assert!(skipped.over());
     assert_eq!(skipped.exited(None).unwrap(), failed());
@@ -314,7 +332,10 @@ fn each_refused_turn_setting_names_its_setting() {
             "piped.argv: this setting is needed.",
         ),
         (
-            STANDIN.replace("    - \"{prompt}\"\n", "    - \"hello\"\n"),
+            STANDIN.replace(
+                "    - \"--prompt={prompt}\"\n",
+                "    - \"--prompt=hello\"\n",
+            ),
             manifest::VALUE,
             "piped.argv: {prompt} is needed, so each turn's prompt reaches the harness.",
         ),
@@ -341,5 +362,144 @@ fn each_refused_turn_setting_names_its_setting() {
     ];
     for (text, code, message) in cases {
         assert_eq!(refused(&text), (code, message.to_owned()), "{message}");
+    }
+}
+
+/// rv-code F1 and rv-ds241 T13-sec F1: as on jsonl-turn, a `{prompt}` that begins an
+/// argument before any `--` entry is refused, as a prompt such as `--` or `--flag=value`
+/// there could end the harness's options or add one; it is read behind text such as
+/// `--prompt=` or after `--`. A `{prompt}` in `piped.resume` or `piped.tools_off` is refused,
+/// as those come before `--`.
+#[test]
+fn a_prompt_that_begins_an_argument_is_refused_unless_it_comes_after_a_double_dash() {
+    let argv = |entries: &str| STANDIN.replace("    - \"--prompt={prompt}\"\n", entries);
+    let refused = |text: &str| {
+        Config::read(&manifest_of(text))
+            .err()
+            .map(|refusal| (refusal.code, refusal.message))
+    };
+    let alone = "piped.argv: {prompt} begins an argument; write it after text such as \
+                 --prompt= or after a -- entry, so a prompt is never read as an option.";
+    for entries in [
+        "    - \"--prompt\"\n    - \"{prompt}\"\n",
+        "    - \"{prompt}\"\n    - \"--\"\n",
+        "    - \"{prompt} and more\"\n",
+    ] {
+        assert_eq!(
+            refused(&argv(entries)),
+            Some((manifest::VALUE, alone.to_owned())),
+            "{entries}"
+        );
+    }
+    for entries in [
+        "    - \"-p{prompt}\"\n",
+        "    - \"--\"\n    - \"{prompt}\"\n",
+        "    - \"--prompt={prompt}\"\n    - \"--\"\n    - \"x\"\n    - \"{prompt}\"\n",
+    ] {
+        assert_eq!(refused(&argv(entries)), None, "{entries}");
+    }
+    let cases = [
+        (
+            STANDIN.replace("    - \"--resume\"\n", "    - \"--resume={prompt}\"\n"),
+            "piped.resume: {prompt} belongs in piped.argv only, so a prompt is never read as \
+             an option.",
+        ),
+        (
+            with_tools_off().replace("    - \"--no-tools\"\n", "    - \"{prompt}\"\n"),
+            "piped.tools_off: {prompt} belongs in piped.argv only, so a prompt is never read \
+             as an option.",
+        ),
+    ];
+    for (text, message) in cases {
+        assert_eq!(
+            refused(&text),
+            Some((manifest::VALUE, message.to_owned())),
+            "{message}"
+        );
+    }
+}
+
+/// rv-code F1 and rv-ds241 T13-sec F1: with a `--` entry in `piped.argv`, `piped.resume` and
+/// `piped.tools_off` go before it, so tools off reaches the harness as an option and a prompt
+/// of `--` or `--x=y` after it can neither end nor add one. Text-turn has no event stream to
+/// catch a tool used anyway, so this order is what keeps tools off.
+#[test]
+fn resume_and_tools_off_come_before_the_double_dash_so_a_prompt_cannot_end_them() {
+    let ended = with_final_json()
+        .replace(
+            "  resume:\n",
+            "  tools_off:\n    - \"--no-tools\"\n  resume:\n",
+        )
+        .replace(
+            "    - \"--prompt={prompt}\"\n",
+            "    - \"--\"\n    - \"{prompt}\"\n",
+        );
+    let answer = "{\"result\":{\"text\":\"ok\"},\"session_id\":\"s-9\"}\n";
+    let mut turns = begin_with(config_of(&ended), Some("m-1"), false);
+
+    let first = turns.start("first").unwrap();
+    feed(&mut turns, &[answer]);
+    let ended_first = turns.exited(Some(0)).unwrap();
+
+    assert_eq!(
+        first,
+        [
+            "--home",
+            HOME,
+            "--model",
+            "m-1",
+            "--no-tools",
+            "--",
+            "first"
+        ]
+    );
+    assert_eq!(ended_first, [text("ok"), finished(true)]);
+    for prompt in ["--", "--x=y"] {
+        assert_eq!(
+            turns.start(prompt).unwrap(),
+            [
+                "--home",
+                HOME,
+                "--model",
+                "m-1",
+                "--resume",
+                "s-9",
+                "--no-tools",
+                "--",
+                prompt
+            ],
+            "{prompt}"
+        );
+        feed(&mut turns, &[answer]);
+        assert_eq!(turns.exited(Some(0)).unwrap(), [text("ok"), finished(true)]);
+    }
+}
+
+/// rv-ds241 T13-sec F3: a reply longer than one protocol frame comes as text events of at
+/// most `FIELD_BYTES_MAX` bytes, cut at character boundaries, that join to the whole reply,
+/// as a streamed reply does on the other drivers, so one large event never fails a turn.
+#[test]
+fn a_long_reply_comes_as_text_events_within_the_field_bound_that_join_to_the_whole_reply() {
+    let line = format!("{}\n", "é".repeat(1000));
+    let lines = vec![line.as_str(); 100];
+    let whole = line.repeat(100);
+    let reply = "ü".repeat(100 * 1024);
+    let answer = format!("{{\"result\":{{\"text\":\"{reply}\"}}}}\n");
+    let mut plain = running();
+    feed(&mut plain, &lines);
+    let mut json = running_with(config_of(&with_final_json()));
+    feed(&mut json, &[answer.as_str()]);
+
+    let plain_events = plain.exited(Some(0)).unwrap();
+    let json_events = json.exited(Some(0)).unwrap();
+
+    for (events, expected) in [
+        (plain_events, whole.trim_end()),
+        (json_events, reply.as_str()),
+    ] {
+        assert!(events.len() > 2, "{}", events.len());
+        let (texts, end) = events.split_at(events.len() - 1);
+        assert_eq!(joined(texts), expected);
+        assert_eq!(end, [finished(true)]);
     }
 }

@@ -1,4 +1,5 @@
 use super::TurnSession;
+use crate::adapters::FIELD_BYTES_MAX;
 use crate::harnesses::drivers::jsonl_turn::Config;
 use crate::harnesses::drivers::text_turn;
 use crate::harnesses::launch::{
@@ -13,12 +14,15 @@ const TEXT_STANDIN: &str = include_str!("../../../tests/fixtures/harness/standin
 
 const TEXT_HARNESS: &str = r#"#!/bin/sh
 prompt=
-while [ "$#" -gt 1 ]; do
+while [ "$#" -gt 0 ]; do
   case "$1" in
-    --prompt) prompt=$2 ;;
+    --prompt=*) prompt=${1#--prompt=} ;;
   esac
   shift
 done
+case "$prompt" in
+  stubborn*) trap '' TERM ;;
+esac
 case "$prompt" in
   fail)
     printf '%s\n' 'partial'
@@ -28,7 +32,7 @@ case "$prompt" in
     printf '%s\n' 'thinking'
     exec /bin/sleep 30
     ;;
-  flood) exec /usr/bin/yes flood ;;
+  flood | stubborn-flood) exec /usr/bin/yes flood ;;
 esac
 printf '\nYou said: %s\n\n' "$prompt"
 "#;
@@ -429,14 +433,63 @@ fn a_text_turn_whose_output_passes_the_bound_is_stopped() {
     let events = finish_within(&mut session, Duration::from_secs(20));
 
     assert!(started.elapsed() < Duration::from_secs(20));
-    assert_eq!(events.len(), 3, "{:?}", events.get(1..));
-    let LaunchEvent::Text { text } = &events[0] else {
-        panic!("{:?}", events[0]);
-    };
-    assert!(text.starts_with("flood\nflood") && text.len() <= text_turn::OUTPUT_BYTES_MAX);
-    assert_eq!(events[1..], [turn_error(), finished(false)]);
+    let kept = kept_before_the_error(&events);
+    assert!(kept.starts_with("flood\nflood") && kept.len() <= text_turn::OUTPUT_BYTES_MAX);
     assert_eq!(session.turn_group(), None);
     session.stop().unwrap();
+}
+
+/// rv-ds241 T13-sec F2, macOS only: a text turn whose harness ignores TERM and floods its
+/// output gets KILL once the stop grace after the bound passes, well before the session
+/// deadline; the turn ends with what fit, a turn error and an unsuccessful end, its process
+/// group is gone and the next prompt runs. A first turn runs before the timed one, so the
+/// wait macOS may add to a new program's first start is not timed.
+#[test]
+fn a_text_turn_past_the_bound_that_ignores_term_is_killed_once_the_stop_grace_passes() {
+    let (_directory, mut session) = begin_text();
+    assert_eq!(
+        turn(&mut session, "one"),
+        [text("You said: one"), finished(true)]
+    );
+    let started = Instant::now();
+    session.send("stubborn-flood").unwrap();
+    let group = session.turn_group().unwrap();
+
+    let events = finish_within(&mut session, overdue());
+
+    assert!(started.elapsed() < overdue());
+    let kept = kept_before_the_error(&events);
+    assert!(kept.starts_with("flood\nflood") && kept.len() <= text_turn::OUTPUT_BYTES_MAX);
+    assert_eq!(session.turn_group(), None);
+    assert!(gone(group));
+    assert_eq!(
+        turn(&mut session, "two"),
+        [text("You said: two"), finished(true)]
+    );
+    session.stop().unwrap();
+}
+
+/// The reply a text turn kept before it ended with a turn error and an unsuccessful end:
+/// its text events, each 1 to `FIELD_BYTES_MAX` bytes, joined. Input: the turn's events.
+/// Output: the joined text.
+fn kept_before_the_error(events: &[LaunchEvent]) -> String {
+    assert!(events.len() > 2, "{}", events.len());
+    let (texts, end) = events.split_at(events.len() - 2);
+    assert_eq!(end, [turn_error(), finished(false)]);
+    texts
+        .iter()
+        .map(|event| match event {
+            LaunchEvent::Text { text } => {
+                assert!(
+                    !text.is_empty() && text.len() <= FIELD_BYTES_MAX,
+                    "{}",
+                    text.len()
+                );
+                text.as_str()
+            }
+            other => panic!("{other:?}"),
+        })
+        .collect()
 }
 
 /// DEC-180 Task 13, macOS only: an interrupt stops a text turn's process group well before
