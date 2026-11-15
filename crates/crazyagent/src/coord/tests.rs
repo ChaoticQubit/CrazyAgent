@@ -3358,6 +3358,7 @@ fn every_harness_kind_gets_each_protection_or_says_why_not() {
                         protection != Protection::Receipts,
                         "{case}"
                     ),
+                    HarnessKind::Listed(id) => unreachable!("{id} is not a native kind"),
                 }
                 if let Some(words) = lacks {
                     assert!(
@@ -3442,6 +3443,7 @@ fn harness_name(harness: HarnessKind) -> &'static str {
         HarnessKind::ClaudeCode => "Claude Code",
         HarnessKind::Codex => "Codex",
         HarnessKind::Rcli => "RCLI",
+        HarnessKind::Listed(id) => id,
     }
 }
 
@@ -3511,4 +3513,150 @@ fn coordination_settings_are_kept_for_codex_claude_code_and_rcli_and_no_other_ha
     }
     assert_eq!(HarnessKind::parse("claude"), None);
     assert!(serde_json::from_str::<HarnessKind>("\"claude\"").is_err());
+}
+
+/// The 15 catalog harnesses that are not Codex, Claude Code or RCLI, written out.
+#[cfg(unix)]
+const LISTED: [&str; 15] = [
+    "opencode",
+    "gemini-cli",
+    "fx",
+    "openclaw",
+    "pi",
+    "goose",
+    "aider",
+    "qwen-code",
+    "crush",
+    "droid",
+    "copilot",
+    "cline",
+    "continue",
+    "openhands",
+    "kimi",
+];
+
+/// DEC-180 Phase 1: a listed kind is stored and sent as its catalog id, and every question
+/// asked of a harness kind has an answer for it: its sub-agents are workers the app starts,
+/// so Native is refused, its mode and delivery read the defaults, no sub-agent runs on it
+/// yet, no terminal display is known to hold for it, and every retry option leaves its own
+/// retries.
+#[cfg(unix)]
+#[test]
+fn a_listed_harness_kind_is_stored_as_its_id_and_answers_every_question_asked_of_a_kind() {
+    use super::settings::{NativeSubAgents, Protection};
+    use crate::provider_retry::{LISTED_OWN_RETRIES, ProviderRetry};
+    let connection = db();
+    let project = project();
+    for id in LISTED {
+        let kind = HarnessKind::Listed(id);
+        assert_eq!(kind.as_str(), id);
+        assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{id}\""));
+        assert!(!HarnessKind::ALL.contains(&kind), "{id}");
+        assert_eq!(
+            settings::native_sub_agents(kind),
+            NativeSubAgents::Unavailable(settings::LISTED_NATIVE_UNAVAILABLE),
+            "{id}"
+        );
+        assert!(!settings::native_supported(kind), "{id}");
+        assert_eq!(settings::native_scope(kind), None, "{id}");
+        let native = settings::set_mode(&connection, &project, kind, SubagentMode::Native);
+        assert_eq!(code(native), "coord_native_unsupported", "{id}");
+        assert_eq!(
+            settings::mode(&connection, &project, kind).unwrap(),
+            SubagentMode::AppSpawned,
+            "{id}"
+        );
+        assert_eq!(
+            settings::delivery(&connection, &project, kind).unwrap(),
+            Delivery::Auto,
+            "{id}"
+        );
+        for endpoint in [false, true] {
+            for protection in Protection::ALL {
+                assert_eq!(kind.lacks(endpoint, protection), None, "{id}");
+            }
+        }
+        assert_eq!(
+            crate::team::sub_agents_unavailable(kind),
+            Some(crate::team::NO_SUB_AGENTS),
+            "{id}"
+        );
+        assert!(
+            crate::harnesses::interactive::displays(kind).is_empty(),
+            "{id}"
+        );
+        for choice in ProviderRetry::ALL {
+            assert_eq!(choice.harness_line(kind), LISTED_OWN_RETRIES, "{id}");
+        }
+    }
+    for words in [settings::LISTED_NATIVE_UNAVAILABLE, LISTED_OWN_RETRIES] {
+        assert!(
+            words.starts_with("This harness") && words.ends_with('.'),
+            "{words}"
+        );
+        assert!(!words.contains('\u{2014}'), "{words}");
+    }
+}
+
+/// DEC-180 Phase 1: the kind of a harness follows its manifest. A harness that is not one
+/// of the three native ones becomes a listed kind, under its own id, the moment its
+/// manifest names the agent or the master role, and has no kind while it names neither.
+#[cfg(unix)]
+#[test]
+fn a_harness_gets_a_listed_kind_when_its_manifest_names_the_agent_or_the_master_role() {
+    use crate::harnesses::registry::Registry;
+    let manifest = |id: &str, roles: &[&str]| {
+        let roles: String = match roles {
+            [] => String::new(),
+            named => {
+                let lines: String = named
+                    .iter()
+                    .map(|role| format!("  - \"{role}\"\n"))
+                    .collect();
+                format!("roles:\n{lines}")
+            }
+        };
+        format!(
+            "schema: 1\nkind: harness\nid: \"{id}\"\nname: \"Sample\"\nbinaries:\n  - \"{id}-bin\"\nheadless: \"sample --json\"\nmodel_selection: true\naccount_kinds:\n  - \"api_key\"\n{roles}"
+        )
+    };
+    let files = [
+        ("agent-only", manifest("agent-only", &["agent"])),
+        ("master-only", manifest("master-only", &["master"])),
+        ("research-only", manifest("research-only", &["research"])),
+        ("no-role", manifest("no-role", &[])),
+        ("codex", manifest("codex", &["agent", "master"])),
+    ];
+    let borrowed: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(file, text)| (*file, text.as_str()))
+        .collect();
+    let registry: &'static Registry = Box::leak(Box::new(Registry::build(&borrowed).unwrap()));
+    let kind = |id: &str| HarnessKind::of(registry.get(id).unwrap());
+    assert_eq!(kind("agent-only"), Some(HarnessKind::Listed("agent-only")));
+    assert_eq!(
+        kind("master-only"),
+        Some(HarnessKind::Listed("master-only"))
+    );
+    assert_eq!(kind("research-only"), None);
+    assert_eq!(kind("no-role"), None);
+    assert_eq!(kind("codex"), Some(HarnessKind::Codex));
+    for harness in crate::harnesses::registry::registry().all() {
+        let id = harness.id();
+        assert_eq!(
+            HarnessKind::of(harness),
+            HarnessKind::from_harness(id),
+            "{id}"
+        );
+        assert_eq!(HarnessKind::of(harness), HarnessKind::parse(id), "{id}");
+    }
+}
+
+/// A listed kind made by hand for an id no manifest has is a programming error, caught
+/// where its sub-agents are asked for.
+#[cfg(unix)]
+#[test]
+#[should_panic(expected = "every harness kind names a harness of the registry")]
+fn a_listed_kind_no_manifest_names_is_caught_when_its_sub_agents_are_asked_for() {
+    let _ = settings::native_sub_agents(HarnessKind::Listed("no-such-harness"));
 }

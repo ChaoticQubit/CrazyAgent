@@ -128,7 +128,8 @@ pub struct DisplaySwitches {
 /// its `tui.alternate_screen` setting, `never` for Classic and `always` for Fullscreen, its
 /// own view with mouse reporting on (OB-8); a `-c` setting, because the app server a tools-on
 /// launch starts first takes `-c` and exits on `--no-alt-screen`. RCLI runs one turn at a
-/// time with no view of its own, so it has no switches and only Classic holds for it.
+/// time with no view of its own, so it has no switches and only Classic holds for it. A
+/// listed harness has no switches the engine knows, so neither display holds for it.
 /// Inputs: the kind and the display. Output: the switches.
 pub fn display_switches(harness: HarnessKind, display: TerminalDisplay) -> DisplaySwitches {
     let (variables, arguments, honoured): (&'static [(&str, &str)], &'static [&str], bool) =
@@ -152,6 +153,7 @@ pub fn display_switches(harness: HarnessKind, display: TerminalDisplay) -> Displ
             }
             (HarnessKind::Rcli, TerminalDisplay::Classic) => (&[], &[], true),
             (HarnessKind::Rcli, TerminalDisplay::Fullscreen) => (&[], &[], false),
+            (HarnessKind::Listed(_), _) => (&[], &[], false),
         };
     DisplaySwitches {
         variables,

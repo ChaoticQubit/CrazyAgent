@@ -18076,6 +18076,7 @@ fn unreached_lists_idle_tools_off_codex_sub_agents_in_kept_sessions_under_native
                 assert!(!woken);
                 assert_eq!(crate::team::launch_harness(kind.as_str()), None);
             }
+            HarnessKind::Listed(id) => unreachable!("{id} is not a native kind"),
         }
         team.workers.remove(&walked);
     }

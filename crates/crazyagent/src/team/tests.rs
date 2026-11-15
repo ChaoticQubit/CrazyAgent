@@ -8063,3 +8063,34 @@ fn the_team_status_marks_each_unwired_harness_as_not_runnable() {
         );
     }
 }
+
+/// DEC-180 Phase 1: the launch adapter and the master backend follow the registry: every
+/// harness whose manifest names the agent role has an adapter under its own id, and the
+/// three with a master host are the only masters, as each names the master role.
+#[test]
+fn the_launch_adapter_and_the_master_backend_follow_the_roles_the_registry_names() {
+    use crate::master_session::MasterBackend;
+    let registry = crate::harnesses::registry::registry();
+    for harness in registry.all() {
+        let id = harness.id();
+        assert_eq!(launch_harness(id), harness.runnable().then_some(id), "{id}");
+        assert!(master_backend(id).is_none() || harness.master(), "{id}");
+        for alias in harness.aliases() {
+            assert_eq!(launch_harness(alias), launch_harness(id), "{alias}");
+            assert_eq!(master_backend(alias), master_backend(id), "{alias}");
+        }
+    }
+    let masters: Vec<(&str, MasterBackend)> = registry
+        .all()
+        .iter()
+        .filter_map(|harness| Some((harness.id(), master_backend(harness.id())?)))
+        .collect();
+    assert_eq!(
+        masters,
+        [
+            ("codex", MasterBackend::Codex),
+            ("claude-code", MasterBackend::Claude),
+            ("rcli", MasterBackend::Rcli),
+        ]
+    );
+}
