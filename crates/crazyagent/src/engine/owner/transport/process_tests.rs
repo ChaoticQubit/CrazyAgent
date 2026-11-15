@@ -1731,13 +1731,11 @@ fn a_project_proposal_holds_both_texts_keeps_the_version_and_writes_nothing() {
         Ok("Done.\n~~~\n- Run make check.\n~~~\n".to_owned())
     })
     .unwrap();
-    assert_eq!(
-        proposed,
-        ProcessText {
-            text: "- Run make check.\n".into(),
-            version: before.version
-        }
-    );
+    assert_eq!(proposed.text, "- Run make check.\n");
+    assert_eq!(proposed.version, before.version);
+    let had = "The app instructions already have this line.";
+    let found = vec![Finding::new(FindingKind::Duplicate, vec![1], had)];
+    assert_eq!(proposed.findings, found, "the check rides along");
     assert_eq!(prompts.len(), 1, "one model run per proposal");
     assert!(
         prompts[0].contains("App instructions file, for comparison only:\n~~~\n- Use TDD.\n~~~\n")
@@ -2115,7 +2113,10 @@ fn the_edit_names_a_text_over_what_a_claude_master_takes_as_over_budget() {
     let seen = check_prompt(&root, Some(&project));
     assert!(seen.contains("- over_budget, whole file: Agents get "));
     assert!(seen.contains("; a Claude master takes at most "));
-    assert!(!seen.contains("- duplicate"), "numbered rules repeat nothing");
+    assert!(
+        !seen.contains("- duplicate"),
+        "numbered rules repeat nothing"
+    );
 }
 
 #[test]
@@ -2180,7 +2181,8 @@ fn the_edit_names_a_tool_whose_mcp_server_its_agents_do_not_get() {
          agents do not get.\n"
     ));
     assert!(!seen.contains("`mcp__docs__search` names"), "{seen}");
-    assert!(!seen.contains("`mcp__crazyagent-team__start_work` names"), "{seen}");
+    let team = "`mcp__crazyagent-team__start_work` names";
+    assert!(!seen.contains(team), "{seen}");
 }
 
 #[test]
@@ -2195,7 +2197,10 @@ fn the_edit_names_a_command_this_computer_does_not_have() {
         "- broken_reference, line 2: `no-such-tool-dec172` is not a command on this computer.\n"
     ));
     assert!(!seen.contains("`sh` is not"), "{seen}");
-    assert!(!seen.contains("`cd` is not"), "a shell builtin is no program: {seen}");
+    assert!(
+        !seen.contains("`cd` is not"),
+        "a shell builtin is no program: {seen}"
+    );
     assert!(
         !seen.contains("`nosuchtool` is not"),
         "one word alone may name anything: {seen}"
@@ -2211,7 +2216,8 @@ fn the_edit_names_repeated_lines_and_lines_the_app_text_has_only_when_it_may_sen
     let own = "- Keep commits small.\n- Run make check.\n- Keep commits small.\n";
     save(&root, Some(project.clone()), own, 0).unwrap();
     let seen = check_prompt(&root, Some(&project));
-    assert!(seen.contains("- duplicate, lines 1, 3: Line 3 repeats line 1.\n"), "{seen}");
+    let repeated = "- duplicate, lines 1, 3: Line 3 repeats line 1.\n";
+    assert!(seen.contains(repeated), "{seen}");
     assert!(
         seen.contains("- duplicate, line 2: The app instructions already have this line.\n"),
         "{seen}"
@@ -2234,10 +2240,12 @@ fn the_edit_names_repeated_lines_and_lines_the_app_text_has_only_when_it_may_sen
 fn the_edit_asks_the_model_for_contradictions_and_rules_said_twice_as_finding_lines() {
     let (_directory, root) = root();
     let project = cleanup_project(&root);
-    save(&root, Some(project.clone()), "- Always run tests.\n- Never run tests.\n", 0).unwrap();
+    let text = "- Always run tests.\n- Never run tests.\n";
+    save(&root, Some(project.clone()), text, 0).unwrap();
     let seen = check_prompt(&root, Some(&project));
     assert!(seen.contains("rules that contradict each other"), "{seen}");
-    assert!(seen.contains("FINDING {\"kind\":\"contradiction\",\"lines\":["), "{seen}");
+    let wanted = "FINDING {\"kind\":\"contradiction\",\"lines\":[";
+    assert!(seen.contains(wanted), "{seen}");
     assert!(seen.contains("the kind \"duplicate\""), "{seen}");
 }
 

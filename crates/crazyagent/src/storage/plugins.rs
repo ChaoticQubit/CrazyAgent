@@ -1462,6 +1462,36 @@ pub(crate) fn effective(
     Ok(plugins)
 }
 
+/// Names the skills and MCP servers the agents an instructions text is written for get, for
+/// Edit with AI's reference check (DEC-172): a project's own effective set, or for the app
+/// text the enabled global skills and approved global servers every project starts from.
+/// Inputs: the open transaction, the engine root and the project, none for the app text.
+/// Output: the skill names and the server names.
+pub(crate) fn check_names(
+    tx: &Transaction<'_>,
+    root: &Path,
+    project: Option<&ProjectId>,
+) -> Result<(Vec<String>, Vec<String>), EngineError> {
+    if let Some(project) = project {
+        let plugins = effective(tx, root, project)?;
+        let skills = plugins.skills.into_iter().map(|item| item.name).collect();
+        let servers = plugins.servers.into_iter().map(|item| item.name).collect();
+        return Ok((skills, servers));
+    }
+    let skills: Vec<String> = all::<SkillRecord>(tx, "skill")?
+        .into_iter()
+        .filter(|skill| skill.enabled && skill.scope == Scope::Global)
+        .map(|skill| skill.name)
+        .collect();
+    let servers: Vec<String> = all::<ServerRecord>(tx, "server")?
+        .into_iter()
+        .filter(|server| server.scope == Scope::Global)
+        .filter(|server| status(server) == ServerStatus::Approved)
+        .map(|server| server.name)
+        .collect();
+    Ok((skills, servers))
+}
+
 /// Reads the launch set of one project inside a caller's transaction, for launchers that
 /// hold their own engine database connection. Inputs: the transaction, the engine root and
 /// the project. Output: the effective set with secret values read, or `plugin_project_unknown`.

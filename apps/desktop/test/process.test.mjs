@@ -795,7 +795,7 @@ test("Edit with AI says what it waits for while it reads the pools and while the
 test("the editor takes no edits while Edit with AI runs or shows a proposal, so a stale Accept cannot drop typed lines", () => {
   const project = { kind: "project", id: "alpha", name: "Alpha" };
   const steps = [{ kind: "pools" }, { kind: "choosing", pools: [{ id: "pool-a", name: "Pool A" }], picked: null }, { kind: "running" },
-    { kind: "proposed", proposal: { text: "Use TDD.\n", base_version: 1 } }];
+    { kind: "proposed", proposal: { text: "Use TDD.\n", base_version: 1, findings: [] } }];
   const button = (markup, label) => {
     const end = markup.indexOf(`${label}</button>`);
     assert.ok(end >= 0, `the page has a ${label} button`);
@@ -823,7 +823,7 @@ test("a proposal shows as a line diff with Accept and Discard, and nothing is sa
   const project = { kind: "project", id: "alpha", name: "Alpha" };
   for (const scope of [{ kind: "app" }, project]) {
     const markup = page({ scope, saved: { kind: "ok", value: "- Use TDD.\n- Use TDD.\n- <b>Run</b> make check.\n" }, draft: "- Use TDD.\n- Use TDD.\n- <b>Run</b> make check.\n",
-      cleanup: { kind: "proposed", proposal: { text: "- Use TDD.\n- <b>Run</b> make check.\n- Keep commits small.\n", base_version: 3 } } });
+      cleanup: { kind: "proposed", proposal: { text: "- Use TDD.\n- <b>Run</b> make check.\n- Keep commits small.\n", base_version: 3, findings: [] } } });
     assert.match(markup, /Proposed instructions/);
     assert.match(markup, /1 line removed, 1 added\. Nothing changes until you accept\./);
     assert.equal((markup.match(/<del class="pr-diff-row removed">/g) ?? []).length, 1);
@@ -838,12 +838,12 @@ test("a proposal shows as a line diff with Accept and Discard, and nothing is sa
 });
 
 test("a proposal that changes nothing says so and offers no Accept; one too long to diff shows both texts", () => {
-  const same = page({ cleanup: { kind: "proposed", proposal: { text: "Use tdd.\n", base_version: 1 } } });
+  const same = page({ cleanup: { kind: "proposed", proposal: { text: "Use tdd.\n", base_version: 1, findings: [] } } });
   assert.match(same, /The model found nothing to change\./);
   assert.doesNotMatch(same, />Accept<\/button>/);
   assert.match(same, />Close<\/button>/);
   const long = `${"x\n".repeat(client.DIFF_LINES_MAX)}x\n`;
-  const sides = page({ saved: { kind: "ok", value: long }, draft: long, cleanup: { kind: "proposed", proposal: { text: "y\n", base_version: 1 } } });
+  const sides = page({ saved: { kind: "ok", value: long }, draft: long, cleanup: { kind: "proposed", proposal: { text: "y\n", base_version: 1, findings: [] } } });
   assert.match(sides, /Too many lines to mark each change, so both texts are shown whole\./);
   assert.match(sides, /<h3>Saved now<\/h3>/);
   assert.match(sides, /<h3>Proposed<\/h3>/);

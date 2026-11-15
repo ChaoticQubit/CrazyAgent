@@ -12,7 +12,9 @@ const APP = `# House rules\n\n${RULE}\n- Keep commits small.\n`;
 const OWN = `# House rules\n\n${RULE}\n- Run make check before you finish.\n`;
 const PROPOSAL = "# House rules\n\n- Run make check before you finish.\n";
 const NEWER = `${OWN}- Ask before a force push.\n`;
-const CODEX = answering(`Here is the cleaned file.\n\n~~~\n${PROPOSAL}~~~`);
+const CONTRADICTION = "A stand-in contradiction.";
+const FINDING = `FINDING ${JSON.stringify({ kind: "contradiction", lines: [RULE, "- Run make check before you finish."], note: CONTRADICTION })}`;
+const CODEX = answering(`Here is the cleaned file.\n${FINDING}\n\n~~~\n${PROPOSAL}~~~`);
 const QUESTION = "Which pool runs this edit?";
 const PROPOSED = "Proposed instructions";
 const DOWN = "Can't reach this pool's model provider, so nothing was sent. Start it or pick another account, then try again.";
@@ -119,6 +121,8 @@ test("Edit with AI: On, a project's editor proposes on the project's pool with n
     await me.capture("project-proposal");
     assert.ok(!shown.includes(QUESTION), "a project's editor never asks for a pool");
     assert.ok(shown.includes("1 line removed, 0 added. Nothing changes until you accept."), `the change count: ${shown.slice(0, 2000)}`);
+    assert.ok(shown.includes("The app instructions already have this line."), `the engine's check shows above the diff: ${shown.slice(0, 2000)}`);
+    assert.ok(shown.includes(CONTRADICTION), `the model's finding shows with the engine's: ${shown.slice(0, 2000)}`);
     assert.deepEqual(await marked(page), { removed: [RULE], added: [] }, "the line the app instructions already hold is the one marked as removed");
     assert.equal(await text(bridge, project), OWN, "a proposal changes nothing by itself");
 

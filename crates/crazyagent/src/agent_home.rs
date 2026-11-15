@@ -582,18 +582,14 @@ fn mark(lines: &[Entry<'_>], from: Option<usize>, marks: &mut [bool]) {
     }
 }
 
-/// Takes out of the project text each plain line the app text also has in the same place:
-/// under the same headings and hanging on the same lines, compared whole with only trailing
-/// spaces ignored. So the same words under another heading, under another lead-in line or
-/// parent item, or at another indent stay. A line also stays when a line the project keeps
-/// hangs on it, such as a lead-in of a kept list item or code block. Rules, table rows, code
-/// fence markers, every line inside a code block and every line indented by four columns or
-/// more always stay; a heading goes only when lines under it were left out and nothing under
-/// it is kept. A blank line goes only where lines left out would leave two in a row. A text
-/// with no such line comes back as it is; one left with only headings, rules and blank
-/// lines comes back empty. Inputs: both texts. Output: the kept text and how many plain
-/// lines were left out.
-fn without_repeats(app: &str, project: &str) -> (String, usize) {
+/// Marks the project lines `without_repeats` leaves out: each plain line the app text also
+/// has in the same place, unless a line the project keeps hangs on it. Inputs: both texts.
+/// Output: the project lines as `outline` reads them, one left-out mark and one needed mark
+/// per line, and whether the project keeps any line that holds content.
+fn repeat_marks<'a>(
+    app: &'a str,
+    project: &'a str,
+) -> (Vec<Entry<'a>>, Vec<bool>, Vec<bool>, bool) {
     assert!(app.len() <= TEXT_BYTES_MAX && project.len() <= TEXT_BYTES_MAX);
     let mut places = Places::default();
     let known: std::collections::HashSet<(usize, &str)> = outline(app, &mut places)
@@ -623,6 +619,63 @@ fn without_repeats(app: &str, project: &str) -> (String, usize) {
     for (index, held) in needed.iter().enumerate() {
         gone[index] &= !*held;
     }
+    assert!(gone.len() == lines.len() && needed.len() == lines.len());
+    (lines, gone, needed, content)
+}
+
+/// Numbers the project lines a joined text leaves out because the app text already has
+/// them, by the rule of `without_repeats`, for Edit with AI's check (DEC-172). Inputs: both
+/// texts, each at most `TEXT_BYTES_MAX` bytes. Output: the line numbers, counted from 1, in
+/// order; as many as `repeated_lines` counts.
+pub(crate) fn repeated_line_numbers(app: &str, project: &str) -> Vec<usize> {
+    let (lines, gone, _, _) = repeat_marks(app, project);
+    let numbers: Vec<usize> = (1..=lines.len()).filter(|line| gone[line - 1]).collect();
+    assert!(numbers.is_empty() || !app.trim().is_empty());
+    numbers
+}
+
+/// Pairs each plain line of one text with the earlier line it repeats in the same place, by
+/// the rule `without_repeats` uses between the app and project texts, for Edit with AI's
+/// check (DEC-172). Input: the text, at most `TEXT_BYTES_MAX` bytes. Output: (repeat, first)
+/// line numbers, counted from 1, in reading order.
+pub(crate) fn repeats_within(text: &str) -> Vec<(usize, usize)> {
+    let mut places = Places::default();
+    let lines = outline(text, &mut places);
+    let mut first: std::collections::HashMap<(usize, &str), usize> =
+        std::collections::HashMap::new();
+    let mut pairs = Vec::new();
+    for (index, entry) in lines.iter().enumerate() {
+        if entry.kind != LineKind::Plain {
+            continue;
+        }
+        let earlier = *first
+            .entry((entry.place, entry.text.trim_end()))
+            .or_insert(index);
+        if earlier != index {
+            pairs.push((index + 1, earlier + 1));
+        }
+    }
+    assert!(
+        pairs
+            .iter()
+            .all(|(later, earlier)| earlier < later && *later <= lines.len())
+    );
+    pairs
+}
+
+/// Takes out of the project text each plain line the app text also has in the same place:
+/// under the same headings and hanging on the same lines, compared whole with only trailing
+/// spaces ignored. So the same words under another heading, under another lead-in line or
+/// parent item, or at another indent stay. A line also stays when a line the project keeps
+/// hangs on it, such as a lead-in of a kept list item or code block. Rules, table rows, code
+/// fence markers, every line inside a code block and every line indented by four columns or
+/// more always stay; a heading goes only when lines under it were left out and nothing under
+/// it is kept. A blank line goes only where lines left out would leave two in a row. A text
+/// with no such line comes back as it is; one left with only headings, rules and blank
+/// lines comes back empty. Inputs: both texts. Output: the kept text and how many plain
+/// lines were left out.
+fn without_repeats(app: &str, project: &str) -> (String, usize) {
+    let (lines, mut gone, needed, content) = repeat_marks(app, project);
     let left_out = gone.iter().filter(|out| **out).count();
     if left_out == 0 {
         return (project.to_owned(), 0);
