@@ -329,9 +329,9 @@ mod tests {
         match at {
             0 => data.nr,
             4 => data.arch,
-            16..=63 if at % 4 == 0 => {
+            16..=63 if at.is_multiple_of(4) => {
                 let arg = data.args[((at - 16) / 8) as usize];
-                if at % 8 == 0 {
+                if at.is_multiple_of(8) {
                     arg as u32
                 } else {
                     (arg >> 32) as u32
