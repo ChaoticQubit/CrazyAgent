@@ -1632,6 +1632,57 @@ fn shell_cloud_and_gpg_credential_files_are_secret_like() {
     assert!(missed.is_empty(), "not secret-like: {missed:?}");
 }
 
+/// RV-DS241-146: a secret word inside a compound name is found, split at a lower-to-upper
+/// case change, at the end of an upper-case run and between letters and digits, each part
+/// and each adjacent pair matched, and the common joined compounds; unsplit forms such as
+/// `p12`, `s3cfg` and `id_ed25519` still match. Neither the documents nor the overview
+/// evidence offers such a name, while plain names with those letters inside one word, in
+/// any case, stay offered.
+#[test]
+fn secret_words_inside_compound_names_are_secret_like() {
+    let missed: Vec<&str> = [
+        "awsCredentials.txt",
+        "docs/myPasswords.md",
+        "notes/passwords2.txt",
+        "apitoken.md",
+        "StripeSecretKey.txt",
+        "myApiKey.md",
+        "AWSCredentials.txt",
+        "docs/MyAccessToken.md",
+        "authtoken.txt",
+        "accesstoken.md",
+        "secretkey.txt",
+        "notes/1password-export.txt",
+        "certs/client.p12",
+        "ops/.s3cfg",
+        "ssh/id_ed25519",
+    ]
+    .into_iter()
+    .filter(|name| {
+        draft::names::offered(name, &[])
+            || !draft::names::secret_like(name)
+            || !draft::names::names_secret(name)
+    })
+    .collect();
+    assert!(missed.is_empty(), "not secret-like: {missed:?}");
+    for plain in [
+        "src/keyboard.rs",
+        "docs/monkey.md",
+        "src/config.rs",
+        "README.md",
+        "docs/KeyboardShortcuts.md",
+        "src/MonkeyPatch.ts",
+        "docs/tokenizer.md",
+        "notes/turkey2024.md",
+        "docs/v2Roadmap.md",
+    ] {
+        assert!(
+            draft::names::offered(plain, &[]) && !draft::names::secret_like(plain),
+            "{plain} is not a secret"
+        );
+    }
+}
+
 /// macOS only: by DEC-094 the graph build runs under Seatbelt alone, and Linux refuses it
 /// with the line that `a_graph_build_on_linux_ends_failed_and_writes_nothing` asserts.
 #[cfg(target_os = "macos")]
