@@ -116,8 +116,13 @@ impl GitOwn {
     /// would land that `.git` where none may be made. Input: the real, absolute source
     /// path. Output: true when no own git folder sits at or below it.
     pub fn moves(&self, real: &Path) -> bool {
-        let _ = real;
-        true
+        let holds = |folder: &Path| folder.starts_with(real);
+        let kid = |kid: &PathBuf| holds(kid) || real.parent() == Some(kid.as_path());
+        let exact = |own: &PathBuf| own.parent().is_some_and(holds);
+        real.is_absolute()
+            && !self.trees.iter().any(|tree| holds(tree))
+            && !self.kids.iter().any(kid)
+            && !self.exact.iter().any(exact)
     }
 
     /// Tells whether a path ending in a `.git` component is one of the agent's own git
@@ -226,16 +231,30 @@ pub fn field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
 /// for a bare name, `/` for a name in the root) and the name, or none when the path is
 /// empty or only slashes.
 pub fn split_last(path: &[u8]) -> Option<(&[u8], &[u8])> {
-    let _ = path;
-    None
+    let end = path.iter().rposition(|byte| *byte != b'/')? + 1;
+    let named = &path[..end];
+    match named.iter().rposition(|byte| *byte == b'/') {
+        Some(0) => Some((&named[..1], &named[1..])),
+        Some(slash) => Some((&named[..slash], &named[slash + 1..])),
+        None => Some((&named[..0], named)),
+    }
 }
 
 /// Rewrites a path that begins with `/proc/self` or `/proc/thread-self` to name the agent
 /// that asked, since here those names mean the supervisor. Inputs: the path bytes, the
 /// agent's process id and thread id. Output: the path to resolve; other paths unchanged.
 pub fn as_agent(path: &[u8], tgid: i32, tid: i32) -> Vec<u8> {
-    let _ = (tgid, tid);
-    path.to_vec()
+    assert!(tgid > 0 && tid > 0);
+    let named = |own: &[u8]| {
+        let rest = path.strip_prefix(own)?;
+        (rest.is_empty() || rest[0] == b'/').then_some(rest)
+    };
+    let (head, rest) = match (named(b"/proc/self"), named(b"/proc/thread-self")) {
+        (Some(rest), _) => (format!("/proc/{tgid}"), rest),
+        (None, Some(rest)) => (format!("/proc/{tgid}/task/{tid}"), rest),
+        (None, None) => return path.to_vec(),
+    };
+    [head.as_bytes(), rest].concat()
 }
 
 /// Rewrites a resolved folder that lies under the supervisor's own `/proc` entry to the
@@ -243,23 +262,28 @@ pub fn as_agent(path: &[u8], tgid: i32, tid: i32) -> Vec<u8> {
 /// the supervisor's process and thread ids, the agent's. Output: the agent's path, or
 /// none when the folder is not under the supervisor's entry.
 pub fn from_own(real: &Path, own: (i32, i32), agent: (i32, i32)) -> Option<PathBuf> {
-    let _ = (real, own, agent);
-    None
+    assert!(own.0 > 0 && own.1 > 0 && agent.0 > 0 && agent.1 > 0);
+    let thread = format!("/proc/{}/task/{}", own.0, own.1);
+    if let Ok(rest) = real.strip_prefix(thread) {
+        let head = format!("/proc/{}/task/{}", agent.0, agent.1);
+        return Some(Path::new(&head).join(rest));
+    }
+    let rest = real.strip_prefix(format!("/proc/{}", own.0)).ok()?;
+    Some(Path::new(&format!("/proc/{}", agent.0)).join(rest))
 }
 
 /// Reads the file mode mask from the text of `/proc/<pid>/status`. Input: the text.
 /// Output: the mask, or none when the line is missing or not octal.
 pub fn umask(status: &str) -> Option<u32> {
-    let _ = status;
-    None
+    let mask = u32::from_str_radix(field(status, "Umask")?, 8).ok()?;
+    (mask <= 0o777).then_some(mask)
 }
 
 /// The mode a new entry gets when the supervisor makes it for an agent: the asked mode
 /// without the bits the agent's mask clears. Inputs: the asked mode and the mask. Output:
 /// the mode to make the entry with, under a mask of zero.
 pub fn mode_under(mode: u32, umask: u32) -> u32 {
-    let _ = umask;
-    mode
+    mode & !umask & 0o7777
 }
 
 #[cfg(test)]
