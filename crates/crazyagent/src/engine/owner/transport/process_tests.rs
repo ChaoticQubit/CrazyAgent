@@ -2362,3 +2362,32 @@ fn process_import_never_labels_the_project_text() {
         "OWNER-TEXT-7\n\n### Imported from CLAUDE.md\n\nREPO-RULE-7\n"
     );
 }
+
+/// SA vid 7 residual (leader 14:22 A): once the project file holds text Process did not
+/// save, as the owner's own git or an accepted change set leaves it, agents get that text
+/// under the Imported heading with its headings demoted, until the owner saves it in Process.
+#[test]
+fn project_text_changed_after_a_process_save_reaches_agents_labelled_until_saved_again() {
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    save(&root, Some(project.clone()), "Owner rule.\n", 0).unwrap();
+    let saved = given(&root, &project).unwrap();
+    assert!(
+        saved.ends_with("## Project instructions\n\nOwner rule.\n"),
+        "{saved}"
+    );
+    let pulled = "## Pulled\nRule.\n";
+    fs::write(folder.join(".crazyagent/instructions.md"), pulled).unwrap();
+    let heading = crate::instruction_files::CARRIED_HEADING;
+    let label = format!("## Project instructions\n\n{heading}\n\n##### Pulled\nRule.\n");
+    let changed = given(&root, &project).unwrap();
+    assert!(changed.ends_with(&label), "{changed}");
+    save(&root, Some(project.clone()), pulled, 1).unwrap();
+    let kept = given(&root, &project).unwrap();
+    assert!(
+        kept.ends_with("## Project instructions\n\n## Pulled\nRule.\n"),
+        "{kept}"
+    );
+}

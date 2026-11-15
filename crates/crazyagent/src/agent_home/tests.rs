@@ -1893,3 +1893,24 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
         );
     }
 }
+
+/// SA vid 7 residual (leader 14:22 A): project instructions the engine did not write last,
+/// here from a project onboarded before arrived text was labelled, reach agents under the
+/// Imported heading with their headings demoted, while the file keeps its text as it is.
+#[test]
+fn project_text_the_engine_never_wrote_reaches_agents_labelled_and_the_file_stays() {
+    let (_directory, root) = folder();
+    let mut project = project(&root);
+    project.mode = crate::instruction_files::Mode::ProjectOnly;
+    let file = project
+        .folder
+        .as_deref()
+        .unwrap()
+        .join(".crazyagent/instructions.md");
+    fs::write(&file, "# Rules\nDo X.\n").unwrap();
+    let given = text(&project).unwrap().text;
+    let heading = crate::instruction_files::CARRIED_HEADING;
+    let label = format!("## Project instructions\n\n{heading}\n\n#### Rules\nDo X.\n");
+    assert!(given.ends_with(&label), "{given}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "# Rules\nDo X.\n");
+}
