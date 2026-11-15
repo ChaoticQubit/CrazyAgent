@@ -242,10 +242,12 @@ async fn a_versions_read_that_falls_back_from_a_broken_pin_never_runs_a_planted_
 /// security-audit vid 1 with rv-sa241 f-11: a Versions request re-pins a registered Codex
 /// whose entry now leads to another file only once that file passes the checks of engine
 /// start. An entry relinked to a Codex in a project's `.crazyagent` folder, in a folder
-/// anyone can write, or to a version-manager shim is refused there: the pin is not replaced,
-/// and neither that file nor the owner's first one is run for its version.
+/// anyone can write, or to a version-manager shim is refused there with the code engine
+/// start gives it: the pin is not replaced, and neither that file nor the owner's first one
+/// is run for its version.
 #[tokio::test]
 async fn a_versions_read_never_repins_an_entry_relinked_to_a_file_engine_start_refuses() {
+    use crate::harnesses::finding::{PATH_AGENT_SPACE, PATH_CHANGEABLE, PATH_SHIM};
     let root = tempfile::Builder::new()
         .prefix("ca-hc-repin-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -275,9 +277,9 @@ async fn a_versions_read_never_repins_an_entry_relinked_to_a_file_engine_start_r
     let open = open_folder.join("codex");
     let shim = outside.path().join("shims/mise");
     let refused = [
-        ("agent space", &crazyagent),
-        ("open folder", &open),
-        ("shim", &shim),
+        ("agent space", &crazyagent, PATH_AGENT_SPACE),
+        ("open folder", &open, PATH_CHANGEABLE),
+        ("shim", &shim, PATH_SHIM),
     ];
     let version = |ran: &Path| {
         format!(
@@ -287,7 +289,7 @@ async fn a_versions_read_never_repins_an_entry_relinked_to_a_file_engine_start_r
     };
     program(&host, "host", 0o700);
     program(&owned, &version(&owner_ran), 0o700);
-    for (_, file) in &refused {
+    for (_, file, _) in &refused {
         program(file, &version(&file.with_extension("ran")), 0o700);
     }
     std::fs::set_permissions(&open_folder, std::fs::Permissions::from_mode(0o777)).unwrap();
@@ -303,30 +305,37 @@ async fn a_versions_read_never_repins_an_entry_relinked_to_a_file_engine_start_r
         ))
         .unwrap();
     service.ensure_ready(&stopped).unwrap();
-    let runtime = service.owner_runtime().unwrap().clone();
     let client = OwnerClient::discover(root.path(), OwnerClientKind::Tui, Duration::from_secs(20))
         .await
         .unwrap()
         .0;
 
     let mut seen = Vec::new();
-    for (name, file) in &refused {
+    for (name, file, code) in &refused {
         std::fs::remove_file(&entry).unwrap();
         std::os::unix::fs::symlink(file, &entry).unwrap();
         let versions = client.harness_versions("codex", false).await.unwrap();
-        let registered = runtime.registered_codex_executable();
-        let repinned = matches!(registered, Ok(Some(_)));
+        let refusal = service
+            .owner_runtime()
+            .unwrap()
+            .registered_codex_executable()
+            .err()
+            .map(|error| error.0);
         let ran = file.with_extension("ran").exists();
-        seen.push((*name, versions.installed, repinned, ran));
+        seen.push((*name, *code, versions.installed, refusal, ran));
     }
     tokio::time::timeout(Duration::from_secs(5), service.shutdown())
         .await
         .unwrap()
         .unwrap();
 
-    for (name, installed, repinned, ran) in seen {
+    for (name, code, installed, refusal, ran) in seen {
         assert_eq!(installed, None, "{name}");
-        assert!(!repinned, "{name}: a refused file never replaces the pin");
+        assert_eq!(
+            refusal.as_deref(),
+            Some(code),
+            "{name}: the re-pin is refused with the code of engine start"
+        );
         assert!(!ran, "{name}: a refused file is never run for its version");
     }
     assert!(
