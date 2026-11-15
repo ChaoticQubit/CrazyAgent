@@ -1901,8 +1901,10 @@ fn ignores_any(checkout: &Path, paths: &[&str]) -> Result<bool, EngineError> {
 /// lists them, an ignored folder once with a closing `/`. The confined add on Linux may not
 /// read that file, since a link swapped in during the add would copy it into the object
 /// store (SA vid 2), so it gets the file's patterns as names, which tell it nothing the
-/// agent's own listing does not. Input: the agent's repository. Output: the pathspecs,
+/// agent's own listing does not; elsewhere the add still applies that file itself, so no
+/// second listing runs there. Input: the agent's repository. Output: the pathspecs,
 /// `changes_too_large` past the listing bound or `changes_git_failed`.
+#[cfg(target_os = "linux")]
 fn add_pathspecs(repo: &Repo) -> Result<Vec<u8>, EngineError> {
     let teammates = teammates_left_out();
     let ignored = repo.exec(
@@ -1962,16 +1964,22 @@ fn commit_worktree(
     message: &str,
 ) -> Result<Option<String>, EngineError> {
     check_bounds(repo, worktree, bounds)?;
-    let pathspecs = add_pathspecs(repo)?;
-    let added = repo.confined(Writes::Objects)?.exec(
-        &["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
-        Some(&pathspecs),
-        &[],
-        4096,
-    )?;
-    if added.code != 0 || added.overflow {
-        return Err(failure("changes_git_failed"));
+    #[cfg(target_os = "linux")]
+    {
+        let pathspecs = add_pathspecs(repo)?;
+        let added = repo.confined(Writes::Objects)?.exec(
+            &["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+            Some(&pathspecs),
+            &[],
+            4096,
+        )?;
+        if added.code != 0 || added.overflow {
+            return Err(failure("changes_git_failed"));
+        }
     }
+    #[cfg(not(target_os = "linux"))]
+    repo.confined(Writes::Objects)?
+        .run(&["add", "-A", "--", ":(top)", &teammates_left_out()])?;
     let tree = object_id(&repo.run(&["write-tree"])?)?;
     if tree == repo.tree_of(head)? {
         return Ok(None);

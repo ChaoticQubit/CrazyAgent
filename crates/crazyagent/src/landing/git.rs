@@ -498,7 +498,9 @@ impl Repo {
     /// reads the system, the work tree, the repository's git folder and git, never the owner's
     /// ignore file, which a link swapped in during a turn-end add would otherwise copy into
     /// the object store (SA vid 2): its git takes no excludes file ([`NO_EXCLUDES`]), and a
-    /// turn end applies that file's patterns as names instead (`flow::add_pathspecs`). It
+    /// turn end applies that file's patterns as names instead (`flow::add_pathspecs`). So a
+    /// `read-tree -u` counts an untracked file only that file names as the agent's and refuses
+    /// to write over it, failing closed where macOS writes over it (rv-sec3 F1). It
     /// writes only what it names and the engine's step folder in the
     /// worktree's git folder, where it works on a copy of the index ([`Self::swapped`]), so a
     /// link swapped in during the step reaches nothing else, and a step that may write the work
