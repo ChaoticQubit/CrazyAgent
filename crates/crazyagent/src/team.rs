@@ -364,13 +364,15 @@ impl DelegationPath {
     }
 }
 
-/// Maps a team plan harness identifier to the launch adapter that runs it.
-/// Takes the opaque harness identifier stored in the team plan.
+/// Maps a team plan harness identifier to the launch adapter that runs it, by the harness
+/// registry: a harness whose manifest names the agent role.
+/// Takes the opaque harness identifier stored in the team plan, an id or an alias.
 /// Returns the launch adapter identifier, or none when no adapter exists.
 pub fn launch_harness(harness: &str) -> Option<&'static str> {
-    crate::harnesses::spec(harness)
-        .map(|spec| spec.id)
-        .filter(|id| matches!(*id, "codex" | "claude-code"))
+    crate::harnesses::registry::registry()
+        .get(harness)
+        .filter(|listed| listed.runnable())
+        .map(|listed| listed.id())
 }
 
 /// Names the accounts that run a launch adapter, in the words of the Add account tiles
@@ -378,11 +380,14 @@ pub fn launch_harness(harness: &str) -> Option<&'static str> {
 /// words the team start line and the default team status say.
 /// Takes the launch adapter `launch_harness` gives. Returns the two provider names.
 pub(crate) fn account_providers(launch: &str) -> (&'static str, &'static str) {
+    use crate::coord::settings::HarnessKind;
     assert!(launch_harness(launch) == Some(launch));
-    match launch {
-        "codex" => ("ChatGPT", "OpenAI"),
-        "claude-code" => ("Claude", "Anthropic"),
-        other => unreachable!("{other} is not a launch adapter"),
+    match HarnessKind::parse(launch) {
+        Some(HarnessKind::Codex) => ("ChatGPT", "OpenAI"),
+        Some(HarnessKind::ClaudeCode) => ("Claude", "Anthropic"),
+        Some(HarnessKind::Rcli | HarnessKind::Listed(_)) | None => {
+            unreachable!("{launch} names no account providers")
+        }
     }
 }
 
@@ -412,16 +417,22 @@ pub fn sub_agents_unavailable(kind: crate::coord::settings::HarnessKind) -> Opti
     }
 }
 
-/// Maps a team plan master harness to the backend that runs the project's master on it.
+/// Maps a team plan master harness to the backend that runs the project's master on it, by
+/// the harness registry: a harness whose manifest names the master role.
 /// Takes the harness identifier or a connection name for it. Returns Codex, Claude or
-/// RCLI, the only harnesses a master runs on, or none for any other harness.
+/// RCLI, the harnesses the engine has a master host for, or none for any other harness:
+/// one without the master role, and a listed one until its master host exists.
 pub fn master_backend(harness: &str) -> Option<crate::master_session::MasterBackend> {
+    use crate::coord::settings::HarnessKind;
     use crate::master_session::MasterBackend;
-    match crate::harnesses::spec(harness)?.id {
-        "codex" => Some(MasterBackend::Codex),
-        "claude-code" => Some(MasterBackend::Claude),
-        "rcli" => Some(MasterBackend::Rcli),
-        _ => None,
+    let listed = crate::harnesses::registry::registry()
+        .get(harness)
+        .filter(|listed| listed.master())?;
+    match HarnessKind::from_harness(listed.id())? {
+        HarnessKind::Codex => Some(MasterBackend::Codex),
+        HarnessKind::ClaudeCode => Some(MasterBackend::Claude),
+        HarnessKind::Rcli => Some(MasterBackend::Rcli),
+        HarnessKind::Listed(_) => None,
     }
 }
 

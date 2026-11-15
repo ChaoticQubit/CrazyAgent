@@ -7896,3 +7896,201 @@ fn the_no_account_line_names_the_account_kind_the_harness_needs() {
         "No account in this project's pool can run claude. Add a Claude sign-in or an Anthropic API key to the pool"
     );
 }
+
+/// The 15 catalog harnesses no launch adapter and no master host runs yet, written out so
+/// the rows below hold whatever the registry says.
+const UNWIRED: [&str; 15] = [
+    "opencode",
+    "gemini-cli",
+    "fx",
+    "openclaw",
+    "pi",
+    "goose",
+    "aider",
+    "qwen-code",
+    "crush",
+    "droid",
+    "copilot",
+    "cline",
+    "continue",
+    "openhands",
+    "kimi",
+];
+
+/// DEC-180 Phase 1: Codex and Claude Code start team agents, they and RCLI run a master,
+/// and each of the 15 other catalog harnesses does neither, by id or alias and by no
+/// other spelling.
+#[test]
+fn only_codex_and_claude_code_start_a_team_agent_and_only_they_and_rcli_run_a_master() {
+    use crate::master_session::MasterBackend;
+    for (name, launch, master) in [
+        ("codex", Some("codex"), Some(MasterBackend::Codex)),
+        (
+            "claude-code",
+            Some("claude-code"),
+            Some(MasterBackend::Claude),
+        ),
+        ("claude", Some("claude-code"), Some(MasterBackend::Claude)),
+        ("rcli", None, Some(MasterBackend::Rcli)),
+    ] {
+        assert_eq!(launch_harness(name), launch, "{name}");
+        assert_eq!(master_backend(name), master, "{name}");
+        for tools in [false, true] {
+            let path = match (launch, tools) {
+                (Some(_), true) => DelegationPath::Tool,
+                (Some(_), false) => DelegationPath::Reply,
+                (None, _) => DelegationPath::Unavailable,
+            };
+            assert_eq!(delegation_path(name, tools), path, "{name}");
+        }
+    }
+    for name in UNWIRED {
+        assert!(crate::harnesses::spec(name).is_some(), "{name}");
+        assert_eq!(launch_harness(name), None, "{name}");
+        assert_eq!(master_backend(name), None, "{name}");
+        for tools in [false, true] {
+            assert_eq!(
+                delegation_path(name, tools),
+                DelegationPath::Unavailable,
+                "{name}"
+            );
+        }
+    }
+    for name in ["", "Codex", "CLAUDE", "no-such-harness", "cursor-agent"] {
+        assert_eq!(launch_harness(name), None, "{name}");
+        assert_eq!(master_backend(name), None, "{name}");
+    }
+    assert_eq!(
+        runnable_harnesses().collect::<Vec<_>>(),
+        ["codex", "claude-code"]
+    );
+}
+
+/// DEC-180 Phase 1: a task named for one of the 15 unwired harnesses ends with today's
+/// refusal, under an empty plan and under a plan whose only row is that harness.
+#[test]
+fn a_task_for_each_unwired_harness_is_refused_as_a_harness_that_cannot_run() {
+    let (_directory, mut connection) = database();
+    let mut any = stored("team-unwired", vec![]);
+    any.team.master_tools = true;
+    any.team.max_agents = crate::project_setup::TEAM_AGENTS_MAX;
+    assert!(any.team.validate().is_ok());
+    let both = access("team-unwired", &["local-a", "anthropic-local"]);
+    let tx = connection.transaction().unwrap();
+    for (at, harness) in UNWIRED.into_iter().enumerate() {
+        let now = 20 + i64::try_from(at).unwrap();
+        let handed = admit(
+            &tx,
+            &both,
+            &any,
+            Some(harness),
+            "Do the work",
+            TaskSource::Master,
+            None,
+            now,
+        )
+        .unwrap();
+        assert_eq!(handed, Err("team_harness_cannot_run"), "{harness}");
+        let row = stored(
+            "team-unwired",
+            vec![HarnessSlot {
+                harness: harness.into(),
+                agents: 1,
+                tools: true,
+            }],
+        );
+        for named in [Some(harness), None] {
+            let handed = admit(
+                &tx,
+                &both,
+                &row,
+                named,
+                "Do the work",
+                TaskSource::Master,
+                None,
+                now,
+            )
+            .unwrap();
+            assert_eq!(
+                handed,
+                Err("team_harness_cannot_run"),
+                "{harness} {named:?}"
+            );
+        }
+    }
+    tx.commit().unwrap();
+}
+
+/// DEC-180 Phase 1: the team status marks a master and an agent row on one of the 15
+/// unwired harnesses as not runnable, with no way to hand work to sub-agents.
+#[test]
+fn the_team_status_marks_each_unwired_harness_as_not_runnable() {
+    let (_directory, connection) = database();
+    for harness in UNWIRED {
+        let mut plan = stored(
+            "team-unwired-status",
+            vec![
+                HarnessSlot {
+                    harness: harness.into(),
+                    agents: 1,
+                    tools: true,
+                },
+                HarnessSlot {
+                    harness: "codex".into(),
+                    agents: 1,
+                    tools: true,
+                },
+            ],
+        );
+        plan.team.master = harness.into();
+        let team = status(&connection, &plan).unwrap();
+        assert_eq!(
+            team.harnesses
+                .iter()
+                .map(|h| (h.harness.as_str(), h.role, h.runnable, h.delegation))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    harness,
+                    AgentRole::Master,
+                    false,
+                    Some(DelegationPath::Unavailable)
+                ),
+                (harness, AgentRole::Sub, false, None),
+                ("codex", AgentRole::Sub, true, None),
+            ],
+            "{harness}"
+        );
+    }
+}
+
+/// DEC-180 Phase 1: the launch adapter and the master backend follow the registry: every
+/// harness whose manifest names the agent role has an adapter under its own id, and the
+/// three with a master host are the only masters, as each names the master role.
+#[test]
+fn the_launch_adapter_and_the_master_backend_follow_the_roles_the_registry_names() {
+    use crate::master_session::MasterBackend;
+    let registry = crate::harnesses::registry::registry();
+    for harness in registry.all() {
+        let id = harness.id();
+        assert_eq!(launch_harness(id), harness.runnable().then_some(id), "{id}");
+        assert!(master_backend(id).is_none() || harness.master(), "{id}");
+        for alias in harness.aliases() {
+            assert_eq!(launch_harness(alias), launch_harness(id), "{alias}");
+            assert_eq!(master_backend(alias), master_backend(id), "{alias}");
+        }
+    }
+    let masters: Vec<(&str, MasterBackend)> = registry
+        .all()
+        .iter()
+        .filter_map(|harness| Some((harness.id(), master_backend(harness.id())?)))
+        .collect();
+    assert_eq!(
+        masters,
+        [
+            ("codex", MasterBackend::Codex),
+            ("claude-code", MasterBackend::Claude),
+            ("rcli", MasterBackend::Rcli),
+        ]
+    );
+}

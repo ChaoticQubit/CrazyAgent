@@ -9197,6 +9197,7 @@ impl TeamRuntime {
         switch: bool,
     ) -> Result<(PathBuf, Plan, Mode), String> {
         let launch = launch_harness(harness).ok_or("harness has no launch adapter")?;
+        let kind = crate::coord::settings::HarnessKind::parse(launch);
         let executable = &self.harness(launch).ok_or("harness is not installed")?;
         if let Some(line) = confined_unavailable(std::env::consts::OS) {
             return Err(line.to_owned());
@@ -9223,7 +9224,9 @@ impl TeamRuntime {
                 .map_err(|e| with_code("the agent folder could not be made private", Some(&e.0)))?;
         }
         #[cfg(target_os = "macos")]
-        if launch == "claude-code" && matches!(account.reach, TeamReach::Endpoint { .. }) {
+        if kind == Some(crate::coord::settings::HarnessKind::ClaudeCode)
+            && matches!(account.reach, TeamReach::Endpoint { .. })
+        {
             crate::engine::keychain::fresh_profile_keychain(&self.state, &own_home, &[]).map_err(
                 |_| {
                     with_code(
@@ -9429,7 +9432,7 @@ impl TeamRuntime {
         (sandbox, _) = sandbox
             .allow_extra_reads(&toolchains::graphify(&homes))
             .map_err(sandboxed)?;
-        if launch == "codex"
+        if kind == Some(crate::coord::settings::HarnessKind::Codex)
             && let Some(socket) = crate::coord::delivery::codex::socket(&home)
             && crate::coord::delivery::codex::prepare_folder().is_ok()
         {
@@ -13477,13 +13480,14 @@ fn io_code(error: &std::io::Error) -> &'static str {
 /// endpoint. Inputs: the launch harness and the account's reach. Output: the hosts, or the
 /// plain refusal for an endpoint no proxy can reach by name or a harness with no list.
 fn model_hosts(launch: &str, reach: &TeamReach) -> Result<Vec<ModelHost>, String> {
+    use crate::coord::settings::HarnessKind;
     let fixed = |hosts: &[(&str, u16)]| -> Vec<ModelHost> {
         hosts
             .iter()
             .filter_map(|(name, port)| ModelHost::new(name, *port))
             .collect()
     };
-    let hosts = match (reach, launch) {
+    let hosts = match (reach, HarnessKind::parse(launch)) {
         (TeamReach::Endpoint { base_url, .. }, _) => match endpoint_model_host(base_url) {
             Some(host) => vec![host],
             None => {
@@ -13493,9 +13497,9 @@ fn model_hosts(launch: &str, reach: &TeamReach) -> Result<Vec<ModelHost>, String
                 ));
             }
         },
-        (TeamReach::Managed { .. }, "codex") => fixed(CODEX_MODEL_HOSTS),
-        (TeamReach::Managed { .. }, "claude-code") => fixed(CLAUDE_MODEL_HOSTS),
-        (TeamReach::Managed { .. }, _) => {
+        (TeamReach::Managed { .. }, Some(HarnessKind::Codex)) => fixed(CODEX_MODEL_HOSTS),
+        (TeamReach::Managed { .. }, Some(HarnessKind::ClaudeCode)) => fixed(CLAUDE_MODEL_HOSTS),
+        (TeamReach::Managed { .. }, Some(HarnessKind::Rcli | HarnessKind::Listed(_)) | None) => {
             return Err(with_code(
                 "this harness has no model hosts for the no network setting",
                 Some("network_none_harness_unlisted"),

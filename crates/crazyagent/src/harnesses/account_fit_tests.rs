@@ -55,6 +55,7 @@ fn runs_on(harness: HarnessKind, provider: Provider, method: SignInMethod) -> bo
         (HarnessKind::ClaudeCode, ..) => false,
         (HarnessKind::Codex, Claude | AnthropicApi, _) => false,
         (HarnessKind::Codex, ..) => true,
+        (HarnessKind::Listed(id), ..) => unreachable!("{id} is not a native kind"),
     }
 }
 
