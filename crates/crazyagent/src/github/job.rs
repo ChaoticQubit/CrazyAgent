@@ -9,6 +9,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 const WORKFLOW: [&str; 1] = ["workflow"];
+const CREATE_UNSENT: [&str; 9] = [
+    "github_repo_create_refused",
+    "github_repo_name_invalid",
+    "github_repo_description_invalid",
+    "github_token_refused",
+    "github_not_signed_in",
+    "credential_missing",
+    "credential_store_unavailable",
+    "github_state_invalid",
+    "github_state_unavailable",
+];
 const EXCLUDE_SPECIAL: &[u8] = b"*?[\\";
 
 static PUBLISHING: Mutex<BTreeSet<(PathBuf, PathBuf)>> = Mutex::new(BTreeSet::new());
@@ -138,6 +149,20 @@ pub(super) fn publishing(root: &Path, project: &Path) -> Result<Publishing, Engi
 }
 
 /// The repository a plan asks GitHub to make. Input: the plan. Output: the new repository.
+/// Tells whether a job at Creating surely made no repository: its create was refused, or
+/// never sent for want of a valid name, a sign-in or a token. Any other stop, or none, as
+/// when the engine stopped, GitHub's answer was lost or refused after a 201, or the name
+/// is taken by a repository this job cannot tell from its own, may have left one. Input:
+/// the job. Output: true when nothing can have been made.
+fn create_unsent(job: &GitHubPublishJob) -> bool {
+    assert!(matches!(job.step, GitHubPublishStep::Creating { .. }));
+    job.made.is_none()
+        && job
+            .stopped
+            .as_deref()
+            .is_some_and(|code| CREATE_UNSENT.contains(&code))
+}
+
 fn new_repo(plan: &GitHubPublishPlan) -> GitHubNewRepo {
     GitHubNewRepo {
         owner: plan.owner.clone(),
@@ -161,9 +186,10 @@ impl GitHub {
     /// project's agent through `ask` for .gitignore lines from the project's names only,
     /// and records the lines the owner is shown first: the baseline, then the agent's, or
     /// the baseline alone with the code `ask` gave. Nothing is written into the project.
-    /// A job that made its repository already is gone on with Continue or forgotten with
-    /// Discard instead, and a start over an earlier job keeps the paths it wrote, which
-    /// the commit then takes.
+    /// A job that made its repository already, or whose create may have made it, is gone
+    /// on with Continue, which knows that repository again, or forgotten with Discard
+    /// instead, and a start over an earlier job keeps the paths it wrote, which the
+    /// commit then takes.
     /// Inputs: the project folder, the plan and `ask`, which takes the prompt and gives
     /// the reply or a code. Output: the job at its lines, or
     /// `github_repo_name_invalid`, `github_repo_description_invalid`,
@@ -180,12 +206,12 @@ impl GitHub {
         self.saved()?;
         let written = match state::load_job(&self.root, project)? {
             Some(job)
-                if !matches!(job.step, GitHubPublishStep::Done { .. })
-                    && (job.made.is_some()
-                        || matches!(
-                            job.step,
-                            GitHubPublishStep::Created { .. } | GitHubPublishStep::Pushed { .. }
-                        )) =>
+                if match &job.step {
+                    GitHubPublishStep::Done { .. } => false,
+                    GitHubPublishStep::Created { .. } | GitHubPublishStep::Pushed { .. } => true,
+                    GitHubPublishStep::Creating { .. } => !create_unsent(&job),
+                    _ => job.made.is_some(),
+                } =>
             {
                 return Err(failure("github_publish_in_progress"));
             }
@@ -334,11 +360,13 @@ impl GitHub {
         })
     }
 
-    /// Forgets a project's publish short of Done, so Start runs fresh: the way out of a
+    /// Forgets a project's publish before its push, so Start runs fresh: the way out of a
     /// job whose repository is gone on GitHub or whose name or visibility the owner wants
-    /// changed. Nothing on GitHub or in the project is touched. Input: the project folder.
-    /// Output: the `owner/name` of the repository the job left on GitHub, if it made one,
-    /// or `github_publish_not_started`, `github_publish_step_invalid` for a job at Done.
+    /// changed. A job at Pushed holds the code on GitHub with its rules still to apply,
+    /// which Continue does, so it is kept. Nothing on GitHub or in the project is touched.
+    /// Input: the project folder. Output: the empty repository the job made, or the one
+    /// its create may have made, if any, or `github_publish_not_started`,
+    /// `github_publish_step_invalid` for a job at Pushed or Done.
     pub fn publish_discard(
         &self,
         project: &Path,
@@ -346,16 +374,25 @@ impl GitHub {
         let _held = publishing(&self.root, project)?;
         let job = self.job(project)?;
         let left = match &job.step {
-            GitHubPublishStep::Done { .. } => return Err(failure("github_publish_step_invalid")),
-            GitHubPublishStep::Created { full_name, .. }
-            | GitHubPublishStep::Pushed { full_name, .. } => Some(full_name.clone()),
+            GitHubPublishStep::Pushed { .. } | GitHubPublishStep::Done { .. } => {
+                return Err(failure("github_publish_step_invalid"));
+            }
+            GitHubPublishStep::Created { full_name, .. } => Some(GitHubPublishLeft::Made {
+                full_name: full_name.clone(),
+            }),
+            _ if job.made.is_some() => job
+                .made
+                .clone()
+                .map(|full_name| GitHubPublishLeft::Made { full_name }),
+            GitHubPublishStep::Creating { .. } if !create_unsent(&job) => {
+                Some(GitHubPublishLeft::Maybe {
+                    full_name: format!("{}/{}", job.plan.owner, job.plan.name),
+                })
+            }
             _ => None,
         };
         state::remove_job(&self.root, project)?;
-        Ok(job
-            .made
-            .or(left)
-            .map(|full_name| GitHubPublishLeft::Made { full_name }))
+        Ok(left)
     }
 
     /// Reads a project's publish record, which a run in progress keeps up to date step by

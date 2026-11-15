@@ -233,8 +233,9 @@ impl OwnerClient {
         }
     }
 
-    /// Forgets a project's publish short of Done, so Start runs fresh. Input: the project.
-    /// Output: the name of the empty repository the job left on GitHub, if it made one.
+    /// Forgets a project's publish before its push, so Start runs fresh. Input: the
+    /// project. Output: the empty repository the job made, or the one its create may have
+    /// made, if any; a job at Pushed or Done gives `github_publish_step_invalid`.
     pub async fn github_publish_discard(
         &self,
         project: ProjectId,
