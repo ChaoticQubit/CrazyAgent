@@ -1738,3 +1738,132 @@ fn hooks_kept_while_an_entry_is_off_survive_a_second_new_pin() {
         "a hook switched off in one project stays off there across two pins"
     );
 }
+
+/// RV-DS241-154: removing the skill a pack entry's hooks follow, on the plugin screen, while
+/// the entry keeps other skills, keeps each hook as the owner left it. The hooks go with the
+/// skill, and the next seed adds them following the entry's next skill, off where they were.
+#[test]
+fn removing_the_skill_pack_hooks_follow_keeps_the_hooks_the_owner_switched_off() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    for project in ["project-1", "project-2"] {
+        connection
+            .execute("INSERT INTO projects(id, body) VALUES(?1, '{}')", [project])
+            .unwrap();
+    }
+    let work = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/superpowers@1",
+        vec![
+            skill(work.path(), "alpha"),
+            skill(work.path(), "beta"),
+            skill(work.path(), "gamma"),
+        ],
+        None,
+    )
+    .unwrap();
+    let plugin = hook_plugin(work.path(), "superpowers");
+    seed(&mut connection, root, "superpowers", &plugin).unwrap();
+    let views = hook_views(&mut connection, root, None);
+    assert_eq!(views.len(), 2);
+    assert!(
+        views
+            .iter()
+            .all(|view| view.follows.as_deref() == Some("alpha"))
+    );
+    let id_of = |event: &str| {
+        views
+            .iter()
+            .find(|view| view.event == event)
+            .unwrap()
+            .id
+            .clone()
+    };
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetHook {
+            id: id_of("SessionStart"),
+            enabled: false,
+        },
+    )
+    .unwrap();
+    let prompt = id_of("UserPromptSubmit");
+    let version = plugins::plugin_version(&connection, &prompt).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::Switch {
+            project: crate::protocol::ProjectId::new("project-1").unwrap(),
+            id: prompt,
+            on: false,
+            version,
+        },
+    )
+    .unwrap();
+    assert!(effective_events(&mut connection, root, "project-1").is_empty());
+    assert_eq!(
+        effective_events(&mut connection, root, "project-2"),
+        ["UserPromptSubmit"]
+    );
+
+    for name in ["alpha", "beta"] {
+        let id = skills(&mut connection, root)
+            .into_iter()
+            .find(|view| view.name == name)
+            .unwrap()
+            .id;
+        let version = plugins::plugin_version(&connection, &id).unwrap();
+        plugins::execute(
+            &mut connection,
+            root,
+            plugins::Command::RemoveSkill { id, version },
+        )
+        .unwrap();
+        assert!(
+            hook_views(&mut connection, root, None).is_empty(),
+            "the hooks go with the skill they follow"
+        );
+    }
+    seed(&mut connection, root, "superpowers", &plugin).unwrap();
+
+    let views = hook_views(&mut connection, root, None);
+    assert_eq!(views.len(), 2);
+    assert!(
+        views
+            .iter()
+            .all(|view| view.follows.as_deref() == Some("gamma")),
+        "the hooks follow the entry's next skill"
+    );
+    let start = views
+        .iter()
+        .find(|view| view.event == "SessionStart")
+        .unwrap();
+    assert!(
+        !start.enabled,
+        "a hook switched off stays off when the skill it follows is removed"
+    );
+    assert!(
+        views
+            .iter()
+            .any(|view| view.event == "UserPromptSubmit" && view.enabled),
+        "a hook switched off in one project only stays on everywhere else"
+    );
+    assert!(
+        effective_events(&mut connection, root, "project-1").is_empty(),
+        "a hook switched off in one project stays off there"
+    );
+    assert_eq!(
+        effective_events(&mut connection, root, "project-2"),
+        ["UserPromptSubmit"]
+    );
+    let tx = connection.transaction().unwrap();
+    let row = load_pack(&tx, "superpowers").unwrap().unwrap();
+    assert!(
+        row.hooks.is_empty(),
+        "what was kept is forgotten once applied"
+    );
+}
