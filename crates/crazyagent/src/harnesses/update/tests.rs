@@ -2356,6 +2356,80 @@ fn a_self_update_is_refused_when_a_middle_link_sits_where_agents_or_others_can_m
     }
 }
 
+/// RV-DS241-203: a self-update whose script asks `env` for node is refused when the entry's
+/// own folder, which the child's PATH looks in first, holds a `node` link whose target is not
+/// there yet: `env` passes over it now, but an agent that makes that target in its project
+/// before the run would have its file started as the owner. The vetted node elsewhere does
+/// not make the command safe.
+#[test]
+fn a_self_update_is_refused_when_its_env_interpreter_has_a_dangling_copy_agents_can_fill() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    std::fs::create_dir_all(&roots.home).unwrap();
+    let at = machine.root.path();
+    std::fs::create_dir_all(at.join("proj/.crazyagent")).unwrap();
+    let vetted = machine.program("brew/bin/node", 0o755);
+    let real = at.join("home/.codex/packages/standalone/0.167.1/codex");
+    let entry = at.join("home/.local/bin/codex");
+    executable(&real, "#!/usr/bin/env node\n");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &entry).unwrap();
+    let filled = at.join("proj/tools/node");
+    std::os::unix::fs::symlink(&filled, entry.with_file_name("node")).unwrap();
+    assert_eq!(method("codex", &real, &roots), Method::SelfUpdate);
+    match crate::tools::resolve_entry(&entry, &roots.places)
+        .unwrap()
+        .kind
+    {
+        crate::tools::Kind::Script { interpreter, .. } => assert_eq!(interpreter.entry, vetted),
+        crate::tools::Kind::Native => panic!("the self-updater is a script"),
+    }
+    assert_eq!(
+        update_command("codex", &entry, &real, &roots).unwrap_err(),
+        TOOL_UNSAFE
+    );
+    assert!(!filled.exists(), "nothing made the agent's file");
+}
+
+/// RV-DS241-203: a command's search folders are the child's PATH ahead of the system folders,
+/// so each one that exists must be one a lookup would trust
+/// ([`crate::tools::Places::kept_for_children`]):
+/// a folder every user can write or one inside a project agents can write is refused even
+/// with no copy of an interpreter in it yet, while the owner's folder and a folder not made
+/// yet, as the engine's npm prefix before its first install, pass.
+#[test]
+fn a_command_is_refused_when_a_search_folder_others_or_agents_can_write_exists() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    let at = machine.root.path();
+    let program = machine.program("brew/bin/brew", 0o755);
+    let open = at.join("open/bin");
+    std::fs::create_dir_all(&open).unwrap();
+    std::fs::set_permissions(at.join("open"), std::fs::Permissions::from_mode(0o777)).unwrap();
+    let project = at.join("proj/bin");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(at.join("proj/.crazyagent")).unwrap();
+    let fixed = |folder: &Path| Fixed {
+        program: program.clone(),
+        args: vec!["--version"],
+        search: vec![at.join("brew/bin"), folder.to_path_buf()],
+        prefix: None,
+    };
+    for (folder, refused) in [
+        (&open, true),
+        (&project, true),
+        (&at.join("brew/bin"), false),
+        (&at.join("setup/prefix/bin"), false),
+    ] {
+        let answer = checked(fixed(folder), &roots.places);
+        if refused {
+            assert_eq!(answer.unwrap_err(), TOOL_UNSAFE, "{}", folder.display());
+        } else {
+            assert_eq!(answer.unwrap().search[1], *folder, "{}", folder.display());
+        }
+    }
+}
+
 /// security-audit vid 1 r2 (3), on macOS, where the owner's cache folder lies outside every
 /// temp folder: on the engine's places a command is refused when a link on its program's way
 /// to the real file lies in the temp folder while the program's own place does not, since
