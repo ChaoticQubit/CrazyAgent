@@ -260,9 +260,8 @@ impl Connection {
         client: Client,
         engine: Option<(crate::paths::Layout, crate::service::Service)>,
     ) -> Result<Self, String> {
-        let mut connection = Self::connect_paired(client)?;
-        connection.engine = engine.map(Box::new);
-        Ok(connection)
+        drop(engine);
+        Self::connect_paired(client)
     }
 
     fn spawn(mode: WorkerMode) -> Result<Self, String> {

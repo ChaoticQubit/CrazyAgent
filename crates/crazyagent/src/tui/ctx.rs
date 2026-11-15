@@ -338,7 +338,6 @@ impl Ctx {
     /// reconnect, which jumps the queue as a reconnect ask does (DS-118).
     /// Input: none. Output: none.
     pub fn start_engine(&mut self) {
-        self.start = true;
         self.reconnect = true;
     }
 
