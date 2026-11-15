@@ -1,8 +1,9 @@
 //! The engine state behind each Action kind (DEC-136a decision 1): open questions, accounts
-//! that need a sign-in, research waiting for a pool, memories to review and change sets to
-//! review. Each source reads only its own tables and reports at most `SOURCE_ROWS_MAX`
-//! conditions; one whose tables are missing reports none and resolves nothing, and one a cap
-//! stopped before the end of its state resolves nothing either.
+//! that need a sign-in, research waiting for a pool, memories to review, change sets to
+//! review and Keep awake changes an engine start could not undo. Each source reads only its
+//! own tables and reports at most `SOURCE_ROWS_MAX` conditions; one whose tables are
+//! missing reports none and resolves nothing, and one a cap stopped before the end of its
+//! state resolves nothing either.
 
 use super::reconcile::{Condition, SOURCE_ROWS_MAX};
 use super::{NoticeKind, NoticeTarget, error};
@@ -33,7 +34,11 @@ impl Found {
     /// One source's read. Inputs: the conditions, whether a row or project cap was reached
     /// and the projects an inbox cap cut short. Output: the read, capped as well when the
     /// list itself is full.
-    fn read(conditions: Vec<Condition>, capped: bool, capped_projects: Vec<ProjectId>) -> Self {
+    pub(super) fn read(
+        conditions: Vec<Condition>,
+        capped: bool,
+        capped_projects: Vec<ProjectId>,
+    ) -> Self {
         assert!(conditions.len() <= SOURCE_ROWS_MAX);
         assert!(capped_projects.len() <= SOURCE_ROWS_MAX);
         let full = conditions.len() == SOURCE_ROWS_MAX;
@@ -59,12 +64,13 @@ pub(super) struct Live {
 /// Reads every Action source. Inputs: the engine database and the model access. Output:
 /// what holds now.
 pub(super) fn live(connection: &Connection, access: &ModelAccess) -> Live {
-    let sources: [(NoticeKind, Source); 5] = [
+    let sources: [(NoticeKind, Source); 6] = [
         (NoticeKind::Question, questions),
         (NoticeKind::AccountSignIn, accounts),
         (NoticeKind::ResearchPool, pools),
         (NoticeKind::MemoryReview, memories),
         (NoticeKind::ChangeSetReview, change_sets),
+        (NoticeKind::KeepAwakeRestore, super::keep_awake::restores),
     ];
     let mut live = Live::default();
     for (kind, read) in sources {
@@ -100,7 +106,9 @@ pub(super) fn live(connection: &Connection, access: &ModelAccess) -> Live {
     live
 }
 
-fn tables_exist(connection: &Connection, names: &[&str]) -> Result<bool, EngineError> {
+/// Tells whether every named table is there. Inputs: the engine database and the names.
+/// Output: true when all are, or the SQLite failure.
+pub(super) fn tables_exist(connection: &Connection, names: &[&str]) -> Result<bool, EngineError> {
     assert!(!names.is_empty());
     let mut statement = connection
         .prepare("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)")

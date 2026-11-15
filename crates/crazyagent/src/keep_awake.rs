@@ -341,6 +341,7 @@ pub fn evaluate(
     advance(&settings, &mut stored, work, now_ms);
     if dirty || stored != before {
         save_state(&tx, &stored, false)?;
+        noted(&tx, &settings, &before, &stored, now_ms);
     }
     tx.commit().map_err(error)?;
     Ok(view_of(settings, &stored))
@@ -359,6 +360,7 @@ pub(crate) fn apply(
     action.validate()?;
     let mut settings = settings::load(connection)?;
     let (mut stored, _) = load_state(connection)?;
+    let before = stored.clone();
     if let Some(code) = change(action, &mut settings, &mut stored, now_ms) {
         return Ok(Outcome::Rejected { code: code.into() });
     }
@@ -368,6 +370,7 @@ pub(crate) fn apply(
     let work = work::count(connection)?;
     advance(&settings, &mut stored, work, now_ms);
     save_state(connection, &stored, true)?;
+    noted(connection, &settings, &before, &stored, now_ms);
     Ok(Outcome::Applied)
 }
 
@@ -388,15 +391,18 @@ pub(crate) fn read(connection: &Connection) -> Result<OwnerData, EngineError> {
 }
 
 /// Records that the platform hold could not be kept: the decision becomes no hold with the
-/// end reason `HoldLost`, any timer is gone, and Auto stands down until the running work
-/// finishes, so a hold that cannot be taken is not tried again every few seconds. Inputs:
-/// the engine database outside any transaction. Output: the view after the change.
-fn hold_failed(connection: &Connection) -> Result<KeepAwakeView, EngineError> {
+/// end reason `HoldLost`, any timer is gone, Auto stands down until the running work
+/// finishes, so a hold that cannot be taken is not tried again every few seconds, and the
+/// owner gets the notice. Inputs: the engine database outside any transaction and the
+/// time. Output: the view after the change.
+fn hold_failed(connection: &Connection, now_ms: i64) -> Result<KeepAwakeView, EngineError> {
     assert!(connection.is_autocommit());
+    assert!(now_ms > 0);
     let tx =
         Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)?;
     let settings = settings::load(&tx)?;
     let (mut stored, dirty) = load_state(&tx)?;
+    let before = stored.clone();
     stored.manual_until_ms = None;
     stored.work_last_ms = None;
     stored.hold_since_ms = None;
@@ -406,6 +412,7 @@ fn hold_failed(connection: &Connection) -> Result<KeepAwakeView, EngineError> {
         ..Decision::NONE
     };
     save_state(&tx, &stored, dirty)?;
+    noted(&tx, &settings, &before, &stored, now_ms);
     tx.commit().map_err(error)?;
     assert_eq!(stored.decision.want, Want::Nothing);
     Ok(view_of(settings, &stored))
@@ -430,13 +437,65 @@ pub enum Leftover {
     Unreadable,
 }
 
-/// Undoes at engine start every persistent change an earlier engine left behind (DEC-167).
-/// Not written yet: says nothing is left. Input: the engine root. Output: what was left.
+/// Undoes at engine start every persistent change an earlier engine left behind (DEC-167)
+/// and says what it could not: the kinds of the entries still recorded, or a journal it
+/// could not open or read, which never counts as empty. A failure is logged by its code.
+/// Input: the engine root. Output: what was left.
 pub(crate) fn reconcile(root: &Path) -> Leftover {
-    if let Err(problem) = journal::Journal::open(root).and_then(|mut found| found.reconcile(undo)) {
-        eprintln!("keep awake journal: {}", problem.0);
+    let mut found = match journal::Journal::open(root) {
+        Ok(found) => found,
+        Err(problem) => {
+            eprintln!("keep awake journal: {}", short(&problem.0));
+            return Leftover::Unreadable;
+        }
+    };
+    if let Err(problem) = found.reconcile(undo) {
+        eprintln!("keep awake journal: {}", short(&problem.0));
     }
-    Leftover::Kinds(Vec::new())
+    let kinds: Vec<String> = found
+        .entries()
+        .iter()
+        .map(|entry| entry.kind.clone())
+        .collect();
+    assert!(kinds.len() <= journal::ENTRIES_MAX);
+    Leftover::Kinds(kinds)
+}
+
+/// Cuts a logged failure to at most 300 characters. Input: the text. Output: its start.
+fn short(text: &str) -> String {
+    text.chars().take(300).collect()
+}
+
+/// Writes the notices one change earns (DEC-167 addendum 10): a hold that was in place and
+/// is gone says how it ended, and heat that turned serious while the hold stays says so.
+/// Inputs: the connection inside the change's transaction, the settings, the run state
+/// before and after the change, and the time. Output: none; a notice that cannot be
+/// written is logged and never fails the change.
+fn noted(
+    connection: &Connection,
+    settings: &KeepAwakeSettings,
+    before: &Stored,
+    after: &Stored,
+    now_ms: i64,
+) {
+    assert!(!connection.is_autocommit());
+    assert!(now_ms > 0);
+    match (before.hold_since_ms, after.hold_since_ms) {
+        (Some(since), None) => {
+            if let Some(ended) = after.decision.ended {
+                crate::notifications::keep_awake::hold_ended(connection, ended, since, now_ms);
+            }
+        }
+        (_, Some(since)) => {
+            let same_hold = before.hold_since_ms == Some(since);
+            let hot_before = same_hold && heat_notice(settings, &before.sensors);
+            if heat_notice(settings, &after.sensors) && !hot_before {
+                let heat_end = settings.heat_end;
+                crate::notifications::keep_awake::running_hot(connection, heat_end, since, now_ms);
+            }
+        }
+        (None, None) => {}
+    }
 }
 
 /// The engine's Keep awake pacer: looks once a second for a changed work count, an owner
@@ -482,10 +541,26 @@ impl Keeper {
         self
     }
 
-    /// Gives the keeper what the engine start's undo left. Not written yet: drops it. Input:
-    /// what was left. Output: the keeper.
-    pub fn with_leftover(self, _leftover: Leftover) -> Self {
+    /// Gives the keeper what the engine start's undo left, which its next step writes to
+    /// the restore state the notification center reads. Input: what was left. Output: the
+    /// keeper.
+    pub fn with_leftover(mut self, leftover: Leftover) -> Self {
+        assert!(self.leftover.is_none());
+        self.leftover = Some(leftover);
         self
+    }
+
+    /// Writes what the engine start's undo left, once; a write that fails is logged and
+    /// tried again at the next step, and never fails this one. Input: the engine database
+    /// outside any transaction.
+    fn hand_on(&mut self, connection: &Connection) {
+        let Some(leftover) = self.leftover.as_ref() else {
+            return;
+        };
+        match crate::notifications::keep_awake::left_over(connection, leftover) {
+            Ok(()) => self.leftover = None,
+            Err(problem) => eprintln!("keep awake restore state: {}", short(&problem.0)),
+        }
     }
 
     /// The readings `decide` looks at, from the last platform reading. Output: none
@@ -588,6 +663,7 @@ impl Keeper {
             return Ok(None);
         }
         self.looked_ms = Some(now_ms);
+        self.hand_on(connection);
         let work = work::count(connection)?;
         let sensed = self.sense(now_ms);
         let settled = since(self.evaluated_ms, TICK_MS) && self.work == Some(work);
@@ -610,7 +686,7 @@ impl Keeper {
             view
         } else {
             self.release();
-            hold_failed(connection)?
+            hold_failed(connection, now_ms)?
         };
         self.evaluated_ms = Some(now_ms);
         self.work = Some(view.work);

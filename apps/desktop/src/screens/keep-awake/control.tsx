@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { KEEP_AWAKE_CHANGED, KEEP_AWAKE_POLL_MS, loadKeepAwake, type KeepAwakeView } from "../../api-keep-awake";
+import { KEEP_AWAKE_CHANGED, KEEP_AWAKE_OPEN, KEEP_AWAKE_POLL_MS, loadKeepAwake, type KeepAwakeView } from "../../api-keep-awake";
 import type { Loaded } from "../../state";
 import { Icon } from "../../ui";
 import { cover } from "../../ui/overlay";
@@ -59,16 +59,21 @@ function useKeepAwake(work: number): [Loaded<KeepAwakeView>, number, () => void]
   return [view, now, () => setTick((before) => before + 1)];
 }
 
-/** The Keep awake control with its panel, left of the bell on every page: shows what the
- * engine holds and opens the panel, which Escape, a click outside or its link closes; while
- * open it covers the page like a Drawer, so the IDE webview steps aside. Input: how many
- * agents work, a change of which reads the engine again. Output: the control and, when open,
- * the panel. */
+/** The Keep awake control with its panel, left of the bell on every page. A click or a Keep
+ * awake notification opens the panel; Escape, a click outside or its link closes it, and
+ * while open it covers the page like a Drawer, so the IDE webview steps aside. Input: how
+ * many agents work, a change of which reads the engine again. Output: the control and, when
+ * open, the panel. */
 export function KeepAwakeControl({ work }: { work: number }) {
   const [view, now, retry] = useKeepAwake(work);
   const [open, setOpen] = useState(false);
   const corner = useRef<HTMLDivElement>(null);
   useEffect(() => (open ? cover() : undefined), [open]);
+  useEffect(() => {
+    const show = () => setOpen(true);
+    window.addEventListener(KEEP_AWAKE_OPEN, show);
+    return () => window.removeEventListener(KEEP_AWAKE_OPEN, show);
+  }, []);
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {

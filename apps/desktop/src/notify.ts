@@ -109,12 +109,12 @@ export async function pickBanners(kept: number | null, notifying: boolean, load:
  * around it. Inputs: the click and the way to go and to send. Output: the anchor of the part
  * to highlight, or null. */
 export async function openClicked(clicked: Clicked, { go, send }: {
-  go: (hash: string) => void;
+  go: (hash: string | null) => void;
   send: (action: NoticeAction) => Promise<Result<void>>;
 }): Promise<string | null> {
   assert(Number.isSafeInteger(clicked.id) && clicked.id >= 1, "a click names a store item");
   const { hash, anchor } = routeOf(clicked.target);
-  assert(hash.startsWith("#/"), "a notification opens a page of the app");
+  assert(hash === null || hash.startsWith("#/"), "a notification opens a page of the app");
   go(hash);
   await send({ read: { ids: [clicked.id] } });
   return anchor;

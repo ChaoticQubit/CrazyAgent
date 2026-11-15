@@ -70,6 +70,10 @@ export const KEEP_AWAKE_POLL_MS = 5000;
 /** The window event that says Keep awake changed here, so the control reads at once. */
 export const KEEP_AWAKE_CHANGED = "crazyagent:keep-awake-changed";
 
+/** The window event that opens the Keep awake panel over the page, sent by a click on a
+ * Keep awake notification. */
+export const KEEP_AWAKE_OPEN = "crazyagent:keep-awake-open";
+
 /** The engine's settings before the first save. */
 export const KEEP_AWAKE_DEFAULTS: KeepAwakeSettings = {
   mode: "auto", grace: "min10", cap: "h24", lid: "ac_only", battery_floor: "pct10",

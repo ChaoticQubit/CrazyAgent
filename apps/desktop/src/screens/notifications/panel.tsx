@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Result } from "../../api";
+import { KEEP_AWAKE_OPEN } from "../../api-keep-awake";
 import {
   NOTICE_FILTERS, badgeText, countsQuery, foldsAction, kindLabel, loadNotifications, panelQuery, projectNeeds, projectNeedsQuery,
   routeOf, sendNotice, signInsQuery, type FoldChange, type Notice, type NoticeAction, type NoticeCounts, type NoticeFilter, type NoticePage,
@@ -151,11 +152,11 @@ export async function changeProblem(action: NoticeAction, send: (action: NoticeA
  * and the way to go and to send. Output: the anchor of the part to highlight, or null, and
  * the refusal of the read, empty once it stands or when nothing was unread. */
 export async function openNotice(notice: Notice, filter: NoticeFilter, { go, send }: {
-  go: (hash: string) => void;
+  go: (hash: string | null) => void;
   send: (action: NoticeAction) => Promise<Result<void>>;
 }): Promise<{ anchor: string | null; problem: string }> {
   const { hash, anchor } = routeOf(notice.target);
-  assert(hash.startsWith("#/"), "a notification opens a page of the app");
+  assert(hash === null || hash.startsWith("#/"), "a notification opens a page of the app");
   assert(notice.folded >= 1, "a row holds at least one item");
   go(hash);
   if (notice.unread === 0) return { anchor, problem: "" };
@@ -193,9 +194,11 @@ export function highlight(anchor: string | null): void {
   look();
 }
 
-/** Goes to one location hash, as a click on a link would. Input: the hash. Output: none. */
-export function goTo(hash: string): void {
-  window.location.hash = hash;
+/** Goes to one location hash, as a click on a link would, or opens the Keep awake panel
+ * over the page for none. Input: the hash or null. Output: none. */
+export function goTo(hash: string | null): void {
+  if (hash === null) window.dispatchEvent(new Event(KEEP_AWAKE_OPEN));
+  else window.location.hash = hash;
 }
 
 /** The panel with its reads: the folded page for the filter and project, reloaded when the

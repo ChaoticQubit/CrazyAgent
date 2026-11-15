@@ -423,7 +423,8 @@ fn place_of(target: &NoticeTarget, ctx: &Ctx) -> Result<(Place, Option<Spot>), &
         }
         NoticeTarget::Usage => Ok(Place::Usage),
         NoticeTarget::Harnesses => Ok(Place::Settings(SettingsSection::Harnesses)),
-        NoticeTarget::Home | NoticeTarget::KeepAwake => Ok(Place::Home),
+        NoticeTarget::Home => Ok(Place::Home),
+        NoticeTarget::KeepAwake => Ok(Place::KeepAwake),
         NoticeTarget::Updates => Err(UPDATES),
     }?;
     assert!(

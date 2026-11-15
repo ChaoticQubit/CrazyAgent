@@ -13,10 +13,12 @@ export type NoticeClass = "action" | "info";
 /** One notification kind, the engine's `NoticeKind` wire name. */
 export type NoticeKind =
   | "question" | "account_sign_in" | "research_pool" | "memory_review" | "change_set_review"
+  | "keep_awake_restore" | "keep_awake_approval"
   | "agent_finished" | "agent_failed" | "agent_stopped" | "master_off"
   | "change_set_landed" | "change_set_conflict" | "change_set_rolled_back"
   | "account_near_limit" | "account_at_limit" | "pool_failover"
-  | "app_update_ready" | "engine_restarted" | "engine_lost" | "harness_update" | "team_alert";
+  | "app_update_ready" | "engine_restarted" | "engine_lost" | "harness_update" | "team_alert"
+  | "keep_awake_ended" | "keep_awake_heat";
 
 /** Every kind in the engine's order, with its class and the label both clients show
  * (`NoticeKind::label`, checked against the engine source by a test). */
@@ -26,6 +28,8 @@ export const NOTICE_KINDS: readonly { kind: NoticeKind; class: NoticeClass; labe
   { kind: "research_pool", class: "action", label: "Waiting for a pool" },
   { kind: "memory_review", class: "action", label: "Memories to review" },
   { kind: "change_set_review", class: "action", label: "Change set to review" },
+  { kind: "keep_awake_restore", class: "action", label: "Sleep not restored" },
+  { kind: "keep_awake_approval", class: "action", label: "Lid hold approval" },
   { kind: "agent_finished", class: "info", label: "Agent finished" },
   { kind: "agent_failed", class: "info", label: "Agent failed" },
   { kind: "agent_stopped", class: "info", label: "Agent stopped" },
@@ -41,6 +45,8 @@ export const NOTICE_KINDS: readonly { kind: NoticeKind; class: NoticeClass; labe
   { kind: "engine_lost", class: "info", label: "Engine lost" },
   { kind: "harness_update", class: "info", label: "Harness update" },
   { kind: "team_alert", class: "info", label: "Team alert" },
+  { kind: "keep_awake_ended", class: "info", label: "Keep awake ended" },
+  { kind: "keep_awake_heat", class: "info", label: "Hot during Keep awake" },
 ];
 
 /** The page a click opens, the engine's `NoticeTarget`: never an address, since item text
@@ -57,7 +63,8 @@ export type NoticeTarget =
   | { page: "usage" }
   | { page: "updates" }
   | { page: "harnesses" }
-  | { page: "home" };
+  | { page: "home" }
+  | { page: "keep_awake" };
 
 /** One item or folded row, the engine's `Notice`. */
 export interface Notice {
@@ -191,9 +198,9 @@ export function badgeText(count: number): string | null {
 }
 
 /** The page one item opens and the anchor of the part to highlight there. Input: the
- * target. Output: the location hash and the anchor, or null when the page itself is the
- * part. */
-export function routeOf(target: NoticeTarget): { hash: string; anchor: string | null } {
+ * target. Output: the location hash, null for the Keep awake panel, which opens over the
+ * page the owner is on, and the anchor, or null when the page itself is the part. */
+export function routeOf(target: NoticeTarget): { hash: string | null; anchor: string | null } {
   const project = (id: string, tab: ProjectTab, section?: string): string =>
     formatRoute(section === undefined ? { name: "project", id, tab } : { name: "project", id, tab, section });
   switch (target.page) {
@@ -212,6 +219,7 @@ export function routeOf(target: NoticeTarget): { hash: string; anchor: string | 
     case "updates": return { hash: formatRoute({ name: "settings", tab: "updates" }), anchor: null };
     case "harnesses": return { hash: formatRoute({ name: "settings", tab: "harnesses" }), anchor: null };
     case "home": return { hash: formatRoute({ name: "home" }), anchor: null };
+    case "keep_awake": return { hash: null, anchor: null };
   }
 }
 

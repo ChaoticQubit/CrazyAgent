@@ -3,15 +3,41 @@
 //! sleep changes an earlier engine could not put back, an Action kind whose state is the
 //! `keep_awake_restore` table the keeper fills after the engine start's undo.
 
-use super::error;
+use super::reconcile::{Condition, SOURCE_ROWS_MAX};
+use super::sources::{Found, tables_exist};
+use super::{InfoNotice, NoticeKind, NoticeTarget, TEXT_BYTES_MAX, error, note};
+use crate::config::ModelAccess;
 use crate::engine::EngineError;
+use crate::keep_awake::journal::ENTRIES_MAX;
 use crate::keep_awake::{EndReason, HeatEnd, Leftover};
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use std::collections::BTreeSet;
+
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+const PERCENT_MAX: u8 = 100;
+const ENTRY_SUBJECT: &str = "keep_awake_restore:entry:";
+const UNREADABLE_SUBJECT: &str = "keep_awake_restore:unreadable";
+const NOT_PUT_BACK: &str = "Keep awake could not put back a sleep setting it changed. It tries \
+                            again when the engine starts.";
+const NOT_READ: &str = "Keep awake could not read its list of sleep settings to put back. It \
+                        tries again when the engine starts.";
+const HOT_UNTIL_CRITICAL: &str =
+    "This computer is running hot. Keep awake goes on and ends if the heat gets critical.";
+const HOT_NEVER_ENDS: &str =
+    "This computer is running hot. Keep awake goes on; it is set never to end for heat.";
+const HOT_ENDS: &str = "This computer is running hot. Keep awake ends at this heat.";
 
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS keep_awake_restore (
     subject TEXT PRIMARY KEY CHECK(length(subject) BETWEEN 1 AND 128),
     unreadable INTEGER NOT NULL CHECK(unreadable IN (0,1))
 )";
+
+const _: () = assert!(ENTRIES_MAX < SOURCE_ROWS_MAX);
+const _: () = assert!(NOT_PUT_BACK.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(NOT_READ.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(HOT_UNTIL_CRITICAL.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(HOT_NEVER_ENDS.len() <= TEXT_BYTES_MAX);
+const _: () = assert!(ENTRY_SUBJECT.len() + 64 <= 128);
 
 /// Creates the restore state when missing. Input: the engine database. Output: Ok, or the
 /// SQLite failure.
@@ -19,29 +45,149 @@ pub(super) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)
 }
 
-/// The line of a hold that ended by itself. Not written yet: says nothing. Input: the end
-/// reason. Output: none.
-pub fn ended_text(_ended: EndReason) -> Option<String> {
-    None
+/// The line of a hold that ended by itself, in the words of the Keep awake control.
+/// Input: the end reason. Output: the line, or none for an end the owner chose (End, a
+/// timer that ran out, mode Off).
+pub fn ended_text(ended: EndReason) -> Option<String> {
+    let text = match ended {
+        EndReason::Battery { pct } => format!(
+            "Keep awake ended: the battery reached {}%.",
+            pct.min(PERCENT_MAX)
+        ),
+        EndReason::BatteryUnread => {
+            "Keep awake ended: the battery charge could not be read.".into()
+        }
+        EndReason::Heat => "Keep awake ended: this computer got too hot.".into(),
+        EndReason::Cap { hours } => format!("Keep awake ended after its {hours} h limit."),
+        EndReason::HoldLost => {
+            "Keep awake ended: the system did not keep this computer awake.".into()
+        }
+        EndReason::Manual | EndReason::Off => return None,
+    };
+    assert!(!text.is_empty());
+    assert!(text.len() <= TEXT_BYTES_MAX);
+    Some(text)
 }
 
-/// The line of heat a hold runs on through. Not written yet. Input: the setting. Output: an
-/// empty line.
-pub fn hot_text(_heat_end: HeatEnd) -> &'static str {
-    ""
+/// The line of heat a hold runs on through. Input: the End at heat setting. Output: the
+/// line.
+pub fn hot_text(heat_end: HeatEnd) -> &'static str {
+    match heat_end {
+        HeatEnd::Critical => HOT_UNTIL_CRITICAL,
+        HeatEnd::Never => HOT_NEVER_ENDS,
+        HeatEnd::Serious => HOT_ENDS,
+    }
 }
 
-/// Records one hold that ended by itself. Not written yet: records nothing. Inputs: the
-/// connection, the end reason, the hold start and the time. Output: none.
-pub(crate) fn hold_ended(_connection: &Connection, _ended: EndReason, _since_ms: i64, _now: i64) {}
-
-/// Records heat a hold runs on through. Not written yet: records nothing. Inputs: the
-/// connection, the setting, the hold start and the time. Output: none.
-pub(crate) fn running_hot(_connection: &Connection, _heat_end: HeatEnd, _since_ms: i64, _now: i64) {
+/// Records one hold that was in place and ended by itself, once per hold; a hold the
+/// system did not keep is said at most once a UTC day, so a computer that can never hold
+/// does not say it for every burst of work. Inputs: the connection inside the change's
+/// transaction, the end reason, when the hold started and the time. Output: none; a write
+/// that fails is logged.
+pub(crate) fn hold_ended(connection: &Connection, ended: EndReason, since_ms: i64, now: i64) {
+    assert!(since_ms > 0);
+    assert!(now > 0);
+    let Some(text) = ended_text(ended) else {
+        return;
+    };
+    let subject = match ended {
+        EndReason::HoldLost => format!("keep_awake_ended:hold_lost:{}", now / DAY_MS),
+        _ => format!("keep_awake_ended:{since_ms}"),
+    };
+    let info = InfoNotice {
+        kind: NoticeKind::KeepAwakeEnded,
+        project_id: None,
+        subject: &subject,
+        text: &text,
+        target: NoticeTarget::KeepAwake,
+    };
+    note(connection, &info, now);
 }
 
-/// Replaces the restore state. Not written yet: changes nothing. Inputs: the engine
-/// database and what was left. Output: Ok.
-pub(crate) fn left_over(_connection: &Connection, _leftover: &Leftover) -> Result<(), EngineError> {
-    Ok(())
+/// Records heat a hold runs on through, once per hold. Inputs: the connection inside the
+/// change's transaction, the End at heat setting, when the hold started and the time.
+/// Output: none; a write that fails is logged.
+pub(crate) fn running_hot(connection: &Connection, heat_end: HeatEnd, since_ms: i64, now: i64) {
+    assert!(since_ms > 0);
+    assert!(now > 0);
+    let subject = format!("keep_awake_heat:{since_ms}");
+    let info = InfoNotice {
+        kind: NoticeKind::KeepAwakeHeat,
+        project_id: None,
+        subject: &subject,
+        text: hot_text(heat_end),
+        target: NoticeTarget::KeepAwake,
+    };
+    note(connection, &info, now);
+}
+
+/// Replaces the restore state with what the engine start's undo left: one row per kind of
+/// entry it could not undo, or one row when the journal could not be read, never shown by
+/// its kind. Inputs: the engine database outside any transaction and what was left.
+/// Output: Ok, or the SQLite failure, with nothing changed.
+pub(crate) fn left_over(connection: &Connection, leftover: &Leftover) -> Result<(), EngineError> {
+    assert!(connection.is_autocommit());
+    let rows: Vec<(String, bool)> = match leftover {
+        Leftover::Kinds(kinds) => kinds
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|kind| (format!("{ENTRY_SUBJECT}{kind}"), false))
+            .collect(),
+        Leftover::Unreadable => vec![(UNREADABLE_SUBJECT.into(), true)],
+    };
+    assert!(rows.len() <= ENTRIES_MAX);
+    let tx =
+        Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)?;
+    tx.execute("DELETE FROM keep_awake_restore", [])
+        .map_err(error)?;
+    for (subject, unreadable) in &rows {
+        tx.execute(
+            "INSERT INTO keep_awake_restore(subject,unreadable) VALUES(?1,?2)",
+            params![subject, unreadable],
+        )
+        .map_err(error)?;
+    }
+    tx.commit().map_err(error)
+}
+
+/// The line of a restore item. Input: whether the journal could not be read. Output: the
+/// line.
+fn restore_text(unreadable: bool) -> &'static str {
+    if unreadable { NOT_READ } else { NOT_PUT_BACK }
+}
+
+/// The restore source (DEC-136a decision 1): one condition per row of the restore state,
+/// at most `SOURCE_ROWS_MAX`. A missing table reports nothing, so it resolves nothing.
+/// Inputs: the engine database and the model access, which it does not need. Output: the
+/// read, or none.
+pub(super) fn restores(
+    connection: &Connection,
+    _access: &ModelAccess,
+) -> Result<Option<Found>, EngineError> {
+    if !tables_exist(connection, &["keep_awake_restore"])? {
+        return Ok(None);
+    }
+    let mut statement = connection
+        .prepare("SELECT subject, unreadable FROM keep_awake_restore ORDER BY subject LIMIT ?1")
+        .map_err(error)?;
+    let rows: Vec<(String, bool)> = statement
+        .query_map([SOURCE_ROWS_MAX as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    let conditions: Vec<Condition> = rows
+        .into_iter()
+        .map(|(subject, unreadable)| Condition {
+            kind: NoticeKind::KeepAwakeRestore,
+            project_id: None,
+            subject,
+            text: restore_text(unreadable).into(),
+            target: NoticeTarget::KeepAwake,
+        })
+        .collect();
+    assert!(conditions.len() <= SOURCE_ROWS_MAX);
+    Ok(Some(Found::read(conditions, false, Vec::new())))
 }
