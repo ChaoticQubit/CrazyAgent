@@ -1862,5 +1862,8 @@ fn removing_the_skill_pack_hooks_follow_keeps_the_hooks_the_owner_switched_off()
     );
     let tx = connection.transaction().unwrap();
     let row = load_pack(&tx, "superpowers").unwrap().unwrap();
-    assert!(row.hooks.is_empty(), "what was kept is forgotten once applied");
+    assert!(
+        row.hooks.is_empty(),
+        "what was kept is forgotten once applied"
+    );
 }
