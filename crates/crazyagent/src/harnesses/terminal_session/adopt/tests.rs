@@ -762,8 +762,8 @@ fn long_record(fixture: &Fixture, turns: usize) -> PathBuf {
 /// RV-DS241-72 and -143: an agent can grow its record without end, so adoption reads it only
 /// while the launch's run time lasts, at most `REPLAY_WAIT`. A read cut short passes over the
 /// rest of the record as it stands, unread, so no earlier turn reaches the session as a new
-/// one; whether a turn is open there is unknown, told as a dropped turn, and the next turn
-/// typed in the pane is followed alone.
+/// one; whether a turn is open there is unknown, so nothing is typed (the stand-in records
+/// every Escape), the turn is told as dropped and the next turn is followed alone.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_adoption_replay_cut_at_the_run_time_passes_over_the_rest_and_hands_the_session_no_old_turn() {
@@ -773,7 +773,8 @@ fn an_adoption_replay_cut_at_the_run_time_passes_over_the_rest_and_hands_the_ses
     let file = long_record(&fixture, 1_024);
     let length = std::fs::metadata(&file).unwrap().len();
     assert!(length > 4 * READ_BYTES_MAX as u64);
-    let record = fixture.spawn(&host, &agent, "exec cat", &file);
+    let record = fixture.spawn(&host, &agent, ESCAPE_HARNESS, &file);
+    std::thread::sleep(Duration::from_millis(500));
     let launched = PaneRecord {
         since_ms: record.since_ms - 60_000,
         ..record
@@ -817,7 +818,8 @@ fn a_live_master_older_than_the_launch_run_time_is_replayed_to_its_record_s_end(
     let file = long_record(&fixture, 1_024);
     let length = std::fs::metadata(&file).unwrap().len();
     assert!(length > 3 * READ_BYTES_MAX as u64);
-    let record = fixture.spawn(&host, &agent, "exec cat", &file);
+    let record = fixture.spawn(&host, &agent, ESCAPE_HARNESS, &file);
+    std::thread::sleep(Duration::from_millis(500));
     let launched = PaneRecord {
         since_ms: record.since_ms - 25 * 3_600_000,
         ..record
