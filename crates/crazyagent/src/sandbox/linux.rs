@@ -23,7 +23,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::ops::RangeInclusive;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -72,6 +72,9 @@ const HOST_AGE_MAX: Duration = Duration::from_secs(60);
 const SUPERVISOR_PROBE_TIME_MAX: Duration = Duration::from_secs(10);
 /// How the name of each private folder a supervisor probe runs in starts ([`private_folder`]).
 const PROBE_FOLDER_PREFIX: &str = "supervisor-probe-";
+/// The most names [`private_folder`] tries: each is 128 random bits, so only a name someone
+/// else already made, or a broken random source, ever takes one.
+const PROBE_FOLDER_TRIES_MAX: usize = 4;
 /// How often [`passes_within`] looks whether its probe has ended.
 const PROBE_POLL: Duration = Duration::from_millis(20);
 /// The set-user-ID and set-group-ID mode bits: a bubblewrap with either runs as someone
@@ -502,10 +505,11 @@ fn run_request(
     })
 }
 
-/// Reads the call supervisor's two probe requests, which stand alone: the question, and
-/// the check the helper then starts as its own harness, with the guarded port and an
-/// empty folder. Input: the helper arguments. Output: the request or the reason it is
-/// refused, or none when the first argument is neither.
+/// Reads the call supervisor's two probe requests, which stand alone: the question, with
+/// the private folder the engine made for it, and the check the helper then starts as its
+/// own harness, with the guarded port and that folder. Input: the helper arguments.
+/// Output: the request or the reason it is refused, or none when the first argument is
+/// neither.
 fn supervisor_probe(args: &[OsString]) -> Option<Result<HelperRequest, String>> {
     let checked = |at: &OsString, folder: &OsString| -> Result<HelperRequest, String> {
         let port = port(Some(at.clone()))?;
@@ -513,11 +517,12 @@ fn supervisor_probe(args: &[OsString]) -> Option<Result<HelperRequest, String>> 
         Ok(HelperRequest::Supervised { port, folder })
     };
     match args {
-        [first] if first == PROBE_SUPERVISOR => Some(Ok(HelperRequest::Supervisor {
-            folder: PathBuf::new(),
-        })),
+        [first, folder] if first == PROBE_SUPERVISOR => {
+            let folder = absolute(Some(folder.clone()));
+            Some(folder.map(|folder| HelperRequest::Supervisor { folder }))
+        }
         [first, ..] if first == PROBE_SUPERVISOR => {
-            Some(Err(format!("{PROBE_SUPERVISOR} takes no other argument")))
+            Some(Err(format!("{PROBE_SUPERVISOR} takes a folder")))
         }
         [first, at, folder] if first == PROBE_SUPERVISED => Some(checked(at, folder)),
         [first, ..] if first == PROBE_SUPERVISED => {
@@ -936,7 +941,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         HelperRequest::Nest { bwrap, args } => return nest(&bwrap, &args, bridge.as_ref()),
         HelperRequest::Scoped => return scoped(),
         HelperRequest::Broker { parent, ports } => return bridge::broker(parent, &ports),
-        HelperRequest::Supervisor { .. } => return probe_supervisor(),
+        HelperRequest::Supervisor { folder } => return probe_supervisor(&folder),
         HelperRequest::Supervised { port, folder } => return probe_supervised(port, &folder),
         HelperRequest::Probe {
             limit_network,
@@ -1050,12 +1055,12 @@ fn supervise(policy: &LandlockPolicy, program: &Path, args: Vec<OsString>) -> Ex
 
 /// Answers through the exit code whether this machine runs the call supervisor: the
 /// helper starts itself as a harness under every guard, with a port only this machine
-/// reaches and a new folder with no git of its own, and that harness checks each guard
-/// ([`probe_supervised`]). Output: 0 when every guard held, 1 otherwise.
-fn probe_supervisor() -> ExitCode {
-    let name = format!("crazyagent-probe-{}", std::process::id());
-    let folder = std::env::temp_dir().join(name);
-    if nix::sys::prctl::set_no_new_privs().is_err() || fs::create_dir(&folder).is_err() {
+/// reaches and the empty private folder the engine made ([`private_empty`]), and that
+/// harness checks each guard ([`probe_supervised`]). Input: the folder. Output: 0 when
+/// every guard held, 1 otherwise or when the folder is not private.
+fn probe_supervisor(folder: &Path) -> ExitCode {
+    assert!(folder.is_absolute());
+    if nix::sys::prctl::set_no_new_privs().is_err() || !private_empty(folder) {
         return ExitCode::from(1);
     }
     let checked = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).and_then(|listener| {
@@ -1064,7 +1069,7 @@ fn probe_supervisor() -> ExitCode {
         check
             .arg(PROBE_SUPERVISED)
             .arg(port.to_string())
-            .arg(&folder);
+            .arg(folder);
         let all = Guard {
             loopback: vec![port],
             git: Some(GitOwn::default()),
@@ -1072,9 +1077,8 @@ fn probe_supervisor() -> ExitCode {
         };
         serve::run(all.supervised(&[port]), &mut check)
     });
-    let removed = fs::remove_dir_all(&folder);
-    match (checked, removed) {
-        (Ok(0), Ok(())) => ExitCode::SUCCESS,
+    match checked {
+        Ok(0) => ExitCode::SUCCESS,
         _ => ExitCode::from(1),
     }
 }
@@ -1082,8 +1086,14 @@ fn probe_supervisor() -> ExitCode {
 /// Tells whether a folder is the private probe folder the engine made ([`private_folder`]):
 /// a real folder, not a link, that this user owns with mode 0700 and that holds nothing
 /// (rv-secreview linux-t4c F1). Input: the absolute folder. Output: true only then.
-fn private_empty(_folder: &Path) -> bool {
-    true
+fn private_empty(folder: &Path) -> bool {
+    assert!(folder.is_absolute());
+    let Ok(held) = fs::symlink_metadata(folder) else {
+        return false;
+    };
+    let own = held.uid() == rustix::process::geteuid().as_raw();
+    let private = held.is_dir() && own && held.mode() & 0o7777 == 0o700;
+    private && fs::read_dir(folder).is_ok_and(|mut entries| entries.next().is_none())
 }
 
 /// The call supervisor's check, run as its harness: the guarded port is reached on this
@@ -1332,11 +1342,11 @@ impl LinuxSandbox {
         })
     }
 
-    /// Puts this launch under the call supervisor when the owner's setting is On and this
-    /// host holds it as the launch starts it, probed in the engine's data folder
-    /// ([`supervises`]); bubblewrap alone never runs it. Off, or a host where the probe fails,
-    /// keeps the launch as it was. Inputs: the owner's choice and the data folder, none where
-    /// no probe may run. Output: the sandbox.
+    /// Puts this launch under the call supervisor when the owner's setting is On and the
+    /// probe in the engine's data folder holds ([`supervises`]); bubblewrap alone never runs
+    /// it. Off keeps the launch as it was; so does a failed probe, which says so on stderr and
+    /// marks the kept host unsupervised ([`forget_supervisor`]). Inputs: the choice and the
+    /// data folder, none where no probe may run. Output: the sandbox.
     pub fn supervise(mut self, calls: LinuxSupervisor, data: Option<&Path>) -> Self {
         assert!(self.supervision.is_none());
         if calls == LinuxSupervisor::Off {
@@ -1354,9 +1364,12 @@ impl LinuxSandbox {
             LinuxBackend::Nested { bwrap, helper } if holds(helper, Some(bwrap.as_path())) => {
                 Some(Supervision { signals: false })
             }
-            LinuxBackend::Landlock { .. }
-            | LinuxBackend::Nested { .. }
-            | LinuxBackend::Bubblewrap { .. } => None,
+            LinuxBackend::Landlock { .. } | LinuxBackend::Nested { .. } => {
+                eprintln!("linux_supervisor_not_started: this launch runs unsupervised");
+                forget_supervisor(&HOST_READ);
+                None
+            }
+            LinuxBackend::Bubblewrap { .. } => None,
         };
         self.supervision = supervision;
         self
@@ -1504,7 +1517,20 @@ fn passes_within(probe: &mut Command, time_max: Duration) -> bool {
 /// folder, for one supervisor probe, so no stale, concurrent or planted folder takes its
 /// name (rv-secreview linux-t4c F1). Input: the absolute data folder. Output: the new empty
 /// folder, or none when no name was free or the data folder refused it.
-fn private_folder(_data: &Path) -> Option<PathBuf> {
+fn private_folder(data: &Path) -> Option<PathBuf> {
+    assert!(data.is_absolute());
+    for _ in 0..PROBE_FOLDER_TRIES_MAX {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).ok()?;
+        let name: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(name.len(), 32);
+        let folder = data.join(format!("{PROBE_FOLDER_PREFIX}{name}"));
+        match fs::DirBuilder::new().mode(0o700).create(&folder) {
+            Ok(()) => return Some(folder),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return None,
+        }
+    }
     None
 }
 
@@ -1513,8 +1539,8 @@ fn private_folder(_data: &Path) -> Option<PathBuf> {
 /// private folder under the engine's data folder ([`private_folder`]), removed after. Never
 /// as root (rv-sec3 linux-t4b N1). Inputs: the helper, the bubblewrap launches nest under,
 /// the data folder and whether this runs as root. Output: true only when the probe held.
-fn supervises(helper: &Path, bwrap: Option<&Path>, _data: &Path, _root: bool) -> bool {
-    if rustix::process::geteuid().is_root() {
+fn supervises(helper: &Path, bwrap: Option<&Path>, data: &Path, root: bool) -> bool {
+    if root || !(clean_absolute(helper) && helper.is_file() && clean_absolute(data)) {
         return false;
     }
     let mut probe = Command::new(helper);
@@ -1526,9 +1552,19 @@ fn supervises(helper: &Path, bwrap: Option<&Path>, _data: &Path, _root: bool) ->
         }
         Some(_) => return false,
     }
-    probe.arg(PROBE_SUPERVISOR);
-    let usable = clean_absolute(helper) && helper.is_file();
-    usable && passes_within(&mut probe, SUPERVISOR_PROBE_TIME_MAX)
+    let Some(folder) = private_folder(data) else {
+        return false;
+    };
+    assert!(folder.starts_with(data));
+    probe.arg(PROBE_SUPERVISOR).arg(&folder);
+    let held = private_empty(&folder) && passes_within(&mut probe, SUPERVISOR_PROBE_TIME_MAX);
+    if let Err(error) = fs::remove_dir_all(&folder) {
+        eprintln!(
+            "linux_supervisor_probe_folder_kept {}: {error}",
+            folder.display()
+        );
+    }
+    held
 }
 
 /// Runs a probe with no environment and no input or output. Input: the probe command.
@@ -1693,7 +1729,13 @@ fn host_within(age_max: Option<Duration>) -> super::LinuxHost {
 /// the setting On found it does not hold (rv-secreview linux-t4c F2), so the Agent access
 /// page shows the wider lines until the next read. Nothing kept stays nothing. Input: what
 /// is kept.
-fn forget_supervisor(_kept: &KeptHost) {}
+fn forget_supervisor(kept: &KeptHost) {
+    let mut held = kept.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((_, host)) = held.as_mut() {
+        host.supervised = false;
+    }
+    assert!(held.as_ref().is_none_or(|(_, host)| !host.supervised));
+}
 
 /// What this machine holds, read again once what is kept is older than [`HOST_AGE_MAX`]:
 /// it may start the helper and bubblewrap, so it is not for a database transaction. No

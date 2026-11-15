@@ -54,7 +54,10 @@ impl Supervised {
 /// Refuses to supervise as root, where dumpability keeps no root agent from tracing the
 /// supervisor or taking its listener (rv-sec3 linux-t4b N1, rv-code4 linux-t4c F1). Input:
 /// the effective user. Output: Ok, or `PermissionDenied` for root.
-fn may_serve(_euid: Uid) -> io::Result<()> {
+fn may_serve(euid: Uid) -> io::Result<()> {
+    if euid.is_root() {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
     Ok(())
 }
 
@@ -66,9 +69,7 @@ fn may_serve(_euid: Uid) -> io::Result<()> {
 pub fn run(config: Supervised, command: &mut Command) -> io::Result<i32> {
     let guards = config.guards();
     assert!(guards != Guards::default());
-    if rustix::process::geteuid().is_root() {
-        return Err(io::ErrorKind::PermissionDenied.into());
-    }
+    may_serve(rustix::process::geteuid())?;
     let calls = Calls::host().ok_or(io::ErrorKind::Unsupported)?;
     sys::sizes_fit()?;
     let program = sys::Program::new(&filter::program(&calls, guards));
