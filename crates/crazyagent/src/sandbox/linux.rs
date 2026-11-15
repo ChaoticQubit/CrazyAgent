@@ -5,8 +5,8 @@ use super::{
     LinuxSockets, OWNER_PORTS, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork,
     SandboxRemote, agent_env, clean_absolute, invalid,
 };
-use crazyagent_linux_supervisor::rules::GitOwn;
-use crazyagent_linux_supervisor::serve::Supervised;
+use crazyagent_linux_supervisor::rules::{GitOwn, Reach};
+use crazyagent_linux_supervisor::serve::{self, Supervised};
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
     RulesetCreatedAttr, RulesetError, RulesetStatus, Scope, path_beneath_rules,
@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::ffi::{CString, OsStr, OsString};
 use std::fs;
 use std::io::Read;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::ops::RangeInclusive;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
@@ -213,14 +214,49 @@ pub struct Guard {
 impl Guard {
     /// The helper arguments for this guard, in the order the helper reads them back.
     fn args(&self) -> Vec<OsString> {
-        Vec::new()
+        let mut args: Vec<OsString> = Vec::new();
+        for port in &self.loopback {
+            args.push(GUARD_LOOPBACK.into());
+            args.push(port.to_string().into());
+        }
+        if let Some(git) = &self.git {
+            args.push(GUARD_GIT.into());
+            let own = [
+                (OWN_TREE, &git.trees),
+                (OWN_KIDS, &git.kids),
+                (OWN_GIT, &git.exact),
+            ];
+            for (flag, paths) in own {
+                for path in paths {
+                    args.push(flag.into());
+                    args.push(path.into());
+                }
+            }
+        }
+        if self.signals {
+            args.push(GUARD_SIGNALS.into());
+        }
+        args
     }
 
     /// What the supervisor holds for this guard. Input: the policy's connect ports.
     /// Output: the guarded ports reached on this machine only and the others anywhere.
     fn supervised(&self, connect: &[u16]) -> Supervised {
-        assert!(connect.len() <= usize::from(u16::MAX));
-        Supervised::default()
+        assert!(self.loopback.iter().all(|port| connect.contains(port)));
+        let any = connect
+            .iter()
+            .copied()
+            .filter(|port| !self.loopback.contains(port))
+            .collect();
+        let reach = Reach {
+            any,
+            loopback: self.loopback.clone(),
+        };
+        Supervised {
+            reach: Some(reach).filter(|_| !self.loopback.is_empty()),
+            git: self.git.clone(),
+            signals: self.signals,
+        }
     }
 }
 
@@ -257,6 +293,7 @@ impl LandlockPolicy {
         if self.nested {
             args.push(NESTED.into());
         }
+        args.extend(self.guard.args());
         args
     }
 }
@@ -311,7 +348,8 @@ pub(crate) fn holds_file_rules(helper: &Path) -> bool {
 /// Landlock ruleset, apply a policy and start a harness, inside bubblewrap install only
 /// the socket filter and start a harness, start bubblewrap from a fixed place with
 /// [`NEST_ARGS`], which then starts the helper again inside its namespaces, tell whether
-/// the kernel scopes signals, or carry a nested agent's bridged ports as its broker.
+/// the kernel scopes signals, carry a nested agent's bridged ports as its broker, tell
+/// whether this machine runs the call supervisor, or be the check that question starts.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HelperRequest {
     Probe {
@@ -362,6 +400,9 @@ impl HelperRequest {
         if args.first().is_some_and(|flag| flag == bridge::BROKER) {
             return bridge::broker_request(args);
         }
+        if let Some(probe) = supervisor_probe(&args) {
+            return probe;
+        }
         Self::flagged(args)
     }
 
@@ -374,6 +415,9 @@ impl HelperRequest {
         let mut nest = false;
         let mut rest = args.into_iter();
         while let Some(flag) = rest.next() {
+            if guard_flag(&mut policy.guard, &flag, &mut rest)? {
+                continue;
+            }
             match flag.to_str() {
                 Some(PROBE) => probe = true,
                 Some(FILTER_SOCKETS) => filter = true,
@@ -402,22 +446,7 @@ impl HelperRequest {
                         args: rest.collect(),
                     });
                 }
-                Some("--") if !probe => {
-                    open_needs_limit(&policy)?;
-                    binds_fit(&policy)?;
-                    if policy.nested && policy.die_with.is_some() {
-                        return Err(format!("{NESTED} takes no {DIE_WITH}"));
-                    }
-                    let program = absolute(rest.next())?;
-                    if policy.read.len() + policy.write.len() > HELPER_PATHS_MAX {
-                        return Err("too many path grants".into());
-                    }
-                    return Ok(Self::Run {
-                        policy,
-                        program,
-                        args: rest.collect(),
-                    });
-                }
+                Some("--") if !probe => return run_request(policy, rest),
                 _ => return Err(format!("unexpected argument {}", flag.to_string_lossy())),
             }
         }
@@ -425,7 +454,8 @@ impl HelperRequest {
             && policy.write.is_empty()
             && policy.connect.is_empty()
             && policy.die_with.is_none()
-            && !policy.nested;
+            && !policy.nested
+            && policy.guard == Guard::default();
         if probe && bare && !filter && !nest {
             open_needs_limit(&policy)?;
             binds_fit(&policy)?;
@@ -437,6 +467,110 @@ impl HelperRequest {
         }
         Err("missing the harness command after --".into())
     }
+}
+
+/// Reads what follows a policy's `--`: the harness and its arguments, once the policy
+/// holds together. Inputs: the parsed policy and the arguments after `--`. Output: the
+/// run, or the reason the policy or the harness is refused.
+fn run_request(
+    policy: LandlockPolicy,
+    mut rest: impl Iterator<Item = OsString>,
+) -> Result<HelperRequest, String> {
+    open_needs_limit(&policy)?;
+    binds_fit(&policy)?;
+    guard_fits(&policy)?;
+    if policy.nested && policy.die_with.is_some() {
+        return Err(format!("{NESTED} takes no {DIE_WITH}"));
+    }
+    let program = absolute(rest.next())?;
+    if policy.read.len() + policy.write.len() > HELPER_PATHS_MAX {
+        return Err("too many path grants".into());
+    }
+    Ok(HelperRequest::Run {
+        policy,
+        program,
+        args: rest.collect(),
+    })
+}
+
+/// Reads the call supervisor's two probe requests, which stand alone: the question, and
+/// the check the helper then starts as its own harness, with the guarded port and an
+/// empty folder. Input: the helper arguments. Output: the request or the reason it is
+/// refused, or none when the first argument is neither.
+fn supervisor_probe(args: &[OsString]) -> Option<Result<HelperRequest, String>> {
+    let checked = |at: &OsString, folder: &OsString| -> Result<HelperRequest, String> {
+        let port = port(Some(at.clone()))?;
+        let folder = absolute(Some(folder.clone()))?;
+        Ok(HelperRequest::Supervised { port, folder })
+    };
+    match args {
+        [first] if first == PROBE_SUPERVISOR => Some(Ok(HelperRequest::Supervisor)),
+        [first, ..] if first == PROBE_SUPERVISOR => {
+            Some(Err(format!("{PROBE_SUPERVISOR} takes no other argument")))
+        }
+        [first, at, folder] if first == PROBE_SUPERVISED => Some(checked(at, folder)),
+        [first, ..] if first == PROBE_SUPERVISED => {
+            Some(Err(format!("{PROBE_SUPERVISED} takes a port and a folder")))
+        }
+        _ => None,
+    }
+}
+
+/// Reads one call-supervisor flag into a guard. Inputs: the guard, the flag and the
+/// arguments after it. Output: whether the flag was one of them, or the reason its value
+/// is refused; an own git place is one only after `--guard-git`, which comes once.
+fn guard_flag(
+    guard: &mut Guard,
+    flag: &OsStr,
+    rest: &mut impl Iterator<Item = OsString>,
+) -> Result<bool, String> {
+    let place = match flag.to_str() {
+        Some(GUARD_LOOPBACK) => {
+            guard.loopback.push(port(rest.next())?);
+            return Ok(true);
+        }
+        Some(GUARD_SIGNALS) => {
+            guard.signals = true;
+            return Ok(true);
+        }
+        Some(GUARD_GIT) if guard.git.is_none() => {
+            guard.git = Some(GitOwn::default());
+            return Ok(true);
+        }
+        Some(OWN_TREE) => guard.git.as_mut().map(|git| &mut git.trees),
+        Some(OWN_KIDS) => guard.git.as_mut().map(|git| &mut git.kids),
+        Some(OWN_GIT) => guard.git.as_mut().map(|git| &mut git.exact),
+        _ => return Ok(false),
+    };
+    let place = place.ok_or_else(|| format!("an own git place needs {GUARD_GIT} before it"))?;
+    place.push(absolute(rest.next())?);
+    Ok(true)
+}
+
+/// Refuses a guard that does not fit its policy. A guarded port is one the agent may
+/// connect to, under the network limit with TCP sockets alone, where every connect is one
+/// the supervisor can judge; no guard goes with `--die-with`; the own git places are
+/// bounded. Input: the parsed policy. Output: Ok, or the reason.
+fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
+    let guard = &policy.guard;
+    if *guard == Guard::default() {
+        return Ok(());
+    }
+    if policy.die_with.is_some() {
+        return Err(format!("{DIE_WITH} takes no call supervisor"));
+    }
+    let tcp_only = policy.limit_network && !policy.open_sockets;
+    if !guard.loopback.is_empty() && !tcp_only {
+        return Err(format!("{GUARD_LOOPBACK} needs {LIMIT_NETWORK} without {OPEN_SOCKETS}"));
+    }
+    if !guard.loopback.iter().all(|port| policy.connect.contains(port)) {
+        return Err(format!("{GUARD_LOOPBACK} names a port with no {CONNECT}"));
+    }
+    let own = |git: &GitOwn| git.trees.len() + git.kids.len() + git.exact.len();
+    if guard.git.as_ref().map_or(0, own) > GRANTS_MAX {
+        return Err("too many own git places".into());
+    }
+    Ok(())
 }
 
 /// Reads what follows `--nest --`: bubblewrap at one of its fixed places, then exactly
@@ -767,7 +901,8 @@ fn die_with_parent(parent: u32) -> Result<(), String> {
 /// A probe applies a ruleset with no rule, the scope layer and the socket filter to itself and
 /// exits 0 when this kernel holds them; a run applies the policy, the scope layer and the
 /// filter to itself, moves into a session of its own and then replaces itself with the
-/// harness; a nest becomes bubblewrap, which starts a run inside its namespaces ([`nest`]).
+/// harness, or with a guard stays as its parent and ends with its exit code ([`supervise`]);
+/// a nest becomes bubblewrap, which starts a run inside its namespaces ([`nest`]).
 /// Bridge flags may lead a nest and the run or probe inside it ([`Bridge::fits`]).
 /// Output: the exit code, 2 for refused arguments, 3 when the kernel cannot hold the policy,
 /// the session or the signal mask, or the process it dies with is gone, 126 when the
@@ -790,9 +925,8 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         HelperRequest::Nest { bwrap, args } => return nest(&bwrap, &args, bridge.as_ref()),
         HelperRequest::Scoped => return scoped(),
         HelperRequest::Broker { parent, ports } => return bridge::broker(parent, &ports),
-        HelperRequest::Supervisor | HelperRequest::Supervised { .. } => {
-            return ExitCode::from(2);
-        }
+        HelperRequest::Supervisor => return probe_supervisor(),
+        HelperRequest::Supervised { port, folder } => return probe_supervised(port, &folder),
         HelperRequest::Probe {
             limit_network,
             open_sockets,
@@ -815,7 +949,8 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     hold(&policy, launch, bridge.as_ref())
 }
 
-/// Holds a policy on this process, then becomes the harness; for a probe it only tells
+/// Holds a policy on this process, then becomes the harness, or with a guard stays as its
+/// parent ([`supervise`]); for a probe it only tells
 /// whether this kernel held it. Under a bridge it first hands the bridged listeners to the
 /// broker, before any rule; the ports it would keep free are then ports of a network of
 /// its own, so the picked range is not asked. Inputs: the policy, the harness if any, and
@@ -870,12 +1005,94 @@ fn hold(
         eprintln!("crazyagent-landlock: {reason}");
         return ExitCode::from(3);
     }
+    if policy.guard != Guard::default() {
+        return supervise(policy, &program, args);
+    }
     let error = Command::new(&program).args(args).exec();
     eprintln!(
         "crazyagent-landlock: cannot start {}: {error}",
         program.display()
     );
     ExitCode::from(126)
+}
+
+/// Starts the harness under the call supervisor and stays as its parent, answering its
+/// guarded calls until it ends. The engine's stop signals reach the harness, which shares
+/// this process's group, and are held off here, so the helper ends with the harness.
+/// Inputs: the policy with its guard and the harness. Output: the harness's exit code, 128
+/// plus the signal that ended it, 126 when it cannot start under the supervisor.
+fn supervise(policy: &LandlockPolicy, program: &Path, args: Vec<OsString>) -> ExitCode {
+    assert!(policy.guard != Guard::default());
+    let mut harness = Command::new(program);
+    harness.args(args);
+    match serve::run(policy.guard.supervised(&policy.connect), &mut harness) {
+        Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        Err(error) => {
+            eprintln!(
+                "crazyagent-landlock: cannot start {} under the call supervisor: {error}",
+                program.display()
+            );
+            ExitCode::from(126)
+        }
+    }
+}
+
+/// Answers through the exit code whether this machine runs the call supervisor: the
+/// helper starts itself as a harness under every guard, with a port only this machine
+/// reaches and a new folder with no git of its own, and that harness checks each guard
+/// ([`probe_supervised`]). Output: 0 when every guard held, 1 otherwise.
+fn probe_supervisor() -> ExitCode {
+    let name = format!("crazyagent-probe-{}", std::process::id());
+    let folder = std::env::temp_dir().join(name);
+    if nix::sys::prctl::set_no_new_privs().is_err() || fs::create_dir(&folder).is_err() {
+        return ExitCode::from(1);
+    }
+    let checked = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).and_then(|listener| {
+        let port = listener.local_addr()?.port();
+        let mut check = Command::new("/proc/self/exe");
+        check
+            .arg(PROBE_SUPERVISED)
+            .arg(port.to_string())
+            .arg(&folder);
+        let all = Guard {
+            loopback: vec![port],
+            git: Some(GitOwn::default()),
+            signals: true,
+        };
+        serve::run(all.supervised(&[port]), &mut check)
+    });
+    let removed = fs::remove_dir_all(&folder);
+    match (checked, removed) {
+        (Ok(0), Ok(())) => ExitCode::SUCCESS,
+        _ => ExitCode::from(1),
+    }
+}
+
+/// The call supervisor's check, run as its harness: the guarded port is reached on this
+/// machine and refused on another address, a new file is made and written, a `.git` is
+/// refused, and so is a signal to the supervisor, a process the agent did not start.
+/// Inputs: the guarded port and an empty folder. Output: 0 when all five hold, else 1.
+fn probe_supervised(port: u16, folder: &Path) -> ExitCode {
+    let refused = |error: std::io::Error| error.kind() == std::io::ErrorKind::PermissionDenied;
+    let elsewhere = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), port));
+    let made = folder.join("made");
+    let here = TcpStream::connect((Ipv4Addr::LOCALHOST, port));
+    let there = TcpStream::connect_timeout(&elsewhere, Duration::from_secs(2));
+    let written = fs::write(&made, b"made").and_then(|()| fs::read(&made));
+    let git = fs::create_dir(folder.join(".git"));
+    let supervisor = rustix::process::getppid();
+    let signal = supervisor.map(rustix::process::test_kill_process);
+    let held = [
+        here.is_ok(),
+        there.is_err_and(refused),
+        written.is_ok_and(|read| read == b"made"),
+        git.is_err_and(refused),
+        signal == Some(Err(rustix::io::Errno::PERM)),
+    ];
+    if held == [true; 5] {
+        return ExitCode::SUCCESS;
+    }
+    ExitCode::from(1)
 }
 
 /// Answers the scope question through the exit code: the scope layer applied to this

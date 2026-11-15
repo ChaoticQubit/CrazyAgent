@@ -2595,8 +2595,7 @@ fn supervised(case: &Case, flags: &[&str], program: &str, args: &[&str]) -> Comm
 
 /// Runs a launch to its end. Input: the launch. Output: what it wrote and how it ended.
 fn finished(mut command: Command) -> Output {
-    crazyagent::spawn_gate::output(command.stdout(Stdio::piped()).stderr(Stdio::piped()))
-        .unwrap()
+    crazyagent::spawn_gate::output(command.stdout(Stdio::piped()).stderr(Stdio::piped())).unwrap()
 }
 
 /// What a finished launch wrote to its output, after it ended well. Input: the output.
