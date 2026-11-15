@@ -168,3 +168,32 @@ fn a_reader_skipped_to_the_end_reads_only_lines_written_after() {
     append(&record, "{\"turn\":2}\n");
     assert_eq!(adopted.read().unwrap(), vec![json!({"turn": 2})]);
 }
+
+#[test]
+fn a_record_swapped_for_a_link_is_never_followed_out_of_the_home() {
+    let home = Home::new();
+    let away = Home::new();
+    let mut reader = standin(&home);
+    let record = home.write(&record_below(), "{\"turn\":1}\n", NEW);
+    assert_eq!(reader.read().unwrap().len(), 1);
+    let planted = away.write("planted.jsonl", "{\"planted\":1}\n", NEW);
+    std::fs::remove_file(&record).unwrap();
+    std::os::unix::fs::symlink(&planted, &record).unwrap();
+    assert_eq!(reader.read().unwrap(), nothing());
+    let pattern = pattern(&home, STANDIN_PATH).unwrap();
+    let mut later = JsonlAppend::resumed(pattern, 0);
+    assert_eq!(later.read().unwrap(), nothing());
+    assert_eq!(later.record(), None);
+}
+
+#[test]
+fn a_resumed_position_past_the_record_s_end_reads_on_from_its_end() {
+    let home = Home::new();
+    let record = home.write(&record_below(), "{\"turn\":1}\n", NEW);
+    let pattern = pattern(&home, STANDIN_PATH).unwrap();
+    let mut resumed = JsonlAppend::resumed(pattern, 1000);
+    assert_eq!(resumed.read().unwrap(), nothing());
+    assert_eq!(resumed.position(), 11);
+    append(&record, "{\"turn\":2}\n");
+    assert_eq!(resumed.read().unwrap(), vec![json!({"turn": 2})]);
+}
