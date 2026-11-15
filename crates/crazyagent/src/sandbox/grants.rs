@@ -611,13 +611,10 @@ pub fn request(
         return Err("grant_full".into());
     }
     let host = crate::sandbox::linux_host_kept();
-    let gap = match crate::sandbox_settings::load(db) {
-        Ok(settings) => {
-            let sockets = settings.linux_sockets;
-            super::policy::linux_network_gap(policy.network, host, sockets, &grown.grants)
-        }
-        Err(_) => host.map(|_| crate::sandbox::LINUX_PORTS_ANY_HOST_LINE.to_owned()),
-    };
+    let sockets = crate::sandbox_settings::load(db)
+        .ok()
+        .map(|settings| settings.linux_sockets);
+    let gap = super::policy::linux_network_gap(policy.network, host, sockets, &grown.grants);
     let body = serde_json::to_string(&grant).map_err(|_| "grant_requests_unavailable")?;
     requests_table(db).map_err(|_| "grant_requests_unavailable")?;
     let waiting: i64 = db

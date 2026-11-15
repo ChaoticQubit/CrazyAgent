@@ -2101,6 +2101,15 @@ mod tests {
         assert_eq!(linux_unbridged_notice_on(host(true), &bridged), None);
         let (_temp, open) = project(SandboxNetwork::Open);
         assert_eq!(linux_unbridged_notice_on(host(true), &open), None);
+        let plain = Some(super::super::LINUX_PORTS_ANY_HOST_LINE.to_owned());
+        let hosted = launched(&[SandboxRemote::AnyHost(443), Loopback(8080)]);
+        assert_eq!(linux_unbridged_notice_on(host(true), &hosted), plain);
+        assert_eq!(linux_unbridged_notice_on(host(false), &hosted), None);
+        let ports = launched(&[Loopback(8080)]).limit_sockets(LinuxSockets::TcpPorts);
+        assert_eq!(linux_unbridged_notice_on(host(true), &ports), plain);
+        let model = launched(&[SandboxRemote::AnyHost(443)]);
+        assert_eq!(linux_unbridged_notice_on(host(true), &model), None, "no port here");
+        assert_eq!(linux_unbridged_notice_on(host(true), &launched(&[])), None);
     }
 
     #[test]

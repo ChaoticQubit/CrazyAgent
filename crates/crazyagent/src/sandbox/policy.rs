@@ -485,7 +485,7 @@ impl AgentPolicy {
         project: &Path,
         homes: &ToolHomes,
         version: u64,
-        sockets: crate::sandbox::LinuxSockets,
+        sockets: Option<crate::sandbox::LinuxSockets>,
     ) -> PolicyView {
         let allowed = self.allowed(project);
         let toolchains: Vec<ToolchainView> = Toolchain::ALL
@@ -762,17 +762,18 @@ pub struct NetworkView {
 /// drops the line, where this Linux nests agents and the sockets setting is `TcpOnly`, so
 /// an agent's loopback ports are bridged; an allowed port below the bridge's lowest then
 /// brings it back with the port named. Inputs: the choice, what this Linux holds, none on
-/// another system, the sockets setting and the project's grants. Output: the line, or none.
+/// another system, the sockets setting, none when it cannot be read, which keeps the line,
+/// and the project's grants. Output: the line, or none.
 pub fn linux_network_gap(
     network: AgentNetwork,
     host: Option<crate::sandbox::LinuxHost>,
-    sockets: crate::sandbox::LinuxSockets,
+    sockets: Option<crate::sandbox::LinuxSockets>,
     grants: &[AccessGrant],
 ) -> Option<String> {
     let host = host?;
     let bridges = network == AgentNetwork::None
         && host.nested
-        && sockets == crate::sandbox::LinuxSockets::TcpOnly;
+        && sockets == Some(crate::sandbox::LinuxSockets::TcpOnly);
     if !bridges {
         return Some(crate::sandbox::LINUX_PORTS_ANY_HOST_LINE.to_owned());
     }
@@ -1010,7 +1011,7 @@ mod tests {
         );
         let saved = serde_json::to_string(&own).unwrap();
         assert!(saved.contains(r#""tool_cache":"per_agent""#), "{saved}");
-        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1);
+        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1, None);
         assert_eq!(view.tool_cache, ToolCacheScope::PerAgent);
         let listed: Vec<(&str, &str)> = view
             .tool_caches
@@ -1050,7 +1051,7 @@ mod tests {
         assert!(saved.contains(r#""apply_changes":"next_start""#), "{saved}");
         assert!(saved.contains(r#"{"kind":"port","port":47821}"#), "{saved}");
         assert!(saved.contains(r#"{"kind":"temp_folder"}"#), "{saved}");
-        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1);
+        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1, None);
         let listed: Vec<(&str, &str)> = view
             .apply_choices
             .iter()
@@ -1468,7 +1469,7 @@ mod tests {
             assert_eq!(read.ide_agent_files, choice);
             assert_eq!(read.pinned(nowhere).ide_agent_files, choice);
             assert_eq!(
-                read.view(nowhere, &ToolHomes::at(nowhere), 0)
+                read.view(nowhere, &ToolHomes::at(nowhere), 0, None)
                     .ide_agent_files,
                 choice
             );
@@ -1567,7 +1568,7 @@ mod tests {
         };
         let port = |port| AccessGrant::Port { port };
         let line = Some(LINUX_PORTS_ANY_HOST_LINE.to_owned());
-        let tcp = LinuxSockets::TcpOnly;
+        let tcp = Some(LinuxSockets::TcpOnly);
         let none = |nested, sockets, grants: &[AccessGrant]| {
             linux_network_gap(AgentNetwork::None, host(nested), sockets, grants)
         };
@@ -1581,7 +1582,7 @@ mod tests {
         assert_eq!(none(true, tcp, &[]), None);
         assert_eq!(none(true, tcp, &[port(8080), AccessGrant::TempFolder]), None);
         assert_eq!(none(true, tcp, &[port(1024)]), None);
-        for sockets in [LinuxSockets::TcpPorts, LinuxSockets::Refuse] {
+        for sockets in [Some(LinuxSockets::TcpPorts), Some(LinuxSockets::Refuse), None] {
             assert_eq!(none(true, sockets, &[]), line, "{sockets:?}");
         }
         let named = none(true, tcp, &[port(8080), port(443), port(80)]).unwrap();
