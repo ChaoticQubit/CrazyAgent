@@ -391,6 +391,23 @@ enum Open {
     Remove { remove_focused: bool },
 }
 
+/// The lines of what a server runs that its details box shows on the frame: the first
+/// shown, how many and how many there are (RV-DS241-206).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Window {
+    top: usize,
+    shown: usize,
+    total: usize,
+}
+
+impl Window {
+    /// Whether the box shows the command's last line now, so Approve may run. Output: the
+    /// answer; never for a box too short to show any line of a command that has some.
+    fn at_end(&self) -> bool {
+        self.top + self.shown == self.total && (self.shown > 0 || self.total == 0)
+    }
+}
+
 /// Settings, Plugins and skills: skills, MCP servers and hooks for every
 /// project, with On or off, details, approval and remove.
 /// Input: keys and the engine's skill, server and hook lists. Output: the lists.
@@ -408,6 +425,7 @@ pub struct Plugins {
     hook_offset: usize,
     expanded: Option<(String, Scope)>,
     open: Open,
+    reading: Option<(String, usize)>,
 }
 
 impl Default for Plugins {
@@ -434,6 +452,7 @@ impl Plugins {
             hook_offset: 0,
             expanded: None,
             open: Open::None,
+            reading: None,
         }
     }
 
@@ -956,6 +975,16 @@ impl Plugins {
     }
 
     fn details(&self, focus: usize, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
+        self.details_window(focus, ctx)
+            .map(|(modal, hints, _)| (modal, hints))
+    }
+
+    /// Builds the details box of the server picked, sized to the frame: what it runs shows
+    /// as many lines as fit from the line Up and Down chose, with a line saying where the
+    /// window is when some do not fit, so the buttons always stay on screen (RV-DS241-206).
+    /// Inputs: the button focused and the context. Output: the box, its hints and the
+    /// window, or none when no server is picked.
+    fn details_window(&self, focus: usize, ctx: &Ctx) -> Option<(Modal, Vec<Hint>, Window)> {
         let theme = &ctx.theme;
         let glyphs = ctx.glyphs;
         let room = usize::from(MODAL_WIDTH) - 4;
@@ -978,11 +1007,15 @@ impl Plugins {
         let actions = self.actions();
         let labels: Vec<&str> = actions.iter().map(|action| self.label(*action)).collect();
         let mut body = Vec::new();
+        let runs_at;
+        let runs: Vec<String>;
+        let asked_top;
+        let asking;
         let title = match self.picked()? {
             Picked::Skill(_) | Picked::HookPlugin(_) | Picked::Hook(_) => return None,
             Picked::Server(index) => {
                 let server = &self.servers[index];
-                let asking = server.status == ServerStatus::WaitingForApproval;
+                asking = server.status == ServerStatus::WaitingForApproval;
                 if asking {
                     body.extend(
                         wrap(
@@ -1000,11 +1033,12 @@ impl Plugins {
                     ]));
                 }
                 body.push(Line::default());
-                wrapped(
-                    "Runs",
-                    &crate::memory::visible_text(&server.runs),
-                    &mut body,
-                );
+                runs_at = body.len();
+                runs = wrap(&crate::memory::visible_text(&server.runs), value_room);
+                asked_top = match &self.reading {
+                    Some((read, top)) if *read == server.runs => *top,
+                    _ => 0,
+                };
                 for (index, secret) in server.secrets.iter().enumerate() {
                     let state = if secret.saved {
                         status("Key saved", theme, glyphs)
@@ -1055,12 +1089,52 @@ impl Plugins {
             Some(focus.min(labels.len().saturating_sub(1))),
             theme,
         ));
+        assert!(runs_at <= body.len());
+        let total = runs.len();
+        let room = usize::from(ctx.height).saturating_sub(body.len() + 2);
+        let fits = total <= room;
+        let shown = if fits { total } else { room.saturating_sub(1) };
+        let top = asked_top.min(total - shown);
+        let window = Window { top, shown, total };
+        let end = top + shown;
+        let mut lines: Vec<Line<'static>> = runs[top..end]
+            .iter()
+            .enumerate()
+            .map(|(index, part)| {
+                if index == 0 {
+                    label("Runs", Line::raw(part.clone()))
+                } else {
+                    Line::raw(format!("{}{part}", " ".repeat(LABEL_WIDTH)))
+                }
+            })
+            .collect();
+        if !fits {
+            let marker = match shown {
+                0 => "Make the window taller to read what it runs.".to_owned(),
+                _ if end == total => format!(
+                    "Lines {}-{end} of {total}, the end. Up reads back.",
+                    top + 1
+                ),
+                _ if asking => format!(
+                    "Lines {}-{end} of {total}. Down reads on; Approve waits.",
+                    top + 1
+                ),
+                _ => format!("Lines {}-{end} of {total}. Down reads on.", top + 1),
+            };
+            lines.push(Line::raw(marker));
+        }
+        body.splice(runs_at..runs_at, lines);
         let arrows = format!("{}{}", glyphs.left, glyphs.right);
         let close = if title == "Approve MCP server" {
             "Not now"
         } else {
             "Close"
         };
+        let mut hints = vec![hint(&arrows, "Choose")];
+        if !fits {
+            hints.push(hint(&format!("{}{}", glyphs.up, glyphs.down), "Read"));
+        }
+        hints.extend([hint("Enter", "Confirm"), hint("Esc", close)]);
         Some((
             Modal {
                 width: MODAL_WIDTH,
@@ -1068,11 +1142,8 @@ impl Plugins {
                 body,
                 top: None,
             },
-            vec![
-                hint(&arrows, "Choose"),
-                hint("Enter", "Confirm"),
-                hint("Esc", close),
-            ],
+            hints,
+            window,
         ))
     }
 
@@ -1106,8 +1177,22 @@ impl Plugins {
                         focus: (focus + 1) % count,
                     }
                 }
+                Key::Up | Key::Down => {
+                    let window = self.details_window(focus, ctx).map(|(_, _, window)| window);
+                    if let (Some(window), Some(Picked::Server(index))) = (window, self.picked()) {
+                        let top = match key {
+                            Key::Up => window.top.saturating_sub(1),
+                            _ => (window.top + 1).min(window.total - window.shown),
+                        };
+                        self.reading = Some((self.servers[index].runs.clone(), top));
+                    }
+                }
                 Key::Enter => {
                     let action = self.actions().get(focus).copied().unwrap_or(Action::Close);
+                    let window = self.details_window(focus, ctx).map(|(_, _, window)| window);
+                    if action == Action::Approve && !window.is_some_and(|window| window.at_end()) {
+                        return Flow::Handled;
+                    }
                     if let (Action::Edit, Some(Picked::Server(index))) = (action, self.picked()) {
                         self.open = Open::None;
                         let server = self.servers[index].clone();
@@ -1178,7 +1263,10 @@ impl Screen for Plugins {
                         skill.name.clone(),
                     )));
                 }
-                Some(Picked::Server(_)) => self.open = Open::Details { focus: 0 },
+                Some(Picked::Server(_)) => {
+                    self.reading = None;
+                    self.open = Open::Details { focus: 0 };
+                }
                 Some(Picked::HookPlugin(at)) => {
                     let group = hook_groups(&self.hooks).swap_remove(at);
                     let key = (group.plugin, group.scope);
