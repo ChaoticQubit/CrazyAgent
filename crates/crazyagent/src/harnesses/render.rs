@@ -145,16 +145,21 @@ fn entry<K: Copy>(
     Ok(Render { kind, path })
 }
 
-/// The part of a render path after `{home}/`: one to [`PATH_PARTS_MAX`] plain names, none
-/// `.`, `..` or holding a brace. Input: the path as written. Output: that part, or none.
+/// The part of a render path after `{home}/`, when that part is [`plain`]. Input: the path
+/// as written. Output: that part, or none.
 fn inside_home(path: &str) -> Option<String> {
     let rest = path.strip_prefix(HOME_PREFIX)?;
-    let parts: Vec<&str> = rest.split('/').collect();
-    let plain = parts.len() <= PATH_PARTS_MAX
+    plain(rest).then(|| rest.to_owned())
+}
+
+/// Whether a path inside the private home is one to [`PATH_PARTS_MAX`] plain names joined by
+/// `/`, none empty, `.`, `..` or holding a brace. Input: the path. Output: the answer.
+pub(crate) fn plain(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    parts.len() <= PATH_PARTS_MAX
         && parts.iter().all(|part| {
             !part.is_empty() && *part != "." && *part != ".." && !part.contains(['{', '}'])
-        });
-    plain.then(|| rest.to_owned())
+        })
 }
 
 /// Writes the files a manifest asks for into one launch's private home, each 0600, made new
@@ -212,6 +217,7 @@ pub fn write(
 fn put(home: &Path, path: &str, text: String) -> Result<PathBuf, LaunchError> {
     use rustix::fs::{AtFlags, Mode, OFlags};
     use std::io::Write;
+    assert!(plain(path));
     let (folders, name) = match path.rsplit_once('/') {
         Some((folders, name)) => (folders.split('/').collect::<Vec<_>>(), name),
         None => (Vec::new(), path),
@@ -234,6 +240,39 @@ fn put(home: &Path, path: &str, text: String) -> Result<PathBuf, LaunchError> {
     bytes.fill(0);
     written?;
     Ok(home.join(path))
+}
+
+/// Deletes one file a render wrote, by its path inside the private home, through no-follow
+/// steps from the home: a path that is not [`plain`], a folder on the way that is a link or
+/// is missing, and a name that is a folder are each left alone; a link at the name itself
+/// is removed, never what it names. Inputs: the home and the path inside it.
+#[cfg(unix)]
+pub(crate) fn remove(home: &Path, path: &str) {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    if !plain(path) {
+        return;
+    }
+    let (folders, name) = match path.rsplit_once('/') {
+        Some((folders, name)) => (folders.split('/').collect::<Vec<_>>(), name),
+        None => (Vec::new(), path),
+    };
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(mut folder) = rustix::fs::open(home, flags, Mode::empty()) else {
+        return;
+    };
+    for part in folders {
+        let Ok(child) = rustix::fs::openat(&folder, part, flags, Mode::empty()) else {
+            return;
+        };
+        folder = child;
+    }
+    let _ = rustix::fs::unlinkat(&folder, name, AtFlags::empty());
+}
+
+/// Leaves render files alone where [`write`] never makes any. Inputs: unused.
+#[cfg(not(unix))]
+pub(crate) fn remove(home: &Path, path: &str) {
+    let _ = (home, path);
 }
 
 /// Fills a template's placeholders, each value quoted for the template's format so it stays

@@ -1052,9 +1052,10 @@ impl AgentContext {
     }
 
     /// Writes this context into one agent's private home for one launch of `harness`.
-    /// Input: a harness id or alias whose manifest names the Codex or Claude Code driver
-    /// ([`drivers::piped`]), else `launch_harness_unsupported`, the agent's 0700 home (its
-    /// CODEX_HOME or CLAUDE_CONFIG_DIR) and the tools switch; with tools off no skill or
+    /// Input: a harness id or alias whose manifest names the Codex, Claude Code or ACP driver
+    /// ([`drivers::piped`]), else `launch_harness_unsupported`, an ACP harness written as its
+    /// manifest asks ([`Self::install_listed`]), the agent's 0700 home (its CODEX_HOME,
+    /// CLAUDE_CONFIG_DIR or private home) and the tools switch; with tools off no skill or
     /// MCP server is given. On macOS the files hold the agent's own `getconf`
     /// ([`crate::sandbox::toolchains::write_getconf`]). Output: the guard holding the files
     /// and the harness arguments, or `launch_home_busy` while another launch uses the home.
@@ -1067,7 +1068,12 @@ impl AgentContext {
         let codex = match drivers::piped(harness)? {
             Piped::Codex => true,
             Piped::Claude => false,
-            Piped::Acp => return Err(failure("launch_harness_unsupported")),
+            Piped::Acp => {
+                let listed = crate::harnesses::registry::registry()
+                    .get(harness)
+                    .ok_or_else(|| failure("launch_harness_unsupported"))?;
+                return self.install_listed(listed.manifest(), home, tools);
+            }
         };
         crate::harnesses::launch::validate_home(home)?;
         let lock = lock(home)?;
@@ -1325,8 +1331,45 @@ impl AgentContext {
         home: &Path,
         tools: bool,
     ) -> Result<Installed, LaunchError> {
-        let _ = (manifest, home, tools);
-        Err(failure("launch_harness_unsupported"))
+        if self.process.is_some() {
+            return Err(failure("launch_harness_unsupported"));
+        }
+        let invalid = |_: crate::harnesses::manifest::Refused| failure("launch_manifest_invalid");
+        let renders = crate::harnesses::render::read(manifest).map_err(invalid)?;
+        let asked = crate::harnesses::home::read(manifest).map_err(invalid)?;
+        crate::harnesses::launch::validate_home(home)?;
+        let lock = lock(home)?;
+        let rendered: Vec<String> = [
+            renders.mcp.as_ref().map(|file| file.path.clone()),
+            renders.instructions.as_ref().map(|file| file.path.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let count = rendered.len();
+        let installed = Installed {
+            arguments: Vec::new(),
+            files: Some(InstalledFiles {
+                home: home.to_path_buf(),
+                codex: false,
+                rendered,
+            }),
+            transcripts: self.transcripts,
+            hooks: false,
+            relay: false,
+            denied: Vec::new(),
+            native: None,
+            native_threads: false,
+            model_proxy: self.model_proxy,
+            freeze_record: self.freeze_record.clone(),
+            terminal_display: self.terminal_display,
+            environment: asked.environment(home),
+            _lock: lock,
+        };
+        let servers: &[LaunchServer] = if tools { &self.plugins.servers } else { &[] };
+        let written = crate::harnesses::render::write(&renders, home, servers, &self.instructions)?;
+        assert_eq!(written.len(), count);
+        Ok(installed)
     }
 }
 
@@ -1457,6 +1500,9 @@ impl Drop for Installed {
             }
             if files.codex {
                 let _ = remove_copies(&files.home);
+            }
+            for path in &files.rendered {
+                crate::harnesses::render::remove(&files.home, path);
             }
         }
         #[cfg(unix)]
