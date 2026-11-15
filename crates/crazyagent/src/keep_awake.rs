@@ -535,9 +535,30 @@ impl Keeper {
         }
     }
 
-    /// Runs one step. Inputs: the engine database and the time. Output: the view when this
-    /// step evaluated, none when nothing was due, or the first failure.
+    /// Runs one step. A step that fails lets the platform hold go, so an engine that can
+    /// no longer check its decision fails toward sleep; the next good step evaluates at
+    /// once and takes the hold again when one is still wanted. Inputs: the engine database
+    /// and the time. Output: the view when this step evaluated, none when nothing was due,
+    /// or the first failure.
     pub fn tick(
+        &mut self,
+        connection: &Connection,
+        now_ms: i64,
+    ) -> Result<Option<KeepAwakeView>, EngineError> {
+        assert!(now_ms > 0);
+        let stepped = self.step(connection, now_ms);
+        if stepped.is_err() {
+            self.release();
+            self.evaluated_ms = None;
+        }
+        assert!(stepped.is_ok() || self.evaluated_ms.is_none());
+        stepped
+    }
+
+    /// The work of one step: looks, takes a platform reading that came back, evaluates
+    /// when something changed or `TICK_MS` passed, and brings the hold in step. Inputs and
+    /// output as `tick`.
+    fn step(
         &mut self,
         connection: &Connection,
         now_ms: i64,
