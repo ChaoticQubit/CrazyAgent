@@ -4162,6 +4162,187 @@ fn a_launch_that_left_context_mode_out_leaves_out_the_hooks_that_follow_it() {
     );
 }
 
+/// RV-DS241-196: a team role's agents get no hook that follows a skill the owner left out
+/// of that role, only the hooks of the skills the role keeps.
+#[test]
+fn a_role_agent_gets_no_hook_of_a_skill_its_role_left_out() {
+    use crate::coord::settings::{CoordSettings, RoleSkills, SkillRole};
+    use crate::plugins::Scope;
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let root = private_folder(&base.join("engine"));
+    let mut connection = app_database(&root);
+    for name in ["kept-skill", "left-skill"] {
+        let plugin = format!("{name}-hooks");
+        skill_with_hook(&mut connection, &root, &base, name, Scope::Global, &plugin);
+    }
+    let app = ProjectId::new("app").unwrap();
+    let settings = CoordSettings {
+        role_skills: RoleSkills {
+            worker: Some(vec!["kept-skill".to_owned()]),
+            ..RoleSkills::default()
+        },
+        ..CoordSettings::default()
+    };
+    crate::coord::settings::write(&connection, &app, &settings).unwrap();
+
+    let context = crate::launch_context::for_team_role(
+        &connection,
+        &app,
+        crate::agent_git::Layout::Linked,
+        SkillRole::Worker,
+    )
+    .unwrap();
+
+    let skills: Vec<&str> = context
+        .plugins
+        .skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect();
+    assert_eq!(skills, ["kept-skill"]);
+    assert_eq!(
+        launched_hooks(&context),
+        ["kept-skill-hooks"],
+        "a hook of a skill the role left out never launches"
+    );
+}
+
+/// RV-DS241-196: a hook follows its skill into a launch only when the launch gives that
+/// skill. A global skill that a project skill of the same name replaces brings no hook, nor
+/// does a skill whose stored SKILL.md no longer passes its checks; the replacing project
+/// skill's hook still launches.
+#[test]
+fn a_launch_gives_no_hook_of_a_shadowed_or_refused_skill() {
+    use crate::plugins::Scope;
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let root = private_folder(&base.join("engine"));
+    let mut connection = app_database(&root);
+    let app = ProjectId::new("app").unwrap();
+    let project = Scope::Project {
+        project_id: app.clone(),
+    };
+    for (scope, plugin) in [(Scope::Global, "global-hook"), (project, "project-hook")] {
+        skill_with_hook(&mut connection, &root, &base, "shared", scope, plugin);
+    }
+    let broken = skill_with_hook(
+        &mut connection,
+        &root,
+        &base,
+        "broken",
+        Scope::Global,
+        "broken-hooks",
+    );
+    fs::write(broken.join("SKILL.md"), "no frontmatter\n").unwrap();
+
+    let context =
+        crate::launch_context::for_project(&connection, &app, crate::agent_git::Layout::Linked)
+            .unwrap();
+
+    let skills: Vec<&str> = context
+        .plugins
+        .skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect();
+    assert_eq!(skills, ["shared"]);
+    assert_eq!(
+        launched_hooks(&context),
+        ["project-hook"],
+        "a shadowed or refused skill's hook never launches"
+    );
+}
+
+/// A real engine database at `root` holding the project `app` and no plugin yet. Input: the
+/// engine root. Output: the open database.
+fn app_database(root: &Path) -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let app = serde_json::to_string(&crate::protocol::StoredProject {
+        project_id: ProjectId::new("app").unwrap(),
+        spec: crate::protocol::ProjectSpec {
+            name: "App".into(),
+            repositories: vec![],
+        },
+    })
+    .unwrap();
+    connection
+        .execute("INSERT INTO projects(id, body) VALUES('app', ?1)", [app])
+        .unwrap();
+    connection
+}
+
+/// Adds one skill from a real SKILL.md folder in `scope` and the SessionStart hook of a
+/// plugin named `plugin` that follows it, as the owner's Add skill and Add hooks do.
+/// Inputs: the database, the engine root, a scratch folder, the skill name, the scope and
+/// the plugin name. Output: the skill's stored folder.
+fn skill_with_hook(
+    connection: &mut rusqlite::Connection,
+    root: &Path,
+    scratch: &Path,
+    name: &str,
+    scope: crate::plugins::Scope,
+    plugin: &str,
+) -> PathBuf {
+    use crate::storage::plugins::{Command, ResultValue, execute};
+    let source = private_folder(&scratch.join(plugin).join(name));
+    fs::write(
+        source.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: Teaches {name}.\n---\n\nSteps.\n"),
+    )
+    .unwrap();
+    let added = execute(
+        connection,
+        root,
+        Command::AddSkill {
+            scope: scope.clone(),
+            source: source.to_str().unwrap().to_owned(),
+        },
+    );
+    let Ok(ResultValue::Skill(change)) = added else {
+        panic!("skill change required");
+    };
+    let hooks = private_folder(&scratch.join(plugin).join("plugin"));
+    private_folder(&hooks.join("hooks"));
+    private_folder(&hooks.join(".claude-plugin"));
+    fs::write(
+        hooks.join(".claude-plugin/plugin.json"),
+        format!(r#"{{"name":"{plugin}"}}"#),
+    )
+    .unwrap();
+    fs::write(
+        hooks.join("hooks/hooks.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/start.sh\""}]}]}}"#,
+    )
+    .unwrap();
+    fs::write(hooks.join("hooks/start.sh"), "exit 0\n").unwrap();
+    execute(
+        connection,
+        root,
+        Command::AddHooks {
+            scope,
+            source: hooks.to_str().unwrap().to_owned(),
+            follows: Some(change.view.id.clone()),
+        },
+    )
+    .unwrap();
+    PathBuf::from(&change.view.folder)
+}
+
+/// The plugin names of the hooks one launch context gives, in launch order. Input: the
+/// context. Output: the names.
+fn launched_hooks(context: &AgentContext) -> Vec<&str> {
+    context
+        .process
+        .as_ref()
+        .unwrap()
+        .hooks
+        .iter()
+        .map(|hook| hook.plugin.as_str())
+        .collect()
+}
+
 /// The engine's shared context-mode install under a test folder: an engine root whose
 /// `setup/npm` holds context-mode copied from the npm prefix `CRAZYAGENT_CONTEXT_MODE_INSTALL`
 /// names, approved for the project `app`. Input: the test folder. Output: the project's
