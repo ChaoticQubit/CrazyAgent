@@ -295,12 +295,19 @@ pub(super) fn reached_trash(outcome: Option<Result<(), &str>>, ran: bool) -> boo
 }
 
 /// Whether the disk changed before the first grant check of an answer: a Delete whose
-/// folders reached the Trash, or a projects home or project move whose disk work ran, even
-/// one that failed, so a grant found stale there is an outcome to reconcile (rv-code3 r1 F1).
-/// Inputs: whether the Trash move ran, whether the request moves the projects home or one
-/// project, and whether its disk work ran. Output: the answer, which [`regranted`] reads.
-pub(super) fn disk_changed(trashed: bool, moving: bool, moving_project: bool, ran: bool) -> bool {
-    trashed || ((moving || moving_project) && ran)
+/// folders reached the Trash, or a projects home move, project move or folder add whose disk
+/// work ran, even one that failed, so a grant found stale there is an outcome to reconcile
+/// (rv-code3 r1 F1, RV-DS241-198). Inputs: whether the Trash move ran, whether the request
+/// moves the projects home or one project or adds a folder, and whether its disk work ran.
+/// Output: the answer, which [`regranted`] reads.
+pub(super) fn disk_changed(
+    trashed: bool,
+    moving: bool,
+    moving_project: bool,
+    adding: bool,
+    ran: bool,
+) -> bool {
+    trashed || ((moving || moving_project || adding) && ran)
 }
 
 /// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, DeleteProject, SetupProject,
@@ -490,9 +497,11 @@ pub(super) async fn serve(
         _ => None,
     };
     let trashed = deleting && reached_trash(outcome, ran);
+    let placed =
+        adding.is_some() && ran && (matches!(&step, Ok(Step::Record(Ok(_)))) || tally.clearing());
     let answer = async {
         let mut barrier = Some(engine.owner_egress.write().await);
-        let changed = disk_changed(trashed, moving, moving_project, ran);
+        let changed = disk_changed(trashed, moving, moving_project, adding.is_some(), ran);
         let mut result = match regranted(authority.authenticate(packet), a, changed) {
             Ok(()) => finish(engine, a, request, step).await,
             Err(e) => Err(e),
@@ -567,7 +576,7 @@ pub(super) async fn serve(
     }
     if let Some(added) = adding {
         settled(engine, "home_add_not_settled", |reply| {
-            Job::HomeAddSettle(added.clone(), reply)
+            Job::HomeAddSettle(added.clone(), placed, reply)
         })
         .await;
     }

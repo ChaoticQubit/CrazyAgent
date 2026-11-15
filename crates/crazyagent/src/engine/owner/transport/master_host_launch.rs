@@ -994,6 +994,7 @@ fn turn_sandbox(
     let runtime = Root::open(&root.path.join(&name))?;
     verify_master_runtime(root, &runtime, &name)?;
     let engine_root = root.engine_root()?;
+    let anchor = std::fs::canonicalize(engine_root).map_err(io_error)?;
     let tmp = runtime.path.join(MASTER_TMP);
     std::fs::DirBuilder::new()
         .mode(0o700)
@@ -1026,6 +1027,7 @@ fn turn_sandbox(
     .and_then(|sandbox| sandbox.allow_tools(&tools))
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
     .and_then(|sandbox| sandbox.guard_engine_around(engine_root, &root.path))
+    .map(|sandbox| sandbox.anchor_home(&anchor))
     .map_err(refused)?;
     #[cfg(target_os = "macos")]
     let sandbox = crate::sandbox::tool_cache::grant(
@@ -1392,6 +1394,72 @@ mod tests {
             crate::sandbox::LinuxSockets::TcpPorts
         );
         assert!(!base.join("engine.db").exists());
+    }
+
+    /// rv-code2 b8 F1: a master turn whose home the owner chose outside the engine's data
+    /// root, as a configured RCLI home may be the owner's own HOME, keeps the links a dotfile
+    /// manager made at `.config` and `.cargo` and what they name, while a turn home below the
+    /// data root still gets both as real folders.
+    #[test]
+    fn a_master_turn_keeps_the_config_links_of_a_home_outside_the_engine_root() {
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let owner_folder = private_root();
+        let owner = owner_folder.path().canonicalize().unwrap();
+        let home = owner.join("home");
+        let dotfiles = owner.join("dotfiles");
+        private_directory(&home);
+        for name in ["config", "cargo"] {
+            private_directory(&dotfiles.join(name));
+            std::fs::write(dotfiles.join(name).join("kept"), name).unwrap();
+            std::os::unix::fs::symlink(dotfiles.join(name), home.join(format!(".{name}")))
+                .unwrap();
+        }
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _, _capture) = allocate_master_capture(&root).unwrap();
+
+        let outside = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+            &[],
+        );
+
+        assert!(outside.is_ok(), "the turn on the owner's home was refused");
+        for name in ["config", "cargo"] {
+            assert_eq!(
+                std::fs::read_link(home.join(format!(".{name}"))).ok(),
+                Some(dotfiles.join(name)),
+                "the owner's .{name} link was replaced"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dotfiles.join(name).join("kept")).ok(),
+                Some(name.to_owned())
+            );
+        }
+        drop(outside);
+        let second = private_root();
+        let below_base = owner_generation(&second);
+        let below = master_in_generation(&below_base);
+        assert!(below.is_ok(), "the turn below the data root was refused");
+        for name in [".config", ".cargo"] {
+            let made = std::fs::symlink_metadata(below_base.join("profile-home").join(name));
+            assert!(made.is_ok_and(|made| made.is_dir()), "{name}");
+        }
     }
 
     /// T8: a master's tool cache is the project's cache in the engine root, where the team

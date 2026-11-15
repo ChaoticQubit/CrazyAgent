@@ -2059,6 +2059,103 @@ fn a_confined_agent_cannot_add_shadow_or_link_a_git_object_in_the_shared_store()
     assert_eq!(fs::read_to_string(one.join("mine.txt")).unwrap(), "mine");
 }
 
+/// A confined agent changes no mode, flag or ACL of the git objects the owner and the other
+/// agents share, nor of its worktree's git links, so the owner's git and every landing keep
+/// reading them (RV-DS241-185): `chmod 000`, `chflags uchg` and `chmod +a` on a fan-out
+/// folder, a loose object, the admin folder's `commondir` and `gitdir` and the worktree's
+/// `.git` all fail, as does a hard link of each into the worktree, a name it could change
+/// one through (rv-sa241 NV-1), and the owner's git still reads the object. What a try
+/// changed is put back before the row checks, so its folder can be removed.
+#[test]
+fn a_confined_agent_cannot_chmod_flag_or_acl_the_shared_git_objects_or_its_git_links() {
+    use std::os::macos::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let case = case();
+    let source = case.root.join("loose.txt");
+    fs::write(&source, "loose\n").unwrap();
+    let git = |arguments: &[&str]| {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+        String::from_utf8(made.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "start"]);
+    let loose = git(&["hash-object", "-w", source.to_str().unwrap()]);
+    let one = case.project.join("worktrees").join("one");
+    git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        one.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let fan_out = case.project.join(".git").join("objects").join(&loose[..2]);
+    let admin = case.project.join(".git").join("worktrees").join("one");
+    let targets = [
+        fan_out.clone(),
+        fan_out.join(&loose[2..]),
+        admin.join("commondir"),
+        admin.join("gitdir"),
+        one.join(".git"),
+    ];
+    let state = |path: &PathBuf| {
+        fs::symlink_metadata(path)
+            .ok()
+            .map(|metadata| (metadata.st_mode(), metadata.st_flags()))
+    };
+    let before: Vec<Option<(u32, u32)>> = targets.iter().map(state).collect();
+    assert!(before.iter().all(Option::is_some));
+    let linked = one.join("linked");
+    let script = targets
+        .iter()
+        .flat_map(|target| {
+            let target = quoted(target);
+            [
+                format!("/bin/chmod 000 {target}"),
+                format!("/usr/bin/chflags uchg {target}"),
+                format!("/bin/chmod +a 'everyone deny read' {target}"),
+                format!("/bin/ln {target} {}", quoted(&linked)),
+            ]
+        })
+        .map(|step| format!("{step} 2>/dev/null && echo \"changed: {step}\"\n"))
+        .collect::<String>();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_worktree(&one)
+        .unwrap();
+    let profile = case.profiles.join("object-modes.sb");
+    let tried = run(&sandbox, &profile, &format!("{script}echo tried"));
+    let after: Vec<Option<(u32, u32)>> = targets.iter().map(state).collect();
+    let listed = crazyagent::spawn_gate::output(
+        std::process::Command::new("/bin/ls")
+            .arg("-led")
+            .args(&targets)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    for (target, found) in targets.iter().zip(&before) {
+        let mode = found.map_or(0o700, |(mode, _)| mode & 0o7777);
+        for (program, argument) in [("/usr/bin/chflags", "nouchg"), ("/bin/chmod", "-N")] {
+            let _ = crazyagent::spawn_gate::status(
+                std::process::Command::new(program)
+                    .arg(argument)
+                    .arg(target),
+            );
+        }
+        let _ = fs::set_permissions(target, fs::Permissions::from_mode(mode));
+    }
+    let stdout = String::from_utf8_lossy(&tried.stdout).into_owned();
+    let errors = String::from_utf8_lossy(&tried.stderr).into_owned();
+    assert_eq!(stdout, "tried\n", "{errors}");
+    assert_eq!(after, before);
+    assert!(fs::symlink_metadata(&linked).is_err());
+    let acls = String::from_utf8_lossy(&listed.stdout).into_owned();
+    assert!(!acls.contains("deny"), "{acls}");
+    assert_eq!(git(&["cat-file", "-p", &loose]), "loose");
+}
+
 const AGENT_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 
 /// A project whose agent works in its own clone (DEC-102 Own branch): a committed
