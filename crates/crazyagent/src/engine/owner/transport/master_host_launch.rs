@@ -994,6 +994,7 @@ fn turn_sandbox(
     let runtime = Root::open(&root.path.join(&name))?;
     verify_master_runtime(root, &runtime, &name)?;
     let engine_root = root.engine_root()?;
+    let anchor = std::fs::canonicalize(engine_root).map_err(io_error)?;
     let tmp = runtime.path.join(MASTER_TMP);
     std::fs::DirBuilder::new()
         .mode(0o700)
@@ -1026,6 +1027,7 @@ fn turn_sandbox(
     .and_then(|sandbox| sandbox.allow_tools(&tools))
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
     .and_then(|sandbox| sandbox.guard_engine_around(engine_root, &root.path))
+    .map(|sandbox| sandbox.anchor_home(&anchor))
     .map_err(refused)?;
     #[cfg(target_os = "macos")]
     let sandbox = crate::sandbox::tool_cache::grant(

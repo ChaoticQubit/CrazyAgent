@@ -991,6 +991,7 @@ pub struct ProjectSandbox {
     open_tops: Option<Vec<String>>,
     node_bin: Option<PathBuf>,
     owner_config: bool,
+    engine_home: Option<bool>,
 }
 
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
@@ -1079,6 +1080,7 @@ impl ProjectSandbox {
             open_tops: None,
             node_bin: None,
             owner_config: false,
+            engine_home: None,
         })
     }
 
@@ -2188,6 +2190,19 @@ impl ProjectSandbox {
         self
     }
 
+    /// Names the engine's data root the agent home is judged by, as a master turn's home may
+    /// be a configured RCLI home the owner chose, even the owner's own HOME: [`Self::install`]
+    /// makes and removes nothing in a home not strictly below it, so a link a dotfile manager
+    /// made there stays, and clears what holds a config folder's name in one that is
+    /// (rv-code2 b8 F1). The profile keeps every deny either way. Input: the canonical data
+    /// root. Output: the sandbox.
+    pub fn anchor_home(mut self, engine_root: &Path) -> Self {
+        assert!(engine_root.is_absolute());
+        let below = self.agent_home != engine_root && self.agent_home.starts_with(engine_root);
+        self.engine_home = Some(below);
+        self
+    }
+
     /// Keeps one file or folder inside a granted root from being read, written or run: its
     /// name, size and dates stay visible, its contents, folder listing and attribute values
     /// do not, so a tool that stats an import does not fail; the graph step keeps the
@@ -3188,7 +3203,8 @@ impl ProjectSandbox {
     /// can rewrite the profile its next launch uses. A profile holding a string Seatbelt
     /// cannot read, or longer than [`PROFILE_BYTES_MAX`], is refused as `Invalid`, never written.
     /// An agent home first gets the folders its profile keeps it from making
-    /// ([`make_config_parents`]).
+    /// ([`make_config_parents`]), unless it lies outside the engine's data root
+    /// ([`Self::anchor_home`]).
     #[cfg(unix)]
     pub fn install(&self, path: &Path) -> Result<(), SandboxError> {
         let parent = path
@@ -3207,8 +3223,8 @@ impl ProjectSandbox {
                 "profile must live outside the sandbox's writable roots",
             ));
         }
-        if !self.owner_config {
-            make_config_parents(&self.agent_home)?;
+        if !self.owner_config && self.engine_home != Some(false) {
+            make_config_parents(&self.agent_home, self.engine_home == Some(true))?;
         }
         let profile = self.profile();
         if !sbpl_overlong(&profile).is_empty() {
@@ -4308,17 +4324,21 @@ const AGENT_CONFIG: [&str; 8] = [
 ];
 
 /// The folders of an agent home an [`AGENT_CONFIG`] name lies in. Each is made by
-/// [`ProjectSandbox::install`] and kept by every launch, and an agent may neither make, move
-/// nor remove one, so no folder built elsewhere is moved in with config past the names
-/// (RV-DS241-186).
+/// [`ProjectSandbox::install`] in a home the engine made and kept by every launch, and an
+/// agent may neither make, move nor remove one, so no folder built elsewhere is moved in
+/// with config past the names (RV-DS241-186).
 const CONFIG_PARENTS: [&str; 2] = [".cargo", ".config"];
 
-/// Makes each [`CONFIG_PARENTS`] folder of an agent home a real 0700 folder where it is
-/// missing, removing first what holds its name as anything else, since the agent's profile
-/// keeps it from making one (RV-DS241-186). Each step goes through the home's open handle
-/// and follows no link. Input: the home. Output: unit, or `Invalid` when one cannot be made.
+/// Makes each [`CONFIG_PARENTS`] folder of an agent home a real 0700 folder where nothing
+/// holds its name, since the agent's profile keeps it from making one (RV-DS241-186). With
+/// `clear`, for a home strictly below the engine's data root ([`ProjectSandbox::anchor_home`]),
+/// what holds a name as anything else, as a link an earlier run planted, goes first, and a
+/// name that is still no folder refuses; without it nothing is ever removed and such a name
+/// stays for the launch's reset to judge (rv-code2 b8 F1). Each step goes through the home's
+/// open handle and follows no link. Inputs: the home and `clear`. Output: unit, or `Invalid`
+/// when one cannot be made.
 #[cfg(unix)]
-fn make_config_parents(home: &Path) -> Result<(), SandboxError> {
+fn make_config_parents(home: &Path, clear: bool) -> Result<(), SandboxError> {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags};
     let refused = || invalid("a config folder of the agent home could not be made");
     let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -4328,16 +4348,23 @@ fn make_config_parents(home: &Path) -> Result<(), SandboxError> {
         rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW)
             .map(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Directory)
     };
+    let remove = |name: &str| {
+        crate::team::cleanup::remove_home_entry(&parent, name)
+            .map_err(|_| refused())
+    };
     for name in CONFIG_PARENTS {
-        if is_folder(name) == Ok(false) {
-            crate::team::cleanup::remove_home_entry(&parent, name)
-                .map_err(|_| refused())?;
+        match is_folder(name) {
+            Ok(true) => continue,
+            Ok(false) if !clear => continue,
+            Ok(false) => remove(name)?,
+            Err(rustix::io::Errno::NOENT) => {}
+            Err(_) => return Err(refused()),
         }
         match rustix::fs::mkdirat(&parent, name, Mode::RWXU) {
             Ok(()) | Err(rustix::io::Errno::EXIST) => {}
             Err(_) => return Err(refused()),
         }
-        if is_folder(name) != Ok(true) {
+        if clear && is_folder(name) != Ok(true) {
             return Err(refused());
         }
     }
