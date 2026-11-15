@@ -1085,8 +1085,9 @@ fn passes(probe: &mut Command) -> bool {
 
 /// Tells whether a bubblewrap is one the helper may nest an agent under: a file that root
 /// or this user owns, with neither [`SET_ID_BITS`] bit, so it runs with this user's
-/// privileges and no one else could have written it. A host whose bubblewrap fails this
-/// stays on plain Landlock with its gap lines. Input: its path. Output: true when it may.
+/// privileges and was put there by root or by this user. A host whose bubblewrap fails
+/// this stays on plain Landlock with its gap lines. Input: its path. Output: true when it
+/// may.
 fn trusted(bwrap: &Path) -> bool {
     let own = rustix::process::geteuid().as_raw();
     fs::metadata(bwrap).is_ok_and(|file| {
