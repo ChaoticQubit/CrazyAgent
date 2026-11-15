@@ -11384,7 +11384,8 @@ fn work(
             Mode::Kept { account, context } => {
                 let resume = plan.resume.as_ref();
                 plan.request(account, plan.access).and_then(|request| {
-                    AgentSession::start_resuming(
+                    start_session(
+                        &by,
                         request,
                         plan.team_context(*context),
                         plan.pane.clone(),
@@ -11477,7 +11478,8 @@ fn live(
                 Err(problem) => return Some(problem),
             };
             (
-                AgentSession::start_resuming(
+                start_session(
+                    by,
                     request,
                     plan.team_context((*context).with_live_instructions(&instructions)),
                     plan.pane.clone(),
@@ -11511,7 +11513,8 @@ fn live(
                 }
             };
             (
-                AgentSession::start_resuming(
+                start_session(
+                    by,
                     request,
                     plan.team_context(context.with_live_instructions(&instructions)),
                     plan.pane.clone(),
@@ -11928,7 +11931,8 @@ fn native_session(
         }
     };
     let resume = plan.resume.as_ref();
-    match AgentSession::start_resuming(
+    match start_session(
+        by,
         request,
         plan.team_context(context),
         plan.pane.clone(),
@@ -11953,7 +11957,7 @@ fn native_session(
                 let _ = reports.send(Report::ResumeRefused);
             }
             turn_closed(reports, taken, Some(problem.0.clone()));
-            Some(with_code("The agent could not start", Some(&problem.0)))
+            Some(start_problem(&problem))
         }
     }
 }
@@ -12416,7 +12420,8 @@ fn per_turn(
                 ));
             }
         };
-        let started = AgentSession::start_resuming(
+        let started = start_session(
+            by,
             request,
             plan.team_context(context),
             plan.pane.clone(),
@@ -13251,6 +13256,40 @@ fn turn_bound(limits: super::TimeLimits, ran: Duration) -> Option<(Duration, Tur
     }
 }
 
+/// The code an agent's start is refused with while a hold still lists commands a sandboxed
+/// run of it left that go on running.
+const COMMANDS_LEFT: &str = "team_commands_left";
+
+/// The owner's line for a start refused with [`COMMANDS_LEFT`].
+const COMMANDS_LEFT_PROBLEM: &str = "This agent still has commands running from its last run. \
+     End them on the team page, then start it again";
+
+/// Refuses an agent's start while a hold still lists commands a sandboxed run of it left
+/// that the owner keeps or has yet to end or keep
+/// ([`crate::harnesses::leftovers::confined_left_by`]): they write where the agent does, so
+/// the home the start resets would hold what they write next (SA vid 12). Input: who would
+/// start. Output: unit, or [`COMMANDS_LEFT`].
+fn commands_left(by: &HoldBy) -> Result<(), LaunchError> {
+    if crate::harnesses::leftovers::confined_left_by(by) {
+        return Err(LaunchError(COMMANDS_LEFT.to_owned(), None));
+    }
+    Ok(())
+}
+
+/// Starts an agent's harness as [`AgentSession::start_resuming`] does, once
+/// [`commands_left`] finds none of its last run's commands still running under a hold.
+/// Inputs: who starts, then as for that start. Output: the session, or the refusal.
+fn start_session(
+    by: &HoldBy,
+    request: LaunchRequest,
+    context: AgentContext,
+    pane: Option<(Arc<dyn Host>, AgentId)>,
+    resume: Option<&Resume>,
+) -> Result<AgentSession, LaunchError> {
+    commands_left(by)?;
+    AgentSession::start_resuming(request, context, pane, resume)
+}
+
 /// The owner's line for a Codex launch refused because skills an earlier run locked into its
 /// home could not be removed (CTX-M1 r2 I3).
 const SKILLS_KEPT_PROBLEM: &str = "The agent could not start: an earlier run locked skills into \
@@ -13265,6 +13304,7 @@ fn start_problem(problem: &LaunchError) -> String {
         None if problem.0 == crate::launch_context::SKILLS_KEPT => {
             with_code(SKILLS_KEPT_PROBLEM, Some(&problem.0))
         }
+        None if problem.0 == COMMANDS_LEFT => with_code(COMMANDS_LEFT_PROBLEM, Some(&problem.0)),
         None => with_code("The agent could not start", Some(&problem.0)),
     }
 }

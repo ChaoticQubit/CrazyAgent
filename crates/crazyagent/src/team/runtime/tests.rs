@@ -29702,6 +29702,40 @@ fn an_agent_refused_for_skills_left_in_its_codex_home_says_what_happened() {
     );
 }
 
+/// SA vid 12: an agent is not started while a hold still lists commands a sandboxed run of
+/// it left that the owner has not ended, since they write where the agent does and its next
+/// run would run what they leave in its home. The refusal says what to do, with its code
+/// kept; another agent of the project starts.
+#[cfg(unix)]
+#[test]
+fn an_agent_is_not_started_while_commands_of_its_last_sandboxed_run_stay_held() {
+    let by = HoldBy {
+        project: Some("commands-left".into()),
+        who: "team agent 41".into(),
+    };
+    let other = HoldBy {
+        project: Some("commands-left".into()),
+        who: "team agent 42".into(),
+    };
+    let mut left = crate::harnesses::leftovers::tests::held_sandboxed(
+        by.clone(),
+        crate::harnesses::leftovers::LeftoverMode::Ask,
+    );
+
+    let refused = commands_left(&by).map_err(|problem| problem.0);
+    let started = commands_left(&other).map_err(|problem| problem.0);
+    let _ = left.kill();
+    let _ = left.wait();
+
+    assert_eq!(refused, Err(COMMANDS_LEFT.to_owned()));
+    assert_eq!(started, Ok(()));
+    assert_eq!(
+        start_problem(&LaunchError(COMMANDS_LEFT.into(), None)),
+        "This agent still has commands running from its last run. End them on the team \
+         page, then start it again. (team_commands_left)"
+    );
+}
+
 /// A start that a projects home move holds back leaves its work waiting (HMC-N1): a
 /// delegated task stays queued with no attempt spent and no error, the owner's Keep warm
 /// switch stays on with no note, and the owner's restart of the master waits; once the move
