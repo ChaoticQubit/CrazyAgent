@@ -310,6 +310,8 @@ async fn a_versions_read_never_repins_an_entry_relinked_to_a_file_engine_start_r
         .unwrap()
         .0;
 
+    let runs = |ran: &Path| std::fs::read_to_string(ran).map_or(0, |text| text.lines().count());
+    let before = runs(&owner_ran);
     let mut seen = Vec::new();
     for (name, file, code) in &refused {
         std::fs::remove_file(&entry).unwrap();
@@ -338,8 +340,9 @@ async fn a_versions_read_never_repins_an_entry_relinked_to_a_file_engine_start_r
         );
         assert!(!ran, "{name}: a refused file is never run for its version");
     }
-    assert!(
-        !owner_ran.exists(),
-        "the entry no longer leads to the owner's first file"
+    assert_eq!(
+        runs(&owner_ran),
+        before,
+        "the reads never run the owner's first file once the entry leads elsewhere"
     );
 }
