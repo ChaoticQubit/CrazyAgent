@@ -11,11 +11,11 @@ use std::path::Path;
 
 /// RV-DS241-139: Codex registered at engine start through a PATH link stays installed after
 /// that link is removed while another PATH link still leads to the same pinned file. The
-/// catalog lists it by the pinned file, its versions row is an installed one with no install
-/// line, and Update is never refused as not installed. Before the fix the catalog listed the
-/// removed link, so List and Versions said Not installed and Update was refused.
+/// catalog lists it by that other link, the launcher a launch now uses, never by the removed
+/// link or the pinned versioned file, its versions row is an installed one with no install
+/// line, and Update is never refused as not installed.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_registered_harness_whose_path_link_is_gone_stays_installed_by_its_pinned_file() {
+async fn a_registered_harness_whose_path_link_is_gone_is_listed_by_the_path_link_a_launch_uses() {
     let disk = scratch("ca-e2e-entry-");
     let base = disk.path().canonicalize().unwrap();
     let (first, second, kept, owner_home) = (
@@ -58,8 +58,8 @@ async fn a_registered_harness_whose_path_link_is_gone_stays_installed_by_its_pin
     assert_ne!(codex.status, HarnessStatus::NotInstalled, "{codex:?}");
     assert_eq!(
         codex.executable.as_deref(),
-        Some(real.as_path()),
-        "listed by the pinned file, never by the removed link: {codex:?}"
+        Some(other.as_path()),
+        "listed by the PATH link a launch uses, never the removed link or the real file: {codex:?}"
     );
 
     let versions = owner
