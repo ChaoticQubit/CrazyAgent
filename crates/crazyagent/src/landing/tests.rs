@@ -15697,6 +15697,37 @@ fn a_confined_read_tree_on_linux_keeps_a_racy_edit_to_a_path_it_leaves_alone_in_
     assert!(std::fs::symlink_metadata(case.workspace.git_dir.join("crazyagent-step")).is_err());
 }
 
+/// SA vid 3: the index a confined Linux `read-tree -u -m` ends with holds the stat data of the
+/// files the move wrote, so the next move, here putting them back as `flow::files_back` and a
+/// refused Accept do, lands as well instead of finding them not up to date, and the worktree is
+/// clean after.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_read_tree_on_linux_leaves_an_index_the_next_move_can_put_back() {
+    let case = Case::new();
+    let worktree = case.workspace.worktree.clone();
+    let target = case.owner_commit("notes", "Notes\n", "Target");
+    let head = git_in(&case.home, &worktree, &["rev-parse", "HEAD"]);
+    let head = head.trim();
+    let moved = |from: &str, to: &str| {
+        confined_agent(&case, git::Writes::WorkTree)
+            .exec(&["read-tree", "-u", "-m", from, to], None, &[], 4096)
+            .unwrap()
+            .code
+    };
+    assert_eq!(moved(head, &target), 0);
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("notes")).unwrap(),
+        "Notes\n"
+    );
+    assert_eq!(moved(&target, head), 0, "the files did not go back");
+    assert!(std::fs::symlink_metadata(worktree.join("notes")).is_err());
+    assert_eq!(
+        git_in(&case.home, &worktree, &["status", "--porcelain"]),
+        ""
+    );
+}
+
 /// LINUX-GIT-CONFINE r1 F2 (rv-code), RV-DS241-135: an engine stopped during a confined Linux
 /// step leaves its `index.lock`, naming that engine process by id and start, beside the step
 /// folder in the agent worktree's git folder. The sweep the engine runs once at start removes
