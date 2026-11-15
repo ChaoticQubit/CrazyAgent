@@ -270,6 +270,65 @@ fn the_waiting_line_names_the_lane_the_queue_and_the_resources() {
     assert!(!waiting_line(HeavyLane::NoLimit, 0, 0, &[]).contains("uses"));
 }
 
+/// RV-DS241-57: a waiting line never passes `LINE_BYTES_MAX` bytes whatever the shared
+/// resources it would name hold: past that it leaves them out and still names the lane and
+/// the queue.
+#[test]
+fn the_waiting_line_leaves_out_resources_too_long_to_name() {
+    let uses: Vec<String> = (0..4)
+        .map(|at| format!("{at}{}", "r".repeat(200)))
+        .collect();
+
+    let line = waiting_line(HeavyLane::Two, 1, 0, &uses);
+
+    assert!(line.len() as u64 <= LINE_BYTES_MAX, "{} bytes", line.len());
+    assert!(
+        line.contains("1 running") && !line.contains("uses"),
+        "{line}"
+    );
+}
+
+/// RV-DS241-57: a running command whose ticket its agent rewrote never reaches the lane
+/// unchecked when its project's lane rows go between the tick's two reads, as a project
+/// removal can do: the rewritten ticket is refused, nothing is stored and the tick ends
+/// without stopping the team-runtime thread.
+#[test]
+fn a_running_ticket_rewritten_while_its_lane_row_goes_is_refused_not_stored() {
+    let root = tempfile::tempdir().unwrap();
+    let connection = db();
+    let settings = CoordSettings {
+        heavy_lane: HeavyLane::One,
+        shared_resources: vec![resource("ollama", 1)],
+        ..CoordSettings::default()
+    };
+    let a = holder(root.path(), 1);
+    let entry = Entry::enter(&a.folder, &ticket(&["ollama"], "eval")).unwrap();
+    let holders = [a.clone()];
+    tick(&connection, &project(), &holders, &settings, 1_000).unwrap();
+    assert!(has(&a, &entry, GO), "the command did not start");
+    let long: Vec<String> = (0..5)
+        .map(|at| format!("{at}{}", "r".repeat(300)))
+        .collect();
+    let rewritten = Ticket {
+        uses: long,
+        label: "eval".to_owned(),
+    };
+    let text = serde_json::to_vec(&rewritten).unwrap();
+    std::fs::write(a.folder.join(format!("{}{TICKET}", entry.id)), text).unwrap();
+    BETWEEN_LANE_READS.with(|step| {
+        *step.borrow_mut() = Some(Box::new(|db: &Connection| {
+            db.execute("DELETE FROM coord_lane", []).unwrap();
+        }));
+    });
+
+    let ticked = tick(&connection, &project(), &holders, &settings, 2_000);
+
+    assert!(ticked.is_ok(), "{ticked:?}");
+    assert_eq!(rows(&connection), 0, "the rewritten ticket was stored");
+    assert!(has(&a, &entry, NO), "the rewritten ticket was not refused");
+    entry.leave();
+}
+
 #[test]
 fn coord_settings_refuse_shared_resources_the_lane_cannot_use() {
     let with = |resources: Vec<SharedResource>| CoordSettings {

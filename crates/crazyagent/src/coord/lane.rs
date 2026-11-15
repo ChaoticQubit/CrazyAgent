@@ -553,6 +553,20 @@ fn say_waiting(folder: &crate::team::tool::Mailbox, id: &str, line: &str) {
     }
 }
 
+/// A step a lane test runs once in [`tick`] between its read of the lane rows and the
+/// change that reads them again, standing in for a project removal that clears them
+/// meanwhile. Takes the database.
+#[cfg(all(test, unix))]
+type LaneStep = Box<dyn FnOnce(&Connection)>;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// The step [`tick`] runs between its two reads of the lane rows (RV-DS241-57). Runs
+    /// once; None runs nothing.
+    pub(super) static BETWEEN_LANE_READS: std::cell::RefCell<Option<LaneStep>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[cfg(unix)]
 struct Found {
     agent: AgentId,
@@ -629,6 +643,10 @@ pub fn tick(
             .any(|found| found.agent == agent && found.id == ticket)
     };
     let opened = |agent: AgentId| folders.iter().any(|(holder, _)| *holder == agent);
+    #[cfg(test)]
+    if let Some(step) = BETWEEN_LANE_READS.with(|step| step.borrow_mut().take()) {
+        step(db);
+    }
     let change = Change::begin(db)?;
     let tx = change.db();
     let before = stored(tx, project)?;
