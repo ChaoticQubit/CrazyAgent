@@ -4712,6 +4712,50 @@ mod profile_string_tests {
         assert_eq!(sbpl_overlong("(literal \"/open"), vec!["/open"]);
     }
 
+    /// SA vid 202: a name is spelled with every code point the case-insensitive volume folds
+    /// onto its letters, also those for two or three letters (U+00DF and U+1E9E for `ss`,
+    /// U+FB00 to U+FB06 for `ff`, `fi`, `fl`, `ffi`, `ffl` and `st`), and the Greek question
+    /// mark and varia for `;` and the backtick. In a pattern a fold reaches into a wildcard
+    /// next to the letters, never into a literal or an alternation, so the env templates the
+    /// secret rule gives back stay exact.
+    #[test]
+    fn a_name_is_spelled_with_every_fold_of_the_volume_also_for_two_or_three_letters() {
+        let spelled = [
+            ("config", "[cC][oO][nN]([fF][iI]|\u{fb01})[gG]"),
+            (
+                "instructions.md",
+                concat!(
+                    "[iI][nN]((s|S|\u{17f})[tT]|\u{fb05}|\u{fb06})",
+                    "[rR][uU][cC][tT][iI][oO][nN](s|S|\u{17f})\\.[mM][dD]",
+                ),
+            ),
+            (
+                ".ssh",
+                "\\.((s|S|\u{17f})(s|S|\u{17f})|\u{df}|\u{1e9e})[hH]",
+            ),
+            ("ffi", "([fF][fF][iI]|[fF]\u{fb01}|\u{fb00}[iI]|\u{fb03})"),
+            ("k", "(k|K|\u{212a})"),
+            (";`", "(;|\u{37e})(`|\u{1fef})"),
+        ];
+        for (name, pattern) in spelled {
+            assert_eq!(any_case(name), pattern, "{name}");
+        }
+        assert_eq!(
+            fold_case(".*service"),
+            ".*((s|S|\u{17f})|\u{df}|\u{1e9e})[eE][rR][vV][iI][cC][eE]"
+        );
+        assert_eq!(
+            fold_case("of.*"),
+            "[oO]([fF]|\u{fb00}|\u{fb01}|\u{fb02}|\u{fb03}|\u{fb04}).*"
+        );
+        assert_eq!(
+            fold_case("secrets?"),
+            "(s|S|\u{17f})[eE][cC][rR][eE][tT](s|S|\u{17f})?"
+        );
+        let templates = fold_case(shared_folders::SECRET_TEMPLATES);
+        assert!(!templates.contains(['\u{df}', '\u{1e9e}']));
+    }
+
     /// The default secret rule and 64 long open top-level names give a profile with no string
     /// past the limit; a project folder so deep that one secret name no longer fits, and the
     /// most open names at the longest length, which pass the 64 KiB cap, are each refused at

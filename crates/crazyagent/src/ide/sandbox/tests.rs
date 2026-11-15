@@ -3086,6 +3086,43 @@ fn the_ide_plants_no_admin_root_under_a_kelvin_or_long_s_spelling() {
     crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
 }
 
+/// SA vid 202 and the ligature half of vid 11 under the installed `server.sb`: the IDE
+/// makes no `.git/config.worktree` and no `.crazyagent/instructions.md` under a spelling
+/// the case-insensitive volume folds onto them through one code point for two letters
+/// (U+FB01 for `fi`, U+FB05 and U+FB06 for `st`), so the owner's own git never reads a
+/// planted `core.fsmonitor` and no later agent reads planted instructions. Nor under a
+/// spelling holding a code point HFS+ ignores in names (U+200C, U+FEFF), which that volume
+/// opens as the plain name, and it reads no project file whose path holds one. A project
+/// file named with such a fold of letters no rule protects stays writable.
+#[test]
+fn the_ide_plants_no_git_config_or_instructions_under_a_ligature_or_hfs_ignored_spelling() {
+    let s = server();
+    let git = s.root.join(".git");
+    let state = s.root.join(".crazyagent");
+    folder(&state);
+    let write = r#"printf '[core]\n\tfsmonitor = /usr/bin/true\n' > "$1""#;
+    for planted in [
+        git.join("con\u{fb01}g.worktree"),
+        git.join("CON\u{fb01}G.WORKTREE"),
+        state.join("in\u{fb05}ructions.md"),
+        state.join("IN\u{fb06}RUCTIONS.MD"),
+        git.join("con\u{200c}fig.worktree"),
+        state.join("\u{feff}instructions.md"),
+    ] {
+        assert!(!sh(&s.profile, write, &planted), "{}", planted.display());
+        assert!(!planted.exists(), "{}", planted.display());
+    }
+    assert!(!git.join("config.worktree").exists());
+    assert!(!state.join("instructions.md").exists());
+    let hidden = s.root.join("no\u{200c}tes.md");
+    fs::write(&hidden, "owner\n").unwrap();
+    assert!(!sh(&s.profile, r#"/bin/cat "$1""#, &hidden));
+    for kept in [s.root.join("Gro\u{df}.md"), s.root.join("o\u{fb03}ce.md")] {
+        assert!(sh(&s.profile, write, &kept), "{}", kept.display());
+    }
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
+
 /// r1 M1 for a locked folder: the Remote settings lock holds against a path spelled with
 /// the long s, the only other letter APFS folds to `s`, in the folders above the lock:
 /// the engine's settings keep their bytes.

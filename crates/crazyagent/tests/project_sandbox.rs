@@ -1624,13 +1624,15 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
     let context = "[cC][oO][nN][tT][eE][xX][tT](/.*)?";
     let any_k = "(k|K|\u{212a})";
     let any_s = "(s|S|\u{17f})";
+    let st = format!("({any_s}[tT]|\u{fb05}|\u{fb06})");
+    let fi = "([fF][iI]|\u{fb01})";
     for path in [
         context.to_owned(),
         format!("{state}/{context}"),
-        format!("{state}/[iI][nN]{any_s}[tT][rR][uU][cC][tT][iI][oO][nN]{any_s}\\.[mM][dD]"),
+        format!("{state}/[iI][nN]{st}[rR][uU][cC][tT][iI][oO][nN]{any_s}\\.[mM][dD]"),
         format!("{dot_git}/[hH][oO][oO]{any_k}{any_s}(/.*)?"),
-        format!("{dot_git}/[cC][oO][nN][fF][iI][gG]"),
-        format!("{dot_git}/[cC][oO][nN][fF][iI][gG]\\.[lL][oO][cC]{any_k}"),
+        format!("{dot_git}/[cC][oO][nN]{fi}[gG]"),
+        format!("{dot_git}/[cC][oO][nN]{fi}[gG]\\.[lL][oO][cC]{any_k}"),
         format!(
             "{dot_git}(/[wW][oO][rR]{any_k}[tT][rR][eE][eE]{any_s}/[^/]+)?/[mM][oO][dD][uU][lL][eE]{any_s}(/.*)?"
         ),
