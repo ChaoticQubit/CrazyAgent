@@ -1098,7 +1098,8 @@ fn real_folder(folder: &Path) -> Result<(), AgentHomeError> {
 /// made removable: the flags of its parent, of the entry and of all it holds are cleared and
 /// its folders opened up, each through a handle that follows no link, or by path where an
 /// entry will not open (RV-DS241-138, -137 code r1 F2), and the ACLs of the parent, the
-/// entry and all it holds go (sec r1 F2). Input: the entry. Output: unit, or
+/// entry and all it holds go (sec r1 F2), by their paths, so one that denies listing or
+/// reading goes too (code r2 F3). Input: the entry. Output: unit, or
 /// `agent_home_unwritable` when it stays, refusing the launch.
 pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
     let folder = match fs::symlink_metadata(path) {
@@ -1121,7 +1122,7 @@ pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
     if !folder {
         unpin(path);
     }
-    crate::team::cleanup::clear_acls(parent.into_iter().chain([path]));
+    crate::team::cleanup::release_acls(parent.into_iter().chain([path]));
     if folder {
         return crate::team::cleanup::remove_home_tree(path)
             .map_err(|_| failure("agent_home_unwritable"));
@@ -1136,7 +1137,8 @@ pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
 /// (V231-ACL, r3). Flags an agent set on the folder or on an entry it keeps are cleared
 /// (RV-DS241-138), and the folder and every entry it keeps are added to `held`, whose ACLs
 /// the caller clears in one step (sec r1 F2). The folder is listed as it goes, in passes
-/// until one removes nothing. Inputs: the folder, what stays in it and the entries held so
+/// until one removes nothing; a listing that stops clears the folder's ACL by its path and
+/// tries once more (code r2 F3). Inputs: the folder, what stays in it and the entries held so
 /// far. Output: unit, or `agent_home_unwritable` when it cannot be listed, one entry stays
 /// or it still changes after [`HOME_PASSES_MAX`] passes.
 fn keep_only(
@@ -1152,7 +1154,11 @@ fn keep_only(
         held.truncate(before);
         held.push(folder.to_path_buf());
         let mut removed = false;
-        for entry in fs::read_dir(folder).map_err(|_| failure("agent_home_unwritable"))? {
+        let listed = fs::read_dir(folder).or_else(|_| {
+            crate::team::cleanup::release_acls([folder]);
+            fs::read_dir(folder)
+        });
+        for entry in listed.map_err(|_| failure("agent_home_unwritable"))? {
             let name = entry
                 .map_err(|_| failure("agent_home_unwritable"))?
                 .file_name();

@@ -2239,10 +2239,12 @@ fn lock(_home: &Path) -> Result<File, LaunchError> {
 
 /// Opens and locks the agent home's launch lock, made owner-only and never through a link.
 /// A flag or ACL an earlier run left on the home or on the lock, which would refuse the
-/// open, is cleared once and the open tried again (RV-DS241-137 code r1 F1); a confined
-/// agent can set neither there. A lock with a second link, which may be the owner's file
-/// an agent linked in, is refused, since the reset removes a kept file with a second link
-/// and would take the lock this launch holds (r3). Input: the home. Output: the locked file,
+/// open, is cleared once, the ACL by path so one that denies listing or searching goes too,
+/// and the open tried again (RV-DS241-137 code r1 F1, r2 F3); a confined agent can set
+/// neither there. A lock with a second link, which may be the owner's file an agent linked
+/// in, is refused, since the reset removes a kept file with a second link and would take the
+/// lock this launch holds; a confined agent can neither link nor replace the lock (r3,
+/// `sandbox::launch_denies`). Input: the home. Output: the locked file,
 /// `launch_context_unsafe` or `launch_home_busy`.
 #[cfg(unix)]
 fn lock(home: &Path) -> Result<File, LaunchError> {
@@ -2259,7 +2261,7 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
         for entry in [home, path.as_path()] {
             crate::team::cleanup::unpin_home_entry(rustix::fs::CWD, entry);
         }
-        crate::team::cleanup::clear_acls([home, path.as_path()]);
+        crate::team::cleanup::release_acls([home, path.as_path()]);
         open()
     });
     let file = File::from(opened.map_err(|_| failure("launch_context_unsafe"))?);

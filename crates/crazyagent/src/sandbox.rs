@@ -4019,11 +4019,13 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
 /// `.cargo/config.toml`, `.config/git`, `.npmrc`, `.yarnrc`, `.yarnrc.yml`, `.cargo/bin`)
 /// and any file flag or ACL in it, so a run, or a process of it still alive after the next
 /// launch's reset, neither plants config or programs its own tools run nor pins what the
-/// next launch removes or writes (RV-DS241-137, -138, sec r1 F1, F2).
-/// They must follow every write allow. Input: the home. Output: the rule text.
+/// next launch removes or writes (RV-DS241-137, -138, sec r1 F1, F2). They deny writes to
+/// the launch lock too, so no run links, removes or replaces it, since a launch refuses a
+/// lock with a second link (r3). They must follow every write allow. Input: the home.
+/// Output: the rule text.
 fn launch_denies(home: &Path) -> String {
     use crate::agent_home::Harness;
-    use crate::launch_context::STATE;
+    use crate::launch_context::{LOCK, STATE};
     let home = seatbelt_pattern(home);
     let skills = format!("{home}/{}", any_case("skills"));
     let folders = [
@@ -4050,6 +4052,7 @@ fn launch_denies(home: &Path) -> String {
         "config.toml",
         "settings.json",
         "Library/Preferences/com.apple.security.plist",
+        LOCK,
     ];
     let mut text = String::from("(deny file-write*\n");
     for folder in folders {
@@ -4085,7 +4088,7 @@ fn launch_denies(home: &Path) -> String {
         spelled("  "),
         spelled("      "),
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 41);
+    assert_eq!(text.matches("(regex #\"^/").count(), 42);
     text
 }
 
