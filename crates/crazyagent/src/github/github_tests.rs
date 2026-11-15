@@ -779,7 +779,7 @@ fn owners_server(secret_text: &str, scopes: Option<&'static str>, memberships: u
         "/user/memberships/orgs" => Answer::json(
             memberships,
             serde_json::json!({
-                "message": "You need at least read:org scope or user scope to list your organization memberships."
+                "message": "Forbidden"
             }),
         ),
         _ => Answer::json(404, serde_json::json!({ "message": "Not Found" })),
@@ -821,10 +821,17 @@ fn owners_list_the_personal_account_first_then_the_organizations_the_owner_is_a_
 
 #[test]
 fn owners_without_read_org_still_offer_the_personal_account_and_say_why() {
-    for (scopes, memberships, asks) in [
-        (Some("repo, read:user"), 200, false),
-        (None, 403, true),
-        (Some("repo, admin:org"), 200, true),
+    let reauth = "gh auth refresh -s read:org";
+    for (scopes, memberships, asks, sentence) in [
+        (Some("repo, read:user"), 200, false, Some(reauth)),
+        (None, 403, true, Some(reauth)),
+        (Some("repo, admin:org"), 200, true, None),
+        (
+            Some("repo, read:org"),
+            403,
+            true,
+            Some("refused to list your organizations"),
+        ),
     ] {
         let scratch = Scratch::new();
         let secret_text = token();
@@ -837,22 +844,25 @@ fn owners_without_read_org_still_offer_the_personal_account_and_say_why() {
             .iter()
             .any(|seen| seen.path == "/user/memberships/orgs");
         assert_eq!(asked, asks, "{scopes:?}");
-        if memberships == 200 && asks {
+        let Some(sentence) = sentence else {
             assert_eq!(owners.owners.len(), 3, "{scopes:?}");
             assert_eq!(owners.problem, None, "{scopes:?}");
             continue;
-        }
+        };
         assert_eq!(
             owners.owners,
             [GitHubOwner {
                 login: "octo-cat".into(),
                 personal: true,
-            }]
+            }],
+            "{scopes:?}"
         );
         let problem = owners.problem.unwrap();
-        assert!(
-            problem.contains("read:org") && problem.contains("gh auth refresh -s read:org"),
-            "{problem}"
+        assert!(problem.contains(sentence), "{scopes:?}: {problem}");
+        assert_eq!(
+            problem.contains("read:org"),
+            sentence == reauth,
+            "{scopes:?}: {problem}"
         );
     }
 }
