@@ -1,4 +1,5 @@
 use crate::protocol::ProjectId;
+use crate::sandbox::policy::{AgentAccess, HomeCaches};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -53,8 +54,8 @@ const KEPT_DEPTH_MAX: usize = 2;
 /// engine's launch state, lock, relay plugin and key file; both harnesses' instruction and
 /// Codex config files, which the launch rewrites, and a Codex home's skills ([`kept_in`]);
 /// Claude Code's sign-in, transcripts and team, task, todo and plan state; Codex's sign-in
-/// and sessions; the per-agent keychain; and the download caches. No entry kept holds
-/// config a tool runs.
+/// and sessions; the per-agent keychain; and the download caches, unless the launch's caches
+/// choice clears them ([`clears_caches`]). No entry kept holds config a tool runs.
 const HOME_KEPT: &[(&str, Kept)] = &[
     (crate::launch_context::STATE, Kept::Folder),
     (crate::launch_context::LOCK, Kept::Lock),
@@ -84,20 +85,50 @@ const HOME_KEPT: &[(&str, Kept)] = &[
 /// the engine's skills in the relay plugin folder, so in its home the folder holds only what
 /// an earlier run wrote there.
 const CODEX_SKILLS: &str = "skills";
+/// The download caches in [`HOME_KEPT`] a launch removes when its caches choice says so
+/// (DEC-173 add.1): `.cache` and npm's folder, which keeps only its content cache.
+const HOME_CACHES: [&str; 2] = [".cache", ".npm"];
+/// The most bytes of a home's level record: one access level's id.
+const LEVEL_RECORD_BYTES_MAX: usize = 32;
 /// What a launch keeps in the home of one harness: [`HOME_KEPT`], without the skills folder
-/// for Claude Code, which would load each skill an earlier run left there. Input: the
-/// harness. Output: the names with their kinds.
-fn kept_in(harness: Harness) -> Vec<(&'static str, Kept)> {
+/// for Claude Code, which would load each skill an earlier run left there, and without the
+/// download caches when the launch clears them. Inputs: the harness and whether the caches
+/// go. Output: the names with their kinds.
+fn kept_in(harness: Harness, clear: bool) -> Vec<(&'static str, Kept)> {
     let kept: Vec<_> = HOME_KEPT
         .iter()
         .copied()
         .filter(|(name, _)| harness == Harness::Codex || *name != CODEX_SKILLS)
+        .filter(|(name, _)| !clear || !HOME_CACHES.contains(name))
         .collect();
     assert_eq!(
-        kept.len() + usize::from(harness == Harness::Claude),
+        kept.len()
+            + usize::from(harness == Harness::Claude)
+            + usize::from(clear) * HOME_CACHES.len(),
         HOME_KEPT.len()
     );
     kept
+}
+
+/// Tells whether a launch removes the download caches in its home (DEC-173 add.1): never
+/// under Keep, always under Clear every launch, and under Clear when access is raised when
+/// the launch's level is unknown, the home has no level record yet or its level is wider than
+/// the recorded one, the level of the home's last launch. Inputs: the engine data root, the
+/// home and the launch's caches choice and level. Output: whether the caches go, or a plain
+/// code when the record cannot be read.
+fn clears_caches(data: &Path, home: &Path, caches: Caches) -> Result<bool, AgentHomeError> {
+    let level = match (caches.choice, caches.level) {
+        (HomeCaches::Keep, _) => return Ok(false),
+        (HomeCaches::ClearEveryLaunch, _) | (HomeCaches::ClearWhenRaised, None) => {
+            return Ok(true);
+        }
+        (HomeCaches::ClearWhenRaised, Some(level)) => level,
+    };
+    let record = read_record(data, LEVELS_FOLDER, home, LEVEL_RECORD_BYTES_MAX)?;
+    let last = AgentAccess::ALL
+        .into_iter()
+        .find(|known| known.id() == record);
+    Ok(last.is_none_or(|last| level.wider_than(last)))
 }
 /// What a launch keeps in an agent home's `.claude`, where some Claude Code versions keep a
 /// native team's config and tasks, which the engine reads there.
@@ -262,8 +293,8 @@ pub struct AgentProject {
 /// the launch does not know it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Caches {
-    pub choice: crate::sandbox::policy::HomeCaches,
-    pub level: Option<crate::sandbox::policy::AgentAccess>,
+    pub choice: HomeCaches,
+    pub level: Option<AgentAccess>,
 }
 
 /// Whether the project part of a joined instruction text leaves out lines the app part
@@ -885,11 +916,15 @@ pub fn with_agent(mut text: String, agent: &str) -> String {
 /// is empty, so a stale copy never outlives a cleared page; the engine's own record of the
 /// instruction files it found, kept outside the home, replaces the last launch's; nothing
 /// an earlier run left in the home but what its harness keeps stays for this one
-/// ([`keep_only`] with [`kept_in`]). The instruction file is written in the engine's record
-/// folder, which no agent writes, and only then moved into the home, so a process an earlier
-/// run left never swaps the text before the move (RV-DS241-184).
+/// ([`keep_only`] with [`kept_in`]), the download caches going too when [`clears_caches`]
+/// says so, with a native lead's teammates' caches ([`clear_mates_caches`]), and the launch's
+/// level is recorded outside the home for the next launch to compare with (DEC-173 add.1).
+/// The instruction file is written in the engine's record folder, which no agent writes, and
+/// only then moved into the home, so a process an earlier run left never swaps the text
+/// before the move (RV-DS241-184).
 /// Input: the agent's 0700 home (its CLAUDE_CONFIG_DIR or CODEX_HOME), the harness, the
-/// project and what `text` built. Output: unit, or a plain code.
+/// project, what `text` built and the launch's caches choice and level. Output: unit, or a
+/// plain code.
 pub fn prepare(
     home: &Path,
     harness: Harness,
@@ -903,13 +938,19 @@ pub fn prepare(
     if !home.is_absolute() {
         return Err(failure("agent_home_invalid"));
     }
-    let _ = caches;
     real_folder(home)?;
+    let clear = clears_caches(&project.data, home, caches)?;
     record_files(&project.data, home, &given.files)?;
     write_record(&project.data, GIVEN_FOLDER, home, &given.text)?;
     let mut held = Vec::new();
-    keep_only(home, &kept_in(harness), &mut held)?;
+    keep_only(home, &kept_in(harness, clear), &mut held)?;
+    #[cfg(unix)]
+    if clear {
+        clear_mates_caches(&project.data, home, &mut held)?;
+    }
     crate::team::cleanup::clear_acls(held.iter().map(PathBuf::as_path));
+    let level = caches.level.unwrap_or(AgentAccess::Sandboxed);
+    write_record(&project.data, LEVELS_FOLDER, home, level.id())?;
     let name = harness.instruction_file();
     if given.text.is_empty() {
         return remove_entry(&home.join(name));
@@ -1510,17 +1551,28 @@ fn before_home_step(entry: &Path) {
 }
 
 /// Resets a native lead's teammates' home as [`prepare`] resets a Claude Code agent's home:
-/// only what [`kept_in`] names stays, with the folders
-/// [`crate::sandbox::CLAUDE_TEAM_SHARED`] names kept only as links, since there they lead to
-/// the lead's own folders (RV-DS241-137 code r2 F1). Input: the teammates' 0700 home.
-/// Output: unit, or a plain code when it is not a real folder or an entry stays.
+/// only what [`mates_kept`] names stays, the download caches included, which the lead's own
+/// launch clears when it clears its own ([`clear_mates_caches`]). Input: the teammates' 0700
+/// home. Output: unit, or a plain code when it is not a real folder or an entry stays.
 #[cfg(unix)]
 pub(crate) fn reset_mates_home(mates: &Path) -> Result<(), AgentHomeError> {
     if !mates.is_absolute() {
         return Err(failure("agent_home_invalid"));
     }
     real_folder(mates)?;
-    let kept: Vec<(&str, Kept)> = kept_in(Harness::Claude)
+    let mut held = Vec::new();
+    keep_only(mates, &mates_kept(false), &mut held)?;
+    crate::team::cleanup::clear_acls(held.iter().map(PathBuf::as_path));
+    Ok(())
+}
+
+/// What stays in a native lead's teammates' home: what [`kept_in`] names for Claude Code, with
+/// the folders [`crate::sandbox::CLAUDE_TEAM_SHARED`] names kept only as links, since there
+/// they lead to the lead's own folders (RV-DS241-137 code r2 F1). Input: whether the download
+/// caches go. Output: the names with their kinds.
+#[cfg(unix)]
+fn mates_kept(clear: bool) -> Vec<(&'static str, Kept)> {
+    kept_in(Harness::Claude, clear)
         .into_iter()
         .map(|(name, kind)| {
             if crate::sandbox::CLAUDE_TEAM_SHARED.contains(&name) {
@@ -1529,11 +1581,33 @@ pub(crate) fn reset_mates_home(mates: &Path) -> Result<(), AgentHomeError> {
                 (name, kind)
             }
         })
-        .collect();
-    let mut held = Vec::new();
-    keep_only(mates, &kept, &mut held)?;
-    crate::team::cleanup::clear_acls(held.iter().map(PathBuf::as_path));
-    Ok(())
+        .collect()
+}
+
+/// Clears the download caches of the teammates' home beside a lead's home when the lead's
+/// launch clears its own (DEC-173 add.1): the teammates run at the lead's level and their home
+/// has no level record of its own. Only a home below the engine data root, where the engine
+/// made the teammates' home, is looked at, so no folder of the owner's beside a home the
+/// owner chose loses an entry; a home with no teammates' home beside it has nothing to
+/// clear. Inputs: the engine data root, the lead's home and the entries held so far. Output:
+/// unit, or a plain code when the teammates' home is no real folder or an entry stays.
+#[cfg(unix)]
+fn clear_mates_caches(
+    data: &Path,
+    home: &Path,
+    held: &mut Vec<PathBuf>,
+) -> Result<(), AgentHomeError> {
+    let real = |path: &Path| fs::canonicalize(path).map_err(|_| failure("agent_home_unwritable"));
+    let home = real(home)?;
+    if !home.starts_with(real(data)?) {
+        return Ok(());
+    }
+    let mates = crate::launch_context::mates_home(&home);
+    match fs::symlink_metadata(&mates) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(metadata) if metadata.is_dir() => keep_only(&mates, &mates_kept(true), held),
+        _ => Err(failure("agent_home_unwritable")),
+    }
 }
 
 /// Names, as paths below the home, the folders of an agent home a launch keeps only part

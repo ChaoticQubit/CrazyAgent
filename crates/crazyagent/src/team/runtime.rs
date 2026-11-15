@@ -11386,6 +11386,7 @@ fn work(
                 plan.request(account, plan.access).and_then(|request| {
                     start_session(
                         &by,
+                        plan.access,
                         request,
                         plan.team_context(*context),
                         plan.pane.clone(),
@@ -11480,6 +11481,7 @@ fn live(
             (
                 start_session(
                     by,
+                    plan.access,
                     request,
                     plan.team_context((*context).with_live_instructions(&instructions)),
                     plan.pane.clone(),
@@ -11517,6 +11519,7 @@ fn live(
             (
                 start_session(
                     by,
+                    access,
                     request,
                     plan.team_context(context.with_live_instructions(&instructions)),
                     plan.pane.clone(),
@@ -11942,6 +11945,7 @@ fn native_session(
     let resume = plan.resume.as_ref();
     match start_session(
         by,
+        access,
         request,
         plan.team_context(context),
         plan.pane.clone(),
@@ -12440,6 +12444,7 @@ fn per_turn(
         };
         let started = start_session(
             by,
+            access,
             request,
             plan.team_context(context),
             plan.pane.clone(),
@@ -13304,17 +13309,20 @@ fn hand_after_check<T>(by: &HoldBy, hand: impl FnOnce() -> T) -> Result<T, Launc
 }
 
 /// Starts an agent's harness as [`AgentSession::start_resuming`] does, once
-/// [`commands_left`] finds none of its last run's commands still running under a hold.
-/// Inputs: who starts, then as for that start. Output: the session, or the refusal.
+/// [`commands_left`] finds none of its last run's commands still running under a hold, with
+/// the context naming the level the request was built for, so the home reset keeps or clears
+/// the download caches by it (DEC-173 add.1). Inputs: who starts, the request's access level,
+/// then as for that start. Output: the session, or the refusal.
 fn start_session(
     by: &HoldBy,
+    access: AgentAccess,
     request: LaunchRequest,
     context: AgentContext,
     pane: Option<(Arc<dyn Host>, AgentId)>,
     resume: Option<&Resume>,
 ) -> Result<AgentSession, LaunchError> {
     commands_left(by)?;
-    AgentSession::start_resuming(request, context, pane, resume)
+    AgentSession::start_resuming(request, context.at_access(access), pane, resume)
 }
 
 /// The owner's line for a Codex launch refused because skills an earlier run locked into its
