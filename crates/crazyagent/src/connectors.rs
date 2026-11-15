@@ -71,6 +71,34 @@ const PLAIN: &[(&str, &str)] = &[
     ),
     ("connector_request_bounds", "the request is too large."),
     (
+        "connector_busy",
+        "too many connector calls are waiting; try again shortly.",
+    ),
+    (
+        "connector_gateway_unavailable",
+        "the engine did not answer the connector call.",
+    ),
+    (
+        "connector_not_granted",
+        "this connector is not turned on for this project and agent.",
+    ),
+    (
+        "connector_reply_withheld",
+        "the vendor's reply held the connector's key, so it was not passed on.",
+    ),
+    (
+        "connector_tools_changed",
+        "the vendor changed this connector's tools; the owner reviews them first.",
+    ),
+    (
+        "connector_tools_too_large",
+        "this connector's tool list is larger than the engine passes on.",
+    ),
+    (
+        "connector_writes_not_yet",
+        "this tool can change things at the vendor; writes arrive with the approval step.",
+    ),
+    (
         "connector_outcome_unknown",
         "the engine did not answer in time; check the list again.",
     ),

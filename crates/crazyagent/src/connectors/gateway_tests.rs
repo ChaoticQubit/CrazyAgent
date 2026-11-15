@@ -799,20 +799,20 @@ fn the_audit_row_has_sizes_and_outcome_and_no_content() {
     let brief = |row: &CallRow| (row.tool.clone(), row.kind, row.outcome.clone());
     assert_eq!(
         brief(&rows[0]),
-        (String::new(), CallKind::List, "ok".into())
+        (String::new(), CallKind::List, "ok".to_owned())
     );
     assert_eq!(
         brief(&rows[1]),
-        ("list_issues".into(), CallKind::Read, "ok".into())
+        ("list_issues".to_owned(), CallKind::Read, "ok".to_owned())
     );
     assert_eq!(rows[1].bytes_in, arguments.to_string().len() as i64);
     assert_eq!(rows[1].bytes_out, text.len() as i64);
     assert_eq!(
         brief(&rows[2]),
         (
-            "create_issue".into(),
+            "create_issue".to_owned(),
             CallKind::Write,
-            "connector_writes_not_yet".into()
+            "connector_writes_not_yet".to_owned()
         )
     );
     assert_eq!(
@@ -820,7 +820,7 @@ fn the_audit_row_has_sizes_and_outcome_and_no_content() {
         (
             String::new(),
             CallKind::Unknown,
-            "connector_tool_unknown".into()
+            "connector_tool_unknown".to_owned()
         )
     );
     assert!(rows[0].bytes_out > 0 && rows[0].bytes_in == 0);

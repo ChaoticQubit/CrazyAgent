@@ -536,7 +536,7 @@ pub fn known_tools(names: &[String]) -> bool {
         })
 }
 
-fn rpc(
+pub(crate) fn rpc(
     mut input: impl BufRead,
     mut output: impl Write,
     mut answer: impl FnMut(&Value) -> Option<Value>,
@@ -578,7 +578,7 @@ fn reply(output: &mut impl Write, message: &Value) -> std::io::Result<()> {
     output.flush()
 }
 
-fn failure(id: Value, code: i64, message: &str) -> Value {
+pub(crate) fn failure(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
@@ -596,7 +596,7 @@ fn initialized(params: Option<&Value>) -> Value {
     })
 }
 
-fn tool_result(text: &str, error: bool) -> Value {
+pub(crate) fn tool_result(text: &str, error: bool) -> Value {
     json!({"content": [{"type": "text", "text": text}], "isError": error})
 }
 

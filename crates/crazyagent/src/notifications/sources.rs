@@ -1,8 +1,9 @@
 //! The engine state behind each Action kind (DEC-136a decision 1): open questions, accounts
-//! that need a sign-in, research waiting for a pool, memories to review and change sets to
-//! review. Each source reads only its own tables and reports at most `SOURCE_ROWS_MAX`
-//! conditions; one whose tables are missing reports none and resolves nothing, and one a cap
-//! stopped before the end of its state resolves nothing either.
+//! that need a sign-in, research waiting for a pool, memories to review, change sets to
+//! review and connectors whose tools changed. Each source reads only its own tables and
+//! reports at most `SOURCE_ROWS_MAX` conditions; one whose tables are missing reports none
+//! and resolves nothing, and one a cap stopped before the end of its state resolves nothing
+//! either.
 
 use super::reconcile::{Condition, SOURCE_ROWS_MAX};
 use super::{NoticeKind, NoticeTarget, error};
@@ -59,12 +60,13 @@ pub(super) struct Live {
 /// Reads every Action source. Inputs: the engine database and the model access. Output:
 /// what holds now.
 pub(super) fn live(connection: &Connection, access: &ModelAccess) -> Live {
-    let sources: [(NoticeKind, Source); 5] = [
+    let sources: [(NoticeKind, Source); 6] = [
         (NoticeKind::Question, questions),
         (NoticeKind::AccountSignIn, accounts),
         (NoticeKind::ResearchPool, pools),
         (NoticeKind::MemoryReview, memories),
         (NoticeKind::ChangeSetReview, change_sets),
+        (NoticeKind::ConnectorToolsChanged, connector_tools),
     ];
     let mut live = Live::default();
     for (kind, read) in sources {
@@ -98,6 +100,30 @@ pub(super) fn live(connection: &Connection, access: &ModelAccess) -> Live {
             .all(|(kind, _)| live.kinds.contains(kind))
     );
     live
+}
+
+/// Connectors stopped because their vendor changed a tool list the owner has not
+/// reviewed (DEC-168 addendum 7): one app-wide item per connector. Inputs: the database
+/// and the model access (unused). Output: the conditions, or none before any list was
+/// pinned.
+fn connector_tools(connection: &Connection, _: &ModelAccess) -> Result<Option<Found>, EngineError> {
+    let Some(rows) = crate::connectors::gateway::pins::changed(connection, SOURCE_ROWS_MAX)? else {
+        return Ok(None);
+    };
+    let capped = rows.len() >= SOURCE_ROWS_MAX;
+    let mut found = Vec::new();
+    let mut keys = BTreeSet::new();
+    for (connector, title) in rows {
+        let condition = Condition {
+            kind: NoticeKind::ConnectorToolsChanged,
+            project_id: None,
+            subject: format!("connector:{connector}"),
+            text: format!("{title} changed its tools; review them."),
+            target: NoticeTarget::Connectors,
+        };
+        push(&mut found, &mut keys, condition);
+    }
+    Ok(Some(Found::read(found, capped, Vec::new())))
 }
 
 fn tables_exist(connection: &Connection, names: &[&str]) -> Result<bool, EngineError> {

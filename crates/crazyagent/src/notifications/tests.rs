@@ -1196,6 +1196,7 @@ fn every_kind_has_one_wire_name_and_its_class() {
         NoticeKind::ResearchPool,
         NoticeKind::MemoryReview,
         NoticeKind::ChangeSetReview,
+        NoticeKind::ConnectorToolsChanged,
     ];
     for kind in NoticeKind::ALL {
         assert_eq!(NoticeKind::parse(kind.name()), Some(kind));

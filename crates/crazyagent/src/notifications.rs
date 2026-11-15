@@ -96,6 +96,7 @@ pub enum NoticeKind {
     ResearchPool,
     MemoryReview,
     ChangeSetReview,
+    ConnectorToolsChanged,
     AgentFinished,
     AgentFailed,
     AgentStopped,
@@ -114,12 +115,13 @@ pub enum NoticeKind {
 }
 
 impl NoticeKind {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Question,
         Self::AccountSignIn,
         Self::ResearchPool,
         Self::MemoryReview,
         Self::ChangeSetReview,
+        Self::ConnectorToolsChanged,
         Self::AgentFinished,
         Self::AgentFailed,
         Self::AgentStopped,
@@ -137,7 +139,7 @@ impl NoticeKind {
         Self::TeamAlert,
     ];
 
-    /// The kind's class. Input: the kind. Output: Action for the five kinds the owner must
+    /// The kind's class. Input: the kind. Output: Action for the six kinds the owner must
     /// act on, Info for the rest.
     pub fn class(self) -> NoticeClass {
         match self {
@@ -145,7 +147,8 @@ impl NoticeKind {
             | Self::AccountSignIn
             | Self::ResearchPool
             | Self::MemoryReview
-            | Self::ChangeSetReview => NoticeClass::Action,
+            | Self::ChangeSetReview
+            | Self::ConnectorToolsChanged => NoticeClass::Action,
             _ => NoticeClass::Info,
         }
     }
@@ -159,6 +162,7 @@ impl NoticeKind {
             Self::ResearchPool => "research_pool",
             Self::MemoryReview => "memory_review",
             Self::ChangeSetReview => "change_set_review",
+            Self::ConnectorToolsChanged => "connector_tools_changed",
             Self::AgentFinished => "agent_finished",
             Self::AgentFailed => "agent_failed",
             Self::AgentStopped => "agent_stopped",
@@ -186,6 +190,7 @@ impl NoticeKind {
             Self::ResearchPool => "Waiting for a pool",
             Self::MemoryReview => "Memories to review",
             Self::ChangeSetReview => "Change set to review",
+            Self::ConnectorToolsChanged => "Connector tools changed",
             Self::AgentFinished => "Agent finished",
             Self::AgentFailed => "Agent failed",
             Self::AgentStopped => "Agent stopped",
@@ -244,6 +249,7 @@ pub enum NoticeTarget {
     Usage,
     Updates,
     Harnesses,
+    Connectors,
     Home,
 }
 
@@ -263,6 +269,7 @@ impl NoticeTarget {
             | Self::Usage
             | Self::Updates
             | Self::Harnesses
+            | Self::Connectors
             | Self::Home => None,
         }
     }

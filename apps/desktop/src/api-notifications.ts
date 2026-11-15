@@ -13,6 +13,7 @@ export type NoticeClass = "action" | "info";
 /** One notification kind, the engine's `NoticeKind` wire name. */
 export type NoticeKind =
   | "question" | "account_sign_in" | "research_pool" | "memory_review" | "change_set_review"
+  | "connector_tools_changed"
   | "agent_finished" | "agent_failed" | "agent_stopped" | "master_off"
   | "change_set_landed" | "change_set_conflict" | "change_set_rolled_back"
   | "account_near_limit" | "account_at_limit" | "pool_failover"
@@ -26,6 +27,7 @@ export const NOTICE_KINDS: readonly { kind: NoticeKind; class: NoticeClass; labe
   { kind: "research_pool", class: "action", label: "Waiting for a pool" },
   { kind: "memory_review", class: "action", label: "Memories to review" },
   { kind: "change_set_review", class: "action", label: "Change set to review" },
+  { kind: "connector_tools_changed", class: "action", label: "Connector tools changed" },
   { kind: "agent_finished", class: "info", label: "Agent finished" },
   { kind: "agent_failed", class: "info", label: "Agent failed" },
   { kind: "agent_stopped", class: "info", label: "Agent stopped" },
@@ -57,6 +59,7 @@ export type NoticeTarget =
   | { page: "usage" }
   | { page: "updates" }
   | { page: "harnesses" }
+  | { page: "connectors" }
   | { page: "home" };
 
 /** One item or folded row, the engine's `Notice`. */
@@ -211,6 +214,7 @@ export function routeOf(target: NoticeTarget): { hash: string; anchor: string | 
     case "usage": return { hash: formatRoute({ name: "metrics" }), anchor: null };
     case "updates": return { hash: formatRoute({ name: "settings", tab: "updates" }), anchor: null };
     case "harnesses": return { hash: formatRoute({ name: "settings", tab: "harnesses" }), anchor: null };
+    case "connectors": return { hash: formatRoute({ name: "settings", tab: "plugins" }), anchor: null };
     case "home": return { hash: formatRoute({ name: "home" }), anchor: null };
   }
 }

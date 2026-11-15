@@ -25,6 +25,7 @@ crazyagent update [--check] [--channel stable|dev]\n\
 crazyagent team-mcp DROP_FILE [MAILBOX_DIR [OFF_TOOL ...]]\n\
 crazyagent team-mcp-live MAILBOX_DIR [OFF_TOOL ...]\n\
 crazyagent team-mcp-agent MAILBOX_DIR [OFF_TOOL ...]\n\
+crazyagent connector-mcp LAUNCH_DIR\n\
 crazyagent coord-hook post-tool|stop|asked|notification|prompt|edit MAILBOX_DIR\n\
 crazyagent coord-watch MAILBOX_DIR\n\
 crazyagent lane --folder LANE_DIR [--uses NAME]... [--label TEXT] -- PROGRAM [ARGUMENT ...]\n\
@@ -100,6 +101,27 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 let _ = writeln!(io::stderr(), "{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == crazyagent::connectors::shim::SERVER_COMMAND)
+    {
+        let result = match args.as_slice() {
+            [_, folder] => crazyagent::connectors::shim::serve(
+                io::stdin().lock(),
+                io::stdout().lock(),
+                Path::new(folder),
+            )
+            .map_err(|e| e.to_string()),
+            _ => Err("usage: crazyagent connector-mcp LAUNCH_DIR".to_owned()),
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
                 ExitCode::FAILURE
             }
         };

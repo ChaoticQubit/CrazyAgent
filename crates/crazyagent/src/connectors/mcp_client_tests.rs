@@ -81,7 +81,9 @@ pub(in crate::connectors) struct Vendor {
 }
 
 impl Vendor {
-    pub(in crate::connectors) fn start(answer: impl Fn(&Seen, usize, &mut TcpStream) + Send + 'static) -> Self {
+    pub(in crate::connectors) fn start(
+        answer: impl Fn(&Seen, usize, &mut TcpStream) + Send + 'static,
+    ) -> Self {
         let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -167,7 +169,12 @@ pub(in crate::connectors) fn send(stream: &mut TcpStream, bytes: &[u8]) {
     let _ = stream.flush();
 }
 
-pub(in crate::connectors) fn http(status: &str, kind: &str, extra: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
+pub(in crate::connectors) fn http(
+    status: &str,
+    kind: &str,
+    extra: &[(&str, &str)],
+    body: &[u8],
+) -> Vec<u8> {
     let mut head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
@@ -181,7 +188,11 @@ pub(in crate::connectors) fn http(status: &str, kind: &str, extra: &[(&str, &str
     bytes
 }
 
-pub(in crate::connectors) fn json_reply(status: &str, extra: &[(&str, &str)], body: &Value) -> Vec<u8> {
+pub(in crate::connectors) fn json_reply(
+    status: &str,
+    extra: &[(&str, &str)],
+    body: &Value,
+) -> Vec<u8> {
     http(
         status,
         "application/json",
@@ -198,7 +209,12 @@ pub(in crate::connectors) fn result(seen: &Seen, result: Value) -> Vec<u8> {
     )
 }
 
-pub(in crate::connectors) fn rpc_error(status: &str, seen: &Seen, code: i64, message: &str) -> Vec<u8> {
+pub(in crate::connectors) fn rpc_error(
+    status: &str,
+    seen: &Seen,
+    code: i64,
+    message: &str,
+) -> Vec<u8> {
     json_reply(
         status,
         &[],
@@ -262,7 +278,11 @@ pub(in crate::connectors) fn modern(seen: &Seen) -> Option<Vec<u8>> {
 /// The replies of a server of the handshake era to the opening requests: it refuses the
 /// probe, answers `initialize` in `version` with the session id given, and takes the
 /// `initialized` notice. Output: the reply, none for any other request.
-pub(in crate::connectors) fn legacy(seen: &Seen, session: Option<&str>, version: &str) -> Option<Vec<u8>> {
+pub(in crate::connectors) fn legacy(
+    seen: &Seen,
+    session: Option<&str>,
+    version: &str,
+) -> Option<Vec<u8>> {
     match seen.rpc() {
         "server/discover" => Some(json_reply(
             "400 Bad Request",
