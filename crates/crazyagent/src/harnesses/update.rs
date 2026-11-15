@@ -7,10 +7,11 @@ pub use run::{
     AS_ROOT, CHECK_TIME, LOOKUP_FAILED, POINTER_TIME, Ran, SHOWN_BYTES_MAX, START_FAILED, TIMEOUT,
     UPDATE_TIME, VERSION_TIME, lookup, masked, refused_user, run,
 };
+pub(crate) use state::needs;
 pub use state::{
-    BUSY, CHECK_FAILED, CHECK_ONLY, INSTALL_ALREADY, INSTALL_FAILED, INSTALL_NOT_FOUND,
-    INSTALL_OFF, NOT_INSTALLED, SETTINGS_UNREADABLE, UNKNOWN_HARNESS, UPDATE_FAILED, UPDATE_OFF,
-    Updates, initialize, set_settings, settings,
+    BUSY, CHECK_FAILED, CHECK_ONLY, INSTALL_ALREADY, INSTALL_FAILED, INSTALL_LIST_INVALID,
+    INSTALL_NOT_FOUND, INSTALL_OFF, NOT_INSTALLED, SETTINGS_UNREADABLE, UNKNOWN_HARNESS,
+    UPDATE_FAILED, UPDATE_OFF, Updates, initialize, set_settings, settings,
 };
 
 use crate::harnesses;
@@ -23,7 +24,15 @@ use std::path::{Component, Path, PathBuf};
 
 pub const VERSION_BYTES_MAX: usize = 64;
 pub const ARGS_MAX: usize = 5;
+/// The Homebrew prefixes the engine trusts for install, check and update on this platform,
+/// as the tool resolver looks in them: Apple silicon's and Intel's everywhere, Linuxbrew's
+/// only on Linux, so a Mac never reads or runs a brew from the home automount.
+#[cfg(target_os = "linux")]
 pub const BREW_PREFIXES: [&str; 3] = ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"];
+/// The Homebrew prefixes the engine trusts for install, check and update on this platform,
+/// as the tool resolver looks in them: Apple silicon's and Intel's; Linuxbrew's is Linux only.
+#[cfg(not(target_os = "linux"))]
+pub const BREW_PREFIXES: [&str; 2] = ["/opt/homebrew", "/usr/local"];
 pub const POINTER_BYTES_MAX: u64 = 256 * 1024;
 pub const OUTPUT_BYTES_MAX: usize = 64 * 1024;
 
@@ -35,6 +44,7 @@ pub const NEEDS_ADMIN: &str = "harness_update_needs_admin";
 pub const UNSUPPORTED_HERE: &str = "harness_update_unsupported_here";
 pub const CHECK_UNREADABLE: &str = "harness_update_check_unreadable";
 pub const NO_INSTALLER: &str = "harness_install_no_tool";
+pub const NEEDS_NODE: &str = "harness_install_needs_node";
 
 const VERSION_WORDS_MAX: usize = 8;
 const VERSION_PARTS_MAX: usize = 6;
@@ -95,7 +105,9 @@ pub struct LastUpdate {
 
 /// Everything a client shows on one harness row about versions. `command` is the exact update
 /// line of an installed harness, `install` the exact install line of a missing one, `refusal`
-/// the code for why a button is not offered and `guide` the vendor's page for that case.
+/// the code for why a button is not offered, `guide` the vendor's page for that case,
+/// `needs` what an installed harness lacks before it can run, as the tool resolver reads it,
+/// and `sign_in_min` the oldest version CrazyAgent signs in with, for a harness that signs in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessVersions {
@@ -109,6 +121,20 @@ pub struct HarnessVersions {
     pub guide: Option<String>,
     pub running: bool,
     pub last: Option<LastUpdate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs: Option<HarnessNeeds>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in_min: Option<String>,
+}
+
+/// What an installed harness lacks before it can run, from the tool resolver
+/// (`crate::tools::resolve_entry`): the program its first line asks for, such as `node`
+/// for an npm-built Codex, and the resolver's one owner line for it. No path is sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessNeeds {
+    pub program: Option<String>,
+    pub line: String,
 }
 
 /// The owner's choice for harness updates: check and update, check only, or neither.
@@ -164,13 +190,28 @@ pub struct UpdateSettings {
 }
 
 /// The folders an install is recognized by: the owner's home, the Homebrew prefixes in the
-/// order they are tried, and whether Homebrew casks can be installed on this platform.
-/// Tests pass temp folders; the engine passes the real ones.
+/// order they are tried, whether Homebrew casks can be installed on this platform, the npm
+/// that installs npm harnesses into the engine's own prefix, when a usable Node is found, and
+/// the tool resolver's places a harness runs from. Tests pass temp folders; the engine
+/// passes the real ones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roots {
     pub home: PathBuf,
     pub brew_prefixes: Vec<PathBuf>,
     pub casks: bool,
+    pub npm: Option<NpmInstall>,
+    pub places: crate::tools::Places,
+}
+
+/// The npm an npm harness installs with and the node entry it runs, found by the one
+/// Node test of setup (`crate::setup::node::usable`), the folders its run puts first (Node's
+/// own, then the prefix's `bin`) and the engine-owned prefix it installs into, never global.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpmInstall {
+    pub node: PathBuf,
+    pub program: PathBuf,
+    pub search: Vec<PathBuf>,
+    pub prefix: PathBuf,
 }
 
 /// One command the engine may start: an absolute program, arguments that are all strings of
@@ -730,6 +771,27 @@ fn npm_fixed(prefix: &Path, args: Vec<&'static str>) -> Fixed {
     }
 }
 
+/// The npm command for one npm prefix: the engine's npm with its search folders when the
+/// prefix is the engine's own, else the npm in that prefix's `bin`. Inputs: the prefix, the
+/// roots and the arguments. Output: the command, not yet checked.
+fn npm_for(prefix: &Path, roots: &Roots, args: Vec<&'static str>) -> Fixed {
+    match roots.npm.as_ref().filter(|engine| engine.prefix == prefix) {
+        Some(engine) => engine_npm_fixed(engine, args),
+        None => npm_fixed(prefix, args),
+    }
+}
+
+fn engine_npm_fixed(engine: &NpmInstall, args: Vec<&'static str>) -> Fixed {
+    assert!(!engine.search.is_empty() && engine.search.len() <= 2);
+    assert!(engine.prefix.is_absolute());
+    Fixed {
+        program: engine.program.clone(),
+        args,
+        search: engine.search.clone(),
+        prefix: Some(engine.prefix.clone()),
+    }
+}
+
 fn npm_install_args(npm: &'static Npm) -> Vec<&'static str> {
     let mut args = vec!["install", "-g"];
     args.extend(npm.flags);
@@ -737,15 +799,59 @@ fn npm_install_args(npm: &'static Npm) -> Vec<&'static str> {
     args
 }
 
-/// Passes a built command only when its program is a tool this user can trust.
-/// Input: the command. Output: the same command, or the refusal code of the tool check.
-fn checked(fixed: Fixed) -> Result<Fixed, &'static str> {
+/// Passes a built command only when its program is a tool this user can trust and one the
+/// tool resolver would run: no part of its path, as written or real, that agents or another
+/// user can change, an interpreter its first line names vetted the same way, and no link on
+/// its way to the real file that could be moved before the command runs the path as written
+/// ([`crate::tools::Places::link_hops_kept`]). Inputs: the command and the resolver's
+/// places. Output: the same command, or the refusal code of the tool check.
+fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'static str> {
     trusted(&fixed.program)?;
+    vetted(&fixed, places)?;
+    if !places.link_hops_kept(&fixed.program) {
+        return Err(TOOL_UNSAFE);
+    }
     assert!(fixed.program.is_absolute());
     assert!(fixed.args.len() <= ARGS_MAX);
     assert!(fixed.search.iter().all(|folder| folder.is_absolute()));
     assert!(fixed.prefix.as_deref().is_none_or(Path::is_absolute));
     Ok(fixed)
+}
+
+/// Passes a command only when the tool resolver would run its program and every copy of an
+/// interpreter the program asks `env` for by name that the command's own search folders
+/// hold, since the child's PATH looks there first and would find that copy ahead of the one
+/// the resolver vetted. Inputs: the command and the resolver's places. Output: the real file
+/// the resolver resolved the program to and checked, or `TOOL_UNSAFE`.
+fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<PathBuf, &'static str> {
+    let resolved = crate::tools::resolve_entry(&fixed.program, places).map_err(|_| TOOL_UNSAFE)?;
+    let mut at = &resolved;
+    for _ in 0..=crate::tools::INTERPRETER_DEPTH_MAX {
+        let crate::tools::Kind::Script {
+            interpreter,
+            by_name,
+            ..
+        } = &at.kind
+        else {
+            return Ok(resolved.program.clone());
+        };
+        if *by_name {
+            let name = interpreter.entry.file_name().ok_or(TOOL_UNSAFE)?;
+            let refused = fixed
+                .search
+                .iter()
+                .map(|folder| folder.join(name))
+                .any(|copy| {
+                    std::fs::metadata(&copy).is_ok()
+                        && crate::tools::resolve_entry(&copy, places).is_err()
+                });
+            if refused {
+                return Err(TOOL_UNSAFE);
+            }
+        }
+        at = &**interpreter;
+    }
+    Err(TOOL_UNSAFE)
 }
 
 /// Builds the one update command of an installed harness: its own updater, or the Homebrew
@@ -766,23 +872,29 @@ pub fn update_command(
             if std::fs::canonicalize(entry).ok().as_deref() != Some(real) {
                 return Err(UNKNOWN_INSTALL);
             }
-            checked(Fixed {
-                program: entry.to_path_buf(),
-                args: own.args.to_vec(),
-                search: vec![folder.to_path_buf()],
-                prefix: None,
-            })
+            checked(
+                Fixed {
+                    program: entry.to_path_buf(),
+                    args: own.args.to_vec(),
+                    search: vec![folder.to_path_buf()],
+                    prefix: None,
+                },
+                &roots.places,
+            )
         }
-        Found::Brew { prefix, brew } => checked(brew_fixed(
-            prefix,
-            vec!["upgrade", flag(brew.kind), brew.name],
-        )),
+        Found::Brew { prefix, brew } => checked(
+            brew_fixed(prefix, vec!["upgrade", flag(brew.kind), brew.name]),
+            &roots.places,
+        ),
         Found::Npm {
             prefix,
             modules,
             npm,
         } => {
-            let fixed = checked(npm_fixed(&prefix, npm_install_args(npm)))?;
+            let fixed = checked(
+                npm_for(&prefix, roots, npm_install_args(npm)),
+                &roots.places,
+            )?;
             if owned(&modules) {
                 Ok(fixed)
             } else {
@@ -803,18 +915,21 @@ pub fn check_command(id: &str, real: &Path, roots: &Roots) -> Result<Option<Fixe
                 BrewKind::Cask => vec!["outdated", flag(brew.kind), GREEDY, "--json=v2", brew.name],
                 BrewKind::Formula => vec!["outdated", flag(brew.kind), "--json=v2", brew.name],
             };
-            checked(brew_fixed(prefix, args)).map(Some)
+            checked(brew_fixed(prefix, args), &roots.places).map(Some)
         }
-        Found::Npm { prefix, npm, .. } => {
-            checked(npm_fixed(&prefix, vec!["view", npm.package, "version"])).map(Some)
-        }
+        Found::Npm { prefix, npm, .. } => checked(
+            npm_for(&prefix, roots, vec!["view", npm.package, "version"]),
+            &roots.places,
+        )
+        .map(Some),
     }
 }
 
 /// Builds the one install command of a harness that is not installed: Homebrew first with
-/// the table's installable name (casks only where `roots.casks`), else npm with the table's
-/// package and the vendor's flags. A missing or untrusted tool is skipped, never an error of
-/// its own. Inputs: the harness id and the roots. Output: the command, or the refusal code.
+/// the table's installable name (casks only where `roots.casks`), else the found npm
+/// (`roots.npm`) with the table's package and the vendor's flags into the engine's prefix.
+/// An untrusted tool is skipped; an npm harness with no usable Node is refused as needing
+/// Node. Inputs: the harness id and the roots. Output: the command, or the refusal code.
 pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
     let id = harnesses::canonical(id);
     if id == BUNDLED {
@@ -830,16 +945,23 @@ pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
         roots
             .brew_prefixes
             .iter()
-            .find_map(|prefix| checked(brew_fixed(prefix, args())).ok())
+            .find_map(|prefix| checked(brew_fixed(prefix, args()), &roots.places).ok())
     });
     let with_npm = || {
         let npm = recipe.npm.as_ref()?;
-        roots.brew_prefixes.iter().find_map(|prefix| {
-            let fixed = checked(npm_fixed(prefix, npm_install_args(npm))).ok()?;
-            owned(&prefix.join("lib").join(MODULES)).then_some(fixed)
-        })
+        let engine = roots.npm.as_ref()?;
+        checked(
+            engine_npm_fixed(engine, npm_install_args(npm)),
+            &roots.places,
+        )
+        .ok()
     };
-    let fixed = with_brew.or_else(with_npm).ok_or(NO_INSTALLER)?;
+    let refusal = if recipe.npm.is_some() && roots.npm.is_none() {
+        NEEDS_NODE
+    } else {
+        NO_INSTALLER
+    };
+    let fixed = with_brew.or_else(with_npm).ok_or(refusal)?;
     assert!(fixed.args.first() == Some(&"install"));
     assert!(fixed.args.len() <= ARGS_MAX);
     assert!(fixed.program.is_absolute());
@@ -961,9 +1083,26 @@ fn numbers(text: &str) -> Option<Vec<u64>> {
         .collect()
 }
 
+/// Asks an installed harness for its version under the engine's own HOME, as the updates
+/// check does, and only where the tool resolver would run it and every interpreter its
+/// first line names (`version_if_runs`), so the usage User-Agent read never starts a file or
+/// an interpreter copy agents or other users can change. Input: the harness executable.
+/// Output: the version, None when the harness is refused or cannot be asked, prints no plain
+/// version, or HOME is unset or relative.
+pub(crate) fn version_under_home(executable: &Path) -> Option<String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())?;
+    state::version_if_runs(
+        executable,
+        &home,
+        &crate::tools::Places::from_environment(None),
+    )
+}
+
 /// Tells whether text is a plain version: two to six numbers joined by single dots, at most
 /// `VERSION_BYTES_MAX` bytes and nothing else. Input: text. Output: the answer.
-fn plain_version(text: &str) -> bool {
+pub fn plain_version(text: &str) -> bool {
     numbers(text).is_some_and(|parts| parts.len() >= 2)
 }
 
@@ -996,6 +1135,15 @@ fn higher(candidate: &str, installed: &str) -> bool {
         })
         .find(|order| order.is_ne())
         .is_some_and(|order| order.is_gt())
+}
+
+/// Tells whether an installed version reads lower than a minimum, number by number with a
+/// missing number counting as zero. Inputs: the installed version and the plain minimum.
+/// Output: true only when the installed version is plain and lower; an installed version that
+/// is not plain is unknown, so never below.
+pub fn below(installed: &str, minimum: &str) -> bool {
+    assert!(plain_version(minimum), "minimum {minimum:?}");
+    plain_version(installed) && higher(minimum, installed)
 }
 
 fn unreadable() -> Latest {

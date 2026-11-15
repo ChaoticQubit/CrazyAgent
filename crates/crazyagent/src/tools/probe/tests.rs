@@ -529,3 +529,60 @@ fn a_version_is_probed_again_when_its_file_changes_or_after_the_backoff_when_it_
         "a probe that gave none is retried after the backoff"
     );
 }
+
+/// SETUP-PROBE-GAP: setup keeps the mark its check read and checks again once it moved, so
+/// the mark moves when the first run ends, found or not, and whenever a later run changes
+/// the kept folders; a run that keeps the same folders leaves it as it was.
+#[test]
+fn the_probe_mark_moves_when_the_first_run_ends_and_whenever_the_folders_change() {
+    let (_folder, root) = scratch();
+    let (a, b) = (root.join("a"), root.join("b"));
+    let first = Instant::now();
+    let mut probes = Probes::new();
+    let before = probes.mark();
+    assert!(before.first_run_pending, "no run has ended yet");
+    assert!(probes.start(first, false));
+    assert!(
+        probes.mark().first_run_pending,
+        "a run going is still pending"
+    );
+    probes.finish(Vec::new(), true, first);
+    let ended = probes.mark();
+    assert!(!ended.first_run_pending);
+    assert_ne!(
+        ended.generation, before.generation,
+        "the first run ends the wait"
+    );
+    assert!(probes.start_now());
+    probes.finish(Vec::new(), true, first);
+    assert_eq!(probes.mark(), ended, "the same folders leave the mark");
+    assert!(probes.start_now());
+    probes.finish(vec![a.clone()], true, first);
+    let found = probes.mark();
+    assert_ne!(
+        found.generation, ended.generation,
+        "a new folder moves the mark"
+    );
+    assert!(probes.start_now());
+    probes.finish(Vec::new(), false, first);
+    assert_eq!(probes.found, std::slice::from_ref(&a));
+    assert_eq!(
+        probes.mark(),
+        found,
+        "a failed run that keeps the folders leaves it"
+    );
+    assert!(probes.start_now());
+    probes.finish(vec![b.clone()], false, first);
+    assert_eq!(probes.found, [b, a]);
+    assert_ne!(probes.mark().generation, found.generation);
+}
+
+/// SETUP-PROBE-GAP: the module's mark comes from the same decision `folders` makes, a due
+/// run started first, so a run that cannot start, as in every unit test, is recorded before
+/// the mark is read and never leaves the mark pending behind it.
+#[test]
+fn the_module_mark_starts_a_due_run_first_as_folders_does() {
+    let mark = mark();
+    assert!(!mark.first_run_pending);
+    assert!(lock(&FOLDERS).last.is_some());
+}

@@ -104,6 +104,71 @@ fn claude_turn_reads_prompt_text_tools_and_finish() {
     );
 }
 
+/// An answer Claude Code continues past the output cap stays one turn: the cut part keeps
+/// the turn going and gains no line break at the cut, and the turn ends with the last part.
+#[test]
+fn claude_answer_cut_at_its_output_cap_goes_on_in_the_same_turn() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"Count to three"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"1. one\n2. tw"}],"stop_reason":"max_tokens"}}"#,
+            "\n",
+            r#"{"type":"user","isMeta":true,"message":{"content":"Output token limit hit. Resume directly"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"o\n3. three"}],"stop_reason":"end_turn"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            text("1. one\n2. tw"),
+            text("o\n3. three\n"),
+            TranscriptEvent::TurnFinished { success: true },
+        ]
+    );
+}
+
+/// An answer Claude Code gives up on after a cut past its last continue ends the turn
+/// failed at Claude Code's own error record, so a pane never waits on a turn that is over.
+#[test]
+fn claude_answer_cut_past_its_last_continue_ends_the_turn_failed() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":"Count to three"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"1. one\n2. tw"}],"stop_reason":"max_tokens"}}"#,
+            "\n",
+            r#"{"type":"user","isMeta":true,"message":{"content":"Output token limit hit. Resume directly"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"o\n3. th"}],"stop_reason":"max_tokens"}}"#,
+            "\n",
+            r#"{"type":"assistant","isApiErrorMessage":true,"error":"max_output_tokens","message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: the response exceeded the output token maximum"}],"stop_reason":"stop_sequence"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            text("1. one\n2. tw"),
+            text("o\n3. th"),
+            TranscriptEvent::TurnError {
+                rate_limited: false
+            },
+            TranscriptEvent::TurnFinished { success: false },
+        ]
+    );
+}
+
 #[test]
 fn claude_meta_lines_and_unknown_lines_are_ignored() {
     let case = Case::new();
@@ -911,6 +976,82 @@ fn a_reader_resumed_inside_a_line_passes_over_the_rest_of_it() {
     }
 }
 
+/// RV-DS241-143: a reader skipped to its record's end passes over every line written before
+/// the skip, the turn open among them included, and reads the first line written after it:
+/// the model's work in that turn starts it again, as for a dropped turn. A reader with no
+/// record yet skips nothing and later reads its record from the start.
+#[test]
+fn a_reader_skipped_to_the_end_reads_only_the_lines_written_after_it() {
+    let prompt = concat!(
+        r#"{"type":"user","message":{"content":"Fix the build"}}"#,
+        "\n"
+    );
+    let reply = concat!(
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Reviewed"}],"stop_reason":"end_turn"}}"#,
+        "\n"
+    );
+    let ended = vec![
+        TranscriptEvent::TurnStarted,
+        text("Reviewed\n"),
+        TranscriptEvent::TurnFinished { success: true },
+    ];
+
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    reader.skip_to_end().unwrap();
+    assert_eq!(reader.bytes(), 0);
+    append(&file, prompt);
+    append(&file, reply);
+    assert_eq!(reader.read().unwrap(), ended);
+    for _ in 0..3 {
+        append(&file, prompt);
+        append(&file, reply);
+    }
+    append(&file, prompt);
+    let length = std::fs::metadata(&file).unwrap().len();
+    reader.skip_to_end().unwrap();
+    assert_eq!(reader.bytes(), length);
+    assert_eq!(reader.unread(), Some(0));
+    assert_eq!(reader.read().unwrap(), Vec::new());
+    append(&file, reply);
+    assert_eq!(
+        reader.read().unwrap(),
+        ended,
+        "the skipped open turn starts again by the model's work and ends"
+    );
+    append(&file, prompt);
+    append(&file, reply);
+    assert_eq!(reader.read().unwrap(), ended);
+}
+
+/// RV-DS241-143: a reader skipped to an end inside a line, one the harness is still writing,
+/// passes over the rest of that line and reads the next, whether the line's start was
+/// already read or not.
+#[test]
+fn a_reader_skipped_inside_a_line_passes_over_the_rest_of_it() {
+    let prompt = r#"{"type":"user","message":{"content":"Fix the build"}}"#;
+    for read_first in [true, false] {
+        let case = Case::new();
+        let (file, mut reader) = case.claude();
+        append(&file, &format!("{prompt}\n"));
+        assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+        append(&file, r#"{"type":"user","message":{"content":"Old "#);
+        if read_first {
+            assert_eq!(reader.read().unwrap(), Vec::new());
+        }
+        let length = std::fs::metadata(&file).unwrap().len();
+        reader.skip_to_end().unwrap();
+        assert_eq!(reader.bytes(), length, "read first {read_first}");
+        append(&file, "prompt\"}}\n");
+        append(&file, &format!("{prompt}\n"));
+        assert_eq!(
+            reader.read().unwrap(),
+            vec![TranscriptEvent::TurnStarted],
+            "read first {read_first}"
+        );
+    }
+}
+
 fn rollout(sessions: &Path, day: &str, name: &str, cwd: &Path, lines: &[&str]) -> PathBuf {
     let folder = sessions.join(day);
     std::fs::create_dir_all(&folder).unwrap();
@@ -927,6 +1068,50 @@ fn rollout(sessions: &Path, day: &str, name: &str, cwd: &Path, lines: &[&str]) -
     }
     std::fs::write(&path, body).unwrap();
     path
+}
+
+/// RV-DS241-60: a Codex master that swaps its home's `sessions` folder for a link to a
+/// sessions folder outside its home, such as the owner's own `~/.codex/sessions`, gets none
+/// of the rollouts there: a reader adopting its pane never takes one, a resume is refused,
+/// and the conversation and typed readers read nothing through the link, though they read
+/// the same record where it really lies.
+#[test]
+fn a_codex_sessions_folder_swapped_for_a_link_is_never_read_through() {
+    let case = Case::new();
+    let started = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+    let typed = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Owner words"}]}}"#;
+    let done =
+        r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Done"}}"#;
+    let owner = case.path().join("owner").join("sessions");
+    let real = rollout(
+        &owner,
+        "2026/10/23",
+        "rollout-owner.jsonl",
+        &case.work(),
+        &[started, typed, done],
+    );
+    assert!(!conversation_messages("codex", &real).is_empty());
+    assert!(typed_past("codex", &real, 0).is_some());
+    let home = case.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let sessions = home.join("sessions");
+    std::os::unix::fs::symlink(&owner, &sessions).unwrap();
+    let source = Transcript::CodexRollouts {
+        sessions: sessions.clone(),
+    };
+
+    let mut adopted =
+        TranscriptReader::adopted(source.clone(), &case.work(), SystemTime::UNIX_EPOCH);
+    assert_eq!(adopted.read().unwrap(), Vec::new());
+    assert_eq!(adopted.conversation(), None);
+    let record = sessions.join("2026/10/23/rollout-owner.jsonl");
+    assert_eq!(
+        TranscriptReader::resumed(source, &case.work(), &record, None).err(),
+        Some(LaunchError("launch_resume_unavailable".to_owned(), None))
+    );
+    assert_eq!(conversation_messages("codex", &record), Vec::new());
+    assert_eq!(typed_after("codex", &record, 0), None);
+    assert_eq!(typed_past("codex", &record, 0), None);
 }
 
 #[test]
@@ -1724,7 +1909,9 @@ fn injected_instructions_and_summaries_are_never_typed_and_keep_their_own_roles(
     );
 
     let case = Case::new();
-    let codex = case.path().join("rollout.jsonl");
+    let day = case.path().join("sessions/2026/11/14");
+    std::fs::create_dir_all(&day).unwrap();
+    let codex = day.join("rollout.jsonl");
     std::fs::write(&codex, format!("{instructions}\n{summary}\n{typed}\n")).unwrap();
     assert_eq!(
         conversation_messages("codex", &codex),

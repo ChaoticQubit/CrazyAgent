@@ -17,7 +17,7 @@ const status = (extra = {}) => ({
     { item: { section: "V2", text: "Share" }, status: "pending", evidence: "" },
   ],
   checked_ms: NOW - 60_000, running: false, stale: false, refresh: "after_landing", source: "docs/plan-2026.md", problem: null,
-  ...extra,
+  waiting_for_account: false, ...extra,
 });
 const shown = (value, extra = {}) => renderToStaticMarkup(createElement(view.RoadmapStatusView, {
   status: value, now: NOW, busy: false, onRefresh: () => {}, ...extra,
@@ -87,15 +87,25 @@ test("a check that is due and a failed check are both said in plain words", () =
 
 test("a check that waits for an account says why under a status, never as a failed check alert, while it is due or running", () => {
   const reason = "No account in this project's pool can run the check";
-  for (const value of [status({ stale: true, problem: reason }), status({ stale: true, running: true, problem: reason })]) {
+  const waiting = { stale: true, problem: reason, waiting_for_account: true };
+  for (const value of [status(waiting), status({ ...waiting, running: true })]) {
     const html = shown(value);
     assert.doesNotMatch(html, /role="alert"/);
     assert.doesNotMatch(html, /The last check failed/);
     assert.match(html, /role="status">No account in this project&#x27;s pool can run the check\.</);
   }
-  assert.match(shown(status({ stale: true, refresh: "off", problem: reason })), /role="alert"[^>]*>The last check failed: No account/);
-  const refused = shown(status({ stale: true, problem: reason }), { problem: "Roadmap status is off in Project settings." });
+  assert.match(shown(status({ ...waiting, refresh: "off" })), /role="alert"[^>]*>The last check failed: No account/);
+  const refused = shown(status(waiting), { problem: "Roadmap status is off in Project settings." });
   assert.match(refused, /role="alert"[^>]*>Roadmap status is off in Project settings\.</);
+});
+
+test("an ended failure stays a failed check alert while a new check is due and while it runs (IW-L1)", () => {
+  const reason = "The last check did not finish";
+  for (const value of [status({ stale: true, problem: reason }), status({ stale: true, running: true, problem: reason }), status({ running: true, problem: reason })]) {
+    const html = shown(value);
+    assert.match(html, /role="alert"[^>]*>The last check failed: The last check did not finish\.</, JSON.stringify(value));
+    assert.doesNotMatch(html, /role="status">The last check did not finish\.</);
+  }
 });
 
 test("text from the roadmap and the agent is shown through displayText, so hidden characters cannot hide", () => {
@@ -123,8 +133,21 @@ test("a reply that is not a roadmap status is refused before it is shown", () =>
     status({ items: [{ item: { section: "V1", text: "Sign in" }, status: "shipped", evidence: "" }] }),
     status({ items: [{ item: { section: 1, text: "Sign in" }, status: "done", evidence: "" }] }),
     status({ items: Array.from({ length: api.ROADMAP_ITEMS_MAX + 1 }, () => status().items[0]) }),
-    status({ running: "yes" }), status({ problem: 7 }),
+    status({ running: "yes" }), status({ problem: 7 }), status({ waiting_for_account: "yes" }),
   ]) assert.equal(api.isRoadmapStatus(broken), false, JSON.stringify(broken)?.slice(0, 80));
+});
+
+test("a roadmap status from an engine before the wait flag reads as no wait for an account", async () => {
+  const { waiting_for_account, ...older } = status({ running: true, problem: "The roadmap check ended without a reply." });
+  assert.equal(waiting_for_account, false);
+  assert.equal(api.isRoadmapStatus(older), true);
+  const before = globalThis.window;
+  globalThis.window = { __TAURI_INTERNALS__: { async invoke() { return older; } } };
+  try {
+    assert.deepEqual(await api.roadmapStatus("p1"), { kind: "ok", value: { ...older, waiting_for_account: false } });
+  } finally {
+    globalThis.window = before;
+  }
 });
 
 test("every roadmap status code the engine or the bridge can answer has its own sentence", () => {

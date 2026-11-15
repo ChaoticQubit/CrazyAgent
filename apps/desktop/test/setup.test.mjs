@@ -75,3 +75,59 @@ test("every setup command the client calls is a desktop command the bridge maps 
     assert.doesNotMatch(client.errorMessage({ code }), / \([a-z0-9_]+\)$/, code);
   }
 });
+
+test("the Node row installs Node alone through its own desktop command, which the bridge maps plainly", () => {
+  const source = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
+  const bridge = readFileSync(new URL("../src-tauri/src/bridge.rs", import.meta.url), "utf8");
+  const setup = readFileSync(new URL("../src-tauri/src/bridge/intake.rs", import.meta.url), "utf8");
+  const commands = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  assert.equal(typeof client.installDependency, "function");
+  const match = source.match(/export function installDependency\([^)]*\)[^{]*\{\s*return invoke<SetupStatus>\("(desktop_[a-z_]+)", \{ name, generation \}\)/);
+  assert.ok(match, "installDependency must invoke a desktop command with the name and a generation");
+  assert.equal(match[1], "desktop_install_dependency");
+  assert.ok(commands.includes("async fn desktop_install_dependency("), "the command exists");
+  assert.match(commands, /native_commands! \{[^}]*\bdesktop_install_dependency,/, "the command is registered");
+  const capability = JSON.parse(readFileSync(new URL("../src-tauri/capabilities/main-window.json", import.meta.url), "utf8"));
+  assert.ok(capability.permissions.includes("allow-desktop-install-dependency"), "the main window may call it");
+  assert.match(setup, /pub async fn install_dependency\([^)]*name: Dependency,\s*generation: u64,?\s*\) -> Result<SetupStatus, BridgeError>/);
+  assert.match(setup, /pub async fn install_dependency\([^)]*\)[^{]*\{[^}]*self\.setup_change\(OwnerMutation::InstallDependency \{ name \}, generation\)/);
+  assert.ok(bridge.includes(`=> ("install_dependency", None, None)`));
+  assert.ok(source.includes(`"install_dependency"`), "the pending change kind is known");
+  assert.match(source, /export type DependencyName = "tmux" \| "uv" \| "graphify" \| "node";/);
+});
+
+test("the permission fix and the unused tools setting go through their own desktop commands, which the bridge maps plainly", () => {
+  const source = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
+  const bridge = readFileSync(new URL("../src-tauri/src/bridge.rs", import.meta.url), "utf8");
+  const setup = readFileSync(new URL("../src-tauri/src/bridge/intake.rs", import.meta.url), "utf8");
+  const commands = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  const build = readFileSync(new URL("../src-tauri/build.rs", import.meta.url), "utf8");
+  const routes = readFileSync(new URL("../src-tauri/e2e_bridge/routes.rs", import.meta.url), "utf8");
+  const capability = JSON.parse(readFileSync(new URL("../src-tauri/capabilities/main-window.json", import.meta.url), "utf8"));
+  assert.match(source, /export function fixToolPermissions\(name: DependencyName, tree: string, recursive: boolean, generation: number\)[^{]*\{\s*return invoke<SetupStatus>\("desktop_fix_tool_permissions", \{ name, tree, recursive, generation \}\)/);
+  assert.match(source, /export function setRefusedTool\(choice: RefusedTool, generation: number\)[^{]*\{\s*return invoke<SetupStatus>\("desktop_set_refused_tool", \{ choice, generation \}\)/);
+  for (const [command, permission, label, kind] of [
+    ["desktop_fix_tool_permissions", "allow-desktop-fix-tool-permissions", "FixToolPermissions", "fix_tool_permissions"],
+    ["desktop_set_refused_tool", "allow-desktop-set-refused-tool", "SetRefusedTool", "refused_tool"],
+  ]) {
+    assert.ok(commands.includes(`async fn ${command}(`), command);
+    assert.match(commands, new RegExp(`native_commands! \\{[^}]*\\b${command},`), `${command} is registered`);
+    assert.ok(build.includes(`"${command}"`), `${command} is built`);
+    assert.ok(routes.includes(`"${command}" =>`), `${command} has an e2e route`);
+    assert.ok(capability.permissions.includes(permission), `the main window may call ${command}`);
+    assert.ok(bridge.includes(`OwnerMutation::${label} { .. } => ("${kind}", None, None)`), label);
+    assert.ok(source.includes(`"${kind}"`), `the pending change kind ${kind} is known`);
+  }
+  assert.match(setup, /pub async fn fix_tool_permissions\([^)]*\)[^{]*\{[^}]*self\.setup_change\(OwnerMutation::FixToolPermissions \{ name, tree, recursive \}, generation\)/);
+  const intake = readFileSync(new URL("../src/api-intake.ts", import.meta.url), "utf8");
+  assert.match(intake, /export function fixToolPermissions\(name: DependencyName, tree: string, recursive: boolean\)[^{]*\{\s*return wrap\(\(\) => startFix\(name, tree, recursive, nextGeneration\(\)\)\)/);
+  for (const screen of ["settings/pack.tsx", "intake/setup-step.tsx"]) {
+    const text = readFileSync(new URL(`../src/screens/${screen}`, import.meta.url), "utf8");
+    assert.match(text, /fixToolPermissions\([^)]*\.fix\.tree, [^)]*\.fix\.recursive\)/, `${screen} sends the scope its confirm named`);
+  }
+  assert.match(setup, /pub async fn set_refused_tool\([^)]*\)[^{]*\{[^}]*self\.setup_change\(OwnerMutation::SetRefusedTool \{ choice \}, generation\)/);
+  const setupCodes = setup.match(/const SETUP_CODES: \[&str; \d+\] = \[([^\]]*)\]/);
+  for (const code of ["tool_fix_off", "tool_fix_not_needed", "tool_fix_unavailable", "tool_fix_changed", "tool_fix_refused", "tool_fix_too_large", "tool_fix_failed"]) {
+    assert.ok(setupCodes[1].includes(`"${code}"`), code);
+  }
+});

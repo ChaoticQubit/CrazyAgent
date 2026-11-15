@@ -60,7 +60,9 @@ async fn first_run_saves_the_profile_picks_the_home_reads_setup_and_reaches_home
         assert!(!dependency.label.is_empty());
         match &dependency.state {
             DependencyState::Missing { .. } => {}
-            DependencyState::Found { version } => {
+            DependencyState::Found { version }
+            | DependencyState::Bundled { version }
+            | DependencyState::System { version, .. } => {
                 assert!(!version.as_str().is_empty(), "{dependency:?}")
             }
             other => panic!("nothing ran yet, so a tool is found or missing: {other:?}"),

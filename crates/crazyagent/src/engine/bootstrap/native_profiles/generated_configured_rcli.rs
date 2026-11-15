@@ -3,7 +3,7 @@ use super::*;
 use crate::engine::owner::AccountSecret;
 use std::io::Write;
 
-pub(super) const HOMES: &str = "configured-sdk-homes";
+pub(super) const HOMES: &str = crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER;
 pub(super) const CONFIG: &str = "config.json";
 
 /// Writes the generated SDK config as a new private file inside a staging directory.

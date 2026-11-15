@@ -2,7 +2,7 @@ use crate::engine::owner::AgentInstructions;
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::team::graph::{LiveAction, Relation, RelationEdge};
 use crate::team::{AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamGraph};
-use crate::terminal::{AgentId, TerminalFrame};
+use crate::terminal::{AgentId, INPUT_BYTES_MAX, TerminalFrame};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::ctx::{Ctx, Link, Load};
@@ -685,6 +685,56 @@ fn a_window_resize_resizes_the_attached_terminal_once() {
     ));
     shell.resize(120, 36);
     assert!(requests(&mut shell).is_empty());
+}
+
+#[test]
+fn a_window_larger_than_the_drawn_area_resizes_the_attached_terminal_once_for_the_area_drawn() {
+    let mut shell = team();
+    shell.key(Key::Enter);
+    requests(&mut shell);
+    shell.resize(400, 150);
+    let first = requests(&mut shell);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(
+        matches!(&first[0], Request::TerminalResize { .. }),
+        "{first:?}"
+    );
+    let drawn = crate::tui::bounded_area(400, 150);
+    let mut screen = Terminal::new(TestBackend::new(drawn.width, drawn.height)).unwrap();
+    screen.draw(|frame| shell.draw(frame)).unwrap();
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    let again: Vec<Request> = requests(&mut shell)
+        .into_iter()
+        .filter(|request| matches!(request, Request::TerminalResize { .. }))
+        .collect();
+    assert!(
+        again.is_empty(),
+        "drawing the capped area sends no second resize: {again:?}"
+    );
+}
+
+#[test]
+fn a_paste_longer_than_the_request_queue_reaches_the_terminal_whole() {
+    let mut shell = team();
+    shell.key(Key::Enter);
+    requests(&mut shell);
+    let text = "é".repeat(70_000);
+    assert!(text.len() > 32 * INPUT_BYTES_MAX);
+    shell.key(Key::Paste(text.clone()));
+    let typed: Vec<u8> = requests(&mut shell)
+        .iter()
+        .filter_map(input)
+        .flat_map(|(_, bytes)| bytes.to_vec())
+        .collect();
+    let typed = String::from_utf8(typed).expect("the inputs join into the pasted text");
+    assert_eq!(
+        typed.matches('é').count(),
+        70_000,
+        "no part of the paste is dropped"
+    );
 }
 
 #[test]
@@ -2776,6 +2826,92 @@ fn a_master_view_on_live_terminal_off_starts_nothing_and_goes_back() {
     }
 }
 
+/// A master view opened on Live terminal On over a fresh master. Input: none. Output: the
+/// context and the view after its open requests were taken.
+fn opened_master() -> (Ctx, Box<dyn crate::tui::screens::Screen>) {
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        String::new(),
+    );
+    ctx.width = 80;
+    ctx.height = 24;
+    ctx.link = Link::Ready;
+    let place = Place::Master {
+        id: project(),
+        name: "Tidepool".into(),
+    };
+    let mut screen = open(&place, &mut ctx);
+    screen.shown(&mut ctx);
+    std::iter::from_fn(|| ctx.next_screen_request()).for_each(drop);
+    (ctx, screen)
+}
+
+/// DEC-141 parity: a team read whose saved master has no live terminal, such as rcli, takes
+/// the master view back to the console and never asks for a live terminal, as the desktop's
+/// area shows the conversation; on the first read whatever the switch says, and after a
+/// saved switch from Codex with the switch off. Codex and its Claude alias keep the view.
+#[test]
+fn a_master_with_no_live_terminal_takes_the_master_view_back_and_starts_nothing() {
+    let no_terminal = "This master has no live terminal: its conversation is the console.";
+    for on in [None, Some(false), Some(true)] {
+        let (mut ctx, mut screen) = opened_master();
+        let flow = screen.arrive(&harnessed(on, "rcli", None), &mut ctx);
+        assert!(
+            matches!(flow, crate::tui::screens::Flow::Back),
+            "the view goes back with the switch at {on:?}"
+        );
+        let sent: Vec<Request> = std::iter::from_fn(|| ctx.next_screen_request()).collect();
+        assert!(
+            sent.iter().all(|sent| !live_master_change(sent, true)),
+            "no live terminal is asked for: {sent:?}"
+        );
+        assert_eq!(
+            ctx.message().map(|message| message.lead.as_str()),
+            Some(no_terminal)
+        );
+    }
+    let (mut ctx, mut screen) = opened_master();
+    let flow = screen.arrive(&harnessed(Some(false), "codex", None), &mut ctx);
+    assert!(matches!(flow, crate::tui::screens::Flow::Handled));
+    let sent: Vec<Request> = std::iter::from_fn(|| ctx.next_screen_request()).collect();
+    assert!(
+        sent.iter().any(|sent| live_master_change(sent, true)),
+        "a Codex master starts: {sent:?}"
+    );
+    screen.arrive(&turned(true, Ok(())), &mut ctx);
+    std::iter::from_fn(|| ctx.next_screen_request()).for_each(drop);
+    let mut switched = harnessed_status(Some(false), "rcli", None);
+    switched.live_problem = Some("The live master was turned off: it could not start".into());
+    let flow = screen.arrive(&team_read(switched), &mut ctx);
+    assert!(
+        matches!(flow, crate::tui::screens::Flow::Back),
+        "a saved switch to rcli goes back to the console"
+    );
+    let sent: Vec<Request> = std::iter::from_fn(|| ctx.next_screen_request()).collect();
+    assert!(
+        sent.iter().all(|sent| !live_master_change(sent, true)),
+        "the switch to rcli asks for no live terminal: {sent:?}"
+    );
+    assert_eq!(
+        ctx.message().map(|message| message.lead.as_str()),
+        Some(no_terminal)
+    );
+    let (mut ctx, mut screen) = opened_master();
+    let flow = screen.arrive(&harnessed(Some(false), "claude", None), &mut ctx);
+    assert!(
+        matches!(flow, crate::tui::screens::Flow::Handled),
+        "the Claude alias is the Claude Code master, which keeps the view"
+    );
+    let sent: Vec<Request> = std::iter::from_fn(|| ctx.next_screen_request()).collect();
+    assert!(
+        sent.iter().any(|sent| live_master_change(sent, true)),
+        "the Claude alias starts: {sent:?}"
+    );
+}
+
 #[test]
 fn a_failed_switch_read_never_starts_the_live_master() {
     let mut shell = master_view(80, 24);
@@ -3892,8 +4028,8 @@ async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_ope
     let agent = |status: &str| {
         engine
             .execute(
-                "INSERT INTO team_agents(project, role, harness, tools, status, created_ms, heartbeat_ms)
-                 VALUES (?1, 'sub', 'claude-code', 1, ?2, ?3, ?3)",
+                "INSERT INTO team_agents(project, role, harness, tools, status, created_ms, heartbeat_ms, process_group)
+                 VALUES (?1, 'sub', 'claude-code', 1, ?2, ?3, ?3, 2000000000)",
                 rusqlite::params![project().as_str(), status, now],
             )
             .unwrap();
@@ -5567,4 +5703,56 @@ fn keys_typed_into_the_master_terminal_across_the_minute_never_act_on_the_view()
     assert!(!rows[23].contains("New line"), "{}", rows[23]);
     shell.key(Key::Char('s'));
     assert_eq!(starts_asked(&mut shell), 1);
+}
+
+/// DEC-161 bug 2: a master harness saved while a failed start left the live master off
+/// starts it on the new harness at the next team read, with no other open of the view, and
+/// the old harness's line goes; a read naming the same harness by its alias starts nothing.
+#[test]
+fn a_saved_master_harness_switch_starts_a_stopped_live_master_on_the_new_harness_at_once() {
+    let codex = "The live master was turned off: it could not start: No account in this project's pool can run codex";
+    let mut shell = master_view(100, 24);
+    requests(&mut shell);
+    shell.arrive(harnessed(Some(false), "codex", None));
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(|sent| live_master_change(sent, true)),
+        "the open starts it: {sent:?}"
+    );
+    shell.arrive(turned(true, Ok(())));
+    requests(&mut shell);
+    let mut refused = harnessed_status(Some(false), "codex", None);
+    refused.live_problem = Some(codex.into());
+    shell.arrive(team_read(refused));
+    assert!(
+        requests(&mut shell)
+            .iter()
+            .all(|sent| !live_master_change(sent, true)),
+        "a refused start is not sent again on its own"
+    );
+    let mut switched = harnessed_status(Some(false), "claude-code", None);
+    switched.live_problem = Some(codex.into());
+    shell.arrive(team_read(switched));
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(|sent| live_master_change(sent, true)),
+        "the saved switch starts it on the new harness at once: {sent:?}"
+    );
+    let rows = render(&mut shell);
+    assert!(
+        rows.iter().all(|row| !row.contains("can run codex")),
+        "the old harness's line is gone: {rows:?}"
+    );
+    shell.arrive(turned(true, Ok(())));
+    requests(&mut shell);
+    let mut alias = harnessed_status(Some(false), "claude", None);
+    alias.live_problem =
+        Some("The live master was turned off: it could not start: claude is not installed".into());
+    shell.arrive(team_read(alias));
+    assert!(
+        requests(&mut shell)
+            .iter()
+            .all(|sent| !live_master_change(sent, true)),
+        "the alias names the same harness, so nothing starts again"
+    );
 }

@@ -1176,10 +1176,11 @@ async fn owner_reads_the_project_activity_through_the_engine() {
     assert_eq!(result(response), OwnerResult::Applied);
     let store =
         crate::research::jobs::ResearchJobs::open(&engine.root.path().join("engine.db")).unwrap();
-    store
+    let claimed = store
         .claim("setup-pooled", "runner-test", 4)
         .unwrap()
         .unwrap();
+    store.launched(&claimed).unwrap();
 
     let read = owner.project_activity(project.clone(), 50).await.unwrap();
     assert!(!read.more, "every event fits");
@@ -1477,6 +1478,261 @@ async fn a_retried_job_whose_research_was_turned_off_is_not_cancelled_by_the_nex
             .revision,
         5,
         "a kind still on keeps the revision"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// RV-DS241-159: Run again starts a job's rate-limited ends in a row again. A job that ended
+/// failed on its third limit hands a limited account back and waits for the pool's next one
+/// after the owner runs it again, as a new job does, instead of failing on its first limit.
+#[tokio::test]
+async fn a_job_run_again_after_the_rate_limit_cap_takes_a_limit_as_a_new_job_does() {
+    use crate::research::jobs::ResearchStatus as QueueStatus;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![ResearchKind::MarketResearch]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let market = job_of(&mut owner, &project, ResearchKind::MarketResearch)
+        .await
+        .id;
+    let store =
+        crate::research::jobs::ResearchJobs::open(&engine.root.path().join("engine.db")).unwrap();
+    let account = CredentialRef::new("a-codex").unwrap();
+    let limited = || {
+        let held = store
+            .claim("setup-pooled", "runner-test", 4)
+            .unwrap()
+            .unwrap();
+        assert_eq!(held.id, market);
+        store.rate_limited(&held, &account).unwrap().0
+    };
+    assert_eq!(
+        [limited(), limited(), limited()],
+        [
+            QueueStatus::Queued,
+            QueueStatus::Queued,
+            QueueStatus::Failed
+        ]
+    );
+
+    let retried = owner.retry_research(project.clone(), market, 2).await;
+    assert_eq!(result(retried.unwrap()), OwnerResult::Applied);
+    assert_eq!(
+        limited(),
+        QueueStatus::Queued,
+        "a job run again waits for the pool's next account on its first limit"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// RV-DS241-159: Plan roadmap now starts the planning job's rate-limited ends in a row again.
+/// A plan that was saved after two limits, and then one the cap ended failed, takes a limit
+/// when it is planned again, as a new job does, instead of failing on the first one.
+#[tokio::test]
+async fn a_roadmap_planned_again_takes_a_rate_limit_as_a_new_job_does() {
+    use crate::research::jobs::ResearchStatus as QueueStatus;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![ResearchKind::MarketResearch]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let market = job_of(&mut owner, &project, ResearchKind::MarketResearch)
+        .await
+        .id;
+    let stopped = owner.cancel_research(project.clone(), market, 2).await;
+    assert_eq!(result(stopped.unwrap()), OwnerResult::Applied);
+    let planned = owner.plan_roadmap(project.clone(), 3).await.unwrap();
+    assert_eq!(result(planned), OwnerResult::Applied);
+    let planning = job_of(&mut owner, &project, ResearchKind::RoadmapPlanning)
+        .await
+        .id;
+    let store =
+        crate::research::jobs::ResearchJobs::open(&engine.root.path().join("engine.db")).unwrap();
+    let account = CredentialRef::new("a-codex").unwrap();
+    let claim = || {
+        let held = store
+            .claim("setup-pooled", "runner-test", 4)
+            .unwrap()
+            .unwrap();
+        assert_eq!(held.id, planning);
+        held
+    };
+    for _ in 0..2 {
+        assert_eq!(
+            store.rate_limited(&claim(), &account).unwrap().0,
+            QueueStatus::Queued
+        );
+    }
+    store.finish(&claim(), "context/roadmap.md").unwrap();
+
+    let planned = owner.plan_roadmap(project.clone(), 4).await.unwrap();
+    assert_eq!(result(planned), OwnerResult::Applied);
+    assert_eq!(
+        store.rate_limited(&claim(), &account).unwrap().0,
+        QueueStatus::Queued,
+        "a roadmap planned again waits for the pool's next account on its first limit"
+    );
+
+    let ends = [
+        store.rate_limited(&claim(), &account).unwrap().0,
+        store.rate_limited(&claim(), &account).unwrap().0,
+    ];
+    assert_eq!(ends, [QueueStatus::Queued, QueueStatus::Failed]);
+    let planned = owner.plan_roadmap(project.clone(), 5).await.unwrap();
+    assert_eq!(result(planned), OwnerResult::Applied);
+    assert_eq!(
+        store.rate_limited(&claim(), &account).unwrap().0,
+        QueueStatus::Queued,
+        "a roadmap planned again after the cap failed it takes a limit as a new job does"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// RV-DS241-159: Run again ends the wait a refused launch left and forgets the refusals in a
+/// row. A job stopped while it waits out a refusal is claimed at once after the owner runs it
+/// again, and its next refusal counts as the first.
+#[tokio::test]
+async fn a_job_run_again_does_not_wait_out_the_refusal_it_was_stopped_in() {
+    use crate::research::jobs::ResearchStatus as QueueStatus;
+    const WAITING: &str = "Waiting for this account to be ready";
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![ResearchKind::MarketResearch]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let market = job_of(&mut owner, &project, ResearchKind::MarketResearch)
+        .await
+        .id;
+    let store =
+        crate::research::jobs::ResearchJobs::open(&engine.root.path().join("engine.db")).unwrap();
+    let held = store
+        .claim("setup-pooled", "runner-test", 4)
+        .unwrap()
+        .unwrap();
+    assert_eq!(held.id, market);
+    assert_eq!(store.refused(&held, WAITING).unwrap(), QueueStatus::Queued);
+    assert!(
+        store
+            .claim("setup-pooled", "runner-test", 4)
+            .unwrap()
+            .is_none(),
+        "the refused job waits out its backoff"
+    );
+
+    let stopped = owner.cancel_research(project.clone(), market, 2).await;
+    assert_eq!(result(stopped.unwrap()), OwnerResult::Applied);
+    let retried = owner.retry_research(project.clone(), market, 3).await;
+    assert_eq!(result(retried.unwrap()), OwnerResult::Applied);
+    let claimed = store.claim("setup-pooled", "runner-test", 4).unwrap();
+    assert_eq!(
+        claimed.as_ref().map(|job| job.id),
+        Some(market),
+        "a job run again is claimed at once"
+    );
+    let held = claimed.unwrap();
+    assert_eq!(store.refused(&held, WAITING).unwrap(), QueueStatus::Queued);
+    assert_eq!(
+        engine.rows("SELECT refused FROM research_jobs WHERE kind='market_research'"),
+        1,
+        "the next refusal counts as the first"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// RV-DS241-159: research turned off and on again ends the wait a refused launch left. A job
+/// stopped by turning its research off while it waits out a refusal is claimed at once after
+/// the owner turns the research on again, ahead of the project's later job.
+#[tokio::test]
+async fn research_turned_on_again_does_not_wait_out_the_refusal_it_was_turned_off_in() {
+    use crate::research::jobs::ResearchStatus as QueueStatus;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![
+                ResearchKind::MarketResearch,
+                ResearchKind::CompetitorResearch,
+            ]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let market = job_of(&mut owner, &project, ResearchKind::MarketResearch)
+        .await
+        .id;
+    let store =
+        crate::research::jobs::ResearchJobs::open(&engine.root.path().join("engine.db")).unwrap();
+    let held = store
+        .claim("setup-pooled", "runner-test", 4)
+        .unwrap()
+        .unwrap();
+    assert_eq!(held.id, market);
+    assert_eq!(
+        store
+            .refused(&held, "Waiting for this account to be ready")
+            .unwrap(),
+        QueueStatus::Queued
+    );
+
+    let saved = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    let mut off = saved.editable();
+    off.research = vec![ResearchKind::CompetitorResearch];
+    let response = owner
+        .update_project_setup(project.clone(), saved.revision, None, off, 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let job = job_of(&mut owner, &project, ResearchKind::MarketResearch).await;
+    assert_eq!((job.id, job.status), (market, ResearchStatus::Cancelled));
+    let saved = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    let mut on = saved.editable();
+    on.research = vec![
+        ResearchKind::MarketResearch,
+        ResearchKind::CompetitorResearch,
+    ];
+    let response = owner
+        .update_project_setup(project.clone(), saved.revision, None, on, 3)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let claimed = store.claim("setup-pooled", "runner-test", 4).unwrap();
+    assert_eq!(
+        claimed.map(|job| job.id),
+        Some(market),
+        "research turned on again is claimed at once"
     );
     drop(owner);
     engine.stop().await;
@@ -2037,6 +2293,80 @@ async fn stale_read_paths_write_is_refused() {
         .await
         .unwrap();
     assert_eq!(result(fresh), OwnerResult::Applied);
+    drop(owner);
+    engine.stop().await;
+}
+
+/// RV-DS241-64: removing a project finishes the start and worktree notices of the agents
+/// the removal deletes, so no pending notice names an agent that is gone; another project's
+/// notice stays pending.
+#[tokio::test]
+async fn a_removed_project_finishes_the_notices_of_the_agents_it_deletes() {
+    use crate::ledger::ActionKind;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    connection.busy_timeout(ENGINE_WAIT).unwrap();
+    crate::ledger::initialize(&connection).unwrap();
+    let agent = |project: &str| {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,stopped_ms) VALUES (?1,'sub','codex',0,'stopped',1,1,1)",
+                [project],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let removed_agent = agent("setup-pooled");
+    let kept_agent = agent("elsewhere");
+    let notice = |kind: ActionKind, agent: i64, payload: String| {
+        crate::ledger::begin(&connection, kind, &format!("team-{agent}"), &payload)
+            .unwrap()
+            .get()
+    };
+    let unknown_start =
+        |agent: i64| format!("{{\"team_agent\":{agent},\"pane\":false,\"unknown\":true}}");
+    notice(
+        ActionKind::AgentSpawn,
+        removed_agent,
+        unknown_start(removed_agent),
+    );
+    notice(
+        ActionKind::WorktreeCreate,
+        removed_agent,
+        format!(
+            "{{\"team_agent\":{removed_agent},\"repository\":\"/r\",\"worktree\":\"/r/w\",\"unknown\":true}}"
+        ),
+    );
+    let kept = notice(
+        ActionKind::AgentSpawn,
+        kept_agent,
+        unknown_start(kept_agent),
+    );
+
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    let pending = |kind: ActionKind| {
+        crate::ledger::pending(&connection, kind)
+            .unwrap()
+            .into_iter()
+            .map(|action| action.id.get())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(pending(ActionKind::AgentSpawn), [kept]);
+    assert_eq!(pending(ActionKind::WorktreeCreate), Vec::<i64>::new());
+    drop(connection);
     drop(owner);
     engine.stop().await;
 }
@@ -3185,6 +3515,128 @@ async fn owner_removal_takes_the_team_limits_budget_spread_and_teammates_with_it
     engine.stop().await;
 }
 
+/// A project added again under a removed project's id starts with the live master switch
+/// off, the default done-quiet time and no notifications: the removal takes the live
+/// master row, the done-quiet choice and the owner notifications with it (RV-DS241-12).
+#[tokio::test]
+async fn owner_removal_takes_the_live_master_done_quiet_and_notifications_with_it() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.execute(
+        "INSERT INTO team_live_masters(project,live,turns) VALUES ('setup-pooled',0,3)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO team_done_quiet(project,secs) VALUES ('setup-pooled',600)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO team_notifications(project,kind,text,created_ms) VALUES ('setup-pooled','escalation','Old project question',1)",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let tables = ["team_live_masters", "team_done_quiet", "team_notifications"];
+    for table in tables {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            1,
+            "{table} holds the project's row before removal"
+        );
+    }
+
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    for table in tables {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            0,
+            "{table} goes with the project"
+        );
+    }
+    drop(owner);
+    engine.stop().await;
+}
+
+/// A project added again under a removed project's id starts with no Overview row, tab
+/// seal or pending proposal and no master turn or kept conversation of the old one: the
+/// removal takes them with it, so no Overview run of the old project is claimed again and
+/// no text written from its evidence is offered for Accept (RV-DS241-81, ds-engine r1).
+#[tokio::test]
+async fn owner_removal_takes_the_overview_and_master_conversation_rows_with_it() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    crate::project_overview::initialize(&db).unwrap();
+    for row in [
+        "INSERT INTO project_overview(project,stale,due_ms) VALUES ('setup-pooled',1,0)",
+        "INSERT INTO project_overview_tabs(project,tab,seal,proposal) VALUES ('setup-pooled','features','s1','- Old feature')",
+        "INSERT INTO team_master_turns(agent,turn,project,started_ms,finished_ms,outcome) VALUES (7,1,'setup-pooled',1,2,'done')",
+        "INSERT INTO team_master_conversations(session,project,agent,harness,connection,conversation,record) VALUES ('s-old','setup-pooled',7,'claude','c1','conv-old','/tmp/old.jsonl')",
+    ] {
+        db.execute(row, []).unwrap();
+    }
+    drop(db);
+    let tables = [
+        "project_overview",
+        "project_overview_tabs",
+        "team_master_turns",
+        "team_master_conversations",
+    ];
+    for table in tables {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            1,
+            "{table} holds the project's row before removal"
+        );
+    }
+
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    for table in tables {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            0,
+            "{table} goes with the project"
+        );
+    }
+    drop(owner);
+    engine.stop().await;
+}
+
 /// A live agent keeps its row when its project is removed, and the status it writes after
 /// that logs nothing: the removal already took the project's history (HB-S5-I).
 #[tokio::test]
@@ -3560,5 +4012,131 @@ async fn a_new_project_records_the_toolchains_the_owner_has_installed_in_its_fir
         "a later save keeps exactly the choices sent: {}",
         body()
     );
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_folder() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let created = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(created), OwnerResult::Applied);
+    let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    let folder = stored.project_folder();
+    let (secret, vendor) = (folder.join("secret"), folder.join("vendor"));
+    std::fs::create_dir_all(&secret).unwrap();
+    std::fs::create_dir_all(&vendor).unwrap();
+    let text = |path: &Path| {
+        std::fs::canonicalize(path)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    let opened = owner.project_hidden_paths(project.clone()).await.unwrap();
+    assert_eq!(opened.version, 0, "folders nobody hid are at version 0");
+    let landed = owner
+        .set_project_hidden_paths(project.clone(), opened.version, vec![text(&secret)], 2)
+        .await
+        .unwrap();
+    assert_eq!(result(landed), OwnerResult::Applied);
+
+    for (version, generation) in [(opened.version, 3), (7, 4)] {
+        let refused = owner
+            .set_project_hidden_paths(project.clone(), version, vec![], generation)
+            .await
+            .unwrap();
+        assert_eq!(
+            result(refused),
+            rejected("stale_revision"),
+            "a save from version {version} never un-hides the folder saved at version 1"
+        );
+    }
+    let invalid_and_stale = owner
+        .set_project_hidden_paths(project.clone(), 0, vec!["relative".into()], 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        result(invalid_and_stale),
+        rejected("hidden_path_not_absolute"),
+        "a refused folder is named before the version is checked"
+    );
+    assert_eq!(
+        owner.project_hidden_paths(project.clone()).await.unwrap(),
+        HiddenPaths {
+            paths: vec![text(&secret)],
+            version: 1
+        },
+        "the stale window changed nothing"
+    );
+    assert_eq!(
+        engine.rows(
+            "SELECT version FROM versioned_items WHERE item='hidden-paths:setup-pooled'
+             AND writer='owner'"
+        ),
+        1
+    );
+
+    let redone = owner
+        .set_project_hidden_paths(project.clone(), 1, vec![text(&secret), text(&vendor)], 6)
+        .await
+        .unwrap();
+    assert_eq!(result(redone), OwnerResult::Applied);
+    assert_eq!(
+        owner.project_hidden_paths(project.clone()).await.unwrap(),
+        HiddenPaths {
+            paths: vec![text(&secret), text(&vendor)],
+            version: 2
+        },
+        "after a re-read the redo lands"
+    );
+
+    let removed = owner.remove_project(project.clone(), 7).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT version FROM versioned_items WHERE item='hidden-paths:setup-pooled'"),
+        3,
+        "a removed project's hidden folders move their version on once more"
+    );
+    let again = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner again"),
+            pooled_setup(vec![]),
+            8,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(again), OwnerResult::Applied);
+    assert_eq!(
+        owner.project_hidden_paths(project.clone()).await.unwrap(),
+        HiddenPaths {
+            paths: vec![],
+            version: 3
+        },
+        "the project added again under the same id starts with no hidden folders"
+    );
+    for (version, generation) in [(0, 9), (2, 10)] {
+        let refused = owner
+            .set_project_hidden_paths(project.clone(), version, vec![], generation)
+            .await
+            .unwrap();
+        assert_eq!(
+            result(refused),
+            rejected("stale_revision"),
+            "a save read before the removal at version {version} is refused"
+        );
+    }
+    drop(owner);
     engine.stop().await;
 }

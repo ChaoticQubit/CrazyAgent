@@ -28,8 +28,10 @@ const IDLE_WAKE: Duration = Duration::from_millis(500);
 const STREAM_WAKE: Duration = Duration::from_millis(16);
 const FRAMES_PER_PASS: usize = 64;
 const REFRESH: Duration = Duration::from_secs(5);
+const REPLY_WATCH: Duration = Duration::from_secs(1);
 const RECONNECT: Duration = Duration::from_secs(3);
-const PASTE_CHARS_MAX: usize = 100_000;
+/// The most characters of one paste the TUI takes; the rest is dropped.
+pub(in crate::tui) const PASTE_CHARS_MAX: usize = 100_000;
 
 struct Extras;
 
@@ -55,7 +57,8 @@ impl Drop for Extras {
     }
 }
 
-static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
+/// Whether this TUI pushed the enhanced keyboard protocol and has not popped it yet.
+pub(in crate::tui) static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
 
 /// Turns on the enhanced keyboard protocol (disambiguated escape codes) under Auto when the
 /// terminal says it has it, so Shift-Enter arrives as its own key; Off never asks. The flag
@@ -72,6 +75,25 @@ fn push_keyboard(
         return Ok(());
     }
     pushed.store(true, Ordering::SeqCst);
+    execute!(
+        out,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )
+}
+
+/// Pushes the keyboard protocol again on the screen a child that took the terminal handed
+/// back, when the restore before the child popped it, so Shift-Enter stays its own key. The
+/// terminal already said it has the protocol, so it is not asked again; the flag is set
+/// before the push is written, so the next restore pops it. Inputs: the writer, whether it
+/// was pushed before the handoff and the pushed flag. Output: the write result.
+pub(in crate::tui) fn push_back(
+    out: &mut impl std::io::Write,
+    was_pushed: bool,
+    pushed: &AtomicBool,
+) -> std::io::Result<()> {
+    if !was_pushed || pushed.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
     execute!(
         out,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
@@ -123,7 +145,12 @@ pub(super) fn restore(out: &mut impl std::io::Write) -> std::io::Result<()> {
     restore_with(out, &KEYBOARD_PUSHED)
 }
 
-fn restore_with(out: &mut impl std::io::Write, pushed: &AtomicBool) -> std::io::Result<()> {
+/// Writes what `restore` writes, popping the keyboard protocol when the given flag says
+/// it was pushed. Inputs: the writer and the pushed flag. Output: the write result.
+pub(in crate::tui) fn restore_with(
+    out: &mut impl std::io::Write,
+    pushed: &AtomicBool,
+) -> std::io::Result<()> {
     let popped = pop_keyboard(out, pushed);
     execute!(
         out,
@@ -220,6 +247,29 @@ pub fn run(
     )
 }
 
+/// How long the loop waits for a key before it looks again: a frame while an agent terminal
+/// streams or a fresh engine reply is due, since a reply never wakes the key poll and would
+/// otherwise sit out a tick; a tick while anything else waits or the shell animates; otherwise
+/// the idle wake. Inputs: whether a terminal streams, whether a fresh reply is due, and
+/// whether anything else waits. Output: the wait.
+fn wake(streaming: bool, replying: bool, waiting: bool) -> Duration {
+    if streaming || replying {
+        STREAM_WAKE
+    } else if waiting {
+        TICK
+    } else {
+        IDLE_WAKE
+    }
+}
+
+/// Whether a fresh engine reply is due: a request is in flight, not a failed create kept for
+/// Retry, and it went out less than REPLY_WATCH ago, so a long job such as a sign-in falls back
+/// to the tick. Inputs: whether a request is in flight, when the last one went out and now.
+/// Output: true while the reply is due.
+fn replying(in_flight: bool, asked: Option<Instant>, now: Instant) -> bool {
+    in_flight && asked.is_some_and(|at| now.saturating_duration_since(at) < REPLY_WATCH)
+}
+
 fn drive(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     shell: &mut Shell,
@@ -228,6 +278,7 @@ fn drive(
     stopped: &AtomicBool,
 ) -> Result<(), TuiError> {
     let mut dirty = true;
+    let mut asked: Option<Instant> = None;
     let mut tick = Instant::now();
     let mut refresh = Instant::now() + REFRESH;
     let mut reconnect = Instant::now() + RECONNECT;
@@ -277,6 +328,7 @@ fn drive(
                 reconnect = now + RECONNECT;
             } else if link == Link::Ready {
                 if let Some(request) = shell.ctx.next_request() {
+                    asked = Some(now);
                     send(request, shell, connection, terminals)?;
                     dirty = true;
                 } else if now >= refresh {
@@ -319,13 +371,12 @@ fn drive(
             dirty = false;
         }
         let waiting = shell.ctx.link == Link::Ready && shell.ctx.queued() > 0;
-        let wait = if terminals.live() {
-            STREAM_WAKE
-        } else if shell.busy() || connection.busy() || waiting {
-            TICK
-        } else {
-            IDLE_WAKE
-        };
+        let in_flight = connection.busy() && !connection.uncertain();
+        let wait = wake(
+            terminals.live(),
+            replying(in_flight, asked, now),
+            shell.busy() || connection.busy() || waiting,
+        );
         if !event::poll(wait).map_err(|error| TuiError(error.to_string()))? {
             continue;
         }
@@ -593,6 +644,45 @@ fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_engine_reply_the_loop_waits_for_is_read_within_a_frame_not_a_tick() {
+        assert!(STREAM_WAKE < TICK);
+        assert!(TICK < IDLE_WAKE);
+        for waiting in [false, true] {
+            assert_eq!(
+                wake(false, true, waiting),
+                STREAM_WAKE,
+                "a fresh reply is due"
+            );
+            assert_eq!(
+                wake(true, false, waiting),
+                STREAM_WAKE,
+                "a terminal streams"
+            );
+        }
+        assert_eq!(wake(false, false, true), TICK, "something else waits");
+        assert_eq!(wake(false, false, false), IDLE_WAKE, "nothing waits");
+    }
+
+    #[test]
+    fn only_a_request_in_flight_for_under_a_second_counts_as_a_fresh_reply() {
+        let asked = Instant::now();
+        assert!(replying(true, Some(asked), asked));
+        assert!(replying(true, Some(asked), asked + REPLY_WATCH / 2));
+        assert!(
+            !replying(true, Some(asked), asked + REPLY_WATCH),
+            "a long job ticks"
+        );
+        assert!(
+            !replying(false, Some(asked), asked),
+            "the reply landed or a create failed"
+        );
+        assert!(
+            !replying(true, None, asked),
+            "nothing went out from this loop"
+        );
+    }
 
     #[test]
     fn a_restore_hands_the_terminal_back_in_full() {

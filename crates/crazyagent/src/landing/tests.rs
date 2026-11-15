@@ -477,6 +477,177 @@ fn accepting_two_change_sets_that_each_hold_half_a_bare_layout_refuses_the_secon
     }
 }
 
+/// A bare-repository layout whose `refs` or `objects` is spelled with a letter a
+/// case-insensitive volume folds onto ASCII, here U+017F LATIN SMALL LETTER LONG S, is
+/// refused like the plain one, since the owner's own git on that volume opens it
+/// (RV-DS241-70).
+#[test]
+fn a_bare_repository_layout_spelled_with_folded_letters_is_refused_when_its_turn_is_committed() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    for (objects, refs) in [("objects", "ref\u{17f}"), ("object\u{17f}", "refs")] {
+        let case = Case::new();
+        let layout = case.workspace.worktree.join("notes");
+        let packs = format!("{objects}/info/packs");
+        let main = format!("{refs}/heads/main");
+        plant_layout(
+            &layout,
+            &[
+                ("HEAD", "ref: refs/heads/main\n", false),
+                (packs.as_str(), "\n", false),
+                (main.as_str(), "\n", false),
+            ],
+        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                git_in(&case.home, &layout, &["rev-parse", "--git-dir"]).trim(),
+                ".",
+                "the owner's own git on a folding volume takes {objects} and {refs} as a repository"
+            );
+        }
+        assert_eq!(
+            refused(record_turn_end(&case.db, &case.workspace, &turn)),
+            "changes_bare_repository",
+            "{objects} {refs}"
+        );
+    }
+}
+
+/// Two change sets whose folders differ only in letter case, each holding half a bare
+/// repository layout, make the whole layout in one folder of an owner checkout on a
+/// case-insensitive volume, so accepting the second is refused and the branch stays
+/// (RV-DS241-70).
+#[test]
+fn accepting_halves_of_a_bare_layout_in_folders_that_differ_only_in_case_refuses_the_second() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    let store: Vec<(&str, &str, bool)> = vec![
+        ("objects/info/packs", "\n", false),
+        ("refs/heads/main", "\n", false),
+    ];
+    let head: Vec<(&str, &str, bool)> = vec![
+        ("HEAD", "ref: refs/heads/main\n", false),
+        ("config", "[core]\n\tbare = true\n", false),
+    ];
+    for (first, second) in [(&store, &head), (&head, &store)] {
+        let case = Case::new();
+        let sibling = second_agent(&case);
+        plant_layout(&case.workspace.worktree.join("evil"), first);
+        plant_layout(&sibling.worktree.join("Evil"), second);
+        let one = record_turn_end(&case.db, &case.workspace, &turn)
+            .unwrap()
+            .expect("half a layout lands as a change set");
+        let two = record_turn_end(&case.db, &sibling, &turn)
+            .unwrap()
+            .expect("the other half lands as a change set");
+        assert!(matches!(
+            case.accept(&one).unwrap(),
+            AcceptOutcome::Landed { .. }
+        ));
+        let tip = case.tip();
+        assert_eq!(
+            refused(case.accept(&two)),
+            "changes_bare_repository",
+            "evil/ and Evil/ are one folder of the owner's checkout"
+        );
+        assert_eq!(case.tip(), tip, "the branch did not move");
+    }
+}
+
+/// A bare-repository layout whose `HEAD`, `objects` or `refs` holds a code point a
+/// case-insensitive HFS+ volume ignores in names, here U+200C ZERO WIDTH NON-JOINER or
+/// U+FEFF ZERO WIDTH NO-BREAK SPACE, is refused like the plain one, since the owner's own
+/// git on such a volume opens it (RV-DS241-148).
+#[test]
+fn a_bare_repository_layout_spelled_with_code_points_hfs_ignores_is_refused_when_committed() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    for (head, objects, refs) in [
+        ("HE\u{200c}AD", "objects", "refs"),
+        ("HEAD", "ob\u{feff}jects", "refs"),
+        ("HEAD", "objects", "re\u{200c}fs"),
+        ("\u{feff}HEAD", "objects\u{200c}", "\u{feff}refs\u{feff}"),
+    ] {
+        let case = Case::new();
+        let packs = format!("{objects}/info/packs");
+        let main = format!("{refs}/heads/main");
+        plant_layout(
+            &case.workspace.worktree.join("notes"),
+            &[
+                (head, "ref: refs/heads/main\n", false),
+                (packs.as_str(), "\n", false),
+                (main.as_str(), "\n", false),
+                ("config", "[core]\n\tbare = true\n", false),
+            ],
+        );
+        assert_eq!(
+            refused(record_turn_end(&case.db, &case.workspace, &turn)),
+            "changes_bare_repository",
+            "{head:?} {objects:?} {refs:?}"
+        );
+    }
+}
+
+/// Two change sets that make one bare-repository layout only once a volume ignores a code
+/// point HFS+ ignores in names, in a folder name or in `HEAD`, make the whole layout in
+/// one folder of an owner checkout on such a volume, so accepting the second is refused
+/// and the branch stays (RV-DS241-148).
+#[test]
+fn accepting_halves_of_a_bare_layout_spelled_with_code_points_hfs_ignores_refuses_the_second() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    let store: Vec<(&str, &str, bool)> = vec![
+        ("objects/info/packs", "\n", false),
+        ("refs/heads/main", "\n", false),
+    ];
+    for (folder, other, head) in [
+        ("evil", "e\u{200c}vil", "HEAD"),
+        ("evil", "\u{feff}evil", "HEAD"),
+        ("evil", "evil", "HE\u{feff}AD"),
+        ("evil", "evil", "\u{200c}HEAD"),
+    ] {
+        let case = Case::new();
+        let sibling = second_agent(&case);
+        plant_layout(&case.workspace.worktree.join(folder), &store);
+        plant_layout(
+            &sibling.worktree.join(other),
+            &[
+                (head, "ref: refs/heads/main\n", false),
+                ("config", "[core]\n\tbare = true\n", false),
+            ],
+        );
+        let one = record_turn_end(&case.db, &case.workspace, &turn)
+            .unwrap()
+            .expect("half a layout lands as a change set");
+        let two = record_turn_end(&case.db, &sibling, &turn)
+            .unwrap()
+            .expect("the other half lands as a change set");
+        assert!(matches!(
+            case.accept(&one).unwrap(),
+            AcceptOutcome::Landed { .. }
+        ));
+        let tip = case.tip();
+        assert_eq!(
+            refused(case.accept(&two)),
+            "changes_bare_repository",
+            "{folder:?} {other:?} {head:?} make one layout on an HFS+ volume"
+        );
+        assert_eq!(case.tip(), tip, "the branch did not move");
+    }
+}
+
 #[test]
 fn a_link_an_agent_leaves_pointing_outside_the_project_or_into_the_agents_folder_is_refused() {
     let turn = TurnEnd {
@@ -3472,43 +3643,205 @@ fn the_owners_ignore_file_is_the_global_setting_else_the_default_and_only_a_real
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let (home, xdg) = (root.join("home"), root.join("xdg"));
     std::fs::create_dir(&home).unwrap();
-    assert_eq!(git::owner_excludes(&home, None), None);
+    let nowhere = Within::Folder(Path::new("/"));
+    assert_eq!(git::owner_excludes(&home, None, nowhere), None);
     write(&home.join(".config/git/ignore"), "secret.env\n");
     assert_eq!(
-        git::owner_excludes(&home, None),
+        git::owner_excludes(&home, None, nowhere),
         Some(home.join(".config/git/ignore"))
     );
-    assert_eq!(git::owner_excludes(&home, Some(xdg.as_path())), None);
+    assert_eq!(
+        git::owner_excludes(&home, Some(xdg.as_path()), nowhere),
+        None
+    );
     write(&xdg.join("git/ignore"), "secret.env\n");
     assert_eq!(
-        git::owner_excludes(&home, Some(xdg.as_path())),
+        git::owner_excludes(&home, Some(xdg.as_path()), nowhere),
         Some(xdg.join("git/ignore"))
     );
     assert_eq!(
-        git::owner_excludes(&home, Some(Path::new("xdg"))),
+        git::owner_excludes(&home, Some(Path::new("xdg")), nowhere),
         Some(home.join(".config/git/ignore"))
     );
-    assert_eq!(git::owner_excludes(Path::new("home"), None), None);
+    assert_eq!(git::owner_excludes(Path::new("home"), None, nowhere), None);
     write(
         &home.join(".gitconfig"),
         "[core]\n\texcludesFile = ~/ignores/global\n",
     );
-    assert_eq!(git::owner_excludes(&home, None), None);
+    assert_eq!(git::owner_excludes(&home, None, nowhere), None);
     write(&home.join("ignores/real"), "secret.env\n");
     std::os::unix::fs::symlink(home.join("ignores/real"), home.join("ignores/global")).unwrap();
     assert_eq!(
-        git::owner_excludes(&home, None),
+        git::owner_excludes(&home, None, nowhere),
         Some(home.join("ignores/real"))
     );
     std::fs::remove_file(home.join("ignores/global")).unwrap();
     std::fs::create_dir(home.join("ignores/global")).unwrap();
-    assert_eq!(git::owner_excludes(&home, None), None);
+    assert_eq!(git::owner_excludes(&home, None, nowhere), None);
     write(
         &home.join(".gitconfig"),
         "[core]\n\texcludesFile = relative/ignore\n",
     );
     write(&home.join("relative/ignore"), "secret.env\n");
-    assert_eq!(git::owner_excludes(&home, None), None);
+    assert_eq!(git::owner_excludes(&home, None, nowhere), None);
+}
+
+#[test]
+fn the_onboarding_listing_keeps_out_what_the_owners_global_ignore_file_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let (home, repo) = (root.join("home"), root.join("repo"));
+    for folder in [&home, &repo] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    git::OWNER_HOME.with(|owner| *owner.borrow_mut() = Some(home.clone()));
+    git_in(&home, &repo, &["init", "-q", "--template="]);
+    write(&home.join(".config/git/ignore"), "scratch.txt\n");
+    write(&repo.join("scratch.txt"), "the owner's own notes\n");
+    write(&repo.join("notes.md"), "# Notes\n");
+
+    let kept = crate::onboarding::draft::kept_out(&repo);
+
+    assert_eq!(kept, Some(vec!["scratch.txt".to_owned()]));
+}
+
+/// Checks that the onboarding listing of `repo` keeps out `name` alone: the code graph's
+/// keep-out list is exactly that file, no gathered document is it, and the plain
+/// `notes.txt` beside it is still read. Takes the folder and the file's path below it.
+fn listing_keeps_out_only(repo: &Path, name: &str) {
+    assert_eq!(
+        crate::onboarding::draft::kept_out(repo),
+        Some(vec![name.to_owned()])
+    );
+    let documents = crate::onboarding::draft::gather(repo, &[]).documents;
+    assert!(
+        documents.iter().all(|document| document.path != name),
+        "{name} was read as a document"
+    );
+    assert!(
+        documents
+            .iter()
+            .any(|document| document.path == "notes.txt"),
+        "the plain document beside it is still read"
+    );
+}
+
+/// RV-DS241-145: the onboarding listing honours a repository's own `core.excludesFile` while
+/// the owner's global ignore file is present, which since r2 applies beside it: a .txt file
+/// only the repository's file names is kept out of the graph and never read.
+#[test]
+fn the_onboarding_listing_keeps_out_what_a_repositorys_own_excludes_file_names_beside_the_owners_global_one()
+ {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let (home, repo) = (root.join("home"), root.join("repo"));
+    for folder in [&home, &repo] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    git::OWNER_HOME.with(|owner| *owner.borrow_mut() = Some(home.clone()));
+    git_in(&home, &repo, &["init", "-q", "--template="]);
+    write(&home.join(".config/git/ignore"), "scratch.log\n");
+    let local = root.join("repo-ignore");
+    write(&local, "roster.txt\n");
+    git_in(
+        &home,
+        &repo,
+        &["config", "core.excludesFile", local.to_str().unwrap()],
+    );
+    write(&repo.join("roster.txt"), "ROSTER_CANARY_145\n");
+    write(&repo.join("notes.txt"), "Plain notes\n");
+
+    listing_keeps_out_only(&repo, "roster.txt");
+}
+
+/// RV-DS241-145: the owner's excludes file that an `includeIf "gitdir:..."` section of the
+/// owner's global config scopes to this repository is the one the onboarding listing
+/// honours, as the owner's own git in this repository does.
+#[test]
+fn the_onboarding_listing_keeps_out_what_a_gitdir_scoped_owner_excludes_file_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let (home, repo) = (root.join("home"), root.join("repo"));
+    for folder in [&home, &repo] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    git::OWNER_HOME.with(|owner| *owner.borrow_mut() = Some(home.clone()));
+    git_in(&home, &repo, &["init", "-q", "--template="]);
+    let (scoped, work) = (home.join("work-ignore"), home.join(".gitconfig-work"));
+    write(&scoped, "client.txt\n");
+    write(
+        &work,
+        &format!("[core]\n\texcludesFile = {}\n", scoped.display()),
+    );
+    write(
+        &home.join(".gitconfig"),
+        &format!(
+            "[includeIf \"gitdir:{}/\"]\n\tpath = {}\n",
+            repo.display(),
+            work.display()
+        ),
+    );
+    write(&repo.join("client.txt"), "CLIENT_CANARY_145\n");
+    write(&repo.join("notes.txt"), "Plain notes\n");
+
+    listing_keeps_out_only(&repo, "client.txt");
+}
+
+/// RV-DS241-145 r2: what the onboarding reads and sends still leaves out what the owner's
+/// global ignore file names when the repository names its own `core.excludesFile`, an empty
+/// file or one that is not there, so the repository's value never switches the owner's
+/// global ignores off on that path.
+#[test]
+fn the_onboarding_listing_keeps_out_what_the_owners_global_ignore_file_names_beside_a_repositorys_own()
+ {
+    for own in ["empty", "missing"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let (home, repo) = (root.join("home"), root.join("repo"));
+        for folder in [&home, &repo] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        git::OWNER_HOME.with(|owner| *owner.borrow_mut() = Some(home.clone()));
+        git_in(&home, &repo, &["init", "-q", "--template="]);
+        write(&home.join(".config/git/ignore"), "drafts.txt\n");
+        let local = root.join("repo-ignore");
+        if own == "empty" {
+            write(&local, "");
+        }
+        git_in(
+            &home,
+            &repo,
+            &["config", "core.excludesFile", local.to_str().unwrap()],
+        );
+        write(&repo.join("drafts.txt"), "DRAFTS_CANARY_145\n");
+        write(&repo.join("notes.txt"), "Plain notes\n");
+
+        listing_keeps_out_only(&repo, "drafts.txt");
+    }
+}
+
+/// RV-DS241-145: a change set keeps git's ignore precedence too: a file only the owner
+/// checkout's own `core.excludesFile` names stays out of it while the owner's global ignore
+/// file is present, as the owner's git would leave it unstaged.
+#[test]
+fn files_the_repositorys_own_excludes_file_names_stay_out_of_change_sets() {
+    let case = Case::new();
+    write(&case.home.join(".config/git/ignore"), "scratch.log\n");
+    let local = case.home.join("repo-ignore");
+    write(&local, "private.env\n");
+    case.owner(&["config", "core.excludesFile", local.to_str().unwrap()]);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.edit("private.env", "TOKEN=x\n");
+
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+
+    let view = case.view(&id);
+    assert_eq!(view.files, 1);
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &view.head]),
+        "README\n"
+    );
+    assert_eq!(case.agent(&["ls-files", "--", "private.env"]), "");
 }
 
 #[test]
@@ -14756,7 +15089,7 @@ fn an_owner_accept_through_accept_into_as_is_refused_by_assertion() {
 
 /// How long a landing race row runs: `CRAZYAGENT_LANDING_RACE_SECONDS` for a longer run at a
 /// red, else a few seconds. Output: the seconds.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn race_seconds() -> u64 {
     std::env::var("CRAZYAGENT_LANDING_RACE_SECONDS")
         .ok()
@@ -14766,7 +15099,7 @@ fn race_seconds() -> u64 {
 
 /// The engine's git on the case's agent worktree, confined for one step. Inputs: the case and
 /// what the step may write. Output: the repository.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn confined_agent(case: &Case, writes: git::Writes) -> git::Repo {
     git::Repo::open(
         &case.repo,
@@ -14780,7 +15113,7 @@ fn confined_agent(case: &Case, writes: git::Writes) -> git::Repo {
 
 /// SECAUDIT unconfined-git-add-reads-through-raced-symlink, with no timing: a step on the work
 /// tree cannot read a file behind a link, while a plain file in the work tree still reads.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_confined_git_step_cannot_read_a_file_behind_a_link() {
     let case = Case::new();
@@ -14803,7 +15136,7 @@ fn a_confined_git_step_cannot_read_a_file_behind_a_link() {
 /// only what it names. Neither step reaches the owner's hooks or anywhere outside, a step
 /// filling the work tree writes no git metadata, and a step adding the work tree writes
 /// nothing in it. What each may write still works.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_confined_git_step_writes_only_what_it_names_and_never_the_git_folder() {
     use super::git::Writes::{Objects, WorkTree};
@@ -14842,7 +15175,7 @@ fn a_confined_git_step_writes_only_what_it_names_and_never_the_git_folder() {
 
 /// SECAUDIT unconfined-git-add-reads-through-raced-symlink: a file an agent keeps swapping for
 /// a link while its turn ends leaves no blob of what the link points at.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_file_swapped_for_a_link_during_the_turn_end_leaves_no_blob_of_what_it_points_at() {
     use std::sync::Arc;
@@ -14901,7 +15234,7 @@ fn a_file_swapped_for_a_link_during_the_turn_end_leaves_no_blob_of_what_it_point
 /// One attempt of the read-tree race: a lead's worktree on its branch holding `x/keep.txt`
 /// from one landed set, and a waiting second set adding `x/planted.bin` with `known`.
 /// Input: the file's text. Output: the case, the lead and the waiting set.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn read_tree_attempt(known: &str) -> (Case, Workspace, ChangeSetId) {
     let case = Case::new();
     let agents = case
@@ -14950,7 +15283,7 @@ fn read_tree_attempt(known: &str) -> (Case, Workspace, ChangeSetId) {
 /// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree, with no timing: the step an
 /// Accept fills an agent's worktree through writes nothing outside that worktree, where the
 /// same step on the owner's checkout still can.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn an_accept_fills_an_agents_worktree_through_a_step_confined_to_it() {
     let (case, lead, _) = read_tree_attempt("known\n");
@@ -14993,7 +15326,7 @@ fn an_accept_fills_an_agents_worktree_through_a_step_confined_to_it() {
 /// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree: a folder of a lead's worktree
 /// swapped for a link while its worker's set lands writes nothing outside the worktree, and
 /// the same landing with no swap still fills the worktree under the confined step.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn a_folder_swapped_for_a_link_during_a_landing_writes_nothing_outside_the_worktree() {
     use std::sync::Arc;
@@ -15072,6 +15405,740 @@ fn a_folder_swapped_for_a_link_during_a_landing_writes_nothing_outside_the_workt
     }
     assert!(tried > 0);
     assert_eq!(hits, 0, "planted.bin was written outside the worktree");
+}
+
+/// The text a Linux reset race row writes, long enough that git's write of it spans many
+/// swaps of the folder above it. Output: the text.
+#[cfg(target_os = "linux")]
+fn reset_race_text() -> String {
+    (0..)
+        .map(|n: u32| format!("{n:08}\n"))
+        .take(466_034)
+        .collect()
+}
+
+/// One attempt of a Linux reset race: the case's master worktree on its lease holding
+/// `x/keep.txt` and, with `held`, `x/planted.bin` with `known`, and the owner commit a reset
+/// moves it onto, which adds `x/planted.bin` when `held` is false and drops it when true.
+/// Inputs: the file's text and whether the lease holds it. Output: the case, the master's
+/// workspace, the opened agent, the commit it holds and the reset's target.
+#[cfg(target_os = "linux")]
+fn reset_attempt(known: &str, held: bool) -> (Case, Workspace, flow::Agent, String, String) {
+    let case = Case::new();
+    case.owner_commit("x/keep.txt", "keep\n", "Keep");
+    if held {
+        case.owner_commit("x/planted.bin", known, "Plant");
+    }
+    let master = master_agent(&case);
+    let agent = flow::open_agent(
+        &case.db,
+        AgentKind::Master,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    let from = agent.head().unwrap();
+    let target = if held {
+        case.owner(&["rm", "-q", "x/planted.bin"]);
+        case.owner(&["commit", "-q", "-m", "Drop"]);
+        case.tip()
+    } else {
+        case.owner_commit("x/planted.bin", known, "Plant")
+    };
+    (case, master, agent, from, target)
+}
+
+/// Swaps `x` in a worktree for a link to `outside` and back, over and over on a thread from
+/// when `go` is set until `done` is, as an agent racing an engine git step would. Inputs:
+/// the worktree and the link's target. Output: the go and done flags and the thread.
+#[cfg(target_os = "linux")]
+fn swap_x(
+    worktree: &Path,
+    outside: &Path,
+) -> (
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let go = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let x = worktree.join("x");
+    let aside = worktree.join("x.aside");
+    let target = outside.to_path_buf();
+    let swapper = std::thread::spawn({
+        let (go, done) = (go.clone(), done.clone());
+        move || {
+            while !go.load(Ordering::Relaxed) {
+                if done.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::yield_now();
+            }
+            while !done.load(Ordering::Relaxed) {
+                let _ = std::fs::rename(&x, &aside);
+                let _ = std::os::unix::fs::symlink(&target, &x);
+                let _ = std::fs::remove_file(&x);
+                let _ = std::fs::rename(&aside, &x);
+            }
+        }
+    });
+    (go, done, swapper)
+}
+
+/// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree on Linux, the reset an owner
+/// Accept, Update or Restore and the startup reconcile run (`flow::reset_agent`): a folder of
+/// the master's worktree swapped for a link while the reset fills it writes nothing outside
+/// the worktree, and the same reset with no swap still fills the worktree under the
+/// confined step.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_folder_swapped_for_a_link_during_a_reset_writes_nothing_outside_the_worktree() {
+    use std::sync::atomic::Ordering;
+    let known = reset_race_text();
+    let (_case, master, agent, from, target) = reset_attempt(&known, false);
+    assert!(flow::reset_agent(&agent, &from, &target).unwrap());
+    assert!(
+        master.worktree.join("x/planted.bin").is_file(),
+        "the reset with no swap did not fill the worktree"
+    );
+    let deadline = Instant::now() + Duration::from_secs(race_seconds());
+    let (mut tried, mut hits) = (0u32, 0u32);
+    while tried < 100 && Instant::now() < deadline {
+        let (_case, master, agent, from, target) = reset_attempt(&known, false);
+        let outside = tempfile::tempdir().unwrap();
+        let (go, done, swapper) = swap_x(&master.worktree, outside.path());
+        plant(&flow::BEFORE_READ_TREE, &master.git_dir, move || {
+            go.store(true, Ordering::Relaxed);
+        });
+        let _ = flow::reset_agent(&agent, &from, &target);
+        flow::BEFORE_READ_TREE
+            .lock()
+            .unwrap()
+            .retain(|(planted, _)| planted != &master.git_dir);
+        done.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        tried += 1;
+        if std::fs::read(outside.path().join("planted.bin"))
+            .is_ok_and(|bytes| bytes == known.as_bytes())
+        {
+            hits += 1;
+        }
+    }
+    assert!(tried > 0);
+    assert_eq!(hits, 0, "planted.bin was written outside the worktree");
+}
+
+/// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree on Linux, the read-tree a
+/// reset that did not hold puts the files back with (`flow::files_back`): the agent switches
+/// its branch inside the reset, so the engine writes `x/planted.bin` back, and a folder
+/// swapped for a link meanwhile writes nothing outside the worktree. With no swap the file
+/// comes back and the worktree is clean.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_folder_swapped_for_a_link_while_a_reset_puts_files_back_writes_nothing_outside() {
+    use std::sync::atomic::Ordering;
+    let known = reset_race_text();
+    let switched = |case: &Case, master: &Workspace| {
+        let (home, worktree) = (case.home.clone(), master.worktree.clone());
+        plant(&flow::AFTER_READ_TREE, &master.git_dir, move || {
+            git_in(&home, &worktree, &["switch", "-q", "-c", "side"]);
+        })
+    };
+    let (case, master, agent, from, target) = reset_attempt(&known, true);
+    let runs = switched(&case, &master);
+    assert!(!flow::reset_agent(&agent, &from, &target).unwrap());
+    assert_eq!(unplant_from(&master.git_dir, &runs), 1);
+    assert!(
+        std::fs::read(master.worktree.join("x/planted.bin"))
+            .is_ok_and(|bytes| bytes == known.as_bytes()),
+        "the files did not come back with no swap"
+    );
+    assert_eq!(
+        git_in(&case.home, &master.worktree, &["status", "--porcelain"]),
+        ""
+    );
+    let deadline = Instant::now() + Duration::from_secs(race_seconds());
+    let (mut tried, mut hits) = (0u32, 0u32);
+    while tried < 100 && Instant::now() < deadline {
+        let (case, master, agent, from, target) = reset_attempt(&known, true);
+        let outside = tempfile::tempdir().unwrap();
+        let (go, done, swapper) = swap_x(&master.worktree, outside.path());
+        let runs = switched(&case, &master);
+        plant(&flow::AFTER_READ_TREE, &master.git_dir, move || {
+            go.store(true, Ordering::Relaxed);
+        });
+        let _ = flow::reset_agent(&agent, &from, &target);
+        unplant_from(&master.git_dir, &runs);
+        done.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        tried += 1;
+        if std::fs::read(outside.path().join("planted.bin"))
+            .is_ok_and(|bytes| bytes == known.as_bytes())
+        {
+            hits += 1;
+        }
+    }
+    assert!(tried > 0);
+    assert_eq!(hits, 0, "planted.bin was written outside the worktree");
+}
+
+/// On a Linux that cannot hold the Landlock file rules, here with no helper, every landing
+/// git step on an agent's worktree refuses with `changes_git_unsupported` before git runs and
+/// never runs unconfined: both confined steps, the turn end's git add and a reset's
+/// read-tree, which leaves the master's worktree where it was.
+#[cfg(target_os = "linux")]
+#[test]
+fn without_landlock_every_landing_git_step_on_an_agent_worktree_refuses() {
+    let case = Case::new();
+    git::LANDLOCK_HELPER.with(|helper| {
+        *helper.borrow_mut() = Some(PathBuf::from("/nonexistent/crazyagent-landlock"));
+    });
+    let repo = git::Repo::open(
+        &case.repo,
+        &case.workspace.git_dir,
+        Some(&case.workspace.worktree),
+    )
+    .unwrap();
+    for writes in [git::Writes::Objects, git::Writes::WorkTree] {
+        assert_eq!(
+            repo.confined(writes).err().map(|error| error.0).as_deref(),
+            Some("changes_git_unsupported")
+        );
+    }
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    assert_eq!(
+        turn_outcome(&case, &case.workspace),
+        "changes_git_unsupported"
+    );
+    let master = master_agent(&case);
+    let agent = flow::open_agent(
+        &case.db,
+        AgentKind::Master,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    let from = agent.head().unwrap();
+    let target = case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    assert_eq!(
+        refused(flow::reset_agent(&agent, &from, &target)),
+        "changes_git_unsupported"
+    );
+    assert_eq!(agent.head().unwrap(), from);
+    git::LANDLOCK_HELPER.with(|helper| *helper.borrow_mut() = None);
+}
+
+/// On Linux the engine takes the worktree's `index.lock` for a confined step, so a step that
+/// finds it held answers as git would, exit 128 with the lock and the index left as they
+/// were, and a reset reports it did not hold instead of failing; a step that only reads
+/// leaves the index file in place and the lock free.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_step_on_linux_meets_a_held_index_lock_as_git_does() {
+    let case = Case::new();
+    let repo = confined_agent(&case, git::Writes::WorkTree);
+    let index = case.workspace.git_dir.join("index");
+    let lock = case.workspace.git_dir.join("index.lock");
+    let before = std::fs::read(&index).unwrap();
+    write(&lock, "held\n");
+    let held = repo
+        .exec(&["read-tree", "-u", "-m", "HEAD", "HEAD"], None, &[], 4096)
+        .unwrap();
+    assert_eq!(held.code, 128);
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), "held\n");
+    assert_eq!(std::fs::read(&index).unwrap(), before);
+    std::fs::remove_file(&lock).unwrap();
+    let placed = std::fs::metadata(&index).unwrap().ino();
+    let read = repo
+        .exec(
+            &["diff-index", "--quiet", "--cached", "HEAD"],
+            None,
+            &[],
+            4096,
+        )
+        .unwrap();
+    assert_eq!(read.code, 0);
+    assert_eq!(std::fs::metadata(&index).unwrap().ino(), placed);
+    assert!(!lock.exists());
+}
+
+/// One plant of [`index_plants`]: its name and how to make it at a path.
+#[cfg(target_os = "linux")]
+type Plant = (&'static str, Box<dyn Fn(&Path)>);
+
+/// What an agent could leave where a confined Linux step keeps its copy of the index, or
+/// where the engine reads the index: a link to a file outside, a link to an endless device, a
+/// FIFO, a second hard link of a file outside and a folder with a file in it. Input: the file
+/// outside. Output: each plant's name and how to make it at a path.
+#[cfg(target_os = "linux")]
+fn index_plants(outside: &Path) -> Vec<Plant> {
+    let mut plants: Vec<Plant> = Vec::new();
+    let linked = outside.to_path_buf();
+    plants.push((
+        "a link to a file outside",
+        Box::new(move |path: &Path| std::os::unix::fs::symlink(&linked, path).unwrap()),
+    ));
+    plants.push((
+        "a link to an endless device",
+        Box::new(|path: &Path| std::os::unix::fs::symlink("/dev/zero", path).unwrap()),
+    ));
+    plants.push((
+        "a FIFO",
+        Box::new(|path: &Path| {
+            let made = crate::spawn_gate::status(
+                Command::new("/usr/bin/mkfifo")
+                    .arg(path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .unwrap();
+            assert!(made.success());
+        }),
+    ));
+    let hard = outside.to_path_buf();
+    plants.push((
+        "a second hard link of a file outside",
+        Box::new(move |path: &Path| std::fs::hard_link(&hard, path).unwrap()),
+    ));
+    plants.push((
+        "a folder with a file in it",
+        Box::new(|path: &Path| {
+            std::fs::create_dir(path).unwrap();
+            write(&path.join("index"), "planted\n");
+        }),
+    ));
+    assert_eq!(plants.len(), 5);
+    plants
+}
+
+/// LINUX-GIT-CONFINE r1 F1: a link, FIFO, second hard link or folder that a raced work-tree
+/// step leaves as its copy of the index is never taken as the worktree's index. The step
+/// refuses with `changes_git_failed`; the index, its lock and the file outside stay as they
+/// were, the step folder keeps nothing, and the next step runs.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_step_on_linux_never_takes_a_link_or_a_special_file_as_the_index() {
+    let case = Case::new();
+    let outside = case.home.join("outside");
+    write(&outside, "owner secret\n");
+    let index = case.workspace.git_dir.join("index");
+    let lock = case.workspace.git_dir.join("index.lock");
+    let copy = case.workspace.git_dir.join("crazyagent-step").join("index");
+    let before = std::fs::read(&index).unwrap();
+    let placed = std::fs::symlink_metadata(&index).unwrap().ino();
+    for (name, plant) in index_plants(&outside) {
+        let repo = confined_agent(&case, git::Writes::WorkTree);
+        let left = repo.swapped(|| {
+            std::fs::remove_file(&copy).unwrap();
+            plant(&copy);
+            Ok(git::Output {
+                code: 0,
+                stdout: Vec::new(),
+                overflow: false,
+            })
+        });
+        assert_eq!(
+            left.err().map(|error| error.0).as_deref(),
+            Some("changes_git_failed"),
+            "{name}"
+        );
+        assert_eq!(std::fs::read(&index).unwrap(), before, "{name}");
+        assert_eq!(
+            std::fs::symlink_metadata(&index).unwrap().ino(),
+            placed,
+            "{name}"
+        );
+        assert!(std::fs::symlink_metadata(&lock).is_err(), "{name}");
+        assert!(std::fs::symlink_metadata(&copy).is_err(), "{name}");
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "owner secret\n",
+            "{name}"
+        );
+        assert_eq!(std::fs::metadata(&outside).unwrap().nlink(), 1, "{name}");
+        let next = repo
+            .exec(
+                &["diff-index", "--quiet", "--cached", "HEAD"],
+                None,
+                &[],
+                4096,
+            )
+            .unwrap();
+        assert_eq!(next.code, 0, "{name}: the next step did not run");
+    }
+}
+
+/// LINUX-GIT-CONFINE r1 F2 (rv-code), RV-DS241-135: an engine stopped during a confined Linux
+/// step leaves its `index.lock`, naming that engine process by id and start, beside the step
+/// folder in the agent worktree's git folder. The sweep the engine runs once at start removes
+/// that lock once no running process is the one it names, gone or its id now another
+/// process's, so the agent's steps run again, and keeps a lock another git took.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_engine_start_clears_the_index_lock_a_stopped_confined_step_left() {
+    let case = Case::new();
+    let master = master_agent(&case);
+    let left = master.git_dir.join("index.lock");
+    let kept = case.workspace.git_dir.join("index.lock");
+    write(&kept, "owner git\n");
+    let repo = git::Repo::open(&master.repository, &master.git_dir, Some(&master.worktree))
+        .unwrap()
+        .confined(git::Writes::WorkTree)
+        .unwrap();
+    let diff = || {
+        repo.exec(
+            &["diff-index", "--quiet", "--cached", "HEAD"],
+            None,
+            &[],
+            4096,
+        )
+        .unwrap()
+        .code
+    };
+    let reused = std::process::id();
+    for (pid, started) in [(i32::MAX.unsigned_abs(), "1"), (reused, "0")] {
+        std::fs::create_dir_all(master.git_dir.join("crazyagent-step")).unwrap();
+        write(&left, &format!("crazyagent-step {pid} {started}\n"));
+        assert_eq!(diff(), 128, "the left lock holds the master's steps");
+        assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 1);
+        assert!(std::fs::symlink_metadata(&left).is_err());
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "owner git\n");
+        assert_eq!(diff(), 0, "the master's steps run again");
+    }
+    assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 0);
+}
+
+/// RV-DS241-135: a confined Linux step that finds the worktree's `index.lock` held answers
+/// exit 128 and leaves no empty step folder of its own beside that lock, and leaves a step
+/// folder holding another step's copy of the index to that step.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_step_on_linux_that_meets_a_held_lock_leaves_no_step_folder() {
+    let case = Case::new();
+    let repo = confined_agent(&case, git::Writes::WorkTree);
+    let step = case.workspace.git_dir.join("crazyagent-step");
+    let lock = case.workspace.git_dir.join("index.lock");
+    let diff = || {
+        repo.exec(
+            &["diff-index", "--quiet", "--cached", "HEAD"],
+            None,
+            &[],
+            4096,
+        )
+        .unwrap()
+        .code
+    };
+    assert!(step.is_dir(), "confining makes the step folder");
+    write(&lock, "");
+    assert_eq!(diff(), 128);
+    assert!(
+        std::fs::symlink_metadata(&step).is_err(),
+        "the step folder stayed beside a lock the engine did not take"
+    );
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), "");
+    std::fs::create_dir(&step).unwrap();
+    write(&step.join("index"), "another step's copy\n");
+    assert_eq!(diff(), 128);
+    assert_eq!(
+        std::fs::read_to_string(step.join("index")).unwrap(),
+        "another step's copy\n"
+    );
+}
+
+/// RV-DS241-135: the start sweep never removes an `index.lock` another git took beside a step
+/// folder an earlier engine left, whether that git has just made it or written its index
+/// there, nor one an engine still running took; each lock stays as it was.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_engine_start_keeps_a_foreign_index_lock_beside_a_left_step_folder() {
+    let case = Case::new();
+    let master = master_agent(&case);
+    let lock = master.git_dir.join("index.lock");
+    std::fs::create_dir(master.git_dir.join("crazyagent-step")).unwrap();
+    let index = std::fs::read(master.git_dir.join("index")).unwrap();
+    let pid = i32::try_from(std::process::id()).unwrap();
+    let running = crate::storage::harness_groups::start_identity(pid)
+        .unwrap()
+        .unwrap();
+    let engine = format!("crazyagent-step {pid} {running}\n").into_bytes();
+    for held in [Vec::new(), b"owner git\n".to_vec(), index, engine] {
+        std::fs::write(&lock, &held).unwrap();
+        assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 0);
+        assert_eq!(std::fs::read(&lock).unwrap(), held);
+    }
+}
+
+/// RV-DS241-147: an entry that is racy against the worktree's index, its file rewritten at
+/// the same size in the index's own second, stays racy in a confined Linux step's copy, so
+/// git still reads the file: `read-tree -u -m` refuses to write over the agent's edit and
+/// `add -A` stages it. `core.checkStat=minimal` and set times keep the second fixed.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_step_on_linux_keeps_a_racy_entry_racy_in_its_index_copy() {
+    let case = Case::new();
+    let worktree = case.workspace.worktree.clone();
+    let readme = worktree.join("README");
+    let index = case.workspace.git_dir.join("index");
+    let then = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let stamp = |path: &Path| {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(then))
+            .unwrap();
+    };
+    git_in(&case.home, &case.repo, &["config", "core.checkStat", "minimal"]);
+    write(&case.repo.join("README"), "uno\ndos\ntres\n");
+    git_in(&case.home, &case.repo, &["commit", "-q", "-am", "Target"]);
+    let target = git_in(&case.home, &case.repo, &["rev-parse", "HEAD"]);
+    stamp(&readme);
+    git_in(&case.home, &worktree, &["update-index", "--refresh"]);
+    let edit = "ONE\nTWO\nTHREE\n";
+    assert_eq!(std::fs::read(&readme).unwrap().len(), edit.len(), "the same size");
+    write(&readme, edit);
+    stamp(&readme);
+    stamp(&index);
+    assert_eq!(
+        git_in(&case.home, &worktree, &["diff-files", "--name-only"]),
+        "README\n",
+        "the real index sees the racy edit"
+    );
+    let moved = confined_agent(&case, git::Writes::WorkTree)
+        .exec(&["read-tree", "-u", "-m", "HEAD", target.trim()], None, &[], 4096)
+        .unwrap();
+    assert_ne!(moved.code, 0, "read-tree wrote over the agent's edit");
+    assert_eq!(std::fs::read_to_string(&readme).unwrap(), edit);
+    let added = confined_agent(&case, git::Writes::Objects)
+        .exec(&["add", "-A"], None, &[], 4096)
+        .unwrap();
+    assert_eq!(added.code, 0);
+    assert_eq!(
+        git_in(&case.home, &worktree, &["rev-parse", ":README"]),
+        git_in(&case.home, &worktree, &["hash-object", "README"]),
+        "add -A staged the agent's edit"
+    );
+}
+
+/// RV-DS241-142: a confined Linux step that takes the worktree's lock while its step folder
+/// holds a git `index.lock`, as a git an earlier engine started can still hold there, answers
+/// exit 128 and leaves that folder, the lock in it and the worktree's index as they were, so
+/// it never races that git; once that lock is gone the step runs again.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_step_on_linux_never_runs_while_its_step_folder_holds_a_git_lock() {
+    let case = Case::new();
+    let repo = confined_agent(&case, git::Writes::WorkTree);
+    let step = case.workspace.git_dir.join("crazyagent-step");
+    let lock = case.workspace.git_dir.join("index.lock");
+    let held = step.join("index.lock");
+    let index = std::fs::read(case.workspace.git_dir.join("index")).unwrap();
+    let diff = || {
+        repo.exec(
+            &["diff-index", "--quiet", "--cached", "HEAD"],
+            None,
+            &[],
+            4096,
+        )
+        .unwrap()
+        .code
+    };
+    assert!(step.is_dir(), "confining makes the step folder");
+    write(&held, "orphan git\n");
+    assert_eq!(diff(), 128, "the step waits for the git that holds its folder");
+    assert_eq!(std::fs::read_to_string(&held).unwrap(), "orphan git\n");
+    assert!(
+        std::fs::symlink_metadata(&lock).is_err(),
+        "the step let go of the worktree's lock"
+    );
+    assert_eq!(
+        std::fs::read(case.workspace.git_dir.join("index")).unwrap(),
+        index
+    );
+    std::fs::remove_file(&held).unwrap();
+    assert_ne!(diff(), 128, "the step runs once that lock is gone");
+}
+
+/// RV-DS241-142: the start sweep that removes the `index.lock` of a confined Linux step whose
+/// engine is gone also removes that step's folder, where its git, killed with that engine,
+/// left its own `index.lock` and copy, so the next step runs instead of waiting on a git that
+/// no longer exists. A lock the sweep keeps keeps its step folder too.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_engine_start_removes_the_step_folder_of_a_gone_engine_step() {
+    let case = Case::new();
+    let master = master_agent(&case);
+    let lock = master.git_dir.join("index.lock");
+    let step = master.git_dir.join("crazyagent-step");
+    let repo = git::Repo::open(&master.repository, &master.git_dir, Some(&master.worktree))
+        .unwrap()
+        .confined(git::Writes::WorkTree)
+        .unwrap();
+    write(&lock, "owner git\n");
+    write(&step.join("index.lock"), "killed git\n");
+    assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 0);
+    assert_eq!(
+        std::fs::read_to_string(step.join("index.lock")).unwrap(),
+        "killed git\n",
+        "a kept lock keeps its step folder"
+    );
+    write(&lock, &format!("crazyagent-step {} 1\n", i32::MAX));
+    write(&step.join("index"), "copy\n");
+    assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 1);
+    assert!(std::fs::symlink_metadata(&lock).is_err());
+    assert!(
+        std::fs::symlink_metadata(&step).is_err(),
+        "the gone step's folder went with its lock"
+    );
+    let ran = repo
+        .exec(
+            &["diff-index", "--quiet", "--cached", "HEAD"],
+            None,
+            &[],
+            4096,
+        )
+        .unwrap();
+    assert_eq!(ran.code, 0, "the master's steps run again");
+}
+
+/// RV-DS241-142 r2 (rv-code4 F1): an engine that cannot name itself takes the worktree's
+/// `index.lock` empty, so the start sweep keeps it and the owner removes it by hand. The git
+/// killed with that engine left its own `index.lock` in the step folder; the next start
+/// removes a step folder whose worktree holds no `index.lock`, so the steps run again.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_engine_start_removes_a_step_folder_left_beside_no_worktree_lock() {
+    let case = Case::new();
+    let master = master_agent(&case);
+    let lock = master.git_dir.join("index.lock");
+    let step = master.git_dir.join("crazyagent-step");
+    let repo = git::Repo::open(&master.repository, &master.git_dir, Some(&master.worktree))
+        .unwrap()
+        .confined(git::Writes::WorkTree)
+        .unwrap();
+    write(&lock, "");
+    write(&step.join("index.lock"), "killed git
+");
+    assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 0);
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), "");
+    assert_eq!(
+        std::fs::read_to_string(step.join("index.lock")).unwrap(),
+        "killed git
+",
+        "a kept worktree lock keeps its step folder"
+    );
+    std::fs::remove_file(&lock).unwrap();
+    assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 0);
+    assert!(
+        std::fs::symlink_metadata(&step).is_err(),
+        "the step folder beside no worktree lock went"
+    );
+    let ran = repo
+        .exec(
+            &["diff-index", "--quiet", "--cached", "HEAD"],
+            None,
+            &[],
+            4096,
+        )
+        .unwrap();
+    assert_eq!(ran.code, 0, "the master's steps run again");
+}
+
+/// RV-DS241-135 r2 (rv-code4 F1): while a confined Linux step runs, the `index.lock` it took
+/// holds `crazyagent-step <pid> <start>` for this engine process. The start sweep reads that
+/// very text as the engine's: kept while this engine runs, swept once the process it names
+/// is gone.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_step_on_linux_names_its_engine_process_in_the_lock_it_takes() {
+    let case = Case::new();
+    let _master = master_agent(&case);
+    let repo = confined_agent(&case, git::Writes::WorkTree);
+    let lock = case.workspace.git_dir.join("index.lock");
+    let pid = i32::try_from(std::process::id()).unwrap();
+    let started = crate::storage::harness_groups::start_identity(pid)
+        .unwrap()
+        .unwrap();
+    let mut seen = String::new();
+    repo.swapped(|| {
+        seen = std::fs::read_to_string(&lock).unwrap();
+        Ok(git::Output {
+            code: 0,
+            stdout: Vec::new(),
+            overflow: false,
+        })
+    })
+    .unwrap();
+    assert_eq!(seen, format!("crazyagent-step {pid} {started}\n"));
+    assert!(
+        std::fs::symlink_metadata(&lock).is_err(),
+        "the step left its lock"
+    );
+    write(&lock, &seen);
+    assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 0);
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), seen);
+    let gone = seen.replacen(&format!(" {pid} "), &format!(" {} ", i32::MAX), 1);
+    assert_ne!(gone, seen);
+    write(&lock, &gone);
+    assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 1);
+    assert!(std::fs::symlink_metadata(&lock).is_err());
+}
+
+/// The other half of LINUX-GIT-CONFINE r1 F1: an index that already is a link, FIFO, second
+/// hard link or folder is never read or copied by a confined Linux step. The step refuses
+/// with `changes_git_failed` before git runs, at once even for a FIFO, and nothing from
+/// outside reaches the step folder.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_step_on_linux_never_copies_an_index_that_is_a_link_or_a_special_file() {
+    let case = Case::new();
+    let outside = case.home.join("outside");
+    write(&outside, "owner secret\n");
+    let index = case.workspace.git_dir.join("index");
+    let lock = case.workspace.git_dir.join("index.lock");
+    let copy = case.workspace.git_dir.join("crazyagent-step").join("index");
+    let before = std::fs::read(&index).unwrap();
+    let repo = confined_agent(&case, git::Writes::WorkTree);
+    let gone = |path: &Path| {
+        if std::fs::symlink_metadata(path).unwrap().is_dir() {
+            std::fs::remove_dir_all(path).unwrap();
+        } else {
+            std::fs::remove_file(path).unwrap();
+        }
+    };
+    for (name, plant) in index_plants(&outside) {
+        gone(&index);
+        plant(&index);
+        let ran = std::cell::Cell::new(false);
+        let refused = repo.swapped(|| {
+            ran.set(true);
+            Ok(git::Output {
+                code: 0,
+                stdout: Vec::new(),
+                overflow: false,
+            })
+        });
+        assert_eq!(
+            refused.err().map(|error| error.0).as_deref(),
+            Some("changes_git_failed"),
+            "{name}"
+        );
+        assert!(!ran.get(), "{name}: the step ran on a copy of it");
+        assert!(std::fs::symlink_metadata(&copy).is_err(), "{name}");
+        assert!(std::fs::symlink_metadata(&lock).is_err(), "{name}");
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "owner secret\n",
+            "{name}"
+        );
+        gone(&index);
+        std::fs::write(&index, &before).unwrap();
+    }
 }
 
 /// An owner repository whose config names a thousand stale branches lists more keys than

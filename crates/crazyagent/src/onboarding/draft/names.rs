@@ -4,9 +4,10 @@
 /// service-account JSON, `.dockercfg` or `.s3cfg`, and GnuPG keyrings, kept even when
 /// renamed `.txt`. The mapping prompt goes to the project's model provider, and a document
 /// is chosen by its name alone before any text is read, so a name with one of these words,
-/// or two adjacent words joining into one, is neither read nor listed. A few documents with
+/// or two adjacent words joining into one, is neither read nor listed, and so is a word that
+/// joins them with no break at all, such as `apitoken` (RV-DS241-146). A few documents with
 /// such names, such as `key-metrics.md`, are left out with them.
-const SECRET_WORDS: [&str; 41] = [
+const SECRET_WORDS: [&str; 51] = [
     "secret",
     "secrets",
     "credential",
@@ -18,6 +19,16 @@ const SECRET_WORDS: [&str; 41] = [
     "tokens",
     "apikey",
     "apikeys",
+    "apitoken",
+    "apitokens",
+    "authtoken",
+    "authtokens",
+    "accesstoken",
+    "accesstokens",
+    "accesskey",
+    "accesskeys",
+    "secretkey",
+    "secretkeys",
     "privatekey",
     "pem",
     "key",
@@ -59,25 +70,62 @@ const EXTENSION_BYTES_MAX: usize = 8;
 
 /// Whether the file or folder `name` looks like it holds a secret: one of its words, split
 /// at every character that is not an ASCII letter or digit, or two adjacent words joined,
-/// is in [`SECRET_WORDS`], ignoring case. Takes the full name, extensions included.
+/// is in [`SECRET_WORDS`], ignoring case; and so for the parts of those words
+/// ([`sub_words`]), so `awsCredentials`, `myApiKey` and `passwords2` are found while the
+/// unsplit `p12`, `s3cfg` and `id_ed25519` still match (RV-DS241-146). A secret word
+/// inside one unbroken word, as `key` in `keyboard`, is not one. Takes the full name,
+/// extensions included.
 pub(crate) fn secret_like(name: &str) -> bool {
     let words: Vec<&str> = name
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|word| !word.is_empty())
         .collect();
+    let parts: Vec<&str> = words.iter().copied().flat_map(sub_words).collect();
+    assert!(parts.len() >= words.len());
     let secret = |word: &str| {
         SECRET_WORDS
             .iter()
             .any(|known| known.eq_ignore_ascii_case(word))
     };
-    words.iter().any(|word| secret(word))
-        || words
-            .windows(2)
-            .any(|pair| secret(&format!("{}{}", pair[0], pair[1])))
+    let found = |list: &[&str]| {
+        list.iter().any(|word| secret(word))
+            || list
+                .windows(2)
+                .any(|pair| secret(&format!("{}{}", pair[0], pair[1])))
+    };
+    found(words.as_slice()) || found(parts.as_slice())
+}
+
+/// The parts of `word`, ASCII letters and digits only, split before an upper-case letter
+/// that follows a lower-case one or that ends an upper-case run before a lower-case letter
+/// (`myAPIKey` gives `my`, `API`, `Key`), and wherever letters and digits meet
+/// (`passwords2` gives `passwords` and `2`). Takes the word. Returns its parts in order,
+/// the word alone when it has no such break.
+fn sub_words(word: &str) -> Vec<&str> {
+    assert!(word.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+    let bytes = word.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for at in 1..bytes.len() {
+        let (before, here) = (bytes[at - 1], bytes[at]);
+        let lower_next = bytes.get(at + 1).is_some_and(u8::is_ascii_lowercase);
+        let split = (before.is_ascii_lowercase() && here.is_ascii_uppercase())
+            || (before.is_ascii_uppercase() && here.is_ascii_uppercase() && lower_next)
+            || before.is_ascii_alphabetic() != here.is_ascii_alphabetic();
+        if split {
+            parts.push(&word[start..at]);
+            start = at;
+        }
+    }
+    parts.push(&word[start..]);
+    assert!(parts.iter().all(|part| !part.is_empty()));
+    assert_eq!(parts.concat(), word);
+    parts
 }
 
 /// File extensions of programming source. A source file is not kept out of the code graph
 /// by a secret word in its name alone (DEC-132 Q12), as graphify's own detection rule does.
+#[cfg(unix)]
 const SOURCE_EXTENSIONS: &[&str] = &[
     "c", "cc", "cjs", "cpp", "cs", "css", "go", "h", "hpp", "java", "js", "jsx", "kt", "kts",
     "less", "mjs", "php", "py", "rb", "rs", "sass", "scala", "scss", "svelte", "swift", "ts",
@@ -87,6 +135,7 @@ const SOURCE_EXTENSIONS: &[&str] = &[
 /// Whether `name`, one file name, ends in a programming-source extension, matched exactly.
 /// Takes the name. Returns true for `tokens.ts`, false for `tokens.json`, `.env` and a name
 /// with no extension.
+#[cfg(unix)]
 pub(super) fn source_file(name: &str) -> bool {
     assert!(!name.contains('/'), "a file name, not a path");
     assert!(SOURCE_EXTENSIONS.windows(2).all(|pair| pair[0] < pair[1]));
@@ -130,4 +179,44 @@ pub(crate) fn without_secret_paths(text: &str) -> String {
     text.split_inclusive('\n')
         .filter(|line| !names_secret(line))
         .collect()
+}
+
+/// The project's `hidden` folders as paths below `repo`, with `/` between names, for the
+/// mapping to leave out. Takes the folder and the hidden folders. Returns the paths, or
+/// `None` when one is not below the folder or not UTF-8, so nothing is cleared.
+pub(crate) fn below_root(
+    repo: &std::path::Path,
+    hidden: &[std::path::PathBuf],
+) -> Option<Vec<String>> {
+    let root = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    hidden
+        .iter()
+        .map(|folder| {
+            let below = folder
+                .strip_prefix(&root)
+                .or_else(|_| folder.strip_prefix(repo))
+                .ok()?;
+            let text = below.to_str()?;
+            (!text.is_empty()).then(|| text.to_owned())
+        })
+        .collect()
+}
+
+/// Whether `path`, below the project folder and with an optional closing `/`, is one of the
+/// `hidden` folders or lies inside one. Takes the path and the folders. Returns the answer.
+pub(super) fn under(path: &str, hidden: &[String]) -> bool {
+    let path = path.trim_end_matches('/');
+    hidden.iter().any(|folder| {
+        path.strip_prefix(folder.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
+}
+
+/// Whether the evidence sent to a model provider may name `path`, below the project folder,
+/// by the onboarding documents' own skip rules: not when any name in it looks like it holds
+/// a secret ([`secret_like`], a bare name such as `id_rsa` at the root included) nor when it
+/// is or lies in one of the `hidden` folders, given below the project folder
+/// ([`below_root`]). Takes the path and the folders. Returns the answer.
+pub(crate) fn offered(path: &str, hidden: &[String]) -> bool {
+    !secret_like(path) && !under(path, hidden)
 }

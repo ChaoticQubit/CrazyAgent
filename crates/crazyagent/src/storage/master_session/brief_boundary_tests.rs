@@ -207,6 +207,30 @@ async fn a_saved_owner_profile_prefaces_every_master_prompt() {
     assert_eq!(briefed.unwrap(), format!("{preface}\n\nBuild a CLI.\n\n{message}"));
 }
 
+/// RV-DS241-134: a stored owner name made only of hidden characters, which the load-time
+/// cleaning leaves blank, counts as no profile, so the master prompt still builds, without
+/// a preface, instead of every master turn being refused.
+#[tokio::test]
+async fn a_stored_owner_name_of_only_hidden_characters_still_lets_the_master_prompt_build() {
+    let mut case = Fixture::new(false).await;
+    let message = "What next?";
+    queue(&mut case, message).await;
+    let writer = Connection::open(&case.path).unwrap();
+    writer
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO user_profile(singleton, body) VALUES(1, ?1)",
+            [r#"{"name":"\u200b\u2060"}"#],
+        )
+        .unwrap();
+    drop(writer);
+    let actual = assembled(&case);
+    case.close().await;
+    assert_eq!(actual.unwrap(), message);
+}
+
 #[tokio::test]
 async fn latest_project_brief_uses_exact_two_lf() {
     let mut case = Fixture::new(false).await;

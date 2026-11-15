@@ -594,7 +594,7 @@ async function main() {
       await step("3", "answer once in the Questions view: the master gets the answer once and a second answer is stale", ["QL-1", "QL-2"], async () => {
         const id = needs(state.asked.view, "1");
         const view = onPage();
-        await view.follow(".qs-card .qs-option input[type=radio]");
+        await view.follow(".qs-list .qs-card .qs-option input[type=radio]");
         await view.click("Answer");
         await view.waitFor("the answered note", (text) => text.includes("Answered. The agent that asked gets your answer once."), VIEW_MS);
         await view.capture("questions-answered");

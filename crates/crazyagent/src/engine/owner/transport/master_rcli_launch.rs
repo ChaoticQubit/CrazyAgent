@@ -986,6 +986,7 @@ printf '%s' "$ack"
             frames: prepared.frames,
             model: prepared.model.clone(),
             model_provider: prepared.model_provider.clone(),
+            provider_retry: prepared.provider_retry,
         }
     }
 

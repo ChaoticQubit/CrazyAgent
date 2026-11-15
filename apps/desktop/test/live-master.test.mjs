@@ -226,6 +226,16 @@ test("the wait for the master's terminal is bounded: overdue a minute after the 
   assert.equal(live.runningState(missing, node, 9, true), missing);
 });
 
+test("a master still starting says Starting and opens no terminal until its pane runs, then attaches, its minute counted from the first read with no terminal (DEC-161 3b, owner 11-12)", () => {
+  const node = { id: "m", kind: "master", parent: null, label: "m", harness: "claude-code", status: "starting", status_label: "Starting", account: null, terminal: null };
+  assert.deepEqual(live.runningState({ kind: "starting" }, node, 5, false), { kind: "starting", since: 5 });
+  assert.deepEqual(live.runningState({ kind: "running", node: null, since: 5 }, node, 9, false), { kind: "starting", since: 5 }, "a master taken over after an engine restart waits as starting and keeps the clock");
+  assert.equal(live.liveWord({ kind: "starting", since: 5 }).word, "Starting");
+  const ready = { ...node, status: "idle", status_label: "Idle", terminal: "team-1" };
+  assert.deepEqual(live.runningState({ kind: "starting", since: 5 }, ready, 12, false), { kind: "running", node: ready, since: 5 }, "the pane runs: the terminal opens and the same minute goes on");
+  assert.deepEqual(live.runningState({ kind: "starting", since: 5 }, ready, 12, true), { kind: "running", node: ready, since: null });
+});
+
 test("the wait for the master's terminal ends only when it opens: a listed terminal keeps the clock until its first frame and one that closes with the switch on starts it again, as the TUI (rv-code V240-MASTER-UI N1, DEC-141)", () => {
   const node = { id: "m", kind: "master", parent: null, label: "m", harness: "codex", status: null, status_label: null, account: null, terminal: "team-1" };
   assert.deepEqual(live.runningState({ kind: "running", node: null, since: 5 }, node, 9, false), { kind: "running", node, since: 5 }, "listed with no first frame: the clock runs on");
@@ -799,4 +809,28 @@ test("the master area shows the time left under Master run time and the rounds o
   assert.equal(live.timeLeftWords(5 * 3_600_000 + 10 * 60_000), "5 h 10 min left");
   assert.equal(live.timeLeftWords(12 * 60_000), "12 min left");
   assert.equal(live.timeLeftWords(0), "Time is up; it stops if it works on without you");
+});
+
+test("a master harness saved while a failed start left the live master off starts it on the new harness at once, with no tab change, and an alias of the same harness starts nothing (DEC-161 bug 2)", async () => {
+  const codex = "The live master was turned off: it could not start: No account in this project's pool can run codex. Start it again from the master view.";
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate('Fixture.mountArea("codex", false)');
+    await evaluate("Fixture.settle()");
+    const opened = await evaluate("Fixture.teamReloads()");
+    await evaluate(`Fixture.readSwitch("codex", false, ${JSON.stringify({ live_problem: codex })})`);
+    await evaluate("Fixture.settle()");
+    const refused = await evaluate("Fixture.teamReloads()");
+    await evaluate(`Fixture.readSwitch("claude-code", false, ${JSON.stringify({ live_problem: codex })})`);
+    const switched = await evaluate("Fixture.settle()");
+    const started = await evaluate("Fixture.teamReloads()");
+    await evaluate(`Fixture.readSwitch("claude", false, ${JSON.stringify({ live_problem: codex })})`);
+    await evaluate("Fixture.settle()");
+    return { opened, refused, switched, started, alias: await evaluate("Fixture.teamReloads()") };
+  });
+  assert.equal(seen.opened, 1, "the open starts it once");
+  assert.equal(seen.refused, 1, "a refused start is not sent again on its own");
+  assert.equal(seen.started, 2, "the saved switch starts it on the new harness at once");
+  assert.match(seen.switched.text, /Claude Code/, seen.switched.text);
+  assert.doesNotMatch(seen.switched.text, /can run codex/, seen.switched.text);
+  assert.equal(seen.alias, 2, "the alias claude is the same Claude Code master, so nothing starts again");
 });

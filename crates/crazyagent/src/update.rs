@@ -522,10 +522,11 @@ fn decode_text(base64: &str) -> Option<String> {
 
 /// Checks a downloaded archive against its SHA-256 and its minisign signature, then checks
 /// that the signature was made for the announced version, so an old signed archive can't be
-/// passed off as a new release. Inputs: the file, the hex SHA-256, the Tauri-format signature
-/// and public key, and the manifest version. Output: Ok, or `update_checksum_mismatch`,
-/// `update_signature_invalid`, `update_signature_unversioned`,
-/// `update_signed_version_mismatch` or `update_key_missing`.
+/// passed off as a new release. A trusted comment that names a field twice is refused, as the
+/// release asset check refuses it, so both read the same version. Inputs: the file, the hex
+/// SHA-256, the Tauri-format signature and public key, and the manifest version. Output: Ok, or
+/// `update_checksum_mismatch`, `update_signature_invalid`, `update_signature_ambiguous`,
+/// `update_signature_unversioned`, `update_signed_version_mismatch` or `update_key_missing`.
 pub fn verify_file(
     path: &Path,
     sha256: &str,
@@ -574,8 +575,18 @@ pub fn verify_file(
         ));
     }
     verifier.finalize().map_err(|_| bad_signature())?;
-    let signed = signature
-        .trusted_comment()
+    let trusted = signature.trusted_comment();
+    let mut names = std::collections::BTreeSet::new();
+    if !trusted
+        .split('\t')
+        .all(|field| names.insert(field.split_once(':').map_or(field, |(name, _)| name)))
+    {
+        return Err(fail(
+            "update_signature_ambiguous",
+            "The download's signature names a field more than once, so it was not installed.",
+        ));
+    }
+    let signed = trusted
         .split('\t')
         .find_map(|field| field.strip_prefix("version:"))
         .ok_or_else(|| {

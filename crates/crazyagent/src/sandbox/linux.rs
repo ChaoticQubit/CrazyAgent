@@ -1,9 +1,9 @@
-use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
+use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS, RELAY_PORTS};
 use super::{
-    APP_PLUGIN_PORTS_MAX, KEPT_PORTS_MAX, LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF,
-    LINUX_OPEN_NETWORK_NEEDS_LANDLOCK, LINUX_RESOLVER_NEEDS_UDP, LinuxSockets, OWNER_PORTS,
-    ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote, agent_env,
-    clean_absolute, invalid,
+    APP_PLUGIN_PORTS_MAX, GIT_STATE_FILES, GIT_STATE_TREES, KEPT_PORTS_MAX,
+    LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK,
+    LINUX_RESOLVER_NEEDS_UDP, LinuxSockets, OWNER_PORTS, ProjectSandbox, Sandbox, SandboxError,
+    SandboxNetwork, SandboxRemote, agent_env, clean_absolute, invalid,
 };
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
@@ -39,12 +39,20 @@ const LIMIT_NETWORK: &str = "--limit-network";
 const OPEN_SOCKETS: &str = "--open-sockets";
 const KEEP_FREE: &str = "--keep-free";
 const PROBE: &str = "--probe";
+const FILTER_SOCKETS: &str = "--filter-sockets";
+const DIE_WITH: &str = "--die-with";
+const RESOLVER_ROOT: &str = "/run/systemd/resolve";
+const HELPER_MISSING: &str = "this Linux cannot fully enforce Landlock file rules (Linux 6.2 \
+     or newer), and CrazyAgent's sandbox helper, which keeps a bubblewrap agent off Unix \
+     sockets, is missing; reinstall CrazyAgent";
 /// The most ports one agent is kept off: the owner's fixed ports, the kept local model
-/// ports, the app plugin loopback ports and every model proxy port.
+/// ports, the app plugin loopback ports and every model proxy and model relay port.
 const KEEP_FREE_MAX: usize = OWNER_PORTS.len()
     + KEPT_PORTS_MAX
     + APP_PLUGIN_PORTS_MAX
     + (*PROXY_PORTS.end() - *PROXY_PORTS.start()) as usize
+    + 1
+    + (*RELAY_PORTS.end() - *RELAY_PORTS.start()) as usize
     + 1;
 /// The socket family of SMC, whose listener holds a TCP port and takes plain TCP clients.
 const AF_SMC: u64 = 43;
@@ -88,7 +96,7 @@ const SYSTEM_READ_ROOTS: &[&str] = &[
     "/libx32",
     "/etc",
     "/opt",
-    "/run/systemd/resolve",
+    RESOLVER_ROOT,
     "/home/linuxbrew/.linuxbrew",
     "/nix/store",
     "/sys/devices/system/cpu",
@@ -127,8 +135,9 @@ const LANDLOCK_DEVICES: &[&str] = &[
 /// `open_sockets` keeps the other socket kinds open ([`LinuxSockets::TcpPorts`]). A listen
 /// with no bind still takes a port Linux picks, on either network, so both name
 /// `keep_free`: the helper starts no agent while Linux could hand one of them out by
-/// itself, and an open-network agent binds any TCP port but those. The engine renders it
-/// as helper arguments and the helper parses it back.
+/// itself, and an open-network agent binds any TCP port but those. `die_with` names the
+/// process the helper and the program it becomes are killed with (an engine git step). The
+/// engine renders it as helper arguments and the helper parses it back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LandlockPolicy {
     pub read: Vec<PathBuf>,
@@ -137,6 +146,7 @@ pub struct LandlockPolicy {
     pub limit_network: bool,
     pub open_sockets: bool,
     pub keep_free: Vec<u16>,
+    pub die_with: Option<u32>,
 }
 
 impl LandlockPolicy {
@@ -165,12 +175,63 @@ impl LandlockPolicy {
             args.push(KEEP_FREE.into());
             args.push(port.to_string().into());
         }
+        if let Some(parent) = self.die_with {
+            args.push(DIE_WITH.into());
+            args.push(parent.to_string().into());
+        }
         args
     }
 }
 
+/// The Landlock rules of one engine git step on an agent's linked worktree, the Linux form
+/// of the macOS step profile (SECAUDIT unconfined-git-add-reads-through-raced-symlink,
+/// unconfined-read-tree-u): it reads the system, `/proc` and `read`, and writes the devices
+/// and `write`, with no network rule and no kept port, and dies with this engine process, so
+/// its git never outlives the lock the engine took for it (RV-DS241-142); an engine that is
+/// process 1 takes every process down with it. Inputs: the absolute places the step reads
+/// and writes. Output: the policy.
+pub(crate) fn git_step_policy(read: &[PathBuf], write: &[PathBuf]) -> LandlockPolicy {
+    assert!(read.iter().chain(write).all(|path| path.is_absolute()));
+    let policy = LandlockPolicy {
+        read: SYSTEM_READ_ROOTS
+            .iter()
+            .chain(&["/proc"])
+            .map(PathBuf::from)
+            .chain(read.iter().cloned())
+            .collect(),
+        write: LANDLOCK_DEVICES
+            .iter()
+            .map(PathBuf::from)
+            .chain(write.iter().cloned())
+            .collect(),
+        die_with: Some(std::process::id()).filter(|engine| *engine > 1),
+        ..LandlockPolicy::default()
+    };
+    assert!(policy.read.len() + policy.write.len() <= HELPER_PATHS_MAX);
+    assert!(!policy.limit_network && policy.keep_free.is_empty());
+    policy
+}
+
+/// Tells whether this kernel holds the helper's file rules, as a landing git step needs
+/// them: the helper's probe with no network flag. Input: the helper. Output: true only when
+/// it is an absolute file and its probe exits 0.
+pub(crate) fn holds_file_rules(helper: &Path) -> bool {
+    clean_absolute(helper)
+        && helper.is_file()
+        && crate::spawn_gate::status(
+            Command::new(helper)
+                .arg(PROBE)
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .is_ok_and(|status| status.success())
+}
+
 /// What the `crazyagent-landlock` helper was asked to do: probe whether this kernel holds a
-/// Landlock ruleset, or apply a policy and start a harness.
+/// Landlock ruleset, apply a policy and start a harness, or, inside bubblewrap, install only
+/// the socket filter and start a harness.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HelperRequest {
     Probe {
@@ -183,27 +244,46 @@ pub enum HelperRequest {
         program: PathBuf,
         args: Vec<OsString>,
     },
+    Filter {
+        program: PathBuf,
+        args: Vec<OsString>,
+    },
 }
 
 impl HelperRequest {
     /// Parses the helper arguments after its own name. Input: flags from
     /// [`LandlockPolicy::args`] then `--`, an absolute program and its arguments, or
     /// `--probe` with an optional `--limit-network`, `--open-sockets` and `--keep-free`
-    /// with a port. `--open-sockets` needs `--limit-network`. Output: the request, or the
-    /// reason the arguments are refused.
+    /// with a port, or `--filter-sockets` alone then `--` and the harness. `--open-sockets`
+    /// needs `--limit-network`. Output: the request, or the reason the arguments are refused.
     pub fn parse(args: Vec<OsString>) -> Result<Self, String> {
         let mut policy = LandlockPolicy::default();
         let mut probe = false;
+        let mut filter = false;
         let mut rest = args.into_iter();
         while let Some(flag) = rest.next() {
             match flag.to_str() {
                 Some(PROBE) => probe = true,
+                Some(FILTER_SOCKETS) => filter = true,
                 Some(LIMIT_NETWORK) => policy.limit_network = true,
                 Some(OPEN_SOCKETS) => policy.open_sockets = true,
                 Some(READ) => policy.read.push(absolute(rest.next())?),
                 Some(WRITE) => policy.write.push(absolute(rest.next())?),
                 Some(CONNECT) => policy.connect.push(port(rest.next())?),
                 Some(KEEP_FREE) => policy.keep_free.push(port(rest.next())?),
+                Some(DIE_WITH) if policy.die_with.is_none() => {
+                    policy.die_with = Some(parent(rest.next())?);
+                }
+                Some("--") if !probe && filter => {
+                    if policy != LandlockPolicy::default() {
+                        return Err(format!("{FILTER_SOCKETS} takes no policy"));
+                    }
+                    let program = absolute(rest.next())?;
+                    return Ok(Self::Filter {
+                        program,
+                        args: rest.collect(),
+                    });
+                }
                 Some("--") if !probe => {
                     open_needs_limit(&policy)?;
                     binds_fit(&policy)?;
@@ -220,8 +300,11 @@ impl HelperRequest {
                 _ => return Err(format!("unexpected argument {}", flag.to_string_lossy())),
             }
         }
-        let bare = policy.read.is_empty() && policy.write.is_empty() && policy.connect.is_empty();
-        if probe && bare {
+        let bare = policy.read.is_empty()
+            && policy.write.is_empty()
+            && policy.connect.is_empty()
+            && policy.die_with.is_none();
+        if probe && bare && !filter {
             open_needs_limit(&policy)?;
             binds_fit(&policy)?;
             return Ok(Self::Probe {
@@ -256,6 +339,17 @@ fn absolute(value: Option<OsString>) -> Result<PathBuf, String> {
         return Err(format!("path must be absolute: {}", path.display()));
     }
     Ok(path)
+}
+
+/// Reads the process id `--die-with` names: a number above 1, since process 1 is never an
+/// engine. Input: the argument. Output: the id, or the reason it is refused.
+fn parent(value: Option<OsString>) -> Result<u32, String> {
+    value
+        .as_deref()
+        .and_then(OsStr::to_str)
+        .and_then(|text| text.parse::<u32>().ok())
+        .filter(|parent| *parent > 1 && i32::try_from(*parent).is_ok())
+        .ok_or_else(|| format!("{DIE_WITH} needs a process id above 1"))
 }
 
 fn port(value: Option<OsString>) -> Result<u16, String> {
@@ -508,12 +602,27 @@ fn own_session() -> Result<(), String> {
     Ok(())
 }
 
+/// Makes the kernel kill this helper, and the program it then becomes, once the thread of
+/// `parent` that started it exits, and refuses when `parent` is already not its parent, as
+/// after that process exited before the signal was set. The signal survives the exec of a
+/// program that is not set-user-ID. Input: the parent's process id. Output: Ok, or the reason.
+fn die_with_parent(parent: u32) -> Result<(), String> {
+    rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))
+        .map_err(|error| format!("parent death signal: {error}"))?;
+    let now = rustix::process::Pid::as_raw(rustix::process::getppid());
+    if u32::try_from(now).ok() != Some(parent) {
+        return Err("the engine has exited".into());
+    }
+    Ok(())
+}
+
 /// Entry point of the `crazyagent-landlock` helper. Input: its arguments after its own name.
 /// A probe applies a ruleset with no rule, the scope layer and the socket filter to itself and
 /// exits 0 when this kernel holds them; a run applies the policy, the scope layer and the
 /// filter to itself, moves into a session of its own and then replaces itself with the
 /// harness. Output: the exit code, 2 for refused arguments, 3 when the kernel cannot hold
-/// the policy or the session, 126 when the harness cannot start.
+/// the policy or the session or the process it dies with is gone, 126 when the harness
+/// cannot start.
 pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     let request = match HelperRequest::parse(args) {
         Ok(request) => request,
@@ -523,6 +632,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         }
     };
     let (policy, launch) = match request {
+        HelperRequest::Filter { program, args } => return filtered(&program, args),
         HelperRequest::Probe {
             limit_network,
             open_sockets,
@@ -542,6 +652,12 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             args,
         } => (policy, Some((program, args))),
     };
+    if let Some(parent) = policy.die_with
+        && let Err(reason) = die_with_parent(parent)
+    {
+        eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
+    }
     if !policy.keep_free.is_empty()
         && let Err(reason) = kept_outside_picked(&policy.keep_free, read_picked_ports().as_ref())
     {
@@ -586,17 +702,40 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     ExitCode::from(126)
 }
 
+/// Starts a harness bubblewrap launched, behind the socket filter alone, the one a Landlock
+/// agent with a network limit gets ([`refuse_sockets`] with `tcp_only`): no Unix-domain
+/// socket, so a closed agent reaches no socket in the folders bound for it, no io_uring
+/// ring, and no socket but TCP over IPv4 or IPv6 and routing netlink, so no AF_VSOCK or
+/// other family that `--unshare-net` does not isolate reaches outside the closed network
+/// (RV-DS241-84 r2). Bubblewrap already holds the files, the network namespace and the
+/// session. Input: the harness. Output: 3 when the filter cannot be installed, 126 when the
+/// harness cannot start.
+fn filtered(program: &Path, args: Vec<OsString>) -> ExitCode {
+    if let Err(reason) = refuse_sockets(true, false) {
+        eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
+    }
+    let error = Command::new(program).args(args).exec();
+    eprintln!(
+        "crazyagent-landlock: cannot start {}: {error}",
+        program.display()
+    );
+    ExitCode::from(126)
+}
+
 /// The Linux mechanism holding a project agent's boundary: the `crazyagent-landlock` helper,
-/// or bubblewrap where the kernel cannot fully enforce its Landlock rules.
+/// or bubblewrap where the kernel cannot fully enforce its Landlock rules, with that helper
+/// started inside it to install the socket filter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinuxBackend {
     Landlock { helper: PathBuf },
-    Bubblewrap { bwrap: PathBuf },
+    Bubblewrap { bwrap: PathBuf, helper: PathBuf },
 }
 
 /// The Linux boundary for one project agent. It keeps the [`ProjectSandbox`] policy on both
 /// backends: the project folder is read-only, its existing entries are writable except the
-/// protected paths, symbolic links and the git metadata git follows (`GIT_FOLLOWED`), and
+/// protected paths, symbolic links, the git metadata git follows (`GIT_FOLLOWED`) and the
+/// git state the Seatbelt profile denies ([`GIT_STATE_TREES`], [`GIT_STATE_FILES`]), and
 /// the agent's home, temp dir and worktrees are writable. A policy confined to one worktree
 /// is refused, since neither backend can hold its git denies. Landlock limits outbound TCP to the model endpoint ports
 /// and, under the owner's [`LinuxSockets`] setting, the socket filter refuses every other kind
@@ -611,21 +750,24 @@ pub struct LinuxSandbox {
 }
 
 impl LinuxSandbox {
-    /// Binds the policy to one backend. Input: the project policy and the helper or bwrap
-    /// executable as an absolute file. Output: the sandbox, `Invalid` for a bad executable,
-    /// or `Unavailable` for a network limit or an open network on bubblewrap, which keeps no
-    /// port free ([`LINUX_OPEN_NETWORK_NEEDS_LANDLOCK`]), for a policy confined to one
+    /// Binds the policy to one backend. Input: the project policy and the helper, or bwrap
+    /// and the helper, each an absolute file. Output: the sandbox, `Invalid` for a bad
+    /// executable, or `Unavailable` for a network limit or an open network on bubblewrap,
+    /// which keeps no port free ([`LINUX_OPEN_NETWORK_NEEDS_LANDLOCK`]), for a policy confined to one
     /// worktree, whose git denies neither backend can hold, for a limited network the
     /// sockets setting starts no agent on, or on Landlock for a kept port Linux could hand
     /// out by itself ([`kept_outside_picked`]). Bubblewrap starts only a closed agent, in a
     /// network of its own, where no port it takes is a host port.
     pub fn new(sandbox: ProjectSandbox, backend: LinuxBackend) -> Result<Self, SandboxError> {
         admitted(&sandbox)?;
-        let executable = match &backend {
-            LinuxBackend::Landlock { helper } => helper,
-            LinuxBackend::Bubblewrap { bwrap } => bwrap,
+        let (launcher, inside) = match &backend {
+            LinuxBackend::Landlock { helper } => (helper, None),
+            LinuxBackend::Bubblewrap { bwrap, helper } => (bwrap, Some(helper)),
         };
-        if !clean_absolute(executable) || !executable.is_file() {
+        if std::iter::once(launcher)
+            .chain(inside)
+            .any(|executable| !clean_absolute(executable) || !executable.is_file())
+        {
             return Err(invalid("sandbox executable must be an absolute file"));
         }
         if matches!(backend, LinuxBackend::Bubblewrap { .. }) {
@@ -652,7 +794,8 @@ impl LinuxSandbox {
     }
 
     /// Picks the backend this machine holds: Landlock when the helper exists and its probe
-    /// passes for the policy's network needs, otherwise bubblewrap from a fixed path. An open
+    /// passes for the policy's network needs, otherwise bubblewrap from a fixed path with the
+    /// helper started inside it, so no bubblewrap agent starts without the helper. An open
     /// network probes the TCP bind rules that keep ports free and never falls back to
     /// bubblewrap. Input: the project policy and the helper executable. Output: the
     /// sandbox, or `Unavailable` when neither backend can hold it.
@@ -692,6 +835,9 @@ impl LinuxSandbox {
                 LINUX_OPEN_NETWORK_NEEDS_LANDLOCK.into(),
             ));
         }
+        if !clean_absolute(helper) || !helper.is_file() {
+            return Err(SandboxError::Unavailable(HELPER_MISSING.into()));
+        }
         match BWRAP_PATHS
             .iter()
             .map(Path::new)
@@ -701,6 +847,7 @@ impl LinuxSandbox {
                 sandbox,
                 LinuxBackend::Bubblewrap {
                     bwrap: bwrap.to_path_buf(),
+                    helper: helper.to_path_buf(),
                 },
             ),
             None => Err(SandboxError::Unavailable(
@@ -725,7 +872,7 @@ impl LinuxSandbox {
     pub fn launcher(&self) -> &Path {
         match &self.backend {
             LinuxBackend::Landlock { helper } => helper,
-            LinuxBackend::Bubblewrap { bwrap } => bwrap,
+            LinuxBackend::Bubblewrap { bwrap, .. } => bwrap,
         }
     }
 }
@@ -783,8 +930,8 @@ impl Sandbox for LinuxSandbox {
                 command.args(landlock_policy(&grants, &self.sandbox).args());
                 command
             }
-            LinuxBackend::Bubblewrap { bwrap } => {
-                bwrap_command(bwrap, &grants, cwd, self.sandbox.network())
+            LinuxBackend::Bubblewrap { bwrap, helper } => {
+                bwrap_command(bwrap, helper, &grants, cwd, self.sandbox.network())
             }
         };
         let mut base = vec![
@@ -824,7 +971,12 @@ impl Grants {
         let protected = sandbox.protected_paths();
         let objects = git.join("objects");
         let objects_info = objects.join("info");
-        let followed: Vec<PathBuf> = GIT_FOLLOWED.iter().map(|name| git.join(name)).collect();
+        let followed: Vec<PathBuf> = GIT_FOLLOWED
+            .iter()
+            .chain(&GIT_STATE_TREES)
+            .chain(&GIT_STATE_FILES)
+            .map(|name| git.join(name))
+            .collect();
         let followed: Vec<&PathBuf> = followed.iter().collect();
         let folder = |path: &Path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
         let mut write = Vec::new();
@@ -868,10 +1020,12 @@ impl Grants {
             return Err(invalid("a writable root sits inside a protected path"));
         }
         let secrets = sandbox.secret_paths();
+        let carved = sandbox.carved_home.as_ref();
         assert!(read.iter().chain(&write).all(|grant| {
-            secrets
-                .iter()
-                .all(|secret| !grant.starts_with(secret) && !secret.starts_with(grant))
+            secrets.iter().all(|secret| {
+                (carved == Some(grant) && grant.parent() == Some(secret.as_path()))
+                    || (!grant.starts_with(secret) && !secret.starts_with(grant))
+            })
         }));
         Ok(Self { read, write })
     }
@@ -935,12 +1089,13 @@ fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy 
         limit_network,
         open_sockets,
         keep_free,
+        die_with: None,
     }
 }
 
 /// The TCP ports no agent listens on: the owner's fixed ports, the kept local model ports,
-/// the app plugin loopback ports and every model proxy port, as the macOS boundary keeps
-/// them. Input: the policy. Output: those ports, rising and each once.
+/// the app plugin loopback ports and every model proxy and model relay port, as the macOS
+/// boundary keeps them. Input: the policy. Output: those ports, rising and each once.
 fn kept_free(sandbox: &ProjectSandbox) -> Vec<u16> {
     let mut ports: Vec<u16> = OWNER_PORTS
         .iter()
@@ -948,6 +1103,7 @@ fn kept_free(sandbox: &ProjectSandbox) -> Vec<u16> {
         .chain(&sandbox.plugin_ports)
         .copied()
         .chain(PROXY_PORTS)
+        .chain(RELAY_PORTS)
         .collect();
     ports.sort_unstable();
     ports.dedup();
@@ -969,7 +1125,19 @@ fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
     ports
 }
 
-fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path, network: &SandboxNetwork) -> Command {
+/// The bubblewrap command for a closed agent up to its harness: its own namespaces, the
+/// system folders read-only but the name resolver's ([`RESOLVER_ROOT`]), the grants, then
+/// the helper bound read-only and started to install the TCP-only socket filter
+/// ([`FILTER_SOCKETS`]).
+/// Inputs: bwrap, the helper, the grants, the working folder and the network. Output: the
+/// command, which the harness follows after `--`.
+fn bwrap_command(
+    bwrap: &Path,
+    helper: &Path,
+    grants: &Grants,
+    cwd: &Path,
+    network: &SandboxNetwork,
+) -> Command {
     let mut command = Command::new(bwrap);
     command.args([
         "--die-with-parent",
@@ -988,7 +1156,13 @@ fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path, network: &SandboxNet
     if matches!(network, SandboxNetwork::Only(remotes) if remotes.is_empty()) {
         command.arg("--unshare-net");
     }
-    for &root in SYSTEM_READ_ROOTS {
+    let system: Vec<&str> = SYSTEM_READ_ROOTS
+        .iter()
+        .copied()
+        .filter(|root| *root != RESOLVER_ROOT)
+        .collect();
+    assert_eq!(system.len() + 1, SYSTEM_READ_ROOTS.len());
+    for root in system {
         command.args(["--ro-bind-try", root, root]);
     }
     for root in &grants.read {
@@ -997,13 +1171,19 @@ fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path, network: &SandboxNet
     for root in &grants.write {
         command.arg("--bind").arg(root).arg(root);
     }
+    command.arg("--ro-bind").arg(helper).arg(helper);
     command.arg("--chdir").arg(cwd);
+    command.arg("--").arg(helper).arg(FILTER_SOCKETS);
     command
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn helper() -> PathBuf {
+        Path::new("/opt/crazyagent").join(HELPER_NAME)
+    }
 
     #[test]
     fn only_fully_enforced_rules_with_no_new_privs_hold_the_boundary() {
@@ -1022,6 +1202,7 @@ mod tests {
         };
         let command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
+            &helper(),
             &grants,
             Path::new("/tmp"),
             &SandboxNetwork::Open,
@@ -1038,6 +1219,7 @@ mod tests {
         let unshares = |network: SandboxNetwork| {
             bwrap_command(
                 Path::new(BWRAP_PATHS[0]),
+                &helper(),
                 &grants,
                 Path::new("/tmp"),
                 &network,
@@ -1087,8 +1269,9 @@ mod tests {
         assert!(!policy.limit_network);
         let mut expected = vec![1234, 1455, 8080, 11434];
         expected.extend(PROXY_PORTS);
+        expected.extend(crate::sandbox::model_proxy::RELAY_PORTS);
         assert_eq!(policy.keep_free, expected);
-        assert_eq!(policy.keep_free.len(), 4 + 128);
+        assert_eq!(policy.keep_free.len(), 4 + 256);
         assert_eq!(
             HelperRequest::parse(
                 policy
@@ -1174,6 +1357,7 @@ mod tests {
         let closed = sandbox.keep_ports(&[inside]).unwrap();
         let bubblewrap = LinuxBackend::Bubblewrap {
             bwrap: helper.clone(),
+            helper: helper.clone(),
         };
         assert!(
             LinuxSandbox::new(closed, bubblewrap).is_ok(),
@@ -1209,6 +1393,7 @@ mod tests {
         assert!(policy.limit_network);
         let mut expected = vec![1455, 8080, 11434];
         expected.extend(PROXY_PORTS);
+        expected.extend(crate::sandbox::model_proxy::RELAY_PORTS);
         assert_eq!(policy.keep_free, expected);
         assert_eq!(
             HelperRequest::parse(
@@ -1287,6 +1472,7 @@ mod tests {
         let bwrap = std::env::current_exe().unwrap();
         let backend = || LinuxBackend::Bubblewrap {
             bwrap: bwrap.clone(),
+            helper: bwrap.clone(),
         };
         let (_open, sandbox) = project(SandboxNetwork::Open);
         match LinuxSandbox::new(sandbox, backend()) {
@@ -1314,5 +1500,107 @@ mod tests {
             refused_sockets(true, true).unwrap().len(),
             refused_sockets(true, false).unwrap().len()
         );
+    }
+
+    #[test]
+    fn a_closed_bubblewrap_agent_gets_no_name_resolver_and_starts_behind_the_socket_filter() {
+        let grants = Grants {
+            read: Vec::new(),
+            write: Vec::new(),
+        };
+        let command = bwrap_command(
+            Path::new(BWRAP_PATHS[0]),
+            &helper(),
+            &grants,
+            Path::new("/tmp"),
+            &SandboxNetwork::Only(Vec::new()),
+        );
+        let args: Vec<&OsStr> = command.get_args().collect();
+        assert!(
+            !args.contains(&OsStr::new("/run/systemd/resolve")),
+            "{args:?}"
+        );
+        let [split, helper, filter] = args[args.len() - 3..] else {
+            panic!("{args:?}");
+        };
+        assert_eq!(split, "--", "{args:?}");
+        assert_eq!(
+            Path::new(helper).file_name(),
+            Some(OsStr::new(HELPER_NAME)),
+            "{args:?}"
+        );
+        assert_eq!(filter, "--filter-sockets", "{args:?}");
+        let bound = args
+            .windows(3)
+            .any(|three| three[0] == "--ro-bind" && three[1] == helper && three[2] == helper);
+        assert!(bound, "the helper is bound into the namespace: {args:?}");
+    }
+
+    #[test]
+    fn the_socket_filter_request_takes_no_policy_and_names_the_harness() {
+        let parse =
+            |words: &[&str]| HelperRequest::parse(words.iter().map(OsString::from).collect());
+        assert_eq!(
+            parse(&[FILTER_SOCKETS, "--", "/bin/true", "-x"]),
+            Ok(HelperRequest::Filter {
+                program: PathBuf::from("/bin/true"),
+                args: vec![OsString::from("-x")],
+            })
+        );
+        assert!(parse(&[FILTER_SOCKETS, READ, "/usr", "--", "/bin/true"]).is_err());
+        assert!(parse(&[FILTER_SOCKETS, "--", "bin/true"]).is_err());
+        assert!(parse(&[PROBE, FILTER_SOCKETS]).is_err());
+    }
+
+    #[test]
+    fn without_the_helper_bubblewrap_starts_no_agent() {
+        let (_closed, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+        match LinuxSandbox::detect(sandbox, Path::new("/nonexistent/crazyagent-landlock")) {
+            Err(SandboxError::Unavailable(reason)) => {
+                assert!(reason.contains("helper"), "{reason}");
+            }
+            other => panic!("bubblewrap without the socket filter must be refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_agent_is_granted_the_git_state_the_owners_git_reads_and_runs() {
+        let (_temp, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+        let git = sandbox.project_root().join(".git");
+        let trees = [
+            "rebase-merge",
+            "rebase-apply",
+            "remotes",
+            "branches",
+            "sequencer",
+            "refs",
+        ];
+        for name in trees {
+            fs::create_dir_all(git.join(name)).unwrap();
+        }
+        for name in ["index", "index.lock", "HEAD"] {
+            fs::write(git.join(name), "state\n").unwrap();
+        }
+        let grants = Grants::of(&sandbox).unwrap();
+        for name in [
+            "index",
+            "index.lock",
+            "rebase-merge",
+            "rebase-apply",
+            "remotes",
+            "branches",
+            "sequencer",
+        ] {
+            assert!(
+                !grants.write.contains(&git.join(name)),
+                "{name} is writable"
+            );
+        }
+        for name in ["HEAD", "refs"] {
+            assert!(
+                grants.write.contains(&git.join(name)),
+                "{name} is not writable"
+            );
+        }
     }
 }

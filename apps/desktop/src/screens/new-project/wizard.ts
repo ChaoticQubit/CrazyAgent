@@ -252,7 +252,7 @@ export function entry(harnesses: HarnessEntry[] | null, id: string): HarnessEntr
   return harnesses?.find((harness) => harness.id === id || harness.aliases.includes(id));
 }
 
-const choosable = (harness: HarnessEntry | undefined) => harness !== undefined && harness.status.kind !== "not_installed";
+const choosable = (harness: HarnessEntry | undefined) => harness !== undefined && harness.status.kind !== "not_installed" && harness.status.kind !== "cant_run";
 const toolsFixed = (harness: HarnessEntry | undefined) => harness?.tools.kind === "limited";
 
 function toolsFor(wanted: boolean, harness: HarnessEntry | undefined): { tools: boolean; wanted?: boolean } {
@@ -281,7 +281,7 @@ export function wireTeam(team: TeamDraft): TeamPlan {
 }
 
 /** Applies the harness catalog to the engine's smart team defaults: a harness that
- * is not installed is replaced by the first ready one, and fixed tools stay on.
+ * is not installed or can't run is replaced by the first ready one, and fixed tools stay on.
  * Inputs: the engine default and the catalog, or null while it is not ready. Output: the team. */
 export function defaultTeam(engine: TeamPlan, harnesses: HarnessEntry[] | null): TeamPlan {
   if (!harnesses) return engine;
@@ -368,25 +368,26 @@ export function teamNotes(team: TeamPlan, harnesses: HarnessEntry[] | null): str
   return notes;
 }
 
-const GROUPS = { ready: "Ready", limited: "Limited control", not_installed: "Not installed" } as const;
+const GROUPS = { ready: "Ready", limited: "Limited control", cant_run: "Can't run", not_installed: "Not installed" } as const;
 
 /** Who a harness picker chooses for: the project master or an agent row. */
 export type PickRole = "master" | "agent";
 
-/** Orders every catalog harness for a picker: Ready, Limited control, Not installed.
+/** Orders every catalog harness for a picker: Ready, Limited control, Can't run, Not installed.
  * Inputs: the catalog and who the picker chooses for. Output: options; a harness that is not
- * installed or can't run team agents can't be picked, and a master-only harness can be
- * picked for the master only. */
+ * installed, can't run or can't run team agents can't be picked, and a master-only harness can
+ * be picked for the master only. */
 export function harnessChoices(harnesses: HarnessEntry[], role: PickRole): { id: string; label: string; group: string; disabled: boolean }[] {
-  return (["ready", "limited", "not_installed"] as const).flatMap((kind) => harnesses
+  return (["ready", "limited", "cant_run", "not_installed"] as const).flatMap((kind) => harnesses
     .filter((harness) => harness.status.kind === kind)
     .map((harness) => {
       const masterOnly = harness.team.kind === "master_only";
       const blocked = harness.team.kind === "unavailable" || (masterOnly && role === "agent");
       const label = kind === "not_installed" ? `${harness.name} - Not installed`
+        : kind === "cant_run" ? `${harness.name} - Can't run`
         : harness.team.kind === "unavailable" ? `${harness.name} - Can't run team agents`
           : masterOnly ? `${harness.name} - ${role === "master" ? "Master only, no live terminal" : "Runs only as the master"}` : harness.name;
-      return { id: harness.id, label, group: GROUPS[kind], disabled: kind === "not_installed" || blocked };
+      return { id: harness.id, label, group: GROUPS[kind], disabled: kind === "not_installed" || kind === "cant_run" || blocked };
     }));
 }
 
@@ -409,6 +410,7 @@ export function teamErrors(team: TeamPlan, harnesses: HarnessEntry[] | null): { 
     if (!HARNESS_ID.test(id)) return `Pick a harness for ${what}.`;
     const harness = entry(harnesses, id);
     if (harness?.status.kind === "not_installed") return `${harness.name} isn't installed on this Mac. Pick another harness.`;
+    if (harness?.status.kind === "cant_run") return `${harness.name} can't run on this Mac. Pick another harness.`;
     if (harness?.team.kind === "unavailable") return `${harness.name} can't run team agents yet. Pick another harness.`;
     if (harness?.team.kind === "master_only" && role === "agent") return `${harness.name} runs only as the master. Pick another harness.`;
     return undefined;

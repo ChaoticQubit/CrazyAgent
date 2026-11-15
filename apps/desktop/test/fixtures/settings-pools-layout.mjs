@@ -11,6 +11,7 @@ const SAVED_LINE_MS = 6000;
 let timers = [];
 let usageSince;
 let extrasAsks = [];
+let spendSent = [];
 let current = {};
 let schedule = null;
 let saves = [];
@@ -175,7 +176,13 @@ function answer(scene, command, args) {
   if (command === "desktop_usage_report") {
     usageSince = args.sinceMs;
     const limits = failing(scene.limits ?? "ok", LIMITS);
-    return limits instanceof Promise ? limits : { limits };
+    const settings = { confirm: "confirm_each", all_limited: "notice", resets_source: "off" };
+    for (const choice of spendSent) settings[choice.field] = choice.value;
+    return limits instanceof Promise ? limits : { limits, spend: { settings, attempts: [], limited_pools: [] } };
+  }
+  if (command === "desktop_usage_set_spend") {
+    spendSent.push(args.choice);
+    return null;
   }
   if (scene.edits === "ok" && command === "desktop_inspect_model_access") return { ticket: "ticket", record: { kind: "pool", pool: { id: "pool-spare", name: "Spare", members: ["acct-3"] } } };
   if (scene.edits === "ok" && command === "desktop_edit_model_access") return APPLIED;
@@ -191,6 +198,7 @@ export async function mount(scene = {}, theme = "light") {
   timers = [];
   saves = [];
   extrasAsks = [];
+  spendSent = [];
   gated = null;
   gatedAnswers = [];
   savedLineTimers = [];
@@ -372,6 +380,12 @@ export async function fireTimer(ms) {
 /** Reads what each extras read asked for. Output: its detail flag, one per read, in order. */
 export function extrasDetail() {
   return extrasAsks;
+}
+
+/** Lists the free resets choices the page asked the engine to keep, one setting each. Output:
+ * each, in order. */
+export function spendSettingsSent() {
+  return spendSent;
 }
 
 export function lastUsageSince() {

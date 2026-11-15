@@ -86,11 +86,13 @@ impl MacInstaller {
         if !valid {
             return Err(InstallError("setup_pin_invalid"));
         }
-        let brew = self
-            .brew
-            .iter()
-            .find(|path| runnable(path))
-            .ok_or(InstallError("setup_homebrew_missing"))?;
+        let mut found = self.brew.iter().filter(|path| runnable(path)).peekable();
+        if found.peek().is_none() {
+            return Err(InstallError("setup_homebrew_missing"));
+        }
+        let brew = found
+            .find(|path| crate::service::changeable_past_sticky(path).is_none())
+            .ok_or(InstallError("setup_homebrew_unsafe"))?;
         let mut env = self.pinned.env();
         env.extend([
             ("HOMEBREW_NO_AUTO_UPDATE", OsString::from("1")),
@@ -100,7 +102,7 @@ impl MacInstaller {
         ]);
         let (ok, _) = run(
             brew,
-            &["install".into(), formula.into()],
+            &["install".into(), "--formula".into(), formula.into()],
             &env,
             &std::env::temp_dir(),
             BREW_TIME,
@@ -127,6 +129,26 @@ impl Installer for MacInstaller {
 
     fn program(&self, name: &str) -> Option<PathBuf> {
         self.pinned.program(name)
+    }
+
+    fn lookup_program(&self, name: &str) -> Result<PathBuf, crate::tools::Missing> {
+        self.pinned.lookup_program(name)
+    }
+
+    fn fix_target(
+        &self,
+        missing: &crate::tools::Missing,
+    ) -> Option<crate::tools::permission_fix::Target> {
+        self.pinned.fix_target(missing)
+    }
+
+    fn fix_permissions(
+        &self,
+        dep: Dependency,
+        confirmed: &str,
+        recursive: bool,
+    ) -> Result<crate::tools::permission_fix::Report, &'static str> {
+        self.pinned.fix_permissions(dep, confirmed, recursive)
     }
 
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError> {

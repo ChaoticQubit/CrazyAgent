@@ -216,6 +216,7 @@ fn a_project_never_checked_reads_empty_with_the_default_setting() {
             refresh: Refresh::AfterLanding,
             source: None,
             problem: None,
+            waiting_for_account: false,
         }
     );
     let mut db = db;
@@ -1002,16 +1003,83 @@ fn a_run_closed_after_its_time_or_whose_project_was_removed_no_longer_holds_its_
     );
 }
 
+/// The start sweep removes the status and Overview run folders and profiles an engine before
+/// 2.4.1 left, named with no run-id hash, and keeps the hashed runs of this engine and every
+/// other folder, so no old run outlives the names Delete everything reads (RV-DS241-80 r1 F1).
+#[cfg(unix)]
+#[test]
+fn the_start_sweep_removes_unhashed_status_and_overview_runs_only() {
+    let scratch = tempfile::tempdir().unwrap();
+    let state = std::fs::canonicalize(scratch.path()).unwrap();
+    let (agents, profiles) = (state.join("agents"), state.join("profiles"));
+    let demo = ProjectId::new("demo").unwrap();
+    let old = [
+        "overview-web_app-1794000000000",
+        "roadmap-status-web_app-1794000000000",
+    ];
+    let kept = [
+        crate::project_overview::run_name(&demo, 1_794_000_000_000),
+        run::run_name(&demo, NOW),
+        "job-1-1".to_owned(),
+    ];
+    for name in old.iter().map(|name| name.to_string()).chain(kept.clone()) {
+        std::fs::create_dir_all(agents.join(&name)).unwrap();
+        std::fs::create_dir_all(&profiles).unwrap();
+        std::fs::write(profiles.join(format!("{name}.sb")), "").unwrap();
+    }
+    assert_eq!(run::sweep_unhashed(&state), old.len());
+    for name in old {
+        assert!(!agents.join(name).exists(), "{name}");
+        assert!(!profiles.join(format!("{name}.sb")).exists(), "{name}");
+    }
+    for name in kept {
+        assert!(agents.join(&name).is_dir(), "{name}");
+        assert!(profiles.join(format!("{name}.sb")).is_file(), "{name}");
+    }
+}
+
+/// A status run's state name is read back as its own project's only, for ids that differ
+/// only in `.`, `:` or `_` and ids that differ only past the cut, so Delete everything of one
+/// project takes no other project's run (RV-DS241-80 r1 F1).
 #[test]
 fn the_name_of_a_status_run_is_read_back_as_its_own_projects_only() {
     let demo = ProjectId::new("demo").unwrap();
     let name = run::run_name(&demo, NOW);
-    assert_eq!(name, format!("roadmap-status-demo-{NOW}"));
+    let hash = run_stem(&demo)
+        .strip_prefix("roadmap-status-demo-")
+        .unwrap()
+        .to_owned();
+    assert_eq!(hash.len(), 16);
+    assert!(
+        hash.bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    );
+    assert_eq!(name, format!("roadmap-status-demo-{hash}-{NOW}"));
     assert!(names_run(&demo, &name));
     for other in ["demo-2", "dem", "demonstration"] {
         let other = ProjectId::new(other).unwrap();
         assert!(!names_run(&other, &name), "{other:?}");
         assert!(!names_run(&demo, &run::run_name(&other, NOW)), "{other:?}");
+    }
+    let past = |end: &str| ProjectId::new(format!("{}{end}", "a".repeat(100))).unwrap();
+    for (one, two) in [
+        ("web.app", "web_app"),
+        ("web:app", "web_app"),
+        ("web.app", "web:app"),
+        ("x.y", "x_2ey"),
+    ]
+    .map(|(one, two)| (ProjectId::new(one).unwrap(), ProjectId::new(two).unwrap()))
+    .into_iter()
+    .chain([(past("b"), past("c"))])
+    {
+        assert!(
+            !names_run(&one, &run::run_name(&two, NOW)),
+            "{one:?} takes the runs of {two:?}"
+        );
+        assert!(
+            !names_run(&two, &run::run_name(&one, NOW)),
+            "{two:?} takes the runs of {one:?}"
+        );
     }
     for odd in [
         "roadmap-status-demo",
@@ -1023,6 +1091,30 @@ fn the_name_of_a_status_run_is_read_back_as_its_own_projects_only() {
         "job-1-1",
     ] {
         assert!(!names_run(&demo, odd), "{odd}");
+    }
+}
+
+/// Two projects whose ids differ only in bytes a state name cannot hold, or only after the
+/// bytes a state name has room for, never read each other's status runs as their own, so a
+/// delete of one leaves the other's running check alone (RV-DS241-45).
+#[test]
+fn projects_whose_ids_a_state_name_cannot_tell_apart_keep_their_status_runs_apart() {
+    let long = "a".repeat(100);
+    let pairs = [
+        ("v1.2".to_owned(), "v1_2".to_owned()),
+        ("team:one".to_owned(), "team_one".to_owned()),
+        (format!("{long}-first"), format!("{long}-other")),
+    ];
+    for (one, two) in pairs {
+        let one = ProjectId::new(one).unwrap();
+        let two = ProjectId::new(two).unwrap();
+        assert_ne!(run_stem(&one), run_stem(&two), "{one:?} {two:?}");
+        for (project, other) in [(&one, &two), (&two, &one)] {
+            let name = run::run_name(project, NOW);
+            assert!(name.len() <= RUN_NAME_BYTES_MAX, "{name}");
+            assert!(names_run(project, &name), "{name}");
+            assert!(!names_run(other, &name), "{other:?} {name}");
+        }
     }
 }
 
@@ -1111,7 +1203,8 @@ fn a_status_run_names_only_its_own_folder_and_profile_for_removal() {
 
 /// S4-2 r1 M1: Delete everything records the project's roadmap status runs as engine files
 /// and removes each run's folder and Seatbelt profile; the runs of a project whose id only
-/// starts the same, a name in no run's shape and a research job's run all stay.
+/// starts the same, a name in no run's shape, a name in the 2.4.0 shape that carries no
+/// hash of the id and a research job's run all stay.
 #[test]
 fn delete_everything_removes_the_projects_roadmap_status_runs_and_no_other_projects() {
     let root = tempfile::tempdir().unwrap();
@@ -1119,12 +1212,14 @@ fn delete_everything_removes_the_projects_roadmap_status_runs_and_no_other_proje
     let agents = base.join("research").join("agents");
     let profiles = base.join("research").join("profiles");
     std::fs::create_dir_all(&profiles).unwrap();
-    let own = "roadmap-status-demo-1794000000000";
+    let started = 1_794_000_000_000;
+    let own = run::run_name(&ProjectId::new("demo").unwrap(), started);
     let others = [
-        "roadmap-status-demo-2-1794000000000",
-        "roadmap-status-demonstration-1794000000000",
-        "roadmap-status-demo-later",
-        "job-7-1",
+        run::run_name(&ProjectId::new("demo-2").unwrap(), started),
+        run::run_name(&ProjectId::new("demonstration").unwrap(), started),
+        "roadmap-status-demo-later".to_owned(),
+        format!("roadmap-status-demo-{started}"),
+        "job-7-1".to_owned(),
     ];
     for name in others.iter().chain([&own]) {
         std::fs::create_dir_all(agents.join(name).join("home")).unwrap();
@@ -1140,17 +1235,59 @@ fn delete_everything_removes_the_projects_roadmap_status_runs_and_no_other_proje
     };
     let files = plan.engine_files(&[]);
     let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, [own]);
+    assert_eq!(names, [own.as_str()]);
     assert_eq!(
         crate::projects_home::remove_engine_files(&plan.database, &files),
-        [own.to_owned()]
+        [own.clone()]
     );
-    assert!(std::fs::symlink_metadata(agents.join(own)).is_err());
+    assert!(std::fs::symlink_metadata(agents.join(&own)).is_err());
     assert!(std::fs::symlink_metadata(profiles.join(format!("{own}.sb"))).is_err());
-    for name in others {
+    for name in &others {
         assert!(agents.join(name).join("prompt.md").is_file(), "{name}");
         assert!(profiles.join(format!("{name}.sb")).is_file(), "{name}");
     }
+}
+
+/// Only the wait for an account is told as a wait (IW-L1, DEC-147 addendum): the status says
+/// so while the stored problem is the no-account line, until the pick drops it, and never
+/// for an ended real failure, neither while a Refresh is due nor while that check runs.
+#[test]
+fn only_the_no_account_problem_is_told_as_a_wait_and_an_ended_failure_never_is() {
+    let case = status_case(Refresh::AfterLanding);
+    let mut runs = FakeRuns::default();
+    assert!(!case.read(case.now).waiting_for_account);
+    refresh(&case.db, &case.project).unwrap();
+    assert_eq!(tick(&case.db, &mut runs, case.now).unwrap(), 1);
+    let due = case.now + RETRY_MS;
+    assert!(wait_for_account(&case.db, &case.project, runs.last(), NO_ACCOUNT, due).unwrap());
+    let waiting = case.read(case.now + 1);
+    assert!(waiting.waiting_for_account && waiting.stale && !waiting.running);
+
+    assert_eq!(tick(&case.db, &mut runs, due).unwrap(), 1);
+    assert!(case.read(due).waiting_for_account);
+    assert!(account_found(&case.db, &case.project, runs.last()).unwrap());
+    assert!(!case.read(due + 1).waiting_for_account);
+    assert!(
+        finish(
+            &case.db,
+            &case.project,
+            runs.last(),
+            Err(UNFINISHED),
+            due + 2
+        )
+        .unwrap()
+    );
+    let ended = case.read(due + 3);
+    assert_eq!(ended.problem.as_deref(), Some(UNFINISHED));
+    assert!(!ended.waiting_for_account && !ended.running);
+
+    refresh(&case.db, &case.project).unwrap();
+    let queued = case.read(due + 4);
+    assert!(queued.stale && !queued.running && !queued.waiting_for_account);
+    assert_eq!(tick(&case.db, &mut runs, due + 4).unwrap(), 1);
+    let checking = case.read(due + 5);
+    assert_eq!(checking.problem.as_deref(), Some(UNFINISHED));
+    assert!(checking.running && !checking.waiting_for_account);
 }
 
 #[test]
@@ -1187,4 +1324,92 @@ fn a_check_that_got_an_account_drops_the_no_account_problem_and_keeps_any_other(
         "another problem stays until the check ends"
     );
     assert_eq!(case.read(due + 4).problem.as_deref(), Some(UNFINISHED));
+}
+
+/// A roadmap status reply from an engine before IW-L1 has no `waiting_for_account` and
+/// still reads, as no wait for an account, so a newer client keeps its roadmap status
+/// during update skew (IW-L1 r1, DEC-147 addendum).
+#[test]
+fn a_roadmap_status_from_an_engine_without_the_wait_flag_reads_as_no_wait() {
+    let case = status_case(Refresh::AfterLanding);
+    let mut status = case.read(case.now);
+    status.waiting_for_account = true;
+    let mut wire = serde_json::to_value(&status).unwrap();
+    let fields = wire.as_object_mut().unwrap();
+    assert_eq!(fields.remove("waiting_for_account"), Some(true.into()));
+    let older: RoadmapStatus = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        older,
+        RoadmapStatus {
+            waiting_for_account: false,
+            ..status
+        }
+    );
+}
+
+/// A status check whose loopback provider refuses connections fails at once with the plain
+/// reach line, before its evidence is read or any agent folder is made, and leaves nothing
+/// for removal.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_status_check_whose_provider_refuses_connections_fails_at_once_with_the_reach_line() {
+    use crate::research::runner::{ResearchAccount, ResearchLimits, ResearchRunner};
+    use std::os::unix::fs::PermissionsExt;
+    let private = |path: &Path| {
+        std::fs::create_dir(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    };
+    let temp = tempfile::Builder::new()
+        .prefix("ca-reach-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let engine = base.join("engine");
+    private(&engine);
+    let database = engine.join("engine.db");
+    let sqlite = Connection::open(&database).unwrap();
+    sqlite.execute_batch("PRAGMA user_version=1").unwrap();
+    drop(sqlite);
+    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let state = engine.join("research");
+    private(&state);
+    let root = base.join("repo");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    let runner =
+        ResearchRunner::without_codex(&database, &state, ResearchLimits::default()).unwrap();
+    let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let account = ResearchAccount::Endpoint {
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        model: "local-model".into(),
+        key: None,
+    };
+    let line = format!(
+        "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then try again."
+    );
+    let db = Connection::open_in_memory().unwrap();
+    let project = ProjectId::new("plant-shop").unwrap();
+    let mut left = None;
+    match run::answer(
+        &runner,
+        &db,
+        &project,
+        Claim::at(1),
+        &root,
+        &account,
+        &mut left,
+    ) {
+        Err(run::Unchecked::Failed(words)) => assert_eq!(words, line),
+        _ => panic!("the status check did not fail with the reach line"),
+    }
+    assert!(
+        left.is_none(),
+        "a check that made nothing names nothing for removal"
+    );
+    assert!(
+        std::fs::read_dir(state.join("agents"))
+            .map_or(true, |mut entries| entries.next().is_none()),
+        "no agent folder was made"
+    );
 }

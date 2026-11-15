@@ -161,14 +161,26 @@ test("Secrets opens the server's dialog and Open goes to the skill's route", asy
   assert.match(hash, /#\/settings\/plugins\?skill=skill-1/);
 });
 
-test("a hook line keeps its plugin, trigger, command and what it follows, with its switch", async () => {
-  const [section] = await onPlugins({}, async (page) => { await openSection(page, "Hooks"); return read(page); });
+test("a hook plugin line keeps its events count and what it follows, with its switch, and Show events opens its trigger and command", async () => {
+  const seen = await onPlugins({}, async (page) => {
+    await openSection(page, "Hooks");
+    const folded = await read(page);
+    await press(page, 'button[aria-label="Show caveman events"]');
+    return { folded, opened: await read(page) };
+  });
+  const [section] = seen.folded;
   assert.deepEqual([section.heading, section.actions], ["Hooks", ["Add hooks from a plugin"]]);
   const [first, second] = section.rows;
-  assert.equal(first.label, "caveman");
-  for (const part of ["SessionStart, matching startup", "node hook.js", "Runs while the caveman skill is on."]) assert.ok(first.help.includes(part), `${part} in ${first.help}`);
+  assert.equal(first.label, "caveman - 1 event");
+  assert.ok(first.help.includes("Runs while the caveman skill is on."), first.help);
+  assert.ok(!first.help.includes("node hook.js"), first.help);
   assert.deepEqual(first.buttons, ["On for every project"]);
+  assert.equal(second.label, "adhd - 1 event");
   assert.ok(!second.help.includes("Runs while"), second.help);
+  const event = seen.opened[0].rows[1];
+  assert.equal(event.label, "SessionStart, matching startup");
+  assert.ok(event.help.includes("node hook.js"), event.help);
+  assert.deepEqual(event.buttons, ["On for every project"]);
 });
 
 test("Tools keeps its section, one switch per tool, Delete on built-in tools and Restore defaults", async () => {

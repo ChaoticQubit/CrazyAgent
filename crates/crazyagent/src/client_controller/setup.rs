@@ -64,6 +64,55 @@ impl OwnerController {
         self.send_pending().await
     }
 
+    /// Installs one missing tool alone, such as Node when a picked harness needs it.
+    /// Takes the tool and the client generation. Returns the actual owner response; a
+    /// rejection carries a plain code, `setup_busy` while a setup run goes on.
+    pub async fn install_dependency(
+        &mut self,
+        name: crate::setup::Dependency,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.setup_status().await?;
+        self.begin_mutation(OwnerMutation::InstallDependency { name }, generation)?;
+        self.send_pending().await
+    }
+
+    /// Removes group and other write from the tree the owner confirmed for one tool found
+    /// and passed over (DEC-162). Takes the tool, the tree and the scope the confirm named and
+    /// the client generation. Returns the actual owner response; a rejection carries a plain
+    /// code, `tool_fix_off` while the setting asks for the command only.
+    pub async fn fix_tool_permissions(
+        &mut self,
+        name: crate::setup::Dependency,
+        tree: String,
+        recursive: bool,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.setup_status().await?;
+        self.begin_mutation(
+            OwnerMutation::FixToolPermissions {
+                name,
+                tree,
+                recursive,
+            },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
+    /// Saves what setup offers for a tool found and passed over: the fix button, or only
+    /// the command to run. Takes the choice and the client generation. Returns the actual
+    /// owner response; a rejection carries a plain code.
+    pub async fn set_refused_tool(
+        &mut self,
+        choice: crate::setup::RefusedTool,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.setup_status().await?;
+        self.begin_mutation(OwnerMutation::SetRefusedTool { choice }, generation)?;
+        self.send_pending().await
+    }
+
     /// Turns one installed default-pack entry on or off for every project.
     /// Takes the entry id, on or off, the pack version the screen showed and the client
     /// generation. Returns the actual owner response; a rejection carries a plain code,

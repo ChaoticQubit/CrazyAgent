@@ -44,6 +44,7 @@ pub const IDE_TAB_CODES: &[&str] = &[
     "ide_project_unknown",
     "ide_sandbox_invalid",
     "ide_server_check_failed",
+    "ide_server_data_git",
     "ide_server_exited",
     "ide_server_not_loopback",
     "ide_server_port_taken",

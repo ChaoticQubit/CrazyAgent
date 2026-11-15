@@ -32,11 +32,13 @@ export function targetInfo(target) {
 
 /**
  * Lists the executables shipped beside the desktop app and in the CLI archive for `target`:
- * the engine, the rcli host, the runner, plus the Linux Landlock or Windows boundary helper.
+ * the engine, the rcli host, the runner, the bundled tmux on macOS and Linux (DEC-157), plus
+ * the Linux Landlock or Windows boundary helper.
  */
 export function sidecars(target) {
   const { os } = targetInfo(target);
   const names = ["crazyagent", "crazyagent-rcli", "crazyagent-runner"];
+  if (os !== "windows") names.push("crazyagent-tmux");
   if (os === "linux") names.push("crazyagent-landlock");
   if (os === "windows") names.push("crazyagent-win-boundary");
   return names;
@@ -71,15 +73,17 @@ function run(command, args, options = {}) {
 }
 
 /**
- * Copies the built executables for `target` from `cargoDir` and the rcli host from `rcli` into
- * `<tauriDir>/binaries/<name>-<target>[.exe]`, and writes `binaries/release.conf.json`, the
- * `tauri build --config` overlay naming them as `bundle.externalBin`. Output: staged paths and overlay path.
+ * Copies the built executables for `target` from `cargoDir`, the rcli host from `rcli` and the
+ * tmux build-tmux.sh made from `tmux` into `<tauriDir>/binaries/<name>-<target>[.exe]`, and writes
+ * `binaries/release.conf.json`, the `tauri build --config` overlay naming them as
+ * `bundle.externalBin`. Output: staged paths and overlay path.
  */
-export async function stageSidecars({ target, cargoDir, rcli, tauriDir }) {
+export async function stageSidecars({ target, cargoDir, rcli, tmux, tauriDir }) {
   const { exe } = targetInfo(target);
   const names = sidecars(target);
-  const sources = names.map((name) => (name === "crazyagent-rcli" ? rcli : join(cargoDir, `${name}${exe}`)));
-  for (const [index, source] of sources.entries()) if (!(await isFile(source))) fail(`release_sidecar_missing:${names[index]}`);
+  const given = { "crazyagent-rcli": rcli, "crazyagent-tmux": tmux };
+  const sources = names.map((name) => (Object.hasOwn(given, name) ? given[name] : join(cargoDir, `${name}${exe}`)));
+  for (const [index, source] of sources.entries()) if (typeof source !== "string" || !(await isFile(source))) fail(`release_sidecar_missing:${names[index]}`);
   const out = join(tauriDir, "binaries");
   await mkdir(out, { recursive: true });
   const staged = [];
@@ -153,9 +157,11 @@ function boxLines(encoded, label) {
 }
 
 /**
- * Verifies a Tauri `.sig` (base64 minisign signature) over `file` against the base64 Tauri
- * `publicKey`, including the global signature over the trusted comment, and requires the signed
- * version to equal `version`. Output: the signed `version` and `file` name.
+ * Verifies a Tauri `.sig` (base64 prehashed minisign signature, algorithm "ED") over `file`
+ * against the base64 Tauri `publicKey`, including the global signature over the trusted comment,
+ * and requires the signed version to equal `version`. A trusted comment that names a field twice
+ * is refused, as the engine updater refuses it, so both read the same version. Output: the signed
+ * `version` and `file` name.
  */
 export async function verifySignature({ file, signature, publicKey, version }) {
   const keyLines = boxLines(publicKey, "public_key");
@@ -165,16 +171,18 @@ export async function verifySignature({ file, signature, publicKey, version }) {
   if (lines.length !== 4 || !lines[2].startsWith("trusted comment: ")) fail("release_signature_rejected");
   const box = Buffer.from(lines[1], "base64");
   const algorithm = box.subarray(0, 2).toString("latin1");
-  if (box.length !== 74 || (algorithm !== "ED" && algorithm !== "Ed")) fail("release_signature_rejected");
+  if (box.length !== 74 || algorithm !== "ED") fail("release_signature_rejected");
   if (!box.subarray(2, 10).equals(key.subarray(2, 10))) fail("release_signature_key_mismatch");
   const publicKeyObject = createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: key.subarray(10).toString("base64url") }, format: "jwk" });
   const data = await readFile(file);
-  const message = algorithm === "ED" ? createHash("blake2b512").update(data).digest() : data;
+  const message = createHash("blake2b512").update(data).digest();
   if (!verify(null, message, publicKeyObject, box.subarray(10))) fail("release_signature_invalid");
   const trusted = lines[2].slice("trusted comment: ".length);
   const global = Buffer.from(lines[3], "base64");
   if (global.length !== 64 || !verify(null, Buffer.concat([box.subarray(10), Buffer.from(trusted, "utf8")]), publicKeyObject, global)) fail("release_signature_invalid");
-  const fields = new Map(trusted.split("\t").map((field) => [field.slice(0, field.indexOf(":")), field.slice(field.indexOf(":") + 1)]));
+  const pairs = trusted.split("\t").map((field) => [field.slice(0, field.indexOf(":")), field.slice(field.indexOf(":") + 1)]);
+  const fields = new Map(pairs);
+  if (fields.size !== pairs.length) fail("release_signature_ambiguous");
   if (fields.get("version") !== version) fail("release_signature_version_mismatch");
   return { version: fields.get("version"), file: fields.get("file") };
 }
@@ -221,13 +229,13 @@ export async function collectDesktop({ target, version, bundleDir, out, env = pr
   return assets;
 }
 
-function options(args, names, flags = []) {
+function options(args, names, flags = [], optional = []) {
   const parsed = {};
   for (let index = 0; index < args.length; index += 1) {
     const name = args[index].replace(/^--/, "");
     if (!args[index].startsWith("--") || Object.hasOwn(parsed, name)) fail("release_arguments_rejected");
     if (flags.includes(name)) parsed[name] = true;
-    else if (names.includes(name) && index + 1 < args.length) parsed[name] = args[++index];
+    else if ((names.includes(name) || optional.includes(name)) && index + 1 < args.length) parsed[name] = args[++index];
     else fail("release_arguments_rejected");
   }
   for (const name of names) if (!Object.hasOwn(parsed, name)) fail(`release_argument_missing:--${name}`);
@@ -236,8 +244,9 @@ function options(args, names, flags = []) {
 
 async function main([command, ...args]) {
   if (command === "stage") {
-    const given = options(args, ["target", "cargo-dir", "rcli", "tauri-dir"]);
-    return (await stageSidecars({ target: given.target, cargoDir: resolve(given["cargo-dir"]), rcli: resolve(given.rcli), tauriDir: resolve(given["tauri-dir"]) })).config;
+    const given = options(args, ["target", "cargo-dir", "rcli", "tauri-dir"], [], ["tmux"]);
+    const tmux = given.tmux === undefined ? undefined : resolve(given.tmux);
+    return (await stageSidecars({ target: given.target, cargoDir: resolve(given["cargo-dir"]), rcli: resolve(given.rcli), tmux, tauriDir: resolve(given["tauri-dir"]) })).config;
   }
   if (command === "package") {
     const given = options(args, ["target", "version", "source", "out"], ["suffixed", "sign"]);

@@ -65,6 +65,43 @@ fn both_texts_are_saved_and_read_back_and_a_missing_file_is_empty() {
     );
 }
 
+/// SA vid 11 r2 (rv-sec3 F1): a project instructions save writes its temporary file in the
+/// state folder's `context/`, made when missing, and leaves only that folder, empty, and the
+/// instructions file in the state folder; a `context` that is a link is refused with
+/// nothing written through it and the saved text kept.
+#[cfg(unix)]
+#[test]
+fn a_project_save_stages_in_the_context_folder_and_refuses_a_linked_one() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let folder = project.folder.clone().unwrap();
+    let state = folder.join(".crazyagent");
+    save_project(&folder, "Owner rule.\n").unwrap();
+    let mut left: Vec<_> = fs::read_dir(&state)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["context", "instructions.md"]);
+    assert_eq!(
+        fs::read_dir(state.join("context")).unwrap().count(),
+        0,
+        "no temporary file is left behind"
+    );
+    assert_eq!(read_project(&folder).unwrap(), "Owner rule.\n");
+
+    fs::remove_dir(state.join("context")).unwrap();
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, state.join("context")).unwrap();
+    assert_eq!(
+        save_project(&folder, "Planted.\n").unwrap_err().0,
+        "process_text_unwritable"
+    );
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    assert_eq!(read_project(&folder).unwrap(), "Owner rule.\n");
+}
+
 #[test]
 fn a_project_without_its_state_folder_is_refused_and_reads_empty() {
     let (_directory, root) = folder();
@@ -906,4 +943,80 @@ fn owner_text_up_to_the_cap_is_given_inline_and_more_is_refused_by_its_larger_pa
         text(&project).unwrap_err().0,
         "agent_instructions_too_large_project"
     );
+}
+
+/// A launch leaves no code an agent planted in its own home for the shell its harness
+/// starts next (SA vid 12): the zsh, bash and sh startup files, the compiled zsh forms and
+/// the folders whose scripts Claude Code and Codex source ahead of each shell command are
+/// removed, a link among them without what it points to, while the agent's other files,
+/// its shell history and its harness state stay.
+#[cfg(unix)]
+#[test]
+fn a_launch_removes_shell_startup_files_and_shell_prelude_folders_from_the_agent_home() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let outside = root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("kept.sh"), "echo kept\n").unwrap();
+    let startup = [
+        ".zshenv",
+        ".zprofile",
+        ".zshrc",
+        ".zlogin",
+        ".zlogout",
+        ".zshenv.zwc",
+        ".zprofile.zwc",
+        ".zshrc.zwc",
+        ".zlogin.zwc",
+        ".zlogout.zwc",
+        ".bashrc",
+        ".bash_profile",
+        ".bash_login",
+        ".bash_logout",
+        ".profile",
+    ];
+    let kept = [".zsh_history", ".claude.json", "note", "projects/p/s.jsonl"];
+    for (name, harness) in [("claude", Harness::Claude), ("codex", Harness::Codex)] {
+        let home = home(&root, name);
+        for file in startup.iter().chain(kept.iter()) {
+            let path = home.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "echo planted\n").unwrap();
+        }
+        let session = home.join("session-env").join("0b6f1c2e-5d4a");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(session.join("sessionstart-hook-0.sh"), "echo planted\n").unwrap();
+        fs::create_dir(home.join("shell-snapshots")).unwrap();
+        fs::write(
+            home.join("shell-snapshots").join("snapshot-zsh-1.sh"),
+            "echo planted\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, home.join("shell_snapshots")).unwrap();
+
+        prepare(&home, harness, &project, &given).unwrap();
+
+        let left: Vec<&str> = startup
+            .iter()
+            .copied()
+            .chain(["session-env", "shell-snapshots", "shell_snapshots"])
+            .filter(|entry| fs::symlink_metadata(home.join(entry)).is_ok())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "a {name} launch kept planted shell code in the agent home: {left:?}"
+        );
+        for file in kept {
+            assert_eq!(
+                fs::read_to_string(home.join(file)).unwrap(),
+                "echo planted\n",
+                "{file}"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(outside.join("kept.sh")).unwrap(),
+            "echo kept\n"
+        );
+    }
 }

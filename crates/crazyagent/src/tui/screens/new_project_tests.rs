@@ -594,6 +594,72 @@ fn harnesses_that_cannot_run_team_agents_are_listed_but_not_picked() {
     );
 }
 
+/// v241 HR-L1: a harness the engine lists as Can't run is never Ready, so Home never counts
+/// it, never the team default, listed but not picked, and a team kept on it says why.
+#[test]
+fn a_harness_the_engine_lists_as_cant_run_is_never_ready_the_default_or_picked() {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = tempfile::Builder::new()
+        .prefix("ca-tui-cant-run-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    for name in ["codex", "claude"] {
+        let path = bin.path().join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut entries = crate::harnesses::catalog(&crate::harnesses::Search::new(
+        vec![bin.path().to_path_buf()],
+        None,
+        Vec::new(),
+    ));
+    let codex = entries
+        .iter_mut()
+        .find(|entry| entry.id == "codex")
+        .unwrap();
+    codex.status = crate::harnesses::HarnessStatus::CantRun {
+        reason: "codex needs node, which is missing. Install Node.js from nodejs.org, or run \
+                 brew install node in Terminal. Then try again."
+            .into(),
+    };
+    codex.status_label = codex.status.label();
+    let choices = super::new_project_page::harness_choices_from(&entries);
+    let at = |id: &str| choices.iter().position(|choice| choice.id == id).unwrap();
+    assert_ne!(choices[at("codex")].state, HarnessState::Ready);
+    assert_eq!(choices[at("claude-code")].state, HarnessState::Ready);
+    assert_eq!(
+        choices
+            .iter()
+            .filter(|choice| choice.state == HarnessState::Ready)
+            .count(),
+        1,
+        "Home counts only the harness that can start"
+    );
+    let mut wizard = wizard();
+    wizard.research = vec![ResearchKind::MarketResearch];
+    load_catalog(&mut wizard, &["c-codex"]);
+    wizard.go(Step::Team);
+    wizard.set_harnesses(choices.clone());
+    assert_eq!(
+        wizard.team.as_ref().unwrap().master,
+        "claude-code",
+        "the default moves off a harness that can't run"
+    );
+    wizard.key(key(KeyCode::Enter));
+    assert_eq!(wizard.picker.as_ref().unwrap().cursor, 0);
+    for _ in 0..at("codex") {
+        wizard.key(key(KeyCode::Down));
+    }
+    wizard.key(key(KeyCode::Enter));
+    assert!(wizard.picker.is_some(), "Codex is listed but not picked");
+    assert_eq!(wizard.team.as_ref().unwrap().master, "claude-code");
+    wizard.team.as_mut().unwrap().master = "codex".into();
+    assert_eq!(
+        wizard.check_team().unwrap_err().text,
+        "Codex can't run on this Mac. Pick another harness."
+    );
+}
+
 #[test]
 fn a_master_only_harness_is_picked_for_the_master_but_never_for_agents() {
     use std::os::unix::fs::PermissionsExt;
@@ -820,6 +886,32 @@ fn documents_by_path_check_type_size_count_and_duplicates() {
         Some("A project holds at most 16 documents. Remove one first.")
     );
     assert_eq!(wizard.documents.len(), before);
+}
+
+#[test]
+fn a_folder_of_documents_adds_only_its_own_files_never_where_its_links_point() {
+    let home = tempfile::tempdir().unwrap();
+    let shared = home.path().join("Shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::write(shared.join("notes.md"), "# Notes\n").unwrap();
+    std::fs::write(home.path().join("Passwords.csv"), "DUMMY-SECRET-106\n").unwrap();
+    std::os::unix::fs::symlink("../Passwords.csv", shared.join("leak.csv")).unwrap();
+    let mut wizard = Wizard::new(Vec::new(), Some(home.path().to_path_buf()));
+    wizard.go(Step::Documents);
+    wizard.key(control('u'));
+    type_text(&mut wizard, "~/Shared");
+    wizard.key(key(KeyCode::Enter));
+    assert_eq!(wizard.note.as_ref().map(|n| n.text.clone()), None);
+    let listed = std::fs::canonicalize(&shared).unwrap();
+    assert_eq!(
+        wizard
+            .documents
+            .iter()
+            .map(|d| (d.name.as_str(), d.path.as_str()))
+            .collect::<Vec<_>>(),
+        [("notes.md", listed.join("notes.md").to_str().unwrap())],
+        "a link in the folder is skipped, not followed to its target"
+    );
 }
 
 #[test]

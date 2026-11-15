@@ -474,11 +474,13 @@ async fn serve_client(mut stream: UnixStream, engine: std::sync::Arc<Engine>, ti
 }
 
 /// The terminal host the engine serves agent terminals through, once one is made: the tmux
-/// program it was made for, none when tmux was not found, and the host.
+/// program it was made for, none when tmux was not found, the host, and the newest look
+/// that found that program, so an older look still running never replaces it.
 #[cfg(unix)]
 type TerminalHost = (
     Option<std::path::PathBuf>,
     std::sync::Arc<dyn crate::terminal::Host>,
+    u64,
 );
 
 pub struct Engine {
@@ -490,6 +492,8 @@ pub struct Engine {
     agents: Mutex<Option<std::sync::Arc<crate::agents::Agents>>>,
     #[cfg(unix)]
     terminal: Mutex<Option<TerminalHost>>,
+    #[cfg(unix)]
+    terminal_looks: std::sync::atomic::AtomicU64,
     harness_probe: std::sync::Arc<crate::harnesses::ProbeCache>,
     harness_updates: std::sync::Arc<crate::harnesses::update::Updates>,
     settings_files: Option<(std::path::PathBuf, std::path::PathBuf)>,
@@ -598,6 +602,8 @@ impl Engine {
                 agents: Mutex::default(),
                 #[cfg(unix)]
                 terminal: Mutex::default(),
+                #[cfg(unix)]
+                terminal_looks: Default::default(),
                 harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
                 harness_updates: crate::harnesses::update::Updates::new(),
                 settings_files: Some((global.to_path_buf(), project.to_path_buf())),
@@ -619,6 +625,8 @@ impl Engine {
             agents: Mutex::default(),
             #[cfg(unix)]
             terminal: Mutex::default(),
+            #[cfg(unix)]
+            terminal_looks: Default::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
             harness_updates: crate::harnesses::update::Updates::new(),
             settings_files: None,
@@ -638,6 +646,8 @@ impl Engine {
             agents: Mutex::default(),
             #[cfg(unix)]
             terminal: Mutex::default(),
+            #[cfg(unix)]
+            terminal_looks: Default::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
             harness_updates: crate::harnesses::update::Updates::new(),
             settings_files: None,

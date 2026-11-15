@@ -1,12 +1,12 @@
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -219,6 +219,57 @@ impl Shared {
     }
 }
 
+/// Where the next relay of this process starts looking in the relay ports, so relays
+/// started one after another do not all try the same taken ports first.
+static NEXT_RELAY_PORT: AtomicUsize = AtomicUsize::new(0);
+
+/// Binds 127.0.0.1 on the first port of [`crate::sandbox::model_proxy::RELAY_PORTS`], going
+/// round from a start that moves with each relay and process, that no socket holds, bound
+/// without `SO_REUSEADDR` so a wildcard listener of this user counts as holding it. Every
+/// Open-network sandbox denies binding the whole block, so no agent can take the port, not
+/// even after the relay ended while a kept pane still sends there (SA241 vid 9). Output:
+/// the listener, or the [`first_bound`] error.
+fn relay_listener() -> std::io::Result<TcpListener> {
+    let block = crate::sandbox::model_proxy::RELAY_PORTS;
+    let ports: Vec<u16> = block.clone().collect();
+    let start = NEXT_RELAY_PORT
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(usize::try_from(std::process::id()).unwrap_or(0));
+    let listener = first_bound(&ports, start, crate::spawn_gate::bind_tcp_std_exclusive)?;
+    assert!(block.contains(&listener.local_addr()?.port()));
+    Ok(listener)
+}
+
+/// The listener `bind` gives on 127.0.0.1 for the first of `ports`, going round from
+/// `start`, skipping a port some socket already holds (`AddrInUse`), one the system keeps
+/// from this user, as a Windows excluded port range does (`PermissionDenied`), and one it
+/// cannot give (`AddrNotAvailable`) (relay-port r1 F1). Inputs: the ports, at least one,
+/// where to start and the bind. Output: the listener, the first bind error that is not a
+/// skipped one, or `AddrInUse` saying every model relay port is taken.
+fn first_bound(
+    ports: &[u16],
+    start: usize,
+    bind: impl Fn(SocketAddr) -> std::io::Result<TcpListener>,
+) -> std::io::Result<TcpListener> {
+    use std::io::ErrorKind;
+    assert!(!ports.is_empty());
+    for step in 0..ports.len() {
+        let port = ports[(start % ports.len() + step) % ports.len()];
+        match bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port))) {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::AddrInUse | ErrorKind::PermissionDenied | ErrorKind::AddrNotAvailable
+                ) => {}
+            bound => return bound,
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AddrInUse,
+        "every model relay port is taken",
+    ))
+}
+
 /// An engine-owned model key relay on 127.0.0.1 for one agent launch. The agent's harness
 /// gets the relay's address and a random placeholder token instead of the provider key;
 /// the relay checks the token, swaps in the real key from engine memory and forwards the
@@ -241,7 +292,7 @@ impl Relay {
         assert!(is_placeholder(&token));
         let scratch = std::env::temp_dir().join(format!("crazyagent-relay-{}", random_hex(8)?));
         private_scratch(&scratch).map_err(|_| failure("model_relay_unavailable"))?;
-        let bound = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).and_then(|listener| {
+        let bound = relay_listener().and_then(|listener| {
             listener.set_nonblocking(true)?;
             let port = listener.local_addr()?.port();
             Ok((listener, port))

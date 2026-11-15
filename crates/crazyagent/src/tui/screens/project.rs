@@ -721,13 +721,14 @@ pub(in crate::tui) struct ProjectScreen {
     pub confirm_move: bool,
     pub removal: Option<crate::team::cleanup::RemovalPreview>,
     pub remove_choice: RemoveChoice,
+    remove_everything: bool,
     pub remove_typed: String,
     pub confirm_plan: Option<SetupAction>,
     pub adding: Option<AddFile>,
     pub folders: Option<AddFile>,
     pub read_paths: Option<crate::project_setup::ReadPaths>,
     pub hidden: Option<AddFile>,
-    pub hidden_paths: Option<Vec<String>>,
+    pub hidden_paths: Option<crate::project_setup::HiddenPaths>,
     pub access: Option<AccessEdit>,
     pub agent_policy: Option<crate::sandbox::policy::PolicyView>,
     pub trust_edit: Option<TrustEdit>,
@@ -754,6 +755,8 @@ pub(in crate::tui) struct ProjectScreen {
     folders_version: u64,
     folders_stale: bool,
     hidden_paths_read_ms: Option<i64>,
+    hidden_version: u64,
+    hidden_stale: bool,
     agent_policy_read_ms: Option<i64>,
     access_stale: bool,
     repository_trust_read_ms: Option<i64>,
@@ -840,6 +843,7 @@ impl ProjectScreen {
             confirm_move: false,
             removal: None,
             remove_choice: RemoveChoice::Dashboard,
+            remove_everything: false,
             remove_typed: String::new(),
             confirm_plan: None,
             adding: None,
@@ -864,6 +868,8 @@ impl ProjectScreen {
             folders_version: 0,
             folders_stale: false,
             hidden_paths_read_ms: None,
+            hidden_version: 0,
+            hidden_stale: false,
             agent_policy_read_ms: None,
             access_stale: false,
             repository_trust_read_ms: None,
@@ -878,10 +884,14 @@ impl ProjectScreen {
     }
 
     /// Opens one tab.
-    /// Takes the tab; the Conversation tab puts focus in the message input.
+    /// Takes the tab; the Conversation tab puts focus in the message input, and the Overview
+    /// reads its tabs again, since a tab file can change outside CrazyAgent.
     /// Returns nothing.
     pub fn open(&mut self, tab: Tab) {
         self.tab = tab;
+        if tab == Tab::Overview {
+            self.overview_read_ms = None;
+        }
         self.reading = false;
         self.confirm_delete = None;
         self.confirm_stop = None;
@@ -983,9 +993,10 @@ impl ProjectScreen {
         Some(query)
     }
 
-    /// Says whether the Overview tabs are read now: at once before the first read and after
-    /// a refresh was asked, then every `REFRESH_MS` only until they are read once, while a
-    /// run writes them, or while a landed change set waits for a run that can start.
+    /// Says whether the Overview tabs are read now: at once before the first read, after a
+    /// refresh was asked and when the owner opens the Overview or picks one of its tabs, then
+    /// every `REFRESH_MS` only until they are read once, while a run writes them, or while a
+    /// landed change set waits for a run that can start.
     /// Takes the screen and the current time in milliseconds. Returns whether to read.
     fn overview_due(&self, now_ms: i64) -> bool {
         let Some(read_ms) = self.overview_read_ms else {
@@ -1199,8 +1210,19 @@ impl ProjectScreen {
                 self.read_paths = Some(saved);
                 self.read_paths_read_ms = Some(self.now_ms);
             }
-            SetupView::HiddenPaths(paths) => {
-                self.hidden_paths = Some(paths);
+            SetupView::HiddenPaths(saved) => {
+                if std::mem::take(&mut self.hidden_stale)
+                    && let Some(hidden) = self.hidden.as_mut()
+                {
+                    self.hidden_version = saved.version;
+                    let now = if saved.paths.is_empty() {
+                        "no hidden folders".to_owned()
+                    } else {
+                        saved.paths.join(":")
+                    };
+                    hidden.error = Some(format!("Saved now: {now}. {KEEP_MINE}"));
+                }
+                self.hidden_paths = Some(saved);
                 self.hidden_paths_read_ms = Some(self.now_ms);
             }
             SetupView::AgentPolicy(view) => {
@@ -1273,7 +1295,10 @@ impl ProjectScreen {
                 if self.confirm_remove {
                     if !preview.can_delete {
                         self.remove_choice = RemoveChoice::Dashboard;
+                    } else if self.remove_everything {
+                        self.remove_choice = RemoveChoice::Everything;
                     }
+                    self.remove_everything = false;
                     self.removal = Some(*preview);
                 }
             }
@@ -1287,8 +1312,8 @@ impl ProjectScreen {
     }
 
     /// Puts a refused add, edit or remove back in its box with the reason. A General,
-    /// read-only folders or Agent access edit refused as stale keeps its draft and reads the
-    /// saved value again.
+    /// read-only folders, hidden folders or Agent access edit refused as stale keeps its draft
+    /// and reads the saved value again.
     /// Takes the change query and the plain problem code.
     /// Returns true when an open box took the refusal.
     fn refused(&mut self, query: &SetupQuery, code: &str) -> bool {
@@ -1325,6 +1350,11 @@ impl ProjectScreen {
                 if let Some(hidden) = self.hidden.as_mut() {
                     hidden.busy = false;
                     hidden.error = reason;
+                }
+                if stale {
+                    self.hidden_stale = true;
+                    self.hidden_paths = None;
+                    self.hidden_paths_read_ms = None;
                 }
                 true
             }
@@ -2188,6 +2218,7 @@ impl ProjectScreen {
                 };
                 self.overview_tab = (self.overview_tab + step) % count;
                 self.overview_scroll = 0;
+                self.overview_read_ms = None;
             }
             KeyCode::Char('R') if tabs => return self.refresh_overview(),
             KeyCode::PageDown if tabs => {
@@ -2591,7 +2622,26 @@ impl ProjectScreen {
         self.confirm_remove = false;
         self.removal = None;
         self.remove_choice = RemoveChoice::Dashboard;
+        self.remove_everything = false;
         self.remove_typed.clear();
+    }
+
+    /// Opens the remove ask for a delete an engine stop cut short, as x does, on the Settings
+    /// tab where that ask lives, as the desktop's Delete again opens Settings, with Delete
+    /// everything picked once the engine's preview offers it; the exact name is still typed.
+    /// Does nothing while another box is open, which keeps its keys. Takes the screen.
+    /// Returns nothing.
+    pub fn ask_delete_again(&mut self) {
+        if self.boxed() {
+            return;
+        }
+        self.open(Tab::Settings);
+        self.confirm_remove = true;
+        self.removal_read_ms = None;
+        self.remove_everything = true;
+        assert_eq!(self.tab, Tab::Settings);
+        assert!(self.removal.is_none());
+        assert_eq!(self.remove_choice, RemoveChoice::Dashboard);
     }
 
     /// Moves the pool picker or settles it. The rows are the pools, then "No pool" last.
@@ -2679,9 +2729,11 @@ impl ProjectScreen {
             }
             KeyCode::Char('k') => {
                 match &self.hidden_paths {
-                    Some(paths) => {
+                    Some(saved) => {
                         let mut input = TextInput::single(FOLDERS_BYTES_MAX);
-                        input.set(&paths.join(":"));
+                        input.set(&saved.paths.join(":"));
+                        self.hidden_version = saved.version;
+                        self.hidden_stale = false;
                         self.hidden = Some(AddFile {
                             input,
                             busy: false,
@@ -2893,6 +2945,7 @@ impl ProjectScreen {
                     .collect();
                 let action = SetupAction::SetHiddenPaths {
                     project_id: self.project.clone(),
+                    version: self.hidden_version,
                     paths,
                 };
                 if let Err(error) = action.validate() {
@@ -3098,6 +3151,7 @@ impl ProjectScreen {
             );
         }
         assert!(self.confirm_remove || (self.removal.is_none() && self.remove_typed.is_empty()));
+        assert!(!self.remove_everything || (self.confirm_remove && self.removal.is_none()));
         assert!(self.remove_typed.len() <= NAME_BYTES_MAX);
         if let Some(review) = &self.review {
             assert!(review.scroll < review.lines().len().max(1));
@@ -3338,7 +3392,10 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "move_project_busy" => {
             "Stop the team first (Stop all on the Team tab), then move the project. If its agents are still stopping, try again in a few seconds."
         }
-        code if code.starts_with("move_project_") || code.starts_with("home_") => {
+        code if code.starts_with("move_project_")
+            || code.starts_with("home_")
+            || code.starts_with("delete_") =>
+        {
             return crate::projects_home::plain_problem(code).map_or_else(
                 || coded("That didn't work. Try again.", code),
                 str::to_owned,

@@ -225,6 +225,28 @@ fn owner_switch_on(fixture: &mut Fixture) {
     tx.commit().unwrap();
 }
 
+/// Ticks the runtime until the project's master reported ready, so the start time a row
+/// moves back is the one the runtime keeps: the Ready report, which can land after the
+/// stand-in wrote its launch, sets that start time anew. Takes the fixture, the runtime and
+/// the project. Returns the master's id.
+fn ready_master(fixture: &Fixture, team: &mut TeamRuntime, project: &ProjectId) -> i64 {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Some(id) = team.master(project)
+            && team.workers[&id].ready
+        {
+            return id;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the master never reported ready: {:#?}",
+            fixture.status()
+        );
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// r2 F1: the owner's Try again while the live master's switch is already on, as on an
 /// overdue terminal, is a retry from the desktop and the TUI alike (both send LiveMaster
 /// on, DEC-141): the tool probes look again and a master that has not read keys a minute
@@ -256,7 +278,7 @@ fn an_overdue_try_again_looks_for_tools_again_and_restarts_the_master_once() {
         "a young master only gets the look"
     );
 
-    let id = team.master(&project).expect("the master runs");
+    let id = ready_master(&fixture, &mut team, &project);
     team.workers.get_mut(&id).unwrap().spawned = Instant::now()
         .checked_sub(Duration::from_secs(600))
         .unwrap();
@@ -291,7 +313,7 @@ fn an_owner_try_again_is_never_refused_by_the_start_limit() {
     owner_switch_on(&mut fixture);
     fixture.until(&mut team, "the master starts", |f| master_launches(f) == 1);
     for press in 1..=LIVE_STARTS_MAX {
-        let id = team.master(&project).expect("the master runs");
+        let id = ready_master(&fixture, &mut team, &project);
         team.workers.get_mut(&id).unwrap().spawned = Instant::now()
             .checked_sub(Duration::from_secs(600))
             .unwrap();
@@ -305,6 +327,94 @@ fn an_owner_try_again_is_never_refused_by_the_start_limit() {
         super::super::super::master::live(&fixture.connection, &project).unwrap(),
         "{:?}",
         fixture.status().live_problem
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// Ticks the runtime until `done` holds of it, for at most 20 s. Takes the runtime, what is
+/// awaited and the check.
+fn tick_until(team: &mut TeamRuntime, what: &str, done: impl Fn(&TeamRuntime) -> bool) {
+    let began = Instant::now();
+    while !done(team) {
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "timed out: {what}"
+        );
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// RV-DS241-121: the owner turns the live master off in the moment after the runtime read
+/// the switch on and before the master's launch, as a trigger on the new master row does
+/// here. The start never ends the team thread on an assert: the master starts as the switch
+/// was read, stops at the switch off on a later tick, and the owner's next switch-on starts
+/// it again in its terminal.
+#[test]
+fn a_live_master_switched_off_while_it_starts_never_ends_the_team_thread() {
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, SILENT_CODEX, TeamLimits::default())
+        .with_tools_refresh(|| {});
+    let project = fixture.setup.project_id.clone();
+    fixture
+        .connection
+        .execute_batch(
+            "CREATE TRIGGER owner_switches_off AFTER INSERT ON team_agents
+             WHEN NEW.role='master'
+             BEGIN UPDATE team_live_masters SET live=0 WHERE project=NEW.project; END;",
+        )
+        .unwrap();
+    owner_switch_on(&mut fixture);
+    fixture.until(&mut team, "the master row is written", |f| {
+        !masters(&f.connection).is_empty()
+    });
+    tick_until(&mut team, "the master stops at the switch off", |team| {
+        team.master(&project).is_none()
+    });
+    assert!(!super::super::super::master::live(&fixture.connection, &project).unwrap());
+
+    fixture
+        .connection
+        .execute_batch("DROP TRIGGER owner_switches_off;")
+        .unwrap();
+    owner_switch_on(&mut fixture);
+    tick_until(&mut team, "the live master runs again", |team| {
+        team.master(&project)
+            .is_some_and(|id| team.workers[&id].live)
+    });
+    assert!(super::super::super::master::live(&fixture.connection, &project).unwrap());
+    assert_eq!(masters(&fixture.connection).len(), 1, "one master row");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// RV-DS241-121: a master start whose launch finds the live switch off seats no live
+/// session: the master it started is stopped and the start is refused, never an assert
+/// that ends the team thread.
+#[test]
+fn a_master_start_that_finds_the_switch_off_is_refused_not_asserted() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, SILENT_CODEX, TeamLimits::default())
+        .with_tools_refresh(|| {});
+    let project = fixture.setup.project_id.clone();
+    let harness = fixture.setup.team.master.clone();
+    let account = team
+        .account_for(&fixture.access, &project, &harness, &BTreeSet::new())
+        .unwrap()
+        .expect("an account runs the master");
+    let started = team
+        .start_master(&fixture.setup, &fixture.access, &harness, &account, None)
+        .unwrap();
+    assert!(matches!(started, Start::Refused(_)), "{started:?}");
+    let master = masters(&fixture.connection)[0];
+    assert!(
+        team.workers
+            .get(&master)
+            .is_none_or(|worker| worker.stopping),
+        "the master it started stops"
     );
     team.shutdown().unwrap();
     host.close(&[]).unwrap();

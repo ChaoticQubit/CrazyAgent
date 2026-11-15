@@ -1,28 +1,63 @@
 use crate::file_lock::HeldLock;
-use crate::plugins::ServerSpec;
+use crate::plugins::{ContextModeOff, ServerSpec, exact_version};
 use crate::setup::InstallError;
 use crate::setup::process::{private_folder, run_command, staging_folder};
+use base64::Engine;
 use rustix::fs::{FlockOperation, Mode, OFlags};
+use sha2::{Digest, Sha512};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const PACKAGE: &str = "context-mode";
+const PACKAGE: &str = crate::plugins::CONTEXT_MODE_PACKAGE;
 const PROGRAM: &str = "cli.bundle.mjs";
 const MODULES: &str = "node_modules";
-const VERSION_BYTES_MAX: usize = 32;
 const MANIFEST_BYTES_MAX: u64 = 64 * 1024;
 const LOCK_BYTES_MAX: u64 = 1024 * 1024;
 const MARKER_BYTES_MAX: u64 = 32;
+const PROGRAM_BYTES_MAX: u64 = 16 * 1024 * 1024;
 const INSTALL_TIME: Duration = Duration::from_secs(900);
+const NODE_CHECK_TIME: Duration = Duration::from_secs(10);
+const NODE_OLDEST: (u32, u32) = (22, 5);
+const NODE_TOO_OLD: &str = "context_mode_node_too_old";
+const NPX_NOT_FOUND: &str = "context_mode_npx_not_found";
+const NODE_CHECK: &str = "node-check";
 const INSTALL_BACKOFF: Duration = Duration::from_secs(600);
 const INSTALLS_MAX: usize = 16;
 
+const _: () =
+    assert!(INSTALL_BACKOFF.as_secs().div_ceil(60) == crate::plugins::INSTALL_RETRY_MINUTES_MAX);
+
 static INSTALLING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// What a server check runs for one approved spec. The check never runs the default pack's
+/// pinned context-mode npx launch, nor a spec only shaped like it whose npx the tool resolver
+/// does not find ([`crate::plugins::found_context_mode`]): the pinned one runs from the
+/// engine's shared install once that is complete, waits while its install runs in this
+/// engine, and otherwise says why no install can run, with the time left after a recent
+/// failure; the shaped one waits as being set up or is refused. Every other spec runs as
+/// approved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForCheck {
+    Run(ServerSpec),
+    SettingUp,
+    Failed(Duration),
+    Refused(&'static str),
+}
+
+/// How a request to install the shared copy went: started now, already running in this
+/// engine, held back after a recent failure for the time left, or refused with its code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Begin {
+    Started,
+    Running,
+    Failed(Duration),
+    Refused(&'static str),
+}
 
 /// The folder holding the engine's one shared install of a context-mode version,
 /// `<engine root>/setup/npm/context-mode@<version>`. Inputs: the engine root and the
@@ -34,20 +69,75 @@ pub fn install_folder(root: &Path, version: &str) -> PathBuf {
 }
 
 /// The spec an agent launch runs for one approved server. The default pack's pinned
-/// context-mode launch, `<folder>/npx -y context-mode@<version>`, runs the engine's shared
-/// install of that same version with the `node` beside npx once the install is complete, so
-/// a fresh agent home never fetches the package into its own cold npm cache. Until then it
-/// stays the approved npx launch and the engine installs the shared copy in the background.
-/// Every other server is unchanged. Inputs: the engine root and the spec. Output: the spec.
-pub fn for_launch(root: &Path, spec: ServerSpec) -> ServerSpec {
-    let Some((bin, version)) = pinned(&spec) else {
-        return spec;
+/// context-mode launch, `<folder>/npx -y context-mode@<version>`, runs only the engine's
+/// shared install of that same version, checked against the pinned hashes, with the `node`
+/// beside npx. It never runs the npx spec, which would let npm run dependency install
+/// scripts: until the install is complete the launch leaves the server out, says why, and
+/// the engine installs the shared copy in the background when it can. A spec only shaped like
+/// it, whose npx the tool resolver does not find, is left out too
+/// ([`crate::plugins::found_context_mode`]). Every other server is unchanged. Inputs: the
+/// engine root and the spec. Output: the spec, or why it is left out.
+pub fn for_launch(root: &Path, spec: ServerSpec) -> Result<ServerSpec, ContextModeOff> {
+    let Some((bin, version)) = crate::plugins::found_context_mode(root, &spec)? else {
+        return Ok(spec);
     };
-    if let Some(shared) = shared(&install_folder(root, version), &bin.join("node"), version) {
-        return shared;
+    let folder = install_folder(root, version);
+    let node = bin.join("node");
+    let found = checked(&folder, version);
+    if let Some(shared) = found.ok().and_then(|()| run_spec(&folder, &node)) {
+        return Ok(shared);
     }
-    begin_install(root, bin, version);
-    spec
+    let mismatch = found.is_err_and(|code| code.ends_with("_mismatch"));
+    Err(
+        match after_begin(begin_install(root, bin, version), &folder, &node, version) {
+            ForCheck::Run(shared) => return Ok(shared),
+            ForCheck::Refused(NODE_TOO_OLD) => ContextModeOff::NodeTooOld,
+            _ if mismatch => ContextModeOff::Mismatch,
+            ForCheck::SettingUp | ForCheck::Refused("context_mode_installs_busy") => {
+                ContextModeOff::SettingUp
+            }
+            ForCheck::Failed(_) | ForCheck::Refused(_) => ContextModeOff::Failed,
+        },
+    )
+}
+
+/// What a Settings check of one approved server runs ([`ForCheck`]). Like [`for_launch`] it
+/// starts the shared install when one can run, but it never hands back the pinned npx spec.
+/// A shared install found complete after the start wins, so an install that finished between
+/// the two reads still runs. Inputs: the engine root and the approved spec. Output: the run.
+pub fn for_check(root: &Path, spec: ServerSpec) -> ForCheck {
+    let (bin, version) = match crate::plugins::found_context_mode(root, &spec) {
+        Ok(Some(found)) => found,
+        Ok(None) => return ForCheck::Run(spec),
+        Err(ContextModeOff::SettingUp) => return ForCheck::SettingUp,
+        Err(off) => {
+            assert_eq!(off, ContextModeOff::NpxNotFound);
+            return ForCheck::Refused(NPX_NOT_FOUND);
+        }
+    };
+    let folder = install_folder(root, version);
+    let node = bin.join("node");
+    if let Some(shared) = shared(&folder, &node, version) {
+        return ForCheck::Run(shared);
+    }
+    after_begin(begin_install(root, bin, version), &folder, &node, version)
+}
+
+/// Reads what a check runs once its install request went one way: the shared install when
+/// it is complete by now, even if the install was only just started or found running,
+/// otherwise being set up, the time left after a failure, or the refusal. Inputs: how the
+/// request went, the install folder, the `node` beside npx and the version. Output: the run.
+fn after_begin(begin: Begin, folder: &Path, node: &Path, version: &str) -> ForCheck {
+    match begin {
+        Begin::Started | Begin::Running => {
+            shared(folder, node, version).map_or(ForCheck::SettingUp, ForCheck::Run)
+        }
+        Begin::Failed(left) => {
+            assert!(left <= INSTALL_BACKOFF);
+            ForCheck::Failed(left)
+        }
+        Begin::Refused(code) => ForCheck::Refused(code),
+    }
 }
 
 /// The shared install folder a launch spec from [`for_launch`] runs from, which an agent's
@@ -80,17 +170,20 @@ pub fn shared_install(spec: &ServerSpec) -> Option<&Path> {
 
 /// Installs one context-mode version into the engine's shared folder, once. An exclusive
 /// lock on `<folder>.lock` makes a parallel installer wait, then find the finished install.
-/// Only a version the default pack pins with a tarball hash installs. Under the lock a failure
-/// less than [`INSTALL_BACKOFF`] old (`<folder>.failed`) stops a retry, and whatever is left
-/// at the install path that is not complete is removed. npm from npx's folder runs in an agent
-/// sandbox (HTTPS only, a fresh home and cache) into a staging folder that becomes the install
-/// folder only after the package and npm's recorded tarball hash check out.
+/// Only a version the default pack pins with a tarball and a program hash installs, and only
+/// for a `node` beside npx that is 22.5 or newer, read inside a boundary ([`node_supported`]),
+/// which runs it with no dependency built.
+/// Under the lock a failure less than [`INSTALL_BACKOFF`] old (`<folder>.failed`) stops a
+/// retry, and whatever is left at the install path that is not complete is removed. npm from
+/// npx's folder runs in an agent sandbox (HTTPS only, a fresh home and cache) into a staging
+/// folder that becomes the install folder only after the package, npm's recorded tarball hash
+/// and the program's own hash check out.
 /// Inputs: the engine root, npx's folder and the version. Output: the folder, or the code.
 pub fn install(root: &Path, bin: &Path, version: &str) -> Result<PathBuf, InstallError> {
     if !exact_version(version) {
         return Err(InstallError("context_mode_version_invalid"));
     }
-    if pin(version).is_none() {
+    if pin(version).is_none() || program_pin(version).is_none() {
         return Err(InstallError("context_mode_integrity_unpinned"));
     }
     if !runnable(&bin.join("npm")) || !runnable(&bin.join("node")) {
@@ -106,8 +199,11 @@ pub fn install(root: &Path, bin: &Path, version: &str) -> Result<PathBuf, Instal
     if complete(&folder, version) {
         return Ok(folder);
     }
-    let failed = parent.join(format!("{prefix}.failed"));
-    if backing_off(&failed) {
+    if !node_supported(root, bin)? {
+        return Err(InstallError(NODE_TOO_OLD));
+    }
+    let failed = failed_marker(root, version);
+    if backoff_left(&failed).is_some() {
         return Err(InstallError("context_mode_install_backoff"));
     }
     let result = replace(root, &folder, bin, version);
@@ -144,42 +240,7 @@ fn replace(root: &Path, folder: &Path, bin: &Path, version: &str) -> Result<(), 
     result
 }
 
-fn pinned(spec: &ServerSpec) -> Option<(&Path, &str)> {
-    let ServerSpec::Stdio { command, args } = spec else {
-        return None;
-    };
-    let command = Path::new(command);
-    let [flag, package] = args.as_slice() else {
-        return None;
-    };
-    let version = package
-        .strip_prefix(PACKAGE)
-        .and_then(|rest| rest.strip_prefix('@'))
-        .filter(|version| flag == "-y" && exact_version(version))?;
-    let npx = command.is_absolute() && command.file_name() == Some("npx".as_ref());
-    command.parent().filter(|_| npx).map(|bin| (bin, version))
-}
-
-fn exact_version(version: &str) -> bool {
-    let (core, pre) = match version.split_once('-') {
-        Some((core, pre)) => (core, Some(pre)),
-        None => (version, None),
-    };
-    let numbers: Vec<&str> = core.split('.').collect();
-    version.len() <= VERSION_BYTES_MAX
-        && numbers.len() == 3
-        && numbers
-            .iter()
-            .all(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
-        && pre.is_none_or(|pre| {
-            !pre.is_empty()
-                && pre
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
-        })
-}
-
-fn pin(version: &str) -> Option<String> {
+fn pack_entry(version: &str) -> Option<crate::setup::pack::PackManifestEntry> {
     let wanted = format!("{PACKAGE}@{version}");
     crate::setup::pack::default_pack()
         .ok()?
@@ -187,12 +248,27 @@ fn pin(version: &str) -> Option<String> {
         .into_iter()
         .find(|entry| {
             entry.id == PACKAGE && entry.install.split_whitespace().any(|word| word == wanted)
-        })?
-        .integrity
+        })
+}
+
+fn pin(version: &str) -> Option<String> {
+    pack_entry(version)?.integrity
+}
+
+fn program_pin(version: &str) -> Option<String> {
+    pack_entry(version)?.program_integrity
 }
 
 fn shared(folder: &Path, node: &Path, version: &str) -> Option<ServerSpec> {
-    if !folder.is_absolute() || !complete(folder, version) || !runnable(node) {
+    checked(folder, version).ok()?;
+    run_spec(folder, node)
+}
+
+/// The spec that runs a shared install's program with a `node`, without checking the install.
+/// Inputs: the install folder and the `node`. Output: the spec, or none for a relative folder
+/// or a `node` that cannot run.
+fn run_spec(folder: &Path, node: &Path) -> Option<ServerSpec> {
+    if !folder.is_absolute() || !runnable(node) {
         return None;
     }
     let program = folder.join(MODULES).join(PACKAGE).join(PROGRAM);
@@ -221,7 +297,128 @@ fn checked(folder: &Path, version: &str) -> Result<(), &'static str> {
     if recorded_integrity(folder, version).as_deref() != Some(pinned.as_str()) {
         return Err("context_mode_integrity_mismatch");
     }
+    let program = program_pin(version).ok_or("context_mode_integrity_unpinned")?;
+    let found = program_hash(&package.join(PROGRAM));
+    if found.as_deref() != Some(program.as_str()) && !fixture_program(found.as_deref()) {
+        return Err("context_mode_program_mismatch");
+    }
     Ok(())
+}
+
+/// The `sha512-` hash of the program file, read without following a link and refused past
+/// [`PROGRAM_BYTES_MAX`]. Input: the program path. Output: the hash, or none when the path is
+/// not a regular file that reads whole.
+fn program_hash(path: &Path) -> Option<String> {
+    let file = File::from(
+        rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()?,
+    );
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(PROGRAM_BYTES_MAX + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > PROGRAM_BYTES_MAX {
+        return None;
+    }
+    let hash = base64::engine::general_purpose::STANDARD.encode(Sha512::digest(&bytes));
+    Some(format!("sha512-{hash}"))
+}
+
+/// Whether a test build also accepts the empty program its fixtures write in place of the
+/// real bundle. Input: the program's hash. Output: true only in a test build, for that hash.
+#[cfg(test)]
+fn fixture_program(found: Option<&str>) -> bool {
+    found
+        == Some(
+            "sha512-z4PhNX7vuL3xVChQ1m2AB9Yg5AULVxXcg/SpIdNs6c5H0NE8XYXysP+DGNKHfuwvY7kxvUdBeoGlODJ6+SfaPg==",
+        )
+}
+
+#[cfg(not(test))]
+fn fixture_program(_: Option<&str>) -> bool {
+    false
+}
+
+/// Whether the `node` beside npx runs the shared install: its `--version`, read inside a
+/// boundary in a scratch folder removed after ([`node_command`]), names 22.5 or newer, which
+/// has the built-in SQLite context-mode uses without building a dependency. Inputs: the engine
+/// root and npx's folder. Output: false when it is older, fails or names no version, or
+/// `context_mode_sandbox_unavailable` when no boundary can hold it.
+fn node_supported(root: &Path, bin: &Path) -> Result<bool, InstallError> {
+    let scratch = staging_folder(&root.join("setup").join("npm"), NODE_CHECK)?;
+    let supported = node_command(root, &scratch, bin).map(|command| {
+        run_command(command, NODE_CHECK_TIME)
+            .is_ok_and(|(ok, output)| ok && supported_node(&output))
+    });
+    let _ = std::fs::remove_dir_all(&scratch);
+    supported
+}
+
+/// The `node --version` command of npx's folder inside the boundary npm installs in, with no
+/// network: the scratch folder's own project, home and temp folders, the engine's secrets
+/// denied, Node's tool folders and npx's folder read, and a cleared environment
+/// (RV-DS241-150). Inputs: the engine root, the scratch folder and npx's folder. Output: the
+/// command, or `context_mode_sandbox_unavailable`.
+fn node_command(
+    root: &Path,
+    scratch: &Path,
+    bin: &Path,
+) -> Result<std::process::Command, InstallError> {
+    use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
+    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork};
+    let canonical = |path: &Path| path.canonicalize().map_err(refused);
+    let mut folders = Vec::with_capacity(3);
+    for name in ["project", "home", "tmp"] {
+        private_folder(&scratch.join(name))?;
+        folders.push(canonical(&scratch.join(name))?);
+    }
+    let homes = ToolHomes::owner().map_err(refused)?;
+    let sandbox = ProjectSandbox::new(
+        &folders[0],
+        &folders[1],
+        &folders[2],
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .and_then(|sandbox| sandbox.guard_engine(root))
+    .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
+    .map_err(refused)?;
+    let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
+    let sandbox = InstalledSandbox::install(sandbox, &scratch.join("node.sb")).map_err(refused)?;
+    let mut node = std::process::Command::new(bin.join("node"));
+    node.arg("--version").current_dir(&folders[0]);
+    sandbox.wrap(&node).map_err(refused)
+}
+
+/// Reads one `node --version` output, `v<major>.<minor>.<patch>`. Input: the output.
+/// Output: true for 22.5 or newer; anything else counts as too old.
+fn supported_node(output: &[u8]) -> bool {
+    let Some(version) = std::str::from_utf8(output)
+        .ok()
+        .and_then(|text| text.trim_end().strip_prefix('v'))
+    else {
+        return false;
+    };
+    let number = |part: Option<&str>| {
+        part.filter(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|part| part.parse::<u32>().ok())
+    };
+    let mut parts = version.split('.');
+    match (
+        number(parts.next()),
+        number(parts.next()),
+        number(parts.next()),
+        parts.next(),
+    ) {
+        (Some(major), Some(minor), Some(_), None) => (major, minor) >= NODE_OLDEST,
+        _ => false,
+    }
 }
 
 fn recorded_integrity(folder: &Path, version: &str) -> Option<String> {
@@ -245,16 +442,22 @@ fn unix_now() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
-fn backing_off(marker: &Path) -> bool {
+fn failed_marker(root: &Path, version: &str) -> PathBuf {
+    root.join("setup")
+        .join("npm")
+        .join(format!("{PACKAGE}@{version}.failed"))
+}
+
+fn backoff_left(marker: &Path) -> Option<Duration> {
     let mut text = String::new();
     let read =
         File::open(marker).and_then(|file| file.take(MARKER_BYTES_MAX).read_to_string(&mut text));
-    let Some(failed) = read.ok().and_then(|_| text.trim().parse::<u64>().ok()) else {
-        return false;
-    };
+    let failed = read.ok().and_then(|_| text.trim().parse::<u64>().ok())?;
     let now = unix_now();
     let backoff = INSTALL_BACKOFF.as_secs();
-    failed <= now.saturating_add(backoff) && now.saturating_sub(failed) < backoff
+    let since = now.saturating_sub(failed);
+    (failed <= now.saturating_add(backoff) && since < backoff)
+        .then(|| Duration::from_secs(backoff - since))
 }
 
 fn clear(folder: &Path) -> Result<(), InstallError> {
@@ -288,12 +491,51 @@ fn runnable(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
-fn begin_install(root: &Path, bin: &Path, version: &str) {
+fn running(folder: &Path) -> bool {
+    INSTALLING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|held| held == folder)
+}
+
+/// Says whether an install of one version can start now, before it is registered, with the
+/// same refusals [`install`] would return at once. Inputs: the engine root, npx's folder and
+/// the version. Output: none, or the refusal.
+fn can_install(root: &Path, bin: &Path, version: &str) -> Option<Begin> {
+    if pin(version).is_none() || program_pin(version).is_none() {
+        return Some(Begin::Refused("context_mode_integrity_unpinned"));
+    }
+    if !runnable(&bin.join("npm")) || !runnable(&bin.join("node")) {
+        return Some(Begin::Refused("context_mode_npm_missing"));
+    }
+    match node_supported(root, bin) {
+        Ok(true) => {}
+        Ok(false) => return Some(Begin::Refused(NODE_TOO_OLD)),
+        Err(error) => return Some(Begin::Refused(error.0)),
+    }
+    backoff_left(&failed_marker(root, version)).map(Begin::Failed)
+}
+
+/// Starts the shared install of one version in the background unless it runs already or
+/// cannot run now. Only an install that can start is registered, so [`for_check`] reads
+/// "being set up" only while one really runs. Inputs: the engine root, npx's folder and the
+/// version. Output: how it went.
+fn begin_install(root: &Path, bin: &Path, version: &str) -> Begin {
     let folder = install_folder(root, version);
+    if running(&folder) {
+        return Begin::Running;
+    }
+    if let Some(refused) = can_install(root, bin, version) {
+        return refused;
+    }
     {
         let mut installing = INSTALLING.lock().unwrap_or_else(PoisonError::into_inner);
-        if installing.contains(&folder) || installing.len() >= INSTALLS_MAX {
-            return;
+        if installing.contains(&folder) {
+            return Begin::Running;
+        }
+        if installing.len() >= INSTALLS_MAX {
+            return Begin::Refused("context_mode_installs_busy");
         }
         installing.push(folder.clone());
         assert!(installing.len() <= INSTALLS_MAX);
@@ -308,7 +550,9 @@ fn begin_install(root: &Path, bin: &Path, version: &str) {
         });
     if started.is_err() {
         finish(&folder);
+        return Begin::Refused("context_mode_installs_busy");
     }
+    Begin::Started
 }
 
 fn finish(folder: &Path) {
@@ -354,11 +598,11 @@ fn refused<E>(_: E) -> InstallError {
     InstallError("context_mode_sandbox_unavailable")
 }
 
-/// Installs `source` into the staging folder with package scripts off, checks npm's record
-/// of the tarball hash against the pin before any package script can run or rewrite it,
-/// then runs the scripts with `npm rebuild`. Both npm runs share one time limit. Inputs:
-/// the engine root, staging and work folders, npm's folder, the version and what npm
-/// installs. Output: Ok once rebuilt; the caller re-checks before the rename.
+/// Installs `source` into the staging folder with package scripts off, so no script of the
+/// package or any dependency ever runs, then checks npm's record of the tarball hash and the
+/// program's own hash against the pins. Inputs: the engine root, staging and work folders,
+/// npm's folder, the version and what npm installs. Output: Ok once checked; the caller
+/// re-checks before the rename.
 fn fill(
     root: &Path,
     staged: &Path,
@@ -367,35 +611,26 @@ fn fill(
     version: &str,
     source: &OsStr,
 ) -> Result<(), InstallError> {
-    let deadline = Instant::now() + INSTALL_TIME;
-    let npm = |task: &str, extra: &[&OsStr]| -> Result<(), InstallError> {
-        let mut command = npm_command(root, staged, work, bin, version)?;
-        command
-            .arg(task)
-            .arg("--prefix")
-            .arg(staged)
-            .args([
-                "--no-audit",
-                "--no-fund",
-                "--no-update-notifier",
-                "--loglevel=error",
-            ])
-            .args(extra);
-        match run_command(command, deadline.saturating_duration_since(Instant::now()))? {
-            (true, _) => Ok(()),
-            (false, _) => Err(InstallError("context_mode_install_failed")),
-        }
-    };
-    npm(
-        "install",
-        &[
+    let mut command = npm_command(root, staged, work, bin, version)?;
+    command
+        .arg("install")
+        .arg("--prefix")
+        .arg(staged)
+        .args([
+            "--no-audit",
+            "--no-fund",
+            "--no-update-notifier",
+            "--loglevel=error",
+        ])
+        .args([
             OsStr::new("--ignore-scripts"),
             OsStr::new("--no-save"),
             source,
-        ],
-    )?;
-    checked(staged, version).map_err(InstallError)?;
-    npm("rebuild", &[])
+        ]);
+    if !run_command(command, INSTALL_TIME)?.0 {
+        return Err(InstallError("context_mode_install_failed"));
+    }
+    checked(staged, version).map_err(InstallError)
 }
 
 fn npm_command(

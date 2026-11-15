@@ -21,6 +21,9 @@ pub const CONTROL: &str = "ide_run_control_character";
 pub const CHAINED: &str = "ide_run_chained";
 /// The refusal of a run while the project's setting is Off.
 pub const OFF: &str = "ide_run_off";
+/// The refusal of a run while the project's Install & use tab came with the project's
+/// files: neither the engine wrote it nor the owner saved it here (RV-DS241-2).
+pub const FOREIGN_TAB: &str = "ide_run_foreign_tab";
 /// The refusal of a run the project's IDE did not acknowledge within `REVEAL_WAIT`.
 pub const UNANSWERED: &str = "ide_run_unanswered";
 /// The characters a bare word may hold beside ASCII letters and digits. The shared rule
@@ -216,12 +219,41 @@ pub(crate) async fn save_mode(
         .map_err(|_| failure("ide_unavailable"))?
 }
 
+/// Whether the project's Install & use tab, the one tab whose commands the desktop offers
+/// to run, came with the project's files, by the Overview's own tab check, off the async
+/// threads. A project with no stored absolute folder has no tab file. Inputs: the owner
+/// runtime and the project. Output: the answer, or `ide_unavailable`.
+async fn from_foreign_tab(
+    runtime: &OwnerRuntimeHandle,
+    project: &ProjectId,
+) -> Result<bool, EngineError> {
+    use crate::project_overview::{Tab, initialize, tab_foreign};
+    let root = runtime.ide()?.root;
+    let asked = project.clone();
+    tokio::task::spawn_blocking(move || {
+        let db = crate::landing::open(&root)?;
+        let lost = |_| failure("ide_unavailable");
+        let Some(setup) = crate::project_setup::load_setup(&db, &asked).map_err(lost)? else {
+            return Ok(false);
+        };
+        let folder = setup.project_folder();
+        if !folder.is_absolute() {
+            return Ok(false);
+        }
+        initialize(&db).map_err(lost)?;
+        tab_foreign(&db, &asked, &folder, Tab::InstallAndUse).map_err(lost)
+    })
+    .await
+    .map_err(|_| failure("ide_unavailable"))?
+}
+
 /// Types one command the owner confirmed into a new terminal of the project's open IDE:
-/// refuses while the setting is Off, refuses a command that breaks the single-command
-/// rule, needs exactly one IDE listening so the command is typed once, sends one
-/// `run_command` event, marks the project's IDE tab for the desktop, and waits up to
-/// `REVEAL_WAIT` for the extension to say it typed it. Inputs: the owner runtime, the
-/// project and the command. Output: the run's id, or `ide_run_off`, a rule refusal,
+/// refuses while the setting is Off, refuses while the project's Install & use tab came
+/// with the project's files, refuses a command that breaks the single-command rule, needs
+/// exactly one IDE listening so the command is typed once, sends one `run_command` event,
+/// marks the project's IDE tab for the desktop, and waits up to `REVEAL_WAIT` for the
+/// extension to say it typed it. Inputs: the owner runtime, the project and the command.
+/// Output: the run's id, or `ide_run_off`, `ide_run_foreign_tab`, a rule refusal,
 /// `ide_not_running`, `ide_reveal_busy` or `ide_run_unanswered`.
 pub(crate) async fn run(
     runtime: &OwnerRuntimeHandle,
@@ -233,6 +265,9 @@ pub(crate) async fn run(
         RunMode::TypeAndRun => true,
         RunMode::TypeOnly => false,
     };
+    if from_foreign_tab(runtime, project).await? {
+        return Err(failure(FOREIGN_TAB));
+    }
     if let Some(code) = problem(command) {
         return Err(failure(code));
     }

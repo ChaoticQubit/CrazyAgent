@@ -5,6 +5,13 @@ use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+
+/// Passes every entry a re-pin uses, so these rows test the pin alone; the engine-start
+/// checks a re-pin runs are proven in the registry rows. Input: the entry. Output: Ok.
+fn trusted(_: &Path) -> Result<(), crate::engine::EngineError> {
+    Ok(())
+}
 
 fn executable(root: &Path, name: &str) -> PathBuf {
     let path = root.join(name);
@@ -226,9 +233,13 @@ fn native_auth_custodian_command_hands_the_pinned_launch_with_no_environment() {
     std::fs::write(&node_path, b"interpreter-bytes").unwrap();
     let codex = RegisteredNativeAuthHost::capture(&codex_path).unwrap();
     let launch = vec![
-        super::LaunchWord::File(RegisteredNativeAuthHost::capture(&node_path).unwrap()),
+        super::LaunchWord::File(Box::new(
+            RegisteredNativeAuthHost::capture(&node_path).unwrap(),
+        )),
         super::LaunchWord::Argument("--no-warnings".into()),
-        super::LaunchWord::File(RegisteredNativeAuthHost::capture(&codex_path).unwrap()),
+        super::LaunchWord::File(Box::new(
+            RegisteredNativeAuthHost::capture(&codex_path).unwrap(),
+        )),
     ];
     let command =
         super::custodian_command(&path, root.path(), Some(("codex", &codex, &launch))).unwrap();
@@ -323,6 +334,51 @@ fn a_handed_launch_refuses_a_changed_file_and_every_other_shape() {
     }
 }
 
+/// A handed launch of exactly the most words a launch holds, a pinned file first and last
+/// with first-line words between, is read, pinned and started with every word in order, so
+/// the bound refuses only a longer launch.
+#[test]
+fn a_handed_launch_of_the_most_words_is_read_pinned_and_started_in_order() {
+    let max = super::launch::LAUNCH_WORDS_MAX;
+    let root = tempfile::tempdir().unwrap();
+    let node = executable(root.path(), "node");
+    let pinned_node = RegisteredNativeAuthHost::capture(&node).unwrap();
+    let sha256 = pinned_node.verified_sha256().unwrap();
+    let file: Vec<std::ffi::OsString> = vec![
+        "--launch-file".into(),
+        node.clone().into_os_string(),
+        "--launch-sha256".into(),
+        sha256.into(),
+    ];
+    let between: Vec<String> = (0..max - 2).map(|n| format!("-w{n}")).collect();
+    let handed: Vec<std::ffi::OsString> = file
+        .iter()
+        .cloned()
+        .chain(between.iter().flat_map(|word| {
+            [
+                std::ffi::OsString::from("--launch-argument"),
+                std::ffi::OsString::from(word),
+            ]
+        }))
+        .chain(file.iter().cloned())
+        .collect();
+    let parsed = super::handed_words(&handed).unwrap();
+    assert_eq!(parsed.len(), max);
+    let launch = super::launch::pinned(&parsed).unwrap();
+    assert_eq!(launch.len(), max);
+    let words = RegisteredNativeAuthHost::capture(&node)
+        .unwrap()
+        .with_launch(launch)
+        .launch_words()
+        .unwrap();
+    let real = pinned_node.verified_path().unwrap().as_os_str().to_owned();
+    let expected: Vec<std::ffi::OsString> = std::iter::once(real.clone())
+        .chain(between.iter().map(Into::into))
+        .chain(std::iter::once(real))
+        .collect();
+    assert_eq!(words, expected);
+}
+
 /// A harness whose interpreter the engine's resolver cannot find gets no launch, so its
 /// custodian is handed no harness and the sign-in settles unavailable, never the resolver's
 /// sentence as a code.
@@ -382,7 +438,7 @@ fn native_auth_registered_entry_refuses_a_rewrite_of_its_pinned_file_in_place() 
     file.write_all(b"tampered-host-bytes").unwrap();
     drop(file);
     assert_eq!(
-        registered.current().map(|_| ()).unwrap_err().0,
+        registered.current(trusted).map(|_| ()).unwrap_err().0,
         "native_auth_host_executable_changed"
     );
 }
@@ -396,13 +452,13 @@ fn native_auth_registered_entry_keeps_a_pinned_file_whose_metadata_alone_changed
     let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&link).unwrap());
     std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o500)).unwrap();
     assert!(registered.verified_path().is_err());
-    let current = registered.current().unwrap();
+    let current = registered.current(trusted).unwrap();
     assert_eq!(
         current.verified_path().unwrap(),
         std::fs::canonicalize(&real).unwrap()
     );
     assert_eq!(current.digest, registered.digest);
-    assert!(Arc::ptr_eq(&current, &current.current().unwrap()));
+    assert!(Arc::ptr_eq(&current, &current.current(trusted).unwrap()));
 }
 
 #[test]
@@ -438,7 +494,7 @@ fn native_auth_registered_entry_refuses_a_pinned_file_whose_metadata_turned_unsa
     let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&link).unwrap());
     std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o720)).unwrap();
     assert_eq!(
-        registered.current().map(|_| ()).unwrap_err().0,
+        registered.current(trusted).map(|_| ()).unwrap_err().0,
         "native_auth_host_executable_unsafe"
     );
 }
@@ -451,10 +507,13 @@ fn native_auth_registered_entry_moves_to_a_new_install_while_the_old_one_is_kept
     let link = root.path().join("claude");
     symlink(&old, &link).unwrap();
     let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&link).unwrap());
-    assert!(Arc::ptr_eq(&registered, &registered.current().unwrap()));
+    assert!(Arc::ptr_eq(
+        &registered,
+        &registered.current(trusted).unwrap()
+    ));
     std::fs::remove_file(&link).unwrap();
     symlink(&new, &link).unwrap();
-    let current = registered.current().unwrap();
+    let current = registered.current(trusted).unwrap();
     assert_eq!(
         current.verified_path().unwrap(),
         std::fs::canonicalize(&new).unwrap()
@@ -624,4 +683,163 @@ fn native_auth_executable_bound_admits_large_harness_builds_and_refuses_beyond_i
             .0,
         "native_auth_host_executable_unsafe"
     );
+}
+
+/// Rewrites a pinned file in place with other bytes of the same length and sets its modify
+/// time back to the one it had, so only its change time shows the write, as a tamperer who
+/// restores the time would leave it. Inputs: the file and the new bytes. Output: none.
+fn rewrite_keeping_modify_time(path: &Path, bytes: &[u8]) {
+    let modified = std::fs::metadata(path).unwrap().modified().unwrap();
+    assert_eq!(std::fs::metadata(path).unwrap().len(), bytes.len() as u64);
+    let mut file = OpenOptions::new().write(true).open(path).unwrap();
+    file.write_all(bytes).unwrap();
+    file.set_modified(modified).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    assert_eq!(
+        std::fs::metadata(path).unwrap().modified().unwrap(),
+        modified
+    );
+}
+
+/// The engine pins its own file with no entry. A hard link to it, or its removal, moves
+/// only the change time and the link count, as Time Machine, Spotlight, a backup tool or a
+/// rebuild of the same bytes do, so the same host keeps verifying. A later write of other
+/// bytes, even one that restores the modify time, is still refused.
+#[test]
+fn a_host_whose_change_time_alone_moved_keeps_verifying_and_a_later_write_is_still_refused() {
+    use std::os::unix::fs::MetadataExt;
+    let root = tempfile::tempdir().unwrap();
+    let path = executable(root.path(), "crazyagent");
+    let registered = Arc::new(RegisteredNativeAuthHost::capture(&path).unwrap());
+    let before = std::fs::metadata(&path).unwrap();
+    let link = root.path().join("crazyagent-linked");
+    for linked in [true, false] {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        if linked {
+            std::fs::hard_link(&path, &link).unwrap();
+        } else {
+            std::fs::remove_file(&link).unwrap();
+        }
+        let now = std::fs::metadata(&path).unwrap();
+        assert_eq!(now.nlink(), if linked { 2 } else { 1 });
+        assert_eq!(
+            (
+                now.ino(),
+                now.len(),
+                now.mode(),
+                now.mtime(),
+                now.mtime_nsec()
+            ),
+            (
+                before.ino(),
+                before.len(),
+                before.mode(),
+                before.mtime(),
+                before.mtime_nsec()
+            )
+        );
+        assert_ne!(
+            (now.ctime(), now.ctime_nsec()),
+            (before.ctime(), before.ctime_nsec()),
+            "a link count change moves the change time"
+        );
+        assert_eq!(
+            registered.verified_path().unwrap(),
+            path,
+            "linked: {linked}"
+        );
+        assert!(Arc::ptr_eq(
+            &registered,
+            &registered.current(trusted).unwrap()
+        ));
+    }
+    assert_eq!(
+        registered.verified_sha256().unwrap(),
+        format!("{:x}", Sha256::digest(b"registered-host-bytes"))
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    rewrite_keeping_modify_time(&path, b"tampered-host-bytes!!");
+    assert_eq!(
+        registered.verified_path().unwrap_err().0,
+        "native_auth_host_executable_changed"
+    );
+    assert_eq!(
+        registered.current(trusted).map(|_| ()).unwrap_err().0,
+        "native_auth_host_executable_changed"
+    );
+}
+
+fn relink(link: &Path, to: &Path) {
+    std::fs::remove_file(link).unwrap();
+    symlink(to, link).unwrap();
+}
+
+#[test]
+fn a_re_pin_checks_the_file_it_pins_not_a_later_resolution_of_its_entry() {
+    use std::sync::atomic::Ordering;
+    let made = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(made.path()).unwrap();
+    let (owner, agent) = (root.join("owner"), root.join("agent"));
+    std::fs::create_dir_all(&owner).unwrap();
+    std::fs::create_dir_all(&agent).unwrap();
+    let installed = executable(&owner, "codex-0.167.1");
+    let planted = executable(&agent, "codex");
+    let middle = agent.join("middle");
+    symlink(&installed, &middle).unwrap();
+    let entry = owner.join("codex");
+    symlink(&middle, &entry).unwrap();
+    let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&entry).unwrap());
+    assert_eq!(registered.verified_path().unwrap(), installed);
+    relink(&middle, &planted);
+    let checks = AtomicUsize::new(0);
+    let check = |path: &Path| -> Result<(), crate::engine::EngineError> {
+        if checks.fetch_add(1, Ordering::SeqCst) == 0 {
+            relink(&middle, &installed);
+        }
+        let real = std::fs::canonicalize(path).unwrap();
+        if path.starts_with(&agent) || real.starts_with(&agent) {
+            return Err(crate::engine::EngineError(
+                crate::harnesses::finding::PATH_AGENT_SPACE.into(),
+            ));
+        }
+        Ok(())
+    };
+    assert_eq!(
+        registered.current(check).map(|_| ()).unwrap_err().0,
+        crate::harnesses::finding::PATH_AGENT_SPACE
+    );
+    assert_eq!(checks.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_re_pin_refuses_an_entry_that_moved_while_its_file_was_pinned() {
+    use std::sync::atomic::Ordering;
+    let made = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(made.path()).unwrap();
+    let (owner, agent) = (root.join("owner"), root.join("agent"));
+    std::fs::create_dir_all(&owner).unwrap();
+    std::fs::create_dir_all(&agent).unwrap();
+    let old = executable(&owner, "codex-0.166.0");
+    let new = executable(&owner, "codex-0.167.1");
+    let planted = executable(&agent, "codex");
+    let middle = agent.join("middle");
+    symlink(&old, &middle).unwrap();
+    let entry = owner.join("codex");
+    symlink(&middle, &entry).unwrap();
+    let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&entry).unwrap());
+    assert_eq!(registered.verified_path().unwrap(), old);
+    relink(&middle, &new);
+    let checks = AtomicUsize::new(0);
+    let check = |_: &Path| -> Result<(), crate::engine::EngineError> {
+        if checks.fetch_add(1, Ordering::SeqCst) == 1 {
+            relink(&middle, &planted);
+        }
+        Ok(())
+    };
+    assert_eq!(
+        registered.current(check).map(|_| ()).unwrap_err().0,
+        "native_auth_host_executable_changed"
+    );
+    assert_eq!(checks.load(Ordering::SeqCst), 2);
 }

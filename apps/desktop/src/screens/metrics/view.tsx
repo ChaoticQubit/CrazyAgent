@@ -3,7 +3,7 @@ import { accountLabels, listAccounts, type Result } from "../../api";
 import { loadAdoption, type Adoption, type AgentAdoption } from "../../api-process";
 import { loadTeamStatus } from "../../api-projects";
 import type { TeamStatus } from "../../engine-client";
-import { decideRecount, loadExtras, loadMetrics, loadNotices, loadUsage, setMoney, usageNotReady, usageRefusal, type AccountLimits, type LimitExtras, type Metrics, type MoneySettings, type MoneyView, type RecountStatus, type Tokens, type UsageReport, type UsageRow } from "../../api-usage";
+import { decideRecount, loadExtras, loadMetrics, loadNotices, loadUsage, setMoneyOne, usageNotReady, usageRefusal, type AccountLimits, type LimitExtras, type Metrics, type MoneyChoice, type MoneyView, type RecountStatus, type Tokens, type UsageReport, type UsageRow } from "../../api-usage";
 import { useLoad, type Loaded } from "../../state";
 import { EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Select, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
@@ -521,7 +521,7 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
   onRetry: () => void;
 }) {
   const [refused, setRefused] = useState("");
-  const change = (settings: MoneySettings) => void setMoney(settings).then((result) => {
+  const change = (choice: MoneyChoice) => void setMoneyOne(choice).then((result) => {
     setRefused(result.kind === "ok" ? "" : usageRefusal(result.kind === "error" ? result : { code: "usage_unavailable" }));
     if (result.kind === "ok") onRetry();
   });
@@ -531,9 +531,9 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
   const money = usage.kind === "ok" ? usage.value.money : null;
   const accountWide = showsAccountLimits(projectId, money);
   const moneyTools = money && <div className="pj-row mx-money">
-    {money.settings.prices !== "off" && <Segmented label="Main number" value={money.settings.main_number} options={MAIN_NUMBERS} onValue={(main_number) => change({ ...money.settings, main_number })} />}
-    <Segmented label="Prices" value={money.settings.prices} options={PRICE_SOURCES} onValue={(prices) => change({ ...money.settings, prices })} />
-    {filter && projectId !== null && <Segmented label="Account limits here" value={money.settings.project_limits ?? "hidden"} options={PROJECT_LIMITS} onValue={(project_limits) => change({ ...money.settings, project_limits })} />}
+    {money.settings.prices !== "off" && <Segmented label="Main number" value={money.settings.main_number} options={MAIN_NUMBERS} onValue={(value) => change({ field: "main_number", value })} />}
+    <Segmented label="Prices" value={money.settings.prices} options={PRICE_SOURCES} onValue={(value) => change({ field: "prices", value })} />
+    {filter && projectId !== null && <Segmented label="Account limits here" value={money.settings.project_limits ?? "hidden"} options={PROJECT_LIMITS} onValue={(value) => change({ field: "project_limits", value })} />}
   </div>;
   const tools = <div className="mx-tools">
     {filter ? <div className="pj-row">

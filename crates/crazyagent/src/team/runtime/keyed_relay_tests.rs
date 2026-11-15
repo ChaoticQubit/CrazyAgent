@@ -62,6 +62,7 @@ fn a_keyed_endpoint_agent_reaches_its_model_only_through_the_key_relay() {
             &account,
             false,
             crate::agent_git::Layout::Linked,
+            false,
         )
     };
     let Err(missing) = prepare() else {
@@ -164,6 +165,7 @@ fn assert_full_access_claude_keychain(fixture: &Fixture, reach: TeamReach, keyed
             &account,
             false,
             crate::agent_git::Layout::Linked,
+            false,
         )
         .unwrap();
     let home = agent_home(&runtime.state, id);

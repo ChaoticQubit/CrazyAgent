@@ -196,6 +196,7 @@ pub struct AgentContext {
     native_model: crate::model_choice::NativeModel,
     relay: Option<(PathBuf, PathBuf)>,
     model_proxy: Option<u16>,
+    freeze_record: Option<PathBuf>,
     terminal_display: TerminalDisplay,
     catch_up_main: bool,
     settings: Applied,
@@ -229,6 +230,7 @@ pub struct Installed {
     native_threads: bool,
     native_follows: bool,
     model_proxy: Option<u16>,
+    freeze_record: Option<PathBuf>,
     terminal_display: TerminalDisplay,
     settings: Applied,
     _lock: File,
@@ -299,6 +301,7 @@ pub fn for_project(
         native_model: crate::model_choice::NativeModel::Follow,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main,
         settings: Applied::default(),
@@ -791,6 +794,15 @@ impl AgentContext {
         self
     }
 
+    /// Lets a quitting engine freeze this launch's pane while its model proxy is down
+    /// (DEC-158): the pane's keeper gets the engine's freeze record, and the pane record
+    /// says so. Input: the record's absolute path. Output: the context.
+    pub fn with_freeze_record(mut self, record: PathBuf) -> Self {
+        assert!(record.is_absolute());
+        self.freeze_record = Some(record);
+        self
+    }
+
     /// Gives this launch's terminal the project's display (N-D9, DEC-141): Classic draws on
     /// the normal screen, Fullscreen keeps the harness's own view. Each harness kind's launch
     /// maps it to its own switches; headless runs ignore it. Input: the display. Output: the
@@ -1143,6 +1155,7 @@ impl AgentContext {
             native_threads: false,
             native_follows: false,
             model_proxy: self.model_proxy,
+            freeze_record: self.freeze_record.clone(),
             terminal_display: self.terminal_display,
             settings: self.settings.clone(),
             _lock: lock,
@@ -1197,6 +1210,7 @@ impl AgentContext {
                 developer.push_str(&tool_use_section(
                     false,
                     servers,
+                    self.plugins.context_mode_off,
                     &self.off_tools,
                     first_skill,
                 ));
@@ -1268,6 +1282,7 @@ impl AgentContext {
                 text.push_str(&tool_use_section(
                     true,
                     servers,
+                    self.plugins.context_mode_off,
                     &self.off_tools,
                     first_skill,
                 ));
@@ -1433,6 +1448,12 @@ impl Installed {
         self.model_proxy
     }
 
+    /// Names the engine's freeze record this launch's keeper writes the warden's answers to
+    /// (DEC-158), none for a pane no engine freezes.
+    pub fn freeze_record(&self) -> Option<&Path> {
+        self.freeze_record.as_deref()
+    }
+
     /// Names the display this launch's terminal draws with (N-D9, DEC-141).
     pub fn terminal_display(&self) -> TerminalDisplay {
         self.terminal_display
@@ -1463,6 +1484,7 @@ impl Installed {
             native_threads: false,
             native_follows: false,
             model_proxy: None,
+            freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             _lock: lock,
         })
@@ -1726,15 +1748,44 @@ fn short_description(text: &str, bytes: usize) -> String {
     short
 }
 
+/// The tools-section line that tells a launch why it has no context-mode server and what to
+/// do instead. Input: why the server was left out. Output: one line ending in a newline.
+fn context_mode_off_line(off: crate::plugins::ContextModeOff) -> &'static str {
+    use crate::plugins::ContextModeOff;
+    match off {
+        ContextModeOff::SettingUp => {
+            "- context-mode is off for this launch: CrazyAgent is still setting it up on this computer. Use the shell instead; agents started once it is set up get it.\n"
+        }
+        ContextModeOff::Failed => {
+            "- context-mode is off for this launch: setting it up failed on this computer. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n"
+        }
+        ContextModeOff::Mismatch => {
+            "- context-mode is off for this launch: its installed files did not match the copy the default pack pins, so CrazyAgent did not run them. Use the shell instead, and tell the owner in your report.\n"
+        }
+        ContextModeOff::NodeTooOld => {
+            "- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n"
+        }
+        ContextModeOff::Unsupported => {
+            "- context-mode is off for this launch: CrazyAgent cannot run it on this platform yet. Use the shell instead.\n"
+        }
+        ContextModeOff::NpxNotFound => {
+            "- context-mode is off for this launch: CrazyAgent did not find the npx it runs on this computer, so it did not start it. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n"
+        }
+    }
+}
+
 /// Tells a tools-on launch the rules for the tools it has (18.15.1), as firm rules for every
 /// task (DEC-116): the context-mode tools left on, by the names its harness gives them, for
 /// all output that is not short and fixed, a graphify query before any source read and a
-/// check of the approved skills by the names the skills index uses. Inputs: whether the
-/// harness is Claude Code, the launch's servers, the tools switched off and the first
-/// approved skill's name, none without skills. Output: at most `TOOL_USE_BYTES_MAX` bytes.
+/// check of the approved skills by the names the skills index uses. A launch that left the
+/// context-mode server out is told why. Inputs: whether the harness is Claude Code, the
+/// launch's servers, why context-mode was left out if it was, the tools switched off and the
+/// first approved skill's name, none without skills. Output: at most `TOOL_USE_BYTES_MAX`
+/// bytes.
 fn tool_use_section(
     claude: bool,
     servers: &[LaunchServer],
+    context_mode_off: Option<crate::plugins::ContextModeOff>,
     off_tools: &[(String, Vec<String>)],
     skill: Option<&str>,
 ) -> String {
@@ -1760,6 +1811,9 @@ fn tool_use_section(
                 " of the `{CONTEXT_MODE_DECLARED}` MCP server. Use the shell only for short fixed output, state changes and edits.\n"
             ),
         });
+    }
+    if let Some(off) = context_mode_off.filter(|_| !context_mode) {
+        section.push_str(context_mode_off_line(off));
     }
     section.push_str("- graphify: query the project graph before you read or search source. Run `graphify query \"<question>\"` in the shell first, `graphify path \"<A>\" \"<B>\"` for how two parts connect and `graphify explain \"<name>\"` for one part. If your worktree has no `graphify-out/graph.json`, say so in your report.\n");
     if let Some(name) = skill {
@@ -2333,6 +2387,7 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         native_threads: false,
         native_follows: false,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         _lock: lock,
     })

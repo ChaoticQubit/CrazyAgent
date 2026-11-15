@@ -780,6 +780,8 @@ impl ManagedAgent {
                 &account,
                 false,
                 crate::agent_git::Layout::Linked,
+                role == AgentRole::Master
+                    && crate::team::master::live(&runtime.connection, &setup.project_id).unwrap(),
             )
             .unwrap();
         assert_eq!(

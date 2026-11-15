@@ -1,8 +1,7 @@
 use super::InstallError;
-use super::pack::{PackManifestEntry, PackSource};
+use super::pack::{PackManifestEntry, PackSource, repo_key};
 use super::process::{private_folder, run, staging_folder};
 use crate::plugins::ServerSpec;
-use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
@@ -77,15 +76,17 @@ pub fn validate_git(repo: &str, commit: &str, path: Option<&str>) -> Result<(), 
 }
 
 fn git_env(setup: &Path) -> Vec<(&'static str, OsString)> {
-    vec![
+    let mut env = vec![
         ("PATH", OsString::from("/usr/bin:/bin")),
         ("HOME", setup.as_os_str().to_owned()),
-        ("GIT_CONFIG_NOSYSTEM", "1".into()),
         ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
-        ("GIT_TERMINAL_PROMPT", "0".into()),
         ("GIT_ASKPASS", "/usr/bin/false".into()),
         ("LANG", "C".into()),
-    ]
+    ];
+    env.extend(
+        crate::research::runner::GIT_SAFE_ENV.map(|(name, value)| (name, OsString::from(value))),
+    );
+    env
 }
 
 fn git(
@@ -192,12 +193,9 @@ pub fn fetch_git(setup: &Path, repo: &str, commit: &str) -> Result<PathBuf, Inst
 /// Names the folder a pinned git source is checked out in, `<setup>/pack/<repo key>-<commit>`,
 /// without fetching it. Inputs: the setup folder, repository URL and commit. Output: the path.
 pub fn checkout_folder(setup: &Path, repo: &str, commit: &str) -> PathBuf {
-    let key: String = Sha256::digest(repo.as_bytes())
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    setup.join("pack").join(format!("{key}-{commit}"))
+    setup
+        .join("pack")
+        .join(format!("{}-{commit}", repo_key(repo)))
 }
 
 /// Names the plugin folder an entry's hooks come from: the hook folder this build ships for

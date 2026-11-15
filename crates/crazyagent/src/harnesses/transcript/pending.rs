@@ -1,4 +1,6 @@
-use super::{CLAUDE_INTERRUPTED, conversation_id, open_plain, plain_below, rollout_id};
+use super::{
+    CLAUDE_INTERRUPTED, conversation_id, open_plain, open_rollout, plain_below, rollout_id,
+};
 use crate::harnesses::terminal_session::RecordSource;
 use serde_json::Value;
 use std::fs::File;
@@ -89,7 +91,7 @@ pub fn unknown(source: &RecordSource, cwd: &Path, record: &Path) -> Vec<PendingC
 fn opened(source: &RecordSource, cwd: &Path, record: &Path) -> Option<File> {
     match source {
         RecordSource::CodexRollouts { sessions } if plain_below(sessions, record) => {
-            let file = open_plain(record)?;
+            let file = open_rollout(record)?;
             rollout_id(&file, &cwd.to_string_lossy())?;
             Some(file)
         }

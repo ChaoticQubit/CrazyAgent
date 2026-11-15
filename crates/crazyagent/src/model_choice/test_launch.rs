@@ -432,7 +432,7 @@ mod run {
                 return pending(NotStarted::CouldNotStart);
             }
         };
-        let output = runner.read_only_output(&name, harness);
+        let output = runner.read_only_output(&name);
         runner.forget_read_only(&name);
         Ok(outcome(request.harness, ended, output.as_deref()))
     }

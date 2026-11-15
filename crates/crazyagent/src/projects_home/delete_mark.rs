@@ -1,0 +1,144 @@
+use crate::engine::EngineError;
+use crate::ledger::{self, Action, ActionKind, Outcome};
+use crate::protocol::ProjectId;
+use rusqlite::Connection;
+
+/// Marks one Delete everything in the action ledger before it moves anything, so an engine
+/// stop that cuts it short is shown to the owner on the next start, never forgotten. A mark
+/// of the same project the owner was shown is closed first, since this delete replaces it, and
+/// the new mark carries that it was cut short, so this delete keeps the notice if it moves
+/// nothing either (RV-DS241-141 r2); a live mark means another Delete everything of the project
+/// still runs, which refuses this one. Call it inside the plan's write, after every other
+/// refusal. Inputs: the plan's transaction, the project and the plan's exchange. Output:
+/// Ok(Ok), Ok(Err) with `delete_in_progress`, or the ledger's failure.
+pub(crate) fn begin(
+    tx: &Connection,
+    project: &ProjectId,
+    exchange: i64,
+) -> Result<Result<(), &'static str>, EngineError> {
+    assert!(exchange > 0);
+    ledger::initialize(tx)?;
+    let mut payload = serde_json::json!({ "project": project.as_str(), "exchange": exchange });
+    if let Some(earlier) = ledger::pending_key(tx, ActionKind::ProjectDelete, project.as_str())? {
+        assert_eq!(earlier.key, project.as_str());
+        if ledger::notice(&earlier).is_none() {
+            return Ok(Err("delete_in_progress"));
+        }
+        ledger::finish(tx, earlier.id, Outcome::Unknown)?;
+        payload["cut_short"] = serde_json::Value::Bool(true);
+    }
+    ledger::begin(
+        tx,
+        ActionKind::ProjectDelete,
+        project.as_str(),
+        &payload.to_string(),
+    )?;
+    let marked = ledger::pending_key(tx, ActionKind::ProjectDelete, project.as_str())?;
+    assert!(marked.is_some_and(|action| exchange_of(&action) == Some(exchange)));
+    Ok(Ok(()))
+}
+
+/// Ends the mark of one Delete everything once its exchange settled: done when the project's
+/// records went, failed when they stayed with nothing moved. When they stayed after its
+/// folders reached the Trash (a record refused, cut off or failed), or after a delete it
+/// replaced was cut short, the mark is kept as "A delete was cut short" on the project's
+/// banner instead, its exchange dropped, as an engine start shows it. A mark the owner is
+/// shown is left alone, since an exchange number is unique only within one engine process.
+/// Inputs: the transaction, the exchange and whether its folders reached the Trash. Output:
+/// how many marks ended or were shown.
+pub(crate) fn settle(tx: &Connection, exchange: i64, trashed: bool) -> Result<usize, EngineError> {
+    assert!(exchange > 0);
+    ledger::initialize(tx)?;
+    let marks = ledger::pending(tx, ActionKind::ProjectDelete)?;
+    assert!(marks.len() <= ledger::PENDING_MAX);
+    let mut ended = 0;
+    for action in marks {
+        if ledger::notice(&action).is_some() || exchange_of(&action) != Some(exchange) {
+            continue;
+        }
+        ended += 1;
+        if !exists(tx, &action.key)? {
+            ledger::finish(tx, action.id, Outcome::Done)?;
+        } else if trashed || replaced_cut_short(&action) {
+            let payload = serde_json::json!({ "project": action.key, "unknown": true });
+            ledger::note(tx, action.id, &payload.to_string())?;
+        } else {
+            ledger::finish(tx, action.id, Outcome::Failed)?;
+        }
+    }
+    Ok(ended)
+}
+
+/// Turns the marks an engine stop left into what the owner sees, as the engine starts: the
+/// mark of a project whose records went is ended, and the mark of a project still there
+/// becomes a notice on its banner, "A delete was cut short", with its exchange dropped, since
+/// a new engine process numbers exchanges again. Nothing is moved or continued. Input: the
+/// start's transaction. Output: how many notices the owner is shown.
+pub(crate) fn start(tx: &Connection) -> Result<usize, EngineError> {
+    ledger::initialize(tx)?;
+    let marks = ledger::pending(tx, ActionKind::ProjectDelete)?;
+    assert!(marks.len() <= ledger::PENDING_MAX);
+    let mut shown = 0;
+    for action in marks {
+        assert!(ledger::notice(&action).is_none_or(|outcome| outcome == Outcome::Unknown));
+        if !exists(tx, &action.key)? {
+            let outcome = ledger::notice(&action).unwrap_or(Outcome::Done);
+            ledger::finish(tx, action.id, outcome)?;
+            continue;
+        }
+        shown += 1;
+        if ledger::notice(&action).is_none() {
+            let payload = serde_json::json!({ "project": action.key, "unknown": true });
+            ledger::note(tx, action.id, &payload.to_string())?;
+        }
+    }
+    Ok(shown)
+}
+
+/// Ends the mark of a project whose records are removed, by Remove from dashboard or by the
+/// Delete everything it marks, so a project added again under the same id never inherits it.
+/// Inputs: the removal's transaction and the project. Output: whether a mark ended.
+pub(crate) fn forget(tx: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    ledger::initialize(tx)?;
+    let marked = ledger::pending_key(tx, ActionKind::ProjectDelete, project.as_str())?;
+    let Some(action) = marked else {
+        return Ok(false);
+    };
+    assert_eq!(action.key, project.as_str());
+    let outcome = ledger::notice(&action).unwrap_or(Outcome::Done);
+    ledger::finish(tx, action.id, outcome)?;
+    let left = ledger::pending_key(tx, ActionKind::ProjectDelete, project.as_str())?;
+    assert!(left.is_none());
+    Ok(true)
+}
+
+/// Whether the engine still holds a project's records. Inputs: the connection and the
+/// project id. Output: true while its row is there.
+fn exists(tx: &Connection, project: &str) -> Result<bool, EngineError> {
+    assert!(!project.is_empty());
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+        [project],
+        |row| row.get(0),
+    )
+    .map_err(|e| EngineError(e.to_string()))
+}
+
+/// Whether a live mark replaced a delete of its project that was cut short, so what that one
+/// moved can still be in the Trash. Input: the mark. Output: the answer, false for a payload
+/// that does not parse.
+fn replaced_cut_short(action: &Action) -> bool {
+    assert_eq!(action.kind, ActionKind::ProjectDelete);
+    serde_json::from_str::<serde_json::Value>(&action.payload)
+        .ok()
+        .and_then(|payload| payload.get("cut_short")?.as_bool())
+        .unwrap_or(false)
+}
+
+/// The exchange a live mark names. Input: the mark. Output: the exchange, none for a mark
+/// the owner is shown or a payload that names none.
+fn exchange_of(action: &Action) -> Option<i64> {
+    assert_eq!(action.kind, ActionKind::ProjectDelete);
+    let payload: serde_json::Value = serde_json::from_str(&action.payload).ok()?;
+    payload.get("exchange")?.as_i64()
+}

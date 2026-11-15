@@ -2,7 +2,7 @@ use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub mod check;
 pub mod hook_folder;
@@ -54,11 +54,12 @@ fn error(code: &str) -> EngineError {
 }
 
 fn printable(text: &str) -> bool {
-    !text.chars().any(char::is_control)
+    !text.chars().any(char::is_control) && !crate::memory::hidden_text(text)
 }
 
 impl ServerSpec {
-    /// Checks the command or URL before it is saved.
+    /// Checks the command or URL before it is saved, approved or checked, refusing control and
+    /// hidden characters (`crate::memory::hidden_text`) anywhere in it.
     /// Input: an untrusted spec. Output: Ok, or a code naming the first problem:
     /// a relative or oversized command, too many or bad arguments, a command and
     /// arguments over `COMMAND_LINE_BYTES_MAX` together, or a URL that is
@@ -232,6 +233,7 @@ pub struct SkillView {
     pub enabled: bool,
     pub on_here: Option<bool>,
     pub source: String,
+    pub origin: String,
     pub folder: String,
     pub version: u64,
     pub refused: Option<String>,
@@ -387,12 +389,129 @@ pub struct LaunchServer {
     pub secrets: Vec<LaunchSecret>,
 }
 
+/// Why a launch left the default pack's context-mode server out rather than run its npx
+/// spec: the engine's shared install is still being set up, setting it up failed or cannot
+/// run, the installed files did not match the pinned hashes, the Node.js beside npx is older
+/// than context-mode needs, this platform has no shared install at all, or the npx a spec
+/// only shaped like that launch names is not one the engine's tool resolver finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextModeOff {
+    SettingUp,
+    Failed,
+    Mismatch,
+    NodeTooOld,
+    Unsupported,
+    NpxNotFound,
+}
+
+/// The npm package of the default pack's context-mode server.
+pub(crate) const CONTEXT_MODE_PACKAGE: &str = "context-mode";
+const PACKAGE_VERSION_BYTES_MAX: usize = 32;
+
+/// Reads the default pack's pinned context-mode launch from an approved spec: an absolute
+/// `npx` given exactly `-y context-mode@<version>` with an exact version. Input: the spec.
+/// Output: npx's folder and the version, or none for any other spec.
+pub(crate) fn pinned_context_mode(spec: &ServerSpec) -> Option<(&Path, &str)> {
+    let ServerSpec::Stdio { command, args } = spec else {
+        return None;
+    };
+    let command = Path::new(command);
+    let [flag, package] = args.as_slice() else {
+        return None;
+    };
+    let version = package
+        .strip_prefix(CONTEXT_MODE_PACKAGE)
+        .and_then(|rest| rest.strip_prefix('@'))
+        .filter(|version| flag == "-y" && exact_version(version))?;
+    let npx = command.is_absolute() && npx_program(command);
+    command.parent().filter(|_| npx).map(|bin| (bin, version))
+}
+
+/// Reads the default pack's pinned context-mode launch from an approved spec only when its
+/// npx is one the engine's tool resolver finds, as setup writes that launch; a spec only
+/// shaped like it, such as a repository's own npx, never runs (RV-DS241-150). The probe
+/// state is read before the places are built, so a probe ending between the two counts.
+/// Inputs: the engine root and the spec. Output: as [`context_mode_on`].
+pub(crate) fn found_context_mode<'a>(
+    root: &Path,
+    spec: &'a ServerSpec,
+) -> Result<Option<(&'a Path, &'a str)>, ContextModeOff> {
+    if pinned_context_mode(spec).is_none() {
+        return Ok(None);
+    }
+    let pending = crate::tools::probe::mark().first_run_pending;
+    let places = crate::tools::Places::from_environment(Some(root));
+    context_mode_on(spec, &places, pending)
+}
+
+/// Reads the pinned context-mode launch from a spec on the given places, where its npx must
+/// pass the resolver's checks in a folder they look in. Any other npx is being set up while
+/// the first background folder probe may still add its folder, and after that is one
+/// CrazyAgent did not find, and the probes look again. Inputs: the spec, the places and
+/// whether that probe was still going. Output: npx's folder and version, none, or why not.
+pub(crate) fn context_mode_on<'a>(
+    spec: &'a ServerSpec,
+    places: &crate::tools::Places,
+    pending: bool,
+) -> Result<Option<(&'a Path, &'a str)>, ContextModeOff> {
+    let (ServerSpec::Stdio { command, .. }, Some((bin, version))) =
+        (spec, pinned_context_mode(spec))
+    else {
+        return Ok(None);
+    };
+    let listed = places.folders().iter().any(|folder| folder == bin);
+    if listed && crate::tools::resolve_entry(Path::new(command), places).is_ok() {
+        return Ok(Some((bin, version)));
+    }
+    if pending {
+        return Err(ContextModeOff::SettingUp);
+    }
+    crate::tools::probe::missed();
+    Err(ContextModeOff::NpxNotFound)
+}
+
+#[cfg(unix)]
+fn npx_program(command: &Path) -> bool {
+    command.file_name() == Some("npx".as_ref())
+}
+
+#[cfg(not(unix))]
+fn npx_program(command: &Path) -> bool {
+    command
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("npx"))
+}
+
+/// Whether a package version is exact: three numbers and an optional pre-release of letters,
+/// digits, dots and dashes, at most 32 bytes. Input: the version. Output: the answer.
+pub(crate) fn exact_version(version: &str) -> bool {
+    let (core, pre) = match version.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (version, None),
+    };
+    let numbers: Vec<&str> = core.split('.').collect();
+    version.len() <= PACKAGE_VERSION_BYTES_MAX
+        && numbers.len() == 3
+        && numbers
+            .iter()
+            .all(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+        && pre.is_none_or(|pre| {
+            !pre.is_empty()
+                && pre
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+        })
+}
+
 /// The effective set with each server's secret values already read, ready for a harness
-/// launch. Skills are the same folders as in `EffectivePlugins`.
+/// launch. Skills are the same folders as in `EffectivePlugins`. `context_mode_off` says why
+/// the default pack's context-mode server was left out, none when it was not.
 #[derive(Debug, Default)]
 pub struct LaunchPlugins {
     pub skills: Vec<EffectiveSkill>,
     pub servers: Vec<LaunchServer>,
+    pub context_mode_off: Option<ContextModeOff>,
 }
 
 const PROBLEMS: &[(&str, &str)] = &[
@@ -537,6 +656,34 @@ const PROBLEMS: &[(&str, &str)] = &[
         "The server did not answer within 10 seconds.",
     ),
     (
+        "server_setting_up",
+        "context-mode is still being set up. Check again in a minute.",
+    ),
+    (
+        "server_install_failed",
+        "Setting up context-mode failed. Check again in 10 minutes.",
+    ),
+    (
+        "server_npm_missing",
+        "context-mode needs npm and node in the same folder as npx. Install Node.js, then check again.",
+    ),
+    (
+        "server_version_unpinned",
+        "This context-mode version is not the one the default pack pins, so CrazyAgent does not install it. Use the default pack's version.",
+    ),
+    (
+        "server_installs_busy",
+        "Too many installs are running. Check again in a minute.",
+    ),
+    (
+        "server_node_too_old",
+        "context-mode needs Node.js 22.5 or newer. Update Node.js, then check again.",
+    ),
+    (
+        "server_npx_not_found",
+        "CrazyAgent did not find the npx this context-mode server runs on this computer, so it did not start it.",
+    ),
+    (
         "server_output_too_large",
         "The server sent too much output.",
     ),
@@ -631,11 +778,45 @@ pub fn check_refused(reason: &str) -> String {
     problem
 }
 
+/// The start of a recorded check problem for a failed context-mode shared install, followed
+/// by the minutes from the check until a check or an agent launch may try the install again.
+const INSTALL_RETRY: &str = "server_install_failed:";
+
+/// The most minutes a failed context-mode shared install holds the next one back; the
+/// install's own backoff, rounded up, is held to this at compile time.
+pub const INSTALL_RETRY_MINUTES_MAX: u64 = 10;
+
+/// Records a check that found the context-mode shared install held back after a failure.
+/// Input: the minutes until it may be tried again, 1 to [`INSTALL_RETRY_MINUTES_MAX`].
+/// Output: the problem to record, which [`check_problem`] shows with those minutes.
+pub fn install_failed(minutes: u64) -> String {
+    assert!((1..=INSTALL_RETRY_MINUTES_MAX).contains(&minutes));
+    let problem = format!("{INSTALL_RETRY}{minutes}");
+    assert!(check_problem(&problem).contains(&format!(" {minutes} minute")));
+    problem
+}
+
 /// Turns a recorded server check problem into the sentence shown to the owner: a boundary
-/// refusal ([`check_refused`]) shows the boundary's own reason, a plugins code its plain
-/// sentence, and anything else reads as a server that can't start. Input: the recorded
-/// problem. Output: the sentence.
+/// refusal ([`check_refused`]) shows the boundary's own reason, a failed shared install
+/// ([`install_failed`]) the minutes until the retry, a plugins code its plain sentence, and
+/// anything else reads as a server that can't start. Input: the recorded problem. Output:
+/// the sentence.
 pub fn check_problem(problem: &str) -> String {
+    if let Some(left) = problem.strip_prefix(INSTALL_RETRY) {
+        let minutes = left
+            .parse::<u64>()
+            .ok()
+            .filter(|minutes| (1..=INSTALL_RETRY_MINUTES_MAX).contains(minutes));
+        return match minutes {
+            Some(minutes) => format!(
+                "Setting up context-mode failed. Check again in {minutes} {}.",
+                if minutes == 1 { "minute" } else { "minutes" }
+            ),
+            None => plain_problem("server_install_failed")
+                .unwrap_or("The server can't start.")
+                .to_owned(),
+        };
+    }
     match problem.strip_prefix(CHECK_REFUSED) {
         Some(reason) if !reason.is_empty() => format!(
             "CrazyAgent did not run the check: {}.",
@@ -697,6 +878,13 @@ mod tests {
                 "server_args_invalid",
             ),
             (stdio("/bin/x", &["a\u{0}b"]), "server_args_invalid"),
+            (stdio("/bin/x", &["a\u{200b}b"]), "server_args_invalid"),
+            (
+                stdio("/bin/x", &["--path=\u{202e}txt.exe"]),
+                "server_args_invalid",
+            ),
+            (stdio("/bin/x\u{feff}", &[]), "server_command_invalid"),
+            (http("https://e.com/\u{2060}mcp"), "server_url_invalid"),
             (
                 stdio("/bin/x", &[&"a".repeat(ARG_BYTES_MAX + 1)]),
                 "server_args_invalid",
@@ -782,8 +970,81 @@ mod tests {
             check_problem("server_exited"),
             "The server stopped before answering."
         );
+        assert_eq!(
+            check_problem("server_setting_up"),
+            "context-mode is still being set up. Check again in a minute."
+        );
         for other in ["server_cant_start", "no_such_code", CHECK_REFUSED, ""] {
             assert_eq!(check_problem(other), "The server can't start.", "{other:?}");
         }
+    }
+
+    #[test]
+    fn a_check_that_found_no_shared_install_says_why_in_its_own_words() {
+        assert_eq!(
+            check_problem(&install_failed(7)),
+            "Setting up context-mode failed. Check again in 7 minutes."
+        );
+        assert_eq!(
+            check_problem(&install_failed(1)),
+            "Setting up context-mode failed. Check again in 1 minute."
+        );
+        for unreadable in [
+            "server_install_failed:",
+            "server_install_failed:0",
+            "server_install_failed:99",
+            "server_install_failed:x",
+        ] {
+            assert_eq!(
+                check_problem(unreadable),
+                "Setting up context-mode failed. Check again in 10 minutes.",
+                "{unreadable:?}"
+            );
+        }
+        for (code, words) in [
+            (
+                "server_install_failed",
+                "Setting up context-mode failed. Check again in 10 minutes.",
+            ),
+            (
+                "server_npm_missing",
+                "context-mode needs npm and node in the same folder as npx. Install Node.js, then check again.",
+            ),
+            (
+                "server_version_unpinned",
+                "This context-mode version is not the one the default pack pins, so CrazyAgent does not install it. Use the default pack's version.",
+            ),
+            (
+                "server_installs_busy",
+                "Too many installs are running. Check again in a minute.",
+            ),
+            (
+                "server_setting_up",
+                "context-mode is still being set up. Check again in a minute.",
+            ),
+        ] {
+            assert_eq!(check_problem(code), words, "{code}");
+            assert_eq!(plain_problem(code), Some(words), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_check_on_a_node_too_old_for_context_mode_names_the_version_it_needs() {
+        let words = "context-mode needs Node.js 22.5 or newer. Update Node.js, then check again.";
+        assert_eq!(check_problem("server_node_too_old"), words);
+        assert_eq!(plain_problem("server_node_too_old"), Some(words));
+    }
+
+    /// RV-DS241-150 r2: a check of a pinned-shaped context-mode spec whose npx the tool
+    /// resolver does not find reads one sentence of its own, a code the desktop knows.
+    #[test]
+    fn a_check_of_a_context_mode_npx_the_resolver_does_not_find_says_so_in_one_sentence() {
+        let words = "CrazyAgent did not find the npx this context-mode server runs on this computer, so it did not start it.";
+        assert_eq!(check_problem("server_npx_not_found"), words);
+        assert_eq!(plain_problem("server_npx_not_found"), Some(words));
+        assert_eq!(
+            known_code("server_npx_not_found"),
+            Some("server_npx_not_found")
+        );
     }
 }

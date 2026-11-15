@@ -54,6 +54,7 @@ mod icloud;
 pub(crate) mod ide;
 pub(crate) mod ide_extensions;
 pub(crate) mod ide_tab;
+mod intake;
 pub(crate) mod model_choice;
 mod native_auth;
 pub(crate) mod native_auth_channel;
@@ -510,6 +511,7 @@ struct Authority {
     native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
     deferred: std::sync::atomic::AtomicUsize,
+    running: projects_home::RunningSet,
     controls: std::sync::atomic::AtomicU64,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
     reproof: tokio::sync::Mutex<()>,
@@ -518,6 +520,7 @@ struct Authority {
     ide: Arc<crate::ide::bridge::Grants>,
     reproving: Arc<std::sync::atomic::AtomicBool>,
     icloud: crate::projects_home::icloud::Downloads,
+    intake: intake::Intake,
 }
 
 impl Authority {
@@ -1357,6 +1360,7 @@ impl OwnerServer {
                 native_auth_changed: tokio::sync::Notify::new(),
                 usable: std::sync::atomic::AtomicBool::new(true),
                 deferred: std::sync::atomic::AtomicUsize::new(0),
+                running: Mutex::new(std::collections::HashSet::new()),
                 controls: std::sync::atomic::AtomicU64::new(0),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
                 reproof: tokio::sync::Mutex::new(()),
@@ -1365,6 +1369,7 @@ impl OwnerServer {
                 ide,
                 reproving: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 icloud: crate::projects_home::icloud::Downloads::default(),
+                intake: intake::Intake::default(),
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1398,6 +1403,14 @@ impl OwnerServer {
                             "landing_regenerate_sweep_failed cause={}",
                             crate::protocol::plain_code(&problem.0)
                         );
+                    }
+                    match crate::landing::clear_step_locks(&db) {
+                        Ok(0) => {}
+                        Ok(count) => eprintln!("landing_step_lock_removed count={count}"),
+                        Err(problem) => eprintln!(
+                            "landing_step_lock_sweep_failed cause={}",
+                            crate::protocol::plain_code(&problem.0)
+                        ),
                     }
                     locked
                 })
@@ -1577,6 +1590,10 @@ impl OwnerServer {
             Arc::downgrade(&self.authority),
             upkeep_stopped,
         ));
+        self.authority
+            .intake
+            .restore(&self.engine, self.timeout)
+            .await;
         let backfill = setup::engine_root(&self.authority).ok().map(|root| {
             tokio::spawn(setup::backfill_hooks(
                 self.engine.storage.sender.clone(),
@@ -1670,6 +1687,7 @@ impl OwnerServer {
         while tasks.custody.join_next().await.is_some() {}
         while tasks.clients.join_next().await.is_some() {}
         while tasks.refusals.join_next().await.is_some() {}
+        self.authority.intake.stop_all(self.timeout).await;
         log_panic(&upkeep.await, "landing_upkeep_panicked");
         log_panic(&sweep.await, "finished_agents_sweep_panicked");
         let drained = self
@@ -2460,8 +2478,24 @@ async fn serve_admitted(
                 .await
                 .map(|()| None);
         }
+        if let OwnerOperation::Reconcile { operation_id, .. } = &request.operation
+            && projects_home::running(authority, &a, operation_id)
+        {
+            let reply = projects_home::still_running(engine, authority, auth, &a, operation_id)
+                .await
+                .map(|response| OwnerReply {
+                    request_id: id.clone(),
+                    response,
+                });
+            return write_owner_reply(stream, reply, id, mutation)
+                .await
+                .map(|()| None);
+        }
         let submitted = request.clone();
         let _barrier = engine.owner_egress.write().await;
+        if authority.authenticate(auth)? != a {
+            return Err(failure("owner_grant_stale_or_revoked"));
+        }
         if let Err(error) = authority.master_dispatch.lock().await.room(&submitted) {
             return write_owner_reply(stream, Err(error), id, mutation)
                 .await
@@ -2498,8 +2532,9 @@ async fn serve_admitted(
     };
     match deferred {
         Deferred::ProjectsHome(a, request) => {
+            let sink = projects_home::Sink::Client(stream);
             let _ =
-                projects_home::serve(stream, engine, authority, auth, &a, *request, deadline).await;
+                projects_home::serve(sink, engine, authority, auth, &a, *request, deadline).await;
         }
         Deferred::GitHub(a) => {
             let _ = github::serve(stream, engine, authority, auth, &a, body).await;
@@ -2767,8 +2802,10 @@ async fn write_reply(stream: &mut UnixStream, frame: &[u8]) -> Result<(), Engine
 }
 
 /// Encodes one owner reply. An error becomes Rejected with its code when the engine
-/// knows the request changed nothing, and OutcomeUnknown for any other failed mutation.
-/// Inputs: the result, the request id and whether it was a mutation. Output: the frame.
+/// knows the request changed nothing, or for `move_project_old_folder_left`, a project move
+/// recorded in the home whose old folder was left, which clients show as moved; any other
+/// failed mutation becomes OutcomeUnknown. Inputs: the result, the request id and whether it
+/// was a mutation. Output: the frame.
 fn owner_reply_frame(
     result: Result<OwnerReply, EngineError>,
     id: RequestId,
@@ -2785,6 +2822,7 @@ fn owner_reply_frame(
                 | "master_transaction_rolled_back"
                 | "master_dispatch_stopped"
                 | "master_dispatch_capacity"
+                | "move_project_old_folder_left"
         );
         let response = if mutation && !known {
             OwnerResponse::OutcomeUnknown {
@@ -3142,10 +3180,8 @@ async fn observe_dispatch(
             std::process::Command::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .env("GIT_NO_LAZY_FETCH", "1")
+                .envs(crate::research::runner::GIT_SAFE_ENV)
                 .env("GIT_OPTIONAL_LOCKS", "0")
                 .args([
                     "--no-replace-objects",
@@ -3598,31 +3634,106 @@ mod tests {
     use std::future::Future;
     use std::os::unix::fs::PermissionsExt;
 
+    /// The terminal host follows the tmux program the resolver finds: a new host once setup
+    /// installs its copy, the same host while it stays, a new one once it is removed. The
+    /// places hold only `<root>/setup/bin`, so the row reads the same on a Mac whose own tmux
+    /// the engine's places would find first.
     #[tokio::test]
     async fn the_terminal_host_follows_the_tmux_program_setup_installs_or_removes() {
         let root = tempfile::tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
         let engine = Engine::open(&root.path().join("db"), config).await.unwrap();
-        let first = engine.terminal(root.path()).unwrap();
-        assert!(Arc::ptr_eq(&first, &engine.terminal(root.path()).unwrap()));
         let bin = root.path().join("setup/bin");
+        let found = || {
+            crate::terminal::tmux::installed_at(&crate::tools::Places::new(vec![bin.clone()], None))
+        };
+        let host = || engine.terminal_on(root.path(), found).unwrap();
+        assert_eq!(found(), None);
+        let first = host();
+        assert!(Arc::ptr_eq(&first, &host()));
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("tmux"), "#!/bin/sh\nexit 1\n").unwrap();
         std::fs::set_permissions(bin.join("tmux"), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let installed = engine.terminal(root.path()).unwrap();
+        assert_eq!(found(), Some(bin.join("tmux").canonicalize().unwrap()));
+        let installed = host();
         assert!(!Arc::ptr_eq(&first, &installed));
-        assert!(Arc::ptr_eq(
-            &installed,
-            &engine.terminal(root.path()).unwrap()
-        ));
+        assert!(Arc::ptr_eq(&installed, &host()));
         std::fs::remove_file(bin.join("tmux")).unwrap();
-        let removed = engine.terminal(root.path()).unwrap();
+        assert_eq!(found(), None);
+        let removed = host();
         assert!(!Arc::ptr_eq(&installed, &removed));
-        assert!(Arc::ptr_eq(
-            &removed,
-            &engine.terminal(root.path()).unwrap()
-        ));
+        assert!(Arc::ptr_eq(&removed, &host()));
+        engine.close().await.unwrap();
+    }
+
+    /// RV-DS241-67: the tmux look runs with the host's lock free, so a read or a second look
+    /// never waits on a slow `tmux -V`, and a look that started first but ends last keeps the
+    /// host a newer look opened on another program. The newer look runs inside the older
+    /// one's finder only once the lock is seen free, so the row ends under either code.
+    #[tokio::test]
+    async fn a_slow_tmux_look_holds_no_lock_and_an_older_look_keeps_the_newer_host() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let engine = Engine::open(&root.path().join("db"), config).await.unwrap();
+        let (old, new) = (root.path().join("old/tmux"), root.path().join("new/tmux"));
+        let mut newer = None;
+        let older = engine
+            .terminal_on(root.path(), || {
+                if engine.terminal.try_lock().is_ok() {
+                    newer = Some(engine.terminal_on(root.path(), || Some(new.clone())));
+                }
+                Some(old.clone())
+            })
+            .unwrap();
+        let newer = newer
+            .expect("the host's lock is free while tmux is looked up")
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&older, &newer),
+            "the older look keeps the newer host"
+        );
+        let again = engine
+            .terminal_on(root.path(), || Some(new.clone()))
+            .unwrap();
+        assert!(Arc::ptr_eq(&newer, &again));
+        engine.close().await.unwrap();
+    }
+
+    /// RV-DS241-67: a look that finds the kept host's program again counts as the newest
+    /// look, so an older look still running that found another program never replaces the
+    /// host that newer look confirmed.
+    #[tokio::test]
+    async fn an_older_look_never_replaces_a_host_a_newer_look_found_again() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let engine = Engine::open(&root.path().join("db"), config).await.unwrap();
+        let (program, other) = (
+            root.path().join("kept/tmux"),
+            root.path().join("other/tmux"),
+        );
+        let kept = engine
+            .terminal_on(root.path(), || Some(program.clone()))
+            .unwrap();
+        let mut again = None;
+        let older = engine
+            .terminal_on(root.path(), || {
+                if engine.terminal.try_lock().is_ok() {
+                    again = Some(engine.terminal_on(root.path(), || Some(program.clone())));
+                }
+                Some(other.clone())
+            })
+            .unwrap();
+        let again = again
+            .expect("the host's lock is free while tmux is looked up")
+            .unwrap();
+        assert!(Arc::ptr_eq(&kept, &again));
+        assert!(
+            Arc::ptr_eq(&kept, &older),
+            "the older look keeps the host found again"
+        );
         engine.close().await.unwrap();
     }
 

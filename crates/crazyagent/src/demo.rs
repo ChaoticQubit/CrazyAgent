@@ -27,6 +27,7 @@ const SEED_COMMIT: &str = "Add the demo web page";
 #[cfg(unix)]
 const SEED_FAILED: &str = "demo_seed_failed";
 const GOAL_SENT: &str = "SELECT EXISTS(SELECT 1 FROM master_turns AS t JOIN master_sessions AS s ON s.id=t.session WHERE s.project=?1 AND t.input>(SELECT turn_floor FROM demo_projects WHERE project_id=?1))";
+const OWNER_SPOKE: &str = "SELECT EXISTS(SELECT 1 FROM session_messages WHERE project=?1 AND speaker='owner' AND at_ms>=(SELECT created_ms FROM demo_projects WHERE project_id=?1))";
 const AGENT_STARTED: &str = "SELECT EXISTS(SELECT 1 FROM team_agents WHERE project=?1 AND role<>'master' AND created_ms>=(SELECT created_ms FROM demo_projects WHERE project_id=?1))";
 const QUESTION_ANSWERED: &str = "SELECT EXISTS(SELECT 1 FROM questions_log WHERE project=?1 AND status IN ('answered','answered_in_terminal'))";
 const CHANGE_SET_ACCEPTED: &str = "SELECT EXISTS(SELECT 1 FROM landing_change_sets WHERE project=?1 AND state='accepted' AND created_ms>=(SELECT created_ms FROM demo_projects WHERE project_id=?1))";
@@ -111,6 +112,7 @@ pub(crate) fn demo_id() -> Result<ProjectId, EngineError> {
 
 /// Makes the table that marks the demo project, one row at most. Input: the engine
 /// connection. Output: done, or the database failure.
+#[cfg(unix)]
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS demo_projects (
@@ -212,8 +214,9 @@ pub(crate) fn refusal(code: String) -> String {
 }
 
 /// Marks the project the demo created as the demo, in the transaction that records it, with
-/// the newest master turn cursor so steps count only this demo's rows; a mark a deleted
-/// demo left is replaced. Inputs: the transaction, the project and when. Output: done.
+/// the newest master turn cursor so steps count only this demo's rows, and plants its
+/// question there, so the two commit together; a mark a deleted demo left is replaced.
+/// Inputs: the transaction, the project and when. Output: done.
 pub(crate) fn record(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -236,7 +239,31 @@ pub(crate) fn record(
         params![PROJECT_ID, now_ms, turn_floor],
     )
     .map_err(error)?;
+    plant(tx);
     Ok(())
+}
+
+/// Plants the demo's question in the recording transaction under its own savepoint: a
+/// failure rolls back only the question, logs `demo_question_not_planted` and lets the demo
+/// be recorded, since New Project already moved its folder into place. Input: the
+/// transaction. Output: none.
+fn plant(tx: &Transaction<'_>) {
+    if tx.execute_batch("SAVEPOINT demo_question").is_err() {
+        eprintln!("demo_question_not_planted cause=savepoint");
+        return;
+    }
+    let planted = plant_question(tx);
+    let closed = if planted.is_ok() {
+        tx.execute_batch("RELEASE demo_question")
+    } else {
+        tx.execute_batch("ROLLBACK TO demo_question; RELEASE demo_question")
+    };
+    if let Err(e) = planted {
+        eprintln!("demo_question_not_planted cause={}", e.0);
+    }
+    if closed.is_err() {
+        eprintln!("demo_question_not_planted cause=release");
+    }
 }
 
 /// Asserts the demo's agents start confined right after New Project recorded it (DEC-153,
@@ -258,11 +285,11 @@ pub(crate) fn assert_confined(db: &Connection, project_id: &ProjectId) -> Result
     Ok(())
 }
 
-/// Plants the demo's question once the demo is recorded, so the guide's question step has
-/// one whatever the model does; the owner's answer reaches the master as an engine message.
-/// Asking again while it waits returns the same question. Input: the engine connection.
-/// Output: the question id.
-pub(crate) fn plant_question(db: &Connection) -> Result<u64, EngineError> {
+/// Plants the demo's question in the transaction that records the demo, so the guide's
+/// question step has one whatever the model does; the owner's answer reaches the master as an
+/// engine message. Asking again while it waits returns the same question. Input: the
+/// transaction. Output: the question id.
+pub(crate) fn plant_question(tx: &Transaction<'_>) -> Result<u64, EngineError> {
     let ask = crate::questions::Ask {
         question: QUESTION.into(),
         kind: crate::questions::QuestionKind::Single,
@@ -270,7 +297,7 @@ pub(crate) fn plant_question(db: &Connection) -> Result<u64, EngineError> {
         recommended: Some(QUESTION_OPTIONS[0].into()),
         context: Some(QUESTION_CONTEXT.into()),
     };
-    crate::questions::raise(db, &demo_id()?, &crate::questions::EngineSource::Demo, &ask)
+    crate::questions::raise_in(tx, &demo_id()?, &crate::questions::EngineSource::Demo, &ask)
 }
 
 fn any(tx: &Transaction<'_>, query: &str) -> Result<bool, EngineError> {
@@ -278,11 +305,27 @@ fn any(tx: &Transaction<'_>, query: &str) -> Result<bool, EngineError> {
         .map_err(error)
 }
 
-/// Reads the demo: the demo project while both its mark and its project exist, each step
-/// from whether its row exists (a master turn, a team agent that is not the master, an
-/// answered question, an accepted change set), counting only rows made since this demo was
-/// marked, since Delete everything keeps some of them; the goal; every saved pool with why
-/// a demo cannot run on it. Inputs: a transaction and the configuration. Output: the view.
+/// Tells whether the owner said anything to the demo's master since the demo was marked, in
+/// either master mode: a goal typed into the live terminal is kept only as the session's owner
+/// message, never as a master turn. Engine words, such as a relayed answer, are not the
+/// owner's. The store's table comes with its first message, so a database without it has
+/// none. Input: a transaction. Output: the answer.
+fn owner_spoke(tx: &Transaction<'_>) -> Result<bool, EngineError> {
+    let stored: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_messages')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    Ok(stored && any(tx, OWNER_SPOKE)?)
+}
+
+/// Reads the demo while its mark and project both exist: each step from whether its row
+/// exists since this demo was marked (a master turn or the owner's words to the master, a
+/// team agent that is not the master, an answered question, an accepted change set), as
+/// Delete everything keeps some; the goal; each saved pool with why a demo cannot run on it.
+/// Inputs: a transaction and the configuration. Output: the view.
 pub(crate) fn view(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -300,7 +343,7 @@ pub(crate) fn view(
         None => DemoSteps::default(),
         Some(_) => DemoSteps {
             created: true,
-            goal_sent: any(tx, GOAL_SENT)?,
+            goal_sent: any(tx, GOAL_SENT)? || owner_spoke(tx)?,
             agent_started: any(tx, AGENT_STARTED)?,
             question_answered: any(tx, QUESTION_ANSWERED)?,
             change_set_accepted: any(tx, CHANGE_SET_ACCEPTED)?,

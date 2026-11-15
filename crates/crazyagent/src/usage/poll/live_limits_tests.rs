@@ -1,4 +1,4 @@
-use super::{CLAUDE_USAGE_URL, CODEX_USAGE_URL, Provider, fetch};
+use super::{CLAUDE_USAGE_URL, CODEX_USAGE_URL, Provider, claude_user_agent, fetch};
 use crate::team::runtime::managed_agent::{SignedIn, claude, codex};
 use crate::usage::extras::CLAUDE_DETAIL_QUERY;
 use serde_json::Value;
@@ -84,6 +84,7 @@ fn probe_the_codex_usage_reply_shape() {
             CODEX_USAGE_URL.parse().unwrap(),
             &credential,
             false,
+            None,
         ),
     );
 }
@@ -104,17 +105,23 @@ fn probe_the_claude_usage_and_detail_reply_shapes() {
     let url: url::Url = CLAUDE_USAGE_URL.parse().unwrap();
     print_shape(
         "claude usage",
-        fetch(Provider::Claude, url.clone(), &credential, false),
+        fetch(Provider::Claude, url.clone(), &credential, false, None),
     );
     let mut detail = url.clone();
     detail.set_query(Some(CLAUDE_DETAIL_QUERY));
     print_shape(
         "claude detail",
-        fetch(Provider::Claude, detail, &credential, false),
+        fetch(
+            Provider::Claude,
+            detail,
+            &credential,
+            false,
+            Some(&claude_user_agent(None)),
+        ),
     );
     let profile = url.join(CLAUDE_PROFILE_PATH).unwrap();
     print_shape(
         "claude profile",
-        fetch(Provider::Claude, profile, &credential, false),
+        fetch(Provider::Claude, profile, &credential, false, None),
     );
 }

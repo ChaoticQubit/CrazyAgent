@@ -67,6 +67,7 @@ const REFUSALS: Record<string, string> = {
   move_project_in_progress: "This project is being moved into your projects folder. Try again when the move is done.",
   changes_branch_moved: "Your branch moved while these changes were landing, so nothing changed. Review and accept again.",
   changes_branch_not_above_base: "The agent's branch no longer holds the commit these changes start from. Ask the agent to update, or discard.",
+  changes_git_hooks: "Your project's Git config sets a hook command, which CrazyAgent never runs. Remove the hook settings from your project's Git config, then try again.",
   changes_git_unsupported: "The Git on this computer can't land changes. Update Git, then try again.",
   changes_merge_unsafe: "These changes can't land as a merge commit: an agent commit isn't safe to keep in your history (too many commits, hidden characters, another author's name, or files Git treats specially). Switch Landing to Squash, then accept again.",
   changes_ignored_files: "These changes add files your project's ignore rules leave out. Ask the agent to remove them.",

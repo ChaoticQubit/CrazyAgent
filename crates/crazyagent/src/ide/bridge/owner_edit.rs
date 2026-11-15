@@ -16,7 +16,7 @@ pub(super) async fn answer(
     path: String,
 ) -> Result<serde_json::Value, EngineError> {
     let root = runtime.ide()?.root;
-    let host = runtime.terminal().ok();
+    let host = runtime.terminal_off_worker().await.ok();
     let project = project.clone();
     let (path, told) = tokio::task::spawn_blocking(move || -> Result<_, EngineError> {
         let now = std::time::SystemTime::now()

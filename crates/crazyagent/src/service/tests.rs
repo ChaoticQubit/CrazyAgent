@@ -114,6 +114,25 @@ WantedBy=default.target
     );
 }
 
+/// systemd.exec: Environment= expands no variables, so a `$` in a PATH folder is written as
+/// is, while `%` (a specifier), backslash and double quote are still escaped.
+#[test]
+fn systemd_environment_keeps_a_dollar_in_a_path_folder_as_written() {
+    let mut linux = service(Platform::Linux);
+    linux.path = OsString::from(
+        r#"/home/owner/odd$dir/bin:/home/owner/50%/bin:/home/owner/"q"\/bin:/usr/bin"#,
+    );
+    let text = linux.definition_text().unwrap();
+    assert!(
+        text.contains(
+            r#"
+Environment="PATH=/home/owner/odd$dir/bin:/home/owner/50%%/bin:/home/owner/\"q\"\\/bin:/usr/bin"
+"#
+        ),
+        "{text}"
+    );
+}
+
 #[test]
 fn windows_task_runs_at_logon_for_the_user_and_appends_output_to_the_log() {
     let mut windows = service(Platform::Windows);
@@ -349,7 +368,6 @@ fn windows_path_command_hands_the_folder_over_in_its_environment_only() {
         .map(|part| part.to_str().unwrap())
         .collect();
     assert_eq!(args[..3], ["-NoProfile", "-NonInteractive", "-Command"]);
-    assert!(args[3].contains("[Environment]::SetEnvironmentVariable('Path'"));
     assert!(args[3].contains(&format!("$f=$env:{WINDOWS_PATH_FOLDER_VARIABLE};")));
     assert!(!args[3].contains("$args"));
     assert!(!args[3].contains("Cra'zy"));
@@ -364,18 +382,52 @@ fn windows_path_command_hands_the_folder_over_in_its_environment_only() {
     );
 }
 
-/// Reads the user's stored PATH through PowerShell. Takes nothing. Returns the value, empty
-/// when it is unset.
+/// The user's PATH is read as written, with its %VAR% references unexpanded, and stored back
+/// with the registry kind it had (REG_EXPAND_SZ when there was none), never as an expanded
+/// REG_SZ; a changed PATH is announced to running programs.
+#[test]
+fn windows_path_command_keeps_the_user_path_kind_and_its_unexpanded_text() {
+    let command = windows_path_command(Path::new(r"C:\Users\owner\AppData\Local\CrazyAgent"));
+    let script = command.get_args().nth(3).unwrap().to_str().unwrap();
+    assert!(script.contains("DoNotExpandEnvironmentNames"), "{script}");
+    assert!(script.contains("GetValueKind('Path')"), "{script}");
+    assert!(
+        script.contains("[Microsoft.Win32.RegistryValueKind]::ExpandString"),
+        "{script}"
+    );
+    assert!(script.contains("-Type $t"), "{script}");
+    assert!(
+        !script.contains("GetEnvironmentVariable('Path'"),
+        "{script}"
+    );
+    assert!(
+        !script.contains("SetEnvironmentVariable('Path'"),
+        "{script}"
+    );
+    assert!(
+        script.contains(
+            "[Environment]::SetEnvironmentVariable('CRAZYAGENT_PATH_REFRESH', $null, 'User')"
+        ),
+        "{script}"
+    );
+}
+
+/// Serializes the tests that change the user's stored PATH, so one never restores over
+/// another's change.
 #[cfg(windows)]
-fn user_path() -> String {
+static USER_PATH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Runs one PowerShell script with the given environment. Takes the script and the
+/// variables. Returns its standard output; panics when PowerShell fails.
+#[cfg(windows)]
+fn powershell(script: &str, env: &[(&str, &str)]) -> String {
+    let mut command = std::process::Command::new("powershell.exe");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    for (name, value) in env {
+        command.env(name, value);
+    }
     let output = crate::spawn_gate::output(
-        std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "[Console]::Out.Write([Environment]::GetEnvironmentVariable('Path','User'))",
-            ])
+        command
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped()),
@@ -385,44 +437,84 @@ fn user_path() -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-/// Stores the user's PATH back as it was, handing the value over in the environment.
-/// Takes the value. Returns nothing; panics when PowerShell fails.
+/// Reads the user's stored PATH as written, %VAR% references unexpanded, with its registry
+/// kind. Takes nothing. Returns the kind name and the value, both empty when it is unset.
 #[cfg(windows)]
-fn restore_user_path(value: &str) {
-    let output = crate::spawn_gate::output(
-        std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "[Environment]::SetEnvironmentVariable('Path', $env:CRAZYAGENT_TEST_PATH, 'User')",
-            ])
-            .env("CRAZYAGENT_TEST_PATH", value)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .unwrap();
-    assert!(output.status.success(), "{output:?}");
+fn raw_user_path() -> (String, String) {
+    let shown = powershell(
+        "$k=Get-Item -LiteralPath 'HKCU:\\Environment'; \
+if ($k.GetValueNames() -contains 'Path') { [Console]::Out.Write($k.GetValueKind('Path').ToString() + \"`n\" + \
+$k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)) }",
+        &[],
+    );
+    match shown.split_once('\n') {
+        Some((kind, value)) => (kind.to_owned(), value.to_owned()),
+        None => (String::new(), String::new()),
+    }
+}
+
+/// Stores the user's PATH back as it was: the same text with the same registry kind, or no
+/// value when the kind is empty. Takes the kind name and the value. Returns nothing.
+#[cfg(windows)]
+fn restore_raw_user_path(kind: &str, value: &str) {
+    powershell(
+        "if ([string]::IsNullOrEmpty($env:CRAZYAGENT_TEST_KIND)) { \
+Remove-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -ErrorAction SilentlyContinue } else { \
+Set-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -Value $env:CRAZYAGENT_TEST_PATH -Type $env:CRAZYAGENT_TEST_KIND }",
+        &[
+            ("CRAZYAGENT_TEST_KIND", kind),
+            ("CRAZYAGENT_TEST_PATH", value),
+        ],
+    );
 }
 
 #[cfg(windows)]
 #[test]
 fn link_cli_adds_a_folder_named_like_powershell_code_to_the_user_path_once() {
-    let before = user_path();
+    let _held = USER_PATH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (kind, before) = raw_user_path();
     let root = tempfile::tempdir().unwrap();
     let folder = root.path().join("cra'zy;$(exit 7)");
     std::fs::create_dir(&folder).unwrap();
     let executable = folder.join("crazyagent.exe");
     let first = link_cli(&executable, root.path());
     let second = link_cli(&executable, root.path());
-    let after = user_path();
-    restore_user_path(&before);
+    let (_, after) = raw_user_path();
+    restore_raw_user_path(&kind, &before);
     assert_eq!(first.unwrap(), folder);
     assert_eq!(second.unwrap(), folder);
     let shown = folder.to_str().unwrap();
     assert_eq!(after.split(';').filter(|entry| *entry == shown).count(), 1);
-    assert_eq!(user_path(), before);
+    assert_eq!(raw_user_path(), (kind, before));
+}
+
+#[cfg(windows)]
+#[test]
+fn link_cli_keeps_the_user_path_kind_and_its_unexpanded_references() {
+    let _held = USER_PATH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (kind, before) = raw_user_path();
+    let reference = r"%USERPROFILE%\crazyagent-kind-check";
+    restore_raw_user_path("ExpandString", &format!("{reference};{before}"));
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("bin");
+    std::fs::create_dir(&folder).unwrap();
+    let linked = link_cli(&folder.join("crazyagent.exe"), root.path());
+    let after = raw_user_path();
+    restore_raw_user_path(&kind, &before);
+    assert_eq!(linked.unwrap(), folder);
+    assert_eq!(after.0, "ExpandString", "{after:?}");
+    assert!(after.1.starts_with(&format!("{reference};")), "{after:?}");
+    let shown = folder.to_str().unwrap();
+    assert_eq!(
+        after.1.split(';').filter(|entry| *entry == shown).count(),
+        1,
+        "{after:?}"
+    );
+    assert_eq!(raw_user_path(), (kind, before));
 }
 
 #[cfg(unix)]
@@ -718,7 +810,7 @@ fn persistable_runs_an_engine_outside_the_mount_in_place_and_copies_one_from_the
         bundled
     );
     assert!(!layout.root().exists());
-    let copies = layout.root().join("bin");
+    let copies = layout.root().join("setup").join("bin");
     let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
     assert_eq!(installed, copies.join("crazyagent"));
     assert_eq!(changeable_by_others(&installed), None);
@@ -789,6 +881,152 @@ fn persistable_runs_an_engine_outside_the_mount_in_place_and_copies_one_from_the
     assert!(persistable(&stranger, &layout, Some(&mount)).is_err());
 }
 
+/// Leader 20:15: the AppImage's persisted copy lives in `<data root>/setup/bin`, which the
+/// tool resolver trusts, so the engine run from there finds the `crazyagent-tmux` beside it
+/// and never refuses it as a file agents can write, as it did in `<data root>/bin`.
+#[cfg(unix)]
+#[test]
+fn an_appimage_persisted_tmux_is_found_beside_the_engine_not_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let mount = root.join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(root.join("data").join("engine")).unwrap();
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    let app = installed.parent().unwrap();
+    assert_eq!(app, layout.root().join("setup").join("bin"));
+    let places = crate::tools::Places::engine(Some(layout.root()), Some(app), None, None);
+    let tmux = crate::tools::resolve("tmux", &places).unwrap();
+    assert_eq!(tmux.entry, app.join("crazyagent-tmux"));
+}
+
+/// The copy a 2.4.0 AppImage kept in `<data root>/bin`, a private folder (700) holding the
+/// release files and a stranger file. Input: the layout. Output: the old engine executable.
+#[cfg(unix)]
+fn old_copy(layout: &Layout) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let old = layout.root().join("bin");
+    let engine = bundle(&old);
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o700)).unwrap();
+    engine
+}
+
+/// rv-code F1: retiring removes files only from a `<data root>/bin` that is a real folder,
+/// not a link, owned by this user and private (700), as 2.4.0 made it; through a link, or
+/// in a folder others can read, a release-named file stays, wherever it sits.
+#[cfg(unix)]
+#[test]
+fn retiring_never_follows_a_linked_or_shared_old_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    let old = layout.root().join("bin");
+    let elsewhere = bundle(&temp.path().join("elsewhere"));
+    std::os::unix::fs::symlink(elsewhere.parent().unwrap(), &old).unwrap();
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    retire_old_copies_with(&layout, &installed, None);
+    assert!(elsewhere.is_file(), "a file outside the data root stays");
+    assert!(
+        std::fs::symlink_metadata(&old)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    std::fs::remove_file(&old).unwrap();
+    let shared = bundle(&old);
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+    retire_old_copies_with(&layout, &installed, None);
+    assert!(
+        shared.is_file(),
+        "a folder that is not private is left alone"
+    );
+}
+
+/// Leader 20:15: the first start after the move retires the old `<data root>/bin` copy: the
+/// command line link that named it names the new copy, every release file there is removed,
+/// a file CrazyAgent did not put there stays, and the folder goes once it is empty.
+#[cfg(unix)]
+#[test]
+fn a_first_start_retires_the_old_appimage_copy_and_repoints_the_command_line_link() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    let old = layout.root().join("bin");
+    old_copy(&layout);
+    let cli = temp.path().join("home").join(".local").join("bin");
+    std::fs::create_dir_all(&cli).unwrap();
+    std::os::unix::fs::symlink(old.join("crazyagent"), cli.join("crazyagent")).unwrap();
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    assert_eq!(
+        installed,
+        layout.root().join("setup").join("bin").join("crazyagent")
+    );
+    retire_old_copies_with(&layout, &installed, Some(&cli));
+    assert_eq!(
+        std::fs::read_link(cli.join("crazyagent")).unwrap(),
+        installed
+    );
+    for name in crate::update::BINARIES {
+        assert!(
+            std::fs::symlink_metadata(old.join(name)).is_err(),
+            "{name} is retired"
+        );
+    }
+    assert!(old.join("notes.txt").is_file(), "a stranger file stays");
+    std::fs::remove_file(old.join("notes.txt")).unwrap();
+    retire_old_copies_with(&layout, &installed, Some(&cli));
+    assert!(!old.exists(), "the empty old folder goes");
+}
+
+/// `service link-cli` keeps the engine too, but a login service a 2.4.0 AppImage installed
+/// names the old `<data root>/bin` copy until a replacing `service start` rewrites it, so
+/// keeping the engine never removes that copy; retiring it is the start's step after the
+/// service names the new copy, and an engine outside `<data root>/setup/bin` retires nothing.
+#[cfg(unix)]
+#[test]
+fn keeping_the_engine_leaves_the_old_copy_a_login_service_may_still_name() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    let old = old_copy(&layout);
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    assert_ne!(installed, old);
+    assert!(
+        old.is_file(),
+        "a service naming the old copy would not start"
+    );
+    retire_old_copies_with(&layout, &old, None);
+    assert!(old.is_file(), "an engine outside setup/bin retires nothing");
+    retire_old_copies_with(&layout, &installed, None);
+    assert!(!old.exists());
+}
+
+/// A command line link that names anything but the old copy is never touched.
+#[cfg(unix)]
+#[test]
+fn retiring_the_old_appimage_copy_leaves_a_link_to_another_engine_alone() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    old_copy(&layout);
+    let other = bundle(&temp.path().join("other"));
+    let cli = temp.path().join("home").join(".local").join("bin");
+    std::fs::create_dir_all(&cli).unwrap();
+    std::os::unix::fs::symlink(&other, cli.join("crazyagent")).unwrap();
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    retire_old_copies_with(&layout, &installed, Some(&cli));
+    assert_eq!(std::fs::read_link(cli.join("crazyagent")).unwrap(), other);
+}
+
 #[cfg(unix)]
 #[test]
 fn persistable_never_copies_from_a_folder_other_users_can_change_and_install_refuses_it() {
@@ -827,7 +1065,7 @@ fn link_cli_refuses_an_engine_other_users_can_change_and_links_the_private_copy(
     let link = link_cli(&copy, &bin).unwrap();
     assert_eq!(
         std::fs::read_link(&link).unwrap(),
-        layout.root().join("bin").join("crazyagent")
+        layout.root().join("setup").join("bin").join("crazyagent")
     );
 }
 
@@ -1082,6 +1320,511 @@ fn stale_replaces_a_definition_only_for_a_private_copy_of_the_bundled_engine() {
     }
 }
 
+/// An app engine `<root>/<folder>/CrazyAgent.app/Contents/MacOS/crazyagent` written on disk.
+/// Inputs: the row's folder and the folder the app sits in. Output: the engine's path.
+#[cfg(unix)]
+fn app_engine(root: &Path, folder: &str) -> PathBuf {
+    let engine = root
+        .join(folder)
+        .join("CrazyAgent.app")
+        .join("Contents")
+        .join("MacOS")
+        .join("crazyagent");
+    std::fs::create_dir_all(engine.parent().unwrap()).unwrap();
+    std::fs::write(&engine, b"engine").unwrap();
+    engine
+}
+
+/// A dev build's app engine inside a cargo target folder, which [`Service::may_replace`]
+/// refuses. Input: the row's folder. Output: the engine's path.
+#[cfg(unix)]
+fn dev_engine(root: &Path) -> PathBuf {
+    let target = root.join("worktree").join("target");
+    let built = app_engine(&target.join("release").join("bundle"), "macos");
+    std::fs::write(
+        target.join("CACHEDIR.TAG"),
+        b"Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .unwrap();
+    built
+}
+
+/// RV-DS241-118: a login service left naming a program that is gone, as after the app was
+/// moved or renamed, is reinstalled for this app's engine when no engine answers and never
+/// started as it is, also by a dev build, which only keeps away from a program that still
+/// exists. A definition naming this engine starts as it is.
+#[cfg(unix)]
+#[test]
+fn a_definition_naming_a_missing_program_is_reinstalled_not_started() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = app_engine(temp.path(), "Applications");
+    let built = dev_engine(temp.path());
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join("engine");
+        own.executable = bundled.clone();
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        let mut gone = own.clone();
+        gone.executable = temp
+            .path()
+            .join("Moved")
+            .join("CrazyAgent.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("crazyagent");
+        write_definition(&own.definition, &gone.definition_text().unwrap(), platform).unwrap();
+        assert!(own.runs_another_program());
+        assert_eq!(own.broken_program(), Some(gone.executable.clone()));
+        assert_eq!(own.repair(&bundled, true, false), Repair::Install);
+        let mut dev = own.clone();
+        dev.executable = built.clone();
+        assert!(!dev.may_replace());
+        assert_eq!(dev.repair(&built, true, false), Repair::Install);
+        write_definition(&own.definition, &own.definition_text().unwrap(), platform).unwrap();
+        assert_eq!(own.broken_program(), None);
+        assert_eq!(own.repair(&bundled, true, false), Repair::Start);
+        assert_eq!(own.repair(&bundled, true, true), Repair::Install);
+        assert_eq!(own.repair(&bundled, false, false), Repair::Install);
+    }
+}
+
+/// RV-DS241-118: a definition naming an engine on a disk image or another disk (`/Volumes`)
+/// or in a Gatekeeper AppTranslocation folder is never started as it is, since the path goes
+/// away and another disk of the same name could take its place. An engine there is itself
+/// never installed as a login service: it starts a usable installed definition and is
+/// refused otherwise.
+#[cfg(unix)]
+#[test]
+fn a_definition_naming_a_volumes_or_translocated_program_is_never_started_as_is() {
+    let mounted = Path::new("/Volumes/CrazyAgent/CrazyAgent.app/Contents/MacOS/crazyagent");
+    let translocated = Path::new(
+        "/private/var/folders/ab/xyz/T/AppTranslocation/0A1B2C3D/d/CrazyAgent.app/Contents/MacOS/crazyagent",
+    );
+    assert!(transient(mounted));
+    assert!(transient(translocated));
+    assert!(!transient(Path::new(
+        "/Applications/CrazyAgent.app/Contents/MacOS/crazyagent"
+    )));
+    assert!(!transient(Path::new(
+        "/Users/owner/Volumes/CrazyAgent.app/Contents/MacOS/crazyagent"
+    )));
+    assert!(!transient(Path::new(
+        "/VolumesX/CrazyAgent.app/Contents/MacOS/crazyagent"
+    )));
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = app_engine(temp.path(), "Applications");
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join("engine");
+        own.executable = bundled.clone();
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        for program in [mounted, translocated] {
+            let mut there = own.clone();
+            there.executable = program.to_path_buf();
+            write_definition(&own.definition, &there.definition_text().unwrap(), platform).unwrap();
+            assert_eq!(own.broken_program().as_deref(), Some(program));
+            assert_eq!(own.repair(&bundled, true, false), Repair::Install);
+            assert_eq!(there.broken_program().as_deref(), Some(program));
+            assert_eq!(there.repair(program, true, false), Repair::Refuse);
+            assert_eq!(there.repair(program, true, true), Repair::Refuse);
+            assert_eq!(there.repair(program, false, false), Repair::Refuse);
+        }
+        write_definition(&own.definition, &own.definition_text().unwrap(), platform).unwrap();
+        let mut there = own.clone();
+        there.executable = mounted.to_path_buf();
+        assert_eq!(there.broken_program(), None);
+        assert_eq!(there.repair(mounted, true, false), Repair::Start);
+        assert_eq!(there.repair(mounted, true, true), Repair::Refuse);
+    }
+}
+
+/// The service with a launchd label or unit name of its own, unique to this run and
+/// moment, so a row that reaches the service manager never meets the owner's engine.
+/// Inputs: the service and a tag. Output: the relabelled service.
+#[cfg(unix)]
+fn labelled(mut service: Service, tag: &str) -> Service {
+    service.name = format!(
+        "dev.crazyagent.test.{tag}.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    service
+}
+
+/// RV-DS241-129: Restart engine, a forced reinstall, never points the login service away
+/// from another program that still exists when this engine may not replace it, as with a
+/// newer engine known at the data root or a dev build: the definition is kept
+/// (`engine_newer_than_app`). A broken definition, this engine's own, or one it may replace
+/// is still reinstalled, and a plain start still starts the kept one as it is.
+#[cfg(unix)]
+#[test]
+fn a_forced_reinstall_never_replaces_another_program_this_engine_may_not() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = app_engine(temp.path(), "Applications");
+    let other = app_engine(temp.path(), "Newer");
+    let built = dev_engine(temp.path());
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join(format!("{platform:?}-engine"));
+        std::fs::create_dir_all(&own.root).unwrap();
+        own.executable = bundled.clone();
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        let mut newer = own.clone();
+        newer.executable = other.clone();
+        write_definition(&own.definition, &newer.definition_text().unwrap(), platform).unwrap();
+        assert!(own.may_replace());
+        assert_eq!(own.repair(&bundled, true, true), Repair::Install);
+        let mut dev = own.clone();
+        dev.executable = built.clone();
+        assert_eq!(dev.repair(&built, true, true), Repair::Keep);
+        assert_eq!(dev.repair(&built, true, false), Repair::Start);
+        std::fs::write(
+            own.root.join("owner-current"),
+            br#"{"engine_version":"99.0.0"}"#,
+        )
+        .unwrap();
+        assert!(!own.may_replace());
+        assert_eq!(own.repair(&bundled, true, true), Repair::Keep);
+        assert_eq!(own.repair(&bundled, true, false), Repair::Start);
+        write_definition(&own.definition, &own.definition_text().unwrap(), platform).unwrap();
+        assert_eq!(own.repair(&bundled, true, true), Repair::Install);
+        let mut gone = own.clone();
+        gone.executable = temp.path().join("Gone").join("crazyagent");
+        write_definition(&own.definition, &gone.definition_text().unwrap(), platform).unwrap();
+        assert_eq!(own.repair(&bundled, true, true), Repair::Install);
+        assert_eq!(dev.repair(&built, true, true), Repair::Install);
+    }
+}
+
+/// DS-118 r2 F1 (rv-secreview): an AppImage app's login service runs the private copy in
+/// `<root>/setup/bin`, so whether this app may replace another program is judged on the
+/// app's own engine in its `.mount_` folder, not on the copy, which is in no app bundle.
+/// Restart engine and a plain start then replace an older program, and a newer one known
+/// at the data root is kept on Restart engine and started as it is on a plain start. The
+/// copy is one path every AppImage runs, so a definition naming it, with this PATH or
+/// another, is also kept and started as it is while a newer engine is known there, and is
+/// refreshed only once none is (DS-118 r3 F1).
+#[cfg(unix)]
+#[test]
+fn an_appimage_copy_is_judged_by_the_app_engine_it_was_copied_from() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = temp
+        .path()
+        .join(".mount_CrazyAgentX")
+        .join("usr")
+        .join("bin")
+        .join("crazyagent");
+    std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+    std::fs::write(&bundled, b"engine").unwrap();
+    let mut copy = service(Platform::Linux);
+    copy.root = temp.path().join("engine");
+    copy.executable = copy.root.join("setup").join("bin").join("crazyagent");
+    std::fs::create_dir_all(copy.executable.parent().unwrap()).unwrap();
+    std::fs::write(&copy.executable, b"engine").unwrap();
+    copy.definition = temp.path().join("crazyagent.service");
+    let old = copy.root.join("bin").join("crazyagent");
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::write(&old, b"older engine").unwrap();
+    let mut older = copy.clone();
+    older.executable = old;
+    write_definition(
+        &copy.definition,
+        &older.definition_text().unwrap(),
+        Platform::Linux,
+    )
+    .unwrap();
+    assert!(copy.runs_another_program());
+    assert_eq!(copy.broken_program(), None);
+    assert!(!copy.may_replace(), "the copy is in no app bundle");
+    assert_eq!(copy.repair(&bundled, true, true), Repair::Install);
+    assert_eq!(copy.repair(&bundled, true, false), Repair::Install);
+    std::fs::write(
+        copy.root.join("owner-current"),
+        br#"{"engine_version":"99.0.0"}"#,
+    )
+    .unwrap();
+    assert_eq!(copy.repair(&bundled, true, true), Repair::Keep);
+    assert_eq!(copy.repair(&bundled, true, false), Repair::Start);
+    let mut elsewhere = copy.clone();
+    elsewhere.path = OsString::from("/usr/bin:/bin");
+    write_definition(
+        &copy.definition,
+        &elsewhere.definition_text().unwrap(),
+        Platform::Linux,
+    )
+    .unwrap();
+    assert!(!copy.runs_another_program());
+    assert_eq!(copy.repair(&bundled, true, false), Repair::Start);
+    assert_eq!(copy.repair(&bundled, true, true), Repair::Keep);
+    write_definition(
+        &copy.definition,
+        &copy.definition_text().unwrap(),
+        Platform::Linux,
+    )
+    .unwrap();
+    assert!(copy.current());
+    assert_eq!(copy.repair(&bundled, true, false), Repair::Start);
+    assert_eq!(copy.repair(&bundled, true, true), Repair::Keep);
+    std::fs::remove_file(copy.root.join("owner-current")).unwrap();
+    assert_eq!(copy.repair(&bundled, true, false), Repair::Start);
+    assert_eq!(copy.repair(&bundled, true, true), Repair::Install);
+    write_definition(
+        &copy.definition,
+        &elsewhere.definition_text().unwrap(),
+        Platform::Linux,
+    )
+    .unwrap();
+    assert_eq!(copy.repair(&bundled, true, false), Repair::Install);
+    assert_eq!(copy.repair(&bundled, true, true), Repair::Install);
+    std::fs::write(copy.root.join("setup").join("bin-version"), "99.0.0\n").unwrap();
+    assert_eq!(copy.repair(&bundled, true, false), Repair::Start);
+    assert_eq!(copy.repair(&bundled, true, true), Repair::Keep);
+    assert_eq!(copy.repair(&bundled, false, false), Repair::Install);
+}
+
+/// DS-118 r3 F1 (rv-code): an older AppImage never writes its bytes over the private copy
+/// in `<root>/setup/bin` while the data root knows a newer engine, since every AppImage runs
+/// that one path: the copy and the files beside it keep the newer bytes. A newer engine is
+/// known from its locator while it runs, or from the version the app that last wrote the
+/// copy recorded beside it, which outlives a clean stop. A copy that is not this user's
+/// private file, or one with no newer engine known, gets the app's bytes and its version.
+#[cfg(unix)]
+#[test]
+fn persistable_keeps_the_copy_of_a_newer_engine_the_data_root_reports() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    let copies = layout.root().join("setup").join("bin");
+    let runner = copies.join("crazyagent-runner");
+    let read = |path: &Path| std::fs::read_to_string(path).unwrap();
+    write_mode(&installed, "crazyagent newer bytes", 0o700);
+    write_mode(&runner, "crazyagent-runner newer bytes", 0o700);
+    std::fs::write(
+        layout.root().join("owner-current"),
+        br#"{"engine_version":"99.0.0"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        persistable(&bundled, &layout, Some(&mount)).unwrap(),
+        installed
+    );
+    assert_eq!(read(&installed), "crazyagent newer bytes");
+    assert_eq!(read(&runner), "crazyagent-runner newer bytes");
+    write_mode(&installed, "crazyagent newer bytes", 0o755);
+    assert_eq!(
+        persistable(&bundled, &layout, Some(&mount)).unwrap(),
+        installed
+    );
+    assert_eq!(read(&installed), "crazyagent bytes");
+    assert_eq!(mode_of(&installed), 0o700);
+    write_mode(&installed, "crazyagent newer bytes", 0o700);
+    write_mode(&runner, "crazyagent-runner newer bytes", 0o700);
+    std::fs::remove_file(layout.root().join("owner-current")).unwrap();
+    assert_eq!(
+        persistable(&bundled, &layout, Some(&mount)).unwrap(),
+        installed
+    );
+    assert_eq!(read(&installed), "crazyagent bytes");
+    assert_eq!(read(&runner), "crazyagent-runner bytes");
+    let recorded = layout.root().join("setup").join("bin-version");
+    assert_eq!(read(&recorded), crate::version::VERSION);
+    write_mode(&installed, "crazyagent newer bytes", 0o700);
+    std::fs::write(&recorded, "99.0.0\n").unwrap();
+    assert_eq!(
+        persistable(&bundled, &layout, Some(&mount)).unwrap(),
+        installed
+    );
+    assert_eq!(
+        read(&installed),
+        "crazyagent newer bytes",
+        "the newer app's copy outlives its engine's locator"
+    );
+    assert_eq!(read(&recorded), "99.0.0\n");
+}
+
+/// DS-118 r1 F1 (rv-code): a refused start removes an installed definition naming a broken
+/// program, so launchd no longer runs a gone, /Volumes or translocated path at login or on a
+/// KeepAlive retry, and keeps a usable one. The service has a label of its own, never the
+/// owner's.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_refusal_removes_a_definition_naming_a_broken_program_and_keeps_a_usable_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let mounted = Path::new("/Volumes/CrazyAgent/CrazyAgent.app/Contents/MacOS/crazyagent");
+    let bundled = app_engine(temp.path(), "Applications");
+    let mut there = labelled(service(Platform::MacOs), "refuse");
+    there.root = temp.path().join("engine");
+    there.executable = mounted.to_path_buf();
+    there.definition = temp.path().join(format!("{}.plist", there.name));
+    write_definition(
+        &there.definition,
+        &there.definition_text().unwrap(),
+        Platform::MacOs,
+    )
+    .unwrap();
+    assert_eq!(there.repair(mounted, true, false), Repair::Refuse);
+    let refused = there.refuse().0;
+    assert!(
+        refused.contains("move CrazyAgent to Applications"),
+        "{refused}"
+    );
+    assert!(
+        !there.definition.exists(),
+        "the broken definition is removed"
+    );
+    let mut usable = there.clone();
+    usable.executable = bundled;
+    write_definition(
+        &there.definition,
+        &usable.definition_text().unwrap(),
+        Platform::MacOs,
+    )
+    .unwrap();
+    assert_eq!(there.repair(mounted, true, true), Repair::Refuse);
+    let refused = there.refuse().0;
+    assert!(
+        refused.contains("move CrazyAgent to Applications"),
+        "{refused}"
+    );
+    assert!(there.definition.is_file(), "a usable definition stays");
+}
+
+/// DS-118 r1 F1 (rv-secreview): `start()` refuses a definition naming a gone, /Volumes or
+/// translocated program before any service command, so no caller starts it as it is. The
+/// row uses the systemd form and a name of its own, so even without the guard it never
+/// reaches launchd or the owner's unit.
+#[cfg(unix)]
+#[test]
+fn start_refuses_a_definition_naming_a_broken_program_before_any_service_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = app_engine(temp.path(), "Applications");
+    let mut own = labelled(service(Platform::Linux), "start");
+    own.root = temp.path().join("engine");
+    own.executable = bundled;
+    own.definition = temp.path().join(&own.name);
+    for program in [
+        temp.path().join("Gone").join("crazyagent"),
+        PathBuf::from("/Volumes/CrazyAgent/CrazyAgent.app/Contents/MacOS/crazyagent"),
+        PathBuf::from(
+            "/private/var/folders/ab/xyz/T/AppTranslocation/0A1B2C3D/d/CrazyAgent.app/Contents/MacOS/crazyagent",
+        ),
+    ] {
+        let mut broken = own.clone();
+        broken.executable = program.clone();
+        write_definition(
+            &own.definition,
+            &broken.definition_text().unwrap(),
+            Platform::Linux,
+        )
+        .unwrap();
+        let refused = own.start().unwrap_err().0;
+        assert!(
+            refused.contains(&program.display().to_string()),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("reinstall it: crazyagent service install"),
+            "{refused}"
+        );
+        assert!(own.definition.is_file());
+    }
+}
+
+/// DS-118 r1 F1 (rv-secreview): `install()` refuses an engine on a disk image or in a
+/// translocated folder before it prepares, writes or registers anything, so no login
+/// service ever names such a path.
+#[cfg(unix)]
+#[test]
+fn install_refuses_a_transient_engine_before_writing_anything() {
+    let temp = tempfile::tempdir().unwrap();
+    for platform in [Platform::MacOs, Platform::Linux] {
+        for program in [
+            "/Volumes/CrazyAgent/CrazyAgent.app/Contents/MacOS/crazyagent",
+            "/private/var/folders/ab/xyz/T/AppTranslocation/0A1B2C3D/d/CrazyAgent.app/Contents/MacOS/crazyagent",
+        ] {
+            let mut there = labelled(service(platform), "install");
+            there.root = temp.path().join("engine");
+            there.executable = PathBuf::from(program);
+            there.definition = temp.path().join(format!("{platform:?}.definition"));
+            let refused = there.install().unwrap_err().0;
+            assert!(
+                refused.contains("move CrazyAgent to Applications"),
+                "{refused}"
+            );
+            assert!(!there.definition.exists());
+            assert!(!there.root.exists(), "nothing was prepared");
+        }
+    }
+}
+
+/// RV-DS241-118: a program path written escaped (XML in a plist; quoted, with `$$` and `%%`,
+/// for systemd) reads back as itself, so an engine kept in such a folder is never taken for
+/// a gone one and starts as it is.
+#[cfg(unix)]
+#[test]
+fn an_escaped_program_path_reads_back_as_itself_and_starts_as_it_is() {
+    let temp = tempfile::tempdir().unwrap();
+    let folder = temp.path().join("Tools & $Apps %1 \"q\" \\b 'x' <y>");
+    let bundled = app_engine(&folder, "Applications");
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join("engine");
+        own.executable = bundled.clone();
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        write_definition(&own.definition, &own.definition_text().unwrap(), platform).unwrap();
+        assert_eq!(
+            own.installed_program(),
+            Some(bundled.clone()),
+            "{platform:?}"
+        );
+        assert_eq!(own.broken_program(), None);
+        assert_eq!(own.repair(&bundled, true, false), Repair::Start);
+    }
+}
+
+/// RV-DS241-118: before a plain start the installed definition is checked for another
+/// program, as `service start` does: one that still exists is replaced only by an engine
+/// that may replace it, so a dev build or a PATH-only difference starts it as it is.
+#[cfg(unix)]
+#[test]
+fn a_definition_running_another_existing_program_is_replaced_only_by_an_engine_that_may() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = app_engine(temp.path(), "Applications");
+    let other = app_engine(temp.path(), "Older");
+    let built = dev_engine(temp.path());
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join("engine");
+        own.executable = bundled.clone();
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        let mut older = own.clone();
+        older.executable = other.clone();
+        write_definition(&own.definition, &older.definition_text().unwrap(), platform).unwrap();
+        assert!(own.runs_another_program());
+        assert!(own.may_replace());
+        assert_eq!(own.broken_program(), None);
+        assert_eq!(own.repair(&bundled, true, false), Repair::Install);
+        let mut dev = own.clone();
+        dev.executable = built.clone();
+        assert_eq!(dev.repair(&built, true, false), Repair::Start);
+        let mut elsewhere = own.clone();
+        elsewhere.path = OsString::from("/usr/bin:/bin");
+        write_definition(
+            &own.definition,
+            &elsewhere.definition_text().unwrap(),
+            platform,
+        )
+        .unwrap();
+        assert!(!own.runs_another_program());
+        assert_eq!(own.repair(&bundled, true, false), Repair::Start);
+    }
+}
+
 /// A Nix-style store, a sticky folder its group can write such as /nix/store
 /// (root:nixbld 1775), is fine two or more levels above an entry whose folder below it
 /// exists, since its group cannot replace an entry another user owns; the entry's own
@@ -1119,6 +1862,12 @@ fn a_sticky_group_writable_store_counts_only_as_an_entry_s_own_folder_or_above_a
         "the entry's own folder keeps the full checks"
     );
     assert_eq!(
+        changeable_past_sticky(&loose),
+        None,
+        "for the tools setup and the resolver run, a present entry the group cannot replace \
+         passes in the store itself (rv-sec2 corrections F2)"
+    );
+    assert_eq!(
         changeable_by_others(&store.join("gone/bin/tool")),
         Some(store.clone()),
         "the group could make a missing folder below the store"
@@ -1137,7 +1886,7 @@ fn a_sticky_group_writable_store_counts_only_as_an_entry_s_own_folder_or_above_a
 /// folder (root 1777) above this user's 0700 folder passes for the tools the resolver runs
 /// and stays changeable for the engine service; a part another user owns below it is
 /// refused; a /nix/store-like folder (root:nixbld 1775) above 0555 packages passes for
-/// both; a missing part below a store, or a store as the entry's own folder, is refused.
+/// both; a missing part below a store, or /tmp as the entry's own folder, is refused.
 #[cfg(unix)]
 #[test]
 fn a_sticky_store_passes_only_above_parts_this_user_or_root_owns() {
@@ -1191,6 +1940,97 @@ fn a_sticky_store_passes_only_above_parts_this_user_or_root_owns() {
     );
 }
 
+/// rv-sec2 corrections F2 (DS-89): for the tools the resolver and setup run, a file directly
+/// in a sticky store such as /nix/store, where nix-darwin's /opt/homebrew/bin/brew link
+/// resolves, passes: the store's group cannot unlink or rename an entry root owns there. The
+/// service check is unchanged, and a group-writable parent with no sticky bit, a sticky one
+/// another user owns, one over a missing entry, and a world-writable sticky one such as /tmp
+/// as the entry's own folder still count.
+#[cfg(unix)]
+#[test]
+fn a_file_directly_in_a_sticky_group_store_passes_and_an_unsticky_parent_does_not() {
+    const ME: u32 = 501;
+    const OTHER: u32 = 502;
+    const NIXBLD: u32 = 30_000;
+    let found = |owner, group, mode, folder| Part::Found {
+        owner,
+        group,
+        mode,
+        folder,
+        link: false,
+    };
+    let system = found(0, 0, 0o755, true);
+    let brew = found(0, 0, 0o555, false);
+    let store = found(0, NIXBLD, 0o1775, true);
+    assert_eq!(
+        first_changeable_part(&[brew, store, system, system], ME, true),
+        None
+    );
+    assert_eq!(
+        first_changeable_part(&[brew, store, system, system], ME, false),
+        Some(1),
+        "the service check is unchanged"
+    );
+    let unsticky = found(0, NIXBLD, 0o775, true);
+    assert_eq!(
+        first_changeable_part(&[brew, unsticky, system, system], ME, true),
+        Some(1)
+    );
+    let theirs = found(OTHER, NIXBLD, 0o1775, true);
+    assert_eq!(
+        first_changeable_part(&[brew, theirs, system, system], ME, true),
+        Some(1)
+    );
+    assert_eq!(
+        first_changeable_part(&[Part::Missing, store, system, system], ME, true),
+        Some(1)
+    );
+    let tmp = found(0, 0, 0o1777, true);
+    assert_eq!(
+        first_changeable_part(&[brew, tmp, system], ME, true),
+        Some(1)
+    );
+}
+
+/// RV-DS241-140 r4: on macOS the daemon group, whose only member is root, is trusted like
+/// wheel and admin, so /private/var/run (root:daemon 775), where nix-darwin's /run link
+/// leads, passes as a part of a harness chain; the same folder writable by staff, which every
+/// user is in, stays changeable.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_only_root_and_the_daemon_group_can_write_passes_on_macos() {
+    const ME: u32 = 501;
+    const DAEMON: u32 = 1;
+    const STAFF: u32 = 20;
+    let found = |owner, group, mode, folder, link| Part::Found {
+        owner,
+        group,
+        mode,
+        folder,
+        link,
+    };
+    let system = found(0, 0, 0o40755, true, false);
+    let current = found(0, 0, 0o120755, false, true);
+    for open_stores in [false, true] {
+        let run = [
+            current,
+            found(0, DAEMON, 0o40775, true, false),
+            system,
+            system,
+            system,
+        ];
+        assert_eq!(first_changeable_part(&run, ME, open_stores), None);
+        let staff = [
+            current,
+            found(0, STAFF, 0o40775, true, false),
+            system,
+            system,
+            system,
+        ];
+        assert_eq!(first_changeable_part(&staff, ME, open_stores), Some(1));
+    }
+}
+
 /// R2-L1: a file a group other than root's can write counts as changeable, like a folder,
 /// for the engine service and for the tools the resolver runs: a 0775 staff file in this
 /// user's 0755 folder is refused, 0755 or a root-group 0775 passes, and a link's own mode is
@@ -1229,4 +2069,391 @@ fn a_file_an_untrusted_group_can_write_is_changeable_like_a_folder() {
             "a link's own mode is not read"
         );
     }
+}
+
+/// 2.4.1 R2: on Linux the egid's group is trusted for a group-writable folder only when it is
+/// this user's private group, named as the user and listing no other member; a shared
+/// primary group such as openSUSE's `users`, or a group listing another user, is not.
+#[test]
+fn only_a_user_private_group_counts_as_the_user_own_group() {
+    let listed =
+        |names: &[&str]| -> Vec<String> { names.iter().map(|name| (*name).to_owned()).collect() };
+    let own = listed(&["ana"]);
+    assert!(private_group("ana", &listed(&[]), &own, "ana"));
+    assert!(private_group("ana", &listed(&["ana"]), &own, "ana"));
+    assert!(
+        !private_group("users", &listed(&[]), &own, "ana"),
+        "a shared primary group"
+    );
+    assert!(
+        !private_group("ana", &listed(&["ana", "bo"]), &own, "ana"),
+        "a group listing another user"
+    );
+    assert!(
+        !private_group("", &listed(&[]), &listed(&[""]), ""),
+        "no names at all"
+    );
+}
+
+/// 2.4.1 r1 F3: a group's member list leaves out the accounts whose primary group it is, so
+/// a group named as the user that another account has as its primary group is not private,
+/// and neither is one whose own account the local account file does not list, such as a
+/// directory account, whose other primary users cannot be seen.
+#[test]
+fn a_group_another_account_has_as_its_primary_group_is_not_private() {
+    let listed =
+        |names: &[&str]| -> Vec<String> { names.iter().map(|name| (*name).to_owned()).collect() };
+    assert!(private_group("ana", &[], &listed(&["ana"]), "ana"));
+    assert!(
+        !private_group("ana", &[], &listed(&["ana", "svc"]), "ana"),
+        "another account's primary group"
+    );
+    assert!(
+        !private_group("ana", &[], &listed(&[]), "ana"),
+        "the user's own account is not in the file"
+    );
+}
+
+/// 2.4.1 r1 F3: the accounts whose primary group is a gid are read from the local account
+/// file's fourth field; comments and blank lines are skipped, and a line that cannot be read
+/// or that pulls accounts in from elsewhere (`+` or `-`) gives none, the stricter rule.
+#[test]
+fn the_accounts_with_a_primary_group_are_read_from_the_local_account_file() {
+    let passwd = "root:x:0:0:root:/root:/bin/bash\n# kept by hand\n\nana:x:1000:1000:Ana:/home/ana:/bin/bash\nsvc:x:998:1000::/srv:/usr/sbin/nologin\nbo:x:1001:1001::/home/bo:/bin/sh\n";
+    assert_eq!(
+        primary_users(passwd, 1000),
+        Some(vec!["ana".to_owned(), "svc".to_owned()])
+    );
+    assert_eq!(primary_users(passwd, 1001), Some(vec!["bo".to_owned()]));
+    assert_eq!(primary_users(passwd, 4242), Some(Vec::new()));
+    assert_eq!(primary_users("+::::::\n", 1000), None, "a NIS include");
+    assert_eq!(primary_users("-bo::::::\n", 1000), None, "a NIS exclude");
+    assert_eq!(primary_users("ana:x:1000\n", 1000), None, "too few fields");
+    assert_eq!(
+        primary_users("ana:x:1000:staff:::\n", 1000),
+        None,
+        "a group that is not a number"
+    );
+}
+
+/// RV-DS241-18: a part an access list lets someone other than this user or root change
+/// counts as changeable at its depth, for the engine service and for the tools the resolver
+/// runs alike, even inside a store.
+#[cfg(unix)]
+#[test]
+fn a_part_an_access_list_opens_to_others_is_changeable() {
+    const ME: u32 = 501;
+    let own = Part::Found {
+        owner: ME,
+        group: 20,
+        mode: 0o755,
+        folder: true,
+        link: false,
+    };
+    let system = Part::Found {
+        owner: 0,
+        group: 0,
+        mode: 0o755,
+        folder: true,
+        link: false,
+    };
+    let tool = Part::Found {
+        owner: ME,
+        group: 20,
+        mode: 0o755,
+        folder: false,
+        link: false,
+    };
+    for open_stores in [false, true] {
+        assert_eq!(
+            first_changeable_part(&[tool, Part::Shared, own, system], ME, open_stores),
+            Some(1)
+        );
+        assert_eq!(
+            first_changeable_part(&[Part::Shared, own, system], ME, open_stores),
+            Some(0)
+        );
+        assert_eq!(
+            first_changeable_part(&[tool, own, system], ME, open_stores),
+            None
+        );
+    }
+}
+
+/// RV-DS241-18: a macOS `ls -lde` listing names an entry changeable by others when an
+/// allow entry gives write, append, add or delete rights, or rights over the entry's own
+/// attributes, security or owner, to anyone but this user, root, wheel, daemon or admin; deny
+/// entries and read rights never do, and a listing it cannot read fails closed.
+#[cfg(unix)]
+#[test]
+fn an_access_listing_that_lets_others_change_an_entry_is_shared() {
+    let listing = |entries: &[&str]| {
+        let mut text = String::from("drwxr-xr-x+ 2 me  staff  64 Nov 14 03:33 /Users/me/bin\n");
+        for (index, entry) in entries.iter().enumerate() {
+            text.push_str(&format!(" {index}: {entry}\n"));
+        }
+        text
+    };
+    let me = Some("me");
+    assert_eq!(acl::listed_shared(&listing(&[]), me), Some(false));
+    for entry in [
+        "group:staff allow add_file,delete_child",
+        "group:everyone allow write",
+        "user:other allow append",
+        "user:other allow add_subdirectory",
+        "user:other allow delete",
+        "user:other allow writeattr",
+        "user:other allow writeextattr",
+        "user:other allow writesecurity",
+        "user:other allow chown",
+        "group:staff inherited allow add_file",
+        "ABCDEF01-2345-6789-ABCD-EF0123456789 allow write",
+    ] {
+        assert_eq!(
+            acl::listed_shared(&listing(&["group:everyone deny delete", entry]), me),
+            Some(true),
+            "{entry}"
+        );
+        assert_eq!(
+            acl::listed_shared(&listing(&[entry]), None),
+            Some(true),
+            "{entry}"
+        );
+    }
+    for entry in [
+        "group:everyone deny delete",
+        "user:me allow write,append,delete",
+        "user:root allow write",
+        "group:wheel allow add_file",
+        "group:daemon allow add_file",
+        "group:admin allow add_file",
+        "user:other allow read,list,search,readattr,readextattr,readsecurity,execute",
+        "group:staff inherited deny add_file,delete_child",
+    ] {
+        assert_eq!(
+            acl::listed_shared(&listing(&[entry]), me),
+            Some(false),
+            "{entry}"
+        );
+    }
+    assert_eq!(
+        acl::listed_shared(&listing(&["user:me allow write"]), None),
+        Some(true),
+        "without this user's name every user entry counts as someone else"
+    );
+    for broken in [
+        format!("{}x: group:staff allow write\n", listing(&[])),
+        format!("{} 0: group:staff\n", listing(&[])),
+        format!("{} 0: group:staff allow\n", listing(&[])),
+        String::new(),
+    ] {
+        assert_eq!(acl::listed_shared(&broken, me), None, "{broken:?}");
+    }
+}
+
+/// RV-DS241-18 r2: one `ls -lde` listing of several entries is read block by block, each
+/// block going to the one entry its first line ends with, the longest when one name ends
+/// another. An entry with no block or two gets none, and so does one whose block does not
+/// read, alone; a listing with a block for no entry or an access-list line before any entry
+/// gives none for every entry.
+#[cfg(unix)]
+#[test]
+fn a_listing_of_several_entries_is_read_block_by_block() {
+    let me = Some("me");
+    let line = |name: &str| format!("drwxr-xr-x+ 2 me  staff  64 Nov 14 03:33 {name}\n");
+    let open = " 0: group:staff allow add_file,delete_child\n";
+    let closed = " 0: group:everyone deny delete\n";
+    let entries = ["/Volumes/My /c", "/c", "/Users/me/bin", "/Users/me"];
+    let text = format!(
+        "{}{}{open}{}{closed}{}",
+        line("/Users/me"),
+        line("/Users/me/bin"),
+        line("/Volumes/My /c"),
+        line("/c")
+    );
+    assert_eq!(
+        acl::listed_shared_all(&text, &entries, me),
+        vec![Some(false), Some(false), Some(true), Some(false)]
+    );
+    assert_eq!(
+        acl::listed_shared_all(&line("/Users/me"), &["/Users/me", "/gone"], me),
+        vec![Some(false), None],
+        "an entry the listing left out"
+    );
+    assert_eq!(
+        acl::listed_shared_all(&format!("{0}{0}", line("/a")), &["/a"], me),
+        vec![None],
+        "an entry listed twice"
+    );
+    assert_eq!(
+        acl::listed_shared_all(
+            &format!("{} 0: group:staff\n{}{open}", line("/a"), line("/b")),
+            &["/a", "/b"],
+            me
+        ),
+        vec![None, Some(true)],
+        "a block that does not read fails alone"
+    );
+    for whole in [
+        format!("{open}{}", line("/a")),
+        format!("{}{}{open}", line("/a"), line("/zzz")),
+        String::new(),
+    ] {
+        assert_eq!(
+            acl::listed_shared_all(&whole, &["/a", "/b"], me),
+            vec![None, None],
+            "{whole:?}"
+        );
+    }
+}
+
+/// RV-DS241-18: a Linux `system.posix_acl_access` value names an entry changeable by others
+/// when a named user other than this user or root, or a named group the trusted-group rule
+/// does not trust, has write; the owner, group and other entries stay with the mode bits,
+/// and a value it cannot read fails closed.
+#[cfg(unix)]
+#[test]
+fn a_posix_access_list_that_lets_others_write_is_shared() {
+    const ME: u32 = 1000;
+    const OTHER: u32 = 1001;
+    const OWN_GROUP: u32 = 1000;
+    const SHARED_GROUP: u32 = 100;
+    let trusted = |group: u32| group == 0 || group == OWN_GROUP;
+    let value = |entries: &[(u16, u16, u32)]| {
+        let mut bytes = 2u32.to_le_bytes().to_vec();
+        for (tag, perm, id) in entries {
+            bytes.extend(tag.to_le_bytes());
+            bytes.extend(perm.to_le_bytes());
+            bytes.extend(id.to_le_bytes());
+        }
+        bytes
+    };
+    let base = [
+        (0x01, 7, u32::MAX),
+        (0x04, 5, u32::MAX),
+        (0x10, 7, u32::MAX),
+        (0x20, 5, u32::MAX),
+    ];
+    let with = |extra: (u16, u16, u32)| {
+        let mut entries = base.to_vec();
+        entries.insert(1, extra);
+        value(&entries)
+    };
+    assert_eq!(acl::posix_shared(&value(&base), ME, trusted), Some(false));
+    for open in [(0x02, 7, OTHER), (0x02, 2, OTHER), (0x08, 6, SHARED_GROUP)] {
+        assert_eq!(
+            acl::posix_shared(&with(open), ME, trusted),
+            Some(true),
+            "{open:?}"
+        );
+    }
+    for closed in [
+        (0x02, 7, ME),
+        (0x02, 7, 0),
+        (0x02, 5, OTHER),
+        (0x08, 7, OWN_GROUP),
+        (0x08, 5, SHARED_GROUP),
+    ] {
+        assert_eq!(
+            acl::posix_shared(&with(closed), ME, trusted),
+            Some(false),
+            "{closed:?}"
+        );
+    }
+    let mut old = value(&base);
+    old[0] = 1;
+    assert_eq!(acl::posix_shared(&old, ME, trusted), None);
+    let mut cut = value(&base);
+    cut.pop();
+    assert_eq!(acl::posix_shared(&cut, ME, trusted), None);
+    assert_eq!(acl::posix_shared(&[], ME, trusted), None);
+}
+
+/// RV-DS241-18: on macOS a folder whose mode bits are private but whose access list lets
+/// staff add and delete files is changeable by others, for the engine service and for the
+/// resolver's tools, while a deny-only list leaves it private.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tool_folder_staff_may_change_through_its_access_list_is_changeable() {
+    let temp = durable_folder();
+    let folder = temp.path().join("bin");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    assert_eq!(changeable_by_others(&tool), None);
+    let chmod = |rule: &str| {
+        let status = crate::spawn_gate::status(
+            std::process::Command::new("/bin/chmod")
+                .arg("+a")
+                .arg(rule)
+                .arg(&folder),
+        )
+        .unwrap();
+        assert!(status.success(), "{rule}");
+    };
+    chmod("user:nobody deny add_file");
+    assert_eq!(
+        changeable_by_others(&tool),
+        None,
+        "a deny entry changes nothing"
+    );
+    assert_eq!(mode_of(&folder), 0o755);
+    chmod("group:staff allow add_file,delete_child");
+    assert_eq!(mode_of(&folder), 0o755, "the mode bits still read private");
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    assert_eq!(changeable_past_sticky(&tool), Some(folder.clone()));
+}
+
+/// RV-DS241-18 r2: one `ls -lde` lists every part of a path the first time, names with a
+/// space or an accent included; a repeat lists none of the parts it read, and an access-list
+/// change moves only the changed part's change time, so that part alone is listed again and
+/// the change counts.
+#[cfg(target_os = "macos")]
+#[test]
+fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts() {
+    let temp = durable_folder();
+    let kit = temp.path().join("tool kit \u{e9}");
+    let folder = kit.join("bin");
+    let tool = folder.join("tmux");
+    write_mode(&tool, "#!/bin/sh\n", 0o755);
+    let ours = |listings: &[Vec<PathBuf>]| -> Vec<PathBuf> {
+        listings
+            .iter()
+            .flatten()
+            .filter(|listed| listed.starts_with(temp.path()))
+            .cloned()
+            .collect()
+    };
+    acl::take_listings();
+    assert_eq!(changeable_by_others(&tool), None);
+    let first = acl::take_listings();
+    assert_eq!(first.len(), 1, "one listing for every part: {first:?}");
+    for part in [&tool, &folder, &kit] {
+        assert!(first[0].contains(part), "{part:?} in {first:?}");
+    }
+
+    assert_eq!(changeable_by_others(&tool), None);
+    let repeat = acl::take_listings();
+    assert!(repeat.len() <= 1, "{repeat:?}");
+    assert_eq!(
+        ours(&repeat),
+        Vec::<PathBuf>::new(),
+        "nothing read is listed again"
+    );
+
+    let status = crate::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .arg("+a")
+            .arg("group:staff allow add_file,delete_child")
+            .arg(&folder),
+    )
+    .unwrap();
+    assert!(status.success());
+    assert_eq!(changeable_by_others(&tool), Some(folder.clone()));
+    let changed = acl::take_listings();
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert_eq!(
+        ours(&changed),
+        vec![folder.clone()],
+        "the changed part alone"
+    );
 }

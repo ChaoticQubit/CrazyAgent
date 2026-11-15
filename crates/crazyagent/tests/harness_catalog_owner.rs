@@ -98,7 +98,10 @@ async fn the_tui_controller_lists_the_harness_catalog_from_a_discovered_engine()
     assert_eq!(labels.len(), specs().len());
     assert_eq!(labels[0], ("Codex", "Ready"));
     assert!(labels.iter().all(|(_, label)| {
-        *label == "Ready" || *label == "Not installed" || label.starts_with("Limited control: ")
+        *label == "Ready"
+            || *label == "Not installed"
+            || label.starts_with("Limited control: ")
+            || label.starts_with("Can't run: ")
     }));
 }
 
@@ -147,7 +150,7 @@ async fn an_owner_attaching_after_a_claude_update_sees_the_new_install() {
         .unwrap();
     assert_eq!(
         claude(before.harness_catalog(false).await.unwrap()),
-        Some(old.clone())
+        Some(link.clone())
     );
     std::fs::remove_dir_all(old.parent().unwrap()).unwrap();
     std::fs::remove_file(&link).unwrap();
@@ -161,5 +164,5 @@ async fn an_owner_attaching_after_a_claude_update_sees_the_new_install() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(claude(entries.unwrap()), Some(new));
+    assert_eq!(claude(entries.unwrap()), Some(link));
 }

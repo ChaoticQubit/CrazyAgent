@@ -157,6 +157,138 @@ fn launching_for_an_unknown_project_is_refused() {
     );
 }
 
+/// A server spec stored by 2.4.0, before hidden characters were refused, and still waiting
+/// is refused on Approve with the code its check names and stays waiting, unapproved: a
+/// command holding U+202E, an argument holding U+200B and a URL holding U+202E
+/// (RV-DS241-151).
+#[test]
+fn approving_a_stored_spec_with_hidden_characters_is_refused_and_it_stays_waiting() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let cases = [
+        (
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: Vec::new(),
+            },
+            ServerSpec::Stdio {
+                command: "/usr/bin/tr\u{202e}ue".into(),
+                args: Vec::new(),
+            },
+            "server_command_invalid",
+        ),
+        (
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: vec!["--stdio".into()],
+            },
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: vec!["--st\u{200b}dio".into()],
+            },
+            "server_args_invalid",
+        ),
+        (
+            ServerSpec::Http {
+                url: "https://mcp.example.invalid/mcp".into(),
+            },
+            ServerSpec::Http {
+                url: "https://mcp.example.invalid/\u{202e}mcp".into(),
+            },
+            "server_url_invalid",
+        ),
+    ];
+    for (index, (valid, stored, code)) in cases.into_iter().enumerate() {
+        let id = server(&mut connection, root, &format!("old{index}"), &valid);
+        {
+            let tx = connection.transaction().unwrap();
+            let mut record: ServerRecord = load(&tx, "server", &id).unwrap();
+            record.spec = stored.clone();
+            put_server(&tx, &record).unwrap();
+            tx.commit().unwrap();
+        }
+        let refused = execute(
+            &mut connection,
+            root,
+            Command::Approve {
+                id: id.clone(),
+                spec: stored,
+            },
+        );
+        assert_eq!(
+            refused.err().map(|problem| problem.0).as_deref(),
+            Some(code)
+        );
+        let tx = connection.transaction().unwrap();
+        let record: ServerRecord = load(&tx, "server", &id).unwrap();
+        assert!(record.approved.is_none(), "{code}");
+        assert_eq!(status(&record), ServerStatus::WaitingForApproval, "{code}");
+    }
+}
+
+/// A server spec stored by 2.4.0 with hidden characters, waiting or already approved, is
+/// refused when a check asks for it, so Check never runs it, not even in its sandbox; a
+/// valid spec still gives what the check runs (RV-DS241-151 r2).
+#[test]
+fn checking_a_stored_spec_with_hidden_characters_is_refused_before_it_runs() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let valid = ServerSpec::Stdio {
+        command: "/usr/bin/true".into(),
+        args: vec!["--stdio".into()],
+    };
+    let cases = [
+        (
+            ServerSpec::Stdio {
+                command: "/usr/bin/tr\u{202e}ue".into(),
+                args: vec!["--stdio".into()],
+            },
+            false,
+            "server_command_invalid",
+        ),
+        (
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: vec!["--st\u{200b}dio".into()],
+            },
+            false,
+            "server_args_invalid",
+        ),
+        (
+            ServerSpec::Stdio {
+                command: "/usr/bin/tr\u{202e}ue".into(),
+                args: vec!["--stdio".into()],
+            },
+            true,
+            "server_command_invalid",
+        ),
+    ];
+    for (index, (stored, approved, code)) in cases.into_iter().enumerate() {
+        let id = server(&mut connection, root, &format!("old{index}"), &valid);
+        {
+            let tx = connection.transaction().unwrap();
+            let mut record: ServerRecord = load(&tx, "server", &id).unwrap();
+            record.spec = stored.clone();
+            record.approved = approved.then(|| stored.digest());
+            put_server(&tx, &record).unwrap();
+            tx.commit().unwrap();
+        }
+        let refused = execute(&mut connection, root, Command::GetServer { id });
+        assert_eq!(
+            refused.err().map(|problem| problem.0).as_deref(),
+            Some(code),
+            "case {index}"
+        );
+    }
+    let id = server(&mut connection, root, "fresh", &valid);
+    let ResultValue::Check(spec, _, _) =
+        execute(&mut connection, root, Command::GetServer { id }).unwrap()
+    else {
+        panic!("check value required");
+    };
+    assert_eq!(*spec, valid);
+}
+
 #[test]
 fn a_stored_skill_description_or_source_with_hidden_characters_is_shown_escaped() {
     let record = SkillRecord {
@@ -1417,4 +1549,52 @@ fn an_mcp_secret_shorter_than_eight_bytes_is_refused_with_a_plain_reason() {
     let reference = new_secret_reference().unwrap();
     store_secret(root, &reference, b"12345678".to_vec()).unwrap();
     assert_eq!(read_secret(root, &reference).unwrap(), b"12345678");
+}
+
+/// Where the engine has no shared context-mode install, the default pack's pinned
+/// context-mode launch is left out with its reason, never run through npx: one whose npx the
+/// tool resolver finds as this platform's, and one only shaped like it, as a repository's own
+/// npx, as an npx CrazyAgent did not find (RV-DS241-150 r2). Every other spec runs as approved.
+#[cfg(unix)]
+#[test]
+fn a_launch_without_a_shared_install_leaves_the_pinned_context_mode_server_out_never_npx() {
+    use crate::plugins::ContextModeOff;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let root = base.join("engine");
+    let bin = root.join("setup").join("bin");
+    let tools = base.join("repo").join("tools");
+    for folder in [&bin, &tools] {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(folder)
+            .unwrap();
+        std::fs::write(folder.join("npx"), "#!/bin/sh\nexit 3\n").unwrap();
+        std::fs::set_permissions(folder.join("npx"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+    let stdio = |command: &str, package: &str| ServerSpec::Stdio {
+        command: command.into(),
+        args: vec!["-y".into(), package.into()],
+    };
+    let (found, shaped) = (bin.join("npx"), tools.join("npx"));
+    let (found, shaped) = (found.to_str().unwrap(), shaped.to_str().unwrap());
+    assert_eq!(
+        without_shared_install(&root, stdio(found, "context-mode@1.0.169")),
+        Err(ContextModeOff::Unsupported)
+    );
+    assert_eq!(
+        without_shared_install(&root, stdio(shaped, "context-mode@1.0.169")),
+        Err(ContextModeOff::NpxNotFound)
+    );
+    for kept in [
+        stdio(found, "context-mode@latest"),
+        stdio(shaped, "other-server@1.0.0"),
+        stdio("npx", "context-mode@1.0.169"),
+        stdio("/opt/homebrew/bin/node", "context-mode@1.0.169"),
+    ] {
+        assert_eq!(without_shared_install(&root, kept.clone()), Ok(kept));
+    }
 }

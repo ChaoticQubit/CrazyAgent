@@ -40,6 +40,15 @@ pub(crate) use native_profiles::{
 #[cfg(unix)]
 pub(crate) use native_profiles::{remove_generated_home, remove_sign_in};
 
+/// The folder in the engine root that holds every native sign-in profile, one per account,
+/// with its credentials. Agent sandboxes deny it as an engine secret.
+pub(crate) const NATIVE_PROFILES_FOLDER: &str = "native-profiles";
+
+/// The folder in the engine root that holds the SDK home the engine generates for each
+/// configured RCLI account, with its key. Agent sandboxes deny it as an engine secret; an
+/// rcli master keeps only its own home in it.
+pub(crate) const CONFIGURED_SDK_HOMES_FOLDER: &str = "configured-sdk-homes";
+
 const LOCATOR: &str = "owner-current";
 #[cfg(unix)]
 const LOCATOR_MAX: usize = 2048;
@@ -663,6 +672,36 @@ impl EngineService {
             .as_ref()
             .ok_or_else(|| fail("owner_runtime_missing"))?
             .register_claude_executable(host)
+    }
+
+    /// Registers a Codex engine start chose or found rather than was given by flag, pinned
+    /// only once the real file pinned passes the start checks and the entry still leads to
+    /// it (RV-DS241-140). Input: the absolute entry. Output: Ok, or the refusal code.
+    pub fn register_found_codex_executable(&mut self, entry: &Path) -> Result<(), EngineError> {
+        if self.closed {
+            return Err(fail("engine_service_closed"));
+        }
+        self.live()?;
+        let runtime = self
+            .owner_runtime
+            .as_ref()
+            .ok_or_else(|| fail("owner_runtime_missing"))?;
+        runtime.register_codex_executable(runtime.capture_found(entry)?)
+    }
+
+    /// Registers a Claude Code engine start chose or found rather than was given by flag,
+    /// pinned only once the real file pinned passes the start checks and the entry still
+    /// leads to it (RV-DS241-140). Input: the absolute entry. Output: Ok, or the refusal code.
+    pub fn register_found_claude_executable(&mut self, entry: &Path) -> Result<(), EngineError> {
+        if self.closed {
+            return Err(fail("engine_service_closed"));
+        }
+        self.live()?;
+        let runtime = self
+            .owner_runtime
+            .as_ref()
+            .ok_or_else(|| fail("owner_runtime_missing"))?;
+        runtime.register_claude_executable(runtime.capture_found(entry)?)
     }
 
     /// Hands the engine the harness search that Check again, Choose file and a sign-in retry

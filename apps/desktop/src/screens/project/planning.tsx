@@ -57,7 +57,7 @@ export function planningView(state: PlanningState): PlanningView {
     case "waiting": return { word: "Waiting for research", tone: "neutral", line: "The roadmap is planned once research finishes.", action: null, report: null };
     case "planning": {
       const line = state.job.status === "needs_pool" ? state.job.error?.trim() || "Waiting for a pool"
-        : state.job.status === "queued" ? "Waiting to start" : "Writing the roadmap and release process";
+        : state.job.status === "queued" ? state.job.error?.trim() || "Waiting to start" : "Writing the roadmap and release process";
       return { word: "Planning", tone: "info", line, action: null, report: null };
     }
     case "done": return { word: "Done", tone: "ok", line: "The roadmap and release process are in Context.", action: "plan", report: state.job.report_path };

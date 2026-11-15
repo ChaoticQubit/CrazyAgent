@@ -33,7 +33,7 @@ export function BasicsFields({ prefix, draft, onChange, catalog, errors, showErr
   const catalogValue = catalog?.kind === "ok" ? catalog.value : null;
   const stackOptions = (catalogValue?.tech_stack ?? []).filter((option) => !stackQuery.trim() || option.label.toLowerCase().includes(stackQuery.trim().toLowerCase()));
   const platforms = catalogValue?.platforms ?? PLATFORMS;
-  const mark = (field: string) => missing.includes(field) && <span className="pj-missing"> Missing</span>;
+  const mark = (field: string) => missing.includes(field) && <span className="pj-missing"> Fill in</span>;
   const addCustom = () => {
     const result = addStack(draft.stack, stackQuery);
     setStackError(result.error ?? "");

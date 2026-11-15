@@ -626,6 +626,32 @@ pub(super) fn hooks_follow(tx: &Transaction<'_>, item: &str) -> Result<bool, Eng
         .any(|hook| hook.follows.as_deref() == Some(item)))
 }
 
+/// The hooks that follow one skill or MCP server as a new pin keeps them: each hook's
+/// name, whether it is on and the projects it is switched off in. Inputs: the transaction
+/// and the item id. Output: the hooks.
+#[cfg(unix)]
+pub(super) fn following_hooks(
+    tx: &Transaction<'_>,
+    item: &str,
+) -> Result<Vec<(String, bool, Vec<String>)>, EngineError> {
+    let mut hooks = Vec::new();
+    for hook in all::<HookRecord>(tx, "hook")?
+        .into_iter()
+        .filter(|hook| hook.follows.as_deref() == Some(item))
+    {
+        let mut statement = tx
+            .prepare("SELECT project FROM plugin_switches WHERE item=?1")
+            .map_err(error)?;
+        let projects = statement
+            .query_map([&hook.id], |row| row.get::<_, String>(0))
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        hooks.push((hook.name, hook.enabled, projects));
+    }
+    Ok(hooks)
+}
+
 /// Deletes every hook that follows one skill or MCP server, with the item, and notes each
 /// hook folder copy for the trash to delete once nothing refers to it. Inputs: the
 /// transaction and the item id. Output: any SQLite failure.
@@ -917,6 +943,7 @@ fn skill_view(
         enabled: record.enabled,
         on_here,
         source: crate::memory::visible_text(&record.source),
+        origin: crate::skills::origin::of(root, &record.source),
         folder: folder.display().to_string(),
         version: plugin_version(connection, &record.id)?,
         refused,
@@ -1449,9 +1476,37 @@ pub(crate) fn launch_set(
     launch(root, effective(tx, root, project)?)
 }
 
+/// The spec an agent launch runs where the engine has no shared context-mode install: the
+/// default pack's pinned context-mode launch is left out, never run through npx, which would
+/// let npm run dependency install scripts, as is a spec only shaped like it, for the reason
+/// [`crate::plugins::found_context_mode`] gives, and every other spec runs as approved.
+/// Inputs: the engine root and the approved spec. Output: the spec, or why it is left out.
+#[cfg(any(test, not(unix)))]
+fn without_shared_install(
+    root: &Path,
+    spec: ServerSpec,
+) -> Result<ServerSpec, crate::plugins::ContextModeOff> {
+    match crate::plugins::found_context_mode(root, &spec)? {
+        Some(_) => Err(crate::plugins::ContextModeOff::Unsupported),
+        None => Ok(spec),
+    }
+}
+
 fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, EngineError> {
     let mut servers = Vec::with_capacity(plugins.servers.len());
+    let mut context_mode_off = None;
     for server in plugins.servers {
+        #[cfg(unix)]
+        let spec = crate::context_mode::for_launch(root, server.spec);
+        #[cfg(not(unix))]
+        let spec = without_shared_install(root, server.spec);
+        let spec = match spec {
+            Ok(spec) => spec,
+            Err(off) => {
+                context_mode_off = Some(off);
+                continue;
+            }
+        };
         let mut secrets = Vec::with_capacity(server.secrets.len());
         for secret in server.secrets {
             secrets.push(LaunchSecret {
@@ -1459,10 +1514,6 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
                 value: SecretValue::new(read_secret(root, &secret.reference)?),
             });
         }
-        #[cfg(unix)]
-        let spec = crate::context_mode::for_launch(root, server.spec);
-        #[cfg(not(unix))]
-        let spec = server.spec;
         servers.push(LaunchServer {
             name: server.name,
             spec,
@@ -1473,6 +1524,7 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
     Ok(LaunchPlugins {
         skills: plugins.skills,
         servers,
+        context_mode_off,
     })
 }
 
@@ -1493,7 +1545,11 @@ pub(crate) fn execute(
     | Command::SetServer { id, .. }
     | Command::RemoveServer { id, .. } = &command
     {
-        super::setup::plugin_changed(&tx, id)?;
+        let removed = matches!(
+            command,
+            Command::RemoveSkill { .. } | Command::RemoveServer { .. }
+        );
+        super::setup::plugin_changed(&tx, id, removed)?;
     }
     let value = run(&tx, root, command)?;
     let committed = tx.commit().map_err(error);
@@ -1638,6 +1694,7 @@ pub(super) fn run(
             if record.spec != spec {
                 return Err(error("server_changed"));
             }
+            record.spec.validate()?;
             record.approved = Some(record.spec.digest());
             put_server(tx, &record)?;
             ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
@@ -1748,6 +1805,7 @@ pub(super) fn run(
         }
         Command::GetServer { id } => {
             let record: ServerRecord = load(tx, "server", &id)?;
+            record.spec.validate()?;
             let network = match &record.scope {
                 Scope::Project { project_id } => {
                     crate::sandbox::policy::load(tx, project_id.as_str())

@@ -368,3 +368,57 @@ test("the drawer with no open question says where agents' questions wait in the 
   assert.ok(!drawer([agentQuestion(1, "me", "Me")], 0, 0).includes(EMPTY), "an open question replaces the line");
   assert.ok(!drawer([], 2, 0).includes(EMPTY), "questions past the page replace the line too");
 });
+
+test("a team question's card names its asker by the name the engine sends, else its number, and says Urgent and paused only while each holds (V241-QUESTION-UX P1, P3)", () => {
+  assert.equal(client.askerLabel("agent:7", "Ada (@menu-prices)"), "Ada (@menu-prices)");
+  assert.equal(client.askerLabel("agent:7", null), "Agent 7", "no name came: its number");
+  assert.equal(client.askerLabel("agent:7"), "Agent 7");
+  assert.equal(client.askerLabel("master:3", "Ada"), "Master", "only a sub-agent asker is named");
+  const named = card(question({ asker: "agent:7", asker_name: "Ada (@menu-prices)", kind: "text", options: [], recommended: null, urgent: true, paused: true }));
+  assert.match(named, /aria-label="Question from Ada \(@menu-prices\)"/);
+  assert.match(named, /<strong>Ada \(@menu-prices\)<\/strong>/);
+  assert.match(named, />Urgent</);
+  assert.match(named, />Waiting for you</, "the status stays beside the mark");
+  assert.ok(named.includes("The agent is paused until you answer."), named);
+  const lifted = card(question({ asker: "agent:8", asker_name: null, urgent: true, paused: false }));
+  assert.match(lifted, /aria-label="Question from Agent 8"/);
+  assert.match(lifted, />Urgent</);
+  assert.ok(!lifted.includes("paused until you answer"), lifted);
+  for (const plain of [card(question()), card(question({ urgent: false, paused: false })), card(question({ status: "answered", answer: "SQLite", settled_ms: NOW, urgent: false, paused: false }))]) {
+    assert.doesNotMatch(plain, />Urgent</);
+    assert.ok(!plain.includes("paused until you answer"), plain);
+  }
+});
+
+test("the card's urgent and paused words are the engine's, which the TUI shows (DEC-141)", () => {
+  const rust = readFileSync(new URL("../../../crates/crazyagent/src/questions.rs", import.meta.url), "utf8");
+  assert.equal(client.URGENT_WORD, "Urgent");
+  assert.equal(client.PAUSED_NOTE, "The agent is paused until you answer.");
+  assert.ok(rust.includes(`pub const URGENT_WORD: &str = "${client.URGENT_WORD}";`), "the engine's URGENT_WORD");
+  assert.ok(rust.includes(`pub const PAUSED_NOTE: &str = "${client.PAUSED_NOTE}";`), "the engine's PAUSED_NOTE");
+});
+
+test("Open on an urgent question's toast puts the keyboard on the first urgent question waiting, once, and never off a field the owner uses (V241-QUESTION-UX P2)", () => {
+  assert.equal(view.URGENT_SECTION, "urgent");
+  const waiting = [
+    question({ id: 1, status: "answered", answer: "Yes", settled_ms: NOW, urgent: false }),
+    question({ id: 2, urgent: false }),
+    question({ id: 3, urgent: true, paused: true }),
+    question({ id: 4, urgent: true }),
+  ];
+  assert.equal(view.focusTarget(waiting), 3, "the first urgent question waiting");
+  assert.equal(view.focusTarget(waiting.slice(0, 2)), null, "a read from before the urgent question names none, so the tab waits for the next read");
+  assert.equal(view.focusTarget(waiting.slice(0, 1)), null, "none waiting: nothing to focus");
+  const body = { closest: () => null };
+  const doc = { body };
+  body.ownerDocument = doc;
+  const inToast = { ownerDocument: doc, closest: (selector) => (selector === ".toast" ? {} : null) };
+  const inField = { ownerDocument: doc, closest: () => null };
+  assert.equal(view.keyboardFreeOnTab(null), true);
+  assert.equal(view.keyboardFreeOnTab(body), true);
+  assert.equal(view.keyboardFreeOnTab(inToast), true, "the toast's Open button the owner just pressed");
+  assert.equal(view.keyboardFreeOnTab(inField), false, "a field or button the owner uses keeps the keyboard");
+  const target = card(question({ id: 3, urgent: true }), { focusRef: { current: null } });
+  assert.match(target, /<section class="pj-stack-s qs-card"[^>]*tabindex="-1"/, "the card the keyboard goes to can hold it");
+  assert.doesNotMatch(card(question()), /tabindex="-1"/);
+});

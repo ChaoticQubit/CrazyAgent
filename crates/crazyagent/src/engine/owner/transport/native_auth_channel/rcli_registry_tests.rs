@@ -42,7 +42,7 @@ impl RegistryCase {
         .unwrap();
         Self {
             root,
-            tools: tempfile::tempdir().unwrap(),
+            tools: crate::harnesses::finding::owner_folder("rreg-tools-"),
             service,
             _stop: stop,
         }
@@ -919,6 +919,205 @@ async fn check_again_refuses_a_codex_in_an_agent_worktree_or_a_registered_projec
             host.find_harness("codex", None, &search(vec![worktree, declared, good]), None)
                 .unwrap(),
             Found::Registered { path: safe }
+        );
+    })
+    .await;
+}
+
+/// RV-DS241-58: a harness pinned through a link is captured again only where engine start
+/// would take it. When the link comes to lead into a folder agents can write, the fresh
+/// capture is refused with the start check's own code and never pinned, so a sign-in never
+/// runs an agent-planted file outside the sandbox.
+#[tokio::test]
+async fn a_re_pin_into_a_folder_agents_can_write_is_refused_as_at_engine_start() {
+    registry_case(|host, root| async move {
+        let owner = root.join("owner");
+        let planted = root.join("work/.crazyagent/agents/a1/bin");
+        std::fs::create_dir_all(&owner).unwrap();
+        std::fs::create_dir_all(&planted).unwrap();
+        let installed = physical_file(&owner, "codex-0.167.1", b"owner-codex");
+        let dropped = physical_file(&planted, "codex", b"agent-codex");
+        let link = owner.join("codex");
+        std::os::unix::fs::symlink(&installed, &link).unwrap();
+        host.register_codex_executable(RegisteredNativeAuthHost::capture_entry(&link).unwrap())
+            .unwrap();
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            installed
+        );
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&dropped, &link).unwrap();
+        assert_eq!(
+            host.registered_codex_executable()
+                .map(|host| host.verified_path().map(Path::to_path_buf))
+                .unwrap_err()
+                .0,
+            crate::harnesses::finding::PATH_AGENT_SPACE
+        );
+    })
+    .await;
+}
+
+/// RV-DS241-58 with DEC-166: a harness pinned through a link that an update points at a new
+/// install in an owner folder is captured again and used, so an update needs no restart.
+#[tokio::test]
+async fn a_re_pin_to_a_new_install_in_an_owner_folder_is_used() {
+    registry_case(|host, root| async move {
+        let owner = root.join("owner");
+        std::fs::create_dir_all(&owner).unwrap();
+        let old = physical_file(&owner, "codex-0.50.0", b"old-codex");
+        let new = physical_file(&owner, "codex-0.56.0", b"new-codex");
+        let link = owner.join("codex");
+        std::os::unix::fs::symlink(&old, &link).unwrap();
+        host.register_codex_executable(RegisteredNativeAuthHost::capture_entry(&link).unwrap())
+            .unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&new, &link).unwrap();
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            new
+        );
+    })
+    .await;
+}
+
+/// RV-DS241-140: Check again pins the file it checked. A link in the found entry's chain
+/// that moves to an agent-planted file between the check and the capture gets the capture
+/// refused with the start check's own code, and nothing is pinned. The link sits in an
+/// owner folder, since a chain with a link where agents write fails the entry check itself.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn check_again_pins_only_the_file_it_checked_when_a_middle_link_moves() {
+    registry_case(|host, root| async move {
+        let owner = root.join("owner");
+        let links = owner.join("links");
+        let planted = root.join("work/.crazyagent/agents/a1/bin");
+        std::fs::create_dir_all(&links).unwrap();
+        std::fs::create_dir_all(&planted).unwrap();
+        let installed = physical_file(&owner, "codex-0.167.1", b"owner-codex");
+        let dropped = physical_file(&planted, "codex", b"agent-codex");
+        let middle = links.join("middle");
+        std::os::unix::fs::symlink(&installed, &middle).unwrap();
+        let entry = owner.join("codex");
+        std::os::unix::fs::symlink(&middle, &entry).unwrap();
+        let moved = middle.clone();
+        super::BETWEEN_CHECK_AND_CAPTURE.lock().unwrap().push((
+            entry.clone(),
+            Box::new(move || {
+                std::fs::remove_file(&moved).unwrap();
+                std::os::unix::fs::symlink(&dropped, &moved).unwrap();
+            }),
+        ));
+        let search = Search::new(vec![owner], None, Vec::new());
+        assert_eq!(
+            host.find_harness("codex", None, &search, None).unwrap(),
+            Found::Refused {
+                path: entry.clone(),
+                code: crate::harnesses::finding::PATH_AGENT_SPACE.into(),
+            }
+        );
+        assert!(
+            !super::BETWEEN_CHECK_AND_CAPTURE
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(path, _)| *path == entry)
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .map(|_| ())
+                .unwrap_err()
+                .0,
+            "native_auth_host_unavailable"
+        );
+    })
+    .await;
+}
+
+/// RV-DS241-140 r2 (rv-secreview F1): team runs, research and the account renewal resolve
+/// the entry they are handed again at each launch and run what it leads to. An entry whose
+/// chain passes through a link agents can move is never handed to them: Check again refuses
+/// it with the start check's code, nothing is pinned, and the harness lookup they use stays
+/// empty after the link moves to an agent's file.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn an_entry_through_a_link_agents_can_move_never_reaches_a_launch() {
+    registry_case(|host, root| async move {
+        let owner = root.join("owner");
+        let planted = root.join("work/.crazyagent/agents/a1/bin");
+        std::fs::create_dir_all(&owner).unwrap();
+        std::fs::create_dir_all(&planted).unwrap();
+        let installed = physical_file(&owner, "codex-0.167.1", b"owner-codex");
+        let dropped = physical_file(&planted, "codex", b"agent-codex");
+        let middle = planted.join("middle");
+        std::os::unix::fs::symlink(&installed, &middle).unwrap();
+        let entry = owner.join("codex");
+        std::os::unix::fs::symlink(&middle, &entry).unwrap();
+        let search = Search::new(vec![owner], None, Vec::new());
+        let refused = Found::Refused {
+            path: entry.clone(),
+            code: crate::harnesses::finding::PATH_AGENT_SPACE.into(),
+        };
+        assert_eq!(
+            host.find_harness("codex", None, &search, None).unwrap(),
+            refused
+        );
+        let lookup = host.harness_lookup();
+        assert_eq!(lookup("codex"), None);
+        std::fs::remove_file(&middle).unwrap();
+        std::os::unix::fs::symlink(&dropped, &middle).unwrap();
+        assert_eq!(lookup("codex"), None);
+        assert_eq!(
+            host.find_harness("codex", None, &search, None).unwrap(),
+            refused
+        );
+    })
+    .await;
+}
+
+/// RV-DS241-140 r2 (rv-secreview row note 2): engine start checks the real file it pins,
+/// not its entry again. The entry leads to an agent's file when that file is resolved and
+/// back to the owner's install when the check runs, so a check of the entry would pass and
+/// the capture would then refuse as changed; the check of the file pinned refuses it with
+/// the start check's own code.
+#[tokio::test]
+async fn engine_start_checks_the_real_file_it_pins_not_its_entry_again() {
+    registry_case(|host, root| async move {
+        let owner = root.join("owner");
+        let links = owner.join("links");
+        let planted = root.join("work/.crazyagent/agents/a1/bin");
+        std::fs::create_dir_all(&links).unwrap();
+        std::fs::create_dir_all(&planted).unwrap();
+        let installed = physical_file(&owner, "codex-0.167.1", b"owner-codex");
+        let dropped = physical_file(&planted, "codex", b"agent-codex");
+        let middle = links.join("codex");
+        std::os::unix::fs::symlink(&dropped, &middle).unwrap();
+        let entry = owner.join("codex");
+        std::os::unix::fs::symlink(&middle, &entry).unwrap();
+        let moved = middle.clone();
+        super::BETWEEN_CHECK_AND_CAPTURE.lock().unwrap().push((
+            entry.clone(),
+            Box::new(move || {
+                std::fs::remove_file(&moved).unwrap();
+                std::os::unix::fs::symlink(&installed, &moved).unwrap();
+            }),
+        ));
+        assert_eq!(
+            host.capture_found(&entry).map(|_| ()).unwrap_err().0,
+            crate::harnesses::finding::PATH_AGENT_SPACE
+        );
+        assert!(
+            !super::BETWEEN_CHECK_AND_CAPTURE
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(path, _)| *path == entry)
         );
     })
     .await;
