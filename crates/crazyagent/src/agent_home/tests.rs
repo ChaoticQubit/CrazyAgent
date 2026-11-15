@@ -1339,7 +1339,8 @@ fn an_acl_an_agent_set_in_its_home_never_blocks_its_next_launch() {
     let claude = home.join(".claude.json");
     fs::write(&claude, "{}\n").unwrap();
     let chmod = |arguments: &[&str]| {
-        let done = Command::new("/bin/chmod").args(arguments).output().unwrap();
+        let done =
+            crate::spawn_gate::collected(Command::new("/bin/chmod").args(arguments)).unwrap();
         assert!(done.status.success(), "{arguments:?}: {done:?}");
     };
     let path = |path: &Path| path.to_str().unwrap().to_owned();
@@ -1350,20 +1351,14 @@ fn an_acl_an_agent_set_in_its_home_never_blocks_its_next_launch() {
 
     let prepared = prepare(&home, Harness::Claude, &project, &given);
 
-    let listed = Command::new("/bin/ls")
-        .arg("-led")
-        .arg(&claude)
-        .output()
-        .unwrap();
+    let listed =
+        crate::spawn_gate::collected(Command::new("/bin/ls").arg("-led").arg(&claude)).unwrap();
     let kept_acl = String::from_utf8_lossy(&listed.stdout).into_owned();
     let left: Vec<&Path> = [note.as_path(), stuck.as_path()]
         .into_iter()
         .filter(|path| fs::symlink_metadata(path).is_ok())
         .collect();
-    let _ = Command::new("/bin/chmod")
-        .args(["-R", "-N"])
-        .arg(&home)
-        .output();
+    let _ = crate::spawn_gate::collected(Command::new("/bin/chmod").args(["-R", "-N"]).arg(&home));
     assert_eq!(prepared, Ok(()));
     assert!(left.is_empty(), "an ACL kept {left:?} from the launch");
     assert_eq!(fs::read_to_string(&claude).unwrap(), "{}\n");
@@ -1377,11 +1372,12 @@ fn an_acl_an_agent_set_in_its_home_never_blocks_its_next_launch() {
 /// the entry and the path.
 #[cfg(target_os = "macos")]
 fn acl(entry: &str, path: &Path) {
-    let done = std::process::Command::new("/bin/chmod")
-        .args(["+a", entry])
-        .arg(path)
-        .output()
-        .unwrap();
+    let done = crate::spawn_gate::collected(
+        std::process::Command::new("/bin/chmod")
+            .args(["+a", entry])
+            .arg(path),
+    )
+    .unwrap();
     assert!(done.status.success(), "{entry} {path:?}: {done:?}");
 }
 
@@ -1389,11 +1385,9 @@ fn acl(entry: &str, path: &Path) {
 /// path. Output: the answer.
 #[cfg(target_os = "macos")]
 fn denies(path: &Path) -> bool {
-    let listed = std::process::Command::new("/bin/ls")
-        .arg("-led")
-        .arg(path)
-        .output()
-        .unwrap();
+    let listed =
+        crate::spawn_gate::collected(std::process::Command::new("/bin/ls").arg("-led").arg(path))
+            .unwrap();
     listed.status.success() && String::from_utf8_lossy(&listed.stdout).contains("deny")
 }
 
@@ -1406,10 +1400,11 @@ struct Released(PathBuf);
 impl Drop for Released {
     fn drop(&mut self) {
         let _ = nix::unistd::chflags(self.0.as_path(), nix::sys::stat::FileFlag::empty());
-        let _ = std::process::Command::new("/bin/chmod")
-            .arg("-N")
-            .arg(&self.0)
-            .output();
+        let _ = crate::spawn_gate::collected(
+            std::process::Command::new("/bin/chmod")
+                .arg("-N")
+                .arg(&self.0),
+        );
     }
 }
 
@@ -1662,13 +1657,14 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
         format!("[core]\n\tfsmonitor = {}\n", fsmonitor.display()),
     )
     .unwrap();
-    let site = Command::new("/usr/bin/python3")
-        .args(["-c", "import site; print(site.getusersitepackages())"])
-        .env_clear()
-        .env("HOME", &home)
-        .env("PATH", "/usr/bin:/bin")
-        .output()
-        .unwrap();
+    let site = crate::spawn_gate::collected(
+        Command::new("/usr/bin/python3")
+            .args(["-c", "import site; print(site.getusersitepackages())"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin"),
+    )
+    .unwrap();
     assert!(site.status.success(), "{site:?}");
     let site = PathBuf::from(String::from_utf8(site.stdout).unwrap().trim());
     assert!(site.starts_with(&home), "{}", site.display());
@@ -1682,15 +1678,16 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
     fs::create_dir(&repo).unwrap();
     fs::write(repo.join("a.txt"), "a\n").unwrap();
     for arguments in [&["init", "-q"][..], &["add", "a.txt"][..]] {
-        let setup = Command::new("/usr/bin/git")
-            .args(arguments)
-            .current_dir(&repo)
-            .env_clear()
-            .env("HOME", &root)
-            .env("PATH", "/usr/bin:/bin")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .output()
-            .unwrap();
+        let setup = crate::spawn_gate::collected(
+            Command::new("/usr/bin/git")
+                .args(arguments)
+                .current_dir(&repo)
+                .env_clear()
+                .env("HOME", &root)
+                .env("PATH", "/usr/bin:/bin")
+                .env("GIT_CONFIG_NOSYSTEM", "1"),
+        )
+        .unwrap();
         assert!(setup.status.success(), "{setup:?}");
     }
     let path = std::env::var_os("PATH").unwrap_or_else(|| OsString::from("/usr/bin:/bin"));
@@ -1762,13 +1759,14 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
             &package,
         ),
     ] {
-        let output = Command::new(&program)
-            .args(arguments)
-            .current_dir(folder)
-            .env_clear()
-            .envs(env.iter().map(|(name, value)| (name, value)))
-            .output()
-            .unwrap();
+        let output = crate::spawn_gate::collected(
+            Command::new(&program)
+                .args(arguments)
+                .current_dir(folder)
+                .env_clear()
+                .envs(env.iter().map(|(name, value)| (name, value))),
+        )
+        .unwrap();
         ran.push(format!("{program:?}: {output:?}"));
         assert!(output.status.success(), "{ran:?}");
     }
@@ -1800,17 +1798,18 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
             "npmrc".to_owned(),
         ),
     ] {
-        let output = Command::new(&program)
-            .args(arguments)
-            .current_dir(folder)
-            .env_clear()
-            .envs(
-                env.iter()
-                    .filter(|(name, _)| name.as_os_str() != OsStr::new(pin))
-                    .map(|(name, value)| (name, value)),
-            )
-            .output()
-            .unwrap();
+        let output = crate::spawn_gate::collected(
+            Command::new(&program)
+                .args(arguments)
+                .current_dir(folder)
+                .env_clear()
+                .envs(
+                    env.iter()
+                        .filter(|(name, _)| name.as_os_str() != OsStr::new(pin))
+                        .map(|(name, value)| (name, value)),
+                ),
+        )
+        .unwrap();
         let heard = fs::read_to_string(&marker).unwrap_or_default();
         assert!(
             heard.contains(&expected),

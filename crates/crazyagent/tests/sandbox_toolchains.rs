@@ -100,18 +100,6 @@ fn run_in(sandbox: &ProjectSandbox, profile: &Path, shell: &Path, script: &str) 
     crazyagent::spawn_gate::output(&mut command).unwrap()
 }
 
-/// Runs an unconfined command through the spawn gate as `Command::output` would: no input,
-/// stdout and stderr collected. Input: the configured command. Output: its status, stdout
-/// and stderr, or the start error.
-fn collected(command: &mut std::process::Command) -> std::io::Result<Output> {
-    crazyagent::spawn_gate::output(
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
-    )
-}
-
 fn path_of(command: &std::process::Command) -> String {
     command
         .get_envs()
@@ -2706,16 +2694,19 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
             ));
         }
     }
-    let listed = collected(Command::new("/bin/ls").arg("-led").arg(case.home.join("f"))).unwrap();
+    let listed = crazyagent::spawn_gate::collected(
+        Command::new("/bin/ls").arg("-led").arg(case.home.join("f")),
+    )
+    .unwrap();
     let flags = fs::symlink_metadata(case.home.join("f"))
         .map(|metadata| FileFlag::from_bits_retain(metadata.st_flags()))
         .unwrap();
-    let _ = collected(
+    let _ = crazyagent::spawn_gate::collected(
         Command::new("/usr/bin/chflags")
             .args(["-R", "nouchg"])
             .arg(&case.home),
     );
-    let _ = collected(
+    let _ = crazyagent::spawn_gate::collected(
         Command::new("/bin/chmod")
             .args(["-R", "-N"])
             .arg(&case.home),
@@ -2760,14 +2751,14 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
         &package.join("package.json"),
         "{\"name\":\"p\",\"version\":\"0.0.0\",\"scripts\":{\"x\":\"node -e 0\"}}\n",
     );
-    let cargo = collected(
+    let cargo = crazyagent::spawn_gate::collected(
         Command::new(env!("CARGO"))
             .arg("x")
             .current_dir(&case.tmp)
             .env("CARGO_HOME", case.home.join(".cargo")),
     )
     .unwrap();
-    let npm = collected(
+    let npm = crazyagent::spawn_gate::collected(
         Command::new(npm)
             .args(["--no-update-notifier", "run", "x"])
             .current_dir(&package)
