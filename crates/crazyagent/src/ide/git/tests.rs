@@ -1114,5 +1114,8 @@ fn the_shim_leaves_no_copy_of_an_immutable_index_behind() {
     let left = std::fs::read_dir(&private).unwrap().count();
     assert!(flags("nouchg", &base), "the row clears its flags");
     assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert_eq!(left, 0, "a copy holding the index's flags stayed in the private folder");
+    assert_eq!(
+        left, 0,
+        "a copy holding the index's flags stayed in the private folder"
+    );
 }

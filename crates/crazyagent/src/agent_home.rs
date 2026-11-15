@@ -82,7 +82,10 @@ const CLAUDE_FOLDER_KEPT: &[(&str, Kept)] = &[("teams", Kept::Folder), ("tasks",
 /// another tool's settings.
 const LIBRARY_KEPT: &[(&str, Kept)] = &[
     ("Keychains", Kept::Folder),
-    ("Preferences", Kept::Only(&[("com.apple.security.plist", Kept::File)])),
+    (
+        "Preferences",
+        Kept::Only(&[("com.apple.security.plist", Kept::File)]),
+    ),
 ];
 /// What a launch keeps in an agent's cargo home: its crates and git checkouts only as the
 /// links the engine makes to the owner's read-only ones (DEC-173), never a cache folder the

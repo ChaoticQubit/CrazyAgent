@@ -3085,7 +3085,9 @@ fn a_native_lead_is_refused_when_its_teammates_can_write_the_delegate_engine() {
     )
     .unwrap();
     let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
-    let runtime = exiting_claude_runtime(&fixture).with_terminal(host).unwrap();
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host)
+        .unwrap();
     let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
     let home = agent_home(&runtime.state, id);
     let mates = crate::launch_context::mates_home(&home);
@@ -12268,7 +12270,9 @@ fn long_background(secs: u32) -> String {
         );
     assert_eq!(script.matches(&format!("sleep {secs}\n")).count(), 1);
     assert_eq!(
-        script.matches("CLAUDE_CONFIG_DIR/.cache/background-pid").count(),
+        script
+            .matches("CLAUDE_CONFIG_DIR/.cache/background-pid")
+            .count(),
         1
     );
     assert_eq!(script.matches("CLAUDE_CONFIG_DIR/.cache/held").count(), 1);
@@ -18385,11 +18389,9 @@ fn an_owner_cancel_of_a_claimed_task_whose_turn_cannot_be_sent_keeps_it_cancelle
 
     let status: String = fixture
         .connection
-        .query_row(
-            "SELECT status FROM team_tasks WHERE id=?1",
-            [task],
-            |row| row.get(0),
-        )
+        .query_row("SELECT status FROM team_tasks WHERE id=?1", [task], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(status, "cancelled");
     assert!(team.workers[&agent].busy.is_none());
@@ -31809,7 +31811,11 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
             problems.push(format!("{entry} kept by the launch"));
         }
     }
-    if std::fs::read_to_string(home.join(".cache/tool/data")).ok().as_deref() != Some("ok") {
+    if std::fs::read_to_string(home.join(".cache/tool/data"))
+        .ok()
+        .as_deref()
+        != Some("ok")
+    {
         problems.push("the agent's cache removed by the launch".to_owned());
     }
     assert!(

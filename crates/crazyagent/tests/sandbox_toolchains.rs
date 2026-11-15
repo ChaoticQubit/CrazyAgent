@@ -2721,9 +2721,7 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
         problems.push("the link to the owner's crates changed".to_owned());
     }
     for entry in [".npm", ".cargo", ".cargo/git"] {
-        if !fs::symlink_metadata(case.home.join(entry))
-            .is_ok_and(|metadata| metadata.is_dir())
-        {
+        if !fs::symlink_metadata(case.home.join(entry)).is_ok_and(|metadata| metadata.is_dir()) {
             problems.push(format!("{entry} is no longer a real folder"));
         }
     }

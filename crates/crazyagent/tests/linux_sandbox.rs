@@ -1080,9 +1080,20 @@ fn a_closed_bubblewrap_agent_opens_no_socket_its_network_namespace_does_not_hold
                     alg=refused\nudp=refused\naudit=refused\ntcp=ok\nroute=ok\n";
     let mut filtered = Command::new(HELPER);
     filtered
-        .args(["--filter-sockets", "--", "/usr/bin/python3", "-I", "-c", FAMILIES])
+        .args([
+            "--filter-sockets",
+            "--",
+            "/usr/bin/python3",
+            "-I",
+            "-c",
+            FAMILIES,
+        ])
         .current_dir(&case.project);
-    assert_eq!(families(filtered), expected, "the helper's socket filter alone");
+    assert_eq!(
+        families(filtered),
+        expected,
+        "the helper's socket filter alone"
+    );
     let bwrap = BWRAP_PATHS
         .iter()
         .map(Path::new)

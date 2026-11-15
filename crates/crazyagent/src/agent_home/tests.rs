@@ -1103,7 +1103,13 @@ fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
         let left: Vec<&str> = planted
             .iter()
             .copied()
-            .chain([".config", ".ssh", ".local", "history.jsonl", "Library/Python"])
+            .chain([
+                ".config",
+                ".ssh",
+                ".local",
+                "history.jsonl",
+                "Library/Python",
+            ])
             .filter(|entry| fs::symlink_metadata(home.join(entry)).is_ok())
             .collect();
         assert!(
@@ -1117,7 +1123,10 @@ fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
                 "{name}: {file}"
             );
         }
-        assert_eq!(fs::read_link(home.join(".cargo/registry")).unwrap(), outside);
+        assert_eq!(
+            fs::read_link(home.join(".cargo/registry")).unwrap(),
+            outside
+        );
         assert_eq!(
             fs::read_to_string(outside.join("config.toml")).unwrap(),
             "kept outside\n"
@@ -1155,7 +1164,10 @@ fn a_launch_removes_a_link_in_the_place_of_a_kept_entry_without_what_it_names() 
             "{entry} kept as a link"
         );
     }
-    assert_eq!(fs::read_link(home.join(".cargo/registry")).unwrap(), outside);
+    assert_eq!(
+        fs::read_link(home.join(".cargo/registry")).unwrap(),
+        outside
+    );
     assert_eq!(
         fs::read_to_string(outside.join("Keychains/login.keychain-db")).unwrap(),
         "outside\n"
@@ -1258,10 +1270,15 @@ fn a_flag_an_agent_set_in_its_home_never_blocks_its_next_launch() {
     let kept_flags = fs::symlink_metadata(&claude).map(|metadata| {
         FileFlag::from_bits_retain(std::os::macos::fs::MetadataExt::st_flags(&metadata))
     });
-    let left: Vec<&Path> = [hook.as_path(), session.as_path(), startup.as_path(), config.as_path()]
-        .into_iter()
-        .filter(|path| fs::symlink_metadata(path).is_ok())
-        .collect();
+    let left: Vec<&Path> = [
+        hook.as_path(),
+        session.as_path(),
+        startup.as_path(),
+        config.as_path(),
+    ]
+    .into_iter()
+    .filter(|path| fs::symlink_metadata(path).is_ok())
+    .collect();
     for (path, _) in pinned {
         let _ = nix::unistd::chflags(path, FileFlag::empty());
     }
@@ -1698,7 +1715,10 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
     fs::create_dir_all(&site).unwrap();
     fs::write(
         site.join("run.pth"),
-        format!("import os; open('{}', 'a').write('pth\\n')\n", marker.display()),
+        format!(
+            "import os; open('{}', 'a').write('pth\\n')\n",
+            marker.display()
+        ),
     )
     .unwrap();
     let repo = root.join("repo");
@@ -1761,8 +1781,8 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
     if let Some(toolchain) = &toolchain {
         base.push(("RUSTUP_TOOLCHAIN", toolchain.as_os_str()));
     }
-    let env = crate::sandbox::agent_env(&base, std::iter::empty::<(&OsStr, Option<&OsStr>)>())
-        .unwrap();
+    let env =
+        crate::sandbox::agent_env(&base, std::iter::empty::<(&OsStr, Option<&OsStr>)>()).unwrap();
     let mut ran = Vec::new();
     for (program, arguments, folder) in [
         (
@@ -1777,7 +1797,13 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
         ),
         (
             OsString::from(env!("CARGO")),
-            &["check", "--offline", "--quiet", "--manifest-path", "Cargo.toml"][..],
+            &[
+                "check",
+                "--offline",
+                "--quiet",
+                "--manifest-path",
+                "Cargo.toml",
+            ][..],
             &probe,
         ),
         (

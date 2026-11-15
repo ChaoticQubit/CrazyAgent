@@ -1110,8 +1110,8 @@ fn every_agent_process_reads_no_global_git_config_and_no_python_user_site() {
     let program = Path::new("/usr/bin/true");
     let none = || std::iter::empty::<(&OsStr, Option<&OsStr>)>();
     let full = crazyagent::sandbox::unconfined_command(program, &base, none()).unwrap();
-    let confined = agent_command(Path::new("/private/tmp/agent.sb"), program, &base, none())
-        .unwrap();
+    let confined =
+        agent_command(Path::new("/private/tmp/agent.sb"), program, &base, none()).unwrap();
     for (level, command) in [("full", &full), ("confined", &confined)] {
         for (name, value) in pinned {
             assert!(

@@ -280,11 +280,9 @@ fn tasks_held_for_an_owner_stopped_lead_never_fill_the_dispatch_window() {
     });
     let later = "Write the index page.";
     owner(&fixture, &[hand_off(&fixture, later)]);
-    fixture.until(
-        &mut team,
-        "a task queued after the held ones starts",
-        |f| task_of(f, later).0 != "queued",
-    );
+    fixture.until(&mut team, "a task queued after the held ones starts", |f| {
+        task_of(f, later).0 != "queued"
+    });
     let waiting: i64 = fixture
         .connection
         .query_row(

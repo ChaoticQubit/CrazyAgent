@@ -737,8 +737,6 @@ fn a_cargo_home_holds_only_links_to_the_owners_caches_and_never_changes_them() {
 
     prepare_cargo_home(&without, &bare).unwrap();
 
-    assert!(
-        fs::symlink_metadata(without.join(".cargo/registry")).is_err()
-    );
+    assert!(fs::symlink_metadata(without.join(".cargo/registry")).is_err());
     assert!(without.join(".cargo/git/db").is_dir());
 }
