@@ -361,7 +361,7 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
 const MASTER_GROUPS: readonly SettingGroupInfo[] = [
   { id: "master", title: "Master", icon: "brain", rows: ["Harness", "Account", "Live terminal"] },
   { id: "conversation", title: "Conversation", icon: "message-square", rows: ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"] },
-  { id: "messages", title: "Messages", icon: "send", rows: ["Sub-agent questions go to", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents", "Re-ask a sub-agent's empty reply", "End a turn after done"] },
+  { id: "messages", title: "Messages", icon: "send", rows: ["Sub-agent questions go to", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to RCLI agents", "Re-ask a sub-agent's empty reply", "End a turn after done"] },
   { id: "access", title: "Access", icon: "shield-check", rows: ["Full access"] },
 ];
 

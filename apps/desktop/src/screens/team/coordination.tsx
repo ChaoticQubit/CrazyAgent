@@ -102,7 +102,7 @@ export function RoleSkillsControls({ settings, skills, busy, onChoose }: {
 }
 
 /** Each coordination harness id with the name the app shows for it. */
-export const HARNESS_NAMES: Record<CoordHarness, string> = { "claude-code": "Claude Code", codex: "Codex", rcli: "rcli" };
+export const HARNESS_NAMES: Record<CoordHarness, string> = { "claude-code": "Claude Code", codex: "Codex", rcli: "RCLI" };
 
 const NO_SUB_AGENTS = "Not available: runs only as a master";
 const SUB_AGENT_HARNESSES: readonly CoordHarness[] = ["claude-code", "codex"];
