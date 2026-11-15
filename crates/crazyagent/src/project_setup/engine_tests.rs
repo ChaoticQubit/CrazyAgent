@@ -1483,6 +1483,248 @@ async fn a_retried_job_whose_research_was_turned_off_is_not_cancelled_by_the_nex
     engine.stop().await;
 }
 
+/// RV-DS241-159: Run again starts a job's rate-limited ends in a row again. A job that ended
+/// failed on its third limit hands a limited account back and waits for the pool's next one
+/// after the owner runs it again, as a new job does, instead of failing on its first limit.
+#[tokio::test]
+async fn a_job_run_again_after_the_rate_limit_cap_takes_a_limit_as_a_new_job_does() {
+    use crate::research::jobs::ResearchStatus as QueueStatus;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![ResearchKind::MarketResearch]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let market = job_of(&mut owner, &project, ResearchKind::MarketResearch)
+        .await
+        .id;
+    let store =
+        crate::research::jobs::ResearchJobs::open(&engine.root.path().join("engine.db")).unwrap();
+    let account = CredentialRef::new("a-codex").unwrap();
+    let limited = || {
+        let held = store
+            .claim("setup-pooled", "runner-test", 4)
+            .unwrap()
+            .unwrap();
+        assert_eq!(held.id, market);
+        store.rate_limited(&held, &account).unwrap().0
+    };
+    assert_eq!(
+        [limited(), limited(), limited()],
+        [
+            QueueStatus::Queued,
+            QueueStatus::Queued,
+            QueueStatus::Failed
+        ]
+    );
+
+    let retried = owner.retry_research(project.clone(), market, 2).await;
+    assert_eq!(result(retried.unwrap()), OwnerResult::Applied);
+    assert_eq!(
+        limited(),
+        QueueStatus::Queued,
+        "a job run again waits for the pool's next account on its first limit"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// RV-DS241-159: Plan roadmap now starts the planning job's rate-limited ends in a row again.
+/// A plan that was saved after two limits takes a limit when it is planned again, as a new
+/// job does, instead of failing on the first one.
+#[tokio::test]
+async fn a_roadmap_planned_again_takes_a_rate_limit_as_a_new_job_does() {
+    use crate::research::jobs::ResearchStatus as QueueStatus;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![ResearchKind::MarketResearch]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let market = job_of(&mut owner, &project, ResearchKind::MarketResearch)
+        .await
+        .id;
+    let stopped = owner.cancel_research(project.clone(), market, 2).await;
+    assert_eq!(result(stopped.unwrap()), OwnerResult::Applied);
+    let planned = owner.plan_roadmap(project.clone(), 3).await.unwrap();
+    assert_eq!(result(planned), OwnerResult::Applied);
+    let planning = job_of(&mut owner, &project, ResearchKind::RoadmapPlanning)
+        .await
+        .id;
+    let store =
+        crate::research::jobs::ResearchJobs::open(&engine.root.path().join("engine.db")).unwrap();
+    let account = CredentialRef::new("a-codex").unwrap();
+    let claim = || {
+        let held = store
+            .claim("setup-pooled", "runner-test", 4)
+            .unwrap()
+            .unwrap();
+        assert_eq!(held.id, planning);
+        held
+    };
+    for _ in 0..2 {
+        assert_eq!(
+            store.rate_limited(&claim(), &account).unwrap().0,
+            QueueStatus::Queued
+        );
+    }
+    store.finish(&claim(), "context/roadmap.md").unwrap();
+
+    let planned = owner.plan_roadmap(project.clone(), 4).await.unwrap();
+    assert_eq!(result(planned), OwnerResult::Applied);
+    assert_eq!(
+        store.rate_limited(&claim(), &account).unwrap().0,
+        QueueStatus::Queued,
+        "a roadmap planned again waits for the pool's next account on its first limit"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// RV-DS241-159: Run again ends the wait a refused launch left and forgets the refusals in a
+/// row. A job stopped while it waits out a refusal is claimed at once after the owner runs it
+/// again, and its next refusal counts as the first.
+#[tokio::test]
+async fn a_job_run_again_does_not_wait_out_the_refusal_it_was_stopped_in() {
+    use crate::research::jobs::ResearchStatus as QueueStatus;
+    const WAITING: &str = "Waiting for this account to be ready";
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![ResearchKind::MarketResearch]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let market = job_of(&mut owner, &project, ResearchKind::MarketResearch)
+        .await
+        .id;
+    let store =
+        crate::research::jobs::ResearchJobs::open(&engine.root.path().join("engine.db")).unwrap();
+    let held = store
+        .claim("setup-pooled", "runner-test", 4)
+        .unwrap()
+        .unwrap();
+    assert_eq!(held.id, market);
+    assert_eq!(store.refused(&held, WAITING).unwrap(), QueueStatus::Queued);
+    assert!(
+        store
+            .claim("setup-pooled", "runner-test", 4)
+            .unwrap()
+            .is_none(),
+        "the refused job waits out its backoff"
+    );
+
+    let stopped = owner.cancel_research(project.clone(), market, 2).await;
+    assert_eq!(result(stopped.unwrap()), OwnerResult::Applied);
+    let retried = owner.retry_research(project.clone(), market, 3).await;
+    assert_eq!(result(retried.unwrap()), OwnerResult::Applied);
+    let claimed = store.claim("setup-pooled", "runner-test", 4).unwrap();
+    assert_eq!(
+        claimed.as_ref().map(|job| job.id),
+        Some(market),
+        "a job run again is claimed at once"
+    );
+    let held = claimed.unwrap();
+    assert_eq!(store.refused(&held, WAITING).unwrap(), QueueStatus::Queued);
+    assert_eq!(
+        engine.rows("SELECT refused FROM research_jobs WHERE kind='market_research'"),
+        1,
+        "the next refusal counts as the first"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// RV-DS241-159: research turned off and on again ends the wait a refused launch left. A job
+/// stopped by turning its research off while it waits out a refusal is claimed at once after
+/// the owner turns the research on again, ahead of the project's later job.
+#[tokio::test]
+async fn research_turned_on_again_does_not_wait_out_the_refusal_it_was_turned_off_in() {
+    use crate::research::jobs::ResearchStatus as QueueStatus;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![
+                ResearchKind::MarketResearch,
+                ResearchKind::CompetitorResearch,
+            ]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let market = job_of(&mut owner, &project, ResearchKind::MarketResearch)
+        .await
+        .id;
+    let store =
+        crate::research::jobs::ResearchJobs::open(&engine.root.path().join("engine.db")).unwrap();
+    let held = store
+        .claim("setup-pooled", "runner-test", 4)
+        .unwrap()
+        .unwrap();
+    assert_eq!(held.id, market);
+    assert_eq!(
+        store
+            .refused(&held, "Waiting for this account to be ready")
+            .unwrap(),
+        QueueStatus::Queued
+    );
+
+    let saved = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    let mut off = saved.editable();
+    off.research = vec![ResearchKind::CompetitorResearch];
+    let response = owner
+        .update_project_setup(project.clone(), saved.revision, None, off, 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let job = job_of(&mut owner, &project, ResearchKind::MarketResearch).await;
+    assert_eq!((job.id, job.status), (market, ResearchStatus::Cancelled));
+    let saved = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    let mut on = saved.editable();
+    on.research = vec![
+        ResearchKind::MarketResearch,
+        ResearchKind::CompetitorResearch,
+    ];
+    let response = owner
+        .update_project_setup(project.clone(), saved.revision, None, on, 3)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let claimed = store.claim("setup-pooled", "runner-test", 4).unwrap();
+    assert_eq!(
+        claimed.map(|job| job.id),
+        Some(market),
+        "research turned on again is claimed at once"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
 /// Releasing an account cancels the research job and closes the master conversation that
 /// hold it, does not fail on a holder whose conversation already ended, and reads the
 /// account free once the remaining holds end.
