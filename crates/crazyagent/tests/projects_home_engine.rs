@@ -2516,6 +2516,74 @@ async fn a_direct_folder_change_is_refused_job_busy_while_a_job_runs_and_goes_on
     engine.stop().await;
 }
 
+/// DEC-177 step 1b: the slot a job holds never hides a direct change's record. A direct add
+/// that applied, resent with the same request while a project move job waits for its agents,
+/// answers its recorded Applied as a replay, not `job_busy`, and copies nothing again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resent_direct_add_that_applied_answers_its_record_while_a_job_runs() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let engine = Engine::start().await;
+    let (mut owner, reading, _origin, _target) = kept_outside(&engine, &place).await;
+    let database = engine.root.path().join("engine.db");
+    let source = place.join("plain-notes");
+    tree(&source, 2, 2);
+    let landed = place.join("second").join("plain-notes");
+    owner
+        .controller
+        .read(OwnerRead::ProjectsHome)
+        .await
+        .unwrap();
+    owner.generation += 1;
+    let pending = owner
+        .controller
+        .begin_mutation(add(&source, AddMode::Copy), owner.generation)
+        .unwrap();
+    let sent = pending.request().clone();
+    let first = owner.controller.send_pending().await.unwrap();
+    assert!(
+        matches!(&first, OwnerResponse::Applied { operation }
+            if operation.result == OwnerResult::Applied && !operation.historical_replay),
+        "{first:?}"
+    );
+    assert!(landed.join("p1/f1.txt").is_file());
+    slow_agent(&database, 45, &place.join("agent-45"));
+    owner
+        .controller
+        .owner_client()
+        .unwrap()
+        .job_start(
+            id("move-after-add"),
+            moving(&reading),
+            AddMode::Move,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    job_until(&owner.controller, |job| {
+        matches!(job.state, JobState::Stopping { .. })
+    })
+    .await;
+    let second = engine.owner().await;
+    let client = second.owner_client().unwrap();
+    let replayed = client.request(sent).await.unwrap().response;
+    assert!(
+        matches!(&replayed, OwnerResponse::Applied { operation }
+            if operation.result == OwnerResult::Applied && operation.historical_replay),
+        "a resend of the applied add while a job runs answers its record: {replayed:?}"
+    );
+    assert!(
+        !staging(&place.join("second")),
+        "a resend copies nothing again"
+    );
+    sql(
+        &database,
+        "UPDATE team_agents SET status='stopped' WHERE id=45;",
+    );
+    job_until(&owner.controller, |job| job.state == JobState::Done).await;
+    engine.stop().await;
+}
+
 /// rv-sec2 F1 (DEC-177 step 1b): an add plans nothing while a project move is pending, so the
 /// two never plan the same name in the home whatever the client; once the move is gone, the
 /// add goes.
