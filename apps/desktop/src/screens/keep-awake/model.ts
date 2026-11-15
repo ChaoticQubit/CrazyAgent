@@ -4,7 +4,7 @@ import { MINUTES_MAX, MINUTES_MIN, type KeepAwakeSettingId, type KeepAwakeSettin
  * itself, plain is not holding (DEC-167 addendum 5). */
 export type KeepAwakeTone = "hold" | "limit" | "ended" | "plain";
 
-/** The longest label the control and the TUI header show. */
+/** The longest label the control shows. */
 export const LABEL_MAX = 32;
 
 const COUNT_MAX = 999;

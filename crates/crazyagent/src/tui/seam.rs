@@ -184,6 +184,7 @@ pub enum Request {
     Reveal(Box<super::client::ide::RevealQuery>),
     Learning(Box<super::client::learning::LearningQuery>),
     Notices(Box<super::client::notifications::NoticesQuery>),
+    KeepAwake(Box<super::client::keep_awake::KeepAwakeQuery>),
     Reconnect,
 }
 
@@ -236,6 +237,7 @@ impl std::fmt::Debug for Request {
             Self::Reveal(_) => "Reveal",
             Self::Learning(_) => "Learning",
             Self::Notices(_) => "Notices",
+            Self::KeepAwake(_) => "KeepAwake",
             Self::Reconnect => "Reconnect",
         })
     }

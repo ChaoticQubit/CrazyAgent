@@ -2,6 +2,7 @@ use super::client::OwnerEvent;
 use super::client::app_setup::AppSetupEvent;
 use super::client::changes::{ChangesQuery, ChangesView};
 use super::client::intake::{IntakeEvent, IntakeQuery, IntakeView};
+use super::client::keep_awake::{KeepAwakeEvent, KeepAwakeQuery, KeepAwakeReply};
 use super::client::learning::{LearningEvent, LearningQuery, LearningReply};
 use super::client::notifications::{NoticesEvent, NoticesQuery, NoticesReply};
 use super::client::questions::{QuestionsEvent, QuestionsQuery, QuestionsReply};
@@ -9,12 +10,13 @@ use super::client::settings::{SettingsEvent, SettingsJob};
 use super::clock;
 use super::ctx::{Ctx, Link, Load};
 use super::frame::{
-    HINT_ROWS_MAX, Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, header, hint,
-    strip_controls, too_small, wrapped_footer,
+    HINT_ROWS_MAX, Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, header,
+    header_fits, hint, strip_controls, too_small, wrapped_footer,
 };
 use super::glyphs::Glyphs;
 use super::keys::{Global, Key, global};
 use super::screens::intake::not_ready;
+use super::screens::keep_awake::words;
 use super::screens::new_project_page::kept_draft;
 use super::screens::settings_accounts::settings_event;
 use super::screens::startup::Startup;
@@ -94,6 +96,11 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
         kind: "Place",
         place: Place::Notifications,
     });
+    out.push(Target {
+        label: "Keep awake".into(),
+        kind: "Place",
+        place: Place::KeepAwake,
+    });
     for section in SettingsSection::ALL {
         out.push(Target {
             label: format!("Settings / {}", section.label()),
@@ -120,6 +127,11 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
         label: "Settings / Notifications".into(),
         kind: "Settings",
         place: Place::NotificationSettings,
+    });
+    out.push(Target {
+        label: "Settings / Keep awake".into(),
+        kind: "Settings",
+        place: Place::KeepAwakeSettings,
     });
     out.push(Target {
         label: "Settings / App plugins".into(),
@@ -334,6 +346,8 @@ impl Shell {
                 .request(Request::Questions(Box::new(QuestionsQuery::Counts)));
             self.ctx
                 .request(Request::Notices(Box::new(NoticesQuery::counts())));
+            self.ctx
+                .request(Request::KeepAwake(Box::new(KeepAwakeQuery::Read)));
         }
         let ctx = &mut self.ctx;
         self.stack
@@ -571,6 +585,9 @@ impl Shell {
             {
                 return self.apply(Flow::Open(Place::Notifications));
             }
+            Some(Global::KeepAwake) if !modal && self.go_to_allowed() && !self.top().keeps_w() => {
+                return self.apply(Flow::Open(Place::KeepAwake));
+            }
             Some(Global::PreviousSection | Global::NextSection) if !modal => {
                 let forward = global(&key, typing) == Some(Global::NextSection);
                 let ctx = &mut self.ctx;
@@ -677,6 +694,7 @@ impl Shell {
             }
             Arrival::Disconnected(problem) => {
                 self.ctx.identity = None;
+                self.ctx.store.keep_awake = None;
                 let started = self
                     .stack
                     .first()
@@ -781,6 +799,11 @@ impl Shell {
                     && let OwnerEvent::Notices(event) = event.as_ref()
                 {
                     self.notices(event);
+                }
+                if let Arrival::Owner(event) = &arrival
+                    && let OwnerEvent::KeepAwake(event) = event.as_ref()
+                {
+                    self.keep_awake(event);
                 }
                 if let Arrival::Owner(event) = &arrival
                     && let OwnerEvent::Learning(event) = event.as_ref()
@@ -891,6 +914,29 @@ impl Shell {
         }
     }
 
+    /// Keeps the Keep awake view the header and both Keep awake screens draw: a read that
+    /// came back replaces it and a failed read keeps the last one. An answered change is
+    /// read again at once, a refused one too since the view it was made on was stale; a
+    /// save that took effect shows its picks until that read lands. Input: one Keep awake
+    /// reply. Output: none.
+    fn keep_awake(&mut self, event: &KeepAwakeEvent) {
+        match (&event.query, &event.result) {
+            (KeepAwakeQuery::Read, Ok(KeepAwakeReply::View(view))) => {
+                self.ctx.store.keep_awake = Some(view.as_ref().clone());
+            }
+            (KeepAwakeQuery::Read, _) => {}
+            (KeepAwakeQuery::Act { .. } | KeepAwakeQuery::Save { .. }, result) => {
+                if let (KeepAwakeQuery::Save { picks, .. }, Ok(_)) = (&event.query, result)
+                    && let Some(view) = self.ctx.store.keep_awake.as_mut()
+                {
+                    view.settings = picks.over(view.settings);
+                }
+                self.ctx
+                    .request(Request::KeepAwake(Box::new(KeepAwakeQuery::Read)));
+            }
+        }
+    }
+
     /// The hints the help bar shows now: an overlay's, else the top screen's modal's, else
     /// the top screen's own. Input: none. Output: the hints in order.
     fn bar_hints(&self) -> Vec<Hint> {
@@ -934,6 +980,7 @@ impl Shell {
             styled("Everywhere", Role::Heading, theme),
             key("Ctrl-K", "Go to anything", 13),
             key("n", "Notifications", 13),
+            key("W", "Keep awake", 13),
             key("Esc", "Back or cancel", 13),
             key("Tab", "Next field or panel", 13),
             key("Shift-Tab", "Previous", 13),
@@ -1097,10 +1144,18 @@ impl Shell {
         let [head, rule, body, message, help] = bands(area, self.ctx.hint_rows);
         let top = self.stack.last().expect("the stack is never empty");
         let waiting = waiting_text(self.ctx.store.waiting.as_ref(), top.project().as_ref());
-        let status = with_waiting(waiting, top.status(&self.ctx), &theme);
-        let status = with_notices(self.ctx.store.notices.as_ref(), status, &theme);
-        let status = with_intake(self.ctx.store.intake.as_ref(), status, &theme, glyphs);
-        let header_line = header(width, &top.crumbs(), status, &theme, glyphs);
+        let crumbs = top.crumbs();
+        let lead = with_waiting(waiting, Line::default(), &theme);
+        let parts = HeaderParts {
+            lead: with_intake(self.ctx.store.intake.as_ref(), lead, &theme, glyphs),
+            screen: top.status(&self.ctx),
+            keep_awake: self.ctx.store.keep_awake.as_ref(),
+            notices: self.ctx.store.notices.as_ref(),
+        };
+        let status = header_status(&parts, &theme, |status| {
+            header_fits(width, &crumbs, status, &theme, glyphs)
+        });
+        let header_line = header(width, &crumbs, status, &theme, glyphs);
         draw_lines(frame.buffer_mut(), head, &[header_line]);
         draw_lines(
             frame.buffer_mut(),
@@ -1244,9 +1299,9 @@ fn notice_text(counts: Option<&crate::notifications::NoticeCounts>) -> Option<St
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
-/// The header status with the notification counts in front of it, in the warning color
-/// while an Action is pending. Inputs: the last counts read, the status so far and the
-/// theme. Output: the status line; no counts leave the status as it is.
+/// The header status with the notification counts after it, at the right end, in the
+/// warning color while an Action is pending. Inputs: the last counts read, the status so
+/// far and the theme. Output: the status line; no counts leave the status as it is.
 fn with_notices(
     counts: Option<&crate::notifications::NoticeCounts>,
     status: Line<'static>,
@@ -1260,11 +1315,115 @@ fn with_notices(
     } else {
         theme.accent
     };
-    let note = Line::from(Span::styled(text, style));
+    after(status, Line::from(Span::styled(text, style)))
+}
+
+/// Puts a note after a status, two spaces apart; an empty status leaves the note alone.
+/// Inputs: the status so far and the note. Output: the line.
+fn after(status: Line<'static>, note: Line<'static>) -> Line<'static> {
+    assert!(note.width() > 0);
     if status.width() == 0 {
         return note;
     }
-    join([note, Line::raw("  "), status])
+    join([status, Line::raw("  "), note])
+}
+
+/// The header status with Keep awake after it in one form, in the color of its tone: a
+/// hold in the success color, a hold a closed lid would end in the warning color, an end
+/// by itself in the error color, not holding muted. Inputs: the view, the form, the
+/// status so far and the theme. Output: the status line; no view leaves it as it is.
+fn keep_awake_after(
+    view: Option<&crate::keep_awake::KeepAwakeView>,
+    form: words::Form,
+    status: Line<'static>,
+    theme: &Theme,
+) -> Line<'static> {
+    let Some(view) = view else {
+        return status;
+    };
+    let style = match words::tone(view) {
+        words::Tone::Hold => theme.success,
+        words::Tone::Limit => theme.warning,
+        words::Tone::Ended => theme.error,
+        words::Tone::Plain => theme.muted,
+    };
+    let label = words::label(view, clock::now_ms(), form);
+    assert!(label.chars().count() <= words::LABEL_CHARS_MAX);
+    after(status, Line::from(Span::styled(label, style)))
+}
+
+/// The header status with Keep awake after it in the desktop control's words (DEC-167
+/// addendum 7). Inputs: the last view read, none before the first read, the status so far
+/// and the theme. Output: the status line; no view leaves the status as it is.
+fn with_keep_awake(
+    view: Option<&crate::keep_awake::KeepAwakeView>,
+    status: Line<'static>,
+    theme: &Theme,
+) -> Line<'static> {
+    keep_awake_after(view, words::Form::Header, status, theme)
+}
+
+/// The header status with Keep awake after it in its short form, for a narrow terminal.
+/// Inputs: the last view read, the status so far and the theme. Output: the status line.
+fn with_keep_awake_short(
+    view: Option<&crate::keep_awake::KeepAwakeView>,
+    status: Line<'static>,
+    theme: &Theme,
+) -> Line<'static> {
+    keep_awake_after(view, words::Form::Short, status, theme)
+}
+
+/// What the header's right side is built from, left to right: the running folder job and
+/// the waiting change sets, the top screen's own status, Keep awake, and the notification
+/// counts.
+struct HeaderParts<'a> {
+    lead: Line<'static>,
+    screen: Line<'static>,
+    keep_awake: Option<&'a crate::keep_awake::KeepAwakeView>,
+    notices: Option<&'a crate::notifications::NoticeCounts>,
+}
+
+/// The header's right side, as wide as the whole crumbs allow (DEC-167 addendum 7): every
+/// part; else without the screen's own status; else with Keep awake in its short form
+/// too. The folder job, the waiting change sets and the notification counts are never
+/// dropped here; past the last step `header` shortens the crumbs as before. Before the
+/// first Keep awake read nothing is dropped. Inputs: the parts, the theme and whether a
+/// status fits next to the whole crumbs. Output: the status line.
+fn header_status(
+    parts: &HeaderParts,
+    theme: &Theme,
+    fits: impl Fn(&Line<'static>) -> bool,
+) -> Line<'static> {
+    let lead = |screen: bool| {
+        if screen && parts.screen.width() > 0 {
+            after(parts.lead.clone(), parts.screen.clone())
+        } else {
+            parts.lead.clone()
+        }
+    };
+    let whole = with_notices(
+        parts.notices,
+        with_keep_awake(parts.keep_awake, lead(true), theme),
+        theme,
+    );
+    if parts.keep_awake.is_none() || fits(&whole) {
+        return whole;
+    }
+    let bare = with_notices(
+        parts.notices,
+        with_keep_awake(parts.keep_awake, lead(false), theme),
+        theme,
+    );
+    if fits(&bare) {
+        return bare;
+    }
+    let short = with_notices(
+        parts.notices,
+        with_keep_awake_short(parts.keep_awake, lead(false), theme),
+        theme,
+    );
+    assert!(short.width() <= bare.width());
+    short
 }
 
 /// Counts change sets in one sentence. Inputs: the count and where they wait.
@@ -1276,6 +1435,9 @@ fn waiting_sets(count: u32, place: &str) -> Option<String> {
         count => Some(format!("{count} change sets wait {place}")),
     }
 }
+
+#[cfg(all(test, unix))]
+mod keep_awake_tests;
 
 #[cfg(all(test, unix))]
 mod tests {

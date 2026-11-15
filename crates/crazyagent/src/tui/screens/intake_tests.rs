@@ -228,6 +228,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     connection.questions(*query).unwrap();
                 }
                 Request::Notices(query) => connection.notices(*query).unwrap(),
+                Request::KeepAwake(_) => {}
                 Request::Learning(query) => {
                     sent.push("learning");
                     connection.learning(*query).unwrap();

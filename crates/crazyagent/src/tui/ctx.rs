@@ -1,3 +1,4 @@
+use super::client::keep_awake::KeepAwakeQuery;
 use super::client::learning::LearningQuery;
 use super::client::notifications::NoticesQuery;
 use super::client::questions::QuestionsQuery;
@@ -73,6 +74,7 @@ pub struct Store {
         crate::landing::WaitingChanges,
     )>,
     pub notices: Option<crate::notifications::NoticeCounts>,
+    pub keep_awake: Option<crate::keep_awake::KeepAwakeView>,
     pub intake: Option<crate::projects_home::job::JobView>,
 }
 
@@ -102,18 +104,20 @@ impl Default for Store {
             questions: Load::Idle,
             waiting: None,
             notices: None,
+            keep_awake: None,
             intake: None,
         }
     }
 }
 
 /// Says whether a request is one of the shell's badge reads, which every refresh queues:
-/// the pending-questions count for the footer or the notification counts for the header.
-/// Input: the request. Output: true for either read.
+/// the pending-questions count for the footer, the notification counts or the Keep awake
+/// view for the header. Input: the request. Output: true for any of the three reads.
 fn badge_read(request: &Request) -> bool {
     match request {
         Request::Questions(query) => **query == QuestionsQuery::Counts,
         Request::Notices(query) => **query == NoticesQuery::counts(),
+        Request::KeepAwake(query) => **query == KeepAwakeQuery::Read,
         _ => false,
     }
 }

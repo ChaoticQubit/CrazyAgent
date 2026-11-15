@@ -141,22 +141,43 @@ pub fn header(
             crumbs[crumbs.len() - 1].clone(),
         ]);
     }
-    let build = |crumbs: &[String]| {
-        let mut spans = vec![Span::raw(" ")];
-        spans.extend(brand::badge(theme, glyphs));
-        for crumb in crumbs {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled("/", theme.muted));
-            spans.push(Span::raw(format!("  {crumb}")));
-        }
-        Line::from(spans)
-    };
+    let build = |crumbs: &[String]| crumb_line(crumbs, theme, glyphs);
     let chosen = options
         .iter()
         .map(|option| build(option))
         .find(|left| left.width() + right.width() < limit)
         .unwrap_or_else(|| build(options.last().expect("one option exists")));
     row(limit, chosen, right, glyphs)
+}
+
+/// The header's left side: the brand badge, then each crumb after a slash. Inputs: the
+/// crumbs, theme and glyphs. Output: the line.
+fn crumb_line(crumbs: &[String], theme: &Theme, glyphs: &Glyphs) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(brand::badge(theme, glyphs));
+    for crumb in crumbs {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled("/", theme.muted));
+        spans.push(Span::raw(format!("  {crumb}")));
+    }
+    Line::from(spans)
+}
+
+/// Says whether `header` draws a status next to the whole crumbs, without shortening
+/// them. Inputs: width, crumbs after the badge, the status line, theme and glyphs.
+/// Output: true when both fit; an empty status always fits.
+pub fn header_fits(
+    limit: usize,
+    crumbs: &[String],
+    status: &Line<'static>,
+    theme: &Theme,
+    glyphs: &Glyphs,
+) -> bool {
+    let right = status.width();
+    if right == 0 {
+        return true;
+    }
+    crumb_line(crumbs, theme, glyphs).width() + right + 1 < limit
 }
 
 /// The help line with the pending questions badge, "2 questions", before `? Help` while

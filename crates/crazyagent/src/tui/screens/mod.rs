@@ -11,6 +11,7 @@ pub mod home;
 pub mod home_folder;
 pub(in crate::tui) mod intake;
 pub(in crate::tui) mod intake_job;
+pub(in crate::tui) mod keep_awake;
 pub(in crate::tui) mod new_project;
 mod new_project_input;
 pub(in crate::tui) mod new_project_page;
@@ -254,6 +255,8 @@ pub enum Place {
     Usage,
     Notifications,
     NotificationSettings,
+    KeepAwake,
+    KeepAwakeSettings,
     Demo,
     Onboarding {
         path: String,
@@ -376,6 +379,14 @@ pub trait Screen {
         false
     }
 
+    /// True while W is a key of the screen itself, as on the Team settings, where it sets
+    /// the terminals per window. The shell then leaves W to the screen instead of opening
+    /// Keep awake (DEC-167 addendum 7), which stays reachable through Go to. False by
+    /// default.
+    fn keeps_w(&self) -> bool {
+        false
+    }
+
     /// Picks one item a notification opened this screen on, once the screen reads its
     /// list. Inputs: the item and the context. Output: none; a screen without such items
     /// ignores it.
@@ -465,6 +476,8 @@ pub trait Screen {
             | Place::Usage
             | Place::Notifications
             | Place::NotificationSettings
+            | Place::KeepAwake
+            | Place::KeepAwakeSettings
             | Place::Demo
             | Place::AppPlugins
             | Place::SearchSettings => None,
@@ -546,6 +559,8 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::Usage => Box::new(usage::UsagePage::new()),
         Place::Notifications => Box::new(notifications::Notifications::new()),
         Place::NotificationSettings => Box::new(settings::notices::NotificationSettingsPage::new()),
+        Place::KeepAwake => Box::new(keep_awake::KeepAwakeScreen::new()),
+        Place::KeepAwakeSettings => Box::new(settings::keep_awake::KeepAwakeSettingsPage::new()),
         Place::CheckSettings { project } => {
             Box::new(settings::checks::CheckSettingsPage::new(match project {
                 None => process::Scope::App,

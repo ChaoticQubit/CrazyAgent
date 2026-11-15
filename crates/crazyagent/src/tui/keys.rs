@@ -66,6 +66,7 @@ pub enum Global {
     PreviousSection,
     NextSection,
     Notifications,
+    KeepAwake,
 }
 
 /// What Shift-←→ do while the master's terminal has the keys, a choice kept on this
@@ -166,7 +167,7 @@ impl Key {
 
 /// Resolves the keys every screen shares.
 /// Inputs: the key and whether a text field has focus. Output: the global
-/// action; `?`, `[`, `]` and `n` type into a focused field instead.
+/// action; `?`, `[`, `]`, `n` and `W` type into a focused field instead.
 pub fn global(key: &Key, typing: bool) -> Option<Global> {
     match key {
         Key::Ctrl('q' | 'c') => Some(Global::Quit),
@@ -177,6 +178,7 @@ pub fn global(key: &Key, typing: bool) -> Option<Global> {
         Key::Char('[') if !typing => Some(Global::PreviousSection),
         Key::Char(']') if !typing => Some(Global::NextSection),
         Key::Char('n') if !typing => Some(Global::Notifications),
+        Key::Char('W') if !typing => Some(Global::KeepAwake),
         _ => None,
     }
 }
@@ -374,6 +376,9 @@ mod tests {
         assert_eq!(global(&Key::Char('n'), false), Some(Global::Notifications));
         assert_eq!(global(&Key::Char('n'), true), None);
         assert_eq!(global(&Key::Char('N'), false), None);
+        assert_eq!(global(&Key::Char('W'), false), Some(Global::KeepAwake));
+        assert_eq!(global(&Key::Char('W'), true), None);
+        assert_eq!(global(&Key::Char('w'), false), None);
         assert_eq!(global(&Key::Esc, false), None);
     }
 

@@ -902,6 +902,7 @@ impl App {
             | OwnerEvent::Reveal(_)
             | OwnerEvent::Learning(_)
             | OwnerEvent::Notices(_)
+            | OwnerEvent::KeepAwake(_)
             | OwnerEvent::Settled(_) => {}
             OwnerEvent::Setup(event) => match event.result {
                 Ok(view) => {

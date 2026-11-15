@@ -1681,6 +1681,10 @@ impl Screen for Team {
         }
     }
 
+    fn keeps_w(&self) -> bool {
+        self.focus != Focus::Terminal && !self.master && self.settings.is_some()
+    }
+
     fn asking(&self) -> bool {
         if self.focus == Focus::Terminal || self.master {
             return false;

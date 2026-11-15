@@ -34,6 +34,7 @@ pub(super) mod editor;
 pub(super) mod harness_settings;
 pub(super) mod ide;
 pub(super) mod intake;
+pub(super) mod keep_awake;
 pub(super) mod learning;
 pub(super) mod model_choice;
 pub(super) mod notifications;
@@ -81,6 +82,7 @@ enum Job {
     Reveal(Box<ide::RevealQuery>),
     Learning(Box<learning::LearningQuery>),
     Notices(Box<notifications::NoticesQuery>),
+    KeepAwake(Box<keep_awake::KeepAwakeQuery>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -210,6 +212,7 @@ pub(super) enum OwnerEvent {
     Reveal(Box<ide::RevealEvent>),
     Learning(Box<learning::LearningEvent>),
     Notices(Box<notifications::NoticesEvent>),
+    KeepAwake(Box<keep_awake::KeepAwakeEvent>),
     Access {
         ready: bool,
         problem: String,
@@ -939,6 +942,34 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event: OwnerEvent::Notices(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::KeepAwake(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.keep_awake(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => keep_awake::KeepAwakeEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::KeepAwake(Box::new(event)),
                                 })
                                 .is_err()
                             {
