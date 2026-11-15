@@ -145,7 +145,9 @@ async fn the_tui_starts_an_intake_job_reads_it_to_done_and_dismisses_it() {
     let id = start_id().unwrap();
     let start = IntakeQuery::JobStart {
         id: id.clone(),
-        source: source.clone(),
+        subject: crate::projects_home::job::JobSubject::Add {
+            path: source.clone(),
+        },
         mode: AddMode::Copy,
         overrides: Vec::new(),
     };

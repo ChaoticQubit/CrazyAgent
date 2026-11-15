@@ -7,7 +7,7 @@ use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::accounts::AccountStatus;
 use crate::learning::{LearningProgress, MarkStep, StepId, Topic};
 use crate::pools::PoolSummary;
-use crate::projects_home::job::JobView;
+use crate::projects_home::job::{JobKind, JobView};
 use crate::projects_home::{FoundProject, FoundState, ProjectsHome};
 use crate::setup::{Dependency, DependencyState, SetupStatus};
 use crate::tui::client::OwnerEvent;
@@ -518,23 +518,31 @@ impl Home {
         job.filter(|_| ctx.store.projects.ready().is_some())
     }
 
-    /// Does what Enter or d asks of the engine's intake job: stop it, start it again with its
-    /// folder, mode and overrides, answer its soft refusal in Add folder, or forget it. The
-    /// request is kept so a failure is said.
+    /// Does what Enter or d asks of the engine's job: stop it, start it again as the same kind
+    /// of job (an add of its folder, a move of its project) with its mode and overrides,
+    /// answer its soft refusal in Add folder, or forget it. The request is kept so a failure
+    /// is said.
     /// Inputs: the job, an action it offers and the context. Output: the flow.
     fn job_action(&mut self, job: &JobView, action: JobAction, ctx: &mut Ctx) -> Flow {
         assert!(intake_job::actions(job).contains(&action));
         let query = match action {
             JobAction::Stop => IntakeQuery::JobStop { id: job.id.clone() },
-            JobAction::Retry => match start_id() {
-                Ok(id) => IntakeQuery::JobStart {
+            JobAction::Retry => match (start_id(), job.subject()) {
+                (Ok(id), Some(subject)) => IntakeQuery::JobStart {
                     id,
-                    source: job.source.clone(),
+                    subject,
                     mode: job.mode,
                     overrides: job.overrides.clone(),
                 },
-                Err(code) => {
-                    ctx.say(Message::error(RETRY_FAILED, &copy(&code)));
+                (Err(code), _) => {
+                    ctx.say(Message::error(retry_failed(job.kind), &copy(&code)));
+                    return Flow::Handled;
+                }
+                (Ok(_), None) => {
+                    ctx.say(Message::error(
+                        retry_failed(job.kind),
+                        &copy("intake_failed"),
+                    ));
                     return Flow::Handled;
                 }
             },
@@ -1445,7 +1453,8 @@ impl Screen for Home {
             if self.sent.as_ref() == Some(&reply.query) {
                 self.sent = None;
                 if let Err(code) = &reply.result {
-                    ctx.say(Message::error(job_failed(&reply.query), &copy(code)));
+                    let line = intake_job::refusal(code, ctx.store.intake.as_ref());
+                    ctx.say(Message::error(job_failed(&reply.query), &line));
                 }
             }
             match (&reply.query, &reply.result) {
@@ -1574,15 +1583,21 @@ impl Screen for Home {
     }
 }
 
-/// The lead said when Home could not start the intake job again.
-const RETRY_FAILED: &str = "Adding the folder did not start again.";
+/// The lead said when Home could not start a job of `kind` again. Input: the kind. Output:
+/// the lead.
+fn retry_failed(kind: JobKind) -> &'static str {
+    match kind {
+        JobKind::Add => "Adding the folder did not start again.",
+        JobKind::MoveProject => "Moving the project did not start again.",
+    }
+}
 
-/// The lead said when a request Home sent for the intake job failed. Input: the request, a
+/// The lead said when a request Home sent for the engine's job failed. Input: the request, a
 /// stop, a start again or a dismiss. Output: the lead.
 fn job_failed(query: &IntakeQuery) -> &'static str {
     match query {
         IntakeQuery::JobStop { .. } => "The folder did not stop.",
-        IntakeQuery::JobStart { .. } => RETRY_FAILED,
+        IntakeQuery::JobStart { subject, .. } => retry_failed(subject.kind()),
         IntakeQuery::JobDismiss { .. } => "The ended add was not dismissed.",
         other => panic!("Home sends no {other:?} for the intake job"),
     }
