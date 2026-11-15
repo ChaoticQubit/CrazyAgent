@@ -878,10 +878,13 @@ pub fn linux_unbridged_line(port: u16) -> String {
 /// that port, kept in the agent's messages. Inputs: what this Linux holds, none on another
 /// system, and the agent's sandbox as launched. Output: the sentences, or none.
 pub fn linux_unbridged_notice_on(
-    _host: Option<LinuxHost>,
-    _sandbox: &ProjectSandbox,
+    host: Option<LinuxHost>,
+    sandbox: &ProjectSandbox,
 ) -> Option<String> {
-    None
+    let nests = host.is_some_and(|host| host.nested);
+    let port = sandbox.unbridged_port().filter(|_| nests)?;
+    assert!(port < BRIDGE_PORT_MIN);
+    Some(linux_unbridged_line(port))
 }
 
 /// [`linux_unbridged_notice_on`] for this computer as it was last read. Input: the agent's
