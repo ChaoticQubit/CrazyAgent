@@ -5,6 +5,7 @@ use super::registry::{Harness, registry};
 pub mod acp;
 pub mod jsonl_turn;
 pub mod rules;
+pub mod text_turn;
 
 /// The piped drivers the engine runs: its own adapters for Codex and Claude Code and the
 /// Agent Client Protocol client ([`acp::Acp`]) for any harness whose manifest names `acp`,
@@ -17,6 +18,7 @@ pub enum Piped {
     Claude,
     Acp,
     JsonlTurn,
+    TextTurn,
 }
 
 /// The one dispatch point of piped launches: the driver the engine runs for a driver kind.

@@ -1,4 +1,5 @@
 use super::super::drivers::jsonl_turn::{Config, JsonlTurn};
+use super::super::drivers::text_turn;
 use super::super::drivers::{self, Piped};
 use super::super::registry::registry;
 use super::{
@@ -84,6 +85,17 @@ impl TurnSession {
             deadline,
             uncertain: false,
         })
+    }
+
+    /// Starts a conversation with the given text-turn settings; no process runs until the
+    /// first prompt. Inputs: the launch request and the settings. Output: the session, or the
+    /// refusals of [`TurnSession::start_with`].
+    pub fn start_text(
+        request: LaunchRequest,
+        config: text_turn::Config,
+    ) -> Result<Self, LaunchError> {
+        let _ = (request, config);
+        Err(failure("launch_harness_unsupported"))
     }
 
     /// The harness session id the next turn continues. Output: the id, or none before a
