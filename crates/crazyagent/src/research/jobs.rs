@@ -31,6 +31,10 @@ const ADDED_COLUMNS: [(&str, &str); 3] = [
     ("refused", "INTEGER NOT NULL DEFAULT 0"),
     ("not_before_ms", "INTEGER"),
 ];
+/// The assignments that start a job over: no rate-limited ends in a row, no refused launches
+/// in a row and no wait left by a refusal. Every statement that queues a stopped or finished
+/// job again for the owner sets them, so the job runs as a new one does (RV-DS241-159).
+pub(crate) const RUN_AGAIN: &str = "limited = 0, refused = 0, not_before_ms = NULL";
 
 const COLUMNS: &str = "id, project, kind, harness, tools, status, attempts, claimer, report_path, error, cancel_requested, output_bytes, created_ms, started_ms, heartbeat_ms, finished_ms";
 
@@ -367,7 +371,7 @@ impl ResearchJobs {
         let now = now_ms();
         self.transition(
             held,
-            "status = 'done', report_path = ?4, finished_ms = ?5, claimer = NULL",
+            "status = 'done', report_path = ?4, finished_ms = ?5, claimer = NULL, limited = 0",
             &[&report_path, &now],
         )?;
         let saved = ActivityKind::ResearchSaved;
@@ -393,7 +397,8 @@ impl ResearchJobs {
             .query_row(
                 "UPDATE research_jobs
                  SET status = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE 'failed' END,
-                     error = ?4, finished_ms = ?5, claimer = NULL, attempts = attempts - 1
+                     error = ?4, finished_ms = ?5, claimer = NULL, attempts = attempts - 1,
+                     limited = 0
                  WHERE id = ?1 AND claimer = ?2 AND attempts = ?3 AND status = 'running'
                  RETURNING status",
                 params![held.id, claimer, held.attempts, error, now],
@@ -639,7 +644,7 @@ impl ResearchJobs {
         let now = now_ms();
         self.transition(
             held,
-            "status = 'cancelled', finished_ms = ?4, claimer = NULL",
+            "status = 'cancelled', finished_ms = ?4, claimer = NULL, limited = 0",
             &[&now],
         )?;
         let stopped = ActivityKind::ResearchStopped;
@@ -665,7 +670,7 @@ impl ResearchJobs {
                               ELSE error END,
                  finished_ms = CASE WHEN cancel_requested = 1 OR attempts >= ?2 THEN ?4
                                     ELSE finished_ms END,
-                 claimer = NULL
+                 claimer = NULL, limited = 0
              WHERE status = 'running' AND heartbeat_ms <= ?1",
             params![cutoff, attempts_max, STALE_ERROR, now],
         )?)
@@ -797,10 +802,11 @@ impl ResearchJobs {
     }
 }
 
-/// Adds the columns DEC-170 addendum 6 gave the queue to a table an older engine made,
-/// each once, also when another opener adds it at the same time. Takes the connection.
-/// Returns any SQLite failure.
-fn add_columns(connection: &Connection) -> Result<(), JobError> {
+/// Adds the columns DEC-170 addendum 6 gave the queue to a table made without them, each
+/// once, also when another opener adds it at the same time. The queue and the engine's
+/// project setup both call it, so the owner's statements can name the columns before any
+/// runner opened the queue (RV-DS241-159). Takes the connection. Returns any SQLite failure.
+pub(crate) fn add_columns(connection: &Connection) -> rusqlite::Result<()> {
     let present = |name: &str| {
         connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('research_jobs') WHERE name=?1)",
@@ -818,7 +824,7 @@ fn add_columns(connection: &Connection) -> Result<(), JobError> {
         if let Err(error) = added
             && !present(name)?
         {
-            return Err(error.into());
+            return Err(error);
         }
     }
     Ok(())

@@ -1,6 +1,7 @@
 use crate::config::{EffectiveConfig, ModelAuthentication};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
+use crate::research::jobs::RUN_AGAIN;
 use crate::sandbox::policy::LevelView;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 #[cfg(unix)]
@@ -1514,6 +1515,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 ON research_jobs(project, status, id);",
         )
         .map_err(error)?;
+    crate::research::jobs::add_columns(connection).map_err(error)?;
     links::initialize(connection)
 }
 
@@ -2331,7 +2333,7 @@ fn replan_jobs(
                     &format!(
                         "UPDATE research_jobs SET status=?2, harness=?3, tools=?4,
                         attempts=CASE WHEN status IN ('failed','cancelled') THEN 0 ELSE attempts END,
-                        cancel_requested=0, error=NULL, claimer=NULL, finished_ms=NULL
+                        cancel_requested=0, error=NULL, claimer=NULL, finished_ms=NULL, {RUN_AGAIN}
                         WHERE id=?1 AND status IN ({restartable})"
                     ),
                     params![job.id, waiting.stored(), harness, tools],
@@ -2429,9 +2431,11 @@ fn retry_research(
     let status = effective(ResearchStatus::Queued, project_has_pool(config, project_id));
     let changed = tx
         .execute(
-            "UPDATE research_jobs SET status=?2, attempts=0, claimer=NULL, error=NULL,
-            cancel_requested=0, output_bytes=0, started_ms=NULL, heartbeat_ms=NULL,
-            finished_ms=NULL WHERE id=?1 AND status IN ('failed','cancelled')",
+            &format!(
+                "UPDATE research_jobs SET status=?2, attempts=0, claimer=NULL, error=NULL,
+                cancel_requested=0, output_bytes=0, started_ms=NULL, heartbeat_ms=NULL,
+                finished_ms=NULL, {RUN_AGAIN} WHERE id=?1 AND status IN ('failed','cancelled')"
+            ),
             params![id, status.stored()],
         )
         .map_err(error)?;
@@ -2512,9 +2516,12 @@ fn plan_roadmap(
         Some(job) => {
             let changed = tx
                 .execute(
-                    "UPDATE research_jobs SET status=?2, attempts=0, claimer=NULL, error=NULL,
-                    cancel_requested=0, output_bytes=0, started_ms=NULL, heartbeat_ms=NULL,
-                    finished_ms=NULL WHERE id=?1 AND status IN ('done','failed','cancelled')",
+                    &format!(
+                        "UPDATE research_jobs SET status=?2, attempts=0, claimer=NULL, error=NULL,
+                        cancel_requested=0, output_bytes=0, started_ms=NULL, heartbeat_ms=NULL,
+                        finished_ms=NULL, {RUN_AGAIN}
+                        WHERE id=?1 AND status IN ('done','failed','cancelled')"
+                    ),
                     params![job.id, waiting.stored()],
                 )
                 .map_err(error)?;
