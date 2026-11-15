@@ -282,7 +282,7 @@ pub fn finish_device(
 /// Reads the login name the token belongs to, which also proves GitHub accepts it.
 /// Output: the login, or `github_token_refused` for a token GitHub does not accept.
 pub fn login(endpoints: &Endpoints, token: &SecretString) -> Result<String, EngineError> {
-    user(endpoints, token).map(|(login, _)| login)
+    user(endpoints, token).map(|(login, _, _)| login)
 }
 
 /// Reads the account the token belongs to for a publish commit's noreply identity.
@@ -292,21 +292,22 @@ pub fn identity(
     endpoints: &Endpoints,
     token: &SecretString,
 ) -> Result<(String, Option<u64>), EngineError> {
-    let _ = (endpoints, token);
-    Err(failure("github_publish_unbuilt"))
+    user(endpoints, token).map(|(login, id, _)| (login, id))
 }
 
 /// Reads the account the token belongs to: its login, which also proves GitHub accepts
-/// the token, and the scopes GitHub names for a classic token. Inputs: endpoints and
-/// token. Output: the login and the scopes, None when GitHub names none, or
-/// `github_token_refused`.
+/// the token, its numeric id, and the scopes GitHub names for a classic token. Inputs:
+/// endpoints and token. Output: the login, the id and the scopes, each None when GitHub
+/// sent none, or `github_token_refused`.
 fn user(
     endpoints: &Endpoints,
     token: &SecretString,
-) -> Result<(String, Option<Vec<String>>), EngineError> {
+) -> Result<(String, Option<u64>, Option<Vec<String>>), EngineError> {
     #[derive(Deserialize)]
     struct User {
         login: String,
+        #[serde(default)]
+        id: Option<u64>,
     }
     let reply = endpoints
         .request(endpoints.api("user")?, API_JSON, Some(token), None)
@@ -317,7 +318,7 @@ fn user(
         _ => return Err(failure("github_unreachable")),
     }
     let user: User = json(&reply)?;
-    Ok((account_name(&user.login)?, reply.scopes))
+    Ok((account_name(&user.login)?, user.id, reply.scopes))
 }
 
 /// Checks an account name GitHub sent: at most 39 letters, digits and hyphens.
@@ -358,7 +359,7 @@ pub fn owners(endpoints: &Endpoints, token: &SecretString) -> Result<GitHubOwner
     struct Organization {
         login: String,
     }
-    let (login, scopes) = user(endpoints, token)?;
+    let (login, _, scopes) = user(endpoints, token)?;
     let mut owners = vec![GitHubOwner {
         login,
         personal: true,
@@ -503,7 +504,7 @@ pub fn create(
     {
         return Err(failure("github_repo_description_invalid"));
     }
-    let (login, _) = user(endpoints, token)?;
+    let (login, _, _) = user(endpoints, token)?;
     let path = if repo.owner.eq_ignore_ascii_case(&login) {
         "user/repos".to_owned()
     } else {

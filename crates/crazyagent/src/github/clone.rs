@@ -128,6 +128,26 @@ pub(super) fn clone_command(
     destination: &Path,
     name: &str,
 ) -> Result<(Command, url::Url), EngineError> {
+    let (remote, scheme) = remote_url(endpoints, name)?;
+    let mut command = credential_git(git, empty_home, helper, scheme);
+    command
+        .args(["clone", "--quiet", "--no-recurse-submodules", "--template="])
+        .arg("--")
+        .arg(remote.as_str())
+        .arg(destination)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    Ok((command, remote))
+}
+
+/// The address git reaches `owner/name` at on the endpoints' web host, with no user or
+/// password, and the one scheme git may use for it. Inputs: endpoints and `owner/name`.
+/// Output: the URL and the scheme, or `github_repo_name_invalid`.
+pub(super) fn remote_url(
+    endpoints: &Endpoints,
+    name: &str,
+) -> Result<(url::Url, &'static str), EngineError> {
     full_name(name)?;
     let remote = endpoints
         .web
@@ -140,6 +160,15 @@ pub(super) fn clone_command(
         "https"
     };
     assert_eq!(remote.scheme(), scheme);
+    Ok((remote, scheme))
+}
+
+/// Starts a git command that reaches GitHub only through the credential store: the
+/// owner's helpers are reset and the store's helper is the one git asks, no prompt or
+/// askpass program runs, hooks and fsmonitor are off, and every transport but `scheme`
+/// is refused, with no redirect followed. Inputs: git, the empty home, the helper value
+/// and the scheme. Output: the command, without its git verb.
+pub(super) fn credential_git(git: &Path, empty_home: &Path, helper: &str, scheme: &str) -> Command {
     let mut command = git_command(git, empty_home);
     command
         .env("GIT_ASKPASS", "")
@@ -155,15 +184,8 @@ pub(super) fn clone_command(
         .args(["-c", "protocol.allow=never"])
         .arg("-c")
         .arg(format!("protocol.{scheme}.allow=always"))
-        .args(["-c", "http.followRedirects=false"])
-        .args(["clone", "--quiet", "--no-recurse-submodules", "--template="])
-        .arg("--")
-        .arg(remote.as_str())
-        .arg(destination)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    Ok((command, remote))
+        .args(["-c", "http.followRedirects=false"]);
+    command
 }
 
 /// Clones one repository into the projects home through the credential store, so the
@@ -230,34 +252,12 @@ fn fetch(
     private_folder(&empty_home).map_err(|_| failure("github_clone_failed"))?;
     let (mut command, remote) =
         clone_command(endpoints, helper, git, &empty_home, &checkout, name)?;
-    let mut child =
-        crate::spawn_gate::spawn(&mut command).map_err(|_| failure("github_clone_failed"))?;
-    let stderr = child.stderr.take().expect("git stderr is piped");
-    let reader = std::thread::spawn(move || {
-        let mut sink = Vec::new();
-        let _ = stderr.take(ERROR_BYTES_MAX).read_to_end(&mut sink);
-        sink.len()
-    });
-    let deadline = Instant::now() + CLONE_TIME;
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|_| failure("github_clone_failed"))?
-        {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = reader.join();
-            return Err(failure("github_clone_timed_out"));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    let _ = reader.join();
-    if !status.success() {
-        return Err(failure("github_clone_failed"));
-    }
+    finish(
+        &mut command,
+        CLONE_TIME,
+        "github_clone_failed",
+        "github_clone_timed_out",
+    )?;
     verify_config(git, &empty_home, &checkout.join(".git/config"), &remote)?;
     if std::fs::symlink_metadata(destination).is_ok() {
         return Err(failure("clone_destination_exists"));
@@ -267,6 +267,43 @@ fn fetch(
         full_name: name.to_owned(),
         path: destination.to_string_lossy().into_owned(),
     })
+}
+
+/// Runs a git command that talks to GitHub to its end, draining its error output so it
+/// never blocks, and stops it past the time limit. Inputs: the command, with stderr
+/// piped, the limit and the codes for a failure and for a stop. Output: `()` when git
+/// succeeded, or one of the two codes.
+pub(super) fn finish(
+    command: &mut Command,
+    time: Duration,
+    failed: &str,
+    timed_out: &str,
+) -> Result<(), EngineError> {
+    let mut child = crate::spawn_gate::spawn(command).map_err(|_| failure(failed))?;
+    let stderr = child.stderr.take().expect("git stderr is piped");
+    let reader = std::thread::spawn(move || {
+        let mut sink = Vec::new();
+        let _ = stderr.take(ERROR_BYTES_MAX).read_to_end(&mut sink);
+        sink.len()
+    });
+    let deadline = Instant::now() + time;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|_| failure(failed))? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(failure(timed_out));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let _ = reader.join();
+    if !status.success() {
+        return Err(failure(failed));
+    }
+    Ok(())
 }
 
 /// Checks the `.git/config` a clone wrote: its origin URL is the remote cloned and it holds

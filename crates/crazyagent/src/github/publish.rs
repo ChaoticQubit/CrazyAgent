@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Output, Stdio};
+use std::time::Duration;
 
 #[cfg(all(test, target_os = "macos"))]
 mod publish_tests;
@@ -26,6 +27,11 @@ const MAIN: &str = "main";
 const ENGINE_EMAIL: &str = "engine@crazyagent.invalid";
 const ENGINE_START: &str = "Start project";
 const GITIGNORE: &str = ".gitignore";
+const MESSAGE: &str = "Publish with CrazyAgent";
+const AUTHOR_BYTES_MAX: usize = 256;
+const PUSH_TIME: Duration = Duration::from_secs(1800);
+const STAGE: &str = "stage.git";
+const FETCH: &str = "+refs/heads/*:refs/remotes/origin/*";
 const DOCS_OFF: [&str; 2] = ["/.crazyagent/", "/graphify-out/"];
 const DOCS_ON: [&str; 4] = [
     "!/.crazyagent/",
@@ -38,6 +44,7 @@ const SECURITY_PATHS: [&str; 3] = ["SECURITY.md", ".github/SECURITY.md", "docs/S
 const SECURITY_POLICY: &str = "# Security Policy\n\n## Reporting a Vulnerability\n\nPlease report a vulnerability privately through GitHub's private vulnerability reporting: open this repository's Security tab and choose \"Report a vulnerability\". Please do not open a public issue for it.\n";
 const DEPENDABOT: &str = ".github/dependabot.yml";
 const DEPENDABOT_PATHS: [&str; 2] = [DEPENDABOT, ".github/dependabot.yaml"];
+const WRITTEN: [&str; 3] = [GITIGNORE, SECURITY_PATHS[0], DEPENDABOT];
 const ECOSYSTEMS: [(&str, &str); 6] = [
     ("Cargo.toml", "cargo"),
     ("package.json", "npm"),
@@ -241,18 +248,41 @@ pub(super) fn inspect(
     if !project.is_absolute() || !folder.is_dir() {
         return Err(failure("project_folder_missing"));
     }
-    match std::fs::symlink_metadata(project.join(".git")) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(GitHubLocal {
-                repository: false,
-                branch: None,
-                history: GitHubHistory::Empty,
-            });
-        }
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        _ => return Err(failure("github_publish_not_plain_repo")),
+    if !plain_repository(project)? {
+        return Ok(GitHubLocal {
+            repository: false,
+            branch: None,
+            history: GitHubHistory::Empty,
+        });
     }
     remotes(git, home, project, host)?;
+    let (branch, history) = head_state(git, home, project)?;
+    Ok(GitHubLocal {
+        repository: true,
+        branch: Some(branch),
+        history,
+    })
+}
+
+/// Tells whether a project holds its own repository: a plain `.git` folder, not a link
+/// or a file that names a git folder elsewhere. Input: the project. Output: true for a
+/// plain folder, false for none, or `github_publish_not_plain_repo`.
+fn plain_repository(project: &Path) -> Result<bool, EngineError> {
+    match std::fs::symlink_metadata(project.join(".git")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(true),
+        _ => Err(failure("github_publish_not_plain_repo")),
+    }
+}
+
+/// Reads the branch HEAD names and what the history holds. Inputs: git, its empty home
+/// and the project. Output: the branch and the history, or `github_publish_detached`,
+/// `github_publish_not_plain_repo`.
+fn head_state(
+    git: &Path,
+    home: &Path,
+    project: &Path,
+) -> Result<(String, GitHubHistory), EngineError> {
     let head = run(project_git(git, home, project).args(["symbolic-ref", "-q", "HEAD"]))?;
     match head.status.code() {
         Some(0) => {}
@@ -295,11 +325,7 @@ pub(super) fn inspect(
     } else {
         GitHubHistory::Empty
     };
-    Ok(GitHubLocal {
-        repository: true,
-        branch: Some(branch),
-        history,
-    })
+    Ok((branch, history))
 }
 
 /// Refuses a repository that already has a remote: one on GitHub is published already,
@@ -867,26 +893,59 @@ pub(super) struct Author {
     pub(super) email: String,
 }
 
-/// The identity the owner's own git commits with in the project. Inputs: git, the
-/// owner's home folder and the project. Output: the author, or None when git names none
-/// that is valid.
+/// The identity the owner's own git commits with in the project: git reads the project's
+/// settings and the owner's own, from the owner's home, as a commit there would. A name
+/// or email git would refuse or mangle counts as none. Inputs: git, the owner's home
+/// folder and the project. Output: the author, or None.
 pub(super) fn configured_author(git: &Path, owner_home: &Path, project: &Path) -> Option<Author> {
-    let _ = (git, owner_home, project);
-    None
+    let value = |key: &str| {
+        let mut command = clone::git_command(git, owner_home);
+        command
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .current_dir(project)
+            .env("GIT_DIR", project.join(".git"))
+            .args(GIT_SAFE)
+            .args(["config", "--get", key])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
+        let output = run(&mut command).ok()?;
+        let text = String::from_utf8(output.stdout)
+            .ok()
+            .filter(|_| output.status.success())?;
+        let text = text.strip_suffix('\n').unwrap_or(&text).to_owned();
+        let fine = !text.trim().is_empty()
+            && text.len() <= AUTHOR_BYTES_MAX
+            && !text.chars().any(|c| c.is_control() || c == '<' || c == '>');
+        fine.then_some(text)
+    };
+    let name = value("user.name")?;
+    let email = value("user.email")
+        .filter(|email| email.contains('@') && !email.contains(char::is_whitespace))?;
+    Some(Author { name, email })
 }
 
-/// The GitHub account's noreply identity. Inputs: the login and the numeric id when
-/// GitHub sent it. Output: the author.
+/// The GitHub account's noreply identity, which GitHub links to the account without
+/// showing a real address. Inputs: the login and the numeric id when GitHub sent it.
+/// Output: the author.
 pub(super) fn noreply_author(login: &str, id: Option<u64>) -> Author {
-    let _ = (login, id);
+    let email = match id {
+        Some(id) => format!("{id}+{login}@users.noreply.github.com"),
+        None => format!("{login}@users.noreply.github.com"),
+    };
     Author {
-        name: String::new(),
-        email: String::new(),
+        name: login.to_owned(),
+        email,
     }
 }
 
-/// Makes the publish commit. Inputs: git, its empty home, the project, the paths prepare
-/// wrote and the author. Output: the commit to push.
+/// Makes the publish commit, "Publish with CrazyAgent", by the author. With no history,
+/// or only the engine's start commit, it takes everything the ignore rules keep. With
+/// owner history it takes only the files publish wrote, and only when they changed, so
+/// the owner's work in progress, staged or not, stays as it is and is counted.
+/// Inputs: git, its empty home, the project, the paths prepare wrote and the author.
+/// Output: the commit to push, or `github_publish_file_invalid` for a path publish does
+/// not write, `github_publish_detached`, `github_publish_not_plain_repo`,
+/// `github_publish_failed`.
 pub(super) fn commit(
     git: &Path,
     home: &Path,
@@ -894,13 +953,102 @@ pub(super) fn commit(
     written: &[String],
     author: &Author,
 ) -> Result<GitHubCommitted, EngineError> {
-    let _ = (git, home, project, written, author);
-    Err(failure("github_publish_unbuilt"))
+    let failed = || failure("github_publish_failed");
+    if written.iter().any(|path| !WRITTEN.contains(&path.as_str())) {
+        return Err(failure("github_publish_file_invalid"));
+    }
+    let paths: Vec<&str> = WRITTEN
+        .into_iter()
+        .filter(|known| written.iter().any(|path| path == known))
+        .collect();
+    if !plain_repository(project)? {
+        return Err(failure("github_publish_not_plain_repo"));
+    }
+    let (branch, history) = head_state(git, home, project)?;
+    let succeeded = |command: &mut Command| -> Result<(), EngineError> {
+        let output = run(command)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(failed())
+        }
+    };
+    let committing = || {
+        let mut command = project_git(git, home, project);
+        command
+            .env("GIT_AUTHOR_NAME", &author.name)
+            .env("GIT_AUTHOR_EMAIL", &author.email)
+            .env("GIT_COMMITTER_NAME", &author.name)
+            .env("GIT_COMMITTER_EMAIL", &author.email)
+            .args(["-c", "commit.gpgSign=false", "-c", "gc.auto=0"])
+            .args(["-c", "maintenance.auto=false"])
+            .args(["commit", "-q", "--no-verify", "-m", MESSAGE]);
+        command
+    };
+    if history == GitHubHistory::Owner {
+        if !paths.is_empty() {
+            succeeded(
+                project_git(git, home, project)
+                    .args(["add", "-f", "--"])
+                    .args(&paths),
+            )?;
+            let changed = run(project_git(git, home, project)
+                .args(["diff", "--cached", "--quiet", "HEAD", "--"])
+                .args(&paths))?;
+            match changed.status.code() {
+                Some(0) => {}
+                Some(1) => succeeded(committing().args(["--only", "--"]).args(&paths))?,
+                _ => return Err(failed()),
+            }
+        }
+    } else {
+        succeeded(project_git(git, home, project).args(["add", "-A"]))?;
+        succeeded(committing().arg("--allow-empty"))?;
+    }
+    let commit = head_commit(git, home, project)?;
+    let status = listing(project_git(git, home, project).args([
+        "status",
+        "--porcelain",
+        "-z",
+        "--no-renames",
+        "--untracked-files=all",
+    ]))?;
+    let left_out = status
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .count();
+    Ok(GitHubCommitted {
+        branch,
+        commit,
+        left_out,
+    })
 }
 
-/// Pushes the publish commit and points the project at the repository. Inputs: the
+/// Reads the commit HEAD points at. Inputs: git, its empty home and the project.
+/// Output: the commit id, or `github_publish_failed`.
+fn head_commit(git: &Path, home: &Path, project: &Path) -> Result<String, EngineError> {
+    let output =
+        run(project_git(git, home, project).args(["rev-parse", "--verify", "-q", "HEAD"]))?;
+    let commit = String::from_utf8(output.stdout)
+        .ok()
+        .filter(|_| output.status.success())
+        .map(|text| text.trim_end().to_owned())
+        .filter(|commit| {
+            matches!(commit.len(), 40 | 64) && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
+    commit.ok_or_else(|| failure("github_publish_failed"))
+}
+
+/// Pushes the publish commit to `owner/name` and then points the project at it. The push
+/// runs from a private staging repository in git's empty home that borrows the project's
+/// objects and holds one branch, so no setting of the project's own, such as a URL
+/// rewrite, an extra header or a credential helper, ever meets the token. The project
+/// gets its origin, upstream and remote branch only after the push landed. Inputs: the
 /// endpoints, the store's helper, git, its empty home, the project, `owner/name` and the
-/// commit. Output: `()`, or the refusal.
+/// commit. Output: `()`, or `github_repo_name_invalid`, `github_publish_head_moved` when
+/// HEAD is no longer that branch and commit, `github_publish_push_failed`,
+/// `github_publish_push_timed_out`, `github_publish_not_plain_repo`,
+/// `github_publish_failed`.
 pub(super) fn push(
     endpoints: &super::Endpoints,
     helper: &str,
@@ -910,6 +1058,101 @@ pub(super) fn push(
     full_name: &str,
     committed: &GitHubCommitted,
 ) -> Result<(), EngineError> {
-    let _ = (endpoints, helper, git, home, project, full_name, committed);
-    Err(failure("github_publish_unbuilt"))
+    let failed = || failure("github_publish_failed");
+    let (remote, scheme) = clone::remote_url(endpoints, full_name)?;
+    if !plain_repository(project)? {
+        return Err(failure("github_publish_not_plain_repo"));
+    }
+    let (branch, _) = head_state(git, home, project)?;
+    let commit = head_commit(git, home, project)?;
+    if branch != committed.branch || commit != committed.commit {
+        return Err(failure("github_publish_head_moved"));
+    }
+    let config = project.join(".git").join("config");
+    match std::fs::symlink_metadata(&config) {
+        Ok(metadata) if metadata.is_file() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Err(failure("github_publish_not_plain_repo")),
+    }
+    let objects = project.join(".git").join("objects");
+    let mut alternates = objects.as_os_str().as_encoded_bytes().to_vec();
+    if alternates.contains(&b'\n') {
+        return Err(failed());
+    }
+    alternates.push(b'\n');
+    let stage = home.join(STAGE);
+    let reference = format!("refs/heads/{branch}");
+    let mut init = clone::git_command(git, home);
+    init.args(GIT_SAFE)
+        .args(["init", "--bare", "-q", "--template="]);
+    if commit.len() == 64 {
+        init.arg("--object-format=sha256");
+    }
+    let made = run(init
+        .arg("--")
+        .arg(&stage)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null()))?;
+    if !made.status.success() {
+        return Err(failed());
+    }
+    let info = stage.join("objects").join("info");
+    std::fs::create_dir_all(&info)
+        .and_then(|()| std::fs::write(info.join("alternates"), &alternates))
+        .map_err(|_| failed())?;
+    let staged = run(clone::git_command(git, home)
+        .env("GIT_DIR", &stage)
+        .args(GIT_SAFE)
+        .args(["update-ref", reference.as_str(), commit.as_str()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null()))?;
+    if !staged.status.success() {
+        return Err(failed());
+    }
+    clone::finish(
+        clone::credential_git(git, home, helper, scheme)
+            .env("GIT_DIR", &stage)
+            .args(["push", "--quiet", "--no-verify", "--"])
+            .arg(remote.as_str())
+            .arg(format!("{reference}:{reference}"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+        PUSH_TIME,
+        "github_publish_push_failed",
+        "github_publish_push_timed_out",
+    )?;
+    let settings = [
+        ("remote.origin.url".to_owned(), remote.as_str()),
+        ("remote.origin.fetch".to_owned(), FETCH),
+        (format!("branch.{branch}.remote"), "origin"),
+        (format!("branch.{branch}.merge"), reference.as_str()),
+    ];
+    for (key, value) in &settings {
+        let set = run(clone::git_command(git, home)
+            .args(["config", "--file"])
+            .arg(&config)
+            .args(["--replace-all", key.as_str(), *value])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null()))?;
+        if !set.status.success() {
+            return Err(failed());
+        }
+    }
+    let tracking = format!("refs/remotes/origin/{branch}");
+    let tracked = run(project_git(git, home, project).args([
+        "update-ref",
+        tracking.as_str(),
+        commit.as_str(),
+    ]))?;
+    let origin = run(clone::git_command(git, home)
+        .args(["config", "--file"])
+        .arg(&config)
+        .args(["--no-includes", "--get-all", "remote.origin.url"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null()))?;
+    if !tracked.status.success() || origin.stdout != format!("{remote}\n").as_bytes() {
+        return Err(failed());
+    }
+    Ok(())
 }
