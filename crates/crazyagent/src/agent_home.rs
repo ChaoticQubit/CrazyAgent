@@ -51,9 +51,10 @@ const HOME_PASSES_MAX: usize = 8;
 const KEPT_DEPTH_MAX: usize = 2;
 /// What a launch keeps in an agent home (RV-DS241-137), every other entry going: the
 /// engine's launch state, lock, relay plugin and key file; both harnesses' instruction and
-/// Codex config files, which the launch rewrites, and the skills; Claude Code's sign-in,
-/// transcripts and team, task, todo and plan state; Codex's sign-in and sessions; the
-/// per-agent keychain; and the download caches. No entry kept holds config a tool runs.
+/// Codex config files, which the launch rewrites, and a Codex home's skills ([`kept_in`]);
+/// Claude Code's sign-in, transcripts and team, task, todo and plan state; Codex's sign-in
+/// and sessions; the per-agent keychain; and the download caches. No entry kept holds
+/// config a tool runs.
 const HOME_KEPT: &[(&str, Kept)] = &[
     (crate::launch_context::STATE, Kept::Folder),
     (crate::launch_context::LOCK, Kept::Lock),
@@ -62,7 +63,7 @@ const HOME_KEPT: &[(&str, Kept)] = &[
     (Harness::Claude.instruction_file(), Kept::File),
     (Harness::Codex.instruction_file(), Kept::File),
     ("config.toml", Kept::File),
-    ("skills", Kept::Folder),
+    (CODEX_SKILLS, Kept::Folder),
     (".claude.json", Kept::File),
     (".credentials.json", Kept::File),
     ("projects", Kept::Folder),
@@ -78,6 +79,26 @@ const HOME_KEPT: &[(&str, Kept)] = &[
     (".cache", Kept::Folder),
     (".npm", Kept::Only(NPM_KEPT)),
 ];
+/// The folder of a harness home its harness loads skills from. A Codex launch removes it and
+/// makes it again with the engine's copies ([`crate::launch_context`]); Claude Code is given
+/// the engine's skills in the relay plugin folder, so in its home the folder holds only what
+/// an earlier run wrote there.
+const CODEX_SKILLS: &str = "skills";
+/// What a launch keeps in the home of one harness: [`HOME_KEPT`], without the skills folder
+/// for Claude Code, which would load each skill an earlier run left there. Input: the
+/// harness. Output: the names with their kinds.
+fn kept_in(harness: Harness) -> Vec<(&'static str, Kept)> {
+    let kept: Vec<_> = HOME_KEPT
+        .iter()
+        .copied()
+        .filter(|(name, _)| harness == Harness::Codex || *name != CODEX_SKILLS)
+        .collect();
+    assert_eq!(
+        kept.len() + usize::from(harness == Harness::Claude),
+        HOME_KEPT.len()
+    );
+    kept
+}
 /// What a launch keeps in an agent home's `.claude`, where some Claude Code versions keep a
 /// native team's config and tasks, which the engine reads there.
 const CLAUDE_FOLDER_KEPT: &[(&str, Kept)] = &[("teams", Kept::Folder), ("tasks", Kept::Folder)];
@@ -854,7 +875,7 @@ pub fn with_agent(mut text: String, agent: &str) -> String {
 /// is empty, so a stale copy never outlives a cleared page; the engine's own record of the
 /// instruction files it found, kept outside the home, replaces the last launch's; nothing
 /// an earlier run left in the home but what its harness keeps stays for this one
-/// ([`keep_only`] with [`HOME_KEPT`]).
+/// ([`keep_only`] with [`kept_in`]).
 /// Input: the agent's 0700 home (its CLAUDE_CONFIG_DIR or CODEX_HOME), the harness, the
 /// project and what `text` built. Output: unit, or a plain code.
 pub fn prepare(
@@ -873,7 +894,7 @@ pub fn prepare(
     record_files(&project.data, home, &given.files)?;
     write_record(&project.data, GIVEN_FOLDER, home, &given.text)?;
     let mut held = Vec::new();
-    keep_only(home, HOME_KEPT, &mut held)?;
+    keep_only(home, &kept_in(harness), &mut held)?;
     crate::team::cleanup::clear_acls(held.iter().map(PathBuf::as_path));
     let name = harness.instruction_file();
     if given.text.is_empty() {
@@ -1460,20 +1481,20 @@ fn before_home_step(entry: &Path) {
     }
 }
 
-/// Resets a native lead's teammates' home as [`prepare`] resets an agent home: only what
-/// [`HOME_KEPT`] names stays, with the folders [`crate::sandbox::CLAUDE_TEAM_SHARED`] names
-/// kept only as links, since there they lead to the lead's own folders (RV-DS241-137 code
-/// r2 F1). Input: the teammates' 0700 home. Output: unit, or a plain code when it is not a
-/// real folder or an entry stays.
+/// Resets a native lead's teammates' home as [`prepare`] resets a Claude Code agent's home:
+/// only what [`kept_in`] names stays, with the folders
+/// [`crate::sandbox::CLAUDE_TEAM_SHARED`] names kept only as links, since there they lead to
+/// the lead's own folders (RV-DS241-137 code r2 F1). Input: the teammates' 0700 home.
+/// Output: unit, or a plain code when it is not a real folder or an entry stays.
 #[cfg(unix)]
 pub(crate) fn reset_mates_home(mates: &Path) -> Result<(), AgentHomeError> {
     if !mates.is_absolute() {
         return Err(failure("agent_home_invalid"));
     }
     real_folder(mates)?;
-    let kept: Vec<(&str, Kept)> = HOME_KEPT
-        .iter()
-        .map(|&(name, kind)| {
+    let kept: Vec<(&str, Kept)> = kept_in(Harness::Claude)
+        .into_iter()
+        .map(|(name, kind)| {
             if crate::sandbox::CLAUDE_TEAM_SHARED.contains(&name) {
                 (name, Kept::Link)
             } else {
