@@ -226,3 +226,18 @@ fn a_status_command_may_use_the_whole_account_check_bound() {
         Duration::from_secs(575)
     );
 }
+
+/// RV-DS241-54: a token that expires just past Claude Code's refresh window when the
+/// custodian looks is inside it by the time `claude auth status` decides, so it counts as
+/// lapsing for as long as that check may run, and a token well past it does not.
+#[test]
+fn a_token_the_window_reaches_before_the_status_check_decides_counts_as_lapsing() {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    assert!(lapsing(now + REFRESH_WINDOW + Duration::from_secs(5)));
+    assert!(lapsing(
+        now + REFRESH_WINDOW + CHECK_TIME - Duration::from_secs(1)
+    ));
+    assert!(!lapsing(
+        now + REFRESH_WINDOW + CHECK_TIME + Duration::from_secs(60)
+    ));
+}
