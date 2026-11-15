@@ -29,6 +29,9 @@ pub const TEMP_SKIPPED: &str =
 const AGENT_TMP: &str = "/private/tmp/ca-";
 #[cfg(not(target_os = "macos"))]
 const AGENT_TMP: &str = "/tmp/ca-";
+/// The most links one chain may pass through, the bound Linux puts on one lookup.
+#[cfg(unix)]
+const LINK_HOPS_MAX: usize = 40;
 /// The most rows read from one table that names folders agents can write, and the most
 /// repositories one project may declare; more is refused as unreadable, so no folder is
 /// ever left out of an [`AgentSpace`].
@@ -372,7 +375,8 @@ pub fn at_start(root: &Path, home: Option<&Path>) -> crate::paths::Harnesses {
 /// Checks a harness file, chosen or found, before it is pinned or stored: an absolute path
 /// of at most [`PATH_BYTES_MAX`] bytes with no control characters, to a runnable regular
 /// file, no version-manager shim, outside every folder agents can write ([`AgentSpace`]),
-/// in folders no other user can change, whose real file passes the pin's own file rule.
+/// in folders no other user can change, each link of its chain too, whose real file
+/// passes the pin's own file rule.
 /// Inputs: the id, the path, the agent space and HOME. Output: the path, links kept.
 pub fn check(
     id: &str,
@@ -410,15 +414,70 @@ pub fn check_file(
     if is_shim(home, path) {
         return Err(failure(PATH_SHIM));
     }
-    if space.holds(path) {
+    let hops = link_hops(path).ok_or_else(|| failure(PATH_NOT_FOUND))?;
+    if space.holds(path) || hops.iter().any(|hop| space.holds(hop)) {
         return Err(failure(PATH_AGENT_SPACE));
     }
-    if crate::service::changeable_by_others(path).is_some() {
+    if std::iter::once(path)
+        .chain(hops.iter().map(PathBuf::as_path))
+        .any(|part| crate::service::changeable_by_others(part).is_some())
+    {
         return Err(failure(PATH_CHANGEABLE));
     }
     crate::engine::pinnable(&metadata)?;
     assert!(path.is_absolute());
     Ok(path.to_path_buf())
+}
+
+/// Every link a path's resolution passes through, file and folder links alike, each named
+/// in its real folder, in the order the resolution meets them, so a chain is judged by
+/// every place one of its links sits and not only by its two ends (RV-DS241-140). Reads at
+/// most [`LINK_HOPS_MAX`] links. Input: an absolute path. Output: the links, or none when
+/// the path does not resolve within that bound.
+#[cfg(unix)]
+fn link_hops(path: &Path) -> Option<Vec<PathBuf>> {
+    use std::path::Component;
+    assert!(path.is_absolute());
+    let queue = |pending: &mut Vec<PathBuf>, from: &Path| {
+        pending.extend(from.components().rev().filter_map(|part| match part {
+            Component::Normal(name) => Some(PathBuf::from(name)),
+            Component::ParentDir => Some(PathBuf::from("..")),
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
+        }));
+    };
+    let mut pending = Vec::new();
+    queue(&mut pending, path);
+    let mut at = PathBuf::from("/");
+    let mut hops = Vec::new();
+    while let Some(part) = pending.pop() {
+        if part.as_os_str() == ".." {
+            at.pop();
+            continue;
+        }
+        let next = at.join(&part);
+        if !std::fs::symlink_metadata(&next).ok()?.file_type().is_symlink() {
+            at = next;
+            continue;
+        }
+        if hops.len() == LINK_HOPS_MAX {
+            return None;
+        }
+        let target = std::fs::read_link(&next).ok()?;
+        hops.push(next);
+        if target.is_absolute() {
+            at = PathBuf::from("/");
+        }
+        queue(&mut pending, &target);
+    }
+    assert!(hops.len() <= LINK_HOPS_MAX);
+    Some(hops)
+}
+
+/// Reads no links off Unix, where the checks rest on the two ends of a chain as before.
+/// Input: the path, unused. Output: no links.
+#[cfg(not(unix))]
+fn link_hops(_path: &Path) -> Option<Vec<PathBuf>> {
+    Some(Vec::new())
 }
 
 /// Picks the file a pin may use from what a search finds: the first candidate, in search
