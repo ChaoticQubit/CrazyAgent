@@ -3946,11 +3946,14 @@ fn register_rcli_profile(
 }
 
 /// Registers the configured RCLI members of a session about to prepare a turn (PA-6):
-/// each member without a registration whose engine-generated SDK home exists, and each
-/// member whose registration was made under an older binding, from custody's unchanged
-/// profile. Inputs: the actor database, settings, custody, host and the session.
-/// Output: Ok; a member that cannot register is left for its turn check to name, except the
-/// owner's chosen member, whose failure stops the preparation as before.
+/// each member without a registration whose engine-generated SDK home exists, each member
+/// whose registration was made under an older binding, from custody's unchanged profile,
+/// and each member whose pinned home custody no longer loads, such as a config an undone
+/// account save put back with a new change time, which registration re-pins only when the
+/// home differs in its times alone. Inputs: the actor database, settings, custody, host
+/// and the session. Output: Ok; a member that cannot register is left for its turn check
+/// to name, except the owner's chosen member with an unchanged home, whose failure stops
+/// the preparation as before.
 fn register_generated_rcli_profile(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -3983,15 +3986,20 @@ fn register_generated_rcli_profile(
         {
             continue;
         }
-        let stale = match registration(&tx, session_id, &profile)? {
-            None => None,
+        let (stale, moved) = match registration(&tx, session_id, &profile)? {
+            None => (None, false),
             Some(record) => match validate_registration(&tx, &session, &record) {
-                Err(failure) if failure.0 == "master_configured_receipt_stale" => Some(record),
+                Err(failure) if failure.0 == "master_configured_receipt_stale" => {
+                    (Some(record), false)
+                }
+                Err(failure) if failure.0 == "rcli_profile_identity_changed" => {
+                    (Some(record), true)
+                }
                 Ok(()) | Err(_) => continue,
             },
         };
         let account = super::account_profile::configured_profile_ref(member)?;
-        pending.push((member.clone(), account, stale, chosen));
+        pending.push((member.clone(), account, stale, chosen && !moved));
     }
     drop(tx);
     assert!(pending.len() <= crate::config::POOL_MEMBERS_MAX);
