@@ -1328,6 +1328,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "delete_trash_partial" => {
             "Some of its folders are in the Trash and the rest could not be moved. The project stays listed; try again."
         }
+        "delete_cannot_stop" => {
+            "It is moving its folders to the Trash, so it cannot stop now. Wait for it to finish on Home."
+        }
         "project_delete_requires_transport" => {
             "This engine cannot delete projects. Remove it from the dashboard instead."
         }

@@ -303,7 +303,8 @@ export function useSession(): Session {
           showToast(line, { name: "home" });
           setFoundTick((value) => value + 1);
           void notifyIntake(result.value.id);
-          if (result.value.kind === "move_project") void refreshProjects();
+          if (result.value.kind === "move_project" || result.value.kind === "delete") void refreshProjects();
+          if (result.value.kind === "delete" && result.value.state.state === "done" && result.value.project_id) void api.closeProjectWalls(result.value.project_id);
         }
       }
       if (result.kind !== "not_ready") timer = setTimeout(() => void read(), intakePollMs(intakeSeen.current));

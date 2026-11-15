@@ -72,8 +72,11 @@ pub(in crate::tui) fn refusal(code: &str, held: Option<&JobView>) -> String {
     }
 }
 
-/// The folder's own name, or the whole path when it has none.
+/// The folder's own name, or the whole path when it has none; a delete's project name whole.
 pub(in crate::tui) fn name(job: &JobView) -> String {
+    if job.kind == JobKind::Delete {
+        return job.source.clone();
+    }
     let path = std::path::Path::new(&job.source);
     let name = path.file_name().map_or_else(
         || job.source.clone(),
@@ -89,6 +92,9 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
     let name = name(job);
     if running(job) && job.stopping {
         return format!("Stopping {name}...");
+    }
+    if job.kind == JobKind::Delete {
+        return delete_line(job, &name);
     }
     let (verb, done) = match job.mode {
         AddMode::Move => ("Moving", "moved"),
@@ -115,7 +121,6 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
         }
         JobState::Copying { .. } => format!("{verb} {name}..."),
         JobState::Clearing => format!("Removing {name} from its old place..."),
-        JobState::Trashing { .. } => format!("Removing {name}..."),
         JobState::Done if job.kind == JobKind::MoveProject => {
             format!("{name} is now in your projects folder. Start the team again from Team.")
         }
@@ -127,17 +132,52 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
             format!("Adding {name} stopped. Nothing was moved or copied.")
         }
         JobState::Failed { code, .. } => format!("{name}: {}", copy(code)),
-        JobState::CutShort { .. } => format!("{name}: {}", copy("project_delete_interrupted")),
         JobState::NeedsAnswer { .. } => {
             format!("{name} needs your answer before it is {done}.")
+        }
+        JobState::Trashing { .. } | JobState::CutShort { .. } => delete_line(job, &name),
+    }
+}
+
+/// What a delete does now or how it ended, with the project's name and how many of its
+/// folders reached the Trash, in the desktop's words. Takes the delete and its name. Returns
+/// one sentence.
+fn delete_line(job: &JobView, name: &str) -> String {
+    let folders = |total: u64| if total == 1 { "folder" } else { "folders" };
+    match &job.state {
+        JobState::Stopping { agents_left } => {
+            format!("Waiting for {} of {name} to stop...", agents(*agents_left))
+        }
+        JobState::Trashing { done, total } => {
+            assert!(done <= total, "trashed {done} past {total}");
+            format!(
+                "Moving {name} to the Trash: {done} of {total} {}",
+                folders(*total)
+            )
+        }
+        JobState::Clearing => format!("Removing {name} from CrazyAgent..."),
+        JobState::Done => format!("{name} is deleted. Its files are in the Trash."),
+        JobState::Cancelled { .. } => {
+            format!("Deleting {name} stopped. Nothing was moved to the Trash.")
+        }
+        JobState::Failed { code, .. } => format!("{name}: {}", copy(code)),
+        JobState::CutShort { trashed, total } => {
+            assert!(trashed <= total, "trashed {trashed} past {total}");
+            format!(
+                "Deleting {name} was cut short with {trashed} of {total} {} in the Trash. Finish delete or keep the project.",
+                folders(*total)
+            )
+        }
+        JobState::Downloading { .. } | JobState::Copying { .. } | JobState::NeedsAnswer { .. } => {
+            format!("Deleting {name}...")
         }
     }
 }
 
 /// What the TUI offers for the job: Stop while it downloads, waits for agents or copies,
-/// nothing while it clears, Retry only when the folder did not land, Answer for a soft
-/// refusal, Dismiss once it ended. Takes the job. Returns the actions, the one Enter does
-/// first.
+/// nothing while it clears or a delete moves folders to the Trash, Retry only when the folder
+/// did not land (Finish delete for a delete cut short), Answer for a soft refusal, Dismiss once
+/// it ended. Takes the job. Returns the actions, the one Enter does first.
 pub(in crate::tui) fn actions(job: &JobView) -> Vec<JobAction> {
     let offered = match &job.state {
         JobState::Downloading { .. } | JobState::Stopping { .. } | JobState::Copying { .. }
@@ -203,8 +243,10 @@ pub(in crate::tui) fn brief(job: &JobView, ellipsis: &str) -> String {
         JobState::Copying { checked, .. } if *checked > 0 => {
             format!("Checking {name}: {checked} files")
         }
+        JobState::Copying { .. } if job.kind == JobKind::Delete => format!("{verb} {name}..."),
         JobState::Copying { copied, .. } if *copied > 0 => format!("{verb} {name}: {copied} files"),
         JobState::Copying { .. } => format!("{verb} {name}..."),
+        JobState::Trashing { done, total } => format!("{verb} {name}: {done} of {total}"),
         _ => format!("Finishing {name}..."),
     };
     assert!(brief.contains(&name));
@@ -215,15 +257,21 @@ pub(in crate::tui) fn brief(job: &JobView, ellipsis: &str) -> String {
 /// status kind that colors it. Takes the job. Returns the kind and the word.
 pub(in crate::tui) fn badge(job: &JobView) -> (Status, &'static str) {
     let moving = job.kind == JobKind::MoveProject;
+    let deleting = job.kind == JobKind::Delete;
     let badge = match &job.state {
         JobState::Downloading { .. } => (Status::Active, "Downloading"),
         JobState::Stopping { .. } => (Status::Active, "Waiting"),
+        JobState::Copying { .. } | JobState::Trashing { .. } if deleting => {
+            (Status::Active, "Deleting")
+        }
         JobState::Copying { .. } if moving => (Status::Active, "Moving"),
         JobState::Copying { .. } => (Status::Active, "Adding"),
         JobState::Clearing | JobState::Trashing { .. } => (Status::Active, "Finishing"),
+        JobState::Done if deleting => (Status::Ok, "Deleted"),
         JobState::Done if moving => (Status::Ok, "Moved"),
         JobState::Done => (Status::Ok, "Added"),
-        JobState::Failed { .. } | JobState::CutShort { .. } => (Status::Fail, "Failed"),
+        JobState::CutShort { .. } => (Status::Needs, "Cut short"),
+        JobState::Failed { .. } => (Status::Fail, "Failed"),
         JobState::Cancelled { .. } => (Status::Off, "Stopped"),
         JobState::NeedsAnswer { .. } => (Status::Needs, "Needs answer"),
     };
@@ -232,10 +280,19 @@ pub(in crate::tui) fn badge(job: &JobView) -> (Status, &'static str) {
 }
 
 /// What Enter and d do on Home's job card, as the card's last line. Takes the job. Returns
-/// the line; a job that offers nothing yet asks the owner to wait.
+/// the line; a job that offers nothing yet asks the owner to wait, and a delete moving its
+/// folders to the Trash says it can't stop now.
 pub(in crate::tui) fn next(job: &JobView) -> &'static str {
     let next = match actions(job).as_slice() {
+        [] if matches!(job.state, JobState::Trashing { .. }) && !job.stopping => {
+            "It can't stop now. Wait for it to finish."
+        }
         [] => "Wait for it to finish.",
+        [JobAction::Retry, JobAction::Dismiss]
+            if matches!(job.state, JobState::CutShort { .. }) =>
+        {
+            "Enter finishes the delete. d keeps the project."
+        }
         [JobAction::Stop] => "Enter stops it.",
         [JobAction::Dismiss] => "Enter dismisses it.",
         [JobAction::Retry, JobAction::Dismiss] => "Enter tries again. d dismisses it.",
@@ -246,10 +303,13 @@ pub(in crate::tui) fn next(job: &JobView) -> &'static str {
     next
 }
 
-/// The hint word for one job action, the desktop's button word. Takes the action. Returns
-/// the word.
-pub(in crate::tui) fn label(action: JobAction) -> &'static str {
+/// The hint word for one job action, the desktop's button word: Finish delete and Keep the
+/// project for a delete cut short. Takes the job and the action. Returns the word.
+pub(in crate::tui) fn label(job: &JobView, action: JobAction) -> &'static str {
+    let cut = matches!(job.state, JobState::CutShort { .. });
     match action {
+        JobAction::Retry if cut => "Finish delete",
+        JobAction::Dismiss if cut => "Keep the project",
         JobAction::Stop => "Stop",
         JobAction::Retry => "Try again",
         JobAction::Answer => "Answer",

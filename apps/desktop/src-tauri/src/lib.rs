@@ -2228,6 +2228,18 @@ async fn desktop_move_project_home(
 }
 
 #[tauri::command]
+async fn desktop_delete_project_job(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    name: String,
+) -> Result<crazyagent::projects_home::job::JobView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.delete_project_job(&id, name)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_remove_project(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5097,6 +5109,7 @@ native_commands! {
     desktop_project_demo,
     desktop_create_demo,
     desktop_move_project_home,
+    desktop_delete_project_job,
     desktop_cancel_research,
     desktop_retry_research,
     desktop_plan_roadmap,
