@@ -57,37 +57,93 @@ fn every_bundled_manifest_loads_in_catalog_order_under_its_own_file_name() {
     }
 }
 
+const ANSWERS: [(&str, bool, bool, bool, bool); 18] = [
+    ("codex", true, true, true, true),
+    ("claude-code", true, true, true, true),
+    ("opencode", false, false, false, true),
+    ("gemini-cli", false, false, false, true),
+    ("fx", false, false, false, false),
+    ("openclaw", false, false, false, false),
+    ("pi", false, false, false, true),
+    ("rcli", false, true, false, false),
+    ("goose", false, false, false, true),
+    ("aider", false, false, false, false),
+    ("qwen-code", false, false, false, true),
+    ("crush", false, false, false, true),
+    ("droid", false, false, false, true),
+    ("copilot", false, false, false, true),
+    ("cline", false, false, false, true),
+    ("continue", false, false, false, true),
+    ("openhands", false, false, false, false),
+    ("kimi", false, false, false, true),
+];
+
 #[test]
-fn the_registry_answers_what_the_engine_answers_today_for_every_harness() {
+fn every_harness_runs_an_agent_a_master_and_research_and_switches_tools_off_as_listed_here() {
+    assert_eq!(registry().all().len(), ANSWERS.len());
+    for (harness, (id, agent, master, research, tools_off)) in registry().all().iter().zip(ANSWERS)
+    {
+        assert_eq!(harness.id(), id);
+        assert_eq!(harness.runnable(), agent, "{id}");
+        assert_eq!(harness.master(), master, "{id}");
+        assert_eq!(harness.research(), research, "{id}");
+        assert_eq!(harness.tools_off(), tools_off, "{id}");
+        assert_eq!(harness.piped().is_some(), master, "{id}");
+        assert_eq!(harness.record() != RecordKind::Unavailable, agent, "{id}");
+        assert_eq!(spec(id).unwrap().launch.is_none(), agent, "{id}");
+        assert!(harness.owner_folders().is_empty(), "{id}");
+        assert_eq!(harness.minimum_version(), None, "{id}");
+    }
+}
+
+#[test]
+fn the_terminal_table_starts_a_live_terminal_for_the_harnesses_the_registry_can_run() {
     for harness in registry().all() {
         let id = harness.id();
-        let listed = spec(id).unwrap();
+        assert_eq!(harness.runnable(), support(id) == Support::Terminal, "{id}");
+    }
+}
+
+#[test]
+fn a_team_start_and_a_master_pick_the_harnesses_the_registry_names_for_them() {
+    for harness in registry().all() {
+        let id = harness.id();
         assert_eq!(
             harness.runnable(),
             crate::team::launch_harness(id).is_some(),
             "{id}"
         );
-        assert_eq!(harness.runnable(), support(id) == Support::Terminal, "{id}");
         assert_eq!(
             harness.master(),
             crate::team::master_backend(id).is_some(),
             "{id}"
         );
+    }
+    for (kind, id) in [
+        (HarnessKind::ClaudeCode, "claude-code"),
+        (HarnessKind::Codex, "codex"),
+        (HarnessKind::Rcli, "rcli"),
+    ] {
+        let native = native_sub_agents(kind);
+        match registry().get(id).unwrap().sub_agents() {
+            SubAgents::Teams => assert_eq!(native, NativeSubAgents::Teams, "{id}"),
+            SubAgents::Threads => assert_eq!(native, NativeSubAgents::Threads, "{id}"),
+            SubAgents::App => {
+                assert!(matches!(native, NativeSubAgents::Unavailable(_)), "{id}");
+            }
+        }
+    }
+}
+
+#[test]
+fn research_runs_on_the_harnesses_the_registry_names_for_it() {
+    for harness in registry().all() {
+        let id = harness.id();
         assert_eq!(
             harness.research(),
             crate::research::runner::ResearchHarness::of(id).is_some(),
             "{id}"
         );
-        assert_eq!(harness.tools_off(), listed.tools_limited.is_none(), "{id}");
-        assert_eq!(harness.piped().is_some(), harness.master(), "{id}");
-        assert_eq!(
-            harness.record() != RecordKind::Unavailable,
-            harness.runnable(),
-            "{id}"
-        );
-        assert_eq!(listed.launch.is_none(), harness.runnable(), "{id}");
-        assert!(harness.owner_folders().is_empty(), "{id}");
-        assert_eq!(harness.minimum_version(), None, "{id}");
     }
 }
 
@@ -122,20 +178,6 @@ fn codex_claude_code_and_rcli_name_the_engines_own_drivers_readers_and_sub_agent
         )
     );
     assert_eq!(kinds("pi"), (None, RecordKind::Unavailable, SubAgents::App));
-    for (kind, id) in [
-        (HarnessKind::ClaudeCode, "claude-code"),
-        (HarnessKind::Codex, "codex"),
-        (HarnessKind::Rcli, "rcli"),
-    ] {
-        let native = native_sub_agents(kind);
-        match registry().get(id).unwrap().sub_agents() {
-            SubAgents::Teams => assert_eq!(native, NativeSubAgents::Teams, "{id}"),
-            SubAgents::Threads => assert_eq!(native, NativeSubAgents::Threads, "{id}"),
-            SubAgents::App => {
-                assert!(matches!(native, NativeSubAgents::Unavailable(_)), "{id}");
-            }
-        }
-    }
 }
 
 #[test]
