@@ -1,0 +1,15 @@
+schema: 1
+kind: harness
+id: "droid"
+name: "Factory Droid"
+binaries:
+  - "droid"
+locations:
+  - ".factory/bin"
+headless: "droid exec with --output-format stream-json"
+model_selection: true
+account_kinds:
+  - "subscription"
+  - "api_key"
+  - "open_ai_compatible_url"
+cannot_start: "installed, but CrazyAgent cannot start it yet"

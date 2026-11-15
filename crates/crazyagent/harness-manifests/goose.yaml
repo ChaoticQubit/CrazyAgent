@@ -1,0 +1,13 @@
+schema: 1
+kind: harness
+id: "goose"
+name: "Goose"
+binaries:
+  - "goose"
+headless: "goose run --text with --output-format stream-json"
+model_selection: true
+account_kinds:
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+cannot_start: "installed, but CrazyAgent cannot start it yet"

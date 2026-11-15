@@ -1,0 +1,18 @@
+schema: 1
+kind: harness
+id: "rcli"
+name: "RCLI"
+binaries:
+  - "crazyagent-rcli"
+headless: "CrazyAgent's bundled RCLI host"
+model_selection: true
+account_kinds:
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+tools_limited: "runs without tools"
+cannot_start: "runs only as a CrazyAgent master"
+roles:
+  - "master"
+piped:
+  driver: "rcli"

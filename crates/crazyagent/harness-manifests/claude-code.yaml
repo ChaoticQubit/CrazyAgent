@@ -1,0 +1,25 @@
+schema: 1
+kind: harness
+id: "claude-code"
+name: "Claude Code"
+aliases:
+  - "claude"
+binaries:
+  - "claude"
+locations:
+  - ".claude/local"
+headless: "claude --print with stream-json input and output"
+model_selection: true
+account_kinds:
+  - "subscription"
+  - "api_key"
+roles:
+  - "agent"
+  - "master"
+  - "research"
+sub_agents: "teams"
+piped:
+  driver: "claude-stream-json"
+terminal:
+  record:
+    reader: "claude-session"

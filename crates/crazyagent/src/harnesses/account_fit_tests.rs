@@ -169,3 +169,18 @@ fn a_sign_in_fits_only_its_own_harness_and_unknown_harnesses_fit_nothing() {
         );
     }
 }
+
+#[test]
+fn the_registry_asks_the_same_account_rule_for_every_harness_and_every_account() {
+    let accounts = every_account();
+    for harness in super::registry::registry().all() {
+        for (.., connection) in &accounts {
+            assert_eq!(
+                harness.account_fits(connection),
+                account_fits(harness.id(), connection),
+                "{}",
+                harness.id()
+            );
+        }
+    }
+}

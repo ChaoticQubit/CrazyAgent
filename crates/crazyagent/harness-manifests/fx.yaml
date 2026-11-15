@@ -1,0 +1,16 @@
+schema: 1
+kind: harness
+id: "fx"
+name: "fx by Vercel"
+binaries:
+  - "fx"
+locations:
+  - ".fx/bin"
+headless: "fx ask --json: one request, JSON result on stdout"
+model_selection: true
+account_kinds:
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+tools_limited: "no documented switch to turn tools off"
+cannot_start: "installed, but CrazyAgent cannot start it yet"

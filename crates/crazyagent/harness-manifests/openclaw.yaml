@@ -1,0 +1,14 @@
+schema: 1
+kind: harness
+id: "openclaw"
+name: "OpenClaw"
+binaries:
+  - "openclaw"
+headless: "openclaw agent --message through its gateway"
+model_selection: true
+account_kinds:
+  - "subscription"
+  - "api_key"
+  - "local"
+tools_limited: "tools are set in OpenClaw's own configuration"
+cannot_start: "installed, but CrazyAgent cannot start it yet"

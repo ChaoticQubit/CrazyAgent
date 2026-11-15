@@ -1,0 +1,16 @@
+schema: 1
+kind: harness
+id: "opencode"
+name: "OpenCode"
+binaries:
+  - "opencode"
+locations:
+  - ".opencode/bin"
+headless: "opencode run --format json, or opencode serve over HTTP"
+model_selection: true
+account_kinds:
+  - "subscription"
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+cannot_start: "installed, but CrazyAgent cannot start it yet"

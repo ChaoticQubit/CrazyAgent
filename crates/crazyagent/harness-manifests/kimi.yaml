@@ -1,0 +1,12 @@
+schema: 1
+kind: harness
+id: "kimi"
+name: "Kimi CLI"
+binaries:
+  - "kimi"
+headless: "kimi --print with stream-json output"
+model_selection: true
+account_kinds:
+  - "subscription"
+  - "api_key"
+cannot_start: "installed, but CrazyAgent cannot start it yet"

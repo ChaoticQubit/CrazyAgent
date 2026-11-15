@@ -1,0 +1,23 @@
+schema: 1
+kind: harness
+id: "codex"
+name: "Codex"
+binaries:
+  - "codex"
+headless: "codex app-server: JSON-RPC over stdio"
+model_selection: true
+account_kinds:
+  - "subscription"
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+roles:
+  - "agent"
+  - "master"
+  - "research"
+sub_agents: "threads"
+piped:
+  driver: "codex-app-server"
+terminal:
+  record:
+    reader: "codex-rollouts"

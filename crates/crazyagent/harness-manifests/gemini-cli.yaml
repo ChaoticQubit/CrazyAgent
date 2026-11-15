@@ -1,0 +1,12 @@
+schema: 1
+kind: harness
+id: "gemini-cli"
+name: "Gemini CLI"
+binaries:
+  - "gemini"
+headless: "gemini --prompt with --output-format stream-json"
+model_selection: true
+account_kinds:
+  - "subscription"
+  - "api_key"
+cannot_start: "installed, but CrazyAgent cannot start it yet"
