@@ -2141,7 +2141,7 @@ fn delete_everything_removes_the_projects_overview_runs_and_no_other_projects() 
     assert_eq!(names, [own.as_str()]);
     assert_eq!(
         crate::projects_home::remove_engine_files(&plan.database, &files),
-        [own.clone()]
+        std::slice::from_ref(&own)
     );
     assert!(std::fs::symlink_metadata(agents.join(&own)).is_err());
     assert!(std::fs::symlink_metadata(profiles.join(format!("{own}.sb"))).is_err());

@@ -384,7 +384,7 @@ fn a_run_time_switched_to_no_limit_while_the_master_run_ends_never_panics() {
             let began = Instant::now();
             let mut flips = 0_u64;
             while !done.load(Ordering::SeqCst) && began.elapsed() < Duration::from_secs(60) {
-                let run = if flips % 2 == 0 { 0 } else { i64::from(secs) };
+                let run = if flips.is_multiple_of(2) { 0 } else { i64::from(secs) };
                 if connection
                     .execute(
                         "UPDATE team_master_limits SET run_secs=?2 WHERE project=?1",
