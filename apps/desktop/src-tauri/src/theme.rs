@@ -1,8 +1,9 @@
 use std::sync::{Mutex, PoisonError};
 
 use serde::Deserialize;
+#[cfg(any(windows, test))]
 use tauri::image::Image;
-use tauri::{AppHandle, Manager, Runtime, Theme};
+use tauri::{AppHandle, Manager, Runtime, Theme, WebviewWindow};
 
 /// The appearance the owner picked in the app's Profile settings: follow the system, or a
 /// fixed light or dark. Input: the word the webview keeps (`system`, `light` or `dark`).
@@ -20,13 +21,21 @@ impl ThemeChoice {
     /// The theme every window is held to. Output: none for System, so the windows follow the
     /// system appearance; the fixed theme otherwise.
     pub fn held(self) -> Option<Theme> {
-        None
+        match self {
+            Self::System => None,
+            Self::Light => Some(Theme::Light),
+            Self::Dark => Some(Theme::Dark),
+        }
     }
 
     /// The icon that matches what the main window shows. Input: the theme the main window
     /// shows now. Output: Dark for Dark, Light for Light, and the shown theme for System.
-    pub fn icon(self, _shown: Theme) -> Theme {
-        Theme::Light
+    pub fn icon(self, shown: Theme) -> Theme {
+        match self {
+            Self::System if shown == Theme::Dark => Theme::Dark,
+            Self::System | Self::Light => Theme::Light,
+            Self::Dark => Theme::Dark,
+        }
     }
 }
 
@@ -49,24 +58,114 @@ pub fn mirrored<R: Runtime>(app: &AppHandle<R>) -> Option<Mirror> {
 }
 
 /// Holds every window to the choice, then paints the icon for what the main window shows.
+/// The window and Dock calls run on the main thread, where AppKit takes them, and the main
+/// window's theme is read after its own set, so System reads the live appearance.
 /// Inputs: the app and the choice. Output: an error when the work could not be queued.
-pub fn apply<R: Runtime>(_app: &AppHandle<R>, _choice: ThemeChoice) -> tauri::Result<()> {
-    Ok(())
+pub fn apply<R: Runtime>(app: &AppHandle<R>, choice: ThemeChoice) -> tauri::Result<()> {
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        for window in handle.webview_windows().into_values() {
+            let _ = window.set_theme(choice.held());
+        }
+        let shown = handle
+            .get_webview_window("main")
+            .and_then(|main| main.theme().ok())
+            .unwrap_or(Theme::Light);
+        show(&handle, choice, shown);
+    })
 }
 
 /// Repaints the icon when the system appearance changed and the choice follows it.
 /// Inputs: the app and the theme the main window shows now. Output: none.
-pub fn followed<R: Runtime>(_app: &AppHandle<R>, _shown: Theme) {}
+pub fn followed<R: Runtime>(app: &AppHandle<R>, shown: Theme) {
+    let follows = mirrored(app).map(|mirror| mirror.choice) == Some(ThemeChoice::System);
+    if follows {
+        show(app, ThemeChoice::System, shown);
+    }
+}
+
+/// Gives a window opened after the first mirror the theme the others are held to and, on
+/// Windows, the icon they show. Input: the new window. Output: none.
+pub fn dress<R: Runtime>(window: &WebviewWindow<R>) {
+    let Some(mirror) = mirrored(window.app_handle()) else {
+        return;
+    };
+    let _ = window.set_theme(mirror.choice.held());
+    #[cfg(windows)]
+    let _ = window.set_icon(window_picture(mirror.icon));
+}
+
+/// Keeps the choice and paints the icon that matches it. Inputs: the app, the choice and the
+/// theme the main window shows. Output: none.
+fn show<R: Runtime>(app: &AppHandle<R>, choice: ThemeChoice, shown: Theme) {
+    let mirror = Mirror {
+        choice,
+        icon: choice.icon(shown),
+    };
+    if let Some(state) = app.try_state::<Mirrored>() {
+        *state.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(mirror);
+    }
+    paint(app, mirror.icon);
+}
+
+/// Shows the icon in the Dock of the running app: the tile drawn by an image view in the
+/// Dock tile, scaled into the tile. Off the main thread nothing changes. Inputs: the app and
+/// the icon theme. Output: none.
+#[cfg(target_os = "macos")]
+fn paint<R: Runtime>(_app: &AppHandle<R>, icon: Theme) {
+    use objc2::rc::Retained;
+    use objc2::{AllocAnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage, NSImageView, NSView};
+    use objc2_foundation::{NSData, NSPoint, NSRect};
+
+    let Some(marker) = MainThreadMarker::new() else {
+        return;
+    };
+    let data = NSData::with_bytes(dock_picture(icon));
+    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+        return;
+    };
+    let tile = NSApplication::sharedApplication(marker).dockTile();
+    let view: Retained<NSImageView> = NSImageView::imageViewWithImage(&image, marker);
+    view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), tile.size()));
+    let content: &NSView = &view;
+    tile.setContentView(Some(content));
+    tile.display();
+}
+
+/// Shows the icon on every window and its taskbar button. Tao sets the small window icon and
+/// leaves the large one unset, so the taskbar draws the small one. Inputs: the app and the
+/// icon theme. Output: none.
+#[cfg(windows)]
+fn paint<R: Runtime>(app: &AppHandle<R>, icon: Theme) {
+    for window in app.webview_windows().into_values() {
+        let _ = window.set_icon(window_picture(icon));
+    }
+}
+
+/// Linux keeps the one fixed icon (DEC-181 addendum 1). Inputs: unused. Output: none.
+#[cfg(not(any(target_os = "macos", windows)))]
+fn paint<R: Runtime>(_app: &AppHandle<R>, _icon: Theme) {}
 
 /// The Dock picture for an icon theme: the 1024 px tile. Input: the theme. Output: the PNG.
-pub fn dock_picture(_icon: Theme) -> &'static [u8] {
-    include_bytes!("../icons/icon.png")
+#[cfg(any(target_os = "macos", test))]
+fn dock_picture(icon: Theme) -> &'static [u8] {
+    if icon == Theme::Dark {
+        include_bytes!("../icons/icon.png")
+    } else {
+        include_bytes!("../icons/light/icon.png")
+    }
 }
 
 /// The window and taskbar picture for an icon theme: the 256 px tile, decoded when built.
 /// Input: the theme. Output: the RGBA image.
-pub fn window_picture(_icon: Theme) -> Image<'static> {
-    tauri::include_image!("icons/128x128@2x.png")
+#[cfg(any(windows, test))]
+fn window_picture(icon: Theme) -> Image<'static> {
+    if icon == Theme::Dark {
+        tauri::include_image!("icons/128x128@2x.png")
+    } else {
+        tauri::include_image!("icons/light/128x128@2x.png")
+    }
 }
 
 #[cfg(test)]

@@ -165,20 +165,22 @@ test("the Icon Composer file gives the fill and the mark a dark look the Mac pic
   assert.ok(existsSync(new URL(`${folder}/icon.json`, import.meta.url)), "AppIcon.icon/icon.json");
   const icon = JSON.parse(read(`${folder}/icon.json`).toString("utf8"));
   assert.deepEqual(icon["supported-platforms"], { squares: ["macOS"] });
-  const dark = (list) => list?.find((entry) => entry.appearance === "dark");
-  assert.ok(icon.fill?.["linear-gradient"], "the default fill is the bone gradient");
-  assert.ok(dark(icon["fill-specializations"])?.value?.["linear-gradient"], "a dark night gradient fill");
+  const look = (list, appearance) => list?.find((entry) => entry.appearance === appearance)?.value;
+  const hex = (value) => `#${value.slice("srgb:".length).split(",").slice(0, 3).map((part) => Math.round(Number(part) * 255).toString(16).padStart(2, "0")).join("").toUpperCase()}`;
+  const fill = (appearance) => look(icon["fill-specializations"], appearance)?.["linear-gradient"]?.map(hex);
+  assert.deepEqual(fill(undefined), ["#F7F4EE", "#E8E3D9"], "the default fill is the bone gradient");
+  assert.deepEqual(fill("dark"), ["#2A2824", "#161513"], "the dark look fills with the night gradient");
   const layers = icon.groups.flatMap((group) => group.layers);
-  assert.equal(layers.length, 1, "one layer: the mark");
-  const [mark] = layers;
-  const night = dark(mark["image-name-specializations"])?.value;
-  assert.ok(night && night !== mark["image-name"], "the mark has its own dark drawing");
-  const coil = shapes(asset("mark.svg")).coil;
-  for (const [name, colors] of [[mark["image-name"], ["#1B1A17", "#E5482D"]], [night, ["#F2EEE6", "#FF6A45"]]]) {
+  const shown = (appearance) => layers.filter((layer) => look(layer["hidden-specializations"], appearance) === false).map((layer) => layer["image-name"]);
+  assert.deepEqual(shown(undefined), ["mark-light.svg"], "the default look shows only the ink mark");
+  assert.deepEqual(shown("dark"), ["mark-dark.svg"], "the dark look shows only the bone mark");
+  const mark = shapes(asset("mark.svg"));
+  for (const [name, colors] of [["mark-light.svg", ["#1B1A17", "#E5482D"]], ["mark-dark.svg", ["#F2EEE6", "#FF6A45"]]]) {
     assert.ok(existsSync(new URL(`${folder}/Assets/${name}`, import.meta.url)), name);
     const svg = read(`${folder}/Assets/${name}`).toString("utf8");
-    assert.equal(shapes(svg).coil, coil, `${name} draws the brand coil`);
-    assert.deepEqual(shapes(svg).squares, shapes(asset("mark.svg")).squares, `${name} draws the four squares`);
+    assert.equal(shapes(svg).coil, mark.coil, `${name} draws the brand coil`);
+    assert.deepEqual(shapes(svg).squares, mark.squares, `${name} draws the four squares`);
+    assert.match(svg, /<g transform="translate\(194 194\) scale\(9\.9375\)">/, `${name} keeps the tile's mark-to-tile ratio, 512 of 824`);
     for (const color of colors) assert.ok(svg.includes(color), `${name} uses ${color}`);
     assert.doesNotMatch(svg, /<script|href=|on[a-z]+=/i);
   }
