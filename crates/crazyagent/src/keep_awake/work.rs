@@ -31,7 +31,7 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 /// at most `WORK_MAX`.
 pub fn count(connection: &Connection) -> Result<u32, EngineError> {
     let mut names = connection
-        .prepare_cached(
+        .prepare(
             "SELECT name FROM sqlite_schema WHERE type='table' AND name IN
              ('team_agents','research_jobs','landing_change_sets','master_turns')",
         )
@@ -51,7 +51,7 @@ pub fn count(connection: &Connection) -> Result<u32, EngineError> {
         return Ok(0);
     }
     let total: i64 = connection
-        .prepare_cached(&format!("SELECT {}", parts.join(" + ")))
+        .prepare(&format!("SELECT {}", parts.join(" + ")))
         .map_err(error)?
         .query_row([], |row| row.get(0))
         .map_err(error)?;
