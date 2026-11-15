@@ -1297,6 +1297,67 @@ fn removing_an_agent_tree_clears_folders_two_deep_that_deny_listing() {
     assert!(!tree.exists(), "the tree stayed");
 }
 
+/// Clears the ACLs of test folders in one `/bin/chmod -N` when dropped, so their temporary
+/// folder can always be deleted, whatever the test asserted. Holds the folders.
+#[cfg(target_os = "macos")]
+struct AclsCleared(Vec<PathBuf>);
+
+#[cfg(target_os = "macos")]
+impl Drop for AclsCleared {
+    fn drop(&mut self) {
+        let _ = crate::spawn_gate::collected(Command::new("/bin/chmod").arg("-N").args(&self.0));
+    }
+}
+
+/// ds181 r2 (rv-code4 F1, rv-sec3 F1): a folder whose ACL denies only searching it still
+/// lists, but no entry in it can be reached by name until that ACL goes; its read-only
+/// folder below still goes in one removal.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_an_agent_tree_reaches_below_a_folder_that_denies_only_searching_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let tree = root.join("tree");
+    let (searched, shut) = (tree.join("p"), tree.join("p/shut"));
+    write(&shut.join("f"), b"the agent's\n");
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let _cleared = AclCleared(searched.clone());
+    add_acl("everyone deny search", &[searched]);
+
+    let outcome = remove_agent_tree(&tree);
+
+    assert_eq!(outcome, Ok(()));
+    assert!(!tree.exists(), "the tree stayed");
+}
+
+/// ds181 r2 (rv-code4 F2): removing an agent's tree of 300 folders that each hold one folder
+/// whose ACL denies listing never holds more than a few dozen of them waiting for their ACL
+/// clear at once, each with its parent's open handle, and the tree still goes.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_a_wide_tree_of_folders_that_deny_listing_holds_few_handles_at_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let tree = root.join("tree");
+    let denied: Vec<PathBuf> = (0..300)
+        .map(|index| tree.join(format!("d{index:03}/c")))
+        .collect();
+    for folder in &denied {
+        write(&folder.join("f"), b"the agent's\n");
+    }
+    let _cleared = AclsCleared(denied.clone());
+    add_acl("everyone deny list,search", &denied);
+    STUCK_PEAK.set(0);
+
+    let outcome = remove_agent_tree(&tree);
+
+    let peak = STUCK_PEAK.get();
+    assert_eq!(outcome, Ok(()));
+    assert!(!tree.exists(), "the tree stayed");
+    assert!(peak <= 64, "{peak} stuck folders held at once");
+}
+
 #[test]
 fn a_claim_an_engine_stop_interrupted_is_offered_again_or_handed_back_when_it_changed() {
     let case = Case::new();

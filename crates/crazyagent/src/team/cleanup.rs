@@ -1562,6 +1562,8 @@ fn writable(folder: &Path, pins: Flags, acls: Acls) {
                 && clears.add(&found)
             {
                 stuck.push((parent, name));
+                #[cfg(test)]
+                STUCK_PEAK.set(STUCK_PEAK.get().max(stuck.len()));
             }
             continue;
         };
@@ -1635,6 +1637,14 @@ fn open_up<P: rustix::path::Arg>(
         rustix::fs::Mode::RWXU,
         rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
     )
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// The most folders one walk that opens up a folder for removal on this thread held
+    /// waiting for an ACL clear at once, each with its parent's open handle, so a row can
+    /// bound the handles that walk keeps open.
+    pub(super) static STUCK_PEAK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(all(test, target_os = "macos"))]
