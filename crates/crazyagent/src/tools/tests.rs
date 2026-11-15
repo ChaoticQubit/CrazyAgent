@@ -1475,6 +1475,48 @@ fn an_entry_never_resolves_to_a_file_its_check_did_not_see() {
     );
 }
 
+/// DeepSec -193 (SA vid 1 F1 residual): the file `entry_at` hands back must also pass the temp
+/// rule the entry passes, as the engine runs it outside the sandbox. An owner entry whose
+/// middle link, in the temp folder or an owner folder, leads to a file planted in the temp
+/// folder when the real file is read, and back to the owner's file at the check, is refused
+/// as leading into temp; once the chain holds still only the owner folder's link resolves.
+#[test]
+fn an_entry_never_resolves_to_a_temp_file_its_check_did_not_see() {
+    for place in ["tmp/links", "links"] {
+        let (_folder, root) = scratch();
+        let sh = "#!/bin/sh\necho ran\n";
+        let owned = program(&root.join("owner/codex"), sh);
+        let planted = program(&root.join("tmp/planted/codex"), sh);
+        let middle = root.join(place).join("codex");
+        std::fs::create_dir_all(middle.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&planted, &middle).unwrap();
+        let entry = root.join("bin/codex");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&middle, &entry).unwrap();
+        let places = Places::engine(None, None, Some(root.join("home")), Some(OsStr::new("")))
+            .with_temps(vec![root.join("tmp")]);
+        let (moved, to) = (middle.clone(), owned.clone());
+        let step: Step = Box::new(move || {
+            std::fs::remove_file(&moved).unwrap();
+            std::os::unix::fs::symlink(&to, &moved).unwrap();
+        });
+        BETWEEN_PROGRAM_AND_CHECK
+            .lock()
+            .unwrap()
+            .push((entry.clone(), step));
+        let resolved = resolve_entry(&entry, &places);
+        let moved_to = std::fs::read_link(&middle).unwrap();
+        assert_eq!(moved_to, owned, "{place}: the step ran");
+        let why = resolved
+            .err()
+            .and_then(|missing| missing.refused)
+            .map(|refused| refused.why);
+        assert_eq!(why, Some(Refusal::InTemp), "{place}");
+        let kept = resolve_entry(&entry, &places).is_ok();
+        assert_eq!(kept, place == "links", "{place}");
+    }
+}
+
 /// B1 (SA vid 1 residual, the two-end chain): a found file is later run by its path, so the
 /// resolver judges every link on the way to the real file, not only the two ends. An owner
 /// entry whose middle link sits in a project agents can write, or in a folder another user
