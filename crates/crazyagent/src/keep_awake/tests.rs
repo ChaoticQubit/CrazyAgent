@@ -71,8 +71,15 @@ fn master_turn(connection: &Connection, ordinal: i64, phase: &str) {
         .unwrap();
 }
 
+/// Applies one owner change the way the owner path does (storage.rs): inside an open
+/// transaction, which `apply` requires, then commits it. Inputs: the engine connection,
+/// the change and the time. Output: the outcome.
 fn act(connection: &Connection, action: KeepAwakeAction, now_ms: i64) -> Outcome {
-    apply(connection, &action, now_ms).unwrap()
+    let tx = connection.unchecked_transaction().unwrap();
+    let outcome = apply(&tx, &action, now_ms).unwrap();
+    tx.commit().unwrap();
+    assert!(connection.is_autocommit());
+    outcome
 }
 
 fn rejected(code: &str) -> Outcome {
@@ -655,10 +662,7 @@ fn every_setting_option_round_trips_through_the_owner_protocol() {
         let Command::OwnerKeepAwake { action } = sent.command().unwrap() else {
             panic!("a Keep awake change is its own command");
         };
-        assert_eq!(
-            apply(&connection, &action, NOW_MS).unwrap(),
-            Outcome::Applied
-        );
+        assert_eq!(act(&connection, action, NOW_MS), Outcome::Applied);
         assert_eq!(OwnerRead::KeepAwake.command().unwrap(), None);
         let reader = Connection::open_with_flags(
             folder.path().join("engine.db"),
