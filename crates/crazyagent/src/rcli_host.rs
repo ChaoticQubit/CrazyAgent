@@ -54,6 +54,8 @@ mod master_reply;
 
 pub use master::{RcliMasterCompletion, RcliMasterHost, RcliMasterObservation, RcliMasterStatus};
 pub(crate) use master_launch::INSTRUCTIONS_BYTES_MAX;
+#[cfg(unix)]
+pub(crate) use master_launch::checked_configured_config;
 pub(crate) use master_launch::checked_configured_profile;
 #[cfg(unix)]
 pub(crate) use master_launch::configured_sdk_connection;

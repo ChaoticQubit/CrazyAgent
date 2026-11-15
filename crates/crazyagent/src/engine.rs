@@ -33,8 +33,8 @@ pub mod owner;
 
 #[cfg(unix)]
 pub use native_auth_host::{
-    HandedWord, handed_words, run_native_auth_custodian, run_native_auth_custodian_with_claude,
-    run_native_auth_custodian_with_codex,
+    CUSTODIAN_ARGUMENTS_MAX, HandedWord, handed_words, run_native_auth_custodian,
+    run_native_auth_custodian_with_claude, run_native_auth_custodian_with_codex,
 };
 
 pub(crate) use bootstrap::NativeProfileCustody;
