@@ -23,8 +23,26 @@ pub enum Address {
 /// [`ADDRESS_BYTES_MAX`]. Output: the address; `Other` for a family that is not IPv4 or
 /// IPv6 and for bytes too short to hold the address.
 pub fn address(bytes: &[u8]) -> Address {
-    let _ = bytes;
-    Address::Other
+    assert!(bytes.len() <= ADDRESS_BYTES_MAX);
+    let Some(family) = bytes.first_chunk::<2>() else {
+        return Address::Other;
+    };
+    let port = |bytes: &[u8]| u16::from_be_bytes([bytes[2], bytes[3]]);
+    match u16::from_ne_bytes(*family) {
+        AF_INET if bytes.len() >= 8 => Address::V4 {
+            ip: [bytes[4], bytes[5], bytes[6], bytes[7]],
+            port: port(bytes),
+        },
+        AF_INET6 if bytes.len() >= 24 => {
+            let mut ip = [0u8; 16];
+            ip.copy_from_slice(&bytes[8..24]);
+            Address::V6 {
+                ip,
+                port: port(bytes),
+            }
+        }
+        _ => Address::Other,
+    }
 }
 
 /// The TCP ports an agent may reach: `any` on every host, `loopback` only on this
@@ -40,8 +58,12 @@ impl Reach {
     /// same port allowed on loopback. Input: the address. Output: true to connect on the
     /// agent's behalf, false to refuse.
     pub fn allows(&self, address: &Address) -> bool {
-        let _ = address;
-        false
+        let (port, local) = match address {
+            Address::V4 { ip, port } => (*port, ip[0] == 127),
+            Address::V6 { ip, port } => (*port, local_v6(ip)),
+            Address::Other => return false,
+        };
+        self.any.contains(&port) || (local && self.loopback.contains(&port))
     }
 }
 
@@ -54,8 +76,7 @@ fn local_v6(ip: &[u8; 16]) -> bool {
 
 /// Tells whether a name is `.git` in any letter case. Input: one path component.
 pub fn is_git(name: &OsStr) -> bool {
-    let _ = name;
-    false
+    name.as_encoded_bytes().eq_ignore_ascii_case(b".git")
 }
 
 /// The git folders an agent may make entries in: the top-level `.git` of each working
@@ -74,8 +95,20 @@ impl GitOwn {
     /// component is a `.git` in any letter case, or the first one is one of the agent's
     /// own; false otherwise and for a path that is not in that form.
     pub fn allows(&self, real: &Path) -> bool {
-        let _ = real;
-        true
+        let mut walked = PathBuf::new();
+        for part in real.components() {
+            match part {
+                Component::RootDir if walked.as_os_str().is_empty() => walked.push("/"),
+                Component::Normal(name) if walked.is_absolute() => {
+                    walked.push(name);
+                    if is_git(name) {
+                        return self.owns(&walked);
+                    }
+                }
+                _ => return false,
+            }
+        }
+        walked.is_absolute()
     }
 
     /// Tells whether a path ending in a `.git` component is one of the agent's own git
@@ -107,16 +140,23 @@ pub enum Target {
 /// the register. Output: the target; a group id that cannot be negated is `Everyone`,
 /// which is always refused.
 pub fn signal_target(pid: i64) -> Target {
-    let _ = pid;
-    Target::Everyone
+    match pid as i32 {
+        0 => Target::OwnGroup,
+        -1 => Target::Everyone,
+        pid if pid > 0 => Target::One(pid),
+        pid => pid.checked_neg().map_or(Target::Everyone, Target::Group),
+    }
 }
 
 /// Reads the owner a descriptor's signals are sent to (`F_SETOWN`, `FIOSETOWN`): a
 /// positive value names a process, a negative one a process group. Input: the value.
 /// Output: the target, or none for zero, which names no one.
 pub fn owner_target(owner: i64) -> Option<Target> {
-    let _ = owner;
-    Some(Target::Everyone)
+    match owner as i32 {
+        0 => None,
+        pid if pid > 0 => Some(Target::One(pid)),
+        pid => Some(pid.checked_neg().map_or(Target::Everyone, Target::Group)),
+    }
 }
 
 /// Tells whether a process was started by the agent: its chain of parents reaches the
@@ -124,7 +164,18 @@ pub fn owner_target(owner: i64) -> Option<Target> {
 /// Inputs: the process, the supervisor's pid, and a reader of a process's parent. Output:
 /// true within [`TREE_DEPTH_MAX`] steps, false otherwise.
 pub fn in_tree(target: i32, root: i32, parent_of: impl Fn(i32) -> Option<i32>) -> bool {
-    let _ = (target, root, parent_of);
+    assert!(root > 0);
+    let mut pid = target;
+    for _ in 0..TREE_DEPTH_MAX {
+        if pid <= 1 || pid == root {
+            return false;
+        }
+        match parent_of(pid) {
+            Some(parent) if parent == root => return true,
+            Some(parent) => pid = parent,
+            None => return false,
+        }
+    }
     false
 }
 
@@ -141,16 +192,24 @@ pub struct Stat {
 /// program name that may hold spaces and brackets. Input: the text. Output: the fields,
 /// or none when the text is not in that form.
 pub fn stat(text: &str) -> Option<Stat> {
-    let _ = text;
-    None
+    let (_, rest) = text.rsplit_once(')')?;
+    let mut fields = rest.split_ascii_whitespace().skip(1);
+    let mut number = || fields.next()?.parse::<i32>().ok().filter(|id| *id >= 0);
+    Some(Stat {
+        parent: number()?,
+        group: number()?,
+        session: number()?,
+    })
 }
 
 /// Reads one `Name:\tvalue` line of a `/proc` status or fdinfo text. Inputs: the text and
 /// the name. Output: the value without the space around it, or none when no line has
 /// that name.
 pub fn field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
-    let _ = (text, name);
-    None
+    text.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key == name).then(|| value.trim())
+    })
 }
 
 #[cfg(test)]

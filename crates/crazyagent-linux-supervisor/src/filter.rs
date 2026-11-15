@@ -187,8 +187,8 @@ impl Calls {
     /// The call a number names here. Input: the number a notification carries. Output:
     /// the call, or none for a number the filter never traps.
     pub fn call(&self, number: u32) -> Option<Call> {
-        let _ = number;
-        None
+        let found = self.numbers.iter().find(|(_, own)| *own == number);
+        found.map(|(call, _)| *call)
     }
 }
 
@@ -224,8 +224,39 @@ pub struct Rule {
 /// is never tested here: it is trapped whole, or refused whole where a trap could not be
 /// served (`openat2`, a send that opens a connection). Input: the guards. Output: the rules.
 pub fn rules(guards: Guards) -> Vec<Rule> {
-    let _ = guards;
-    Vec::new()
+    let mut rules = Vec::new();
+    let mut add = |call, test, action| rules.push(Rule { call, test, action });
+    if guards.connect {
+        let opens = |arg| Test::AnySet {
+            arg,
+            mask: MSG_FASTOPEN,
+        };
+        add(Call::Connect, Test::Always, NOTIFY);
+        add(Call::Sendto, opens(3), ERRNO | EOPNOTSUPP);
+        add(Call::Sendmsg, opens(2), ERRNO | EOPNOTSUPP);
+        add(Call::Sendmmsg, opens(3), ERRNO | EOPNOTSUPP);
+    }
+    if guards.create {
+        let creates = |arg| Test::AnySet { arg, mask: O_CREAT };
+        for call in CREATING {
+            add(call, Test::Always, NOTIFY);
+        }
+        add(Call::Open, creates(1), NOTIFY);
+        add(Call::Openat, creates(2), NOTIFY);
+        add(Call::Openat2, Test::Always, ERRNO | ENOSYS);
+    }
+    if guards.signal {
+        for call in SIGNALLING {
+            add(call, Test::Always, NOTIFY);
+        }
+        for value in [F_SETOWN, F_SETOWN_EX] {
+            add(Call::Fcntl, Test::Equals { arg: 1, value }, NOTIFY);
+        }
+        for value in [FIOSETOWN, SIOCSPGRP] {
+            add(Call::Ioctl, Test::Equals { arg: 1, value }, NOTIFY);
+        }
+    }
+    rules
 }
 
 /// The seccomp program for one architecture and one set of guards: a call from another
@@ -233,13 +264,54 @@ pub fn rules(guards: Guards) -> Vec<Rule> {
 /// trapped or refused, and every other call runs. Inputs: the architecture's numbers and
 /// the guards. Output: the instructions, at most [`PROGRAM_MAX`].
 pub fn program(calls: &Calls, guards: Guards) -> Vec<Insn> {
-    let _ = (calls, guards);
-    vec![Insn {
+    let load = |k| Insn {
+        code: LOAD,
+        jt: 0,
+        jf: 0,
+        k,
+    };
+    let done = |k| Insn {
         code: RETURN,
         jt: 0,
         jf: 0,
-        k: ALLOW,
-    }]
+        k,
+    };
+    let jump = |code, k, jt, jf| Insn { code, jt, jf, k };
+    let mut program = vec![
+        load(ARCH_AT),
+        jump(JUMP_EQUAL, calls.arch, 1, 0),
+        done(KILL_PROCESS),
+        load(NR_AT),
+    ];
+    if calls.x32 {
+        program.push(jump(JUMP_AT_LEAST, X32_BIT, 0, 1));
+        program.push(done(ERRNO | ENOSYS));
+    }
+    for rule in rules(guards) {
+        let Some(number) = calls.number(rule.call) else {
+            continue;
+        };
+        let (code, arg, operand) = match rule.test {
+            Test::Always => {
+                program.push(jump(JUMP_EQUAL, number, 0, 1));
+                program.push(done(rule.action));
+                continue;
+            }
+            Test::AnySet { arg, mask } => (JUMP_ANY_SET, arg, mask),
+            Test::Equals { arg, value } => (JUMP_EQUAL, arg, value),
+        };
+        assert!(arg < 6);
+        program.extend([
+            jump(JUMP_EQUAL, number, 0, 4),
+            load(ARGS_AT + 8 * u32::from(arg)),
+            jump(code, operand, 0, 1),
+            done(rule.action),
+            load(NR_AT),
+        ]);
+    }
+    program.push(done(ALLOW));
+    assert!(program.len() <= PROGRAM_MAX);
+    program
 }
 
 #[cfg(test)]
