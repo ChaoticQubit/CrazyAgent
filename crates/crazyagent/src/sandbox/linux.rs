@@ -1,6 +1,6 @@
 use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS, RELAY_PORTS};
 use super::{
-    GIT_STATE_FILES, GIT_STATE_TREES, KEPT_PORTS_MAX, LINUX_HARNESS_UNCHECKED,
+    BRIDGE_PORT_MIN, GIT_STATE_FILES, GIT_STATE_TREES, KEPT_PORTS_MAX, LINUX_HARNESS_UNCHECKED,
     LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK, LINUX_RESOLVER_NEEDS_UDP,
     LinuxSockets, OWNER_PORTS, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork,
     SandboxRemote, agent_env, clean_absolute, invalid,
@@ -62,7 +62,8 @@ const SET_ID_BITS: u32 = 0o6000;
 /// process, IPC and host-name namespaces of its own and a fresh `/proc`, with the whole
 /// root bound through, devices too, so the helper's Landlock rules stay the only file
 /// policy. `--die-with-parent` ties the namespace to bubblewrap's outer process, never to
-/// the engine. The network stays shared.
+/// the engine. The network stays shared, but for an agent whose ports are bridged:
+/// [`nest_command`] then adds `--unshare-net` after these.
 pub const NEST_ARGS: [&str; 10] = [
     "--die-with-parent",
     "--unshare-user",
@@ -269,8 +270,9 @@ pub(crate) fn holds_file_rules(helper: &Path) -> bool {
 
 /// What the `crazyagent-landlock` helper was asked to do: probe whether this kernel holds a
 /// Landlock ruleset, apply a policy and start a harness, inside bubblewrap install only
-/// the socket filter and start a harness, or start bubblewrap from a fixed place with
-/// [`NEST_ARGS`], which then starts the helper again inside its namespaces.
+/// the socket filter and start a harness, start bubblewrap from a fixed place with
+/// [`NEST_ARGS`], which then starts the helper again inside its namespaces, tell whether
+/// the kernel scopes signals, or carry a nested agent's bridged ports as its broker.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HelperRequest {
     Probe {
@@ -303,7 +305,8 @@ impl HelperRequest {
     /// [`LandlockPolicy::args`] then `--`, an absolute program and its arguments, or
     /// `--probe` with an optional `--limit-network`, `--open-sockets` and `--keep-free`
     /// with a port, or `--filter-sockets` alone then `--` and the harness, or `--nest`
-    /// alone then `--` and what [`nest_request`] takes, or `--scoped` with nothing else.
+    /// alone then `--` and what [`nest_request`] takes, or `--scoped` with nothing else, or
+    /// `--broker` with what [`bridge::broker_request`] takes.
     /// `--open-sockets` needs `--limit-network`. Output: the request, or the reason the
     /// arguments are refused.
     pub fn parse(args: Vec<OsString>) -> Result<Self, String> {
@@ -721,12 +724,18 @@ fn die_with_parent(parent: u32) -> Result<(), String> {
 /// exits 0 when this kernel holds them; a run applies the policy, the scope layer and the
 /// filter to itself, moves into a session of its own and then replaces itself with the
 /// harness; a nest becomes bubblewrap, which starts a run inside its namespaces ([`nest`]).
+/// Bridge flags may lead a nest and the run or probe inside it ([`Bridge::fits`]).
 /// Output: the exit code, 2 for refused arguments, 3 when the kernel cannot hold the policy,
 /// the session or the signal mask, or the process it dies with is gone, 126 when the
 /// harness or bubblewrap cannot start.
 pub fn helper_main(args: Vec<OsString>) -> ExitCode {
-    let request = match HelperRequest::parse(args) {
-        Ok(request) => request,
+    let asked = Bridge::leading(args).and_then(|(bridge, args)| {
+        let request = HelperRequest::parse(args)?;
+        Bridge::fits(bridge.as_ref(), &request)?;
+        Ok((bridge, request))
+    });
+    let (bridge, request) = match asked {
+        Ok(asked) => asked,
         Err(reason) => {
             eprintln!("crazyagent-landlock: {reason}");
             return ExitCode::from(2);
@@ -734,9 +743,9 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     };
     let (policy, launch) = match request {
         HelperRequest::Filter { program, args } => return filtered(&program, args),
-        HelperRequest::Nest { bwrap, args } => return nest(&bwrap, &args),
+        HelperRequest::Nest { bwrap, args } => return nest(&bwrap, &args, bridge.as_ref()),
         HelperRequest::Scoped => return scoped(),
-        HelperRequest::Broker { .. } => return ExitCode::from(2),
+        HelperRequest::Broker { parent, ports } => return bridge::broker(parent, &ports),
         HelperRequest::Probe {
             limit_network,
             open_sockets,
@@ -756,19 +765,35 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             args,
         } => (policy, Some((program, args))),
     };
+    hold(&policy, launch, bridge.as_ref())
+}
+
+/// Holds a policy on this process, then becomes the harness; for a probe it only tells
+/// whether this kernel held it. Under a bridge it first hands the bridged listeners to the
+/// broker, before any rule; the ports it would keep free are then ports of a network of
+/// its own, so the picked range is not asked. Inputs: the policy, the harness if any, and
+/// the bridge. Output: the exit code as [`helper_main`] gives it.
+fn hold(
+    policy: &LandlockPolicy,
+    launch: Option<(PathBuf, Vec<OsString>)>,
+    bridge: Option<&Bridge>,
+) -> ExitCode {
     if let Some(parent) = policy.die_with
         && let Err(reason) = die_with_parent(parent)
     {
         eprintln!("crazyagent-landlock: {reason}");
         return ExitCode::from(3);
     }
-    if !policy.keep_free.is_empty()
-        && let Err(reason) = kept_outside_picked(&policy.keep_free, read_picked_ports().as_ref())
-    {
+    let readied = match bridge {
+        Some(bridge) => bridge.hand_over(),
+        None if policy.keep_free.is_empty() => Ok(()),
+        None => kept_outside_picked(&policy.keep_free, read_picked_ports().as_ref()),
+    };
+    if let Err(reason) = readied {
         eprintln!("crazyagent-landlock: {reason}");
         return ExitCode::from(3);
     }
-    match enforce(&policy, launch.is_some()) {
+    match enforce(policy, launch.is_some()) {
         Ok(status) if accepted(&status.ruleset, status.no_new_privs) => {}
         Ok(status) => {
             eprintln!(
@@ -822,24 +847,33 @@ fn scoped() -> ExitCode {
 /// mask, so they end only with the harness or by KILL, and a stop signal to the group is
 /// the harness's to handle. Last it gives up new privileges, so a bubblewrap swapped for a
 /// set-user-ID one after [`trusted`] looked still runs as this user. Output: 3 when any of
-/// the three fails, 126 when bubblewrap cannot start.
-fn nest(bwrap: &Path, args: &[OsString]) -> ExitCode {
-    let held = own_session()
-        .and_then(|()| {
+/// the three fails, 126 when bubblewrap cannot start. With a bridge it first starts the
+/// broker on this network and writes the bridge flags for the helper inside
+/// ([`bridge::open`]), keeping its end of the bridge open until bubblewrap has it.
+fn nest(bwrap: &Path, args: &[OsString], bridge: Option<&Bridge>) -> ExitCode {
+    let ready = own_session()
+        .and_then(|()| match bridge {
+            Some(bridge) => bridge::open(&bridge.ports, args)
+                .map(|(end, args)| (Some(end), args)),
+            None => Ok((None, args.to_vec())),
+        })
+        .and_then(|opened| {
             nix::sys::signal::SigSet::all()
                 .thread_block()
-                .map_err(|error| format!("signal mask: {error}"))
-        })
-        .and_then(|()| {
+                .map_err(|error| format!("signal mask: {error}"))?;
             nix::sys::prctl::set_no_new_privs()
-                .map_err(|error| format!("no new privileges: {error}"))
+                .map_err(|error| format!("no new privileges: {error}"))?;
+            Ok(opened)
         });
-    if let Err(reason) = held {
-        eprintln!("crazyagent-landlock: {reason}");
-        return ExitCode::from(3);
-    }
+    let (_end, args) = match ready {
+        Ok(opened) => opened,
+        Err(reason) => {
+            eprintln!("crazyagent-landlock: {reason}");
+            return ExitCode::from(3);
+        }
+    };
     assert_eq!(nix::sys::prctl::get_no_new_privs(), Ok(true));
-    let error = exec_keeping_mask(bwrap, args);
+    let error = exec_keeping_mask(bwrap, &args);
     eprintln!(
         "crazyagent-landlock: cannot start {}: {error}",
         bwrap.display()
@@ -1096,21 +1130,25 @@ fn trusted(bwrap: &Path) -> bool {
 }
 
 /// Tells whether this machine starts the helper inside bubblewrap's namespaces and holds
-/// the same probe there, by running the exact nest: the helper, bubblewrap with
-/// [`NEST_ARGS`], then the helper's probe. A bubblewrap that only exists proves nothing:
-/// Ubuntu 24.04 refuses it the user namespace. A bubblewrap [`trusted`] refuses is never
-/// started. Inputs: bubblewrap, the helper and the probe's arguments. Output: true only
-/// when the nested probe exits 0.
+/// the same probe there, by running the widest nest a launch asks for: the helper,
+/// bubblewrap with [`NEST_ARGS`] and a network of its own with one port bridged, then the
+/// helper's probe. A bubblewrap that only exists proves nothing: Ubuntu 24.04 refuses it
+/// the user namespace. A bubblewrap [`trusted`] refuses is never started. Inputs:
+/// bubblewrap, the helper and the probe's arguments. Output: true only when the nested
+/// probe exits 0.
 fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
     assert!(flags.first().is_some_and(|flag| flag == PROBE));
     clean_absolute(bwrap)
         && trusted(bwrap)
         && passes(
             Command::new(helper)
+                .arg(bridge::BRIDGE)
+                .arg(BRIDGE_PORT_MIN.to_string())
                 .arg(NEST)
                 .arg("--")
                 .arg(bwrap)
                 .args(NEST_ARGS)
+                .arg(bridge::UNSHARE_NET)
                 .arg("--")
                 .arg(helper)
                 .args(flags),
@@ -1225,7 +1263,8 @@ impl Sandbox for LinuxSandbox {
                     nested: true,
                     ..landlock_policy(&grants, &self.sandbox)
                 };
-                nest_command(bwrap, helper, &policy, cwd)
+                let bridged = self.sandbox.bridged_ports().unwrap_or_default();
+                nest_command(bwrap, helper, &policy, cwd, &bridged)
             }
             LinuxBackend::Bubblewrap { bwrap, helper } => {
                 bwrap_command(bwrap, helper, &grants, cwd, self.sandbox.network())
@@ -1424,17 +1463,28 @@ fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
 
 /// The command for a nested agent up to its harness: the helper asked to start bubblewrap
 /// ([`NEST`]) with [`NEST_ARGS`] in the working folder, and inside it the helper again with
-/// the policy. Inputs: bubblewrap, the helper, the policy, marked nested, and the working
-/// folder. Output: the command, which the harness follows after `--`.
-fn nest_command(bwrap: &Path, helper: &Path, policy: &LandlockPolicy, cwd: &Path) -> Command {
+/// the policy. With bridged ports the bridge flags lead and bubblewrap gives the agent a
+/// network of its own. Inputs: bubblewrap, the helper, the policy, marked nested, the
+/// working folder and the bridged ports. Output: the command, which the harness follows
+/// after `--`.
+fn nest_command(
+    bwrap: &Path,
+    helper: &Path,
+    policy: &LandlockPolicy,
+    cwd: &Path,
+    bridged: &[u16],
+) -> Command {
     assert!(policy.nested);
     assert!(policy.die_with.is_none());
     let mut command = Command::new(helper);
+    for port in bridged {
+        command.arg(bridge::BRIDGE).arg(port.to_string());
+    }
+    command.arg(NEST).arg("--").arg(bwrap).args(NEST_ARGS);
+    if !bridged.is_empty() {
+        command.arg(bridge::UNSHARE_NET);
+    }
     command
-        .arg(NEST)
-        .arg("--")
-        .arg(bwrap)
-        .args(NEST_ARGS)
         .arg("--chdir")
         .arg(cwd)
         .arg("--")

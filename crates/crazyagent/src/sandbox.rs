@@ -2476,7 +2476,24 @@ impl ProjectSandbox {
     /// higher. Output: the ports in rising order, or none when the agent keeps the shared
     /// network.
     pub fn bridged_ports(&self) -> Option<Vec<u16>> {
-        None
+        let SandboxNetwork::Only(remotes) = &self.network else {
+            return None;
+        };
+        if self.linux_sockets != LinuxSockets::TcpOnly || remotes.is_empty() {
+            return None;
+        }
+        let mut ports = Vec::with_capacity(remotes.len());
+        for remote in remotes {
+            match remote {
+                SandboxRemote::Loopback(port) if *port >= BRIDGE_PORT_MIN => ports.push(*port),
+                _ => return None,
+            }
+        }
+        ports.sort_unstable();
+        ports.dedup();
+        assert!(!ports.is_empty() && ports.len() <= REMOTES_MAX);
+        assert!(!self.resolves_over_tcp());
+        Some(ports)
     }
 
     /// True when, on Linux, this agent looks host names up over TCP: the setting is
