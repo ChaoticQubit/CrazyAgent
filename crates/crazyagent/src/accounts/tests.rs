@@ -295,3 +295,74 @@ fn statuses_have_plain_labels() {
     assert_eq!(AccountStatus::Unreachable.label(), "Can't reach this URL");
     assert_eq!(AccountStatus::SigningIn.label(), "Signing in...");
 }
+
+/// Task 17 (DEC-180 addendum 2, answer 3): the pool has a Gemini API key kind. It is one
+/// more Add account provider with one method, a key and a model on Google's own address,
+/// stored in the Gemini wire format, so it fits only a harness that speaks that format.
+#[test]
+fn a_gemini_api_key_is_an_account_kind_on_googles_address_in_its_own_wire_format() {
+    let gemini: Provider =
+        serde_json::from_value(serde_json::json!("gemini")).expect("the pool has a Gemini kind");
+    assert_eq!(provider_name(gemini), "Gemini API");
+    let catalog = catalog();
+    let entry = catalog
+        .iter()
+        .find(|entry| entry.provider == gemini)
+        .expect("the catalog lists the Gemini API");
+    assert_eq!(entry.name, "Gemini API");
+    assert_eq!(entry.methods.len(), 1);
+    let method = &entry.methods[0];
+    assert_eq!(method.method, SignInMethod::ApiKey);
+    assert_eq!(method.label, "Use an API key");
+    assert_eq!(method.url, Field::Hidden);
+    assert_eq!(
+        method.url_preset.as_deref(),
+        Some("https://generativelanguage.googleapis.com")
+    );
+    assert_eq!(
+        (method.key, method.model),
+        (Field::Required, Field::Required)
+    );
+    assert_eq!(
+        draft(gemini, SignInMethod::Subscription)
+            .build(false, "0123456789abcdef0123")
+            .unwrap_err()
+            .0,
+        "account_method_unavailable"
+    );
+    let mut value = draft(gemini, SignInMethod::ApiKey);
+    value.model = Some("gemini-2.5-pro".into());
+    assert_eq!(
+        value.build(false, "0123456789abcdef0123").unwrap_err().0,
+        "account_key_required"
+    );
+    let (connection, details) = value.build(true, "0123456789abcdef0123").unwrap();
+    assert_eq!(
+        connection.endpoint,
+        ModelEndpoint::Http {
+            url: "https://generativelanguage.googleapis.com".into()
+        }
+    );
+    assert_eq!(connection.protocol.as_str(), "gemini");
+    assert_eq!(connection.provider.as_str(), "google");
+    assert_eq!(connection.model.author.as_str(), "google");
+    assert_eq!(connection.model.id, "gemini-2.5-pro");
+    assert!(connection.id.as_str().starts_with("gemini-account-"));
+    assert!(matches!(
+        &connection.auth,
+        ModelAuthentication::ApiKey { credential_ref } if credential_ref.as_str().starts_with("gemini-key-")
+    ));
+    assert_eq!(details.name, "Gemini API");
+    assert_eq!(details.provider, gemini);
+    assert_eq!(method_of(&connection, gemini), SignInMethod::ApiKey);
+    assert_eq!(provider_of(&connection), gemini);
+    value.url = Some("https://gateway.example.invalid".into());
+    assert_eq!(
+        value.build(true, "0123456789abcdef0123").unwrap_err().0,
+        "account_url_not_allowed"
+    );
+    assert_eq!(
+        serde_json::to_value(gemini).unwrap(),
+        serde_json::json!("gemini")
+    );
+}
