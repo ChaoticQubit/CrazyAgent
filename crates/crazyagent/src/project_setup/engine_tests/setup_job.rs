@@ -121,6 +121,36 @@ async fn a_setup_job_builds_the_project_and_ends_done_naming_it() {
     engine.stop().await;
 }
 
+/// DEC-177 add.2: a New Project job carries every answer the wizard gives, so one with the
+/// longest About text the setup takes starts and ends done, as the same New Project does
+/// from a client's direct change.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_setup_job_with_the_longest_about_text_starts_and_ends_done() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let mut setup = quiet();
+    setup.about = "a".repeat(ABOUT_BYTES_MAX);
+    let subject = JobSubject::Setup {
+        project_id: ProjectId::new("setup-long").unwrap(),
+        spec: spec(NAME),
+        setup,
+    };
+    start(&mut owner, "setup-long", subject).await.unwrap();
+    let ended = until(&mut owner, |job| {
+        !matches!(job.state, JobState::Building { .. })
+    })
+    .await;
+    assert_eq!(ended.state, JobState::Done);
+    let stored = owner
+        .project_setup(ProjectId::new("setup-long").unwrap())
+        .await
+        .unwrap()
+        .expect("the project is recorded");
+    assert_eq!(stored.about.len(), ABOUT_BYTES_MAX);
+    drop(owner);
+    engine.stop().await;
+}
+
 /// DEC-177 add.2: a New Project job for a project id the engine already has is refused at its
 /// start, as the build's own check refuses it, with no job held and nothing built.
 #[tokio::test(flavor = "multi_thread")]
