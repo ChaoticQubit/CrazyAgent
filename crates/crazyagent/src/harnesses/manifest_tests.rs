@@ -447,3 +447,22 @@ fn a_wire_format_a_limits_reader_or_a_sign_in_minimum_that_is_not_allowed_is_ref
         )
     );
 }
+
+#[test]
+fn a_version_floor_the_version_check_cannot_compare_is_refused_when_the_manifest_is_read() {
+    for floor in ["2", "1..2", "1.", "1.2.3.4.5.6.7", "99999999999999999999.1"] {
+        for key in ["sign_in_minimum", "minimum"] {
+            let text = with(&format!("version:\n  {key}: \"{floor}\"\n"));
+            assert!(parse(text.as_bytes()).is_err(), "{key} {floor}");
+        }
+    }
+    for floor in ["0.56.0", "2.1.268", "1.5", "1.2.3.4.5.6"] {
+        let text = with(&format!(
+            "version:\n  sign_in_minimum: \"{floor}\"\n  minimum: \"{floor}\"\n"
+        ));
+        let manifest = parse(text.as_bytes()).unwrap();
+        assert_eq!(manifest.sign_in_minimum.as_deref(), Some(floor));
+        assert!(!crate::harnesses::update::below("9999.0", floor), "{floor}");
+        assert!(crate::harnesses::update::below("0.0", floor), "{floor}");
+    }
+}
