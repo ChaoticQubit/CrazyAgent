@@ -128,7 +128,8 @@ fn now() -> Result<u64, EngineError> {
 impl GitHub {
     /// Starts a publish: checks the plan, the sign-in and the project's git, and records
     /// the .gitignore lines the owner is shown first. Nothing is written into the project.
-    /// A job that made its repository already is gone on with Continue instead.
+    /// A job that made its repository already is gone on with Continue instead, and a
+    /// start over an earlier job keeps the paths it wrote, which the commit then takes.
     /// Inputs: the project folder and the plan. Output: the job at its lines, or
     /// `github_repo_name_invalid`, `github_repo_description_invalid`,
     /// `github_publish_running`, `github_not_signed_in`, `github_publish_in_progress` or the
@@ -141,20 +142,24 @@ impl GitHub {
         api::check_new(&new_repo(plan))?;
         let _held = publishing(&self.root, project)?;
         self.saved()?;
-        if let Some(job) = state::load_job(&self.root, project)?
-            && matches!(
-                job.step,
-                GitHubPublishStep::Created { .. } | GitHubPublishStep::Pushed { .. }
-            )
-        {
-            return Err(failure("github_publish_in_progress"));
-        }
+        let written = match state::load_job(&self.root, project)? {
+            Some(job)
+                if matches!(
+                    job.step,
+                    GitHubPublishStep::Created { .. } | GitHubPublishStep::Pushed { .. }
+                ) =>
+            {
+                return Err(failure("github_publish_in_progress"));
+            }
+            Some(job) => job.written,
+            None => Vec::new(),
+        };
         self.publish_inspect(project)?;
         let job = GitHubPublishJob {
             project: project.to_path_buf(),
             plan: plan.clone(),
             lines: Vec::new(),
-            written: Vec::new(),
+            written,
             step: GitHubPublishStep::Lines {
                 lines: BASELINE.map(String::from).to_vec(),
             },
@@ -253,8 +258,10 @@ impl GitHub {
 
     /// Runs a publish on from the last step it finished, such as after a stop or an engine
     /// that stopped part way. A job waiting for the owner's lines or a secret needs that
-    /// answer first. Inputs: the project folder and the owner's home folder. Output: the
-    /// job where it stands, or `github_publish_not_started`, `github_publish_step_invalid`.
+    /// answer first, and one stopped before its commit is checked for secrets again, since
+    /// the files may have changed since. Inputs: the project folder and the owner's home
+    /// folder. Output: the job where it stands, or `github_publish_not_started`,
+    /// `github_publish_step_invalid`.
     pub fn publish_continue(
         &self,
         project: &Path,
@@ -268,7 +275,12 @@ impl GitHub {
         ) {
             return Err(failure("github_publish_step_invalid"));
         }
-        self.run(job, |job| self.advance(job, owner_home))
+        self.run(job, |job| {
+            if matches!(job.step, GitHubPublishStep::Checked) {
+                self.checked(job)?;
+            }
+            self.advance(job, owner_home)
+        })
     }
 
     /// Reads a project's publish record, which a run in progress keeps up to date step by
