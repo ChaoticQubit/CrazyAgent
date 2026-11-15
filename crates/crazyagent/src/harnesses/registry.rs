@@ -1,6 +1,6 @@
 use super::HarnessSpec;
 use super::manifest::{self, DriverKind, Manifest, RecordKind, Refused, Role, SubAgents};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 /// The most manifests one registry holds.
 pub const HARNESSES_MAX: usize = 64;
@@ -52,10 +52,12 @@ const BUNDLED: [(&str, &str); 18] = [
     ("kimi", include_str!("../../harness-manifests/kimi.yaml")),
 ];
 
-/// One harness of the registry: its manifest and what the engine can do with it.
-#[derive(Debug, Clone, PartialEq)]
+/// One harness of the registry: its manifest and what the engine can do with it. `spec`
+/// holds the catalog row once it has been built, so it is built at most once.
+#[derive(Debug, Clone)]
 pub struct Harness {
     manifest: Manifest,
+    spec: OnceLock<HarnessSpec>,
 }
 
 impl Harness {
@@ -132,12 +134,14 @@ impl Harness {
         self.manifest.minimum_version.as_deref()
     }
 
-    /// The catalog row of this harness in the shape the rest of the engine reads. The two
-    /// name lists are copied once into memory that lives as long as the process, because a
-    /// spec holds plain text slices; this runs once per bundled harness. Output: the spec.
-    pub fn spec(&'static self) -> HarnessSpec {
+    /// The catalog row of this harness in the shape the rest of the engine reads, for
+    /// `harnesses::specs()` only; everything else reads `harnesses::spec(id)` or `specs()`.
+    /// The two name lists are copied into memory that lives as long as the process, because
+    /// a spec holds plain text slices; the row is kept, so the copy is made once per harness
+    /// however often this is called. Output: the spec.
+    pub(super) fn spec(&'static self) -> HarnessSpec {
         let manifest = &self.manifest;
-        let spec = HarnessSpec {
+        let spec = *self.spec.get_or_init(|| HarnessSpec {
             id: &manifest.id,
             name: &manifest.name,
             binaries: kept(&manifest.binaries),
@@ -147,7 +151,7 @@ impl Harness {
             model_selection: manifest.model_selection,
             account_kinds: &manifest.account_kinds,
             launch: manifest.cannot_start.as_deref(),
-        };
+        });
         assert_eq!(spec.binaries.len(), manifest.binaries.len());
         assert_eq!(spec.locations.len(), manifest.locations.len());
         spec
@@ -161,7 +165,7 @@ fn kept(texts: &'static [String]) -> &'static [&'static str] {
 }
 
 /// Every harness the engine knows, in catalog order.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Registry {
     harnesses: Vec<Harness>,
 }
@@ -196,7 +200,10 @@ impl Registry {
                     });
                 }
             }
-            harnesses.push(Harness { manifest });
+            harnesses.push(Harness {
+                manifest,
+                spec: OnceLock::new(),
+            });
         }
         assert_eq!(harnesses.len(), files.len());
         Ok(Self { harnesses })

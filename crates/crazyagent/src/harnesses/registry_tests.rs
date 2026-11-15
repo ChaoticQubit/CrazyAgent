@@ -273,3 +273,25 @@ fn a_file_not_named_after_its_id_or_holding_a_refused_manifest_names_the_file() 
         (manifest::YAML, "one: The file has no settings.".to_owned())
     );
 }
+
+#[test]
+fn the_spec_of_a_harness_is_built_once_however_often_it_is_asked_for() {
+    for harness in registry().all() {
+        let (one, two) = (harness.spec(), harness.spec());
+        assert!(
+            std::ptr::eq(one.binaries, two.binaries),
+            "{}: a second call copied the program names again",
+            harness.id()
+        );
+        assert!(std::ptr::eq(one.name, two.name), "{}", harness.id());
+        assert_eq!(one.binaries, two.binaries, "{}", harness.id());
+        assert_eq!(one.locations, two.locations, "{}", harness.id());
+    }
+    for (harness, listed) in registry().all().iter().zip(specs()) {
+        assert!(
+            std::ptr::eq(harness.spec().binaries, listed.binaries),
+            "{}: the catalog row and the harness share one copy",
+            harness.id()
+        );
+    }
+}
