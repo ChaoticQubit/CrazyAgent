@@ -338,6 +338,7 @@ pub fn needs_home(folder: &Path) -> bool {
 pub(crate) const RUN_NAME_HEAD: &str = "overview-";
 const RUN_NAME_BYTES_MAX: usize = 96;
 const RUN_TIME_DIGITS_MAX: usize = 19;
+const _: () = assert!(RUN_NAME_BYTES_MAX <= crate::projects_home::RECORDED_NAME_BYTES_MAX);
 
 /// The research state name of one writing run: the head, the project's
 /// [`run_project_part`] sized for the longest start time, so a project's part never changes,

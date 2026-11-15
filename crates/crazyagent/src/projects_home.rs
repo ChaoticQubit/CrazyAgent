@@ -74,10 +74,6 @@ CREATE TABLE IF NOT EXISTS projects_home_add (
 );
 CREATE TABLE IF NOT EXISTS projects_delete_pending (
     exchange INTEGER PRIMARY KEY CHECK(exchange > 0)
-);
-CREATE TABLE IF NOT EXISTS projects_delete_files (
-    name TEXT PRIMARY KEY CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64),
-    inode INTEGER NOT NULL
 )";
 
 /// The owner's projects home folder and whether the engine is watching it.
@@ -923,6 +919,25 @@ fn recorded(root: &Path, names: Vec<String>) -> Vec<RecordedFile> {
 /// it when the project's rows were dropped.
 pub type RecordedFile = (String, i64);
 
+/// The longest engine file name a delete records, an Overview or roadmap status run of the
+/// longest project id (RV-DS241-152), the one width the record's check
+/// ([`delete_files_table`]), its readers and its rows take; migration step 11, which widened
+/// older records to it, is tied to it at build time (G1 code r1 F1).
+pub(crate) const RECORDED_NAME_BYTES_MAX: usize = 96;
+
+/// The statement that makes the record of the engine files a Delete everything moved when
+/// it is missing, its names checked to hold [`RECORDED_NAME_BYTES_MAX`] bytes. Output: the
+/// statement.
+#[cfg(unix)]
+fn delete_files_table() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS projects_delete_files (
+    name TEXT PRIMARY KEY CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND {RECORDED_NAME_BYTES_MAX}),
+    inode INTEGER NOT NULL
+)"
+    )
+}
+
 /// The folder under the engine root that holds every project's tool caches (T8).
 const TOOL_CACHE_FOLDER: &str = "tool-cache";
 
@@ -1188,6 +1203,7 @@ pub fn found(
 pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(TABLE)
+        .and_then(|()| connection.execute_batch(&delete_files_table()))
         .map_err(|e| EngineError(e.to_string()))
 }
 
