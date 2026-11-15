@@ -726,7 +726,9 @@ impl Gateway {
 
     /// The tools a launch may use now: each granted connector's read tools, listed again
     /// from its vendor so a changed list is seen; a connector whose list fails, changed
-    /// or does not fit its budget is left out and logged.
+    /// or does not fit its budget is left out and logged. A connector still locked past
+    /// the wait turns the whole list into `connector_busy`, so the harness shows it and
+    /// can list again instead of running without that connector.
     fn list(&self, db: &Connection, launch: &Launch, settings: &ConnectorSettings) -> Answer {
         let granted = match self.granted_now(db, launch) {
             Ok(granted) => granted,
@@ -753,6 +755,9 @@ impl Gateway {
             }
             row.ms = clock.elapsed().as_millis().min(i64::MAX as u128) as i64;
             self.log(db, settings, &row);
+            if row.outcome == "connector_busy" {
+                return refused("connector_busy");
+            }
         }
         assert!(total <= LIST_BYTES_MAX);
         Answer::Tools { tools }
