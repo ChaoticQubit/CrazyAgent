@@ -1,43 +1,137 @@
 use super::{SkillInfo, one_line};
 use crate::engine::EngineError;
+use crate::harnesses::manifest::{Manifest, Refused};
+use crate::harnesses::registry::{HARNESSES_MAX, Harness, Registry, registry};
 use crate::plugins::skill_folder::{self, IMPORTED, PlannedFile};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 pub const LIST_BYTES_MAX: usize = 48 * 1024;
 pub const FOLDER_NAME_BYTES_MAX: usize = 255;
 const ROOT_ENTRIES_MAX: usize = 1024;
 const DIGEST_ENTRIES_MAX: usize = 4096;
 
-/// Where a found skill lives: the owner's Claude Code or Codex skills folder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Where a found skill lives: the owner's Claude Code or Codex skills folder, or the skills
+/// folder a listed harness's manifest names in `import.skills`, with that harness's catalog
+/// id and name. On the wire it is `claude`, `codex` or the listed harness's catalog id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportFrom {
     Claude,
     Codex,
+    Listed {
+        id: &'static str,
+        folder: &'static str,
+        label: &'static str,
+    },
 }
 
 impl ImportFrom {
-    /// Every folder imports read from, in the order the scan lists them.
-    pub const ALL: [Self; 2] = [Self::Claude, Self::Codex];
+    /// The two folders every scan reads, whatever harnesses the registry holds.
+    pub const BUILT_IN: [Self; 2] = [Self::Claude, Self::Codex];
 
-    /// The skills folder under the owner's home. Output: `.claude/skills` or `.codex/skills`.
+    /// Every folder imports read from, in the order the scan lists them: the two built-in
+    /// ones, then each listed harness's skills folder in catalog order, worked out once from
+    /// the app's registry. Output: the sources.
+    pub fn all() -> &'static [Self] {
+        static ALL: LazyLock<Vec<ImportFrom>> =
+            LazyLock::new(|| ImportFrom::in_registry(registry()));
+        &ALL
+    }
+
+    /// The sources of one registry: the two built-in ones, then each harness whose manifest
+    /// names a skills folder no earlier source reads, so a skill is never listed twice.
+    /// Input: the registry. Output: the sources, in the order a scan lists them.
+    pub fn in_registry(registry: &'static Registry) -> Vec<Self> {
+        let mut sources = Self::BUILT_IN.to_vec();
+        for from in registry.all().iter().filter_map(Self::of) {
+            if !sources.iter().any(|known| known.folder() == from.folder()) {
+                sources.push(from);
+            }
+        }
+        assert!(sources.len() <= Self::BUILT_IN.len() + HARNESSES_MAX);
+        sources
+    }
+
+    /// The source one harness gives: none for the Codex and Claude Code harnesses, whose
+    /// folders are the two built-in ones, and none for a manifest without `import.skills`.
+    /// Input: a harness of a built registry. Output: the source, or none.
+    pub fn of(harness: &'static Harness) -> Option<Self> {
+        let _ = harness;
+        None
+    }
+
+    /// Finds a source by the name it has on the wire. Inputs: the name and the registry
+    /// listed names are looked up in. Output: the source, or none for a name that is neither
+    /// built in nor the catalog id of a harness of that registry that names a skills folder.
+    pub fn named(name: &str, registry: &'static Registry) -> Option<Self> {
+        Self::BUILT_IN
+            .into_iter()
+            .find(|from| from.id() == name)
+            .or_else(|| {
+                registry
+                    .get(name)
+                    .filter(|harness| harness.manifest().id == name)
+                    .and_then(Self::of)
+            })
+    }
+
+    /// The name this source has on the wire. Output: `claude`, `codex` or the catalog id.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Listed { id, .. } => id,
+        }
+    }
+
+    /// The skills folder under the owner's home. Output: `.claude/skills`, `.codex/skills`
+    /// or the folder the listed harness's manifest names.
     pub fn folder(self) -> &'static str {
         match self {
             Self::Claude => ".claude/skills",
             Self::Codex => ".codex/skills",
+            Self::Listed { folder, .. } => folder,
         }
     }
 
-    /// The name the app shows for this folder. Output: "Claude Code" or "Codex".
+    /// The name the app shows for this folder. Output: "Claude Code", "Codex" or the listed
+    /// harness's name.
     pub fn label(self) -> &'static str {
         match self {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
+            Self::Listed { label, .. } => label,
         }
     }
+}
+
+impl Serialize for ImportFrom {
+    /// Writes the source as its wire name. Input: the serializer. Output: its result.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.id())
+    }
+}
+
+impl<'de> Deserialize<'de> for ImportFrom {
+    /// Reads a source from its wire name against the app's registry, so a name only a newer
+    /// engine knows is an unreadable reply. Input: the deserializer. Output: the source.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Self::named(&name, registry())
+            .ok_or_else(|| serde::de::Error::custom("not a skills folder this app imports from"))
+    }
+}
+
+/// Checks a manifest's `import` block: only the keys imports read, and `import.skills` a
+/// folder inside one of the same manifest's `home.owner_folders`, so a manifest never points
+/// an import at another harness's folders or anything else in the owner's home.
+/// Input: a parsed manifest. Output: Ok, or a refusal that names the setting.
+pub fn check(manifest: &Manifest) -> Result<(), Refused> {
+    let _ = manifest;
+    Ok(())
 }
 
 /// How a found skill compares with the app's skills: not there yet, already added with the
@@ -236,18 +330,30 @@ pub fn home() -> Option<PathBuf> {
         .filter(|home| home.is_absolute())
 }
 
-/// Finds the skills in the owner's `~/.claude/skills` and `~/.codex/skills` folders: each
-/// folder holding SKILL.md, skipping dot folders. Each one is checked in place under the
-/// import rules, so the state says exactly what an import would do; nothing is written and
-/// the source folders are only read. Inputs: the owner's home and the app's skills. Output:
-/// what fits one reply, and the rest as a count.
+/// Finds the skills in the owner's `~/.claude/skills` and `~/.codex/skills` folders and in
+/// each skills folder a listed harness's manifest names ([`ImportFrom::all`]). Inputs: the
+/// owner's home and the app's skills. Output: what fits one reply, and the rest as a count.
 pub fn scan(home: &Path, added: &[SkillInfo]) -> Result<ImportList, EngineError> {
+    scan_from(home, ImportFrom::all(), added)
+}
+
+/// Finds the skills in the given sources' folders under the owner's home: each folder
+/// holding SKILL.md, skipping dot folders. Each one is checked in place under the import
+/// rules, so the state says exactly what an import would do; nothing is written and the
+/// source folders are only read. Inputs: the owner's home, the sources in listing order and
+/// the app's skills. Output: what fits one reply, and the rest as a count.
+pub fn scan_from(
+    home: &Path,
+    sources: &[ImportFrom],
+    added: &[SkillInfo],
+) -> Result<ImportList, EngineError> {
+    assert!(sources.len() <= ImportFrom::BUILT_IN.len() + HARNESSES_MAX);
     if !home.is_absolute() || home.to_str().is_none() {
         return Err(error("skill_import_home_unknown"));
     }
     let mut all = Vec::new();
     let mut unlisted = 0usize;
-    for from in ImportFrom::ALL {
+    for &from in sources {
         let root = home.join(from.folder());
         let (names, more) = folder_names(&root);
         unlisted += more;
@@ -566,5 +672,241 @@ mod tests {
             .sum();
         assert!(size <= LIST_BYTES_MAX);
         assert_eq!(list.found[0].name, "skill-000");
+    }
+
+    const STANDIN_SKILLS: &str = "import:\n  skills: \".standin/skills\"\n";
+    const STANDIN: ImportFrom = ImportFrom::Listed {
+        id: "standin-skills",
+        folder: ".standin/skills",
+        label: "Stand-in skills",
+    };
+
+    /// A listed harness manifest that keeps its files in one owner folder. Inputs: the id,
+    /// the shown name, the owner folder and the import block as YAML, empty for none.
+    /// Output: the manifest text.
+    fn listed(id: &str, name: &str, owner: &str, import: &str) -> String {
+        format!(
+            "schema: 1\nkind: harness\nid: \"{id}\"\nname: \"{name}\"\nbinaries:\n  - \"{id}\"\nheadless: \"{id} --json\"\nmodel_selection: true\naccount_kinds:\n  - \"api_key\"\nhome:\n  owner_folders:\n    - \"{owner}\"\n{import}"
+        )
+    }
+
+    /// Builds a registry that lives as long as the process, so its harnesses can be import
+    /// sources. Input: each manifest's id and text. Output: the registry.
+    fn leaked(files: &[(&str, String)]) -> &'static Registry {
+        let named: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(id, text)| (*id, text.as_str()))
+            .collect();
+        Box::leak(Box::new(Registry::build(&named).unwrap()))
+    }
+
+    #[test]
+    fn the_sources_are_the_two_built_in_folders_then_each_manifest_skills_folder_once() {
+        let built = leaked(&[
+            (
+                "codex",
+                listed(
+                    "codex",
+                    "Codex",
+                    ".codex",
+                    "import:\n  skills: \".codex/more-skills\"\n",
+                ),
+            ),
+            (
+                "standin-skills",
+                listed(
+                    "standin-skills",
+                    "Stand-in skills",
+                    ".standin",
+                    STANDIN_SKILLS,
+                ),
+            ),
+            (
+                "standin-twin",
+                listed("standin-twin", "Stand-in twin", ".standin", STANDIN_SKILLS),
+            ),
+            (
+                "standin-plain",
+                listed("standin-plain", "Stand-in plain", ".plain", ""),
+            ),
+        ]);
+        assert_eq!(
+            ImportFrom::in_registry(built),
+            vec![ImportFrom::Claude, ImportFrom::Codex, STANDIN]
+        );
+        assert_eq!(
+            ImportFrom::of(built.get("standin-twin").unwrap()),
+            Some(ImportFrom::Listed {
+                id: "standin-twin",
+                folder: ".standin/skills",
+                label: "Stand-in twin",
+            })
+        );
+        assert_eq!(ImportFrom::of(built.get("codex").unwrap()), None);
+        assert_eq!(ImportFrom::of(built.get("standin-plain").unwrap()), None);
+        assert_eq!(ImportFrom::of(registry().get("claude-code").unwrap()), None);
+        assert_eq!(ImportFrom::all()[..2], ImportFrom::BUILT_IN);
+        assert_eq!(ImportFrom::all(), ImportFrom::in_registry(registry()));
+    }
+
+    #[test]
+    fn a_scan_lists_a_manifest_skills_folder_and_an_import_from_it_names_the_harness() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        skill(
+            &home.join(".claude/skills/review"),
+            "review",
+            "Reviews a change.",
+        );
+        skill(
+            &home.join(".standin/skills/notes"),
+            "notes",
+            "Writes notes.",
+        );
+        skill(&home.join(".standin/other/plan"), "plan", "Plans a change.");
+        let sources = ImportFrom::in_registry(leaked(&[(
+            "standin-skills",
+            listed(
+                "standin-skills",
+                "Stand-in skills",
+                ".standin",
+                STANDIN_SKILLS,
+            ),
+        )]));
+        let list = scan_from(&home, &sources, &[]).unwrap();
+        let rows: Vec<(ImportFrom, &str, &ImportState)> = list
+            .found
+            .iter()
+            .map(|found| (found.from, found.name.as_str(), &found.state))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (ImportFrom::Claude, "review", &ImportState::New),
+                (STANDIN, "notes", &ImportState::New),
+            ]
+        );
+        assert_eq!(list.more, 0);
+        let notes = &list.found[1].folder;
+        assert_eq!(
+            *notes,
+            home.join(".standin/skills/notes").display().to_string()
+        );
+        let setup = root.path().join("setup");
+        let named = |sources: &[ImportFrom]| {
+            crate::skills::origin::label(&setup, Some(home.as_path()), &[], sources, notes)
+        };
+        assert_eq!(named(sources.as_slice()), "Imported from Stand-in skills");
+        assert_eq!(
+            named(ImportFrom::BUILT_IN.as_slice()),
+            crate::skills::origin::ADDED_BY_YOU
+        );
+        assert_eq!(
+            scan_from(&home, &ImportFrom::BUILT_IN, &[])
+                .unwrap()
+                .found
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_manifest_import_block_reads_only_a_skills_folder_inside_its_own_owner_folders() {
+        use crate::harnesses::manifest;
+        let refused = |import: &str| -> Option<(&'static str, String)> {
+            let text = listed("standin-skills", "Stand-in skills", ".standin", import);
+            Registry::build(&[("standin-skills", text.as_str())])
+                .err()
+                .map(|refused| (refused.code, refused.message))
+        };
+        let skills = |folder: &str| refused(&format!("import:\n  skills: \"{folder}\"\n"));
+        for kept in [".standin/skills", ".standin", ".standin/agent/skills"] {
+            assert_eq!(skills(kept), None, "{kept}");
+        }
+        let outside = Some((
+            manifest::VALUE,
+            "standin-skills: import.skills: this must be inside one of home.owner_folders."
+                .to_owned(),
+        ));
+        for folder in [
+            ".other/skills",
+            ".standin-old/skills",
+            ".claude/skills",
+            ".ssh",
+        ] {
+            assert_eq!(skills(folder), outside, "{folder}");
+        }
+        let not_under_home = Some((
+            manifest::VALUE,
+            "standin-skills: import.skills: this must be a folder under the home folder, \
+             written without ~, . or .. parts or a leading /."
+                .to_owned(),
+        ));
+        let long = format!(".standin/{}", "s".repeat(manifest::SENTENCE_BYTES_MAX));
+        for folder in [
+            "",
+            "/home/mira/.standin/skills",
+            "~/.standin/skills",
+            ".standin/~skills",
+            "../.standin/skills",
+            ".standin/../.ssh",
+            ".standin/./skills",
+            ".standin//skills",
+            ".standin/skills/",
+            long.as_str(),
+        ] {
+            assert_eq!(skills(folder), not_under_home, "{folder}");
+        }
+        assert_eq!(
+            refused("import:\n  skills:\n    - \".standin/skills\"\n"),
+            Some((
+                manifest::TYPE,
+                "standin-skills: import.skills: this must be text in quotes.".to_owned()
+            ))
+        );
+        assert_eq!(
+            refused("import:\n  memories: \".standin/memories\"\n"),
+            Some((
+                manifest::UNKNOWN_KEY,
+                "standin-skills: import.memories: this key is not one an import block has."
+                    .to_owned()
+            ))
+        );
+        assert_eq!(refused("import:\n  skills: null\n"), None);
+        assert_eq!(refused(""), None);
+    }
+
+    #[test]
+    fn every_import_source_keeps_its_wire_name_both_ways() {
+        let built = leaked(&[(
+            "standin-skills",
+            listed(
+                "standin-skills",
+                "Stand-in skills",
+                ".standin",
+                STANDIN_SKILLS,
+            ),
+        )]);
+        let sources = ImportFrom::in_registry(built);
+        assert_eq!(
+            sources,
+            vec![ImportFrom::Claude, ImportFrom::Codex, STANDIN]
+        );
+        for from in &sources {
+            assert_eq!(
+                serde_json::to_value(from).unwrap(),
+                serde_json::json!(from.id())
+            );
+            assert_eq!(ImportFrom::named(from.id(), built), Some(*from));
+        }
+        let names: std::collections::HashSet<&str> = sources.iter().map(|from| from.id()).collect();
+        assert_eq!(names.len(), sources.len());
+        assert_eq!(ImportFrom::named("Stand-in skills", built), None);
+        let read = |name: &str| serde_json::from_value::<ImportFrom>(serde_json::json!(name));
+        assert_eq!(read("claude").unwrap(), ImportFrom::Claude);
+        assert_eq!(read("codex").unwrap(), ImportFrom::Codex);
+        for unknown in ["claude-code", "gemini-cli", "standin-skills", "Claude", ""] {
+            assert!(read(unknown).is_err(), "{unknown}");
+        }
     }
 }
