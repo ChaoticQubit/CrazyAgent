@@ -1455,6 +1455,48 @@ fn a_call_that_waits_past_its_connectors_lock_is_refused_as_busy() {
 }
 
 #[test]
+fn a_list_that_waits_past_a_connectors_lock_says_connector_busy_instead_of_leaving_it_out() {
+    let board = serving(vec![read_tool("list_issues")]);
+    let desk = serving(vec![read_tool("search")]);
+    let mut bench = bench();
+    bench.gateway.stand_in("board", board.endpoint());
+    bench.gateway.stand_in("desk", desk.endpoint());
+    grant(&bench, "board", true);
+    grant(&bench, "desk", true);
+    let launch = launch(&bench);
+    bench.gateway.lock_wait = Duration::from_millis(200);
+    let lock = bench.gateway.lock_for("board");
+    let (taken, held) = std::sync::mpsc::channel::<()>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _one = lock.lock().unwrap();
+        taken.send(()).unwrap();
+        let _ = released.recv();
+    });
+    held.recv().unwrap();
+    let replies = talk(&bench, &launch, &[request(1, "tools/list", json!({}))]);
+    let message = replies[0]["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.starts_with("connector_busy"), "{}", replies[0]);
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(
+        listed(&bench, &launch),
+        ["board__list_issues", "desk__search"]
+    );
+    let outcome: String = bench
+        .case
+        .db
+        .query_row(
+            "SELECT outcome FROM connector_calls WHERE connector='board' AND kind='list'
+             ORDER BY id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome, "connector_busy");
+}
+
+#[test]
 fn one_launchs_flood_of_refused_calls_leaves_every_call_that_reached_a_vendor_in_place() {
     let case = case();
     let now = crate::semantic::now_ms();
