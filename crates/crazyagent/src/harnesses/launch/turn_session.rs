@@ -28,13 +28,13 @@ pub struct TurnSession {
     uncertain: bool,
 }
 
-/// The process of the running turn, its sandbox warden, its output lines and whether its
-/// process group was already asked to stop.
+/// The process of the running turn, its sandbox warden, its output lines and when its
+/// process group was asked to stop, if it was.
 struct Running {
     child: Child,
     warden: Option<crate::sandbox::warden::Warden>,
     lines: Receiver<Line>,
-    stopping: bool,
+    stopping: Option<Instant>,
 }
 
 impl TurnSession {
@@ -121,8 +121,9 @@ impl TurnSession {
     }
 
     /// Stops the running turn: the driver marks it interrupted and its process group gets
-    /// TERM; the turn ends as interrupted when its output closes. Output: Ok, or
-    /// `launch_not_running` with no turn or an interrupt already asked.
+    /// TERM; the turn ends as interrupted when its output closes, or when the group gets KILL
+    /// once the stop grace passes. Output: Ok, or `launch_not_running` with no turn or an
+    /// interrupt already asked.
     pub fn interrupt(&mut self) -> Result<(), LaunchError> {
         self.turns.interrupt()?;
         self.stop_turn();
@@ -130,19 +131,21 @@ impl TurnSession {
     }
 
     /// Waits up to `wait` for the next event. A line too long to hold is passed over with one
-    /// note in the engine log, and a breach of tools off stops the turn's process group.
-    /// Output: Some(event), None on timeout or between turns, or an
+    /// note in the engine log, a breach of tools off stops the turn's process group, and a
+    /// group asked to stop that keeps its output open past the stop grace gets KILL, which
+    /// ends its turn. Output: Some(event), None on timeout or between turns, or an
     /// error once the session deadline passes or the driver refuses a line, which also stops
     /// the running turn.
     pub fn next_event(&mut self, wait: Duration) -> Result<Option<LaunchEvent>, LaunchError> {
         let until = Instant::now() + wait;
+        let grace = self.request.limits.stop_grace;
         loop {
             if let Some(event) = self.queue.pop_front() {
                 return Ok(Some(event));
             }
             let now = Instant::now();
             if now >= self.deadline {
-                self.end_turn(true);
+                self.end_turn(true, grace);
                 return Err(failure("launch_deadline"));
             }
             if now >= until {
@@ -152,7 +155,15 @@ impl TurnSession {
                 std::thread::sleep(until.min(self.deadline) - now);
                 continue;
             };
-            match running.lines.recv_timeout(until.min(self.deadline) - now) {
+            let overdue = running.stopping.map(|asked| asked + grace);
+            if overdue.is_some_and(|overdue| now >= overdue) {
+                let code = self.end_turn(false, Duration::ZERO);
+                let events = self.turns.exited(code)?;
+                self.queue.extend(events);
+                continue;
+            }
+            let wake = overdue.map_or(until, |overdue| overdue.min(until));
+            match running.lines.recv_timeout(wake.min(self.deadline) - now) {
                 Ok(Line::Bytes(line)) => match self.turns.receive(&line) {
                     Ok(events) => {
                         self.queue.extend(events);
@@ -161,7 +172,7 @@ impl TurnSession {
                         }
                     }
                     Err(error) => {
-                        self.end_turn(true);
+                        self.end_turn(true, grace);
                         return Err(error);
                     }
                 },
@@ -169,7 +180,7 @@ impl TurnSession {
                     eprintln!("launch_output_line_skipped over={LINE_BYTES_MAX}");
                 }
                 Ok(Line::Closed) | Err(RecvTimeoutError::Disconnected) => {
-                    let code = self.end_turn(false);
+                    let code = self.end_turn(false, grace);
                     let events = self.turns.exited(code)?;
                     self.queue.extend(events);
                 }
@@ -181,7 +192,7 @@ impl TurnSession {
     /// Stops the running turn's process group, if any, and its warden. Output: Ok, or
     /// [`Unstopped::Uncertain`] when a warden of any turn did not confirm its sandbox empty.
     pub fn stop(mut self) -> Result<(), Unstopped> {
-        self.end_turn(true);
+        self.end_turn(true, self.request.limits.stop_grace);
         assert!(self.running.is_none());
         if self.uncertain {
             return Err(Unstopped::Uncertain);
@@ -202,10 +213,10 @@ impl TurnSession {
             child,
             warden,
             lines,
-            stopping: false,
+            stopping: None,
         });
         let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
-            self.end_turn(true);
+            self.end_turn(true, self.request.limits.stop_grace);
             return Err(failure("launch_stdio_unavailable"));
         };
         let readers = std::thread::Builder::new()
@@ -221,36 +232,37 @@ impl TurnSession {
                     })
             });
         if readers.is_err() {
-            self.end_turn(true);
+            self.end_turn(true, self.request.limits.stop_grace);
             return Err(failure("launch_reader_unavailable"));
         }
         Ok(())
     }
 
     /// Asks the running turn's process group to stop, once; its turn ends when its output
-    /// closes.
+    /// closes, or by KILL once the stop grace passes with its output still open.
     fn stop_turn(&mut self) {
         if let Some(running) = self.running.as_mut()
-            && !running.stopping
+            && running.stopping.is_none()
         {
             terminate(&mut running.child);
-            running.stopping = true;
+            running.stopping = Some(Instant::now());
         }
     }
 
-    /// Ends the running turn's process group: TERM first when it is stopped `at_once`, a
-    /// wait of at most the stop grace for its leader to exit, KILL to what is left of the
-    /// group, then the warden. A turn whose output closed is not stopped at once, so its
-    /// leader exits by itself with its own code. Input: whether to stop at once. Output: the
+    /// Ends the running turn's process group: TERM first when `term` is set, a wait of at
+    /// most `wait` for its leader to exit, KILL to what is left of the group, then the
+    /// warden. A turn whose output closed gets no TERM and the stop grace, so its leader
+    /// exits by itself with its own code; a turn asked to stop whose stop grace passed gets
+    /// no TERM and no wait. Inputs: whether to send TERM and the longest wait. Output: the
     /// leader's exit code, none for a signal, a leader that did not exit, or no turn.
     #[cfg(unix)]
-    fn end_turn(&mut self, at_once: bool) -> Option<i32> {
+    fn end_turn(&mut self, term: bool, wait: Duration) -> Option<i32> {
         let mut running = self.running.take()?;
         let group = rustix::process::Pid::from_child(&running.child);
-        if at_once {
+        if term {
             let _ = rustix::process::kill_process_group(group, rustix::process::Signal::TERM);
         }
-        let code = reap(&mut running.child, self.request.limits.stop_grace);
+        let code = reap(&mut running.child, wait);
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         let _ = running.child.kill();
         let status = running.child.wait().ok();
@@ -261,16 +273,12 @@ impl TurnSession {
     }
 
     #[cfg(not(unix))]
-    fn end_turn(&mut self, at_once: bool) -> Option<i32> {
+    fn end_turn(&mut self, term: bool, wait: Duration) -> Option<i32> {
         let mut running = self.running.take()?;
         if let Some(warden) = running.warden.take() {
             match warden {}
         }
-        let wait = if at_once {
-            Duration::ZERO
-        } else {
-            self.request.limits.stop_grace
-        };
+        let wait = if term { Duration::ZERO } else { wait };
         let code = reap(&mut running.child, wait);
         let _ = running.child.kill();
         let status = running.child.wait().ok();
@@ -280,7 +288,7 @@ impl TurnSession {
 
 impl Drop for TurnSession {
     fn drop(&mut self) {
-        self.end_turn(true);
+        self.end_turn(true, self.request.limits.stop_grace);
     }
 }
 

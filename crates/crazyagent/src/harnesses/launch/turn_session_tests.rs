@@ -12,19 +12,22 @@ const STANDIN: &str = include_str!("../../../tests/fixtures/harness/standin-json
 const HARNESS: &str = r#"#!/bin/sh
 prompt=
 resume=
-while [ "$#" -gt 1 ]; do
+while [ "$#" -gt 0 ]; do
   case "$1" in
-    --prompt) prompt=$2 ;;
+    --prompt=*) prompt=${1#--prompt=} ;;
     --resume) resume=$2 ;;
   esac
   shift
 done
+case "$prompt" in
+  stubborn*) trap '' TERM ;;
+esac
 printf '%s\n' '{"type":"session","id":"s-5"}'
 printf '{"type":"text","delta":"%s|%s"}\n' "$prompt" "$resume"
 case "$prompt" in
   fail) exit 3 ;;
-  wait) exec /bin/sleep 30 ;;
-  tool)
+  wait | stubborn) exec /bin/sleep 30 ;;
+  tool | stubborn-tool)
     printf '%s\n' '{"type":"tool","name":"Bash"}'
     exec /bin/sleep 30
     ;;
@@ -131,6 +134,28 @@ fn turn(session: &mut TurnSession, prompt: &str) -> Vec<LaunchEvent> {
     finish(session)
 }
 
+/// The longest a stopped turn whose harness ignores TERM may take to end: the stop grace
+/// and a margin, well under the stand-in's 30 second sleep. Output: the wait.
+fn overdue() -> Duration {
+    let wait = LaunchLimits::default().stop_grace + Duration::from_secs(15);
+    assert!(wait < Duration::from_secs(30));
+    wait
+}
+
+/// Waits up to 5 seconds for a process group to be gone, as macOS answers EPERM for a short
+/// while after its last member is reaped. Input: the group id. Output: whether it is gone.
+fn gone(group: u32) -> bool {
+    let group = rustix::process::Pid::from_raw(i32::try_from(group).unwrap()).unwrap();
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        match rustix::process::test_kill_process_group(group) {
+            Err(rustix::io::Errno::SRCH) => return true,
+            _ if Instant::now() < until => std::thread::sleep(Duration::from_millis(20)),
+            _ => return false,
+        }
+    }
+}
+
 fn code<T: std::fmt::Debug>(result: Result<T, LaunchError>) -> String {
     result.unwrap_err().0
 }
@@ -218,6 +243,50 @@ fn a_tool_used_with_tools_off_stops_the_turn_process() {
     assert!(started.elapsed() < Duration::from_secs(20));
     assert_eq!(session.turn_group(), None);
     assert_eq!(turn(&mut session, "two"), [text("two|s-5"), finished(true)]);
+    session.stop().unwrap();
+}
+
+/// rv-code2 T11-3 and rv-secreview F1, macOS only: an interrupted turn whose harness ignores
+/// TERM and keeps its output open gets KILL once the stop grace passes, well before its 30
+/// second sleep ends; the turn ends interrupted, its process group is gone and the next
+/// prompt runs.
+#[test]
+fn an_interrupted_turn_that_ignores_term_is_killed_once_the_stop_grace_passes() {
+    let (_directory, mut session) = begin();
+    session.send("stubborn").unwrap();
+    assert_eq!(first(&mut session), text("stubborn|"));
+    let group = session.turn_group().unwrap();
+    let started = Instant::now();
+    session.interrupt().unwrap();
+    assert_eq!(
+        finish_within(&mut session, overdue()),
+        [LaunchEvent::Interrupted, finished(false)]
+    );
+    assert!(started.elapsed() < overdue());
+    assert_eq!(session.turn_group(), None);
+    assert!(gone(group));
+    assert_eq!(turn(&mut session, "two"), [text("two|s-5"), finished(true)]);
+    session.stop().unwrap();
+}
+
+/// rv-code2 T11-3 and rv-secreview F1, macOS only: with tools off, a turn whose harness
+/// reports a tool, ignores TERM and keeps its output open gets KILL once the stop grace after
+/// the breach passes, with one `ApprovalDenied` and an unsuccessful end, and its process
+/// group is gone.
+#[test]
+fn a_tools_off_breach_that_ignores_term_is_killed_once_the_stop_grace_passes() {
+    let (_directory, mut session) = begin();
+    session.send("stubborn-tool").unwrap();
+    assert_eq!(first(&mut session), text("stubborn-tool|"));
+    let group = session.turn_group().unwrap();
+    let started = Instant::now();
+    assert_eq!(
+        finish_within(&mut session, overdue()),
+        [LaunchEvent::ApprovalDenied, finished(false)]
+    );
+    assert!(started.elapsed() < overdue());
+    assert_eq!(session.turn_group(), None);
+    assert!(gone(group));
     session.stop().unwrap();
 }
 

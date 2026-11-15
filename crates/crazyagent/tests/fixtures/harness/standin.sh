@@ -49,6 +49,10 @@ for arg in "$@"; do
 	--session) want=session ;;
 	--resume) want=resume ;;
 	--prompt) want=prompt ;;
+	--prompt=*)
+		prompt=${arg#--prompt=}
+		has_prompt=1
+		;;
 	--record) want=record ;;
 	--stdin) read_stdin=1 ;;
 	esac
