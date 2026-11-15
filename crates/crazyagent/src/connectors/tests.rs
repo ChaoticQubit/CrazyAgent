@@ -587,3 +587,49 @@ fn every_connector_code_of_this_module_has_a_plain_sentence() {
     }
     assert_eq!(plain_problem("connector_nothing"), None);
 }
+
+#[test]
+fn a_leftover_key_that_cannot_be_deleted_keeps_its_row_until_it_is() {
+    let case = case();
+    add(&case, BOARD, false);
+    let old_key = CredentialRef::new("plugin-key-fedcba9876543210").unwrap();
+    accounts::replace_key_in(
+        &case.root,
+        PLUGIN_KEYS,
+        &old_key,
+        b"sk-old-embedding-key".to_vec(),
+    )
+    .unwrap();
+    case.db
+        .execute_batch(
+            "INSERT INTO app_plugin_trust (name, sha256, hosts, trusted_ms)
+             VALUES ('linear', 'old', 'api.openai.com', 1);
+             INSERT INTO app_plugin_secrets (plugin, secret, source, reference)
+             VALUES ('linear', 'api_key', 'key', 'plugin-key-fedcba9876543210');",
+        )
+        .unwrap();
+    let keys = case.root.join(PLUGIN_KEYS);
+    std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let refused = store::list(&case.db, &case.root).map(|_| ());
+    std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        refused.unwrap_err().0,
+        "app_plugin_key_store_unavailable",
+        "a key that cannot be deleted stops the pass"
+    );
+    assert!(accounts::key_saved_in(&case.root, PLUGIN_KEYS, &old_key).unwrap());
+    for sql in [
+        "SELECT COUNT(*) FROM app_plugin_trust WHERE name='linear'",
+        "SELECT COUNT(*) FROM app_plugin_secrets WHERE plugin='linear'",
+    ] {
+        assert_eq!(count(&case, sql), 1, "the row stays so the next pass finds the key: {sql}");
+    }
+    store::list(&case.db, &case.root).unwrap();
+    assert!(!accounts::key_saved_in(&case.root, PLUGIN_KEYS, &old_key).unwrap());
+    for sql in [
+        "SELECT COUNT(*) FROM app_plugin_trust WHERE name='linear'",
+        "SELECT COUNT(*) FROM app_plugin_secrets WHERE plugin='linear'",
+    ] {
+        assert_eq!(count(&case, sql), 0, "{sql}");
+    }
+}
