@@ -115,9 +115,40 @@ fn local_v6(ip: &[u8; 16]) -> bool {
     *ip == Ipv6Addr::LOCALHOST.octets() || (mapped && ip[12] == 127)
 }
 
-/// Tells whether a name is `.git` in any letter case. Input: one path component.
+/// The code points a case-folding folder leaves out when it compares names (Unicode's
+/// default ignorable ones), as first and last of each range.
+pub const IGNORED: [(u32, u32); 17] = [
+    (0x00ad, 0x00ad),
+    (0x034f, 0x034f),
+    (0x061c, 0x061c),
+    (0x115f, 0x1160),
+    (0x17b4, 0x17b5),
+    (0x180b, 0x180f),
+    (0x200b, 0x200f),
+    (0x202a, 0x202e),
+    (0x2060, 0x206f),
+    (0x3164, 0x3164),
+    (0xfe00, 0xfe0f),
+    (0xfeff, 0xfeff),
+    (0xffa0, 0xffa0),
+    (0xfff0, 0xfff8),
+    (0x1bca0, 0x1bca3),
+    (0x1d173, 0x1d17a),
+    (0xe0000, 0xe0fff),
+];
+
+/// Tells whether a name is `.git` to some filesystem: in any letter case, with dots and
+/// spaces after it (vfat and exFAT drop them) and with code points a case-folding folder
+/// ignores anywhere in it. Input: one path component. Output: true for such a name; the
+/// agent's own git folders are spelled `.git` exactly ([`GitOwn`]).
 pub fn is_git(name: &OsStr) -> bool {
-    name.as_encoded_bytes().eq_ignore_ascii_case(b".git")
+    let text = String::from_utf8_lossy(name.as_encoded_bytes());
+    let ignored = |point: &char| {
+        let point = u32::from(*point);
+        IGNORED.iter().any(|(first, last)| (*first..=*last).contains(&point))
+    };
+    let kept: String = text.chars().filter(|point| !ignored(point)).collect();
+    kept.trim_end_matches(['.', ' ']).eq_ignore_ascii_case(".git")
 }
 
 /// The git folders an agent may make entries in: the top-level `.git` of each working
