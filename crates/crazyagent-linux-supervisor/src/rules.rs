@@ -91,23 +91,25 @@ pub struct GitOwn {
 
 impl GitOwn {
     /// Tells whether a new entry may be made at a path. Input: the real, absolute path
-    /// of the entry, its folder resolved and no `.` or `..` in it. Output: true when no
-    /// component is a `.git` in any letter case, or the first one is one of the agent's
-    /// own; false otherwise and for a path that is not in that form.
+    /// of the entry, its folder resolved and no `.` or `..` in it. Output: true when every
+    /// component named `.git` in any letter case is one of the agent's own, at most one,
+    /// or there is none; false otherwise and for a path that is not in that form.
     pub fn allows(&self, real: &Path) -> bool {
-        let mut walked = PathBuf::new();
+        let (mut walked, mut owned) = (PathBuf::new(), 0u32);
         for part in real.components() {
             match part {
                 Component::RootDir if walked.as_os_str().is_empty() => walked.push("/"),
                 Component::Normal(name) if walked.is_absolute() => {
                     walked.push(name);
-                    if is_git(name) {
-                        return self.owns(&walked);
+                    if is_git(name) && (owned > 0 || !self.owns(&walked)) {
+                        return false;
                     }
+                    owned += u32::from(is_git(name));
                 }
                 _ => return false,
             }
         }
+        assert!(owned <= 1);
         walked.is_absolute()
     }
 
