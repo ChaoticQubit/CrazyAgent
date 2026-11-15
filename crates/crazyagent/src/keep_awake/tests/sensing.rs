@@ -126,7 +126,11 @@ fn the_first_step_asks_for_a_reading_and_the_view_shows_what_came_back() {
     let read = step_until(&mut keeper, &connection, &mut now_ms, |view| {
         view.lid_support == LidSupport::Held
     });
-    assert_eq!(read.state.want, Want::Nothing, "a reading alone holds nothing");
+    assert_eq!(
+        read.state.want,
+        Want::Nothing,
+        "a reading alone holds nothing"
+    );
     assert!(now_ms - NOW_MS < READ_MS, "the first reading does not wait");
     assert_eq!(fake.reads(), 1);
 }
@@ -189,11 +193,11 @@ fn critical_heat_in_a_reading_ends_the_running_hold() {
         ..on_ac()
     });
     steps(&mut keeper, &connection, &mut now_ms, 35);
-    let serious = keeper
-        .tick(&connection, now_ms + TICK_MS)
-        .unwrap()
-        .unwrap();
-    assert_eq!(serious.state.ended, None, "serious heat does not end by default");
+    let serious = keeper.tick(&connection, now_ms + TICK_MS).unwrap().unwrap();
+    assert_eq!(
+        serious.state.ended, None,
+        "serious heat does not end by default"
+    );
 
     fake.set(PowerReading {
         heat: Heat::Critical,
@@ -229,7 +233,11 @@ fn one_unread_battery_keeps_the_hold_and_the_next_one_ends_it() {
         view.state.ended.is_some()
     });
     assert_eq!(ended.state.ended, Some(EndReason::BatteryUnread));
-    assert_eq!(fake.reads(), 3, "the second unread reading in a row ends the hold");
+    assert_eq!(
+        fake.reads(),
+        3,
+        "the second unread reading in a row ends the hold"
+    );
 
     fake.set(on_battery(Some(50)));
     steps(&mut keeper, &connection, &mut now_ms, 35);
@@ -289,13 +297,19 @@ fn a_refused_lid_lock_keeps_the_idle_hold_and_the_status_says_why() {
         view.lid_support == refused
     });
     assert_eq!(view.state.want, IDLE, "the idle hold goes on");
-    assert_eq!(view.state.ended, None, "a refused lid lock is not a lost hold");
+    assert_eq!(
+        view.state.ended, None,
+        "a refused lid lock is not a lost hold"
+    );
     let never_claimed = asked.lock().unwrap().clone();
     let lid_asks = never_claimed
         .iter()
         .filter(|want| **want == IDLE_AND_LID)
         .count();
-    assert_eq!(lid_asks, 1, "the lid lock is asked for once: {never_claimed:?}");
+    assert_eq!(
+        lid_asks, 1,
+        "the lid lock is asked for once: {never_claimed:?}"
+    );
     assert_eq!(never_claimed.last(), Some(&IDLE));
 
     let later = steps(&mut keeper, &connection, &mut now_ms, 65).unwrap();
@@ -317,7 +331,11 @@ fn the_sensor_thread_ends_with_the_keeper() {
     let mut keeper = Keeper::default().with_reader(fake.reader());
     keeper.tick(&connection, NOW_MS).unwrap();
     assert!(until(|| fake.reads() == 1));
-    assert_eq!(Arc::strong_count(&fake.reads), 2, "the thread owns the reader");
+    assert_eq!(
+        Arc::strong_count(&fake.reads),
+        2,
+        "the thread owns the reader"
+    );
     drop(keeper);
     assert!(
         until(|| Arc::strong_count(&fake.reads) == 1),

@@ -2,8 +2,8 @@ use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::System::Power::{
-    POWER_REQUEST_TYPE, PowerClearRequest, PowerCreateRequest, PowerRequestDisplayRequired,
-    PowerRequestSystemRequired, PowerSetRequest,
+    GetSystemPowerStatus, POWER_REQUEST_TYPE, PowerClearRequest, PowerCreateRequest,
+    PowerRequestDisplayRequired, PowerRequestSystemRequired, PowerSetRequest, SYSTEM_POWER_STATUS,
 };
 use windows_sys::Win32::System::SystemServices::POWER_REQUEST_CONTEXT_VERSION;
 use windows_sys::Win32::System::Threading::{
@@ -11,6 +11,12 @@ use windows_sys::Win32::System::Threading::{
 };
 
 const REASON_UNITS_MAX: usize = 256;
+const LINE_OFFLINE: u8 = 0;
+const LINE_ONLINE: u8 = 1;
+const LINE_BACKUP: u8 = 2;
+const FLAG_NO_BATTERY: u8 = 128;
+const FLAG_UNKNOWN: u8 = 255;
+const PERCENT_MAX: u8 = 100;
 
 /// What a power request keeps on: the system (no idle sleep) or the display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +93,47 @@ impl Request {
     }
 }
 
+/// Where this computer's power comes from and how full its battery is, each none where
+/// Windows does not say: an unknown line state, no system battery, an unknown charge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Status {
+    pub ac: Option<bool>,
+    pub battery_pct: Option<u8>,
+}
+
+/// Reads three fields of the Windows power status. Inputs: the AC line state (0 offline,
+/// 1 online, 2 backup power, 255 unknown), the battery flag (bit 128 no system battery,
+/// 255 unknown) and the charge (0 to 100, 255 unknown). Output: the status; backup power
+/// counts as battery.
+fn status_of(line: u8, flag: u8, percent: u8) -> Status {
+    let ac = match line {
+        LINE_ONLINE => Some(true),
+        LINE_OFFLINE | LINE_BACKUP => Some(false),
+        _ => None,
+    };
+    let battery = flag != FLAG_UNKNOWN && flag & FLAG_NO_BATTERY == 0;
+    let battery_pct = (battery && percent <= PERCENT_MAX).then_some(percent);
+    assert!(battery_pct.is_none_or(|charge| charge <= PERCENT_MAX));
+    assert!(battery || battery_pct.is_none());
+    Status { ac, battery_pct }
+}
+
+/// Reads this computer's power status from Windows. Output: the status, or the Windows
+/// error. Relies on the pointer naming one writable power status value for the whole
+/// call, which Windows fills in.
+pub fn status() -> io::Result<Status> {
+    let mut raw = SYSTEM_POWER_STATUS::default();
+    let read = unsafe { GetSystemPowerStatus(&raw mut raw) };
+    if read == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(status_of(
+        raw.ACLineStatus,
+        raw.BatteryFlag,
+        raw.BatteryLifePercent,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Status, status, status_of};
@@ -111,7 +158,11 @@ mod tests {
         assert_eq!(read(0, 4, 0).battery_pct, Some(0));
         assert_eq!(read(2, 0, 40).ac, Some(false), "backup power is battery");
         assert_eq!(read(255, 0, 40).ac, None);
-        assert_eq!(read(7, 0, 40).ac, None, "a line value Windows does not name");
+        assert_eq!(
+            read(7, 0, 40).ac,
+            None,
+            "a line value Windows does not name"
+        );
         assert_eq!(read(1, 128, 255).battery_pct, None, "no system battery");
         assert_eq!(
             read(1, 128, 50).battery_pct,

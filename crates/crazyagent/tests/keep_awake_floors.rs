@@ -74,7 +74,10 @@ fn this_macs_own_pmset_and_thermal_text_is_understood() {
     let reading = read_power();
     assert_eq!(reading.source, source);
     assert_ne!(reading.heat, Heat::Unknown);
-    assert_eq!(reading.lid_closed, None, "the Mac's lid is read in a later slice");
+    assert_eq!(
+        reading.lid_closed, None,
+        "the Mac's lid is read in a later slice"
+    );
 }
 
 #[test]
@@ -367,7 +370,11 @@ mod linux {
         }
         stop.store(true, Ordering::SeqCst);
         watcher.join().unwrap();
-        assert_eq!(gaps.load(Ordering::SeqCst), 0, "a lock was there at every look");
+        assert_eq!(
+            gaps.load(Ordering::SeqCst),
+            0,
+            "a lock was there at every look"
+        );
         assert!(settles_at(1), "the old lock closes after each swap");
         hold.release();
         assert!(settles_at(0));
@@ -390,7 +397,11 @@ mod linux {
             std::thread::sleep(Duration::from_millis(500));
         }
         std::thread::sleep(SLEPT);
-        assert_eq!(read_power().lid_closed, Some(true), "the lid hold kept it awake");
+        assert_eq!(
+            read_power().lid_closed,
+            Some(true),
+            "the lid hold kept it awake"
+        );
 
         let (wall, steady) = (SystemTime::now(), Instant::now());
         hold.release();

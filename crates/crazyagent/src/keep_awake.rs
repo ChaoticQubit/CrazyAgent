@@ -6,6 +6,11 @@ mod hold_macos;
 #[cfg(windows)]
 mod hold_windows;
 pub mod journal;
+pub mod power;
+pub mod power_linux;
+pub mod power_macos;
+#[cfg(windows)]
+mod power_windows;
 pub mod settings;
 pub mod state;
 pub mod work;
@@ -423,10 +428,11 @@ pub(crate) fn reconcile(root: &Path) -> Result<(), EngineError> {
     journal::Journal::open(root)?.reconcile(undo)
 }
 
-/// The engine's Keep awake pacer: looks once a second for a changed work count or an owner
-/// change and evaluates at once when it finds one, and every `TICK_MS` otherwise. After
-/// every evaluation it brings the platform hold, when it has one, in step with the
-/// decision.
+/// The engine's Keep awake pacer: looks once a second for a changed work count, an owner
+/// change or a new platform reading and evaluates at once when it finds one, and every
+/// `TICK_MS` otherwise. After every evaluation it brings the platform hold, when it has
+/// one, in step with the decision. With a reader it asks a sensor thread for a reading
+/// every `power::READ_MS`.
 #[derive(Debug, Default)]
 pub struct Keeper {
     looked_ms: Option<i64>,
@@ -434,6 +440,11 @@ pub struct Keeper {
     work: Option<u32>,
     hold: Option<Box<dyn Hold + Send>>,
     lost: bool,
+    sensing: Option<power::Sensing>,
+    reading: Option<power::PowerReading>,
+    battery_unread: bool,
+    battery_unread_twice: bool,
+    lid_refused: bool,
 }
 
 impl Keeper {
@@ -446,6 +457,45 @@ impl Keeper {
         }
     }
 
+    /// Gives the keeper platform readings: starts the sensor thread around a reader, which
+    /// the keeper then asks every `power::READ_MS`. Input: the reader. Output: the keeper;
+    /// when the thread cannot start that is logged and the keeper reads nothing, as one
+    /// built without a reader does.
+    pub fn with_reader(mut self, reader: power::Reader) -> Self {
+        assert!(self.sensing.is_none());
+        match power::Sensing::start(reader) {
+            Ok(sensing) => self.sensing = Some(sensing),
+            Err(problem) => eprintln!("keep awake: no sensor thread: {problem}"),
+        }
+        self
+    }
+
+    /// The readings `decide` looks at, from the last platform reading. Output: none
+    /// before the first reading, else the sensors, with a lid the system refused shown as
+    /// not available.
+    fn sensors(&self) -> Option<Sensors> {
+        let reading = self.reading.as_ref()?;
+        Some(power::sensors(
+            reading,
+            self.battery_unread_twice,
+            self.lid_refused,
+        ))
+    }
+
+    /// Takes the reading the sensor thread sent back, if one came, and asks for the next
+    /// when it is due. A battery with no charge counts as unread twice when the reading
+    /// before it was unread too. Input: the time. Output: the new sensors, or none when
+    /// no reading came back.
+    fn sense(&mut self, now_ms: i64) -> Option<Sensors> {
+        let reading = self.sensing.as_mut()?.step(now_ms)?;
+        let unread = reading.source == PowerSource::Battery && reading.battery_pct.is_none();
+        self.battery_unread_twice = unread && self.battery_unread;
+        self.battery_unread = unread;
+        self.reading = Some(reading);
+        assert!(!self.battery_unread_twice || self.battery_unread);
+        self.sensors()
+    }
+
     /// Drops the platform hold, as the engine stops.
     pub fn release(&mut self) {
         if let Some(hold) = self.hold.as_mut() {
@@ -456,8 +506,9 @@ impl Keeper {
 
     /// Brings the platform hold in step with the wanted state. A hold found lost is logged
     /// and taken again at once; one lost twice in a row, or one that cannot be taken, is
-    /// logged and counts as failed. Input: the wanted state. Output: false when the hold is
-    /// wanted and not in place.
+    /// logged and counts as failed. A hold that came back without the lid it was asked for
+    /// marks the lid as refused for the rest of this engine run. Input: the wanted state.
+    /// Output: false when the hold is wanted and not in place.
     fn keep(&mut self, want: &Want) -> bool {
         let Some(hold) = self.hold.as_mut() else {
             return true;
@@ -465,11 +516,17 @@ impl Keeper {
         let first = hold.apply(want);
         let again = self.lost;
         self.lost = first == Err(HoldError::Lost);
-        match first {
-            Ok(_) => true,
+        let held = match first {
             Err(HoldError::Lost) if !again => {
                 eprintln!("keep awake: the hold was lost, taking it again");
-                hold.apply(want).is_ok()
+                hold.apply(want)
+            }
+            other => other,
+        };
+        match held {
+            Ok(held) => {
+                self.lid_refused |= matches!(want, Want::IdleAndLid { .. }) && !held.lid;
+                true
             }
             Err(problem) => {
                 eprintln!("keep awake: no hold: {problem}");
@@ -493,12 +550,24 @@ impl Keeper {
         }
         self.looked_ms = Some(now_ms);
         let work = work::count(connection)?;
+        let sensed = self.sense(now_ms);
         let settled = since(self.evaluated_ms, TICK_MS) && self.work == Some(work);
-        if settled && !dirty(connection)? {
+        if settled && sensed.is_none() && !dirty(connection)? {
             return Ok(None);
         }
-        let view = evaluate(connection, now_ms, None)?;
-        let view = if self.keep(&view.state.want) {
+        let mut view = evaluate(connection, now_ms, sensed.as_ref())?;
+        let refused = self.lid_refused;
+        let mut kept = self.keep(&view.state.want);
+        if kept
+            && self.lid_refused
+            && !refused
+            && let Some(sensors) = self.sensors()
+        {
+            view = evaluate(connection, now_ms, Some(&sensors))?;
+            assert!(!matches!(view.state.want, Want::IdleAndLid { .. }));
+            kept = self.keep(&view.state.want);
+        }
+        let view = if kept {
             view
         } else {
             self.release();
