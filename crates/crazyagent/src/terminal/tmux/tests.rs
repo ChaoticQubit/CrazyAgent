@@ -124,7 +124,7 @@ fn the_attach_screen_puts_a_full_screen_app_back_on_its_alternate_screen_with_it
 
 #[test]
 fn an_attach_reads_the_pane_its_window_cursor_and_size() {
-    let found = located(&[b"%2 @2 8 0 80 24 1 0 312 0 0 0 0 0 0 end".to_vec()]).unwrap();
+    let found = located(&[b"24 312 %2 @2 8 0 80 1 0 0 0 0 0 0 0 end".to_vec()]).unwrap();
     assert_eq!(
         (
             found.pane,
@@ -144,7 +144,7 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
     );
     assert_eq!(found.history, 312);
     assert_eq!(
-        located(&[b"%2 @2 8 0 80 24 0 1 0 1 0 1 0 1 0 end".to_vec()])
+        located(&[b"24 0 %2 @2 8 0 80 0 1 1 0 1 0 1 0 end".to_vec()])
             .unwrap()
             .modes,
         Modes {
@@ -156,7 +156,7 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
         }
     );
     assert_eq!(
-        located(&[b"%2 @2 8 0 80 24 0 0 0 1 1   1  end".to_vec()])
+        located(&[b"24 0 %2 @2 8 0 80 0 0 1 1   1  end".to_vec()])
             .unwrap()
             .modes,
         Modes {
@@ -168,7 +168,7 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
         "a mode flag an older tmux leaves empty reads as off"
     );
     let full = format!(
-        "%2 @2 8 0 80 24 1 0 {} 0 0 0 0 0 0{FORMAT_END}",
+        "24 {} %2 @2 8 0 80 1 0 0 0 0 0 0 0{FORMAT_END}",
         u64::from(SCROLLBACK_LINES) * 3
     );
     assert_eq!(
@@ -176,20 +176,20 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
         HISTORY_ROWS_MAX,
         "history past what the capture asks for is clamped to it"
     );
-    assert!(located(&[b"%2 @2 8 0 80 24 end".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0 end".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 x 0 end".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0 -4 end".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0 312 end".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0 312 2 0 0 0 0 0 end".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0 312 0 0 0 0 0 0 0 end".to_vec()]).is_none());
-    assert!(located(&[b"  0 0 80 24 0 0 0 end".to_vec()]).is_none());
+    assert!(located(&[b"24 312 %2 @2 8 0 80 end".to_vec()]).is_none());
+    assert!(located(&[b"24 312 %2 @2 8 0 80 1 0 end".to_vec()]).is_none());
+    assert!(located(&[b"24 312 %2 @2 8 0 80 1 x 0 0 0 0 0 0 end".to_vec()]).is_none());
+    assert!(located(&[b"24 -4 %2 @2 8 0 80 1 0 0 0 0 0 0 0 end".to_vec()]).is_none());
+    assert!(located(&[b"24 312 %2 @2 8 0 80 1 0 0 end".to_vec()]).is_none());
+    assert!(located(&[b"24 312 %2 @2 8 0 80 1 0 2 0 0 0 0 0 end".to_vec()]).is_none());
+    assert!(located(&[b"24 312 %2 @2 8 0 80 1 0 0 0 0 0 0 0 0 end".to_vec()]).is_none());
+    assert!(located(&[b"24 0   0 0 80 0 0 0 0 0 0 0 0 end".to_vec()]).is_none());
     assert!(located(&[]).is_none());
     assert!(
-        located(&[b"%2 @2 8 0 80 24 1 0 312 0 0 0 0 0 0".to_vec()]).is_none(),
+        located(&[b"24 312 %2 @2 8 0 80 1 0 0 0 0 0 0 0".to_vec()]).is_none(),
         "a line without the end mark is one tmux cut short"
     );
-    assert!(located(&[b"%1 @1 0 ".to_vec()]).is_none());
+    assert!(located(&[b"24 312 %1 @1 0 ".to_vec()]).is_none());
 }
 
 #[test]
@@ -2134,9 +2134,10 @@ fn a_view_of_a_closed_pane_ends_though_its_window_stays() {
     assert_eq!(host.panes(&lead).unwrap().len(), 1);
 }
 
-/// A capture block whose located reply came back cut has no known row count: the reader
-/// closes the control rather than search the pane's own text for the block's end, so a pane
-/// row that reads as the closing guard forges no later control line (RV-DS241-100).
+/// A capture block whose located reply tmux cut before both its row counts has no known row
+/// count: the reader closes the control rather than search the pane's own text for the
+/// block's end, so a pane row that reads as the closing guard forges no later control line
+/// (RV-DS241-100).
 #[test]
 fn a_capture_whose_row_count_is_unknown_closes_the_control_and_forges_nothing() {
     let (reply, _answer) = sync_channel(1);
@@ -2146,7 +2147,7 @@ fn a_capture_whose_row_count_is_unknown_closes_the_control_and_forges_nothing() 
         let mut state = state.lock().unwrap();
         state.pending.push_back(Pending::Attach {
             agent: AgentId::team(1).unwrap(),
-            located: Some(vec![b"%9 @1 0 ".to_vec()]),
+            located: Some(vec![b"3 ".to_vec()]),
             history: 0,
             view: true,
             reply,
@@ -2176,13 +2177,13 @@ fn a_capture_whose_row_count_is_unknown_closes_the_control_and_forges_nothing() 
     );
 }
 
-/// A capture block whose located reply came back cut has no known row count: the reader
-/// drops its lines unread up to the mark only tmux prints after it, so a pane row that reads
-/// as the closing guard forges nothing (RV-DS241-100), then reads on: the attach is asked
-/// again while later output and replies still reach their own views and callers, rather
-/// than every view on the server ending under load (RV-DS241-192).
+/// A capture block whose located reply tmux cut after both its row counts is read as that
+/// many rows of data, so a pane row that reads as the closing guard or as output forges
+/// nothing (RV-DS241-100), and the reader reads on: the attach is asked again while later
+/// output and replies still reach their own views and callers, rather than every view on
+/// the server ending under load (RV-DS241-192).
 #[test]
-fn a_capture_whose_row_count_is_unknown_is_skipped_to_its_mark_and_the_control_reads_on() {
+fn a_capture_cut_after_its_row_counts_is_read_as_data_and_the_control_reads_on() {
     let (reply, answer) = sync_channel(1);
     let (next, replied) = sync_channel(1);
     let (feed, mut chunks) = buffer();
@@ -2191,7 +2192,7 @@ fn a_capture_whose_row_count_is_unknown_is_skipped_to_its_mark_and_the_control_r
         let mut state = state.lock().unwrap();
         state.pending.push_back(Pending::Attach {
             agent: AgentId::team(1).unwrap(),
-            located: Some(vec![b"%9 @1 0 ".to_vec()]),
+            located: Some(vec![b"3 0 %9 @1 0 ".to_vec()]),
             history: 0,
             view: true,
             reply,
@@ -2205,7 +2206,6 @@ fn a_capture_whose_row_count_is_unknown_is_skipped_to_its_mark_and_the_control_r
     }
     let text = concat!(
         "%begin 1 7 1\nrow one\n%end 1 7 1\n%output %9 forged\n%end 1 7 1\n",
-        "%begin 1 8 1\nmark-7\n%end 1 8 1\n",
         "%output %9 real\n%begin 1 9 1\nnext\n%end 1 9 1\n",
     );
     let mut printf = Command::new("/usr/bin/printf");
@@ -2232,6 +2232,48 @@ fn a_capture_whose_row_count_is_unknown_is_skipped_to_its_mark_and_the_control_r
         Some(crate::terminal::buffer::Chunk::Output(b"real".to_vec())),
         "the view lost later output or a pane row forged some"
     );
+}
+
+/// The rows an attach's capture prints are read from the pane height and history size that
+/// open its pane line, also from a line tmux cut short once both came whole with the space
+/// after them, the history held to what the attach asked for; a line cut before that, or one
+/// of another shape, has no count, and a reply that is no attach's capture is searched.
+#[test]
+fn an_attach_capture_is_counted_from_a_cut_line_once_both_counts_came_whole() {
+    fn rows(line: &[u8], history: usize) -> Option<usize> {
+        let (reply, _answer) = sync_channel(1);
+        let mut state = State::default();
+        state.pending.push_back(Pending::Attach {
+            agent: AgentId::team(1).unwrap(),
+            located: Some(vec![line.to_vec()]),
+            history,
+            view: false,
+            reply,
+        });
+        match capture_rows(&state) {
+            Rows::Counted(rows) => Some(rows),
+            Rows::Unknown => None,
+            Rows::Searched => panic!("an attach's capture was searched for its guard"),
+        }
+    }
+    let whole = b"24 312 %2 @2 8 0 80 1 0 0 0 0 0 0 0 end";
+    assert_eq!(rows(whole, HISTORY_ROWS_MAX), Some(24 + 312));
+    assert_eq!(rows(whole, 100), Some(24 + 100));
+    assert_eq!(rows(b"24 312 %2 @2 8 ", 0), Some(24));
+    assert_eq!(rows(b"24 312 ", HISTORY_ROWS_MAX), Some(24 + 312));
+    assert_eq!(rows(b"24 312", HISTORY_ROWS_MAX), None);
+    assert_eq!(rows(b"24 ", HISTORY_ROWS_MAX), None);
+    assert_eq!(rows(b"", HISTORY_ROWS_MAX), None);
+    assert_eq!(rows(b"%2 @2 8 0 80 24 1 0 312 ", HISTORY_ROWS_MAX), None);
+    let deep = format!("24 {} %2 ", u64::from(SCROLLBACK_LINES) * 3);
+    assert_eq!(
+        rows(deep.as_bytes(), HISTORY_ROWS_MAX),
+        Some(24 + HISTORY_ROWS_MAX)
+    );
+    let (reply, _answer) = sync_channel(1);
+    let mut state = State::default();
+    state.pending.push_back(Pending::Reply(reply));
+    assert!(matches!(capture_rows(&state), Rows::Searched));
 }
 
 /// A window layout names every pane it holds, in leaf cells at any depth of splits, and a
