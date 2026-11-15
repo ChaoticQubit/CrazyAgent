@@ -197,12 +197,13 @@ pub(in crate::engine) async fn finish_failure(
 }
 
 /// Whether a Claude Code access token is inside Claude Code's refresh window, where an
-/// account status check would start a refresh it does not wait for. Input: the expiry since
-/// the epoch. Output: true inside the window, and when the clock reads before the epoch.
+/// account status check would start a refresh it does not wait for, or reaches it before a
+/// status check started now can decide, within [`CHECK_TIME`] (RV-DS241-54). Input: the
+/// expiry since the epoch. Output: true then, and when the clock reads before the epoch.
 fn lapsing(expires: Duration) -> bool {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(true, |now| expires <= now + REFRESH_WINDOW)
+        .map_or(true, |now| expires <= now + REFRESH_WINDOW + CHECK_TIME)
 }
 
 /// Renews an existing sign-in whose access token is inside Claude Code's refresh window
