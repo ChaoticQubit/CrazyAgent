@@ -267,13 +267,33 @@ fn a_long_command_in_the_global_approval_box_is_read_to_its_end_before_enter_app
     };
     screen.key(&Key::Enter, &mut ctx);
 
+    let window = |body: &[String]| -> Vec<String> {
+        body.iter()
+            .skip_while(|line| !line.starts_with("Runs"))
+            .take_while(|line| !line.starts_with("Lines ") && !line.starts_with("Projects"))
+            .map(|line| line.chars().skip(LABEL_WIDTH).collect())
+            .collect()
+    };
     let first = body(&screen, &ctx);
     screen.key(&Key::Enter, &mut ctx);
     let early = ctx.next_request();
-    let mut seen = first.clone();
-    for _ in 0..40 {
-        screen.key(&Key::Down, &mut ctx);
-        seen.extend(body(&screen, &ctx));
+    let mut read: Vec<String> = Vec::new();
+    let mut top = 0;
+    let mut previous: Vec<String> = Vec::new();
+    for step in 0..=40 {
+        if step > 0 {
+            screen.key(&Key::Down, &mut ctx);
+        }
+        let shown = window(&body(&screen, &ctx));
+        if !previous.is_empty() && shown != previous {
+            top += 1;
+        }
+        for (at, line) in shown.iter().enumerate() {
+            if top + at == read.len() {
+                read.push(line.clone());
+            }
+        }
+        previous = shown;
     }
     let last = body(&screen, &ctx);
     screen.key(&Key::Enter, &mut ctx);
@@ -293,12 +313,7 @@ fn a_long_command_in_the_global_approval_box_is_read_to_its_end_before_enter_app
     );
     assert!(last.len() + 2 <= rows, "{} rows: {last:?}", last.len() + 2);
     assert!(early.is_none(), "Enter approved with the command unread");
-    for arg in &args {
-        assert!(
-            seen.iter().any(|line| line.contains(arg.as_str())),
-            "{arg} never shown"
-        );
-    }
+    assert_eq!(read.concat(), crate::memory::visible_text(&spec.runs()));
     assert!(
         matches!(
             &late,

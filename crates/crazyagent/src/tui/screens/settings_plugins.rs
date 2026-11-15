@@ -979,8 +979,8 @@ impl Plugins {
             .map(|(modal, hints, _)| (modal, hints))
     }
 
-    /// Builds the details box of the server picked, sized to the frame: what it runs shows
-    /// as many lines as fit from the line Up and Down chose, with a line saying where the
+    /// Builds the details box of the server picked, sized to the frame: what it runs shows,
+    /// cut exactly as it will run, as many lines as fit from the line Up and Down chose, with a line saying where the
     /// window is when some do not fit, so the buttons always stay on screen (RV-DS241-206).
     /// Inputs: the button focused and the context. Output: the box, its hints and the
     /// window, or none when no server is picked.
@@ -1034,7 +1034,10 @@ impl Plugins {
                 }
                 body.push(Line::default());
                 runs_at = body.len();
-                runs = wrap(&crate::memory::visible_text(&server.runs), value_room);
+                runs = super::project_plugins::exact_lines(
+                    &crate::memory::visible_text(&server.runs),
+                    value_room,
+                );
                 asked_top = match &self.reading {
                     Some((read, top)) if *read == server.runs => *top,
                     _ => 0,
