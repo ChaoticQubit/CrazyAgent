@@ -400,8 +400,9 @@ export function masterNote(team: Pick<TeamPlan, "master">, harnesses: HarnessEnt
 
 const HARNESS_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 /** The harnesses CrazyAgent once listed and no longer supports (DEC-180 addenda 1 and 2), the same
- * five the engine names: the id a kept team may still hold, and the product's plain name. */
-const REMOVED_HARNESSES: ReadonlyMap<string, string> = new Map([["antigravity", "Antigravity"], ["cursor-agent", "Cursor CLI"], ["amp", "Amp"], ["kiro", "Kiro CLI"], ["auggie", "Auggie"]]);
+ * five the engine names: the id a kept team may still hold, and the product's plain name. A test
+ * holds this copy to the engine's own list, id for id and name for name, in the engine's order. */
+export const REMOVED_HARNESSES: ReadonlyMap<string, string> = new Map([["antigravity", "Antigravity"], ["cursor-agent", "Cursor CLI"], ["amp", "Amp"], ["kiro", "Kiro CLI"], ["auggie", "Auggie"]]);
 const RANGE = "At most must be at least 1 and not less than At least.";
 
 /** Checks the Team step with the engine's own agent range rules.
