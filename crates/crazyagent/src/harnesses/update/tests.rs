@@ -2151,49 +2151,72 @@ fn an_agent_written_link_to_an_owner_harness_never_starts_a_node_planted_beside_
 }
 
 /// security-audit vid 1 (NEXT-02:50 step 1): a harness file the resolver refuses as one
-/// another user can change, or, on the engine's places, as one that leads into a temp
-/// folder, is never run for its version, and what it needs names that refusal.
+/// another user can change is never run for its version, and what it needs names that
+/// refusal.
 #[test]
-fn a_harness_the_resolver_refuses_as_changeable_or_in_temp_is_never_asked_its_version() {
-    use crate::tools::Refusal;
+fn a_harness_the_resolver_refuses_as_changeable_is_never_asked_its_version() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    std::fs::create_dir_all(&roots.home).unwrap();
+    let ran = machine.root.path().join("ran");
+    let open = machine.root.path().join("open/codex");
+    executable(
+        &open,
+        &format!(
+            "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+            ran.display()
+        ),
+    );
+    let folder = open.parent().unwrap();
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let refused = crate::tools::resolve_entry(&open, &roots.places).unwrap_err();
+    assert!(matches!(
+        refused.refused.as_ref().map(|refused| &refused.why),
+        Some(crate::tools::Refusal::OthersCanChange(_))
+    ));
+    let needs = super::state::needs(&open, &roots.places);
+    assert_eq!(needs.map(|needs| needs.line), Some(refused.line()));
+    let version = super::state::version_if_runs(&open, &roots.home, &roots.places);
+    assert_eq!(version, None);
+    assert!(!ran.exists(), "a refused harness file is never run");
+}
+
+/// security-audit vid 1 (NEXT-02:50 step 1), on macOS, where the owner's cache folder lies
+/// outside every temp folder: an entry there that leads to a harness file in the temp folder
+/// is refused on the engine's places as one in a temp folder, is never run for its version,
+/// and what it needs names that refusal.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_harness_entry_that_leads_into_temp_is_never_asked_its_version_on_macos() {
     let machine = Machine::new();
     let roots = machine.roots();
     std::fs::create_dir_all(&roots.home).unwrap();
     let at = machine.root.path();
-    let text = |ran: &Path| {
-        format!(
+    let ran = at.join("ran");
+    let real = at.join("temp/codex");
+    executable(
+        &real,
+        &format!(
             "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
             ran.display()
-        )
-    };
-    let (open, open_ran) = (at.join("open/codex"), at.join("open-ran"));
-    let (temp, temp_ran) = (at.join("temp/codex"), at.join("temp-ran"));
-    executable(&open, &text(&open_ran));
-    executable(&temp, &text(&temp_ran));
-    let folder = open.parent().unwrap();
-    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o777)).unwrap();
-    let engine = crate::tools::Places::from_environment(Some(&at.join("engine")));
-    let changeable = crate::tools::resolve_entry(&open, &roots.places).unwrap_err();
-    assert!(matches!(
-        changeable.refused.as_ref().map(|refused| &refused.why),
-        Some(Refusal::OthersCanChange(_))
-    ));
-    let in_temp = crate::tools::resolve_entry(&temp, &engine).unwrap_err();
-    assert_eq!(
-        in_temp.refused.as_ref().map(|refused| refused.why.clone()),
-        Some(Refusal::InTemp),
-        "the engine's places refuse the temp folder this row's machine lies in"
+        ),
     );
-    for (file, places, ran, refused) in [
-        (&open, &roots.places, &open_ran, &changeable),
-        (&temp, &engine, &temp_ran, &in_temp),
-    ] {
-        let needs = super::state::needs(file, places).map(|needs| needs.line);
-        assert_eq!(needs, Some(refused.line()), "{}", file.display());
-        let version = super::state::version_if_runs(file, &roots.home, places);
-        assert_eq!(version, None, "{}", file.display());
-        assert!(!ran.exists(), "{} is never run", file.display());
-    }
+    let outside = crate::harnesses::finding::owner_folder("vid1-temp-");
+    let link = outside.path().join("bin/codex");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let engine = crate::tools::Places::from_environment(Some(&at.join("engine")));
+    let refused = crate::tools::resolve_entry(&link, &engine).unwrap_err();
+    assert_eq!(
+        refused.refused.as_ref().map(|refused| refused.why.clone()),
+        Some(crate::tools::Refusal::InTemp),
+        "an owner link into the temp folder is refused on the engine's places"
+    );
+    let needs = super::state::needs(&link, &engine);
+    assert_eq!(needs.map(|needs| needs.line), Some(refused.line()));
+    let version = super::state::version_if_runs(&link, &roots.home, &engine);
+    assert_eq!(version, None);
+    assert!(!ran.exists(), "a refused harness file is never run");
 }
 
 /// security-audit vid 1, leader 03:14 (a): a version read runs the real file the resolver
