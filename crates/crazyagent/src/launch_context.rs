@@ -2245,11 +2245,11 @@ fn lock(_home: &Path) -> Result<File, LaunchError> {
 /// open, is cleared once, the ACL by path so one that denies listing or searching goes too,
 /// and the open tried again (RV-DS241-137 code r1 F1, r2 F3); a confined agent can set
 /// neither there. An open that gets no plain file also clears the lock name of whatever an
-/// agent put there ([`clear_lock_name`]) before that second try, so a folder, link or FIFO
-/// at the name never refuses every later launch of the home. Only a lock [`lock_kept`]
-/// passes is held, the one the reset that follows keeps, so the reset never takes the lock
-/// this launch holds. Input: the home. Output: the locked file, `launch_context_unsafe` or
-/// `launch_home_busy`.
+/// agent put there, or opens its own lock up again ([`clear_lock_name`]), before that second
+/// try, so a folder, link or FIFO at the name, or a lock left at mode 000, never refuses
+/// every later launch of the home. Only a lock [`lock_kept`] passes is held, the one the
+/// reset that follows keeps, so the reset never takes the lock this launch holds. Input: the
+/// home. Output: the locked file, `launch_context_unsafe` or `launch_home_busy`.
 #[cfg(unix)]
 fn lock(home: &Path) -> Result<File, LaunchError> {
     let path = home.join(LOCK);
@@ -2298,36 +2298,91 @@ fn plain_file(file: &File) -> bool {
 /// Clears a home's lock name of an entry that is no plain file, with all it holds, through
 /// the home's open folder and never following a link
 /// ([`crate::team::cleanup::remove_home_entry`]), so what a link there names stays. A plain
-/// file is never removed: it may be the lock another launch holds. The home's folder is
-/// locked meanwhile and stays locked until the caller holds the lock file, so of two
+/// file is never removed: it may be the lock another launch holds. One [`lock_kept`] passes
+/// gets its owner-only mode back instead ([`restore_lock_mode`]), since an agent that
+/// writes its home can take the owner's read and write off its own lock. The home's folder
+/// is locked meanwhile and stays locked until the caller holds the lock file, so of two
 /// launches that find the same entry one clears it and makes the lock and the other is
 /// refused, never removing the lock the first made. Input: the home. Output: the home's
 /// locked folder, `launch_context_unsafe` for a home that does not open or an entry that
 /// stays, or `launch_home_busy` while another launch clears the name.
 #[cfg(unix)]
-fn clear_lock_name(home: &Path) -> Result<std::os::fd::OwnedFd, LaunchError> {
+fn clear_lock_name(home: &Path) -> Result<LockedHome, LaunchError> {
     use rustix::fs::{AtFlags, FileType};
-    let folder = rustix::fs::open(
+    let opened = rustix::fs::open(
         home,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map_err(|_| failure("launch_context_unsafe"))?;
-    rustix::fs::flock(&folder, FlockOperation::NonBlockingLockExclusive)
+    rustix::fs::flock(&opened, FlockOperation::NonBlockingLockExclusive)
         .map_err(|_| failure("launch_home_busy"))?;
+    let folder = LockedHome(opened);
     #[cfg(test)]
     if let Some(step) = WHILE_LOCK_NAME_CLEARS.with(|step| step.borrow_mut().take()) {
         step();
     }
-    let found = match rustix::fs::statat(&folder, LOCK, AtFlags::SYMLINK_NOFOLLOW) {
+    let found = match rustix::fs::statat(&folder.0, LOCK, AtFlags::SYMLINK_NOFOLLOW) {
         Err(rustix::io::Errno::NOENT) => return Ok(folder),
         found => found.map_err(|_| failure("launch_context_unsafe"))?,
     };
     if FileType::from_raw_mode(found.st_mode) != FileType::RegularFile {
-        crate::team::cleanup::remove_home_entry(&folder, LOCK)
+        crate::team::cleanup::remove_home_entry(&folder.0, LOCK)
             .map_err(|_| failure("launch_context_unsafe"))?;
+    } else if lock_kept(&found) {
+        let _ = restore_lock_mode(&folder.0);
     }
     Ok(folder)
+}
+
+/// A home's folder locked while its lock name is cleared ([`clear_lock_name`]). Dropping it
+/// unlocks the folder on its open file description, as [`Installed`] does its lock, so a
+/// child forked by another thread before its exec never keeps the home busy.
+#[cfg(unix)]
+struct LockedHome(std::os::fd::OwnedFd);
+
+#[cfg(unix)]
+impl Drop for LockedHome {
+    /// Unlocks the home's folder. A failure leaves the lock to go when the handle closes.
+    fn drop(&mut self) {
+        let _ = rustix::fs::flock(&self.0, FlockOperation::Unlock);
+    }
+}
+
+/// Gives a home's lock the owner-only mode it was made with, without following a link.
+/// Linux `fchmodat` cannot refuse a link, so there the lock is pinned by an `O_PATH` handle
+/// that refuses one, judged again on that handle ([`lock_kept`]) and changed through
+/// `/proc/self/fd/<n>` of it. Input: the home's open folder. Output: Ok, or the error that
+/// left the lock as it was, which the open that follows then reports.
+#[cfg(target_os = "linux")]
+fn restore_lock_mode(home: impl std::os::fd::AsFd) -> rustix::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let pinned = rustix::fs::openat(
+        home,
+        LOCK,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    if !lock_kept(&rustix::fs::fstat(&pinned)?) {
+        return Ok(());
+    }
+    rustix::fs::chmod(
+        format!("/proc/self/fd/{}", pinned.as_raw_fd()).as_str(),
+        Mode::RUSR | Mode::WUSR,
+    )
+}
+
+/// Gives a home's lock the owner-only mode it was made with, without following a link,
+/// through `chmodat` with `AT_SYMLINK_NOFOLLOW`. Input: the home's open folder. Output: Ok,
+/// or the error that left the lock as it was, which the open that follows then reports.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn restore_lock_mode(home: impl std::os::fd::AsFd) -> rustix::io::Result<()> {
+    rustix::fs::chmodat(
+        home,
+        LOCK,
+        Mode::RUSR | Mode::WUSR,
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
 }
 
 #[cfg(all(test, unix))]
