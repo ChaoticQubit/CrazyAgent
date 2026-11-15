@@ -952,7 +952,27 @@ pub fn specs() -> &'static [HarnessSpec] {
     &SPECS
 }
 
-static SPECS: [HarnessSpec; 23] = [
+/// Names a harness CrazyAgent once listed and no longer supports (DEC-180 addenda 1 and 2).
+/// Input: the id a stored team plan or project may still name. Output: its plain product
+/// name, or none for any other id, a listed harness included.
+pub fn removed(id: &str) -> Option<&'static str> {
+    let name = REMOVED
+        .iter()
+        .find(|(gone, _)| *gone == id)
+        .map(|(_, name)| *name);
+    assert!(name.is_none() || spec(id).is_none(), "{id} is still listed");
+    name
+}
+
+const REMOVED: [(&str, &str); 5] = [
+    ("antigravity", "Antigravity"),
+    ("cursor-agent", "Cursor CLI"),
+    ("amp", "Amp"),
+    ("kiro", "Kiro CLI"),
+    ("auggie", "Auggie"),
+];
+
+static SPECS: [HarnessSpec; 18] = [
     HarnessSpec {
         id: "codex",
         name: "Codex",
@@ -998,17 +1018,6 @@ static SPECS: [HarnessSpec; 23] = [
         launch: Some(NO_ADAPTER),
     },
     HarnessSpec {
-        id: "cursor-agent",
-        name: "Cursor CLI",
-        binaries: &["cursor-agent"],
-        locations: &[".cursor/bin"],
-        headless: "cursor-agent --print with --output-format stream-json",
-        tools_limited: Some("tools are allowed or denied only through Cursor's permission file"),
-        model_selection: true,
-        account_kinds: &[AccountKind::Subscription, AccountKind::ApiKey],
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
         id: "fx",
         name: "fx by Vercel",
         binaries: &["fx"],
@@ -1017,17 +1026,6 @@ static SPECS: [HarnessSpec; 23] = [
         tools_limited: Some("no documented switch to turn tools off"),
         model_selection: true,
         account_kinds: KEY_URL_LOCAL,
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "antigravity",
-        name: "Antigravity",
-        binaries: &["agy", "antigravity"],
-        locations: &[],
-        headless: "agy --print: one prompt, plain text reply",
-        tools_limited: Some("tools cannot be switched off, only approved automatically"),
-        model_selection: true,
-        account_kinds: &[AccountKind::Subscription],
         launch: Some(NO_ADAPTER),
     },
     HarnessSpec {
@@ -1066,17 +1064,6 @@ static SPECS: [HarnessSpec; 23] = [
         model_selection: true,
         account_kinds: KEY_URL_LOCAL,
         launch: Some("runs only as a CrazyAgent master"),
-    },
-    HarnessSpec {
-        id: "amp",
-        name: "Amp",
-        binaries: &["amp"],
-        locations: &[".amp/bin"],
-        headless: "amp --execute with --stream-json",
-        tools_limited: None,
-        model_selection: false,
-        account_kinds: &[AccountKind::Subscription, AccountKind::ApiKey],
-        launch: Some(NO_ADAPTER),
     },
     HarnessSpec {
         id: "goose",
@@ -1138,17 +1125,6 @@ static SPECS: [HarnessSpec; 23] = [
         launch: Some(NO_ADAPTER),
     },
     HarnessSpec {
-        id: "kiro",
-        name: "Kiro CLI",
-        binaries: &["kiro-cli", "kiro"],
-        locations: &[],
-        headless: "kiro-cli chat --no-interactive",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: &[AccountKind::Subscription],
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
         id: "copilot",
         name: "GitHub Copilot CLI",
         binaries: &["copilot"],
@@ -1190,17 +1166,6 @@ static SPECS: [HarnessSpec; 23] = [
         tools_limited: Some("headless mode always runs its tools"),
         model_selection: true,
         account_kinds: KEY_URL_LOCAL,
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "auggie",
-        name: "Auggie",
-        binaries: &["auggie"],
-        locations: &[],
-        headless: "auggie --print: one prompt, plain text reply",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: &[AccountKind::Subscription],
         launch: Some(NO_ADAPTER),
     },
     HarnessSpec {

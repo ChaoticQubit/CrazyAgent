@@ -2,7 +2,7 @@
 
 use crazyagent::harnesses::interactive::{Support, support};
 use crazyagent::harnesses::{
-    AccountKind, HarnessStatus, Search, TeamUse, ToolControl, catalog, spec, specs,
+    AccountKind, HarnessStatus, Search, TeamUse, ToolControl, catalog, removed, spec, specs,
 };
 use crazyagent::team::launch_harness;
 use std::os::unix::fs::PermissionsExt;
@@ -91,6 +91,20 @@ fn the_five_removed_harnesses_are_not_in_the_catalog_and_their_programs_are_neve
         assert_eq!(found.status, HarnessStatus::NotInstalled, "{}", found.id);
         assert!(found.executable.is_none(), "{}", found.id);
         assert!(!GONE.contains(&found.id.as_str()), "{}", found.id);
+    }
+}
+
+#[test]
+fn a_removed_harness_keeps_its_plain_name_and_no_listed_harness_reads_as_removed() {
+    let names = ["Antigravity", "Cursor CLI", "Amp", "Kiro CLI", "Auggie"];
+    for (gone, name) in GONE.into_iter().zip(names) {
+        assert_eq!(removed(gone), Some(name), "{gone}");
+    }
+    for listed in specs() {
+        assert_eq!(removed(listed.id), None, "{}", listed.id);
+    }
+    for other in ["", "claude", "cursor", "Antigravity", "no-such-harness"] {
+        assert_eq!(removed(other), None, "{other}");
     }
 }
 

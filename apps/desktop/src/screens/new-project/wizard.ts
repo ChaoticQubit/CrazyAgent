@@ -399,6 +399,9 @@ export function masterNote(team: Pick<TeamPlan, "master">, harnesses: HarnessEnt
 }
 
 const HARNESS_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+/** The harnesses CrazyAgent once listed and no longer supports (DEC-180 addenda 1 and 2), the same
+ * five the engine names: the id a kept team may still hold, and the product's plain name. */
+const REMOVED_HARNESSES: ReadonlyMap<string, string> = new Map([["antigravity", "Antigravity"], ["cursor-agent", "Cursor CLI"], ["amp", "Amp"], ["kiro", "Kiro CLI"], ["auggie", "Auggie"]]);
 const RANGE = "At most must be at least 1 and not less than At least.";
 
 /** Checks the Team step with the engine's own agent range rules.
@@ -408,6 +411,8 @@ export function teamErrors(team: TeamPlan, harnesses: HarnessEntry[] | null): { 
   const errors: { master?: string; rows: (string | undefined)[]; range?: string } = { rows: [] };
   const harnessProblem = (id: string, what: string, role: PickRole) => {
     if (!HARNESS_ID.test(id)) return `Pick a harness for ${what}.`;
+    const gone = REMOVED_HARNESSES.get(id);
+    if (gone !== undefined) return `${gone} is no longer supported. Pick another harness.`;
     const harness = entry(harnesses, id);
     if (harness?.status.kind === "not_installed") return `${harness.name} isn't installed on this Mac. Pick another harness.`;
     if (harness?.status.kind === "cant_run") return `${harness.name} can't run on this Mac. Pick another harness.`;

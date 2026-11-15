@@ -806,6 +806,15 @@ impl Wizard {
         let min = parse(&self.min, Control::Min)?;
         let max = parse(&self.max, Control::Max)?;
         assert_eq!((min, max), (team.min_agents, team.max_agents));
+        let gone = std::iter::once(&team.master)
+            .chain(team.sub_harnesses.iter().map(|slot| &slot.harness))
+            .find_map(|id| crate::harnesses::removed(id));
+        if let Some(name) = gone {
+            return Err(Note::error(
+                Control::Team,
+                format!("{name} is no longer supported. Pick another harness."),
+            ));
+        }
         if let Some(harnesses) = &self.harnesses {
             let blocked = std::iter::once((&team.master, true))
                 .chain(team.sub_harnesses.iter().map(|slot| (&slot.harness, false)))
@@ -1663,19 +1672,21 @@ impl Wizard {
 
 /// Names a harness in plain words.
 /// Takes the engine id and the harness catalog when known.
-/// Returns the catalog name, a known product name, or the id itself.
+/// Returns the catalog name, a known product name, the name of a harness that is no longer
+/// supported, or the id itself.
 pub(in crate::tui) fn harness_name(id: &str, catalog: Option<&[HarnessChoice]>) -> String {
     if let Some(choice) = catalog.and_then(|c| c.iter().find(|h| same_harness(&h.id, id))) {
         return choice.name.clone();
+    }
+    if let Some(name) = crate::harnesses::removed(id) {
+        return name.to_owned();
     }
     match id {
         "codex" => "Codex",
         "claude" | "claude-code" => "Claude Code",
         "opencode" => "OpenCode",
         "gemini" | "gemini-cli" => "Gemini CLI",
-        "cursor" | "cursor-cli" => "Cursor CLI",
         "fx" => "fx by Vercel",
-        "antigravity" => "Antigravity",
         "openclaw" => "OpenClaw",
         "pi" => "Pi",
         other => other,

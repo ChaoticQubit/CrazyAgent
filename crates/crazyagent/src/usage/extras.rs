@@ -119,29 +119,24 @@ pub enum Adapter {
 /// One limits adapter entry for every harness in `harnesses::specs()`, by catalog id, for its
 /// managed sign-ins. Kept explicit, with no catch-all, so a harness added to the catalog fails
 /// the row that compares the two lists until it gets its own entry.
-pub const ADAPTERS: [(&str, Adapter); 23] = [
+pub const ADAPTERS: [(&str, Adapter); 18] = [
     ("codex", Adapter::Codex),
     ("claude-code", Adapter::Claude),
     ("opencode", Adapter::NotReported),
     ("gemini-cli", Adapter::NotReported),
-    ("cursor-agent", Adapter::NotReported),
     ("fx", Adapter::NotReported),
-    ("antigravity", Adapter::NotReported),
     ("openclaw", Adapter::NotReported),
     ("pi", Adapter::NotReported),
     ("rcli", Adapter::NotReported),
-    ("amp", Adapter::NotReported),
     ("goose", Adapter::NotReported),
     ("aider", Adapter::NotReported),
     ("qwen-code", Adapter::NotReported),
     ("crush", Adapter::NotReported),
     ("droid", Adapter::NotReported),
-    ("kiro", Adapter::NotReported),
     ("copilot", Adapter::NotReported),
     ("cline", Adapter::NotReported),
     ("continue", Adapter::NotReported),
     ("openhands", Adapter::NotReported),
-    ("auggie", Adapter::NotReported),
     ("kimi", Adapter::NotReported),
 ];
 

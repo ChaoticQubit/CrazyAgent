@@ -348,7 +348,7 @@ const _: () = assert!(
     CLAUDE_POINTER.bytes_max <= POINTER_BYTES_MAX && CODEX_POINTER.bytes_max <= POINTER_BYTES_MAX
 );
 
-static RECIPES: [Recipe; 22] = [
+static RECIPES: [Recipe; 17] = [
     Recipe {
         id: "claude-code",
         own: Some(SelfUpdate {
@@ -401,25 +401,11 @@ static RECIPES: [Recipe; 22] = [
         guide: "https://github.com/google-gemini/gemini-cli#readme",
     },
     Recipe {
-        id: "cursor-agent",
-        own: None,
-        brews: &[cask("cursor-cli")],
-        npm: None,
-        guide: "https://cursor.com/docs/cli/installation",
-    },
-    Recipe {
         id: "fx",
         own: None,
         brews: &[],
         npm: None,
         guide: "https://vercel.com/docs/ai-gateway/coding-agents/fx",
-    },
-    Recipe {
-        id: "antigravity",
-        own: None,
-        brews: &[cask("antigravity-cli")],
-        npm: None,
-        guide: "https://antigravity.google/docs/getting-started",
     },
     Recipe {
         id: "openclaw",
@@ -446,19 +432,6 @@ static RECIPES: [Recipe; 22] = [
             &["--ignore-scripts"],
         ),
         guide: "https://pi.dev/",
-    },
-    Recipe {
-        id: "amp",
-        own: None,
-        brews: &[],
-        npm: npm(
-            "@sourcegraph",
-            "amp",
-            "@sourcegraph/amp",
-            "@sourcegraph/amp",
-            &[],
-        ),
-        guide: "https://ampcode.com/manual",
     },
     Recipe {
         id: "goose",
@@ -508,13 +481,6 @@ static RECIPES: [Recipe; 22] = [
         guide: "https://docs.factory.ai/cli/getting-started/quickstart",
     },
     Recipe {
-        id: "kiro",
-        own: None,
-        brews: &[cask("kiro-cli")],
-        npm: None,
-        guide: "https://kiro.dev/docs/getting-started/installation/",
-    },
-    Recipe {
         id: "copilot",
         own: None,
         brews: &[
@@ -558,19 +524,6 @@ static RECIPES: [Recipe; 22] = [
         guide: "https://docs.openhands.dev/openhands/usage/cli/installation",
     },
     Recipe {
-        id: "auggie",
-        own: None,
-        brews: &[],
-        npm: npm(
-            "@augmentcode",
-            "auggie",
-            "@augmentcode/auggie",
-            "@augmentcode/auggie",
-            &[],
-        ),
-        guide: "https://docs.augmentcode.com/cli/setup-auggie/install-auggie-cli",
-    },
-    Recipe {
         id: "kimi",
         own: None,
         brews: &[formula("kimi-code"), known(BrewKind::Formula, "kimi-cli")],
@@ -584,7 +537,7 @@ static RECIPES: [Recipe; 22] = [
         guide: "https://moonshotai.github.io/kimi-code/en/guides/getting-started",
     },
 ];
-const _: () = assert!(RECIPES.len() == 22);
+const _: () = assert!(RECIPES.len() == 17);
 
 /// Every package name, install spec and flag in the table, for the tests that hold the table
 /// to plain names. Output: the strings, in table order.

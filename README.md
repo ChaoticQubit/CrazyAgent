@@ -13,7 +13,7 @@ A Rust engine owns all state and policy. You drive it from a terminal UI or a de
 
 - **Accounts and pools.** Sign in with your own provider accounts and group them into pools that agents draw from.
 - **Projects with research agents.** Add a project folder and let research agents study the code and your documents to build project context.
-- **Team.** The master agent splits work into tasks and runs sub-agents on them, each in its own Git worktree, on harnesses such as Claude Code, Codex, Gemini CLI, OpenCode, Cursor CLI or Aider.
+- **Team.** The master agent splits work into tasks and runs sub-agents on them, each in its own Git worktree, on harnesses such as Claude Code, Codex, Gemini CLI, OpenCode or Aider.
 - **Plugins, skills and MCP.** Add skills (folders with a `SKILL.md`) and MCP servers for every project or for one project only.
 - **Memory approval.** Nothing enters a project's long-term memory until you approve it.
 - **Desktop app and TUI.** Two complete clients for the same engine. Use either one, or both at once.

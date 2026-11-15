@@ -199,7 +199,7 @@ struct Plain {
     model_flag: Option<&'static str>,
 }
 
-const PLAIN: [Plain; 20] = [
+const PLAIN: [Plain; 15] = [
     Plain {
         id: "opencode",
         subcommand: &[],
@@ -211,17 +211,7 @@ const PLAIN: [Plain; 20] = [
         model_flag: Some("--model"),
     },
     Plain {
-        id: "cursor-agent",
-        subcommand: &[],
-        model_flag: Some("--model"),
-    },
-    Plain {
         id: "fx",
-        subcommand: &[],
-        model_flag: None,
-    },
-    Plain {
-        id: "antigravity",
         subcommand: &[],
         model_flag: None,
     },
@@ -234,11 +224,6 @@ const PLAIN: [Plain; 20] = [
         id: "pi",
         subcommand: &[],
         model_flag: Some("--model"),
-    },
-    Plain {
-        id: "amp",
-        subcommand: &[],
-        model_flag: None,
     },
     Plain {
         id: "goose",
@@ -266,11 +251,6 @@ const PLAIN: [Plain; 20] = [
         model_flag: None,
     },
     Plain {
-        id: "kiro",
-        subcommand: &["chat"],
-        model_flag: None,
-    },
-    Plain {
         id: "copilot",
         subcommand: &[],
         model_flag: Some("--model"),
@@ -287,11 +267,6 @@ const PLAIN: [Plain; 20] = [
     },
     Plain {
         id: "openhands",
-        subcommand: &[],
-        model_flag: None,
-    },
-    Plain {
-        id: "auggie",
         subcommand: &[],
         model_flag: None,
     },
