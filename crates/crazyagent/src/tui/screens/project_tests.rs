@@ -4516,6 +4516,12 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
         Some("Adding shop is running. Wait for it to finish on Home."),
         "a busy refusal names the job that runs"
     );
+    screen.move_refused("home_add_in_progress", None);
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("A folder is being added to your projects folder. Try again when it finishes."),
+        "a move while an add runs says so in plain words"
+    );
     screen.move_refused("home_move_worktrees", None);
     assert!(
         screen

@@ -166,6 +166,33 @@ fn named<'a>(found: &'a [FoundProject], name: &str) -> Option<&'a FoundProject> 
     found.iter().find(|entry| entry.name == name)
 }
 
+/// Sends one owner change straight from the client, outside the job, and gives the engine's
+/// answer, a refusal before any plan included. Inputs: the owner and the change. Output: the
+/// answer.
+async fn direct(owner: &mut Owner, mutation: OwnerMutation) -> OwnerResponse {
+    owner
+        .controller
+        .read(OwnerRead::ProjectsHome)
+        .await
+        .unwrap();
+    owner.generation += 1;
+    owner
+        .controller
+        .begin_mutation(mutation, owner.generation)
+        .unwrap();
+    let answer = owner.controller.send_pending().await.unwrap();
+    assert!(owner.controller.pending().is_none(), "{answer:?}");
+    answer
+}
+
+/// The answer to a direct folder change the engine refused before planning it because the
+/// job runs: `job_busy`, with nothing recorded.
+fn job_busy() -> OwnerResponse {
+    OwnerResponse::Rejected {
+        code: "job_busy".into(),
+    }
+}
+
 fn rejected(code: &str) -> OwnerResult {
     OwnerResult::Rejected { code: code.into() }
 }
@@ -1407,9 +1434,9 @@ async fn an_add_is_refused_the_destination_a_running_add_planned() {
         generation: 0,
     };
     assert_eq!(
-        other.apply(add(&second, AddMode::Copy)).await,
-        rejected("home_add_in_progress"),
-        "a folder of the same name while the first add copies"
+        direct(&mut other, add(&second, AddMode::Copy)).await,
+        job_busy(),
+        "a direct add of a folder of the same name while the job copies"
     );
     job_until(&owner.controller, |job| job.state == JobState::Done).await;
     assert_eq!(
@@ -1454,8 +1481,8 @@ async fn one_add_runs_at_a_time_whatever_the_other_folder_is_named() {
         (&unlike, "another"),
     ] {
         assert_eq!(
-            other.apply(add(source, AddMode::Copy)).await,
-            rejected("home_add_in_progress"),
+            direct(&mut other, add(source, AddMode::Copy)).await,
+            job_busy(),
             "{what} while the first add copies"
         );
     }
@@ -1476,10 +1503,11 @@ async fn one_add_runs_at_a_time_whatever_the_other_folder_is_named() {
     engine.stop().await;
 }
 
-/// An intake job that starts while a direct add copies ends `home_add_in_progress` before
-/// its download, with its folder kept and nothing of it in the home; the direct add lands.
+/// A job start while a direct add copies is refused `job_busy` and makes no job, with its
+/// folder kept and nothing of it in the home; the direct add lands (DEC-177 step 1b, leader
+/// 13:26: one folder change at a time for every client).
 #[tokio::test(flavor = "multi_thread")]
-async fn an_intake_job_ends_home_add_in_progress_while_a_direct_add_copies() {
+async fn a_job_start_is_refused_job_busy_while_a_direct_add_copies() {
     let disk = tempfile::tempdir().unwrap();
     let place = disk.path().canonicalize().unwrap();
     let home = place.join("projects");
@@ -1507,14 +1535,21 @@ async fn an_intake_job_ends_home_add_in_progress_while_a_direct_add_copies() {
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     let watcher = engine.owner().await;
+    let client = watcher.owner_client().unwrap();
+    let refused = client
+        .job_start(
+            id("intake-small"),
+            folder(&small),
+            AddMode::Copy,
+            Vec::new(),
+        )
+        .await
+        .unwrap_err();
     assert_eq!(
-        ended(&watcher, "intake-small", &small, AddMode::Copy).await,
-        JobState::Failed {
-            code: "home_add_in_progress".into(),
-            phase: Phase::Downloading,
-        },
-        "a job while a direct add copies"
+        refused.0, "job_busy",
+        "a job start while a direct add copies"
     );
+    assert_eq!(client.job_status().await.unwrap(), None, "no job was made");
     let answered = running.await.unwrap().unwrap();
     assert!(
         matches!(&answered, OwnerResponse::Applied { operation }
@@ -2410,5 +2445,166 @@ async fn an_engine_start_shows_a_project_move_an_engine_stop_cut_short() {
     assert_eq!(landed.id, id("move-landed"));
     assert_eq!(landed.state, JobState::Done);
     assert_eq!(repositories(&database, &reading), [text(&target)]);
+    engine.stop().await;
+}
+
+/// DEC-177 step 1b (leader 13:26): one folder change at a time for every client. While a
+/// project move job waits for its agents, a direct add and a direct move of that project
+/// from an owner client are refused `job_busy` before any plan, and an add job too; once the
+/// move ended, the same direct add goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_direct_folder_change_is_refused_job_busy_while_a_job_runs_and_goes_once_it_ended() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let engine = Engine::start().await;
+    let (mut owner, reading, _origin, target) = kept_outside(&engine, &place).await;
+    let database = engine.root.path().join("engine.db");
+    slow_agent(&database, 44, &place.join("agent-44"));
+    owner
+        .controller
+        .owner_client()
+        .unwrap()
+        .job_start(id("move-hold"), moving(&reading), AddMode::Move, Vec::new())
+        .await
+        .unwrap();
+    job_until(&owner.controller, |job| {
+        matches!(job.state, JobState::Stopping { .. })
+    })
+    .await;
+    let source = place.join("plain-notes");
+    tree(&source, 2, 2);
+    let landed = place.join("second").join("plain-notes");
+    assert_eq!(
+        direct(&mut owner, add(&source, AddMode::Copy)).await,
+        job_busy(),
+        "a direct add while a move job runs"
+    );
+    let again = OwnerMutation::MoveProjectHome {
+        project_id: reading.clone(),
+        mode: AddMode::Move,
+        overrides: Vec::new(),
+    };
+    assert_eq!(
+        direct(&mut owner, again).await,
+        job_busy(),
+        "a direct move while a move job runs"
+    );
+    let busy = owner
+        .controller
+        .owner_client()
+        .unwrap()
+        .job_start(id("add-beside"), folder(&source), AddMode::Copy, Vec::new())
+        .await
+        .unwrap_err();
+    assert_eq!(busy.0, "job_busy", "an add job while a move job runs");
+    assert!(!landed.exists(), "nothing was added");
+    sql(
+        &database,
+        "UPDATE team_agents SET status='stopped' WHERE id=44;",
+    );
+    job_until(&owner.controller, |job| job.state == JobState::Done).await;
+    assert!(target.is_dir(), "{target:?}");
+    assert_eq!(
+        owner.apply(add(&source, AddMode::Copy)).await,
+        OwnerResult::Applied,
+        "the same direct add once the job ended"
+    );
+    assert_eq!(
+        fs::read_to_string(landed.join("p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    engine.stop().await;
+}
+
+/// rv-sec2 F1 (DEC-177 step 1b): an add plans nothing while a project move is pending, so the
+/// two never plan the same name in the home whatever the client; once the move is gone, the
+/// add goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_add_plans_nothing_while_a_project_move_is_pending() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let engine = Engine::start().await;
+    let (mut owner, _reading, origin, target) = kept_outside(&engine, &place).await;
+    let database = engine.root.path().join("engine.db");
+    sql(
+        &database,
+        &format!(
+            "INSERT INTO projects_home_project_move VALUES (1, 'move-held', 7, 'reading', '{}', '{}', 'move');",
+            text(&origin),
+            text(&target)
+        ),
+    );
+    let source = place.join("plain-notes");
+    tree(&source, 2, 2);
+    let landed = place.join("second").join("plain-notes");
+    assert_eq!(
+        owner.apply(add(&source, AddMode::Copy)).await,
+        rejected("move_project_in_progress"),
+        "a direct add while a project move is pending"
+    );
+    assert!(!landed.exists(), "nothing was added");
+    sql(&database, "DELETE FROM projects_home_project_move;");
+    assert_eq!(
+        owner.apply(add(&source, AddMode::Copy)).await,
+        OwnerResult::Applied
+    );
+    assert!(landed.join("p1/f1.txt").is_file());
+    engine.stop().await;
+}
+
+/// rv-sec2 F1 (DEC-177 step 1b): a project move is refused while an add runs, by the job's
+/// check before it starts and by a direct move's plan, with the project left where it was;
+/// once the add is gone, the move goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_project_move_is_refused_while_an_add_runs() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let engine = Engine::start().await;
+    let (mut owner, reading, origin, target) = kept_outside(&engine, &place).await;
+    let database = engine.root.path().join("engine.db");
+    sql(
+        &database,
+        &format!(
+            "INSERT INTO projects_home_add(request, owner, source, destination, mode)
+             VALUES ('add-other', 'owner', '{}', '{}', 'copy');",
+            text(&place.join("elsewhere")),
+            text(&place.join("second").join("elsewhere"))
+        ),
+    );
+    let refused = owner
+        .controller
+        .owner_client()
+        .unwrap()
+        .job_start(
+            id("move-beside-add"),
+            moving(&reading),
+            AddMode::Move,
+            Vec::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.0, "home_add_in_progress",
+        "a move job while an add runs"
+    );
+    let again = OwnerMutation::MoveProjectHome {
+        project_id: reading.clone(),
+        mode: AddMode::Move,
+        overrides: Vec::new(),
+    };
+    assert_eq!(
+        owner.apply(again.clone()).await,
+        rejected("home_add_in_progress"),
+        "a direct move while an add runs"
+    );
+    assert!(origin.is_dir(), "{origin:?}");
+    assert!(!target.exists(), "{target:?}");
+    assert_eq!(pending_moves(&database), 0);
+    sql(
+        &database,
+        "DELETE FROM projects_home_add WHERE request='add-other';",
+    );
+    assert_eq!(owner.apply(again).await, OwnerResult::Applied);
+    assert!(target.is_dir(), "{target:?}");
     engine.stop().await;
 }
