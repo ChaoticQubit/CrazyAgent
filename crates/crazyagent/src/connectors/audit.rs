@@ -182,19 +182,11 @@ pub fn record(db: &Connection, row: &CallRow, keep: KeepLog) -> Result<(), Engin
         )
         .map_err(sqlite)?;
     }
-    let cutoff = crate::semantic::now_ms() - i64::from(keep.days()) * DAY_MS;
-    db.execute(
-        "DELETE FROM connector_calls WHERE started_ms < ?1",
-        [cutoff],
-    )
-    .map_err(sqlite)?;
-    db.execute(
-        "DELETE FROM connector_calls
-         WHERE id <= (SELECT MAX(id) FROM connector_calls) - ?1",
-        [ROWS_MAX],
-    )
-    .map_err(sqlite)?;
-    Ok(())
+    prune(db, keep)
+}
+
+fn cutoff(keep: KeepLog) -> i64 {
+    crate::semantic::now_ms() - i64::from(keep.days()) * DAY_MS
 }
 
 /// Reads the newest rows. Inputs: the engine database and how many, at most `READ_MAX`.
@@ -252,14 +244,190 @@ pub fn view(
     connector: Option<&str>,
     project: Option<&str>,
 ) -> Result<ActivityView, EngineError> {
-    let _ = (db, connector, project);
-    Err(EngineError("connectors_unavailable".into()))
+    db.execute_batch(SCHEMA).map_err(sqlite)?;
+    let (settings, version) = crate::connectors::settings::load(db)?;
+    let after = cutoff(settings.keep_log);
+    let mut statement = db
+        .prepare(
+            "SELECT c.connector, c.tool, c.kind, c.project, c.agent, c.started_ms, c.ms,
+                    c.bytes_in, c.bytes_out, c.outcome, json_extract(p.body, '$.spec.name')
+             FROM connector_calls c LEFT JOIN projects p ON p.id = c.project
+             WHERE c.started_ms >= ?1
+               AND (?2 IS NULL OR c.connector = ?2)
+               AND (?3 IS NULL OR c.project = ?3)
+             ORDER BY c.started_ms DESC, c.id DESC LIMIT ?4",
+        )
+        .map_err(sqlite)?;
+    let found = statement
+        .query_map(
+            params![after, connector, project, VIEW_CALLS_MAX as i64 + 1],
+            |row| {
+                let kind: String = row.get(2)?;
+                let project: String = row.get(3)?;
+                let name: Option<String> = row.get(10).ok().flatten();
+                let outcome: String = row.get(9)?;
+                Ok((
+                    kind,
+                    CallView {
+                        connector: shown(&row.get::<_, String>(0)?),
+                        tool: shown(&row.get::<_, String>(1)?),
+                        kind: CallKind::Unknown,
+                        project_name: project_name(&project, name.as_deref()),
+                        project,
+                        agent: shown(&row.get::<_, String>(4)?),
+                        started_ms: row.get(5)?,
+                        ms: row.get(6)?,
+                        bytes_in: row.get(7)?,
+                        bytes_out: row.get(8)?,
+                        outcome_text: outcome_text(&outcome),
+                        outcome: shown(&outcome),
+                    },
+                ))
+            },
+        )
+        .map_err(sqlite)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite)?;
+    let mut more = found.len() > VIEW_CALLS_MAX;
+    let mut calls = Vec::with_capacity(found.len().min(VIEW_CALLS_MAX));
+    let mut bytes = 0;
+    for (kind, mut call) in found.into_iter().take(VIEW_CALLS_MAX) {
+        call.kind = CallKind::ALL
+            .into_iter()
+            .find(|known| known.name() == kind)
+            .ok_or_else(|| EngineError("connectors_unavailable".into()))?;
+        let json =
+            serde_json::to_vec(&call).map_err(|_| EngineError("connectors_unavailable".into()))?;
+        bytes += json.len() + 1;
+        if bytes > VIEW_CALL_BYTES_MAX {
+            more = true;
+            break;
+        }
+        calls.push(call);
+    }
+    let (connectors, projects) = choices(db, after)?;
+    assert!(calls.len() <= VIEW_CALLS_MAX);
+    assert!(connectors.len() <= VIEW_CHOICES_MAX && projects.len() <= VIEW_CHOICES_MAX);
+    Ok(ActivityView {
+        calls,
+        more,
+        connector: connector.map(str::to_owned),
+        project: project.map(str::to_owned),
+        connectors,
+        projects,
+        settings,
+        version,
+    })
+}
+
+/// The connectors and projects the log holds inside the keep time, the most recently used
+/// first up to `VIEW_CHOICES_MAX` each and inside one shared byte budget, then sorted by
+/// what is shown. Inputs: the database and the oldest start kept. Output: both lists.
+fn choices(db: &Connection, after: i64) -> Result<(Vec<String>, Vec<ProjectChoice>), EngineError> {
+    let mut connectors: Vec<String> = db
+        .prepare(
+            "SELECT connector FROM connector_calls WHERE started_ms >= ?1
+             GROUP BY connector ORDER BY MAX(id) DESC LIMIT ?2",
+        )
+        .map_err(sqlite)?
+        .query_map(params![after, VIEW_CHOICES_MAX as i64], |row| row.get(0))
+        .map_err(sqlite)?
+        .collect::<Result<_, _>>()
+        .map_err(sqlite)?;
+    let mut projects: Vec<ProjectChoice> = db
+        .prepare(
+            "SELECT c.project, json_extract(p.body, '$.spec.name')
+             FROM connector_calls c LEFT JOIN projects p ON p.id = c.project
+             WHERE c.started_ms >= ?1 AND length(CAST(c.project AS BLOB)) BETWEEN 1 AND ?3
+             GROUP BY c.project ORDER BY MAX(c.id) DESC LIMIT ?2",
+        )
+        .map_err(sqlite)?
+        .query_map(
+            params![after, VIEW_CHOICES_MAX as i64, PROJECT_ID_BYTES_MAX as i64],
+            |row| {
+                let id: String = row.get(0)?;
+                let name: Option<String> = row.get(1).ok().flatten();
+                Ok(ProjectChoice {
+                    name: project_name(&id, name.as_deref()),
+                    id,
+                })
+            },
+        )
+        .map_err(sqlite)?
+        .collect::<Result<_, _>>()
+        .map_err(sqlite)?;
+    let mut bytes: usize = 0;
+    connectors.retain(|name| {
+        bytes = bytes.saturating_add(name.len() * 2 + 4);
+        bytes <= VIEW_CHOICE_BYTES_MAX
+    });
+    projects.retain(|choice| {
+        let size = serde_json::to_vec(choice).map_or(usize::MAX, |json| json.len() + 1);
+        bytes = bytes.saturating_add(size);
+        bytes <= VIEW_CHOICE_BYTES_MAX
+    });
+    connectors.sort_unstable();
+    projects.sort_by_cached_key(|choice| (choice.name.to_lowercase(), choice.id.clone()));
+    assert!(
+        projects
+            .iter()
+            .all(|choice| choice.id.len() <= PROJECT_ID_BYTES_MAX)
+    );
+    Ok((connectors, projects))
+}
+
+/// Text the log holds as both apps may show it: hidden and control characters taken out.
+/// Input: the stored text. Output: the shown text.
+fn shown(text: &str) -> String {
+    crate::memory::without_hidden(text)
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect()
+}
+
+/// A project's shown name: its name in the projects table, else its id for a project that
+/// is gone or unnamed. Inputs: the id and the stored name. Output: the name.
+fn project_name(id: &str, name: Option<&str>) -> String {
+    let named = name.map(shown).unwrap_or_default();
+    if named.trim().is_empty() {
+        shown(id)
+    } else {
+        named
+    }
+}
+
+/// The words for an outcome: OK, the engine's plain sentence for a known code with its
+/// first letter raised, or the code itself. Input: the stored outcome. Output: the words.
+fn outcome_text(outcome: &str) -> String {
+    if outcome == "ok" {
+        return "OK".into();
+    }
+    match crate::connectors::plain_problem(outcome) {
+        Some(sentence) => {
+            let mut letters = sentence.chars();
+            letters.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(letters).collect()
+            })
+        }
+        None => shown(outcome),
+    }
 }
 
 /// Drops the rows the keep setting and the row cap no longer hold. Inputs: the engine
 /// database and the keep setting. Output: Ok, or `connectors_unavailable`.
 pub fn prune(db: &Connection, keep: KeepLog) -> Result<(), EngineError> {
-    let _ = (db, keep);
+    db.execute_batch(SCHEMA).map_err(sqlite)?;
+    db.execute(
+        "DELETE FROM connector_calls WHERE started_ms < ?1",
+        [cutoff(keep)],
+    )
+    .map_err(sqlite)?;
+    db.execute(
+        "DELETE FROM connector_calls
+         WHERE id <= (SELECT MAX(id) FROM connector_calls) - ?1",
+        [ROWS_MAX],
+    )
+    .map_err(sqlite)?;
     Ok(())
 }
 

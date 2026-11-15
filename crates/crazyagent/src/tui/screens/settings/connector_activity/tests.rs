@@ -34,7 +34,12 @@ fn call(connector: &str, tool: &str, kind: CallKind, at: i64) -> CallView {
 }
 
 fn view() -> ActivityView {
-    let mut write = call("board", "create_issue", CallKind::Write, NOV_15_1204_UTC - MINUTE);
+    let mut write = call(
+        "board",
+        "create_issue",
+        CallKind::Write,
+        NOV_15_1204_UTC - MINUTE,
+    );
     write.agent = "Master".into();
     write.ms = 0;
     write.bytes_in = 64;
@@ -189,7 +194,10 @@ fn a_filter_change_reads_again_at_once_and_a_keep_pick_waits_for_enter() {
     assert!(shows(&mut shell, "Project             Plant shop"));
     key(&mut shell, Key::Home);
     key(&mut shell, Key::Right);
-    assert!(requests(&mut shell).is_empty(), "a keep pick waits for Enter");
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a keep pick waits for Enter"
+    );
     assert!(shows(&mut shell, "[90 days]"));
     assert!(shows(&mut shell, "Enter Save changes"));
     key(&mut shell, Key::Enter);
@@ -301,7 +309,10 @@ fn an_empty_log_and_a_filter_with_no_match_say_so_and_a_failed_first_read_offers
     none.calls.clear();
     none.connector = Some("board".into());
     arrive(&mut shell, ConnectorsEvent::Activity(Ok(none)));
-    assert!(!shows(&mut shell, "No calls match these filters."), "the page asked for all");
+    assert!(
+        !shows(&mut shell, "No calls match these filters."),
+        "the page asked for all"
+    );
 }
 
 #[test]

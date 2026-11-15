@@ -75,7 +75,13 @@ pub fn clock(ms: i64, offset: i64) -> String {
 /// A local time with its day, such as "Nov 15 17:04", the words the desktop shows for a
 /// logged connector call. Inputs: epoch milliseconds and the UTC offset. Output: the words.
 pub fn stamp(ms: i64, offset: i64) -> String {
-    clock(ms, offset)
+    let day = (ms.div_euclid(1000) + offset).div_euclid(86_400);
+    let (_, month, date) = civil(day);
+    format!(
+        "{} {date} {}",
+        MONTHS[month as usize - 1],
+        clock(ms, offset)
+    )
 }
 
 /// A short past time: "just now", "4 min ago", "today 09:12", "yesterday" or

@@ -46,15 +46,7 @@ fn name_project(db: &Connection, id: &str, name: &str) {
 
 fn keep(db: &Connection, keep_log: KeepLog) {
     let (stored, version) = settings::load(db).unwrap();
-    let saved = settings::save(
-        db,
-        &ConnectorSettings {
-            keep_log,
-            ..stored
-        },
-        version,
-    )
-    .unwrap();
+    let saved = settings::save(db, &ConnectorSettings { keep_log, ..stored }, version).unwrap();
     assert!(saved.is_ok());
 }
 
@@ -79,7 +71,12 @@ fn the_activity_view_lists_calls_newest_first_with_project_names_and_filters_by_
         ("board", "beta", now - 2_000),
         ("board", "gone", now - 1_000),
     ] {
-        record(&case.db, &call(connector, project, "l1", at), KeepLog::Days90).unwrap();
+        record(
+            &case.db,
+            &call(connector, project, "l1", at),
+            KeepLog::Days90,
+        )
+        .unwrap();
     }
 
     let all = view(&case.db, None, None).unwrap();
@@ -139,16 +136,20 @@ fn the_activity_view_lists_calls_newest_first_with_project_names_and_filters_by_
         projects,
         [("beta", "beta"), ("gone", "gone"), ("alpha", "Plant shop")]
     );
-    assert_eq!((all.connector.as_deref(), all.project.as_deref()), (None, None));
     assert_eq!(
-        (all.settings, all.version),
-        (ConnectorSettings::DEFAULT, 0)
+        (all.connector.as_deref(), all.project.as_deref()),
+        (None, None)
     );
+    assert_eq!((all.settings, all.version), (ConnectorSettings::DEFAULT, 0));
 
     let board = view(&case.db, Some("board"), None).unwrap();
     assert_eq!(board.calls.len(), 3);
     assert!(board.calls.iter().all(|call| call.connector == "board"));
-    assert_eq!(board.connectors, ["board", "desk"], "choices ignore the filter");
+    assert_eq!(
+        board.connectors,
+        ["board", "desk"],
+        "choices ignore the filter"
+    );
     assert_eq!(board.connector.as_deref(), Some("board"));
 
     let one = view(&case.db, Some("board"), Some("beta")).unwrap();
@@ -197,8 +198,18 @@ fn the_activity_view_gives_the_engine_sentence_for_an_outcome_and_cleans_hidden_
 fn the_activity_view_holds_only_calls_inside_the_keep_time() {
     let case = case();
     let now = crate::semantic::now_ms();
-    record(&case.db, &call("board", "alpha", "l1", now - 10 * DAY), KeepLog::Days90).unwrap();
-    record(&case.db, &call("board", "alpha", "l1", now - DAY), KeepLog::Days90).unwrap();
+    record(
+        &case.db,
+        &call("board", "alpha", "l1", now - 10 * DAY),
+        KeepLog::Days90,
+    )
+    .unwrap();
+    record(
+        &case.db,
+        &call("board", "alpha", "l1", now - DAY),
+        KeepLog::Days90,
+    )
+    .unwrap();
     assert_eq!(view(&case.db, None, None).unwrap().calls.len(), 2);
 
     keep(&case.db, KeepLog::Days7);
@@ -209,7 +220,11 @@ fn the_activity_view_holds_only_calls_inside_the_keep_time() {
     assert_eq!(shown.version, 1);
 
     prune(&case.db, KeepLog::Days7).unwrap();
-    assert_eq!(count(&case.db, "1=1"), 1, "the prune drops what the read hid");
+    assert_eq!(
+        count(&case.db, "1=1"),
+        1,
+        "the prune drops what the read hid"
+    );
 }
 
 #[test]
@@ -235,10 +250,7 @@ fn a_full_log_at_the_longest_lengths_still_fits_one_owner_frame() {
             [now],
         )
         .unwrap();
-    assert_eq!(
-        count(&case.db, "length(CAST(project AS BLOB)) = 128"),
-        300
-    );
+    assert_eq!(count(&case.db, "length(CAST(project AS BLOB)) = 128"), 300);
 
     let full = view(&case.db, None, None).unwrap();
     assert!(full.more, "more calls matched than the view holds");
@@ -257,13 +269,27 @@ fn a_project_id_longer_than_a_filter_takes_is_listed_but_never_offered_as_a_choi
     let case = case();
     let now = crate::semantic::now_ms();
     let long = "p".repeat(PROJECT_ID_BYTES_MAX + 1);
-    record(&case.db, &call("board", &long, "l1", now - 2_000), KeepLog::Days90).unwrap();
-    record(&case.db, &call("board", "alpha", "l1", now - 1_000), KeepLog::Days90).unwrap();
+    record(
+        &case.db,
+        &call("board", &long, "l1", now - 2_000),
+        KeepLog::Days90,
+    )
+    .unwrap();
+    record(
+        &case.db,
+        &call("board", "alpha", "l1", now - 1_000),
+        KeepLog::Days90,
+    )
+    .unwrap();
 
     let shown = view(&case.db, None, None).unwrap();
     assert_eq!(shown.calls.len(), 2);
     assert_eq!(shown.calls[1].project, long);
-    let ids: Vec<&str> = shown.projects.iter().map(|choice| choice.id.as_str()).collect();
+    let ids: Vec<&str> = shown
+        .projects
+        .iter()
+        .map(|choice| choice.id.as_str())
+        .collect();
     assert_eq!(ids, ["alpha"]);
 }
 
@@ -271,8 +297,18 @@ fn a_project_id_longer_than_a_filter_takes_is_listed_but_never_offered_as_a_choi
 fn one_launchs_flood_of_calls_that_never_reached_a_vendor_leaves_every_sent_call_in_place() {
     let case = case();
     let now = crate::semantic::now_ms();
-    record(&case.db, &call("board", "alpha", "a", now - 5_000), KeepLog::Days90).unwrap();
-    record(&case.db, &call("desk", "beta", "b", now - 4_000), KeepLog::Days90).unwrap();
+    record(
+        &case.db,
+        &call("board", "alpha", "a", now - 5_000),
+        KeepLog::Days90,
+    )
+    .unwrap();
+    record(
+        &case.db,
+        &call("desk", "beta", "b", now - 4_000),
+        KeepLog::Days90,
+    )
+    .unwrap();
     record(&case.db, &refused("b", now - 3_000), KeepLog::Days90).unwrap();
     let mut list = call("board", "alpha", "a", now - 2_000);
     list.kind = CallKind::List;
@@ -288,7 +324,11 @@ fn one_launchs_flood_of_calls_that_never_reached_a_vendor_leaves_every_sent_call
         QUIET_ROWS_PER_LAUNCH_MAX as i64
     );
     assert_eq!(count(&case.db, "launch='a' AND sent=1"), 1);
-    assert_eq!(count(&case.db, "launch='b'"), 2, "another launch keeps every row");
+    assert_eq!(
+        count(&case.db, "launch='b'"),
+        2,
+        "another launch keeps every row"
+    );
     assert_eq!(
         count(&case.db, "launch='a' AND kind='list'"),
         0,
@@ -298,5 +338,9 @@ fn one_launchs_flood_of_calls_that_never_reached_a_vendor_leaves_every_sent_call
     assert_eq!(sent.calls.len(), VIEW_CALLS_MAX);
     assert!(sent.more);
     let board = recent(&case.db, READ_MAX).unwrap();
-    assert!(board.iter().all(|row| !row.sent || row.launch == "a" || row.launch == "b"));
+    assert!(
+        board
+            .iter()
+            .all(|row| !row.sent || row.launch == "a" || row.launch == "b")
+    );
 }

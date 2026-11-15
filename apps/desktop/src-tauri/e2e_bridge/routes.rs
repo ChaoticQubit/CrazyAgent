@@ -3487,6 +3487,34 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.scorecard_set(settings, version)?; call.await }.await;
             routed(result)
         }
+        "desktop_connector_activity" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                connector: Option<String>,
+                project: Option<String>,
+            }
+            let Args { connector, project } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_activity(connector, project)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_connector_settings_set" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                settings: crazyagent::connectors::ConnectorSettings,
+                version: u64,
+            }
+            let Args { settings, version } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .connector_settings_set(settings, version)?; call.await }.await;
+            routed(result)
+        }
         "desktop_app_plugins" => {
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugins()?; call.await }.await;
             routed(result)

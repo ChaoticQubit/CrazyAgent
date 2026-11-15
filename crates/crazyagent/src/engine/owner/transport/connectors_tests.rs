@@ -562,25 +562,48 @@ fn the_activity_page_reads_with_its_filters_and_a_keep_save_drops_older_calls_at
     let db = crate::questions::open(&root).unwrap();
     let now = crate::semantic::now_ms();
     for (connector, days) in [("board", 3), ("board", 10), ("desk", 20)] {
-        crate::connectors::audit::record(&db, &logged(connector, now - days * DAY), KeepLog::Days90)
-            .unwrap();
+        crate::connectors::audit::record(
+            &db,
+            &logged(connector, now - days * DAY),
+            KeepLog::Days90,
+        )
+        .unwrap();
     }
 
-    let all = activity(&root, json!({"kind": "activity", "connector": null, "project": null}));
+    let all = activity(
+        &root,
+        json!({"kind": "activity", "connector": null, "project": null}),
+    );
     assert_eq!(all.calls.len(), 3);
     assert_eq!(all.connectors, ["board", "desk"]);
     assert_eq!(all.projects.len(), 1);
     assert_eq!(
-        (all.projects[0].id.as_str(), all.settings.keep_log, all.version),
+        (
+            all.projects[0].id.as_str(),
+            all.settings.keep_log,
+            all.version
+        ),
         (PROJECT, KeepLog::Days30, 0)
     );
-    let board = activity(&root, json!({"kind": "activity", "connector": "board", "project": null}));
+    let board = activity(
+        &root,
+        json!({"kind": "activity", "connector": "board", "project": null}),
+    );
     assert_eq!(board.calls.len(), 2);
     assert_eq!(board.connector.as_deref(), Some("board"));
-    let alpha = activity(&root, json!({"kind": "activity", "connector": null, "project": PROJECT}));
+    let alpha = activity(
+        &root,
+        json!({"kind": "activity", "connector": null, "project": PROJECT}),
+    );
     assert_eq!(alpha.calls.len(), 3);
-    let ghost = activity(&root, json!({"kind": "activity", "connector": null, "project": "ghost"}));
-    assert!(ghost.calls.is_empty(), "a project that is gone filters to nothing, never a refusal");
+    let ghost = activity(
+        &root,
+        json!({"kind": "activity", "connector": null, "project": "ghost"}),
+    );
+    assert!(
+        ghost.calls.is_empty(),
+        "a project that is gone filters to nothing, never a refusal"
+    );
 
     let saved = ask(
         &root,
@@ -589,14 +612,26 @@ fn the_activity_page_reads_with_its_filters_and_a_keep_save_drops_older_calls_at
             "size_cap": "kib256", "keep_log": "days7"
         }, "version": 0}),
     );
-    assert_eq!((saved.settings.keep_log, saved.version), (KeepLog::Days7, 1));
+    assert_eq!(
+        (saved.settings.keep_log, saved.version),
+        (KeepLog::Days7, 1)
+    );
     let left: i64 = db
         .query_row("SELECT COUNT(*) FROM connector_calls", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(left, 1, "the save drops the calls the new keep time no longer holds");
-    let after = activity(&root, json!({"kind": "activity", "connector": null, "project": null}));
+    assert_eq!(
+        left, 1,
+        "the save drops the calls the new keep time no longer holds"
+    );
+    let after = activity(
+        &root,
+        json!({"kind": "activity", "connector": null, "project": null}),
+    );
     assert_eq!(after.calls.len(), 1);
-    assert_eq!((after.settings.keep_log, after.version), (KeepLog::Days7, 1));
+    assert_eq!(
+        (after.settings.keep_log, after.version),
+        (KeepLog::Days7, 1)
+    );
 
     for action in [
         json!({"kind": "activity", "connector": "", "project": null}),
@@ -605,6 +640,10 @@ fn the_activity_page_reads_with_its_filters_and_a_keep_save_drops_older_calls_at
         json!({"kind": "activity", "connector": null, "project": "p".repeat(PROJECT_BYTES_MAX + 1)}),
         json!({"kind": "activity", "connector": null, "project": null, "arguments": true}),
     ] {
-        assert_eq!(refused(&root, action.clone()), "connector_request_invalid", "{action}");
+        assert_eq!(
+            refused(&root, action.clone()),
+            "connector_request_invalid",
+            "{action}"
+        );
     }
 }

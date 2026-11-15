@@ -122,8 +122,8 @@ test("Settings lists Connector activity under App after App plugins and opens it
   assert.match(index, /tab === "connector-activity" \? <ConnectorActivity \/>/u);
   assert.match(source("../src/ui/router.ts"), /"app-plugins", "connector-activity", "search"/u);
   const apiSource = source("../src/api-connectors.ts");
-  assert.match(apiSource, /call<ActivityView>\("desktop_connector_activity", \{ connector, project \}\)/u);
-  assert.match(apiSource, /call<ConnectorSettingsSave>\("desktop_connector_settings_set", \{ settings, version \}\)/u);
+  assert.match(apiSource, /[cC]all<ActivityView>\("desktop_connector_activity", \{ connector, project \}\)/u);
+  assert.match(apiSource, /[cC]all<ConnectorSettingsSave>\("desktop_connector_settings_set", \{ settings, version \}\)/u);
   const lib = source("../src-tauri/src/lib.rs");
   for (const command of ["desktop_connector_activity", "desktop_connector_settings_set"]) {
     assert.match(lib, new RegExp(`async fn ${command}\\(`, "u"), command);

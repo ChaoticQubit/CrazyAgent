@@ -4,6 +4,7 @@ import { SETTINGS_TABS, isUserMenuTab, type ListedSettingsTab, type SettingsActi
 import { Accounts } from "./accounts";
 import { AppPluginsSettings } from "./app-plugins";
 import { ChecksSettings } from "./checks";
+import { ConnectorActivity } from "./connector-activity";
 import { FinishedAgentsSettings } from "./finished-agents";
 import { Harnesses } from "./harnesses";
 import { MasterSettings } from "./master";
@@ -39,7 +40,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
   ] },
   { title: "App", items: [
     { id: "sandbox", label: "Sandbox" }, { id: "alerts", label: "Team alerts" }, { id: "notifications", label: "Notifications" },
-    { id: "app-plugins", label: "App plugins" }, { id: "search", label: "Search" },
+    { id: "app-plugins", label: "App plugins" }, { id: "connector-activity", label: "Connector activity" }, { id: "search", label: "Search" },
   ] },
 ];
 
@@ -100,6 +101,7 @@ export function Settings({ tab, action, account, skill, harness }: { tab: Listed
       : tab === "master" ? <MasterSettings />
       : tab === "notifications" ? <NotificationSettings />
       : tab === "app-plugins" ? <AppPluginsSettings />
+      : tab === "connector-activity" ? <ConnectorActivity />
       : tab === "search" ? <SearchSettings />
       : <TeamAlertsSettings />}
   </SettingsFrame>;

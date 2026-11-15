@@ -4203,6 +4203,32 @@ async fn desktop_scorecard_set(
 }
 
 #[tauri::command]
+async fn desktop_connector_activity(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    connector: Option<String>,
+    project: Option<String>,
+) -> Result<crazyagent::connectors::audit::ActivityView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connector_activity(connector, project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_connector_settings_set(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: crazyagent::connectors::ConnectorSettings,
+    version: u64,
+) -> Result<bridge::connectors::ConnectorSettingsSave, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .connector_settings_set(settings, version)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_app_plugins(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5872,6 +5898,8 @@ native_commands! {
     desktop_usage_set_spend,
     desktop_scorecard,
     desktop_scorecard_set,
+    desktop_connector_activity,
+    desktop_connector_settings_set,
     desktop_app_plugins,
     desktop_app_plugin_preview,
     desktop_app_plugin_review,

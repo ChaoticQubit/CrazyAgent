@@ -535,16 +535,15 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
         }
         Action::Set { settings, version } => {
             match crate::connectors::settings::save(&db, &settings, version)? {
-                Ok(_) => page(&db, None),
+                Ok(_) => {
+                    let _ = audit::prune(&db, settings.keep_log);
+                    page(&db, None)
+                }
                 Err(current) => Ok(Reply::Stale { current }),
             }
         }
         Action::Activity { connector, project } => Ok(Reply::Activity {
-            view: Box::new(audit::view(
-                &db,
-                connector.as_deref(),
-                project.as_deref(),
-            )?),
+            view: Box::new(audit::view(&db, connector.as_deref(), project.as_deref())?),
         }),
     }
 }

@@ -24,6 +24,7 @@ pub mod app_plugins;
 mod changes;
 pub mod checks;
 mod cleanup;
+pub mod connectors;
 mod coord;
 mod coord_questions;
 mod demo;
