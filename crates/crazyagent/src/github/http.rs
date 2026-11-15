@@ -34,6 +34,17 @@ pub(crate) enum Verb {
     Delete,
 }
 
+impl Verb {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Patch => "PATCH",
+            Self::Delete => "DELETE",
+        }
+    }
+}
+
 /// What came back: the HTTP status, at most 4 MiB of body, and the scopes a classic
 /// GitHub token holds when GitHub named them in `X-OAuth-Scopes`.
 pub(crate) struct Reply {
@@ -57,11 +68,12 @@ fn quoted(value: &str) -> Result<String, EngineError> {
 }
 
 impl Request<'_> {
-    /// Builds curl's config: the URL, headers, token, and either the form body or a JSON
-    /// body sent as given, never both. Input: the JSON body, none for a form or no body.
-    /// Output: the config bytes, or `github_request_invalid` for a control character.
-    fn config(&self, json: Option<&str>) -> Result<Vec<u8>, EngineError> {
-        assert!(json.is_none() || self.form.is_none());
+    /// Builds curl's config: the URL, headers, token, and either the form body or a
+    /// method with its JSON body, never both; a bodyless PUT, POST or PATCH sends an empty
+    /// body so it says its length is zero. Input: the method and body, none for a GET or a
+    /// form. Output: the config bytes, or `github_request_invalid` for a control character.
+    fn config(&self, body: Option<(Verb, Option<&str>)>) -> Result<Vec<u8>, EngineError> {
+        assert!(body.is_none() || self.form.is_none());
         let mut config = format!(
             "url = {}\nheader = {}\nuser-agent = {}\n",
             quoted(self.url.as_str())?,
@@ -89,10 +101,16 @@ impl Request<'_> {
                 .finish();
             config.push_str(&format!("data = {}\n", quoted(&body)?));
         }
-        if let Some(json) = json {
-            config.push_str("request = \"POST\"\n");
-            config.push_str("header = \"Content-Type: application/json\"\n");
-            config.push_str(&format!("data-raw = {}\n", quoted(json)?));
+        if let Some((verb, json)) = body {
+            config.push_str(&format!("request = \"{}\"\n", verb.name()));
+            match json {
+                Some(json) => {
+                    config.push_str("header = \"Content-Type: application/json\"\n");
+                    config.push_str(&format!("data-raw = {}\n", quoted(json)?));
+                }
+                None if verb != Verb::Delete => config.push_str("data-raw = \"\"\n"),
+                None => {}
+            }
         }
         Ok(config.into_bytes())
     }
@@ -107,10 +125,13 @@ impl Request<'_> {
     /// body. Output: the command, whose arguments and environment hold no URL, header,
     /// body or secret, and the config bytes for its stdin.
     pub(crate) fn json_command(&self, json: &str) -> Result<(Command, Vec<u8>), EngineError> {
-        self.command_with(Some(json))
+        self.command_with(Some((Verb::Post, Some(json))))
     }
 
-    fn command_with(&self, json: Option<&str>) -> Result<(Command, Vec<u8>), EngineError> {
+    fn command_with(
+        &self,
+        body: Option<(Verb, Option<&str>)>,
+    ) -> Result<(Command, Vec<u8>), EngineError> {
         let secure = self.url.scheme() == "https";
         let loopback = self.url.scheme() == "http"
             && self.allow_http
@@ -135,7 +156,7 @@ impl Request<'_> {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        Ok((command, self.config(json)?))
+        Ok((command, self.config(body)?))
     }
 
     /// Sends the request and waits at most 30 s. Output: the reply, or
@@ -152,10 +173,12 @@ impl Request<'_> {
         exchange(command, config)
     }
 
-    /// Sends a request with a method and an optional JSON body. Inputs: the method and
-    /// the body. Output: the reply.
-    pub(crate) fn send_body(&self, _verb: Verb, _json: Option<&str>) -> Result<Reply, EngineError> {
-        Err(failure("github_publish_unbuilt"))
+    /// Sends a request with a method and an optional JSON body and waits at most 30 s, as
+    /// `send` does. Inputs: the method and the body. Output: the reply, or
+    /// `github_unreachable` when curl could not finish the exchange.
+    pub(crate) fn send_body(&self, verb: Verb, json: Option<&str>) -> Result<Reply, EngineError> {
+        let (command, config) = self.command_with(Some((verb, json)))?;
+        exchange(command, config)
     }
 }
 

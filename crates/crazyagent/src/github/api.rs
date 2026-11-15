@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const JSON: &str = "application/json";
-const API_JSON: &str = "application/vnd.github+json";
+pub(super) const API_JSON: &str = "application/vnd.github+json";
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const INTERVAL_MIN: Duration = Duration::from_secs(1);
 const INTERVAL_MAX: Duration = Duration::from_secs(60);
@@ -61,7 +61,7 @@ impl Endpoints {
         self.web.host_str().expect("web address has a host")
     }
 
-    fn api(&self, path: &str) -> Result<url::Url, EngineError> {
+    pub(super) fn api(&self, path: &str) -> Result<url::Url, EngineError> {
         self.api
             .join(path)
             .map_err(|_| failure("github_request_invalid"))
@@ -73,7 +73,7 @@ impl Endpoints {
             .map_err(|_| failure("github_request_invalid"))
     }
 
-    fn request<'a>(
+    pub(super) fn request<'a>(
         &self,
         url: url::Url,
         accept: &'a str,
@@ -104,7 +104,7 @@ fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
 }
 
-fn json<T: for<'de> Deserialize<'de>>(reply: &Reply) -> Result<T, EngineError> {
+pub(super) fn json<T: for<'de> Deserialize<'de>>(reply: &Reply) -> Result<T, EngineError> {
     serde_json::from_slice(&reply.body).map_err(|_| failure("github_reply_invalid"))
 }
 
@@ -121,7 +121,7 @@ fn short_text(value: &str, max: usize) -> Result<String, EngineError> {
 /// Shows text from GitHub the way the owner can read it: control and hidden characters,
 /// line breaks and tabs included, escaped, then cut to at most `max` bytes on a character
 /// boundary. Inputs: the text and the byte bound. Output: the visible text.
-fn shown(value: &str, max: usize) -> String {
+pub(super) fn shown(value: &str, max: usize) -> String {
     let flat = value.replace('\n', "\\u000a").replace('\t', "\\u0009");
     let mut text = crate::memory::visible_text(&flat);
     let mut end = text.len().min(max);
