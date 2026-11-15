@@ -1123,6 +1123,180 @@ fn removing_an_agent_tree_never_clears_an_acl_a_link_in_it_leads_to() {
     );
 }
 
+/// Sets `entry` on each path through one `/bin/chmod +a` and asserts it took. Inputs: the
+/// ACL entry and the paths.
+#[cfg(target_os = "macos")]
+fn add_acl(entry: &str, paths: &[PathBuf]) {
+    let added =
+        crate::spawn_gate::collected(Command::new("/bin/chmod").arg("+a").arg(entry).args(paths))
+            .unwrap();
+    assert!(added.status.success(), "{added:?}");
+}
+
+/// Whether a path's ACL listing names a deny entry. Input: the path. Output: the answer.
+#[cfg(target_os = "macos")]
+fn denies(path: &Path) -> bool {
+    let listed =
+        crate::spawn_gate::collected(Command::new("/bin/ls").arg("-led").arg(path)).unwrap();
+    String::from_utf8_lossy(&listed.stdout).contains("deny")
+}
+
+/// RV-DS241-181: removing an agent's tree while a process of its keeps swapping folders in
+/// it for links to an owner folder never clears an ACL there or opens up a mode there, since
+/// ACLs and modes change only through entries reached from the tree's own handles. A later
+/// removal with nothing swapping still finishes.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_to() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let owner = root.join("owner");
+    let tree = root.join("tree");
+    let names: Vec<String> = (0..16).map(|index| format!("c{index:02}")).collect();
+    let parents: Vec<String> = (0..12).map(|index| format!("p{index:02}")).collect();
+    let owned: Vec<PathBuf> = names.iter().map(|name| owner.join(name)).collect();
+    for folder in &owned {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let _owned: Vec<AclCleared> = owned.iter().cloned().map(AclCleared).collect();
+    add_acl("everyone deny delete", &owned);
+    for parent in &parents {
+        for name in &names {
+            let shut = tree.join(parent).join(name);
+            write(&shut.join("f"), b"the agent's\n");
+            std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
+    }
+    for folder in &owned {
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let (stop, tree, owner, parents) = (
+            Arc::clone(&stop),
+            tree.clone(),
+            owner.clone(),
+            parents.clone(),
+        );
+        std::thread::spawn(move || {
+            let pause = std::time::Duration::from_micros(100);
+            while !stop.load(Ordering::Relaxed) {
+                for parent in &parents {
+                    let (real, held) = (tree.join(parent), tree.join(format!("{parent}.held")));
+                    if std::fs::rename(&real, &held).is_err() {
+                        continue;
+                    }
+                    if std::os::unix::fs::symlink(&owner, &real).is_ok() {
+                        std::thread::sleep(pause);
+                        let _ = std::fs::remove_file(&real);
+                    }
+                    let _ = std::fs::rename(&held, &real);
+                    std::thread::sleep(pause);
+                }
+            }
+        })
+    };
+
+    let _ = remove_agent_tree(&tree);
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    let again = remove_agent_tree(&tree);
+
+    assert_eq!(again, Ok(()));
+    assert!(!tree.exists(), "the tree stayed");
+    for folder in &owned {
+        let mode = std::fs::symlink_metadata(folder)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert!(denies(folder), "{folder:?} lost its ACL");
+        assert_eq!(mode & 0o777, 0o500, "{folder:?} was opened up");
+    }
+}
+
+/// RV-DS241-182: removing an agent's tree of many folders that one read-only folder keeps
+/// from a plain delete starts no child process: the read-only folder opens up through its
+/// handle, and no ACL clear runs for a folder that opens.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_a_large_agent_tree_one_read_only_folder_holds_starts_no_child() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let tree = root.join("tree");
+    for index in 0..2_000 {
+        let folder = tree.join(format!("d{:02}/e{index:04}", index % 40));
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let shut = tree.join("shut");
+    write(&shut.join("f"), b"the agent's\n");
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let before = crate::spawn_gate::spawned();
+
+    let outcome = remove_agent_tree(&tree);
+
+    let started = crate::spawn_gate::spawned() - before;
+    assert_eq!(outcome, Ok(()));
+    assert!(!tree.exists(), "the tree stayed");
+    assert_eq!(
+        started, 0,
+        "a removal a mode change was enough for started children"
+    );
+}
+
+/// RV-DS241-182: removing an agent's tree whose files all carry a deny-delete ACL clears
+/// them in a few batched children, never one per entry, and the tree goes.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_an_agent_tree_of_acl_pinned_files_clears_them_in_a_few_children() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let tree = root.join("tree");
+    let files: Vec<PathBuf> = (0..1_200)
+        .map(|index| tree.join(format!("a/f{index:04}")))
+        .collect();
+    for file in &files {
+        write(file, b"the agent's\n");
+    }
+    let _files: Vec<AclCleared> = files.iter().cloned().map(AclCleared).collect();
+    add_acl("everyone deny delete", &files);
+    let before = crate::spawn_gate::spawned();
+
+    let outcome = remove_agent_tree(&tree);
+
+    let started = crate::spawn_gate::spawned() - before;
+    assert_eq!(outcome, Ok(()));
+    assert!(!tree.exists(), "the tree stayed");
+    assert!(
+        started <= 8,
+        "{started} children for {} entries",
+        files.len()
+    );
+}
+
+/// RV-DS241-181 guard: a folder two deep whose ACL denies listing and searching, under one
+/// that does the same, still goes, each opened once its ACL is cleared through its inode.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_an_agent_tree_clears_folders_two_deep_that_deny_listing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let tree = root.join("tree");
+    let (outer, inner) = (tree.join("a"), tree.join("a/b"));
+    write(&inner.join("f"), b"the agent's\n");
+    let _cleared = [AclCleared(inner.clone()), AclCleared(outer.clone())];
+    add_acl("everyone deny list,search,delete_child", &[inner.clone()]);
+    add_acl("everyone deny list,search,delete_child", &[outer.clone()]);
+
+    let outcome = remove_agent_tree(&tree);
+
+    assert_eq!(outcome, Ok(()));
+    assert!(!tree.exists(), "the tree stayed");
+}
+
 #[test]
 fn a_claim_an_engine_stop_interrupted_is_offered_again_or_handed_back_when_it_changed() {
     let case = Case::new();

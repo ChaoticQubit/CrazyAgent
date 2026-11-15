@@ -9,6 +9,18 @@ thread_local! {
     static HELD: Cell<bool> = const { Cell::new(false) };
 }
 
+#[cfg(test)]
+thread_local! {
+    static SPAWNED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Test helper: how many children this thread has started through the gate, so a row can
+/// bound the processes one call starts. Output: the count.
+#[cfg(test)]
+pub(crate) fn spawned() -> usize {
+    SPAWNED.get()
+}
+
 struct Entered(#[allow(dead_code)] MutexGuard<'static, ()>);
 
 impl Drop for Entered {
@@ -42,6 +54,8 @@ pub fn guarded<T>(create: impl FnOnce() -> T) -> T {
 /// from starting.
 #[allow(clippy::disallowed_methods)]
 pub fn spawn(command: &mut Command) -> io::Result<Child> {
+    #[cfg(test)]
+    SPAWNED.set(SPAWNED.get() + 1);
     guarded(|| command.spawn())
 }
 
@@ -52,6 +66,8 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
 pub fn spawn_handing(command: &mut Command, handed: std::os::fd::OwnedFd) -> io::Result<Child> {
+    #[cfg(test)]
+    SPAWNED.set(SPAWNED.get() + 1);
     guarded(move || {
         rustix::io::fcntl_setfd(&handed, rustix::io::FdFlags::empty())?;
         let child = command.spawn();
