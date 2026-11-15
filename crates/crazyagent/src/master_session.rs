@@ -775,3 +775,97 @@ mod cause_code_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod backend_tests {
+    use super::{MasterBackend, MasterSelection};
+    use crate::protocol::CredentialRef;
+    use crate::routing::{ResourceBudget, RouteRequest};
+
+    fn reference(value: &str) -> CredentialRef {
+        CredentialRef::new(value).unwrap()
+    }
+
+    fn selection(backend: MasterBackend) -> MasterSelection {
+        MasterSelection {
+            backend,
+            pool_ref: reference("pool"),
+            target_profile_ref: reference("connection"),
+            route: RouteRequest {
+                preferred_target: Some(reference("connection")),
+                required_target: Some(reference("connection")),
+                required_capabilities: vec![],
+                account_ref: reference("account"),
+                budget_ref: reference("conversation-budget"),
+                resources: ResourceBudget::unit(),
+            },
+        }
+    }
+
+    /// DEC-180 Phase 1: a master's backend is stored and sent as `rcli`, `codex` or
+    /// `claude`, a selection stored without one reads as RCLI, and no other word is taken:
+    /// not the catalog id `claude-code`, and none of the 15 other catalog harnesses.
+    #[test]
+    fn a_master_backend_is_stored_as_rcli_codex_or_claude_and_as_no_other_word() {
+        for (backend, word) in [
+            (MasterBackend::Rcli, "rcli"),
+            (MasterBackend::Codex, "codex"),
+            (MasterBackend::Claude, "claude"),
+        ] {
+            let stored = format!("\"{word}\"");
+            assert_eq!(serde_json::to_string(&backend).unwrap(), stored);
+            assert_eq!(
+                serde_json::from_str::<MasterBackend>(&stored).unwrap(),
+                backend
+            );
+            let mut value = serde_json::to_value(selection(backend)).unwrap();
+            assert_eq!(value["backend"], serde_json::json!(word));
+            assert_eq!(
+                serde_json::from_value::<MasterSelection>(value.clone()).unwrap(),
+                selection(backend)
+            );
+            value.as_object_mut().unwrap().remove("backend");
+            assert_eq!(
+                serde_json::from_value::<MasterSelection>(value)
+                    .unwrap()
+                    .backend,
+                MasterBackend::Rcli
+            );
+        }
+        assert_eq!(MasterBackend::default(), MasterBackend::Rcli);
+        for word in [
+            "claude-code",
+            "opencode",
+            "gemini-cli",
+            "fx",
+            "openclaw",
+            "pi",
+            "goose",
+            "aider",
+            "qwen-code",
+            "crush",
+            "droid",
+            "copilot",
+            "cline",
+            "continue",
+            "openhands",
+            "kimi",
+            "",
+            "Codex",
+            "listed",
+            "no-such-harness",
+        ] {
+            let sent = serde_json::to_string(word).unwrap();
+            assert!(
+                serde_json::from_str::<MasterBackend>(&sent).is_err(),
+                "{word}"
+            );
+            let mut value = serde_json::to_value(selection(MasterBackend::Codex)).unwrap();
+            value["backend"] = serde_json::json!(word);
+            assert!(
+                serde_json::from_value::<MasterSelection>(value).is_err(),
+                "{word}"
+            );
+        }
+    }
+}

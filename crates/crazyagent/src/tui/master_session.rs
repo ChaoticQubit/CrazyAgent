@@ -3245,6 +3245,75 @@ pools = [
     }
 }
 
+#[cfg(test)]
+mod backend_form_tests {
+    use super::*;
+
+    fn form(backend: MasterBackend) -> Form {
+        Form {
+            database: None,
+            project: ProjectId::new("demo").unwrap(),
+            backend,
+            pool: None,
+            account: None,
+            target: None,
+            values: budget_values(&ResourceBudget::unit()).map(|value| value.to_string()),
+            field: 0,
+            generation: 1,
+            open: false,
+            explicit: false,
+            edited: false,
+        }
+    }
+
+    /// DEC-180 Phase 1: the master form's backend choice walks RCLI, Codex and Claude in
+    /// that order, both ways, drops the account and target chosen for the backend before,
+    /// and names each backend as it did.
+    #[test]
+    fn the_backend_choice_walks_rcli_codex_and_claude_both_ways() {
+        let mut form = form(MasterBackend::Rcli);
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            form.cycle_backend(None, true);
+            seen.push(form.backend);
+        }
+        assert_eq!(
+            seen,
+            [
+                MasterBackend::Codex,
+                MasterBackend::Claude,
+                MasterBackend::Rcli
+            ]
+        );
+        seen.clear();
+        for _ in 0..3 {
+            form.cycle_backend(None, false);
+            seen.push(form.backend);
+        }
+        assert_eq!(
+            seen,
+            [
+                MasterBackend::Claude,
+                MasterBackend::Codex,
+                MasterBackend::Rcli
+            ]
+        );
+        form.account = Some(CredentialRef::new("account").unwrap());
+        form.target = Some(CredentialRef::new("target").unwrap());
+        form.cycle_backend(None, true);
+        assert_eq!((form.account, form.target), (None, None));
+        assert_eq!(
+            [
+                MasterBackend::Rcli,
+                MasterBackend::Codex,
+                MasterBackend::Claude
+            ]
+            .map(backend_label),
+            ["RCLI", "Native Codex", "Native Claude"]
+        );
+    }
+}
+
 /// Explains why a master turn stopped, in words the owner can act on.
 /// Input: the engine's turn reason. Output: a short plain sentence.
 fn reason_text(reason: &MasterReason) -> &'static str {
