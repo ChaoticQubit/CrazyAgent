@@ -3382,6 +3382,58 @@ async fn owner_removal_takes_the_overview_and_master_conversation_rows_with_it()
     engine.stop().await;
 }
 
+/// A project added again under a removed project's id starts with no repository admission
+/// of the old one (RV-DS241-149): the removal takes the admission with it, so the master
+/// bootstrap admits the repository now at that path instead of comparing it with the old
+/// folder's identity and failing every turn with `admitted_repository_replaced`.
+#[tokio::test]
+async fn owner_removal_takes_the_projects_repository_admissions_with_it() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.execute(
+        "INSERT INTO repository_admissions(project,repository,body)
+         VALUES ('setup-pooled','/old/meal-planner','{\"old\":true}')",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let admissions = "SELECT count(*) FROM repository_admissions WHERE project='setup-pooled'";
+    assert_eq!(engine.rows(admissions), 1);
+
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(engine.rows(admissions), 0, "the admission goes with the project");
+    let again = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            3,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(again), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows(admissions),
+        0,
+        "the project added again inherits no admission"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
 /// A live agent keeps its row when its project is removed, and the status it writes after
 /// that logs nothing: the removal already took the project's history (HB-S5-I).
 #[tokio::test]
