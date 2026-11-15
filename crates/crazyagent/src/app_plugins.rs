@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::ops::RangeInclusive;
 
+pub mod connector;
 pub mod http;
 pub mod manifest;
 pub mod store;

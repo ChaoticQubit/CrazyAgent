@@ -16,6 +16,20 @@ http:
   dimensions: 128
 ";
 
+const BOARD: &str = "schema: 1
+kind: connector
+name: board
+title: Board
+version: 1
+mcp:
+  url: https://mcp.board.example/mcp
+  hosts: [mcp.board.example]
+key:
+  secret: api_key
+  header: Authorization
+  scheme: Bearer
+";
+
 /// An engine root whose database holds the authority schemas. Output: the temporary
 /// folder and the engine root.
 fn engine() -> (tempfile::TempDir, PathBuf) {
@@ -333,4 +347,66 @@ fn the_model_download_starts_only_with_the_pinned_size_confirmed() {
         "app_plugin_request_invalid"
     );
     assert!(APP_PLUGINS_CODES.contains(&"search_model_confirm"));
+}
+
+#[test]
+fn connectors_stay_off_the_app_plugins_page() {
+    let (_tmp, root) = engine();
+    let refusal = |reply: Reply| match reply {
+        Reply::Preview { preview } => match *preview {
+            Preview::Refused { problem } => (problem.code, problem.field),
+            other => panic!("expected a refusal, got {other:?}"),
+        },
+        other => panic!("expected a preview, got {other:?}"),
+    };
+    let elsewhere = (
+        "app_plugin_connector_elsewhere".to_owned(),
+        Some("kind".to_owned()),
+    );
+    assert_eq!(
+        refusal(
+            send(
+                &root,
+                request(json!({"kind": "preview", "yaml": BOARD})),
+                None
+            )
+            .unwrap()
+        ),
+        elsewhere
+    );
+    assert_eq!(
+        refusal(
+            send(
+                &root,
+                request(json!({"kind": "review", "name": "linear"})),
+                None
+            )
+            .unwrap()
+        ),
+        elsewhere
+    );
+    let sha256 = crate::semantic::sha256_hex(BOARD.as_bytes());
+    assert_eq!(
+        send(
+            &root,
+            request(json!({"kind": "add", "yaml": BOARD, "sha256": sha256, "replace": false})),
+            None
+        )
+        .unwrap_err()
+        .0,
+        "app_plugin_refused"
+    );
+    assert!(!root.join(crate::app_plugins::FOLDER).exists());
+    let db = crate::questions::open(&root).unwrap();
+    store::add(&db, &root, BOARD, &sha256, false, 1).unwrap();
+    let all = store::list(&db, &root).unwrap();
+    assert!(all.plugins.iter().any(|plugin| plugin.name == "board"));
+    assert!(all.plugins.iter().any(|plugin| plugin.name == "linear"));
+    let listed = listing(send(&root, request(json!({"kind": "list"})), None).unwrap());
+    let names: Vec<&str> = listed
+        .plugins
+        .iter()
+        .map(|plugin| plugin.name.as_str())
+        .collect();
+    assert_eq!(names, ["local", "openai", "voyage", "ollama"]);
 }

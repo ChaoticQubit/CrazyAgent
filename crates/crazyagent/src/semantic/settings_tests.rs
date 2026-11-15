@@ -16,6 +16,20 @@ http:
   dimensions: 128
 ";
 
+const BOARD: &str = "schema: 1
+kind: connector
+name: board
+title: Board
+version: 1
+mcp:
+  url: https://mcp.board.example/mcp
+  hosts: [mcp.board.example]
+key:
+  secret: api_key
+  header: Authorization
+  scheme: Bearer
+";
+
 struct Case {
     _temp: tempfile::TempDir,
     root: std::path::PathBuf,
@@ -309,4 +323,66 @@ fn a_confirm_belongs_to_the_reviewed_file_so_a_same_name_replacement_needs_a_new
     ));
     assert!(chosen(&case.db, &case.root).is_some());
     assert!(view(&case.db, &case.root).unwrap().note.is_none());
+}
+
+#[test]
+fn a_ready_connector_is_never_a_search_option_or_the_search_choice() {
+    let case = case();
+    let sha = crate::semantic::sha256_hex(BOARD.as_bytes());
+    store::add(&case.db, &case.root, BOARD, &sha, false, 1).unwrap();
+    store::set_key(
+        &case.db,
+        &case.root,
+        "board",
+        "api_key",
+        b"sk-test-key-0001".to_vec(),
+    )
+    .unwrap();
+    assert!(store::ready(&case.db, &case.root, "board").is_ok());
+    let search = view(&case.db, &case.root).unwrap();
+    assert!(option(&search, "board").is_none());
+    for confirm in [None, Some("mcp.board.example")] {
+        assert_eq!(
+            set(&case.db, &case.root, &plugin("board"), confirm, 0)
+                .unwrap_err()
+                .0,
+            "search_choice_unavailable"
+        );
+    }
+    assert_eq!(view(&case.db, &case.root).unwrap().choice, plugin("local"));
+    let near_sha = crate::semantic::sha256_hex(NEAR.as_bytes());
+    store::add(&case.db, &case.root, NEAR, &near_sha, false, 2).unwrap();
+    saved(set(
+        &case.db,
+        &case.root,
+        &plugin("near"),
+        Some("127.0.0.1"),
+        0,
+    ));
+    assert!(chosen(&case.db, &case.root).is_some_and(|loaded| loaded.manifest.name == "near"));
+    let swapped = BOARD.replace("name: board", "name: near");
+    let swapped_sha = crate::semantic::sha256_hex(swapped.as_bytes());
+    store::add(&case.db, &case.root, &swapped, &swapped_sha, true, 3).unwrap();
+    store::set_key(
+        &case.db,
+        &case.root,
+        "near",
+        "api_key",
+        b"sk-test-key-0002".to_vec(),
+    )
+    .unwrap();
+    assert!(store::ready(&case.db, &case.root, "near").is_ok());
+    assert!(chosen(&case.db, &case.root).is_none());
+    let search = view(&case.db, &case.root).unwrap();
+    assert_eq!(search.choice, plugin("near"));
+    let near = option(&search, "near").unwrap();
+    assert!(!near.usable && near.runs.is_none());
+    assert_eq!(
+        near.reason.as_deref(),
+        Some(
+            crate::app_plugins::Problem::new("search_choice_unavailable", None, None)
+                .message
+                .as_str()
+        )
+    );
 }
