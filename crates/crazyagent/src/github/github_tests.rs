@@ -867,6 +867,67 @@ fn owners_without_read_org_still_offer_the_personal_account_and_say_why() {
     }
 }
 
+fn paged_server(secret_text: &str, full_pages: u32, extra: usize) -> Server {
+    let expected = secret_text.to_owned();
+    Server::start(move |seen, _| match seen.path.as_str() {
+        "/user" => scoped(user(seen, &expected), Some("repo, read:org")),
+        "/user/memberships/orgs" if bearer(seen, &expected) => {
+            let page: u32 = seen
+                .query_pairs()
+                .get("page")
+                .map_or(1, |page| page.parse().unwrap());
+            let count = if page <= full_pages {
+                100
+            } else if page == full_pages + 1 {
+                extra
+            } else {
+                0
+            };
+            let listed: Vec<serde_json::Value> = (0..count)
+                .map(|index| {
+                    serde_json::json!({
+                        "state": "active",
+                        "role": "member",
+                        "organization": { "login": format!("org-{page}-{index}") }
+                    })
+                })
+                .collect();
+            Answer::json(200, serde_json::Value::Array(listed))
+        }
+        _ => Answer::json(404, serde_json::json!({ "message": "Not Found" })),
+    })
+}
+
+#[test]
+fn owners_follow_the_next_page_up_to_ten_pages_and_say_when_more_were_left_out() {
+    for (full_pages, extra, asked, offered, cut) in [
+        (1, 3, 2, 104, false),
+        (1, 0, 2, 101, false),
+        (12, 0, 10, 1001, true),
+    ] {
+        let scratch = Scratch::new();
+        let secret_text = token();
+        let server = paged_server(&secret_text, full_pages, extra);
+        let account = scratch.account(&server);
+        account.use_token(secret(&secret_text)).unwrap();
+        let owners = account.owners().unwrap();
+        let pages: Vec<String> = server
+            .seen()
+            .iter()
+            .filter(|seen| seen.path == "/user/memberships/orgs")
+            .map(|seen| seen.query_pairs().get("page").cloned().unwrap_or_default())
+            .collect();
+        let expected: Vec<String> = (1..=asked).map(|page| page.to_string()).collect();
+        assert_eq!(pages, expected, "{full_pages} {extra}");
+        assert_eq!(owners.owners.len(), offered, "{full_pages} {extra}");
+        assert!(owners.owners[0].personal);
+        match owners.problem {
+            Some(problem) => assert!(cut && problem.contains("1,000"), "{problem}"),
+            None => assert!(!cut, "{full_pages} {extra}"),
+        }
+    }
+}
+
 #[test]
 fn a_repository_name_is_free_on_a_404_taken_otherwise_and_checked_before_any_request() {
     let scratch = Scratch::new();
