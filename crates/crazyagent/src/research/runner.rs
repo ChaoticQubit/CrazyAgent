@@ -2435,6 +2435,7 @@ fn valid_model(model: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/@+".contains(&byte))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn codex_arguments(
     command: &mut Command,
     worktree: &Path,
