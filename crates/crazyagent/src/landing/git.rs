@@ -56,9 +56,10 @@ const STEP_LOCK_TEXT_MAX: u64 = 128;
 /// Removes the `index.lock` a confined Linux step of a stopped engine left: only in a linked
 /// worktree's git folder, only a plain file read without following a link, and only one
 /// whose whole text names an engine process that is gone ([`left_by_gone_step`]), so a lock
-/// another git took, or one a running engine holds, stays (RV-DS241-135). The engine runs it
-/// once at start, before any landing step. Input: the repository's canonical root. Output:
-/// how many locks it removed.
+/// another git took, or one a running engine holds, stays (RV-DS241-135). With such a lock
+/// the step folder beside it goes too, where the step's git, killed with that engine, can have
+/// left its own lock (RV-DS241-142). The engine runs it once at start, before any landing
+/// step. Input: the repository's canonical root. Output: how many locks it removed.
 #[cfg(target_os = "linux")]
 pub(super) fn clear_step_locks(root: &Path) -> usize {
     let real = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
@@ -76,6 +77,9 @@ pub(super) fn clear_step_locks(root: &Path) -> usize {
         if real(&private)
             && std::fs::symlink_metadata(&lock).is_ok_and(|meta| meta.is_file())
             && left_by_gone_step(&lock)
+            && std::fs::remove_dir_all(private.join(STEP_FOLDER))
+                .err()
+                .is_none_or(|error| error.kind() == std::io::ErrorKind::NotFound)
             && std::fs::remove_file(&lock).is_ok()
         {
             removed += 1;
@@ -626,14 +630,16 @@ impl Repo {
     /// engine took ([`clear_step_locks`]); where the process cannot be named, as for process
     /// 1, the lock is taken empty and the sweep keeps it. A step that does not take the lock
     /// removes its step folder when empty and leaves one holding another step's copy to that
-    /// step (RV-DS241-135). The folder starts empty and is emptied after, and the index is copied
-    /// only from a plain file with one link, opened without following a link or waiting on a
-    /// FIFO. Once git exits 0 having rewritten the copy, the copy takes the index's place only
-    /// when it too is a plain file with one link, so whatever a raced step leaves there is
-    /// never taken, and a step that only reads leaves the index as it was; the step itself
-    /// never writes the git folder ([`Self::confined`]). Input: the step. Output: its output,
-    /// git's [`INDEX_LOCKED`] exit when the lock is already held, or `changes_git_failed` when
-    /// the index cannot be locked, copied or put back.
+    /// step (RV-DS241-135). A step whose folder holds a git `index.lock`, as a git an earlier
+    /// engine started can, lets the worktree's lock go and answers [`INDEX_LOCKED`] without
+    /// touching that folder (RV-DS241-142). The folder starts empty and is emptied after, and
+    /// the index is copied only from a plain file with one link, opened without following a
+    /// link or waiting on a FIFO. Once git exits 0 having rewritten the copy, the copy takes
+    /// the index's place only when it too is a plain file with one link, so whatever a raced
+    /// step leaves there is never taken, and a step that only reads leaves the index as it
+    /// was; the step itself never writes the git folder ([`Self::confined`]). Input: the step.
+    /// Output: its output, git's [`INDEX_LOCKED`] exit when the lock is already held, or
+    /// `changes_git_failed` when the index cannot be locked, copied or put back.
     #[cfg(target_os = "linux")]
     pub(super) fn swapped(
         &self,
@@ -686,6 +692,14 @@ impl Repo {
                 let _ = std::fs::remove_dir(folder);
                 return Err(failed());
             }
+        }
+        if std::fs::symlink_metadata(folder.join("index.lock")).is_ok() {
+            let _ = std::fs::remove_file(&lock);
+            return Ok(Output {
+                code: INDEX_LOCKED,
+                stdout: Vec::new(),
+                overflow: false,
+            });
         }
         let plain = |meta: &std::fs::Metadata| meta.file_type().is_file() && meta.nlink() == 1;
         let renewed = std::fs::remove_dir_all(folder)

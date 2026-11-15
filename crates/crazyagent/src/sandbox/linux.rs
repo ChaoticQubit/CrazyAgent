@@ -40,6 +40,7 @@ const OPEN_SOCKETS: &str = "--open-sockets";
 const KEEP_FREE: &str = "--keep-free";
 const PROBE: &str = "--probe";
 const FILTER_SOCKETS: &str = "--filter-sockets";
+const DIE_WITH: &str = "--die-with";
 const RESOLVER_ROOT: &str = "/run/systemd/resolve";
 const HELPER_MISSING: &str = "this Linux cannot fully enforce Landlock file rules (Linux 6.2 \
      or newer), and CrazyAgent's sandbox helper, which keeps a bubblewrap agent off Unix \
@@ -133,8 +134,9 @@ const LANDLOCK_DEVICES: &[&str] = &[
 /// `open_sockets` keeps the other socket kinds open ([`LinuxSockets::TcpPorts`]). A listen
 /// with no bind still takes a port Linux picks, on either network, so both name
 /// `keep_free`: the helper starts no agent while Linux could hand one of them out by
-/// itself, and an open-network agent binds any TCP port but those. The engine renders it
-/// as helper arguments and the helper parses it back.
+/// itself, and an open-network agent binds any TCP port but those. `die_with` names the
+/// process the helper and the program it becomes are killed with (an engine git step). The
+/// engine renders it as helper arguments and the helper parses it back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LandlockPolicy {
     pub read: Vec<PathBuf>,
@@ -143,6 +145,7 @@ pub struct LandlockPolicy {
     pub limit_network: bool,
     pub open_sockets: bool,
     pub keep_free: Vec<u16>,
+    pub die_with: Option<u32>,
 }
 
 impl LandlockPolicy {
@@ -171,6 +174,10 @@ impl LandlockPolicy {
             args.push(KEEP_FREE.into());
             args.push(port.to_string().into());
         }
+        if let Some(parent) = self.die_with {
+            args.push(DIE_WITH.into());
+            args.push(parent.to_string().into());
+        }
         args
     }
 }
@@ -178,8 +185,10 @@ impl LandlockPolicy {
 /// The Landlock rules of one engine git step on an agent's linked worktree, the Linux form
 /// of the macOS step profile (SECAUDIT unconfined-git-add-reads-through-raced-symlink,
 /// unconfined-read-tree-u): it reads the system, `/proc` and `read`, and writes the devices
-/// and `write`, with no network rule and no kept port. Inputs: the absolute places the step
-/// reads and writes. Output: the policy.
+/// and `write`, with no network rule and no kept port, and dies with this engine process, so
+/// its git never outlives the lock the engine took for it (RV-DS241-142); an engine that is
+/// process 1 takes every process down with it. Inputs: the absolute places the step reads
+/// and writes. Output: the policy.
 pub(crate) fn git_step_policy(read: &[PathBuf], write: &[PathBuf]) -> LandlockPolicy {
     assert!(read.iter().chain(write).all(|path| path.is_absolute()));
     let policy = LandlockPolicy {
@@ -194,6 +203,7 @@ pub(crate) fn git_step_policy(read: &[PathBuf], write: &[PathBuf]) -> LandlockPo
             .map(PathBuf::from)
             .chain(write.iter().cloned())
             .collect(),
+        die_with: Some(std::process::id()).filter(|engine| *engine > 1),
         ..LandlockPolicy::default()
     };
     assert!(policy.read.len() + policy.write.len() <= HELPER_PATHS_MAX);
@@ -260,6 +270,9 @@ impl HelperRequest {
                 Some(WRITE) => policy.write.push(absolute(rest.next())?),
                 Some(CONNECT) => policy.connect.push(port(rest.next())?),
                 Some(KEEP_FREE) => policy.keep_free.push(port(rest.next())?),
+                Some(DIE_WITH) if policy.die_with.is_none() => {
+                    policy.die_with = Some(parent(rest.next())?);
+                }
                 Some("--") if !probe && filter => {
                     if policy != LandlockPolicy::default() {
                         return Err(format!("{FILTER_SOCKETS} takes no policy"));
@@ -286,7 +299,10 @@ impl HelperRequest {
                 _ => return Err(format!("unexpected argument {}", flag.to_string_lossy())),
             }
         }
-        let bare = policy.read.is_empty() && policy.write.is_empty() && policy.connect.is_empty();
+        let bare = policy.read.is_empty()
+            && policy.write.is_empty()
+            && policy.connect.is_empty()
+            && policy.die_with.is_none();
         if probe && bare && !filter {
             open_needs_limit(&policy)?;
             binds_fit(&policy)?;
@@ -322,6 +338,17 @@ fn absolute(value: Option<OsString>) -> Result<PathBuf, String> {
         return Err(format!("path must be absolute: {}", path.display()));
     }
     Ok(path)
+}
+
+/// Reads the process id `--die-with` names: a number above 1, since process 1 is never an
+/// engine. Input: the argument. Output: the id, or the reason it is refused.
+fn parent(value: Option<OsString>) -> Result<u32, String> {
+    value
+        .as_deref()
+        .and_then(OsStr::to_str)
+        .and_then(|text| text.parse::<u32>().ok())
+        .filter(|parent| *parent > 1 && i32::try_from(*parent).is_ok())
+        .ok_or_else(|| format!("{DIE_WITH} needs a process id above 1"))
 }
 
 fn port(value: Option<OsString>) -> Result<u16, String> {
@@ -573,6 +600,20 @@ fn own_session() -> Result<(), String> {
     Ok(())
 }
 
+/// Makes the kernel kill this helper, and the program it then becomes, once the thread of
+/// `parent` that started it exits, and refuses when `parent` is already not its parent, as
+/// after that thread exited before the signal was set. The signal survives the exec of a
+/// program that is not set-user-ID. Input: the parent's process id. Output: Ok, or the reason.
+fn die_with_parent(parent: u32) -> Result<(), String> {
+    rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))
+        .map_err(|error| format!("parent death signal: {error}"))?;
+    let now = rustix::process::Pid::as_raw(rustix::process::getppid());
+    if u32::try_from(now).ok() != Some(parent) {
+        return Err("the engine has exited".into());
+    }
+    Ok(())
+}
+
 /// Entry point of the `crazyagent-landlock` helper. Input: its arguments after its own name.
 /// A probe applies a ruleset with no rule, the scope layer and the socket filter to itself and
 /// exits 0 when this kernel holds them; a run applies the policy, the scope layer and the
@@ -608,6 +649,12 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             args,
         } => (policy, Some((program, args))),
     };
+    if let Some(parent) = policy.die_with
+        && let Err(reason) = die_with_parent(parent)
+    {
+        eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
+    }
     if !policy.keep_free.is_empty()
         && let Err(reason) = kept_outside_picked(&policy.keep_free, read_picked_ports().as_ref())
     {
@@ -1039,6 +1086,7 @@ fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy 
         limit_network,
         open_sockets,
         keep_free,
+        die_with: None,
     }
 }
 
