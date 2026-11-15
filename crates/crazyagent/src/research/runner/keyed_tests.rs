@@ -161,3 +161,42 @@ fn a_keyed_research_account_is_put_behind_a_key_relay_and_a_keyless_one_is_not()
     assert_eq!(same, keyless);
     assert!(none.is_none());
 }
+
+/// RV-DS241-205: a research Claude Code run has auto-memory off, in its settings and in its
+/// environment, keyed or not, so a memory file an earlier run left in its home is never
+/// loaded as standing instructions.
+#[test]
+fn a_research_claude_runs_with_auto_memory_off() {
+    for key in [None, Some(key_ref())] {
+        let account = ResearchAccount::AnthropicEndpoint {
+            base_url: "http://127.0.0.1:41234".into(),
+            model: "claude-test".into(),
+            key,
+        };
+        let mut command = Command::new("/usr/bin/true");
+        claude_arguments(
+            &mut command,
+            Path::new("/home/agent"),
+            Path::new("/home/agent/tmp"),
+            false,
+            None,
+            &account,
+            crate::provider_retry::ProviderRetry::HarnessDefault,
+        )
+        .unwrap();
+
+        let (args, envs) = seen(&command);
+        let settings: Vec<serde_json::Value> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--settings")
+            .map(|pair| serde_json::from_str(&pair[1]).unwrap())
+            .collect();
+
+        assert_eq!(settings.len(), 1, "{args:?}");
+        assert_eq!(settings[0]["autoMemoryEnabled"], false, "{args:?}");
+        assert!(
+            envs.contains(&"CLAUDE_CODE_DISABLE_AUTO_MEMORY=1".to_owned()),
+            "{envs:?}"
+        );
+    }
+}
