@@ -1072,16 +1072,27 @@ fn an_agent_git_never_opens_a_folder_laid_out_as_a_bare_repository() {
     );
 }
 
-/// Every agent process, sandboxed or at Full access, reads no global git config and no
-/// Python user site, so a `.gitconfig`, `.config/git/config` or user-site `.pth` file an
-/// agent leaves in its home runs nothing in a later process (RV-DS241-137). A harness can
-/// neither point git at another global config nor turn the user site back on.
+/// Every agent process, sandboxed or at Full access, reads no global git config, no Python
+/// user site and no npm user config, so a `.gitconfig`, `.config/git/config`, user-site
+/// `.pth` or `.npmrc` file an agent leaves in its home runs nothing in a later process
+/// (RV-DS241-137, sec r1 F1). A harness can neither point git at another global config nor
+/// turn the user site or the user `.npmrc` back on.
 #[test]
 fn every_agent_process_reads_no_global_git_config_and_no_python_user_site() {
-    let pinned = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("PYTHONNOUSERSITE", "1")];
+    let pinned = [
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("PYTHONNOUSERSITE", "1"),
+        ("NPM_CONFIG_USERCONFIG", "/dev/null"),
+    ];
     let home = OsStr::new("/private/tmp/ca-agent-home");
     let base = [("HOME", home)];
-    let reopened = [(OsStr::new("PYTHONNOUSERSITE"), Some(OsStr::new("0")))];
+    let reopened = [
+        (OsStr::new("PYTHONNOUSERSITE"), Some(OsStr::new("0"))),
+        (
+            OsStr::new("NPM_CONFIG_USERCONFIG"),
+            Some(OsStr::new("/private/tmp/ca-agent-home/.npmrc")),
+        ),
+    ];
     let env = crazyagent::sandbox::agent_env(&base, reopened).unwrap();
     for (name, value) in pinned {
         let values: Vec<&OsStr> = env

@@ -1239,3 +1239,23 @@ fn the_palette_offers_the_menus_levels_and_words() {
     }
     assert!(terminal.contains("showInformationMessage(pty_js_1.ABOVE_PROJECT)"));
 }
+
+/// The owner's IDE terminal keeps its own global git config, Python user site and npm
+/// config in its home, which no launch resets (RV-DS241-137 code r1 F3): the variables that
+/// keep an agent from reading what an earlier run left in its home never reach it, so an
+/// identity set with `git config --global` there still holds.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_ide_terminal_reads_the_global_git_python_and_npm_config_of_its_home() {
+    let case = Case::new();
+    let output = in_terminal(&case, "/usr/bin/env");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout.contains("HOME="), "{stdout}");
+    for pinned in ["GIT_CONFIG_GLOBAL=", "PYTHONNOUSERSITE=", "NPM_CONFIG_USERCONFIG="] {
+        assert!(
+            !stdout.lines().any(|line| line.starts_with(pinned)),
+            "{pinned} reached the owner's terminal: {stdout}"
+        );
+    }
+}

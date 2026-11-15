@@ -31644,12 +31644,13 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
     );
 }
 
-/// An agent leaves neither cargo's nor git's own config in its home, nor a file flag there,
-/// for its next start (RV-DS241-137, -138). In its installed profile a tools-on agent cannot
-/// write `.cargo/config` or `.cargo/config.toml`, in any letter case, nor make
-/// `.config/git`, nor set a flag on its home or on anything in it, while it still writes a
-/// `.gitconfig`, which no agent git reads, and its own caches. The next launch removes that
-/// `.gitconfig` and keeps the caches.
+/// An agent leaves neither cargo's, git's, npm's nor yarn's own config in its home, nor a
+/// cargo subcommand, a file flag or an ACL there, for its next start (RV-DS241-137, -138,
+/// sec r1 F1, F2). In its installed profile a tools-on agent cannot write `.cargo/config`,
+/// `.cargo/config.toml`, `.npmrc`, `.yarnrc` or `.yarnrc.yml`, in any letter case, nor make
+/// `.config/git` or `.cargo/bin`, nor set a flag or an ACL on its home or on anything in it,
+/// while it still writes a `.gitconfig`, which no agent git reads, and its own caches. The
+/// next launch removes that `.gitconfig` and keeps the caches.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
@@ -31701,6 +31702,12 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
              try git_config sh -c \"mkdir -p '{home}/.config/git' && printf '[core]\\n' > '{home}/.config/git/config'\"\n\
              try gitconfig sh -c \"printf '[core]\\n' > '{home}/.gitconfig'\"\n\
              try control_cache sh -c \"mkdir -p '{home}/.cache/tool' && printf ok > '{home}/.cache/tool/data'\"\n\
+             try npmrc sh -c \"printf 'node-options=--require=x\\n' > '{home}/.npmrc'\"\n\
+             try npmrc_case sh -c \"printf x > '{home}/.NPMRC'\"\n\
+             try yarnrc sh -c \"printf x > '{home}/.yarnrc'\"\n\
+             try yarnrc_yml sh -c \"printf x > '{home}/.yarnrc.yml'\"\n\
+             try cargo_bin sh -c \"mkdir -p '{home}/.cargo/bin' && printf x > '{home}/.cargo/bin/cargo-x'\"\n\
+             try acl_file /bin/chmod +a 'everyone deny delete' '{home}/.cache/tool/data'\n\
              try flag_file /usr/bin/chflags uchg '{home}/.cache/tool/data'\n\
              try flag_home /usr/bin/chflags uchg '{home}'\n",
             home = home.display(),
@@ -31733,6 +31740,14 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
             .stdout(Stdio::null())
             .stderr(Stdio::null()),
     );
+    let acl_cleared = crate::spawn_gate::output(
+        Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(home.join(".cache/tool/data"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     assert!(planted.status.success(), "{planted:?}");
 
     let context = runtime
@@ -31759,6 +31774,12 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         "cargo_config_case",
         "cargo_config_old",
         "git_config",
+        "npmrc",
+        "npmrc_case",
+        "yarnrc",
+        "yarnrc_yml",
+        "cargo_bin",
+        "acl_file",
         "flag_file",
         "flag_home",
     ] {
@@ -31771,7 +31792,16 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
             problems.push(format!("{attempt} refused: {:?}", exit(attempt)));
         }
     }
-    for entry in [".gitconfig", ".config", ".cargo/config", ".cargo/config.toml"] {
+    for entry in [
+        ".gitconfig",
+        ".config",
+        ".cargo/config",
+        ".cargo/config.toml",
+        ".cargo/bin",
+        ".npmrc",
+        ".yarnrc",
+        ".yarnrc.yml",
+    ] {
         if std::fs::symlink_metadata(home.join(entry)).is_ok() {
             problems.push(format!("{entry} kept by the launch"));
         }
@@ -31781,7 +31811,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
     }
     assert!(
         problems.is_empty(),
-        "an agent left config or a flag in its own home {} for its next start:\n{}\nattempts:\n{attempts}\nunpinned: {unpinned:?}",
+        "an agent left config, a flag or an ACL in its own home {} for its next start:\n{}\nattempts:\n{attempts}\nunpinned: {unpinned:?}\nACL cleared: {acl_cleared:?}",
         home.display(),
         problems.join("\n")
     );
