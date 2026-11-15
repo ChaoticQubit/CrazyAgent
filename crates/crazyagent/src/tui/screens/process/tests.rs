@@ -11,6 +11,7 @@ fn reply(query: ProcessQuery, result: Result<&str, &str>) -> Arrival {
             ProcessQuery::Read { .. } => ProcessReply::Current(ProcessText {
                 text: text.to_owned(),
                 version: READ_VERSION,
+                outside: false,
             }),
             ProcessQuery::Save { version, .. } => ProcessReply::Saved(SavedText::Saved {
                 version: version + 1,
@@ -573,6 +574,7 @@ fn a_stale_save_keeps_the_draft_and_never_adopts_the_newer_version() {
         current: ProcessText {
             text: "Desktop rule.".into(),
             version: READ_VERSION + 1,
+            outside: false,
         },
         writer: crate::storage::versioned::LastWriter::Owner,
     };
@@ -622,6 +624,7 @@ fn a_refused_save_over_a_four_line_text_keeps_the_problem_in_view_at_80_by_24() 
         current: ProcessText {
             text: "One.\nTwo.\nThree.\nFour.".into(),
             version: READ_VERSION + 1,
+            outside: false,
         },
         writer: crate::storage::versioned::LastWriter::Owner,
     };
@@ -673,6 +676,7 @@ fn a_refused_save_over_a_long_newer_text_keeps_the_problem_and_both_editor_rows_
             current: ProcessText {
                 text: names[..count].join("\n"),
                 version: READ_VERSION + 1,
+                outside: false,
             },
             writer: crate::storage::versioned::LastWriter::Owner,
         };
@@ -714,6 +718,7 @@ fn stale_save_shows_the_conflict_choices() {
             current: ProcessText {
                 text: text.into(),
                 version: named + 1,
+                outside: false,
             },
             writer: crate::storage::versioned::LastWriter::Agent(
                 crate::terminal::AgentId::team(3).unwrap(),
@@ -2276,6 +2281,7 @@ fn accepting_a_proposal_after_a_newer_save_shows_the_conflict_and_keeps_the_newe
         current: ProcessText {
             text: "Desktop rule.".into(),
             version: READ_VERSION + 1,
+            outside: false,
         },
         writer: crate::storage::versioned::LastWriter::Owner,
     };

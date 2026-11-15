@@ -107,6 +107,7 @@ fn shown(text: &str, version: u64) -> ProcessText {
         text: text.into(),
         version,
     }
+    outside: false,
 }
 
 #[test]

@@ -545,11 +545,9 @@ fn a_launch_follows_the_projects_repeated_lines_choice_and_never_dedupes_project
     let (_directory, root) = folder();
     let mut agent = project(&root);
     save_app(&agent.data, "- Use TDD.\n- No em dash.\n").unwrap();
-    save_project(
-        agent.folder.as_ref().unwrap(),
-        "- Use TDD.\n- Run make check.\n",
-    )
-    .unwrap();
+    let own = "- Use TDD.\n- Run make check.\n";
+    save_project(agent.folder.as_ref().unwrap(), own).unwrap();
+    mark_written(&agent.data, agent.folder.as_ref().unwrap(), own).unwrap();
     let left_out = text(&agent).unwrap().text;
     assert_eq!(left_out.matches("- Use TDD.").count(), 1);
     assert!(left_out.ends_with("## Project instructions\n\n- Run make check.\n"));

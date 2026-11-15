@@ -785,6 +785,7 @@ mod launch {
         let (app, own) = (format!("{APP_RULE}\n"), format!("{PROJECT_RULE}\n"));
         crate::agent_home::save_app(&case.data, &app).unwrap();
         crate::agent_home::save_project(&case.checkout, &own).unwrap();
+        crate::agent_home::mark_written(&case.data, &case.checkout, &own).unwrap();
         let options = [
             (
                 Mode::ProjectOnly,
