@@ -814,6 +814,25 @@ fn the_scan_needs_a_plain_git_folder_and_never_reads_through_a_linked_folder() {
 }
 
 #[test]
+fn a_listed_file_the_scan_cannot_open_for_any_other_reason_stops_the_scan() {
+    use std::os::unix::fs::PermissionsExt;
+    let held = fixture();
+    let project = held.path();
+    git(&["init", "-q", "-b", "main"], &project);
+    held.write("clean.txt", "nothing\n");
+    held.write("held.txt", &format!("{TOKEN}\n"));
+    std::fs::set_permissions(
+        project.join("held.txt"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    assert_eq!(
+        held.findings(GitHubHistory::Empty).map_err(|error| error.0),
+        Err("github_publish_failed".to_owned())
+    );
+}
+
+#[test]
 fn docs_off_after_an_earlier_on_takes_the_context_folder_out_again() {
     let fixture = fixture();
     let project = fixture.path();

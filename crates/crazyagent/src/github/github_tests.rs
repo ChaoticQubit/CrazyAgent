@@ -1862,6 +1862,47 @@ fn publish_push_refuses_a_config_hook_in_the_project_before_anything_is_sent() {
     assert!(publish_homes(scratch.root.path()).is_empty());
 }
 
+#[test]
+fn publish_push_never_runs_a_hook_an_include_keyed_on_the_remote_url_brings_in() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, bare, server) = pushed_repository("octo-cat/tool", &secret_text, false);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project, committed) = published_project();
+    let marks = tempfile::tempdir().unwrap();
+    let mark = marks.path().join("ran");
+    std::fs::write(
+        project.join(".git/gh.inc"),
+        format!(
+            "[hook \"mark\"]\n\tevent = reference-transaction\n\tcommand = /usr/bin/touch '{}'\n",
+            mark.display()
+        ),
+    )
+    .unwrap();
+    git(
+        &[
+            "config",
+            "includeIf.hasconfig:remote.*.url:**.path",
+            "gh.inc",
+        ],
+        &project,
+    );
+    account
+        .publish_push(&project, "octo-cat/tool", &committed)
+        .unwrap();
+    assert!(!mark.exists());
+    assert_eq!(
+        git_out(&["rev-parse", "refs/heads/main"], &bare).trim(),
+        committed.commit
+    );
+    assert_eq!(
+        git_out(&["rev-parse", "refs/remotes/origin/main"], &project).trim(),
+        committed.commit
+    );
+    assert!(publish_homes(scratch.root.path()).is_empty());
+}
+
 const LEAKED: &str = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
 
 struct Stand {
