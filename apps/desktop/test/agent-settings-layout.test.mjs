@@ -130,7 +130,7 @@ test("Overlapping edits lists the engine's choices in the mockup's order and wor
 
 test("Overlapping edits and Hooks say which harness and account kind each protection misses, in the engine's words (DEC-141 PA-12)", () => {
   assert.equal(client.BARE_NO_HOOKS, "Claude Code on an API key or URL account starts without hooks, so it runs none of your hooks and Block and Wait cannot hold its edits.");
-  assert.equal(client.RCLI_NO_HOOKS, "rcli has no hooks, so it runs none of yours and Block and Wait cannot hold its edits.");
+  assert.equal(client.RCLI_NO_HOOKS, "RCLI has no hooks, so it runs none of yours and Block and Wait cannot hold its edits.");
   assert.equal(client.CODEX_HOOK_EVENTS_ONLY, "Codex agents run your hooks on the events Codex has.");
   const coordination = { settings: { questions_to: "lead", overlaps: "block", nudges: "off", counted_tools: [], role_skills: { master: null, lead: null, worker: null }, claude_display: "classic", task_start: "on" }, harnesses: [] };
   const html = settingsHtml({ coordination }).replaceAll("&#x27;", "'");

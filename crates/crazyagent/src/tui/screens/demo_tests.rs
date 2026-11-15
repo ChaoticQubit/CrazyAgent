@@ -182,7 +182,13 @@ fn a_pool_the_engine_marks_unavailable_shows_its_reason_and_cannot_be_picked() {
         ],
     );
     let rows = text(&render(&mut shell, 100, 40));
-    assert!(rows.contains("rcli"), "{rows}");
+    assert!(rows.contains("RCLI") && !rows.contains("rcli"), "{rows}");
+    for words in [
+        pool_reason("demo_harness_unavailable"),
+        refusal("demo_harness_unavailable"),
+    ] {
+        assert!(words.contains("run only on RCLI, which"), "{words}");
+    }
     assert!(
         rows.contains(pool_reason("demo_pool_not_ready").as_str()),
         "{rows}"

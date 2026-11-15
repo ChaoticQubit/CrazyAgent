@@ -4111,7 +4111,7 @@ fn f_moves_the_new_folder_limit_through_every_choice() {
 #[test]
 fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
     use crate::team::BackgroundAtEnd;
-    const SCOPE: &str = "Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an rcli agent has no tools, so it starts none.";
+    const SCOPE: &str = "Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an RCLI agent has no tools, so it starts none.";
     let mut view = TeamView::new(project());
     for key in ['B', 'G'] {
         assert_eq!(view.key(press(KeyCode::Char(key))), TeamReply::Handled);
@@ -4820,7 +4820,7 @@ fn every_harness_kind_says_what_its_delivery_choices_do() {
             HarnessKind::Codex => {
                 "Native only never types: with tools off, a Codex agent gets its messages as a task of their own once it is idle."
             }
-            HarnessKind::Rcli => "rcli runs no team agents, so no message goes to one here.",
+            HarnessKind::Rcli => "RCLI runs no team agents, so no message goes to one here.",
             HarnessKind::Listed(id) => unreachable!("{id} is not a native kind"),
         };
         assert!(said.contains(native), "{kind:?}: {said}");

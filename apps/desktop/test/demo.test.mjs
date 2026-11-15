@@ -55,7 +55,7 @@ test("no pool is picked for the owner, even when exactly one pool can run the de
   assert.doesNotMatch(picked, /<button(?=[^>]*disabled="")[^>]*>[^<]*(<[^>]+>)*Create the demo/);
 });
 
-test("a pool that runs only on rcli or has no ready account is listed disabled with its reason and cannot be picked", () => {
+test("a pool that runs only on RCLI or has no ready account is listed disabled with its reason and cannot be picked", () => {
   const view = demo({ pools: [
     { pool: "pool-r", unavailable: "demo_harness_unavailable" },
     { pool: "pool-n", unavailable: "demo_pool_not_ready" },
@@ -69,6 +69,9 @@ test("a pool that runs only on rcli or has no ready account is listed disabled w
     ["pool-a", null],
   ]);
   assert.equal(model.pickable(choices, "pool-r"), false);
+  for (const sentence of [words.DEMO_POOL_REASONS.demo_harness_unavailable, words.DEMO_REFUSALS.demo_harness_unavailable]) {
+    assert.match(sentence, /run only on RCLI, which/);
+  }
   assert.equal(model.pickable(choices, "pool-n"), false);
   assert.equal(model.pickable(choices, "gone"), false);
   const html = page({ view: ok(view), choices: ok(choices), picked: "pool-r" });
