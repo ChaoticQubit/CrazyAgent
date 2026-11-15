@@ -2,6 +2,9 @@ use super::launch::{LaunchError, failure};
 use super::manifest::DriverKind;
 use super::registry::{Harness, registry};
 
+pub mod jsonl_turn;
+pub mod rules;
+
 /// The piped drivers the engine runs today: its own adapters for Codex and Claude Code.
 /// Each shared driver kind a manifest names joins this list when its task lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
