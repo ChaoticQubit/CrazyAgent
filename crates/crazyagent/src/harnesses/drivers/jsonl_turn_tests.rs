@@ -141,7 +141,7 @@ fn each_fact_from_a_rule_gives_its_event() {
     }
     assert_eq!(turns.exited(Some(0)).unwrap(), [finished(true)]);
 
-    let mut turns = running(None);
+    let mut turns = running(Some("m-1"));
     assert_eq!(
         events_of(
             &mut turns,
@@ -152,7 +152,7 @@ fn each_fact_from_a_rule_gives_its_event() {
     assert!(events_of(&mut turns, json!({"type": "error", "message": "again"})).is_empty());
     assert_eq!(turns.exited(Some(1)).unwrap(), [finished(false)]);
 
-    let mut turns = running(None);
+    let mut turns = running(Some("m-1"));
     assert!(events_of(&mut turns, json!({"type": "stopped"})).is_empty());
     assert_eq!(
         turns.exited(Some(0)).unwrap(),
@@ -172,7 +172,7 @@ fn a_line_no_rule_matches_a_non_json_line_and_a_line_over_the_bound_give_nothing
             .is_empty()
     );
 
-    let mut turns = running(None);
+    let mut turns = running(Some("m-1"));
     let over = format!(
         "{{\"type\":\"text\",\"delta\":\"{}\"}}\n",
         "a".repeat(LINE_BYTES_MAX)
@@ -216,7 +216,7 @@ fn the_exit_code_ends_the_turn_with_exactly_one_turn_finished() {
         },
         finished(false),
     ];
-    let mut turns = running(None);
+    let mut turns = running(Some("m-1"));
     assert_eq!(turns.exited(Some(3)).unwrap(), failed);
     turns.start("again").unwrap();
     assert_eq!(turns.exited(None).unwrap(), failed);
@@ -235,7 +235,7 @@ fn the_exit_code_ends_the_turn_with_exactly_one_turn_finished() {
 /// signal that stopped it, ends it as interrupted; with no turn there is nothing to stop.
 #[test]
 fn an_interrupt_marks_the_turn_and_its_exit_ends_it_interrupted() {
-    let mut turns = begin(None, true, None);
+    let mut turns = begin(Some("m-1"), true, None);
     assert_eq!(code(turns.interrupt()), "launch_not_running");
     turns.start("long job").unwrap();
     turns.interrupt().unwrap();
@@ -251,7 +251,7 @@ fn an_interrupt_marks_the_turn_and_its_exit_ends_it_interrupted() {
 /// is over `PROMPT_BYTES_MAX` is refused before anything starts.
 #[test]
 fn a_second_prompt_waits_for_the_turn_to_end_and_a_bad_prompt_is_refused() {
-    let mut turns = running(None);
+    let mut turns = running(Some("m-1"));
     assert_eq!(code(turns.start("second")), "launch_busy");
     let long = "c".repeat(PROMPT_BYTES_MAX + 1);
     for prompt in [" \n", "a\0b", long.as_str()] {
@@ -305,7 +305,7 @@ fn placeholders_are_filled_once_and_unknown_values_are_refused() {
 fn a_session_id_that_is_not_plain_fails_the_conversation_for_good() {
     let long = "s".repeat(SESSION_BYTES_MAX + 1);
     for id in ["-rf", "", "a\nb", long.as_str()] {
-        let mut turns = running(None);
+        let mut turns = running(Some("m-1"));
         let bad = turns.receive(&line(json!({"type": "session", "id": id})));
         assert_eq!(code(bad), "launch_session_id_invalid", "{id:?}");
         assert_eq!(turns.phase(), Phase::Failed);
