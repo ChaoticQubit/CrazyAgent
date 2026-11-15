@@ -15602,6 +15602,61 @@ fn the_engine_start_keeps_a_foreign_index_lock_beside_a_left_step_folder() {
     }
 }
 
+/// RV-DS241-147: an entry that is racy against the worktree's index, its file rewritten at
+/// the same size in the index's own second, stays racy in a confined Linux step's copy, so
+/// git still reads the file: `read-tree -u -m` refuses to write over the agent's edit and
+/// `add -A` stages it. `core.checkStat=minimal` and set times keep the second fixed.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_step_on_linux_keeps_a_racy_entry_racy_in_its_index_copy() {
+    let case = Case::new();
+    let worktree = case.workspace.worktree.clone();
+    let readme = worktree.join("README");
+    let index = case.workspace.git_dir.join("index");
+    let then = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let stamp = |path: &Path| {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(then))
+            .unwrap();
+    };
+    git_in(&case.home, &case.repo, &["config", "core.checkStat", "minimal"]);
+    write(&case.repo.join("README"), "uno
+dos
+tres
+");
+    git_in(&case.home, &case.repo, &["commit", "-q", "-am", "Target"]);
+    let target = git_in(&case.home, &case.repo, &["rev-parse", "HEAD"]);
+    stamp(&readme);
+    git_in(&case.home, &worktree, &["update-index", "--refresh"]);
+    let edit = "ONE\nTWO\nTHREE\n";
+    assert_eq!(std::fs::read(&readme).unwrap().len(), edit.len(), "the same size");
+    write(&readme, edit);
+    stamp(&readme);
+    stamp(&index);
+    assert_eq!(
+        git_in(&case.home, &worktree, &["diff-files", "--name-only"]),
+        "README\n",
+        "the real index sees the racy edit"
+    );
+    let moved = confined_agent(&case, git::Writes::WorkTree)
+        .exec(&["read-tree", "-u", "-m", "HEAD", target.trim()], None, &[], 4096)
+        .unwrap();
+    assert_ne!(moved.code, 0, "read-tree wrote over the agent's edit");
+    assert_eq!(std::fs::read_to_string(&readme).unwrap(), edit);
+    let added = confined_agent(&case, git::Writes::Objects)
+        .exec(&["add", "-A"], None, &[], 4096)
+        .unwrap();
+    assert_eq!(added.code, 0);
+    assert_eq!(
+        git_in(&case.home, &worktree, &["rev-parse", ":README"]),
+        git_in(&case.home, &worktree, &["hash-object", "README"]),
+        "add -A staged the agent's edit"
+    );
+}
+
 /// RV-DS241-142: a confined Linux step that takes the worktree's lock while its step folder
 /// holds a git `index.lock`, as a git an earlier engine started can still hold there, answers
 /// exit 128 and leaves that folder, the lock in it and the worktree's index as they were, so
