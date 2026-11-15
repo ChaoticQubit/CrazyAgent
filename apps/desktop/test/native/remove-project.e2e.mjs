@@ -18,6 +18,7 @@ const CHFLAGS = "/usr/bin/chflags";
 const KEEP = "Remove from dashboard (keep files)";
 const DELETE = "Delete everything";
 const CUT_SHORT = "A delete was cut short. Some folders may already be in the Trash.";
+const JOB_MS = 90000;
 const run = { generation: 10 };
 
 /** Counts the entries of the owner's own Trash, never listing them, so a run can prove it put
@@ -127,6 +128,69 @@ async function onPage(label, steps) {
       throw failure;
     }
   });
+}
+
+/** Runs one statement on the test engine's database, for a stand-in no client can make, such as
+ * an agent slow to stop or a delete an engine stop cut short. Input: the statement. Output: what
+ * sqlite3 printed, trimmed. */
+function sql(statement) {
+  return execFileSync(SQLITE, [run.database, statement], { encoding: "utf8" }).trim();
+}
+
+/** Adds a stand-in team agent of a project that reads working until the row flips it, as an
+ * agent slow to stop. Inputs: the project and the agent's number. Output: none. */
+function working(id, agent) {
+  sql(`INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms) VALUES (${agent},'${id}','team','codex',1,'${join(run.root, `agent-${agent}`)}','working',0,0);`);
+}
+
+/** The mark a Delete everything job leaves when an engine stop cuts it short, newer than any
+ * mark an earlier row left, so the next start shows this one. Inputs: the project, its name, the
+ * exchange and how many folders the delete moves. Output: the statements. */
+function cutShortMark(id, name, exchange, total) {
+  const payload = JSON.stringify({ project: id, exchange, request: `delete-cut-${exchange}`, name, total });
+  return `INSERT INTO projects_delete_pending(exchange) VALUES (${exchange});
+    INSERT INTO ledger_actions(kind,action_key,payload,started_ms) VALUES ('project_delete','${id}','${payload}',${Date.now()});`;
+}
+
+/** Starts the engine's delete job of a project through the bridge, as Delete everything in the
+ * Remove dialog does once the name is typed. Inputs: the project id and its exact name. Output:
+ * the started job. */
+async function startDelete(id, name) {
+  const job = await value(run.bridge, "desktop_delete_project_job", { id, name });
+  assert.equal(job.kind, "delete", JSON.stringify(job));
+  assert.equal(job.project_id, id, JSON.stringify(job));
+  assert.equal(job.source, name, JSON.stringify(job));
+  return job;
+}
+
+/** Opens Home in the page, where the engine's job is followed. Input: the page. Output: none. */
+async function openHome(page) {
+  await page.send("Page.navigate", { url: `http://127.0.0.1:${run.site.port}/#/` });
+}
+
+/** Picks Delete everything in the open remove dialog, types the project's exact name and presses
+ * Delete, as the owner does. Inputs: the page, its helpers and the name. Output: none. */
+async function confirmDelete(page, me, name) {
+  await me.click(DELETE, "dialog[open] input[type=radio]");
+  await me.waitFor("the name box", (text) => text.includes("Type"));
+  await me.type("dialog[open] input[aria-label='Type the project name']", name);
+  for (let shown, deadline = Date.now() + STEP_MS; !(shown = await dialog(page)).deleteEnabled; await pause(POLL_MS)) {
+    assert.ok(Date.now() < deadline, `Delete never enabled after the exact name: ${JSON.stringify(shown)}`);
+  }
+  await me.click(DELETE, "dialog[open] button");
+}
+
+/** Reads the buttons of Home's job row, never those of a found folder's row. Input: the page.
+ * Output: their labels. */
+function rowButtons(page) {
+  return page.evaluate(`[...document.querySelectorAll("div.in-row button")].map((button) => button.innerText.trim())`);
+}
+
+/** Tells whether the test volume's Trash holds a folder moved there from the projects folder.
+ * Input: the folder. Output: the answer. */
+function inVolumeTrash(folder) {
+  const volumeTrash = join(realpathSync(run.volume), ".Trashes", String(process.getuid()));
+  return readdirSync(volumeTrash).some((entry) => entry.startsWith(basename(folder)));
 }
 
 before(async () => {
@@ -334,11 +398,12 @@ test("a project set up from a folder outside the projects folder offers only Rem
 test("a delete an engine stop cut short shows on the project with Keep the project and Delete again, and Keep clears it", { timeout: 300000 }, async () => {
   const name = "Cut Short";
   const { id, folder } = await made(name);
-  const sql = (statement) => execFileSync(SQLITE, [run.database, statement], { encoding: "utf8" }).trim();
   await value(run.bridge, "desktop_recovery_banner", { projectId: id });
   await restart(() => sql(`INSERT INTO projects_delete_pending(exchange) VALUES (900);
     INSERT INTO ledger_actions(kind,action_key,payload,started_ms) VALUES ('project_delete','${id}','{"project":"${id}","exchange":900}',1);`));
   assert.equal(sql("SELECT count(*) FROM projects_delete_pending"), "0", "the start still forgets the plan, so a home move may go");
+  const held = await value(run.bridge, "desktop_intake_status");
+  assert.ok(held === null || held.project_id !== id, `a 2.4.1 mark names no job, so Home shows none for it: ${JSON.stringify(held)}`);
   await onPage("cut-short", async (page, me) => {
     await page.send("Page.navigate", { url: `http://127.0.0.1:${run.site.port}/#/projects/${encodeURIComponent(id)}/overview` });
     await me.waitFor("the delete cut short on the project", (text) => text.includes(CUT_SHORT) && text.includes("its agents stay stopped until you start them again"));
@@ -357,4 +422,152 @@ test("a delete an engine stop cut short shows on the project with Keep the proje
   assert.equal(await listed(id), true, "Keep the project keeps it");
   assert.ok(existsSync(join(folder, ".crazyagent")), "its folder stays where it is");
   assert.equal(sql("SELECT count(*) FROM ledger_actions WHERE kind='project_delete' AND outcome IS NULL"), "0", "Keep the project clears the mark");
+});
+
+test("a delete waits on Home for the project's agents to stop, refuses another project's delete naming it, is found again by the same project's start and a new window, and moves the folder to the Trash once they stopped (DEC-177)", { timeout: 300000 }, async () => {
+  const name = "Slow Stop";
+  const { id, folder } = await made(name);
+  const other = await made("Waits Its Turn");
+  writeFileSync(join(folder, "notes.md"), "kept until the agents stop\n");
+  working(id, 81);
+  const waiting = `Waiting for 1 agent of ${name} to stop...`;
+  await onPage("delete-stopping", async (page, me) => {
+    await openRemove(page, me, id, name);
+    await confirmDelete(page, me, name);
+    await me.waitFor("Home's waiting line", (text) => text.includes(waiting), JOB_MS);
+    assert.deepEqual(await rowButtons(page), ["Stop"], "Stop is offered while the agents stop");
+    assert.equal(readFileSync(join(folder, "notes.md"), "utf8"), "kept until the agents stop\n", "nothing moves while it waits");
+    await me.capture("delete-job-stopping");
+    await openRemove(page, me, other.id, "Waits Its Turn");
+    await confirmDelete(page, me, "Waits Its Turn");
+    await me.waitFor("the busy note in the dialog", (text) => text.includes(`Deleting ${name} is running. Wait for it to finish on Home.`), JOB_MS);
+    await me.capture("delete-job-busy");
+  });
+  const running = await value(run.bridge, "desktop_intake_status");
+  assert.equal(running?.kind, "delete", JSON.stringify(running));
+  assert.equal((await startDelete(id, name)).id, running.id, "the same project's start finds the running delete");
+  await onPage("delete-reopened", async (page, me) => {
+    await openHome(page);
+    await me.waitFor("the running delete in a new window", (text) => text.includes(waiting), JOB_MS);
+    sql("UPDATE team_agents SET status='stopped' WHERE id=81");
+    await me.waitFor("the deleted line", (text) => text.includes(`${name} is deleted. Its files are in the Trash.`), JOB_MS);
+    assert.deepEqual(await rowButtons(page), ["Dismiss"]);
+    await me.capture("delete-job-done");
+    await me.click("Dismiss", "div.in-row button");
+    await me.waitFor("the row gone", (text) => !text.includes(`${name} is deleted`), JOB_MS);
+  });
+  assert.equal(await listed(id), false, "the engine no longer lists the project");
+  assert.equal(await listed(other.id), true, "the refused delete left the other project");
+  assert.ok(!existsSync(folder), "the folder left the projects folder");
+  assert.ok(inVolumeTrash(folder), "the folder is in the test volume's Trash");
+  assert.equal(await value(run.bridge, "desktop_intake_status"), null, "Dismiss forgets the ended delete");
+});
+
+test("Stop on Home while a delete waits for its agents keeps the project and its folder, says nothing went to the Trash, and Try again opens the remove ask on Delete everything (DEC-177)", { timeout: 300000 }, async () => {
+  const name = "Stopped Delete";
+  const { id, folder } = await made(name);
+  working(id, 82);
+  await startDelete(id, name);
+  const stopped = `Deleting ${name} stopped. Nothing was moved to the Trash.`;
+  await onPage("delete-cancelled", async (page, me) => {
+    await openHome(page);
+    await me.waitFor("Home's waiting line", (text) => text.includes(`Waiting for 1 agent of ${name} to stop...`), JOB_MS);
+    await me.click("Stop", "div.in-row button");
+    await me.waitFor("the stopped line", (text) => text.includes(stopped), JOB_MS);
+    assert.deepEqual(await rowButtons(page), ["Try again", "Dismiss"]);
+    await me.capture("delete-job-cancelled");
+    await me.click("Try again", "div.in-row button");
+    await me.waitFor("the remove dialog on Delete everything", (text) => text.includes(KEEP) && text.includes(folder) && text.includes("Type"), JOB_MS);
+    const shown = await dialog(page);
+    assert.equal(shown.checked, "everything", `Try again opens on Delete everything: ${JSON.stringify(shown)}`);
+    assert.equal(shown.deleteEnabled, false, "nothing deletes in one click: the name is typed again");
+    await me.capture("delete-job-try-again");
+    await me.click("Keep project", "dialog[open] button");
+    await openHome(page);
+    await me.waitFor("the stopped line again", (text) => text.includes(stopped), JOB_MS);
+    await me.click("Dismiss", "div.in-row button");
+    await me.waitFor("the row gone", (text) => !text.includes(stopped), JOB_MS);
+  });
+  assert.equal(await listed(id), true, "a stopped delete keeps the project");
+  assert.ok(existsSync(join(folder, ".crazyagent")), "its folder stays where it is");
+  sql("UPDATE team_agents SET status='stopped' WHERE id=82");
+});
+
+test("a delete whose agents do not stop within the wait fails on Home with the reason, keeps the project and offers Try again (DEC-177)", { timeout: 300000 }, async () => {
+  const name = "Stuck Agents";
+  const { id, folder } = await made(name);
+  working(id, 83);
+  await startDelete(id, name);
+  const failed = `${name}: Its agents didn't stop in time, so nothing was deleted. They stay stopped; try again.`;
+  await onPage("delete-agents-running", async (page, me) => {
+    await openHome(page);
+    await me.waitFor("the failed line after the agents' wait", (text) => text.includes(failed), 120000);
+    assert.deepEqual(await rowButtons(page), ["Try again", "Dismiss"]);
+    await me.capture("delete-job-agents-running");
+    await me.click("Dismiss", "div.in-row button");
+    await me.waitFor("the row gone", (text) => !text.includes(failed), JOB_MS);
+  });
+  assert.equal(await listed(id), true, "a failed delete keeps the project");
+  assert.ok(existsSync(join(folder, ".crazyagent")), "its folder stays where it is");
+  sql("UPDATE team_agents SET status='stopped' WHERE id=83");
+});
+
+test("a delete an engine stop cut short after 1 of its 2 folders shows on Home after the next start, never goes on by itself, and Finish delete asks for the name again and moves the rest to the Trash (DEC-177)", { timeout: 300000 }, async () => {
+  const name = "Half Gone";
+  const { id, folder } = await made(name);
+  const library = join(run.projects, "half-gone-lib");
+  mkdirSync(library, { mode: 0o700 });
+  sql(`UPDATE projects SET body=json_set(body,'$.spec.repositories',json_array('${library}')) WHERE id='${id}'`);
+  await restart(() => {
+    rmSync(library, { recursive: true });
+    sql(cutShortMark(id, name, 901, 2));
+  });
+  const cut = `Deleting ${name} was cut short with 1 of 2 folders in the Trash. Finish delete or keep the project.`;
+  await onPage("delete-cut-short", async (page, me) => {
+    await openHome(page);
+    await me.waitFor("the cut-short line", (text) => text.includes(cut) && text.includes("Cut short"), JOB_MS);
+    assert.deepEqual(await rowButtons(page), ["Finish delete", "Keep the project"]);
+    assert.ok(existsSync(join(folder, ".crazyagent")), "the start never finishes a delete by itself");
+    await me.capture("delete-job-cut-short");
+    await me.click("Finish delete", "div.in-row button");
+    await me.waitFor("the remove dialog on Delete everything", (text) => text.includes(KEEP) && text.includes(folder) && text.includes("Type"), JOB_MS);
+    const shown = await dialog(page);
+    assert.equal(shown.checked, "everything", `Finish delete opens on Delete everything: ${JSON.stringify(shown)}`);
+    assert.equal(shown.deleteEnabled, false, "Finish delete waits for the name typed again");
+    await confirmDelete(page, me, name);
+    await me.waitFor("the deleted line", (text) => text.includes(`${name} is deleted. Its files are in the Trash.`), JOB_MS);
+    await me.capture("delete-job-finished");
+  });
+  assert.equal(await listed(id), false, "Finish delete removes the project");
+  assert.ok(!existsSync(folder), "the folder left the projects folder");
+  assert.ok(inVolumeTrash(folder), "the rest went to the test volume's Trash");
+});
+
+test("Keep the project on Home clears the project's cut-short banner, and the banner's Keep the project clears Home's row (DEC-177)", { timeout: 300000 }, async () => {
+  const first = await made("Kept From Home");
+  await restart(() => sql(cutShortMark(first.id, "Kept From Home", 902, 2)));
+  const fromHome = "Deleting Kept From Home was cut short with 1 of 2 folders in the Trash.";
+  await onPage("delete-keep-home", async (page, me) => {
+    await openHome(page);
+    await me.waitFor("the cut-short line", (text) => text.includes(fromHome), JOB_MS);
+    await me.click("Keep the project", "div.in-row button");
+    await me.waitFor("the row gone", (text) => !text.includes(fromHome), JOB_MS);
+    await me.capture("delete-job-kept-home");
+  });
+  assert.equal(sql(`SELECT count(*) FROM ledger_actions WHERE kind='project_delete' AND action_key='${first.id}' AND outcome IS NULL`), "0", "Keep the project on Home ends the banner's mark");
+  assert.equal(await value(run.bridge, "desktop_intake_status"), null, "Keep the project forgets the job");
+  const second = await made("Kept From Banner");
+  await restart(() => sql(cutShortMark(second.id, "Kept From Banner", 903, 2)));
+  const restored = await value(run.bridge, "desktop_intake_status");
+  assert.deepEqual([restored?.project_id, restored?.state], [second.id, { state: "cut_short", trashed: 1, total: 2 }], JSON.stringify(restored));
+  await onPage("delete-keep-banner", async (page, me) => {
+    await page.send("Page.navigate", { url: `http://127.0.0.1:${run.site.port}/#/projects/${encodeURIComponent(second.id)}/overview` });
+    await me.waitFor("the delete cut short on the project", (text) => text.includes(CUT_SHORT), JOB_MS);
+    await me.click("Keep the project", "button");
+    await me.waitFor("the banner without the delete", (text) => !text.includes(CUT_SHORT), JOB_MS);
+    await me.capture("delete-job-kept-banner");
+  });
+  assert.equal(await value(run.bridge, "desktop_intake_status"), null, "the banner's Keep the project forgets Home's job");
+  assert.equal(await listed(first.id), true);
+  assert.equal(await listed(second.id), true);
 });
