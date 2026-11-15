@@ -15551,6 +15551,40 @@ fn a_confined_step_on_linux_never_takes_a_link_or_a_special_file_as_the_index() 
     }
 }
 
+/// SA vid 3: the copy of the index a confined Linux step that fills the work tree leaves in the
+/// step folder is never taken as the worktree's index, not even a plain file with one link put
+/// there by a rename, as git's own rename of a lock a link raced in during `read-tree -u` could
+/// leave it. With no index-only form of the step to rebuild the index from, the step refuses
+/// with `changes_git_failed`; the index stays as it was, and no lock or step folder is left.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_work_tree_step_on_linux_never_takes_the_index_copy_it_leaves() {
+    let case = Case::new();
+    let index = case.workspace.git_dir.join("index");
+    let lock = case.workspace.git_dir.join("index.lock");
+    let step = case.workspace.git_dir.join("crazyagent-step");
+    let copy = step.join("index");
+    let before = std::fs::read(&index).unwrap();
+    let repo = confined_agent(&case, git::Writes::WorkTree);
+    let left = repo.swapped(|| {
+        let planted = step.join("index.lock");
+        write(&planted, "forged index\n");
+        std::fs::rename(&planted, &copy).unwrap();
+        Ok(git::Output {
+            code: 0,
+            stdout: Vec::new(),
+            overflow: false,
+        })
+    });
+    assert_eq!(
+        left.err().map(|error| error.0).as_deref(),
+        Some("changes_git_failed")
+    );
+    assert_eq!(std::fs::read(&index).unwrap(), before);
+    assert!(std::fs::symlink_metadata(&lock).is_err());
+    assert!(std::fs::symlink_metadata(&step).is_err());
+}
+
 /// LINUX-GIT-CONFINE r1 F2 (rv-code), RV-DS241-135: an engine stopped during a confined Linux
 /// step leaves its `index.lock`, naming that engine process by id and start, beside the step
 /// folder in the agent worktree's git folder. The sweep the engine runs once at start removes
