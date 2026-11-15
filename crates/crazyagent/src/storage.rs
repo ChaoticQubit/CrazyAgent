@@ -2771,6 +2771,29 @@ fn owner_control_reconcile(
     .transpose()
 }
 
+/// Whether a project may hold another git repository, for its Agent access lines: a short
+/// transaction checks the admission and reads the project's folder and the supervisor
+/// setting, and the bounded read of that folder runs after it, so the owner read's own
+/// transaction never waits on a folder (DEC-179 T4d). Inputs: the database, the admission
+/// and the project. Output: the answer, true for a project with no setup.
+fn project_other_git(
+    db: &mut Connection,
+    a: &Admission,
+    project_id: &ProjectId,
+) -> Result<bool, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    let setup = crate::project_setup::load_setup(&tx, project_id)?;
+    let calls = crate::sandbox_settings::load(&tx)
+        .ok()
+        .map(|settings| settings.linux_supervisor);
+    drop(tx);
+    let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
+    let other_git = crate::sandbox::policy::LevelView::other_git;
+    let folder = setup.map(|setup| setup.project_folder());
+    Ok(folder.is_none_or(|folder| other_git(host, &folder)))
+}
+
 fn owner_read(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -2784,6 +2807,10 @@ fn owner_read(
     ) {
         crate::sandbox::policy::LevelView::refresh();
     }
+    let other_git = match query {
+        OwnerRead::ProjectAgentPolicy { project_id } => project_other_git(db, a, project_id)?,
+        _ => true,
+    };
     let tx = db.transaction().map_err(error)?;
     check_owner_admission(&tx, a)?;
     let revision = owner_revision(&tx)?;
@@ -2864,6 +2891,7 @@ fn owner_read(
                     &homes,
                     versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,
                     crate::sandbox_settings::load(&tx).ok(),
+                    other_git,
                 );
             policy.grant_log =
                 crate::sandbox::grants::history(&tx, project_id.as_str()).map_err(error)?;

@@ -520,14 +520,16 @@ impl AgentPolicy {
     /// family the owner has installed, the project uses or the owner chose, the IDE hooks
     /// and agent files choices, the tool cache choice with every choice, the shared folders
     /// choice with the top-level folders it can pick, and the policy's version, which a save
-    /// names. Inputs: the project folder, the owner's tool homes, the version and the
-    /// owner's sandbox settings, none when unreadable. Output: the view.
+    /// names. Inputs: the project folder, the owner's tool homes, the version, the owner's
+    /// sandbox settings, none when unreadable, and whether the project may hold another git
+    /// repository ([`LevelView::other_git`]). Output: the view.
     pub fn view(
         &self,
         project: &Path,
         homes: &ToolHomes,
         version: u64,
         settings: Option<crate::sandbox_settings::SandboxSettings>,
+        other_git: bool,
     ) -> PolicyView {
         let allowed = self.allowed(project);
         let toolchains: Vec<ToolchainView> = Toolchain::ALL
@@ -545,8 +547,6 @@ impl AgentPolicy {
         let calls = settings.map(|settings| settings.linux_supervisor);
         let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
         let sockets = settings.map(|settings| settings.linux_sockets);
-        let supervised = host.is_some_and(|host| host.supervised);
-        let other_git = supervised && crate::sandbox::linux_other_git(project);
         PolicyView {
             access: self.access,
             network: self.network,
@@ -912,8 +912,8 @@ impl LevelView {
     /// ([`crate::sandbox::linux_other_git`]), made only for a supervised host. A reader
     /// calls it before its database transaction, so that read never holds one. Inputs:
     /// what this Linux holds under the setting, none elsewhere, and the folder.
-    pub fn other_git(_host: Option<crate::sandbox::LinuxHost>, _project: &Path) -> bool {
-        true
+    pub fn other_git(host: Option<crate::sandbox::LinuxHost>, project: &Path) -> bool {
+        host.is_some_and(|host| host.supervised) && crate::sandbox::linux_other_git(project)
     }
 }
 
@@ -1108,7 +1108,7 @@ mod tests {
         );
         let saved = serde_json::to_string(&own).unwrap();
         assert!(saved.contains(r#""tool_cache":"per_agent""#), "{saved}");
-        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1, None);
+        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1, None, true);
         assert_eq!(view.tool_cache, ToolCacheScope::PerAgent);
         let listed: Vec<(&str, &str)> = view
             .tool_caches
@@ -1148,7 +1148,7 @@ mod tests {
             let read = load(&connection, "p").unwrap();
             assert_eq!(read.home_caches, choice);
             assert_eq!(read.pinned(folder.path()).home_caches, choice);
-            let view = read.view(folder.path(), &ToolHomes::at(folder.path()), 1, None);
+            let view = read.view(folder.path(), &ToolHomes::at(folder.path()), 1, None, true);
             assert_eq!(view.home_caches, choice);
             let listed: Vec<(&str, &str)> = view
                 .home_cache_choices
@@ -1196,7 +1196,7 @@ mod tests {
         assert!(saved.contains(r#""apply_changes":"next_start""#), "{saved}");
         assert!(saved.contains(r#"{"kind":"port","port":47821}"#), "{saved}");
         assert!(saved.contains(r#"{"kind":"temp_folder"}"#), "{saved}");
-        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1, None);
+        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1, None, true);
         let listed: Vec<(&str, &str)> = view
             .apply_choices
             .iter()
@@ -1538,6 +1538,7 @@ mod tests {
             &ToolHomes::at(Path::new("/nonexistent")),
             0,
             Default::default(),
+            true,
         );
         assert!(view.ide_git_hooks);
         connection
@@ -1616,7 +1617,7 @@ mod tests {
             assert_eq!(read.ide_agent_files, choice);
             assert_eq!(read.pinned(nowhere).ide_agent_files, choice);
             assert_eq!(
-                read.view(nowhere, &ToolHomes::at(nowhere), 0, None)
+                read.view(nowhere, &ToolHomes::at(nowhere), 0, None, true)
                     .ide_agent_files,
                 choice
             );
