@@ -2154,3 +2154,90 @@ fn an_added_hook_that_both_moved_and_replaced_takes_every_off() {
     let added = [added_hook("caveman", "SessionStart", 1, "sh d.sh")];
     assert_eq!(kept_for(&kept, &added, &added[0]), [&kept[1], &kept[0]]);
 }
+
+/// RV-DS241-195: the per-project switches kept for a pack entry's hooks never outlive their
+/// project. Removing a project forgets its kept switches, so a new project that takes the
+/// same id starts with the hook on; a kept switch whose project is gone, as a removal before
+/// this fix left it, adds no switch row at the next seed.
+#[test]
+fn kept_hook_switches_never_outlive_their_project() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    for project in ["project-1", "project-2"] {
+        connection
+            .execute("INSERT INTO projects(id, body) VALUES(?1, '{}')", [project])
+            .unwrap();
+    }
+    let work = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/superpowers@1",
+        vec![skill(work.path(), "alpha"), skill(work.path(), "beta")],
+        None,
+    )
+    .unwrap();
+    let plugin = hook_plugin(work.path(), "superpowers");
+    seed(&mut connection, root, "superpowers", &plugin).unwrap();
+    let prompt = hook_views(&mut connection, root, None)
+        .into_iter()
+        .find(|view| view.event == "UserPromptSubmit")
+        .unwrap()
+        .id;
+    for project in ["project-1", "project-2"] {
+        let version = plugins::plugin_version(&connection, &prompt).unwrap();
+        plugins::execute(
+            &mut connection,
+            root,
+            plugins::Command::Switch {
+                project: crate::protocol::ProjectId::new(project).unwrap(),
+                id: prompt.clone(),
+                on: false,
+                version,
+            },
+        )
+        .unwrap();
+    }
+    let alpha = skills(&mut connection, root)
+        .into_iter()
+        .find(|view| view.name == "alpha")
+        .unwrap()
+        .id;
+    let version = plugins::plugin_version(&connection, &alpha).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::RemoveSkill { id: alpha, version },
+    )
+    .unwrap();
+    {
+        let reused = crate::protocol::ProjectId::new("project-1").unwrap();
+        let tx = connection.transaction().unwrap();
+        tx.execute("DELETE FROM projects WHERE id='project-2'", [])
+            .unwrap();
+        tx.execute("DELETE FROM projects WHERE id='project-1'", [])
+            .unwrap();
+        plugins::remove_project(&tx, &reused).unwrap();
+        tx.execute("INSERT INTO projects(id, body) VALUES('project-1', '{}')", [])
+            .unwrap();
+        plugins::remove_project(&tx, &reused).unwrap();
+        tx.commit().unwrap();
+    }
+
+    seed(&mut connection, root, "superpowers", &plugin).unwrap();
+
+    assert_eq!(
+        effective_events(&mut connection, root, "project-1"),
+        ["SessionStart", "UserPromptSubmit"],
+        "a new project with a removed project's id starts with the hook on"
+    );
+    let left: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM plugin_switches WHERE project IN ('project-1', 'project-2')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0, "no switch row names a project that is gone or new");
+}
