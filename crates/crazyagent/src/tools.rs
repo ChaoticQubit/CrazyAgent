@@ -1031,7 +1031,11 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
             .is_ok_and(|real| leads_into_temp(entry, &real, &places.temps));
     let interpreter = match &shebang.by_name {
         Some(name) => named_interpreter(name, &program, places, depth + 1),
-        None if through_shim => resolve_at(&interpreter_name, places, depth + 1),
+        None if through_shim => match check_place(places, &shebang.interpreter) {
+            Some(Ok(())) => resolve_at(&interpreter_name, places, depth + 1),
+            Some(Err(why)) => Err(refused(shebang.interpreter.as_path(), why)),
+            None => Err(not_there()),
+        },
         None if into_temp => Err(Missing {
             reason: Reason::Refused,
             refused: Some(Box::new(Refused {
@@ -1307,19 +1311,29 @@ fn install_hint(tool: &str) -> &'static str {
 }
 
 /// Checks a found file: none when it is not an executable file whose links resolve, else
-/// passed, or passed over as a version-manager shim, as agents' to write, as changeable by
-/// another user or group past a sticky store, or as leading into a temp folder: the file as
-/// found and real first, then each link and `..` folder on its way, as it runs by its path
-/// ([`Places::hop_refusal`], B1). Inputs: the places and the file. Output: the check.
+/// passed, or passed over as a version-manager shim, or as [`check_place`] refuses it.
+/// Inputs: the places and the file. Output: the check.
 fn check_candidate(places: &Places, candidate: &Path) -> Option<Result<(), Refusal>> {
+    let place = check_place(places, candidate)?;
+    Some(if crate::harnesses::is_shim(places.home(), candidate) {
+        Err(Refusal::Shim)
+    } else {
+        place
+    })
+}
+
+/// Checks where a file sits, shim or not: none when it is not an executable file whose links
+/// resolve, else passed, or passed over as agents' to write, as changeable by another user
+/// or group past a sticky store, or as leading into a temp folder: the file as found and
+/// real first, then each link and `..` folder on its way, as it runs by its path
+/// ([`Places::hop_refusal`], B1). Inputs: the places and the file. Output: the check.
+fn check_place(places: &Places, candidate: &Path) -> Option<Result<(), Refusal>> {
     if !executable_file(candidate) {
         return None;
     }
     let real = candidate.canonicalize().ok()?;
     let hops = crate::harnesses::finding::link_hops(candidate)?;
-    Some(if crate::harnesses::is_shim(places.home(), candidate) {
-        Err(Refusal::Shim)
-    } else if places.agent_writable(candidate) {
+    Some(if places.agent_writable(candidate) {
         Err(Refusal::AgentsCanWrite)
     } else if let Some(part) = crate::service::changeable_past_sticky(candidate) {
         Err(Refusal::OthersCanChange(part))
