@@ -2798,6 +2798,39 @@ fn a_call_made_for_a_supervised_agent_keeps_its_mask_its_proc_names_and_its_pipe
     assert!(!case.project.join("never").exists());
 }
 
+const THREAD_PLACES: &str = "import ctypes, os, threading
+libc = ctypes.CDLL(None, use_errno=True)
+os.mkdir('own')
+os.mkdir('table')
+def own_folder():
+    assert libc.unshare(0x200) == 0, ctypes.get_errno()
+    os.chdir('own')
+    os.close(os.open('made', os.O_CREAT | os.O_WRONLY))
+def own_table():
+    assert libc.unshare(0x400) == 0, ctypes.get_errno()
+    folder = os.open('table', os.O_RDONLY | os.O_DIRECTORY)
+    os.close(os.open('made', os.O_CREAT | os.O_WRONLY, dir_fd=folder))
+for work in (own_folder, own_table):
+    worker = threading.Thread(target=work)
+    worker.start()
+    worker.join()
+print(' '.join(str(os.path.exists(path)) for path in ('own/made', 'table/made', 'made')))
+";
+
+/// A call made for a thread is made where that thread is: a thread with a working folder
+/// of its own makes a relative entry there, and one with a descriptor table of its own
+/// makes an entry at its own folder descriptor, not the first thread's (rv-sec2 linux-t4b
+/// F1).
+#[test]
+fn a_call_made_for_a_supervised_thread_starts_at_that_threads_folder_and_descriptors() {
+    let case = case();
+    let project = case.project.to_str().unwrap();
+    let guard = ["--guard-git", "--own-tree", project];
+    let script = ["-I", "-u", "-c", THREAD_PLACES];
+    let held = finished(supervised(&case, &guard, "/usr/bin/python3", &script));
+    assert_eq!(told(&held), "True True False\n");
+}
+
 const GUARDED_SIGNALS: &str = "import fcntl, os, signal, socket, subprocess, sys
 outside = int(sys.argv[1])
 def said(call):
