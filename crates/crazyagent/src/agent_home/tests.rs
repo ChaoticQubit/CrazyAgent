@@ -947,8 +947,7 @@ fn owner_text_up_to_the_cap_is_given_inline_and_more_is_refused_by_its_larger_pa
 /// A launch leaves no code an agent planted in its own home for the shell its harness
 /// starts next (SA vid 12): the zsh, bash and sh startup files, the compiled zsh forms and
 /// the folders whose scripts Claude Code and Codex source ahead of each shell command are
-/// removed, a link among them without what it points to, while the agent's other files,
-/// its shell history and its harness state stay.
+/// removed, a link among them without what it points to, while its harness state stays.
 #[cfg(unix)]
 #[test]
 fn a_launch_removes_shell_startup_files_and_shell_prelude_folders_from_the_agent_home() {
@@ -975,7 +974,7 @@ fn a_launch_removes_shell_startup_files_and_shell_prelude_folders_from_the_agent
         ".bash_logout",
         ".profile",
     ];
-    let kept = [".zsh_history", ".claude.json", "note", "projects/p/s.jsonl"];
+    let kept = [".claude.json", "projects/p/s.jsonl"];
     for (name, harness) in [("claude", Harness::Claude), ("codex", Harness::Codex)] {
         let home = home(&root, name);
         for file in startup.iter().chain(kept.iter()) {
@@ -1018,4 +1017,333 @@ fn a_launch_removes_shell_startup_files_and_shell_prelude_folders_from_the_agent
             "echo kept\n"
         );
     }
+}
+
+/// A launch keeps in an agent home only what the engine and its harness use across runs,
+/// and nothing a tool reads as config that runs code (RV-DS241-137): git's, cargo's,
+/// npm's, yarn's, ssh's and Python's config and user sites, Node's home module folder,
+/// cargo's own subcommands, the packages npx installed, the harness's plugins, rules and
+/// memories and every other entry go, a link among them without what it names, while each
+/// harness's sign-in, transcripts, team and task state, the per-agent keychain, the
+/// launch's own files, the cargo caches linked from the owner's and the shared caches stay.
+#[cfg(unix)]
+#[test]
+fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let outside = root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("config.toml"), "kept outside\n").unwrap();
+    let planted = [
+        ".gitconfig",
+        ".config/git/config",
+        ".cargo/config",
+        ".cargo/config.toml",
+        ".cargo/bin/cargo-clippy",
+        ".cargo/env",
+        ".npmrc",
+        ".yarnrc.yml",
+        ".ssh/config",
+        ".node_modules/left-pad/index.js",
+        ".local/lib/python3.12/site-packages/run.pth",
+        "Library/Python/3.9/lib/python/site-packages/run.pth",
+        "Library/Application Support/pip/pip.conf",
+        "Library/Preferences/com.example.plist",
+        ".npm/_npx/0b6f/node_modules/run/index.js",
+        "AGENTS.override.md",
+        "settings.json",
+        "rules/default.rules",
+        "plugins/installed_plugins.json",
+        ".claude/settings.json",
+        "memories/note.md",
+        ".zsh_history",
+        "note",
+    ];
+    let kept = [
+        ".claude.json",
+        ".credentials.json",
+        "auth.json",
+        ".crazyagent-key",
+        "crazyagent.lock",
+        "crazyagent/bin/getconf",
+        "crazyagent-relay/plugin.json",
+        "projects/p/s.jsonl",
+        "sessions/2026/11/15/rollout.jsonl",
+        "teams/t/config.json",
+        ".claude/teams/t/config.json",
+        ".claude/tasks/t/1.json",
+        "todos/t.json",
+        "tasks/t/1.json",
+        "plans/p.md",
+        "skills/s/SKILL.md",
+        "config.toml",
+        "Library/Keychains/login.keychain-db",
+        "Library/Preferences/com.apple.security.plist",
+        ".cargo/git/db/x",
+        ".cache/uv/x",
+        ".npm/_cacache/index-v5/x",
+    ];
+    for (name, harness) in [("claude", Harness::Claude), ("codex", Harness::Codex)] {
+        let home = home(&root, name);
+        for file in planted.iter().chain(kept.iter()) {
+            let path = home.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "planted\n").unwrap();
+        }
+        std::os::unix::fs::symlink(&outside, home.join(".cargo/registry")).unwrap();
+        std::os::unix::fs::symlink(&outside, home.join(".config/cargo")).unwrap();
+        std::os::unix::fs::symlink(outside.join("config.toml"), home.join("history.jsonl"))
+            .unwrap();
+
+        prepare(&home, harness, &project, &given).unwrap();
+
+        let left: Vec<&str> = planted
+            .iter()
+            .copied()
+            .chain([".config", ".ssh", ".local", "history.jsonl", "Library/Python"])
+            .filter(|entry| fs::symlink_metadata(home.join(entry)).is_ok())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "a {name} launch kept code-running config in the agent home: {left:?}"
+        );
+        for file in kept {
+            assert_eq!(
+                fs::read_to_string(home.join(file)).unwrap(),
+                "planted\n",
+                "{name}: {file}"
+            );
+        }
+        assert_eq!(fs::read_link(home.join(".cargo/registry")).unwrap(), outside);
+        assert_eq!(
+            fs::read_to_string(outside.join("config.toml")).unwrap(),
+            "kept outside\n"
+        );
+    }
+}
+
+/// A launch never keeps a link in the place of what it keeps, nor follows one (RV-DS241-137):
+/// a `projects` folder, a `.claude.json` file and a `Library` folder that are links go
+/// without what they name, so the next run neither reads its transcripts nor finds its
+/// keychain through a place it chose, while cargo's `registry`, which the engine links to
+/// the owner's read-only crates, stays a link.
+#[cfg(unix)]
+#[test]
+fn a_launch_removes_a_link_in_the_place_of_a_kept_entry_without_what_it_names() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let outside = root.join("outside");
+    fs::create_dir_all(outside.join("Keychains")).unwrap();
+    fs::write(outside.join("Keychains/login.keychain-db"), "outside\n").unwrap();
+    fs::write(outside.join("claude.json"), "{}\n").unwrap();
+    let home = home(&root, "claude");
+    std::os::unix::fs::symlink(&outside, home.join("projects")).unwrap();
+    std::os::unix::fs::symlink(&outside, home.join("Library")).unwrap();
+    std::os::unix::fs::symlink(outside.join("claude.json"), home.join(".claude.json")).unwrap();
+    fs::create_dir(home.join(".cargo")).unwrap();
+    std::os::unix::fs::symlink(&outside, home.join(".cargo/registry")).unwrap();
+
+    prepare(&home, Harness::Claude, &project, &given).unwrap();
+
+    for entry in ["projects", "Library", ".claude.json"] {
+        assert!(
+            fs::symlink_metadata(home.join(entry)).is_err(),
+            "{entry} kept as a link"
+        );
+    }
+    assert_eq!(fs::read_link(home.join(".cargo/registry")).unwrap(), outside);
+    assert_eq!(
+        fs::read_to_string(outside.join("Keychains/login.keychain-db")).unwrap(),
+        "outside\n"
+    );
+    assert_eq!(
+        fs::read_to_string(outside.join("claude.json")).unwrap(),
+        "{}\n"
+    );
+}
+
+/// A flag an agent set in its own home never keeps its next launch from starting
+/// (RV-DS241-138): an immutable hook file in an immutable Claude Code session folder, an
+/// append-only startup file, an immutable cargo config in an immutable `.cargo` and an
+/// immutable home itself all give way, so the launch removes what it removes and writes
+/// what it writes, while the harness state it keeps stays.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_flag_an_agent_set_in_its_home_never_blocks_its_next_launch() {
+    use nix::sys::stat::FileFlag;
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let session = home.join("session-env").join("0b6f1c2e-5d4a");
+    let hook = session.join("sessionstart-hook-0.sh");
+    fs::create_dir_all(&session).unwrap();
+    fs::write(&hook, "echo planted\n").unwrap();
+    let startup = home.join(".zshrc");
+    fs::write(&startup, "echo planted\n").unwrap();
+    let cargo = home.join(".cargo");
+    fs::create_dir(&cargo).unwrap();
+    let config = cargo.join("config.toml");
+    fs::write(&config, "[build]\nrustc-wrapper = \"/private/tmp/run\"\n").unwrap();
+    fs::write(home.join(".claude.json"), "{}\n").unwrap();
+    let pinned = [
+        (hook.as_path(), FileFlag::UF_IMMUTABLE),
+        (session.as_path(), FileFlag::UF_IMMUTABLE),
+        (startup.as_path(), FileFlag::UF_APPEND),
+        (config.as_path(), FileFlag::UF_IMMUTABLE),
+        (cargo.as_path(), FileFlag::UF_IMMUTABLE),
+        (home.as_path(), FileFlag::UF_IMMUTABLE),
+    ];
+    for (path, flag) in pinned {
+        nix::unistd::chflags(path, flag).unwrap();
+    }
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    let left: Vec<&Path> = [hook.as_path(), session.as_path(), startup.as_path(), config.as_path()]
+        .into_iter()
+        .filter(|path| fs::symlink_metadata(path).is_ok())
+        .collect();
+    for (path, _) in pinned {
+        let _ = nix::unistd::chflags(path, FileFlag::empty());
+    }
+    assert_eq!(prepared, Ok(()));
+    assert!(left.is_empty(), "a flag kept {left:?} from the launch");
+    assert_eq!(
+        fs::read_to_string(home.join(".claude.json")).unwrap(),
+        "{}\n"
+    );
+}
+
+/// What an agent's own run leaves in its home runs nothing in a git, Python or cargo it
+/// starts later, sandboxed or at Full access, which share one environment (RV-DS241-137):
+/// git reads no `.gitconfig`, so its `core.fsmonitor` program never runs, Python reads no
+/// user site, so a `.pth` file there runs nothing, and a cargo config naming a
+/// `rustc-wrapper` an earlier run left goes at the next launch. Needs `/usr/bin/git` and
+/// `/usr/bin/python3` from the Command Line Tools, and the cargo and rustc the tests use.
+#[cfg(target_os = "macos")]
+#[test]
+fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "agent");
+    let marker = root.join("ran.txt");
+    let fsmonitor = root.join("fsmonitor.sh");
+    let wrapper = root.join("wrapper.sh");
+    for (script, then) in [(&fsmonitor, "exit 1"), (&wrapper, "exec \"$@\"")] {
+        fs::write(
+            script,
+            format!(
+                "#!/bin/sh\necho '{}' >> '{}'\n{then}\n",
+                script.display(),
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let probe = root.join("probe");
+    fs::create_dir_all(probe.join("src")).unwrap();
+    fs::write(
+        probe.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    fs::write(probe.join("src/lib.rs"), "").unwrap();
+    fs::create_dir(home.join(".cargo")).unwrap();
+    fs::write(
+        home.join(".cargo/config.toml"),
+        format!("[build]\nrustc-wrapper = \"{}\"\n", wrapper.display()),
+    )
+    .unwrap();
+
+    prepare(&home, Harness::Claude, &project, &given).unwrap();
+
+    fs::write(
+        home.join(".gitconfig"),
+        format!("[core]\n\tfsmonitor = {}\n", fsmonitor.display()),
+    )
+    .unwrap();
+    let site = Command::new("/usr/bin/python3")
+        .args(["-c", "import site; print(site.getusersitepackages())"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(site.status.success(), "{site:?}");
+    let site = PathBuf::from(String::from_utf8(site.stdout).unwrap().trim());
+    assert!(site.starts_with(&home), "{}", site.display());
+    fs::create_dir_all(&site).unwrap();
+    fs::write(
+        site.join("run.pth"),
+        format!("import os; open('{}', 'a').write('pth\\n')\n", marker.display()),
+    )
+    .unwrap();
+    let repo = root.join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::write(repo.join("a.txt"), "a\n").unwrap();
+    for arguments in [&["init", "-q"][..], &["add", "a.txt"][..]] {
+        let setup = Command::new("/usr/bin/git")
+            .args(arguments)
+            .current_dir(&repo)
+            .env_clear()
+            .env("HOME", &root)
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(setup.status.success(), "{setup:?}");
+    }
+    let path = std::env::var_os("PATH").unwrap_or_else(|| OsString::from("/usr/bin:/bin"));
+    let owner = std::env::var_os("HOME").map(PathBuf::from);
+    let rustup = std::env::var_os("RUSTUP_HOME")
+        .or_else(|| owner.map(|owner| owner.join(".rustup").into_os_string()))
+        .unwrap();
+    let toolchain = std::env::var_os("RUSTUP_TOOLCHAIN");
+    let cargo_home = home.join(".cargo");
+    let target = root.join("target");
+    let mut base: Vec<(&str, &OsStr)> = vec![
+        ("HOME", home.as_os_str()),
+        ("PATH", path.as_os_str()),
+        ("RUSTUP_HOME", rustup.as_os_str()),
+        ("CARGO_HOME", cargo_home.as_os_str()),
+        ("CARGO_TARGET_DIR", target.as_os_str()),
+    ];
+    if let Some(toolchain) = &toolchain {
+        base.push(("RUSTUP_TOOLCHAIN", toolchain.as_os_str()));
+    }
+    let env = crate::sandbox::agent_env(&base, std::iter::empty::<(&OsStr, Option<&OsStr>)>())
+        .unwrap();
+    let mut ran = Vec::new();
+    for (program, arguments, folder) in [
+        ("/usr/bin/git", &["status", "--porcelain"][..], &repo),
+        ("/usr/bin/python3", &["-c", "pass"][..], &repo),
+        (
+            env!("CARGO"),
+            &["check", "--offline", "--quiet", "--manifest-path", "Cargo.toml"][..],
+            &probe,
+        ),
+    ] {
+        let output = Command::new(program)
+            .args(arguments)
+            .current_dir(folder)
+            .env_clear()
+            .envs(env.iter().map(|(name, value)| (name, value)))
+            .output()
+            .unwrap();
+        ran.push(format!("{program}: {output:?}"));
+        assert!(output.status.success(), "{ran:?}");
+    }
+    assert!(
+        !marker.exists(),
+        "an agent tool ran what its home config named: {:?}\n{ran:?}",
+        fs::read_to_string(&marker).unwrap_or_default()
+    );
 }

@@ -1070,3 +1070,44 @@ fn an_agent_git_never_opens_a_folder_laid_out_as_a_bare_repository() {
         "an agent's git still finds an ordinary repository from a subfolder"
     );
 }
+
+/// Every agent process, sandboxed or at Full access, reads no global git config and no
+/// Python user site, so a `.gitconfig`, `.config/git/config` or user-site `.pth` file an
+/// agent leaves in its home runs nothing in a later process (RV-DS241-137). A harness can
+/// neither point git at another global config nor turn the user site back on.
+#[test]
+fn every_agent_process_reads_no_global_git_config_and_no_python_user_site() {
+    let pinned = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("PYTHONNOUSERSITE", "1")];
+    let home = OsStr::new("/private/tmp/ca-agent-home");
+    let base = [("HOME", home)];
+    let reopened = [(OsStr::new("PYTHONNOUSERSITE"), Some(OsStr::new("0")))];
+    let env = crazyagent::sandbox::agent_env(&base, reopened).unwrap();
+    for (name, value) in pinned {
+        let values: Vec<&OsStr> = env
+            .iter()
+            .filter(|(known, _)| known == name)
+            .map(|(_, value)| value.as_os_str())
+            .collect();
+        assert_eq!(values, [OsStr::new(value)], "{name}");
+    }
+    let elsewhere = [(
+        OsStr::new("GIT_CONFIG_GLOBAL"),
+        Some(OsStr::new("/private/tmp/ca-agent-home/.gitconfig")),
+    )];
+    assert!(crazyagent::sandbox::agent_env(&base, elsewhere).is_err());
+    let program = Path::new("/usr/bin/true");
+    let none = || std::iter::empty::<(&OsStr, Option<&OsStr>)>();
+    let full = crazyagent::sandbox::unconfined_command(program, &base, none()).unwrap();
+    let confined = agent_command(Path::new("/private/tmp/agent.sb"), program, &base, none())
+        .unwrap();
+    for (level, command) in [("full", &full), ("confined", &confined)] {
+        for (name, value) in pinned {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(known, set)| known == name && set == Some(OsStr::new(value))),
+                "{level}: {name}"
+            );
+        }
+    }
+}

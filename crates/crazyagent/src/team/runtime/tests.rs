@@ -31434,8 +31434,10 @@ fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shar
 /// installed profile a tools-on agent cannot write a zsh, bash or sh startup file there, in
 /// any letter case, compiled or as a link, while it still writes the folders whose scripts
 /// Claude Code and Codex source ahead of each shell command, its shell history and the rest
-/// of its home. The next launch then removes those folders and a startup file an earlier
-/// build let it plant, so the shells that start later in its profile run nothing planted.
+/// of its home. The next launch then removes those folders, its shell history, any other
+/// entry the harness does not keep (RV-DS241-137) and a startup file an earlier build let
+/// it plant, while its transcripts stay, so the shells that start later in its profile run
+/// nothing planted.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
@@ -31499,7 +31501,8 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
              try snapshot sh -c \"mkdir -p '{home}/shell-snapshots' && printf '{plant}\\n' > '{home}/shell-snapshots/snapshot-zsh-1-dummy.sh'\"\n\
              try codex_snapshot sh -c \"mkdir -p '{home}/shell_snapshots' && printf '{plant}\\n' > '{home}/shell_snapshots/dummy.sh'\"\n\
              try history sh -c \"printf ok > '{home}/.zsh_history'\"\n\
-             try control_note sh -c \"printf ok > '{home}/note'\"\n",
+             try control_note sh -c \"printf ok > '{home}/note'\"\n\
+             try control_projects sh -c \"mkdir -p '{home}/projects' && printf ok > '{home}/projects/note'\"\n",
             home = home.display(),
             session = session.display(),
             script = script.display(),
@@ -31591,6 +31594,7 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
         "codex_snapshot",
         "history",
         "control_note",
+        "control_projects",
     ] {
         if exit(attempt).as_deref() != Some("0") {
             problems.push(format!("{attempt} refused: {:?}", exit(attempt)));
@@ -31606,12 +31610,14 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
         "session-env",
         "shell-snapshots",
         "shell_snapshots",
+        ".zsh_history",
+        "note",
     ] {
         if std::fs::symlink_metadata(home.join(entry)).is_ok() {
             problems.push(format!("{entry} kept by the launch"));
         }
     }
-    for entry in [".zsh_history", "note"] {
+    for entry in ["projects/note"] {
         if std::fs::symlink_metadata(home.join(entry)).is_err() {
             problems.push(format!("{entry} removed by the launch"));
         }
@@ -31625,6 +31631,149 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
     assert!(
         problems.is_empty(),
         "an agent left shell code in its own home {} for its next start:\n{}\nattempts:\n{attempts}\nshells: {shells:?}",
+        home.display(),
+        problems.join("\n")
+    );
+}
+
+/// An agent leaves neither cargo's nor git's own config in its home, nor a file flag there,
+/// for its next start (RV-DS241-137, -138). In its installed profile a tools-on agent cannot
+/// write `.cargo/config` or `.cargo/config.toml`, in any letter case, nor make
+/// `.config/git`, nor set a flag on its home or on anything in it, while it still writes a
+/// `.gitconfig`, which no agent git reads, and its own caches. The next launch removes that
+/// `.gitconfig` and keeps the caches.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
+    let fixture = Fixture::new(1);
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    let home = agent_home(&runtime.state, id);
+    let work = plan.working_dir.clone();
+    let tried = work.join("tried.txt");
+    let script = work.join("plant.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "try() {{ name=$1; shift; \"$@\" 2>/dev/null; echo \"$name=$?\" >> {tried}; }}\n\
+             try cargo_config sh -c \"printf '[build]\\n' > '{home}/.cargo/config.toml'\"\n\
+             try cargo_config_case sh -c \"printf '[build]\\n' > '{home}/.CARGO/Config.Toml'\"\n\
+             try cargo_config_old sh -c \"printf '[build]\\n' > '{home}/.cargo/config'\"\n\
+             try git_config sh -c \"mkdir -p '{home}/.config/git' && printf '[core]\\n' > '{home}/.config/git/config'\"\n\
+             try gitconfig sh -c \"printf '[core]\\n' > '{home}/.gitconfig'\"\n\
+             try control_cache sh -c \"mkdir -p '{home}/.cache/tool' && printf ok > '{home}/.cache/tool/data'\"\n\
+             try flag_file /usr/bin/chflags uchg '{home}/.cache/tool/data'\n\
+             try flag_home /usr/bin/chflags uchg '{home}'\n",
+            home = home.display(),
+            tried = tried.display(),
+        ),
+    )
+    .unwrap();
+    let planted = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&plan.sandbox_profile)
+            .arg("/bin/sh")
+            .arg(&script)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
+    let unpinned = crate::spawn_gate::output(
+        Command::new("/usr/bin/chflags")
+            .arg("nouchg")
+            .arg(&home)
+            .arg(home.join(".cache/tool/data"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+    assert!(planted.status.success(), "{planted:?}");
+
+    let context = runtime
+        .context(
+            &fixture.setup.project_id,
+            id,
+            AgentRole::Sub,
+            true,
+            Layout::Linked,
+        )
+        .unwrap();
+    let installed = context.install("claude-code", &home, true).unwrap();
+    drop(installed);
+
+    let exit = |attempt: &str| {
+        attempts
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{attempt}=")))
+            .map(str::to_owned)
+    };
+    let mut problems = Vec::new();
+    for attempt in [
+        "cargo_config",
+        "cargo_config_case",
+        "cargo_config_old",
+        "git_config",
+        "flag_file",
+        "flag_home",
+    ] {
+        if !exit(attempt).is_some_and(|code| code != "0") {
+            problems.push(format!("{attempt} written: {:?}", exit(attempt)));
+        }
+    }
+    for attempt in ["gitconfig", "control_cache"] {
+        if exit(attempt).as_deref() != Some("0") {
+            problems.push(format!("{attempt} refused: {:?}", exit(attempt)));
+        }
+    }
+    for entry in [".gitconfig", ".config", ".cargo/config", ".cargo/config.toml"] {
+        if std::fs::symlink_metadata(home.join(entry)).is_ok() {
+            problems.push(format!("{entry} kept by the launch"));
+        }
+    }
+    if std::fs::read_to_string(home.join(".cache/tool/data")).ok().as_deref() != Some("ok") {
+        problems.push("the agent's cache removed by the launch".to_owned());
+    }
+    assert!(
+        problems.is_empty(),
+        "an agent left config or a flag in its own home {} for its next start:\n{}\nattempts:\n{attempts}\nunpinned: {unpinned:?}",
         home.display(),
         problems.join("\n")
     );
