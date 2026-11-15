@@ -846,9 +846,11 @@ fn the_audit_row_has_sizes_and_outcome_and_no_content() {
         columns,
         [
             "id",
+            "launch",
             "connector",
             "tool",
             "kind",
+            "sent",
             "project",
             "agent",
             "started_ms",
