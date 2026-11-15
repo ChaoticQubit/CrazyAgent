@@ -375,8 +375,8 @@ pub fn at_start(root: &Path, home: Option<&Path>) -> crate::paths::Harnesses {
 /// Checks a harness file, chosen or found, before it is pinned or stored: an absolute path
 /// of at most [`PATH_BYTES_MAX`] bytes with no control characters, to a runnable regular
 /// file, no version-manager shim, outside every folder agents can write ([`AgentSpace`]),
-/// in folders no other user can change, each link of its chain too, whose real file
-/// passes the pin's own file rule.
+/// in folders no other user can change, each link of its chain and each folder a `..` in
+/// it leaves too, whose real file passes the pin's own file rule.
 /// Inputs: the id, the path, the agent space and HOME. Output: the path, links kept.
 pub fn check(
     id: &str,
@@ -429,39 +429,48 @@ pub fn check_file(
     Ok(path.to_path_buf())
 }
 
-/// Every link a path's resolution passes through, file and folder links alike, each named
-/// in its real folder, in the order the resolution meets them, so a chain is judged by
-/// every place one of its links sits and not only by its two ends (RV-DS241-140). Reads at
-/// most [`LINK_HOPS_MAX`] links. Input: an absolute path. Output: the links, or none when
-/// the path does not resolve within that bound.
+/// Every link a path's resolution passes through, file and folder links alike, and every
+/// real folder a `..` in it leaves, each named where it really sits, in the order the
+/// resolution meets them, so a chain is judged by every place an agent could move it from,
+/// not only by its two ends (RV-DS241-140). Reads at most [`LINK_HOPS_MAX`] links. Input:
+/// an absolute path. Output: those places, or none when the path does not resolve within
+/// that bound.
 #[cfg(unix)]
 fn link_hops(path: &Path) -> Option<Vec<PathBuf>> {
     use std::path::Component;
     assert!(path.is_absolute());
     let queue = |pending: &mut Vec<PathBuf>, from: &Path| {
-        pending.extend(from.components().rev().filter_map(|part| match part {
-            Component::Normal(name) => Some(PathBuf::from(name)),
-            Component::ParentDir => Some(PathBuf::from("..")),
-            Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
-        }));
+        for part in from.components().rev() {
+            match part {
+                Component::Normal(name) => pending.push(PathBuf::from(name)),
+                Component::ParentDir => pending.push(PathBuf::from("..")),
+                Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+            }
+        }
     };
     let mut pending = Vec::new();
     queue(&mut pending, path);
     let mut at = PathBuf::from("/");
     let mut hops = Vec::new();
+    let mut links = 0;
     while let Some(part) = pending.pop() {
         if part.as_os_str() == ".." {
+            if at.parent().is_some() {
+                hops.push(at.clone());
+            }
             at.pop();
             continue;
         }
         let next = at.join(&part);
-        if !std::fs::symlink_metadata(&next).ok()?.file_type().is_symlink() {
+        let kind = std::fs::symlink_metadata(&next).ok()?.file_type();
+        if !kind.is_symlink() {
             at = next;
             continue;
         }
-        if hops.len() == LINK_HOPS_MAX {
+        if links == LINK_HOPS_MAX {
             return None;
         }
+        links += 1;
         let target = std::fs::read_link(&next).ok()?;
         hops.push(next);
         if target.is_absolute() {
@@ -469,7 +478,8 @@ fn link_hops(path: &Path) -> Option<Vec<PathBuf>> {
         }
         queue(&mut pending, &target);
     }
-    assert!(hops.len() <= LINK_HOPS_MAX);
+    assert!(links <= LINK_HOPS_MAX);
+    assert!(hops.len() >= links);
     Some(hops)
 }
 
