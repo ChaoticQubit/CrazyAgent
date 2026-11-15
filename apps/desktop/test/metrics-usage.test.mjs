@@ -393,7 +393,7 @@ test("a key, URL or local account says what it has in place of limits, every acc
   const sentence = (name) => engine.match(new RegExp(`pub const ${name}: &str =\\s*"([^"]+)";`, "u"))?.[1];
   const [key, url, local] = ["NO_WINDOW_KEY", "NO_WINDOW_URL", "NO_WINDOW_LOCAL"].map(sentence);
   assert.ok(key && url && local, "the engine names each sentence once");
-  for (const provider of ["chatgpt", "claude", "openrouter", "openai_api", "anthropic_api", "openai_compatible", "local"]) {
+  for (const provider of ["chatgpt", "claude", "gemini", "openrouter", "openai_api", "anthropic_api", "openai_compatible", "local"]) {
     assert.equal(limitsView.noWindow({ method: "subscription", provider }), null, provider);
     for (const method of ["api_key", "url"]) {
       assert.equal(limitsView.noWindow({ method, provider }), provider === "local" ? local : method === "api_key" ? key : url, `${method} ${provider}`);

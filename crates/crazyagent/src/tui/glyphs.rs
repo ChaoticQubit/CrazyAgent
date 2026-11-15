@@ -378,6 +378,8 @@ mod tests {
         assert_eq!(UNICODE.provider("Claude"), "✻");
         assert_eq!(ASCII.provider("Anthropic API"), "A");
         assert_eq!(ASCII.provider("Somewhere new"), "*");
+        assert_eq!(UNICODE.provider("Gemini API"), "✧");
+        assert_eq!(ASCII.provider("Gemini API"), "G");
         assert_eq!(ASCII.section(Section::Pools), "#");
         assert_eq!(UNICODE.spin(4), "⠼");
         assert_eq!(ASCII.spin(5), "/");
