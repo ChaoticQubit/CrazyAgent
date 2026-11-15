@@ -3795,6 +3795,12 @@ fn the_terminal_display_shows_fullscreen_by_default_and_space_flips_it() {
             Some(Notice::plain(format!("Terminals now open {words}.")))
         );
         assert!(display(&view).contains(words), "{}", display(&view));
+        assert_eq!(
+            display(&view).contains("stays"),
+            next == TerminalDisplay::Fullscreen,
+            "{}",
+            display(&view)
+        );
     }
 }
 
