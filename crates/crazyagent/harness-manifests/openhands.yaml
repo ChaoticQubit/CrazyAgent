@@ -10,5 +10,7 @@ account_kinds:
   - "api_key"
   - "open_ai_compatible_url"
   - "local"
+update:
+  guide: "https://docs.openhands.dev/openhands/usage/cli/installation"
 tools_limited: "headless mode always runs its tools"
 cannot_start: "installed, but CrazyAgent cannot start it yet"

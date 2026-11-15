@@ -116,30 +116,6 @@ pub enum Adapter {
     NotReported,
 }
 
-/// One limits adapter entry for every harness in `harnesses::specs()`, by catalog id, for its
-/// managed sign-ins. Kept explicit, with no catch-all, so a harness added to the catalog fails
-/// the row that compares the two lists until it gets its own entry.
-pub const ADAPTERS: [(&str, Adapter); 18] = [
-    ("codex", Adapter::Codex),
-    ("claude-code", Adapter::Claude),
-    ("opencode", Adapter::NotReported),
-    ("gemini-cli", Adapter::NotReported),
-    ("fx", Adapter::NotReported),
-    ("openclaw", Adapter::NotReported),
-    ("pi", Adapter::NotReported),
-    ("rcli", Adapter::NotReported),
-    ("goose", Adapter::NotReported),
-    ("aider", Adapter::NotReported),
-    ("qwen-code", Adapter::NotReported),
-    ("crush", Adapter::NotReported),
-    ("droid", Adapter::NotReported),
-    ("copilot", Adapter::NotReported),
-    ("cline", Adapter::NotReported),
-    ("continue", Adapter::NotReported),
-    ("openhands", Adapter::NotReported),
-    ("kimi", Adapter::NotReported),
-];
-
 /// The kind of limit one free reset clears, when the provider says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -361,15 +337,19 @@ pub struct LimitExtras {
     pub resets_unread: Option<UnreadClass>,
 }
 
-/// The adapter entry of a harness for its managed sign-ins, by catalog id or the name a
-/// model connection stores ("claude" for Claude Code). Input: the harness. Output: the
-/// adapter, or none for a harness outside the catalog.
+/// The limits adapter of a harness for its managed sign-ins, as its manifest names it, by
+/// catalog id or the name a model connection stores ("claude" for Claude Code). A manifest
+/// names the Codex or the Claude reader; a harness whose manifest names none is not
+/// reported. Key adapters are chosen by the account's host, never here.
+/// Input: the harness. Output: the adapter, or none for a harness outside the catalog.
 pub fn adapter(harness: &str) -> Option<Adapter> {
-    let id = crate::harnesses::spec(harness)?.id;
-    ADAPTERS
-        .iter()
-        .find(|(entry, _)| *entry == id)
-        .map(|(_, adapter)| *adapter)
+    use crate::harnesses::manifest::LimitsKind;
+    let harness = crate::harnesses::registry::registry().get(harness)?;
+    Some(match harness.limits() {
+        Some(LimitsKind::Codex) => Adapter::Codex,
+        Some(LimitsKind::Claude) => Adapter::Claude,
+        None => Adapter::NotReported,
+    })
 }
 
 /// The key host a base URL names: https, no user name or password, no port but 443, and a

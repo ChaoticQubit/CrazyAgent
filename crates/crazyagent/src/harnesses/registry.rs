@@ -1,5 +1,7 @@
-use super::HarnessSpec;
-use super::manifest::{self, DriverKind, Manifest, RecordKind, Refused, Role, SubAgents};
+use super::manifest::{
+    self, DriverKind, LimitsKind, Manifest, RecordKind, Refused, Role, SubAgents,
+};
+use super::{AccountKind, HarnessSpec};
 use std::sync::{LazyLock, OnceLock};
 
 /// The most manifests one registry holds.
@@ -116,10 +118,66 @@ impl Harness {
         self.manifest.tools_limited.is_none()
     }
 
-    /// Whether it can run on one account, by the one rule every master, team agent and
-    /// research job uses. Input: the stored connection. Output: the answer.
+    /// Whether a name, as a team plan or a connection stores it, is this harness.
+    /// Input: the name. Output: true for its id or one of its aliases.
+    pub fn named(&self, name: &str) -> bool {
+        self.manifest.id == name || self.manifest.aliases.iter().any(|alias| alias == name)
+    }
+
+    /// The wire formats of the endpoint accounts it runs on, as the manifest lists them.
+    /// Output: the names; one that ends in `*` stands for every format that starts with
+    /// the text before it.
+    pub fn account_protocols(&self) -> &[String] {
+        &self.manifest.account_protocols
+    }
+
+    /// Whether it speaks one wire format of an endpoint account. Input: the format a
+    /// connection stores, such as `openai-chat`. Output: the answer.
+    pub fn speaks(&self, protocol: &str) -> bool {
+        self.manifest
+            .account_protocols
+            .iter()
+            .any(|listed| match listed.strip_suffix('*') {
+                Some(start) => protocol.starts_with(start),
+                None => listed == protocol,
+            })
+    }
+
+    /// Whether it can run on one account (DEC-141 PA-4), the one rule every master, team
+    /// agent and research job uses: a sign-in fits only the harness it was made with, and
+    /// only one that lists subscription accounts; an endpoint account, with a key or
+    /// without, fits every harness that speaks its wire format, whatever harness it was
+    /// stored with. Input: the stored connection. Output: the answer.
     pub fn account_fits(&self, connection: &crate::config::ModelConnection) -> bool {
-        super::account_fits(&self.manifest.id, connection)
+        use crate::config::{ModelAuthentication, ModelEndpoint};
+        let protocol = connection.protocol.as_str();
+        match (&connection.endpoint, &connection.auth) {
+            (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { .. }) => {
+                protocol == "native"
+                    && self
+                        .manifest
+                        .account_kinds
+                        .contains(&AccountKind::Subscription)
+                    && self.named(connection.harness.as_str())
+            }
+            (
+                ModelEndpoint::Http { .. },
+                ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {},
+            ) => self.speaks(protocol),
+            _ => false,
+        }
+    }
+
+    /// The oldest version of the harness CrazyAgent can sign in with (DEC-166).
+    /// Output: the version, or none for a harness CrazyAgent never signs in to.
+    pub fn sign_in_minimum(&self) -> Option<&str> {
+        self.manifest.sign_in_minimum.as_deref()
+    }
+
+    /// How the limits of a sign-in of this harness are read beyond its usage windows.
+    /// Output: the reader, or none when they are not reported.
+    pub fn limits(&self) -> Option<LimitsKind> {
+        self.manifest.limits
     }
 
     /// The folders under the owner's home that hold this harness's own files.
@@ -212,10 +270,9 @@ impl Registry {
     /// Where a harness sits in catalog order. Input: its id or one of its aliases.
     /// Output: the position, or none for a name no manifest has.
     pub fn position(&self, name: &str) -> Option<usize> {
-        self.harnesses.iter().position(|harness| {
-            harness.manifest.id == name
-                || harness.manifest.aliases.iter().any(|alias| alias == name)
-        })
+        self.harnesses
+            .iter()
+            .position(|harness| harness.named(name))
     }
 
     /// Finds a harness. Input: its id or one of its aliases. Output: the harness, or none

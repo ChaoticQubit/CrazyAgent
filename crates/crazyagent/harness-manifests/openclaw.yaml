@@ -10,5 +10,15 @@ account_kinds:
   - "subscription"
   - "api_key"
   - "local"
+update:
+  formulae:
+    - "openclaw-cli"
+  npm:
+    name: "openclaw"
+    package: "openclaw"
+    spec: "openclaw@latest"
+    flags:
+      - "--allow-scripts=openclaw"
+  guide: "https://docs.openclaw.ai/install"
 tools_limited: "tools are set in OpenClaw's own configuration"
 cannot_start: "installed, but CrazyAgent cannot start it yet"

@@ -1,3 +1,4 @@
+mod recipes;
 mod run;
 mod state;
 #[cfg(all(test, unix))]
@@ -15,6 +16,9 @@ pub use state::{
 };
 
 use crate::harnesses;
+use recipes::{Brew, BrewKind, Npm, SelfUpdate, recipe};
+#[cfg(all(test, unix))]
+use recipes::{Recipe, install_names, table_names};
 #[cfg(all(test, unix))]
 use run::read_pointer;
 use serde::{Deserialize, Serialize};
@@ -64,7 +68,7 @@ const _: () = assert!(VERSION_PARTS_MAX * 2 <= VERSION_BYTES_MAX);
 
 /// How a harness on this machine was installed, which decides the one updater the engine may
 /// run for it. Built from the real path of its PATH entry only; nothing is executed to tell.
-/// The names inside are always names from the compiled table.
+/// The names inside are always names from the recipes of the bundled harness manifests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Method {
@@ -215,7 +219,7 @@ pub struct NpmInstall {
 }
 
 /// One command the engine may start: an absolute program, arguments that are all strings of
-/// the compiled table, and the folders that go first on the child's search path. `prefix`
+/// the recipes read from the bundled harness manifests, and the folders that go first on the child's search path. `prefix`
 /// is set for npm alone: the prefix the harness was found in, which the runner pins as
 /// npm's global prefix so a prefix in the owner's npmrc never moves the install.
 /// Nothing in it ever comes from a file, the environment or the wire.
@@ -239,337 +243,13 @@ pub enum PointerFormat {
 }
 
 /// A vendor's public release pointer: the fixed HTTPS address, how its reply names the
-/// version and the most bytes a reply may have. Only the compiled table holds any.
+/// version and the most bytes a reply may have. Only the `update` block of a bundled harness
+/// manifest holds any.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pointer {
     pub url: &'static str,
     pub format: PointerFormat,
     pub bytes_max: u64,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BrewKind {
-    Formula,
-    Cask,
-}
-
-struct Brew {
-    kind: BrewKind,
-    name: &'static str,
-    install: bool,
-}
-
-struct Npm {
-    scope: &'static str,
-    name: &'static str,
-    package: &'static str,
-    spec: &'static str,
-    flags: &'static [&'static str],
-}
-
-struct SelfUpdate {
-    root: &'static str,
-    args: &'static [&'static str],
-    pointer: Pointer,
-}
-
-struct Recipe {
-    id: &'static str,
-    own: Option<SelfUpdate>,
-    brews: &'static [Brew],
-    npm: Option<Npm>,
-    guide: &'static str,
-}
-
-/// A Homebrew formula the app may install and update. Input: its name in homebrew/core.
-/// Output: the table entry.
-const fn formula(name: &'static str) -> Brew {
-    Brew {
-        kind: BrewKind::Formula,
-        name,
-        install: true,
-    }
-}
-
-/// A Homebrew cask the app may install and update. Input: its token in homebrew/cask.
-/// Output: the table entry.
-const fn cask(name: &'static str) -> Brew {
-    Brew {
-        kind: BrewKind::Cask,
-        name,
-        install: true,
-    }
-}
-
-/// A Homebrew name the app recognizes and updates but never installs (deprecated, or a
-/// second channel). Inputs: the kind and the name. Output: the table entry.
-const fn known(kind: BrewKind, name: &'static str) -> Brew {
-    Brew {
-        kind,
-        name,
-        install: false,
-    }
-}
-
-/// An npm package the app may install and update. Inputs: the scope ("" for none), the
-/// name inside it, the full package name, the install spec and the vendor's documented
-/// flags. Output: the table entry.
-const fn npm(
-    scope: &'static str,
-    name: &'static str,
-    package: &'static str,
-    spec: &'static str,
-    flags: &'static [&'static str],
-) -> Option<Npm> {
-    assert!(flags.len() <= NPM_FLAGS_MAX);
-    Some(Npm {
-        scope,
-        name,
-        package,
-        spec,
-        flags,
-    })
-}
-
-const CLAUDE_POINTER: Pointer = Pointer {
-    url: "https://downloads.claude.ai/claude-code-releases/latest",
-    format: PointerFormat::PlainVersion,
-    bytes_max: 64,
-};
-const CODEX_POINTER: Pointer = Pointer {
-    url: "https://releases.openai.com/codex/channels/latest",
-    format: PointerFormat::JsonTag {
-        field: "tag_name",
-        prefix: "rust-v",
-    },
-    bytes_max: POINTER_BYTES_MAX,
-};
-const _: () = assert!(
-    CLAUDE_POINTER.bytes_max <= POINTER_BYTES_MAX && CODEX_POINTER.bytes_max <= POINTER_BYTES_MAX
-);
-
-static RECIPES: [Recipe; 17] = [
-    Recipe {
-        id: "claude-code",
-        own: Some(SelfUpdate {
-            root: ".local/share/claude/versions",
-            args: &["update"],
-            pointer: CLAUDE_POINTER,
-        }),
-        brews: &[
-            cask("claude-code"),
-            known(BrewKind::Cask, "claude-code@latest"),
-        ],
-        npm: npm(
-            "@anthropic-ai",
-            "claude-code",
-            "@anthropic-ai/claude-code",
-            "@anthropic-ai/claude-code@latest",
-            &[],
-        ),
-        guide: "https://code.claude.com/docs/en/setup",
-    },
-    Recipe {
-        id: "codex",
-        own: Some(SelfUpdate {
-            root: ".codex/packages/standalone",
-            args: &["update"],
-            pointer: CODEX_POINTER,
-        }),
-        brews: &[cask("codex")],
-        npm: npm("@openai", "codex", "@openai/codex", "@openai/codex", &[]),
-        guide: "https://developers.openai.com/codex/cli",
-    },
-    Recipe {
-        id: "opencode",
-        own: None,
-        brews: &[formula("opencode")],
-        npm: npm("@opencode", "cli", "@opencode/cli", "@opencode/cli", &[]),
-        guide: "https://opencode.ai/docs/",
-    },
-    Recipe {
-        id: "gemini-cli",
-        own: None,
-        brews: &[known(BrewKind::Formula, "gemini-cli")],
-        npm: npm(
-            "@google",
-            "gemini-cli",
-            "@google/gemini-cli",
-            "@google/gemini-cli",
-            &[],
-        ),
-        guide: "https://github.com/google-gemini/gemini-cli#readme",
-    },
-    Recipe {
-        id: "fx",
-        own: None,
-        brews: &[],
-        npm: None,
-        guide: "https://vercel.com/docs/ai-gateway/coding-agents/fx",
-    },
-    Recipe {
-        id: "openclaw",
-        own: None,
-        brews: &[formula("openclaw-cli")],
-        npm: npm(
-            "",
-            "openclaw",
-            "openclaw",
-            "openclaw@latest",
-            &["--allow-scripts=openclaw"],
-        ),
-        guide: "https://docs.openclaw.ai/install",
-    },
-    Recipe {
-        id: "pi",
-        own: None,
-        brews: &[formula("pi-coding-agent")],
-        npm: npm(
-            "@earendil-works",
-            "pi-coding-agent",
-            "@earendil-works/pi-coding-agent",
-            "@earendil-works/pi-coding-agent",
-            &["--ignore-scripts"],
-        ),
-        guide: "https://pi.dev/",
-    },
-    Recipe {
-        id: "goose",
-        own: None,
-        brews: &[formula("block-goose-cli")],
-        npm: None,
-        guide: "https://goose-docs.ai/docs/getting-started/installation",
-    },
-    Recipe {
-        id: "aider",
-        own: None,
-        brews: &[formula("aider")],
-        npm: None,
-        guide: "https://aider.chat/docs/install.html",
-    },
-    Recipe {
-        id: "qwen-code",
-        own: None,
-        brews: &[formula("qwen-code")],
-        npm: npm(
-            "@qwen-code",
-            "qwen-code",
-            "@qwen-code/qwen-code",
-            "@qwen-code/qwen-code@latest",
-            &[],
-        ),
-        guide: "https://github.com/QwenLM/qwen-code#readme",
-    },
-    Recipe {
-        id: "crush",
-        own: None,
-        brews: &[],
-        npm: npm(
-            "@charmland",
-            "crush",
-            "@charmland/crush",
-            "@charmland/crush",
-            &[],
-        ),
-        guide: "https://github.com/charmbracelet/crush#readme",
-    },
-    Recipe {
-        id: "droid",
-        own: None,
-        brews: &[cask("droid")],
-        npm: npm("", "droid", "droid", "droid", &[]),
-        guide: "https://docs.factory.ai/cli/getting-started/quickstart",
-    },
-    Recipe {
-        id: "copilot",
-        own: None,
-        brews: &[
-            cask("copilot-cli"),
-            known(BrewKind::Cask, "copilot-cli@prerelease"),
-        ],
-        npm: npm(
-            "@github",
-            "copilot",
-            "@github/copilot",
-            "@github/copilot",
-            &[],
-        ),
-        guide: "https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli",
-    },
-    Recipe {
-        id: "cline",
-        own: None,
-        brews: &[known(BrewKind::Formula, "cline")],
-        npm: npm("", "cline", "cline", "cline", &[]),
-        guide: "https://docs.cline.bot/usage/cli-overview",
-    },
-    Recipe {
-        id: "continue",
-        own: None,
-        brews: &[],
-        npm: npm(
-            "@continuedev",
-            "cli",
-            "@continuedev/cli",
-            "@continuedev/cli",
-            &[],
-        ),
-        guide: "https://github.com/continuedev/continue/tree/main/extensions/cli",
-    },
-    Recipe {
-        id: "openhands",
-        own: None,
-        brews: &[],
-        npm: None,
-        guide: "https://docs.openhands.dev/openhands/usage/cli/installation",
-    },
-    Recipe {
-        id: "kimi",
-        own: None,
-        brews: &[formula("kimi-code"), known(BrewKind::Formula, "kimi-cli")],
-        npm: npm(
-            "@moonshot-ai",
-            "kimi-code",
-            "@moonshot-ai/kimi-code",
-            "@moonshot-ai/kimi-code",
-            &[],
-        ),
-        guide: "https://moonshotai.github.io/kimi-code/en/guides/getting-started",
-    },
-];
-const _: () = assert!(RECIPES.len() == 17);
-
-/// Every package name, install spec and flag in the table, for the tests that hold the table
-/// to plain names. Output: the strings, in table order.
-#[cfg(all(test, unix))]
-fn table_names() -> Vec<&'static str> {
-    let mut names = Vec::new();
-    for recipe in &RECIPES {
-        names.extend(recipe.brews.iter().map(|brew| brew.name));
-        if let Some(npm) = &recipe.npm {
-            names.extend([npm.package, npm.spec]);
-            names.extend(npm.flags);
-        }
-    }
-    names
-}
-
-/// The Homebrew names of one harness the app may install, for the test that holds every row
-/// to at most one. Input: a catalog id. Output: the names, empty without a recipe.
-#[cfg(all(test, unix))]
-fn install_names(id: &str) -> Vec<&'static str> {
-    recipe(id).map_or(Vec::new(), |recipe| {
-        recipe
-            .brews
-            .iter()
-            .filter(|brew| brew.install)
-            .map(|brew| brew.name)
-            .collect()
-    })
-}
-
-fn recipe(id: &str) -> Option<&'static Recipe> {
-    RECIPES.iter().find(|recipe| recipe.id == id)
 }
 
 const fn flag(kind: BrewKind) -> &'static str {

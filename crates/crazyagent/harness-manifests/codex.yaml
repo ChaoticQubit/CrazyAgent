@@ -11,11 +11,37 @@ account_kinds:
   - "api_key"
   - "open_ai_compatible_url"
   - "local"
+account_protocols:
+  - "openai*"
+limits: "codex"
+version:
+  sign_in_minimum: "0.56.0"
+update:
+  own:
+    root: ".codex/packages/standalone"
+    args:
+      - "update"
+    pointer:
+      url: "https://releases.openai.com/codex/channels/latest"
+      format: "json-tag"
+      field: "tag_name"
+      prefix: "rust-v"
+  casks:
+    - "codex"
+  npm:
+    scope: "@openai"
+    name: "codex"
+    package: "@openai/codex"
+    spec: "@openai/codex"
+  guide: "https://developers.openai.com/codex/cli"
 roles:
   - "agent"
   - "master"
   - "research"
 sub_agents: "threads"
+home:
+  owner_folders:
+    - ".codex"
 piped:
   driver: "codex-app-server"
 terminal:

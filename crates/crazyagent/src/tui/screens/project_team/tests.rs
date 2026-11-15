@@ -1890,6 +1890,11 @@ fn entry(
         account_kinds: Vec::new(),
         team,
         aliases: Vec::new(),
+        terminal: false,
+        master: false,
+        research: false,
+        sub_agents: crate::harnesses::manifest::SubAgents::App,
+        account_protocols: Vec::new(),
     }
 }
 
