@@ -652,38 +652,44 @@ type Register = fn(
 ) -> Result<(), crazyagent::engine::EngineError>;
 
 /// Registers the harness executables of one start. An explicit flag that cannot be
-/// registered stops the engine; a chosen or found one is dropped with a note on stderr
-/// naming the refusal, and Check again reports it. Inputs: the service, the harnesses and
-/// which were not flags. Output: Ok with the harnesses left registered, or the failure.
+/// registered stops the engine; a chosen or found one is pinned only once the real file
+/// pinned passes the start checks (RV-DS241-140), else dropped with a note on stderr naming
+/// the refusal, and Check again reports it. Inputs: the service, the harnesses and which
+/// were not flags. Output: Ok with the harnesses left registered, or the failure.
 fn register_harnesses(
     service: &mut crazyagent::engine::bootstrap::EngineService,
     harnesses: &mut crazyagent::paths::Harnesses,
     found_on_path: [bool; 3],
 ) -> Result<(), String> {
-    let slots: [(&str, &mut Option<PathBuf>, Register, bool); 3] = [
+    use crazyagent::engine::bootstrap::EngineService;
+    let slots: [(&str, &mut Option<PathBuf>, Register, Register, bool); 3] = [
         (
             "codex",
             &mut harnesses.codex,
-            crazyagent::engine::bootstrap::EngineService::register_codex_executable,
+            EngineService::register_codex_executable,
+            EngineService::register_found_codex_executable,
             found_on_path[0],
         ),
         (
             "claude",
             &mut harnesses.claude,
-            crazyagent::engine::bootstrap::EngineService::register_claude_executable,
+            EngineService::register_claude_executable,
+            EngineService::register_found_claude_executable,
             found_on_path[1],
         ),
         (
             crazyagent::paths::RCLI_EXECUTABLE,
             &mut harnesses.rcli,
-            crazyagent::engine::bootstrap::EngineService::register_rcli_executable,
+            EngineService::register_rcli_executable,
+            EngineService::register_rcli_executable,
             found_on_path[2],
         ),
     ];
-    for (name, slot, register, optional) in slots {
+    for (name, slot, told, found, optional) in slots {
         let Some(executable) = slot.clone() else {
             continue;
         };
+        let register = if optional { found } else { told };
         if let Err(error) = register(service, &executable) {
             if !optional {
                 return Err(error.to_string());
@@ -1409,5 +1415,58 @@ mod tests {
             arguments.extend(options.into_iter().map(OsString::from));
             assert!(engine_options(&arguments).is_err());
         }
+    }
+
+    /// RV-DS241-140 at engine start: a harness the owner chose or the search found is
+    /// checked well before it is pinned, so a link in its chain can move in between. Such a
+    /// harness is pinned only once the real file pinned passes the start checks, while a
+    /// flag's file stays as the caller placed it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn engine_start_pins_a_chosen_or_found_harness_only_when_its_real_file_passes() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let made = tempfile::Builder::new()
+            .prefix("ca-start-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = made.path();
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.join("global.toml");
+        std::fs::write(&global, b"version = 1\ntimeout_ms = 2000\n").unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service =
+            crazyagent::engine::bootstrap::EngineService::start_with_settings_sources(
+                root,
+                "e.sock",
+                &global,
+                &root.join("project.toml"),
+                &stopped,
+            )
+            .await
+            .unwrap();
+        let owner = root.join("owner");
+        let planted = root.join("work/.crazyagent/agents/a1/bin");
+        std::fs::create_dir_all(&owner).unwrap();
+        std::fs::create_dir_all(&planted).unwrap();
+        let entries = ["codex", "claude"].map(|name| {
+            let real = planted.join(name);
+            std::fs::write(&real, b"agent-harness").unwrap();
+            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let middle = planted.join(format!("{name}-middle"));
+            symlink(&real, &middle).unwrap();
+            let entry = owner.join(name);
+            symlink(&middle, &entry).unwrap();
+            entry
+        });
+        let mut harnesses = crazyagent::paths::Harnesses {
+            codex: Some(entries[0].clone()),
+            claude: Some(entries[1].clone()),
+            rcli: None,
+        };
+        register_harnesses(&mut service, &mut harnesses, [false, true, true]).unwrap();
+        assert_eq!(harnesses.codex.as_deref(), Some(entries[0].as_path()));
+        assert_eq!(harnesses.claude, None);
+        service.shutdown().await.unwrap();
     }
 }

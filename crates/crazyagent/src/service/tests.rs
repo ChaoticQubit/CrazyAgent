@@ -1992,6 +1992,45 @@ fn a_file_directly_in_a_sticky_group_store_passes_and_an_unsticky_parent_does_no
     );
 }
 
+/// RV-DS241-140 r4: on macOS the daemon group, whose only member is root, is trusted like
+/// wheel and admin, so /private/var/run (root:daemon 775), where nix-darwin's /run link
+/// leads, passes as a part of a harness chain; the same folder writable by staff, which every
+/// user is in, stays changeable.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_only_root_and_the_daemon_group_can_write_passes_on_macos() {
+    const ME: u32 = 501;
+    const DAEMON: u32 = 1;
+    const STAFF: u32 = 20;
+    let found = |owner, group, mode, folder, link| Part::Found {
+        owner,
+        group,
+        mode,
+        folder,
+        link,
+    };
+    let system = found(0, 0, 0o40755, true, false);
+    let current = found(0, 0, 0o120755, false, true);
+    for open_stores in [false, true] {
+        let run = [
+            current,
+            found(0, DAEMON, 0o40775, true, false),
+            system,
+            system,
+            system,
+        ];
+        assert_eq!(first_changeable_part(&run, ME, open_stores), None);
+        let staff = [
+            current,
+            found(0, STAFF, 0o40775, true, false),
+            system,
+            system,
+            system,
+        ];
+        assert_eq!(first_changeable_part(&staff, ME, open_stores), Some(1));
+    }
+}
+
 /// R2-L1: a file a group other than root's can write counts as changeable, like a folder,
 /// for the engine service and for the tools the resolver runs: a 0775 staff file in this
 /// user's 0755 folder is refused, 0755 or a root-group 0775 passes, and a link's own mode is
@@ -2143,7 +2182,7 @@ fn a_part_an_access_list_opens_to_others_is_changeable() {
 
 /// RV-DS241-18: a macOS `ls -lde` listing names an entry changeable by others when an
 /// allow entry gives write, append, add or delete rights, or rights over the entry's own
-/// attributes, security or owner, to anyone but this user, root, wheel or admin; deny
+/// attributes, security or owner, to anyone but this user, root, wheel, daemon or admin; deny
 /// entries and read rights never do, and a listing it cannot read fails closed.
 #[cfg(unix)]
 #[test]
@@ -2186,6 +2225,7 @@ fn an_access_listing_that_lets_others_change_an_entry_is_shared() {
         "user:me allow write,append,delete",
         "user:root allow write",
         "group:wheel allow add_file",
+        "group:daemon allow add_file",
         "group:admin allow add_file",
         "user:other allow read,list,search,readattr,readextattr,readsecurity,execute",
         "group:staff inherited deny add_file,delete_child",

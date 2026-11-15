@@ -19,7 +19,7 @@ const CHANGE_RIGHTS: [&str; 10] = [
 /// The macOS principals that may change an entry without making it changeable by others:
 /// root and the groups whose members can already act as root, as `trusted_group` reads them.
 #[cfg(any(test, target_os = "macos"))]
-const TRUSTED_PRINCIPALS: [&str; 3] = ["user:root", "group:wheel", "group:admin"];
+const TRUSTED_PRINCIPALS: [&str; 4] = ["user:root", "group:wheel", "group:daemon", "group:admin"];
 
 /// The longest a macOS access listing may take.
 #[cfg(target_os = "macos")]
