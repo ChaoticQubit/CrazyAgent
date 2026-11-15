@@ -179,7 +179,14 @@ pub(crate) enum Job {
     ),
     HomeAddSettle(RequestId, oneshot::Sender<Result<(), EngineError>>),
     HomeAddEnded(oneshot::Sender<Result<Option<projects_home::AddEnded>, EngineError>>),
-    HomeAddForget(RequestId, oneshot::Sender<Result<(), EngineError>>),
+    HomeProjectMoveEnded(oneshot::Sender<Result<Option<projects_home::MoveEnded>, EngineError>>),
+    HomeJobForget(RequestId, oneshot::Sender<Result<(), EngineError>>),
+    HomeProjectMoveCheck(
+        Admission,
+        ProjectId,
+        crate::projects_home::AddMode,
+        oneshot::Sender<Result<String, EngineError>>,
+    ),
     HomeMovePlan(
         Admission,
         Cursor,
@@ -662,11 +669,22 @@ impl Storage {
                         Job::HomeAddEnded(reply) => {
                             let _ = reply.send(projects_home::add_ended(&connection));
                         }
-                        Job::HomeAddForget(request, reply) => {
+                        Job::HomeProjectMoveEnded(reply) => {
+                            let _ = reply.send(projects_home::move_ended(&connection));
+                        }
+                        Job::HomeJobForget(request, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::add_forget(&connection, &request)
+                                projects_home::job_forget(&connection, &request)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeProjectMoveCheck(admission, project, mode, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::project_move_check(&mut connection, &admission, &project, mode)
                             };
                             let _ = reply.send(result);
                         }

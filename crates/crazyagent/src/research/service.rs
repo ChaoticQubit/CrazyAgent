@@ -1204,7 +1204,10 @@ mod tests {
             assert!(std::fs::symlink_metadata(profile).is_err(), "{name}");
         }
         for name in kept {
-            assert!(state.join("agents").join(name).join("home").is_dir(), "{name}");
+            assert!(
+                state.join("agents").join(name).join("home").is_dir(),
+                "{name}"
+            );
             let profile = state.join("profiles").join(format!("{name}.sb"));
             assert!(profile.is_file(), "{name}");
         }

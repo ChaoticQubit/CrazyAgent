@@ -52,9 +52,10 @@ struct PackRecord {
     hooks: Vec<KeptHook>,
 }
 
-/// A hook of a pin a new one replaced, with what it runs (event, matcher and command) and
-/// how the owner switched it, everywhere or in some projects, kept until setup adds the new
-/// pin's hooks ([`keep_hooks`]). A row saved before what it runs was kept has none of it.
+/// A hook of a pin a new one replaced, or of an item removed while its entry stays, with what
+/// it runs (event, matcher and command) and how the owner switched it, everywhere or in some
+/// projects, kept until setup adds the entry's hooks again ([`keep_hooks`]). A row saved
+/// before what it runs was kept has none of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct KeptHook {
@@ -180,11 +181,23 @@ fn taken(problem: EngineError) -> EngineError {
     }
 }
 
+/// The hooks following one skill or MCP server that the owner switched off, everywhere or
+/// in some projects, read before the item and its hooks are removed ([`KeptHook`]). Inputs:
+/// the transaction and the item id. Output: those hooks; one left on everywhere is not kept.
+fn hooks_off(tx: &Transaction<'_>, item: &str) -> Result<Vec<KeptHook>, EngineError> {
+    let hooks: Vec<KeptHook> = plugins::following_hooks(tx, item)?
+        .into_iter()
+        .filter(|hook| !hook.enabled || !hook.projects.is_empty())
+        .collect();
+    assert!(hooks.len() <= crate::plugins::HOOKS_PER_SCOPE_MAX);
+    Ok(hooks)
+}
+
 /// Writes the next default-pack version when an installed entry holds this plugin, so a
-/// change made on the plugin screen refuses a pack screen opened before it. A removal also
-/// takes the item out of the entry's row, and a row left with nothing is deleted, so the
-/// entry reads not installed and setup installs it again. Inputs: the transaction, the
-/// plugin id and whether it is being removed. Output: Ok, or a store failure.
+/// change made on the plugin screen refuses a pack screen opened before it. A removal takes
+/// the item out of the entry's row: an emptied row is deleted, so setup installs the entry
+/// again, and a row that stays keeps the removed item's switched-off hooks ([`KeptHook`]).
+/// Inputs: the transaction, the plugin id and whether it is removed. Output: any store failure.
 pub(super) fn plugin_changed(
     tx: &Transaction<'_>,
     id: &str,
@@ -214,6 +227,10 @@ pub(super) fn plugin_changed(
                     tx.execute("DELETE FROM setup_pack WHERE id=?1", [&record.id])
                         .map_err(error)?;
                 } else {
+                    let hooks = hooks_off(tx, id)?;
+                    if !hooks.is_empty() {
+                        record.hooks = hooks;
+                    }
                     save_pack(tx, &record)?;
                 }
             }
@@ -304,8 +321,9 @@ struct Kept {
 /// Reads what the owner set on an older pin, then removes its skills, and its server unless
 /// the new pin names the same server, which is reused so its secrets, switches and on/off
 /// state stay. Every live hook is kept with what it runs and its switches, or the old row's
-/// when none were seeded while the entry was off. Inputs: the transaction, engine root, old
-/// row, new server and the moved-aside folders. Output: what the new pin keeps.
+/// when none is live: the entry was off, or the item they followed was removed. Inputs: the
+/// transaction, engine root, old row, new server and the moved-aside folders. Output: what
+/// the new pin keeps.
 #[cfg(unix)]
 fn carry(
     tx: &Transaction<'_>,
@@ -863,10 +881,10 @@ fn seed_hooks(
     }
 }
 
-/// Switches the hooks setup just added off as the owner had them on the pin they replace
-/// ([`KeptHook`]), each by the kept hooks [`kept_for`] gives it, everywhere or in the same
-/// projects, then forgets what was kept. Inputs: the transaction, engine root, the entry's
-/// row and the added hooks. Output: any failure.
+/// Switches the hooks setup just added off as the owner had them before they went with a
+/// replaced pin or a removed item ([`KeptHook`]), each by the kept hooks [`kept_for`] gives
+/// it, everywhere or in the same projects, then forgets what was kept. Inputs: the
+/// transaction, engine root, the entry's row and the added hooks. Output: any failure.
 #[cfg(unix)]
 fn keep_hooks(
     tx: &Transaction<'_>,

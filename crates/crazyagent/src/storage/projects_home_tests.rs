@@ -425,7 +425,7 @@ fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
         .unwrap();
     assert_eq!(rows, 1, "only the newest end is kept");
     let add_3 = RequestId::new("add-3").unwrap();
-    projects_home::add_forget(&connection, &add_3).unwrap();
+    projects_home::job_forget(&connection, &add_3).unwrap();
     assert_eq!(projects_home::add_ended(&connection).unwrap(), None);
 }
 

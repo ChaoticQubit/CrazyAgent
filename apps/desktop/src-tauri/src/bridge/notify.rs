@@ -116,11 +116,11 @@ pub fn notice(project: Option<&str>, question: &Question) -> Notice {
     Notice { title, body }
 }
 
-/// The notification text for an intake job that ended, built from the engine's view: the
-/// folder's name and what happened in plain words, never an engine code. Input: the job.
-/// Output: the notice, or None while the job still runs.
+/// The notification text for a job that ended, built from the engine's view: the folder's
+/// name and what happened to an add or a project move in plain words, never an engine code.
+/// Input: the job. Output: the notice, or None while the job still runs.
 pub fn intake_notice(job: &JobView) -> Option<Notice> {
-    use crazyagent::projects_home::job::{JobState, Phase};
+    use crazyagent::projects_home::job::{JobKind, JobState, Phase};
     let folder = std::path::Path::new(&job.source)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -133,8 +133,11 @@ pub fn intake_notice(job: &JobView) -> Option<Notice> {
         crazyagent::projects_home::AddMode::Move => "moved",
         crazyagent::projects_home::AddMode::Copy => "copied",
     };
+    let moving = job.kind == JobKind::MoveProject;
+    let verb = if moving { "Moving" } else { "Adding" };
     let landed = format!("{name} is in your projects folder");
     let (title, body) = match &job.state {
+        JobState::Done if moving => (landed, "Start the team again from Team.".to_owned()),
         JobState::Done => (landed, "Set it up from Home.".to_owned()),
         JobState::Failed {
             phase: Phase::Clearing,
@@ -144,18 +147,21 @@ pub fn intake_notice(job: &JobView) -> Option<Notice> {
             "Part of its old place could not be removed. Check it on Home.".to_owned(),
         ),
         JobState::Failed { .. } => (
-            format!("Adding {name} failed"),
+            format!("{verb} {name} failed"),
             "Open Home in CrazyAgent to see why.".to_owned(),
         ),
         JobState::Cancelled { .. } => (
-            format!("Adding {name} stopped"),
+            format!("{verb} {name} stopped"),
             "Nothing was moved or copied.".to_owned(),
         ),
         JobState::NeedsAnswer { .. } => (
             format!("{name} needs your answer"),
             format!("Open Home in CrazyAgent to decide before it is {way}."),
         ),
-        JobState::Downloading { .. } | JobState::Copying { .. } | JobState::Clearing => {
+        JobState::Downloading { .. }
+        | JobState::Stopping { .. }
+        | JobState::Copying { .. }
+        | JobState::Clearing => {
             return None;
         }
     };
@@ -587,6 +593,8 @@ mod tests {
     fn job(state: crazyagent::projects_home::job::JobState) -> JobView {
         JobView {
             id: crazyagent::protocol::RequestId::new("add-1").unwrap(),
+            kind: crazyagent::projects_home::job::JobKind::Add,
+            project_id: None,
             source: "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop".into(),
             mode: crazyagent::projects_home::AddMode::Move,
             overrides: Vec::new(),
@@ -649,6 +657,50 @@ mod tests {
             }),
             None
         );
+    }
+
+    /// DEC-177: an ended project move's notice says the project's folder is in the projects
+    /// folder and the team starts again from Team, and a stopped or failed move says Moving.
+    #[test]
+    fn an_ended_project_move_notice_speaks_of_the_move() {
+        use crazyagent::projects_home::job::{JobKind, JobState, Phase};
+        let moved = |state| {
+            let view = JobView {
+                kind: JobKind::MoveProject,
+                project_id: Some(crazyagent::protocol::ProjectId::new("reading").unwrap()),
+                source: "/Users/mira/Code/reading-list".into(),
+                ..job(state)
+            };
+            intake_notice(&view).map(|notice| (notice.title, notice.body))
+        };
+        let pair = |title: &str, body: &str| Some((title.to_owned(), body.to_owned()));
+        assert_eq!(
+            moved(JobState::Done),
+            pair(
+                "reading-list is in your projects folder",
+                "Start the team again from Team."
+            )
+        );
+        assert_eq!(
+            moved(JobState::Cancelled {
+                phase: Phase::Stopping
+            }),
+            pair(
+                "Moving reading-list stopped",
+                "Nothing was moved or copied."
+            )
+        );
+        assert_eq!(
+            moved(JobState::Failed {
+                code: "move_project_busy".into(),
+                phase: Phase::Stopping
+            }),
+            pair(
+                "Moving reading-list failed",
+                "Open Home in CrazyAgent to see why."
+            )
+        );
+        assert_eq!(moved(JobState::Stopping { agents_left: 1 }), None);
     }
 
     /// A job's notification is claimed once, shares the bound with questions, and a click on

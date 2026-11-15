@@ -3,7 +3,8 @@ use super::*;
 fn job() -> IntakeJob {
     IntakeJob::new(
         RequestId::new("add-1").unwrap(),
-        "owner".into(),
+        JobKind::Add,
+        None,
         "/Users/someone/Library/Mobile Documents/com~apple~CloudDocs/site".into(),
         AddMode::Move,
         Vec::new(),
@@ -125,7 +126,8 @@ fn a_job_ends_once() {
 fn a_view_shows_the_overrides_the_job_goes_past_so_an_answer_keeps_them() {
     let job = IntakeJob::new(
         RequestId::new("add-2").unwrap(),
-        "owner".into(),
+        JobKind::Add,
+        None,
         "/Users/someone/site".into(),
         AddMode::Copy,
         vec![AddOverride::TooLarge],
@@ -153,7 +155,14 @@ fn a_view_crosses_the_wire_as_tagged_json() {
 fn a_job_an_engine_stop_cut_short_restores_as_the_disk_read_it() {
     let restored = |ended: &str| {
         let site = "/Users/someone/site".to_owned();
-        IntakeJob::restored(id_of("add-9"), "owner".into(), site, AddMode::Move, ended)
+        IntakeJob::restored(
+            id_of("add-9"),
+            JobKind::Add,
+            None,
+            site,
+            AddMode::Move,
+            ended,
+        )
     };
     assert_eq!(restored("done").view().state, JobState::Done);
     let left = JobState::Failed {
@@ -173,4 +182,67 @@ fn a_job_an_engine_stop_cut_short_restores_as_the_disk_read_it() {
 
 fn id_of(text: &str) -> RequestId {
     RequestId::new(text).unwrap()
+}
+
+fn move_job() -> IntakeJob {
+    IntakeJob::new(
+        id_of("move-1"),
+        JobKind::MoveProject,
+        Some(ProjectId::new("reading").unwrap()),
+        "/Users/someone/Code/reading-list".into(),
+        AddMode::Move,
+        Vec::new(),
+    )
+}
+
+#[test]
+fn a_move_job_reads_its_agents_stopping_and_a_stop_there_cancels_it_in_that_phase() {
+    let job = move_job();
+    job.copying();
+    job.tally().wait_for(2);
+    assert_eq!(job.view().state, JobState::Stopping { agents_left: 2 });
+    job.tally().wait_for(1);
+    assert_eq!(job.view().state, JobState::Stopping { agents_left: 1 });
+    job.stop();
+    job.end(failure("home_add_cancelled"));
+    let cancelled = JobState::Cancelled {
+        phase: Phase::Stopping,
+    };
+    assert_eq!(job.view().state, cancelled);
+    let busy = move_job();
+    busy.copying();
+    busy.tally().wait_for(1);
+    busy.end(failure("move_project_busy"));
+    let failed = JobState::Failed {
+        code: "move_project_busy".into(),
+        phase: Phase::Stopping,
+    };
+    assert_eq!(busy.view().state, failed);
+}
+
+#[test]
+fn a_move_job_copies_once_its_agents_stopped_and_names_its_kind_and_project() {
+    let job = move_job();
+    job.copying();
+    job.tally().wait_for(1);
+    job.tally().waited();
+    assert_eq!(
+        job.view().state,
+        JobState::Copying {
+            copied: 0,
+            checked: 0
+        }
+    );
+    let view = job.view();
+    assert_eq!(view.kind, JobKind::MoveProject);
+    assert_eq!(view.project_id, Some(ProjectId::new("reading").unwrap()));
+    let subject = JobSubject::MoveProject {
+        project_id: ProjectId::new("reading").unwrap(),
+    };
+    assert_eq!(view.subject(), Some(subject));
+    assert_eq!(job.interrupted(), "move_project_interrupted");
+    assert_eq!(self::job().interrupted(), "home_add_interrupted");
+    let text = serde_json::to_string(&view).unwrap();
+    assert!(text.contains(r#""kind":"move_project""#), "{text}");
+    assert!(text.contains(r#""project_id":"reading""#), "{text}");
 }

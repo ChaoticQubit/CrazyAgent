@@ -205,13 +205,14 @@ pub fn context(var: impl Fn(&str) -> Option<String>, socket: String) -> Result<C
 }
 
 /// Runs the rebuilt TUI until the owner quits or a signal arrives.
-/// Inputs: the unbound engine client, the stop flag set by signals and the
-/// editor-running flag the signal listener reads.
+/// Inputs: the unbound engine client, the stop flag set by signals, the editor-running
+/// flag the signal listener reads and the default engine `r` starts, none for a socket.
 /// Output: Ok after a clean exit, or the terminal or connection error.
 pub fn run(
     client: Client,
     stopped: &AtomicBool,
     editor_running: Arc<AtomicBool>,
+    engine: Option<(crate::paths::Layout, crate::service::Service)>,
 ) -> Result<(), TuiError> {
     let (socket, timeout) = client
         .into_unbound_configuration()
@@ -221,9 +222,10 @@ pub fn run(
         socket.display().to_string(),
     )?;
     ctx.editor_running = editor_running;
+    ctx.starts_engine = engine.is_some();
     let mut terminals = Terminals::new(socket.clone(), timeout);
     let client = Client::new(socket, timeout).map_err(|error| TuiError(error.to_string()))?;
-    let mut connection = Connection::connect_paired(client).map_err(TuiError)?;
+    let mut connection = Connection::connect_starting(client, engine).map_err(TuiError)?;
     restore_on_panic();
     let _guard = TerminalGuard::enter()?;
     let _extras = Extras::enter(ctx.shift_enter)?;
@@ -324,7 +326,11 @@ fn drive(
         }
         if !connection.busy() {
             if shell.ctx.take_reconnect() || (link == Link::Reconnecting && now >= reconnect) {
-                connection.reconnect().map_err(TuiError)?;
+                if shell.ctx.take_start() {
+                    connection.start_engine().map_err(TuiError)?;
+                } else {
+                    connection.reconnect().map_err(TuiError)?;
+                }
                 reconnect = now + RECONNECT;
             } else if link == Link::Ready {
                 if let Some(request) = shell.ctx.next_request() {

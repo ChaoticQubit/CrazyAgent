@@ -303,6 +303,7 @@ export function useSession(): Session {
           showToast(line, { name: "home" });
           setFoundTick((value) => value + 1);
           void notifyIntake(result.value.id);
+          if (result.value.kind === "move_project") void refreshProjects();
         }
       }
       if (result.kind !== "not_ready") timer = setTimeout(() => void read(), intakePollMs(intakeSeen.current));

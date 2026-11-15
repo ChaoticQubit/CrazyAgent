@@ -411,8 +411,8 @@ fn research_on_linux_fails_once_with_the_plain_unavailable_line() {
 #[test]
 fn a_queued_job_waiting_on_a_refusal_reports_why_in_its_progress() {
     const WAITING: [&str; 3] = [
-        "Waiting for the projects home move to finish",
-        "Waiting for another run to finish with this account's sign-in",
+        "Waiting for the projects home move",
+        "Waiting for another run on this sign-in",
         "Waiting for this account to be ready",
     ];
     const OTHER: &str = "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it";
