@@ -1447,3 +1447,75 @@ fn the_rulesets_crazyagent_made_are_remembered_for_the_next_pass() {
     );
     assert_eq!(made.lock().unwrap().len(), 5);
 }
+
+#[test]
+fn a_repository_record_is_found_in_any_case_and_a_tampered_one_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let expected = secret_text.clone();
+    let server = Server::start(move |seen, _| {
+        if seen.path == "/user" {
+            return user(seen, &expected);
+        }
+        match seen.method.as_str() {
+            "GET" => Answer::json(
+                200,
+                serde_json::json!([{ "id": 7, "name": "CrazyAgent pull requests" }]),
+            ),
+            "PUT" => Answer::json(200, serde_json::json!({ "id": 7 })),
+            _ => Answer::bytes(204, Vec::new()),
+        }
+    });
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let folder = scratch.root.path().join("github-repos");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let file: String = Sha256::digest(b"octo-cat/tool")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let write = |text: &str| {
+        let path = folder.join(format!("{file}.json"));
+        let _ = std::fs::remove_file(&path);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        std::io::Write::write_all(&mut options.open(&path).unwrap(), text.as_bytes()).unwrap();
+    };
+    let facts = GitHubRepoFacts {
+        private: true,
+        ci: GitHubCi::None,
+    };
+    write(r#"{"rulesets":{"pull_request":7}}"#);
+    let outcome = account
+        .set_rule(
+            "Octo-Cat/Tool",
+            GitHubRule::PullRequest,
+            &GitHubRule::defaults(),
+            &facts,
+        )
+        .unwrap();
+    assert_eq!(outcome.state, GitHubRuleState::Applied);
+    assert_eq!(server.seen().last().unwrap().method, "PUT");
+    assert_eq!(server.seen().last().unwrap().path, "/repos/Octo-Cat/Tool/rulesets/7");
+    for tampered in [
+        r#"{"rulesets":{"squash_only":7}}"#,
+        r#"{"rulesets":{"conversation_resolution":7}}"#,
+        r#"{"rulesets":{"pull_request":-1}}"#,
+        r#"{"rulesets":{},"extra":1}"#,
+        "not json",
+    ] {
+        write(tampered);
+        let before = server.seen().len();
+        assert_eq!(
+            account
+                .apply_rules("octo-cat/tool", &GitHubRule::defaults(), &facts)
+                .unwrap_err()
+                .0,
+            "github_state_invalid",
+            "{tampered}"
+        );
+        assert_eq!(server.seen().len(), before, "{tampered}");
+    }
+}
