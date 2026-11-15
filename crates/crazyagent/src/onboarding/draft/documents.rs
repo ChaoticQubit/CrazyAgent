@@ -497,8 +497,10 @@ fn ignored(repo: &Path, paths: &[&str]) -> Option<Vec<bool>> {
 /// `!` lines outrank it in every run that reads both, tracked or not, an ignored folder once
 /// with a closing `/`. A file that cannot be opened is skipped, as the owner's own git warns
 /// and goes on. Each run steps over the folders the repository already keeps out whole
-/// ([`pruned`]), which come back as ignored folders, so a large ignored tree is never walked.
-/// Takes the folder and the files. Returns the paths, or `None` as [`listed`].
+/// ([`pruned`]), which come back as ignored folders, so a large ignored tree is never walked;
+/// when git cannot list those folders, such as one whose name is not UTF-8, each run steps
+/// over none, within the same bounds (G6 code r2 F1). Takes the folder and the files.
+/// Returns the paths, or `None` as [`listed`].
 fn owner_ignored(repo: &Path, files: &[String]) -> Option<Vec<String>> {
     let readable: Vec<&String> = files
         .iter()
@@ -507,7 +509,7 @@ fn owner_ignored(repo: &Path, files: &[String]) -> Option<Vec<String>> {
     if readable.is_empty() {
         return Some(Vec::new());
     }
-    let pruned = pruned(repo)?;
+    let pruned = pruned(repo).unwrap_or_default();
     let mut named = Vec::new();
     for file in readable {
         let from = format!("--exclude-from={file}");
