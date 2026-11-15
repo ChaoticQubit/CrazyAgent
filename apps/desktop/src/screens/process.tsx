@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { listSkills, poolSummaries, type Result } from "../api";
+import { harnessCatalog, listSkills, poolSummaries, type Result } from "../api";
 import { loadTeamStatus } from "../api-projects";
 import { type ImportFile, type TeamStatus } from "../engine-client";
 import {
@@ -14,7 +14,7 @@ import { navigate } from "../ui/router";
 import { displayText } from "./conversation";
 import { ConflictView, keepMine, type Conflict } from "./conflict";
 import { SkillTag, skillEntries } from "./skill-tag";
-import { HARNESS_NAMES } from "./team/coordination";
+import { harnessName } from "./new-project/team-editor";
 import "./process.css";
 
 /** Where an instructions text applies: every project, or one project. */
@@ -536,11 +536,12 @@ function skillsUsed(skills: readonly string[], agent: AgentAdoption): string {
 /** Who follows a project's instructions, as a pure view: one row per agent with whether it
  * asked the graph before its edits and used the context tools, the skills it used and its
  * flags, marked once it was reminded. A clicked row shows the agent's counts; stopped agents
- * wait behind Show finished. Inputs: the adoption read, the agents' names by id, whether
- * finished agents show, the open row and the actions. */
-export function FollowingView({ adoption, names, finished, expanded, onFinished, onExpand, onMetrics, onRetry }: {
+ * wait behind Show finished. Inputs: the adoption read, the agents' names by id, how the
+ * harness catalog names each harness, whether finished agents show, the open row and the actions. */
+export function FollowingView({ adoption, names, harness, finished, expanded, onFinished, onExpand, onMetrics, onRetry }: {
   adoption: Loaded<Adoption>;
   names: Map<number, string>;
+  harness: (harness: string) => string;
   finished: boolean;
   expanded: number | null;
   onFinished: () => void;
@@ -568,7 +569,7 @@ export function FollowingView({ adoption, names, finished, expanded, onFinished,
           const isOpen = expanded === agent.agent;
           const row = <tr key={agent.agent} className={agent.active ? undefined : "adoption-stopped"}>
             <th scope="row"><button type="button" className="pr-link pr-agent" aria-expanded={isOpen} onClick={() => onExpand(isOpen ? null : agent.agent)}>{name}</button>
-              {" "}<span className="muted small">{HARNESS_NAMES[agent.harness as keyof typeof HARNESS_NAMES] ?? agent.harness}</span></th>
+              {" "}<span className="muted small">{harness(agent.harness)}</span></th>
             <td><Check state={graphState(agent)} /></td>
             <td><Check state={contextState(agent)} /></td>
             <td className="secondary">{skillsUsed(skills, agent)}</td>
@@ -598,10 +599,11 @@ export function FollowingView({ adoption, names, finished, expanded, onFinished,
 export function ProjectFollowing({ projectId }: { projectId: string }) {
   const [adoption, reload] = useLoad(() => loadAdoption(projectId), [projectId]);
   const [status] = useLoad<TeamStatus>(() => loadTeamStatus(projectId), [projectId]);
+  const [catalog] = useLoad(harnessCatalog, [], "harness-catalog");
   const [finished, setFinished] = useState(false);
   const [expanded, setExpanded] = useState<number | null>(null);
   const names = new Map(status.kind === "ok" ? status.value.agents.map((agent) => [agent.id, displayText(agent.label)]) : []);
-  return <FollowingView adoption={adoption} names={names} finished={finished} expanded={expanded}
+  return <FollowingView adoption={adoption} names={names} harness={(id) => harnessName(catalog.kind === "ok" ? catalog.value : null, id)} finished={finished} expanded={expanded}
     onFinished={() => setFinished((old) => !old)} onExpand={setExpanded} onRetry={reload}
     onMetrics={() => navigate({ name: "project", id: projectId, tab: "metrics" })} />;
 }

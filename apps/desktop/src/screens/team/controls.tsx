@@ -8,7 +8,9 @@ import type { IconName, SelectOption } from "../../ui";
 import { SettingFind, SettingRow, settingMatches } from "../../ui/setting";
 import { afterSave, shownChoice, useHeld } from "../../state";
 import { displayText } from "../conversation";
+import { harnessName } from "../new-project/team-editor";
 import { savedStale } from "../project/settings";
+import { valueOf } from "../project/shared";
 import { CoordinationControls, HeavyLaneControls, PerHarnessControls, TerminalDisplaySetting, ToolsControls } from "./coordination";
 import { AgentAccessSetting, MasterHarnessSetting, SubHarnessesSetting, useTeam, type TeamProject } from "./setup-rows";
 
@@ -560,6 +562,8 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   group?: SettingGroupId | null;
 }) {
   const harnessRows = useTeam(data);
+  const catalog = data === undefined ? null : valueOf(data.harnesses);
+  const name = (harness: string) => harnessName(catalog, harness);
   const [masterBranch, setMasterBranchText] = useState<string | null>(null);
   const [landOn, setLandOnText] = useState<string | null>(null);
   const [graceText, setGraceText] = useState<string | null>(null);
@@ -784,7 +788,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
           <DoneQuietSetting projectId={projectId} status={status} reload={reload} />
         </SettingGroup>
         <SettingGroup group={coord} prefix={prefix}>
-          <CoordinationControls projectId={projectId} status={status} reload={reload}>
+          <CoordinationControls projectId={projectId} status={status} reload={reload} name={name}>
             <SettingRow label="Sub-agent depth">
               <Select id={`tg-depth-${projectId}`} label="Sub-agent depth" value={String(depth)} options={DEPTH_OPTIONS}
                 onValue={(value) => { const chosen = Number(value); if (!busy && [1, 2, 3].includes(chosen)) void chooseDepth(chosen); }}
@@ -809,10 +813,10 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               options={[{ value: "hide", label: "Hide" }, { value: "show", label: "Show" }]} />
             <span className="tg-terminal-note">Hide moves stopped and failed agents to the Finished list.</span>
           </SettingRow>
-          <TerminalDisplaySetting projectId={projectId} status={status} reload={reload} />
+          <TerminalDisplaySetting projectId={projectId} status={status} reload={reload} name={name} />
           <HeavyLaneControls projectId={projectId} status={status} reload={reload} />
           <h3 className="set-sub" hidden={!PER_HARNESS_ROWS.some((row) => settingMatches(row, words))}>Per harness</h3>
-          <PerHarnessControls projectId={projectId} status={status} reload={reload} />
+          <PerHarnessControls projectId={projectId} status={status} reload={reload} name={name} />
         </SettingGroup>
         <SettingGroup group={limitsGroup} prefix={prefix}>
           <SettingRow label="Each task may run">

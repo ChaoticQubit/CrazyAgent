@@ -101,8 +101,9 @@ export function RoleSkillsControls({ settings, skills, busy, onChoose }: {
   </div>;
 }
 
-/** Each coordination harness id with the name the app shows for it. */
-export const HARNESS_NAMES: Record<CoordHarness, string> = { "claude-code": "Claude Code", codex: "Codex", rcli: "RCLI" };
+/** Names a harness as the harness catalog does, or by its id before the catalog arrives.
+ * Input: the harness id. Output: the name the settings show. */
+export type HarnessName = (harness: string) => string;
 
 const NO_SUB_AGENTS = "Not available: runs only as a master";
 const SUB_AGENT_HARNESSES: readonly CoordHarness[] = ["claude-code", "codex"];
@@ -145,16 +146,17 @@ const NATIVE_HELPERS: Record<CoordHarness, string> = {
 
 /** The Sub-agent mode choices in the mockup's words, native first for every harness kind; a kind
  * without native sub-agents lists it unavailable with its reason, so nothing is hidden per harness.
- * Inputs: the harness kind and whether it has them. Output: the options. */
-export function modeOptions(harness: CoordHarness, native: boolean): SelectOption[] {
-  const reason = native ? undefined : NATIVE_UNAVAILABLE[harness] ?? `${HARNESS_NAMES[harness]} has no native sub-agents, so its sub-agents are CrazyAgent workers.`;
+ * Inputs: the harness kind, whether it has them and how the catalog names it. Output: the options. */
+export function modeOptions(harness: CoordHarness, native: boolean, name: HarnessName): SelectOption[] {
+  const reason = native ? undefined : NATIVE_UNAVAILABLE[harness] ?? `${name(harness)} has no native sub-agents, so its sub-agents are CrazyAgent workers.`;
   return [{ value: "native", label: NATIVE_LABELS[harness], ...(reason ? { disabledReason: reason } : {}) }, { value: "app_spawned", label: "CrazyAgent workers" }];
 }
 
 /** The helper line under a harness kind's Sub-agent mode: what native sub-agents are on it, or why
- * it has none. Inputs: the harness kind and whether it has them. Output: the line. */
-export function modeHelper(harness: CoordHarness, native: boolean): string {
-  const reason = modeOptions(harness, native)[0].disabledReason;
+ * it has none. Inputs: the harness kind, whether it has them and how the catalog names it.
+ * Output: the line. */
+export function modeHelper(harness: CoordHarness, native: boolean, name: HarnessName): string {
+  const reason = modeOptions(harness, native, name)[0].disabledReason;
   return reason ?? NATIVE_HELPERS[harness];
 }
 
@@ -175,12 +177,12 @@ function listed(names: string[]): string {
 /** The words under the Terminal display setting, the same setting for every harness (DEC-141):
  * what the chosen display does in the app's terminal view and, for Fullscreen, which harness
  * kinds draw it and which cannot and so stay Classic. A row without the engine's list of
- * displays counts as drawing every one. Inputs: the display, every harness kind's row and
- * whether this is a Mac. Output: the sentences. */
-export function displayHelper(display: TerminalDisplay, harnesses: HarnessCoordination[], mac: boolean): string {
+ * displays counts as drawing every one. Inputs: the display, every harness kind's row,
+ * whether this is a Mac and how the catalog names each kind. Output: the sentences. */
+export function displayHelper(display: TerminalDisplay, harnesses: HarnessCoordination[], mac: boolean, name: HarnessName): string {
   if (display === "classic") return `Classic: every agent draws on the normal screen, so the mouse wheel scrolls the terminal at once and a plain drag selects text. ${DISPLAY_APPLIES}`;
   const draws = (row: HarnessCoordination) => !row.displays?.length || row.displays.includes("fullscreen");
-  const names = (rows: HarnessCoordination[]) => listed(rows.map((row) => HARNESS_NAMES[row.harness]));
+  const names = (rows: HarnessCoordination[]) => listed(rows.map((row) => name(row.harness)));
   const drawn = harnesses.filter(draws);
   const kept = harnesses.filter((row) => !draws(row));
   const stays = kept.length === 0 ? "" : ` ${names(kept)} ${kept.length === 1 ? "has" : "have"} no Fullscreen view and ${kept.length === 1 ? "stays" : "stay"} Classic.`;
@@ -309,11 +311,11 @@ export function QuestionsSetting({ projectId, status, reload }: { projectId: str
 
 /** How messages reach one harness kind's agents, as one row, on Agent settings and in the
  * master's settings. Inputs: the project id, the harness kind's row, the team status it came
- * from and a reload. Output: the row. */
-export function DeliverySetting({ projectId, row, status, reload }: { projectId: string; row: HarnessCoordination; status: TeamStatus; reload: () => void }) {
+ * from, a reload and how the catalog names the kind. Output: the row. */
+export function DeliverySetting({ projectId, row, status, reload, name }: { projectId: string; row: HarnessCoordination; status: TeamStatus; reload: () => void; name: HarnessName }) {
   const { note, change } = useChange(reload);
   const [delivery, hold] = useHeld<Delivery>(row.delivery, Object.is, status);
-  const label = `Messages to ${HARNESS_NAMES[row.harness]} agents`;
+  const label = `Messages to ${name(row.harness)} agents`;
   const unavailable = subAgentsUnavailable(row.harness);
   if (unavailable) return <UnavailableRow label={label} reason={unavailable} helper={DELIVERY_HELPER[row.harness]} />;
   return <SettingRow label={label}>
@@ -380,17 +382,18 @@ export function ToolsControls({ projectId, status, reload }: { projectId: string
 }
 
 /** One harness kind's sub-agent mode as a row: native sub-agents listed for every kind, chosen only where it has them.
- * Inputs: the project id, the harness kind's row, the team status it came from and a reload.
- * Output: the row. */
-function SubAgentModeSetting({ projectId, row, status, reload }: { projectId: string; row: HarnessCoordination; status: TeamStatus; reload: () => void }) {
+ * Inputs: the project id, the harness kind's row, the team status it came from, a reload and
+ * how the catalog names the kind. Output: the row. */
+function SubAgentModeSetting({ projectId, row, status, reload, name }: { projectId: string; row: HarnessCoordination; status: TeamStatus; reload: () => void; name: HarnessName }) {
   const { note, change } = useChange(reload);
   const [mode, hold] = useHeld<SubagentMode>(row.mode, Object.is, status);
   const unavailable = subAgentsUnavailable(row.harness);
-  if (unavailable) return <UnavailableRow label={`${HARNESS_NAMES[row.harness]} sub-agents`} reason={unavailable} />;
-  return <SettingRow label={`${HARNESS_NAMES[row.harness]} sub-agents`}>
-    <Select id={`tg-mode-${row.harness}-${projectId}`} label={`${HARNESS_NAMES[row.harness]} sub-agents`} value={mode} options={modeOptions(row.harness, row.native)}
+  const label = `${name(row.harness)} sub-agents`;
+  if (unavailable) return <UnavailableRow label={label} reason={unavailable} />;
+  return <SettingRow label={label}>
+    <Select id={`tg-mode-${row.harness}-${projectId}`} label={label} value={mode} options={modeOptions(row.harness, row.native, name)}
       onValue={(value) => { if (value === "app_spawned" || (value === "native" && row.native)) void change(() => setHarnessMode(projectId, row.harness, value as SubagentMode), "the sub-agent mode", () => hold(value as SubagentMode)); }}
-      helper={modeHelper(row.harness, row.native)} />
+      helper={modeHelper(row.harness, row.native, name)} />
     <ChangeNote note={note} />
   </SettingRow>;
 }
@@ -399,16 +402,16 @@ function SubAgentModeSetting({ projectId, row, status, reload }: { projectId: st
  * sub-agent mode, then the rows handed in, where sub-agent questions go, what overlapping claims
  * do and the terminals per window, with the engine's choices and any value it holds that this
  * app does not know. Every option is selectable; the plan defaults show for an older engine.
- * Inputs: the project id, the latest team status, a reload and rows to show after the sub-agent
- * rows. Output: the rows. */
-export function CoordinationControls({ projectId, status, reload, children }: { projectId: string; status: TeamStatus; reload: () => void; children?: ReactNode }) {
+ * Inputs: the project id, the latest team status, a reload, how the catalog names each harness
+ * kind and rows to show after the sub-agent rows. Output: the rows. */
+export function CoordinationControls({ projectId, status, reload, name, children }: { projectId: string; status: TeamStatus; reload: () => void; name: HarnessName; children?: ReactNode }) {
   const view = coordination(status);
   const { note, change } = useChange(reload);
   const [overlaps, holdOverlaps] = useHeld<string>(view.settings.overlaps, Object.is, status);
   const [perWindow, holdPerWindow] = useHeld(String(status.terminals_per_window ?? 6), Object.is, status);
 
   return <>
-    {view.harnesses.map((row) => <SubAgentModeSetting key={row.harness} projectId={projectId} row={row} status={status} reload={reload} />)}
+    {view.harnesses.map((row) => <SubAgentModeSetting key={row.harness} projectId={projectId} row={row} status={status} reload={reload} name={name} />)}
     {children}
     <QuestionsSetting projectId={projectId} status={status} reload={reload} />
     <SettingRow label="Overlapping edits" wide>
@@ -500,28 +503,29 @@ export function HeavyLaneQueue({ status, now }: { status: TeamStatus; now: numbe
 /** The Terminal display row: one choice for every agent terminal of the project, whatever
  * harness runs in it (DEC-141), with every option selectable and the words naming a harness
  * kind that cannot draw the chosen one. The plan default shows for an older engine. Inputs:
- * the project id, the latest team status and a reload. Output: the row. */
-export function TerminalDisplaySetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+ * the project id, the latest team status, a reload and how the catalog names each harness
+ * kind. Output: the row. */
+export function TerminalDisplaySetting({ projectId, status, reload, name }: { projectId: string; status: TeamStatus; reload: () => void; name: HarnessName }) {
   const view = coordination(status);
   const { note, change } = useChange(reload);
   const [display, holdDisplay] = useHeld<TerminalDisplay>(view.settings.terminal_display, Object.is, status);
   return <SettingRow label="Terminal display">
     <Select id={`tg-display-${projectId}`} label="Terminal display" value={display} options={DISPLAY_OPTIONS}
       onValue={(value) => { if (value === "classic" || value === "fullscreen") void change(() => saveCoordSettings(projectId, { terminal_display: value }), "the terminal display", () => holdDisplay(value)); }}
-      helper={displayHelper(display, view.harnesses, isMac())} />
+      helper={displayHelper(display, view.harnesses, isMac(), name)} />
     <ChangeNote note={note} />
   </SettingRow>;
 }
 
 /** The per-harness rows the approved mockup leaves off Agent settings, kept under each harness:
  * how messages reach its agents. Every option is selectable; the plan defaults show for an
- * older engine. Inputs: the project id, the latest team status and a reload. Output: one group
- * per harness kind. */
-export function PerHarnessControls({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+ * older engine. Inputs: the project id, the latest team status, a reload and how the catalog
+ * names each harness kind. Output: one group per harness kind. */
+export function PerHarnessControls({ projectId, status, reload, name }: { projectId: string; status: TeamStatus; reload: () => void; name: HarnessName }) {
   const view = coordination(status);
   return <>
-    {view.harnesses.map((row) => <div className="set-harness" role="group" aria-label={HARNESS_NAMES[row.harness]} key={row.harness}>
-      <DeliverySetting projectId={projectId} row={row} status={status} reload={reload} />
+    {view.harnesses.map((row) => <div className="set-harness" role="group" aria-label={name(row.harness)} key={row.harness}>
+      <DeliverySetting projectId={projectId} row={row} status={status} reload={reload} name={name} />
     </div>)}
   </>;
 }

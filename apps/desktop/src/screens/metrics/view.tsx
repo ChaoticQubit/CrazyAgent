@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { accountLabels, listAccounts, type Result } from "../../api";
+import { accountLabels, harnessCatalog, listAccounts, type Result } from "../../api";
 import { loadAdoption, type Adoption, type AgentAdoption } from "../../api-process";
 import { loadTeamStatus } from "../../api-projects";
 import type { TeamStatus } from "../../engine-client";
@@ -7,7 +7,7 @@ import { decideRecount, loadExtras, loadMetrics, loadNotices, loadUsage, setMone
 import { useLoad, type Loaded } from "../../state";
 import { EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Select, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
-import { HARNESS_NAMES } from "../team/coordination";
+import { harnessName } from "../new-project/team-editor";
 import { Activities, Models, ToolsOverTime } from "./activity";
 import { barLabel, barWords, chartBars, ChartSvg } from "./chart";
 import { LeadPanel } from "./lead";
@@ -73,12 +73,14 @@ const RESULTS: Record<string, string> = {
   needs_pool: "Waiting",
 };
 
-/** Names shown in place of usage keys: agents by usage key and accounts by id, the accounts
+/** Names shown in place of usage keys: agents by usage key, accounts by id, harnesses as the
+ * harness catalog names them, the accounts
  * with no 5-hour or weekly window, each with what it has instead, and each account's free
  * resets and credits as stored, by account id. */
 export interface MetricsNames {
   agents: Map<string, string>;
   accounts: Map<string, string>;
+  harness: (harness: string) => string;
   noWindow?: readonly NoWindow[];
   extras?: ReadonlyMap<string, LimitExtras>;
 }
@@ -200,7 +202,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
   const projectName = (id: string) => projectLabel(filter, id);
   const agent = (key: string, label?: string | null) => names.agents.get(key) ?? (label ? displayText(label) : agentLabel(key, projectName));
   const account = (key: string) => key === "" ? "Unattributed" : names.accounts.get(key) ?? key;
-  const harness = (key: string) => HARNESS_NAMES[key as keyof typeof HARNESS_NAMES] ?? key;
+  const harness = names.harness;
   const listed = (kept: string[], more: number | undefined, show: (name: string) => string) =>
     [...kept.map(show), ...(more ? [`+${more} more`] : [])].join(", ");
   const across = filter !== undefined && projectId === null;
@@ -644,6 +646,8 @@ export function MetricsView({ projectId, filter }: { projectId: string | null; f
   const [accounts] = useLoad(listAccounts, [], "accounts");
   const [extrasRead] = useLoad(() => filter ? loadExtras(false) : Promise.resolve({ kind: "ok" as const, value: [] }), [reload, revision, Boolean(filter)]);
   const [notices] = useLoad(loadNotices, []);
+  const [catalog] = useLoad(harnessCatalog, [], "harness-catalog");
+  const harnessOf = (harness: string) => harnessName(catalog.kind === "ok" ? catalog.value : null, harness);
   useEffect(() => {
     const timer = setInterval(() => { setNowMs(Date.now()); setTicks((old) => old + 1); }, TICK_MS);
     return () => clearInterval(timer);
@@ -652,14 +656,13 @@ export function MetricsView({ projectId, filter }: { projectId: string | null; f
   const agents = new Map<string, string>();
   for (const [id, status] of statuses.kind === "ok" ? statuses.value : []) {
     for (const agent of status.agents) {
-      const harness = HARNESS_NAMES[agent.harness as keyof typeof HARNESS_NAMES] ?? agent.harness;
-      agents.set(agentKey(id, { agent: agent.id, role: agent.role }), `${displayText(agent.label)} · ${harness}`);
+      agents.set(agentKey(id, { agent: agent.id, role: agent.role }), `${displayText(agent.label)} · ${harnessOf(agent.harness)}`);
     }
   }
   const listed = accounts.kind === "ok" ? accounts.value : [];
   const plain = listed.flatMap((account) => { const note = noWindow(account); return note === null ? [] : [{ account: account.id, note }]; });
   const extras = extrasRead.kind === "ok" ? new Map(extrasRead.value.map((row) => [row.account, row.extras])) : undefined;
-  const names: MetricsNames = { agents, accounts: accountLabels(listed), noWindow: plain, extras };
+  const names: MetricsNames = { agents, accounts: accountLabels(listed), harness: harnessOf, noWindow: plain, extras };
   const adopted: Loaded<Adoption> | null = adoption.kind === "ok" ? (adoption.value === null ? null : { kind: "ok", value: adoption.value }) : adoption;
   return <MetricsPage projectId={projectId} usage={usage} metrics={metrics} adoption={adopted} range={range} by={by} names={names}
     sinceMs={sinceMs} nowMs={nowMs} updatedMs={updatedMs} offset={offsetMinutes(new Date(nowMs))} filter={filter} notices={notices.kind === "ok" ? notices.value : ""}

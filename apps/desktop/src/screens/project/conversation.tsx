@@ -381,6 +381,8 @@ export function MasterSettings({ data, liveHarness, onLeave = () => {} }: { data
   const base = `/projects/${encodeURIComponent(data.id)}`;
   const prefix = `master-set-${data.id}`;
   const go = (path: string) => { onLeave(); data.navigate(path); };
+  const catalog = valueOf(data.harnesses);
+  const name = (harness: string) => harnessName(catalog, harness);
   const [masterGroup, talk, messages, access] = MASTER_GROUPS;
   return <div className="set-groups">
     <SettingGroup group={masterGroup} prefix={prefix} level={3}>
@@ -395,7 +397,7 @@ export function MasterSettings({ data, liveHarness, onLeave = () => {} }: { data
     </SettingGroup>
     <SettingGroup group={messages} prefix={prefix} level={3}>
       <QuestionsSetting projectId={data.id} status={status} reload={data.reloadTeam} />
-      {coordination(status).harnesses.map((row) => <DeliverySetting key={row.harness} projectId={data.id} row={row} status={status} reload={data.reloadTeam} />)}
+      {coordination(status).harnesses.map((row) => <DeliverySetting key={row.harness} projectId={data.id} row={row} status={status} reload={data.reloadTeam} name={name} />)}
       <ReaskSetting projectId={data.id} status={status} reload={data.reloadTeam} />
       <DoneQuietSetting projectId={data.id} status={status} reload={data.reloadTeam} />
     </SettingGroup>
