@@ -760,10 +760,10 @@ pub struct NetworkView {
 }
 
 /// What a network choice cannot hold on this Linux, for the Agent access page: a port agents
-/// may reach on this computer is open on every host. Only None drops the line, where this
-/// Linux nests agents and the sockets setting is `TcpOnly`; an allowed port below the
-/// bridge's lowest brings it back, named. Inputs: the choice, what this Linux holds, the
-/// sockets setting, none when unreadable, and the grants. Output: the line, or none.
+/// may reach on this computer is open on every host. Under `TcpOnly` the call supervisor
+/// keeps those ports to this computer, though Https reaches port 53 on any host; without it
+/// a nesting host's bridge does under None, unless a granted port is below its lowest.
+/// Inputs: the choice, the host under the setting, sockets, grants. Output: the line, or none.
 pub fn linux_network_gap(
     network: AgentNetwork,
     host: Option<crate::sandbox::LinuxHost>,
@@ -771,9 +771,12 @@ pub fn linux_network_gap(
     grants: &[AccessGrant],
 ) -> Option<String> {
     let host = host?;
-    let bridges = network == AgentNetwork::None
-        && host.nested
-        && sockets == Some(crate::sandbox::LinuxSockets::TcpOnly);
+    let tcp = sockets == Some(crate::sandbox::LinuxSockets::TcpOnly);
+    if host.supervised && tcp && network != AgentNetwork::Open {
+        return (network == AgentNetwork::Https)
+            .then(|| crate::sandbox::LINUX_DNS_ANY_HOST_LINE.to_owned());
+    }
+    let bridges = network == AgentNetwork::None && host.nested && tcp;
     if !bridges {
         return Some(crate::sandbox::LINUX_PORTS_ANY_HOST_LINE.to_owned());
     }
@@ -847,26 +850,41 @@ impl LevelView {
 }
 
 /// What a Linux cannot hold for agents at one access level, as plain lines both clients
-/// show under the level: nothing where agents run in a process namespace of their own, the
-/// process list where only the kernel's signal scope holds, signals too where neither does.
-/// Inputs: the level and what this Linux holds, none on another system. Output: the lines,
-/// none under Full access, which has no sandbox to speak of.
+/// show under it: why root runs no supervisor; nested git, or under the supervisor its
+/// narrower line where another repository may be and what it changes; then the process
+/// list, or signals too, where agents share the process namespace. Inputs: the level, the
+/// host under the setting and whether the project may hold another repository.
 pub fn linux_gaps(
     access: AgentAccess,
     host: Option<crate::sandbox::LinuxHost>,
-    _other_git: bool,
+    other_git: bool,
 ) -> Vec<&'static str> {
     let Some(host) = host else {
         return Vec::new();
     };
-    if access == AgentAccess::Full || host.nested {
+    assert!(!(host.root && host.supervised));
+    if access == AgentAccess::Full {
         return Vec::new();
     }
-    if host.scoped {
-        vec![crate::sandbox::LINUX_PROCESS_LIST_LINE]
-    } else {
-        vec![crate::sandbox::LINUX_SIGNALS_LINE]
+    let mut lines = Vec::with_capacity(3);
+    if host.root {
+        lines.push(crate::sandbox::LINUX_ROOT_LINE);
     }
+    if host.supervised {
+        if other_git {
+            lines.push(crate::sandbox::LINUX_KEPT_GIT_LINE);
+        }
+        lines.push(crate::sandbox::LINUX_SUPERVISED_LINE);
+    } else {
+        lines.push(crate::sandbox::LINUX_NESTED_GIT_LINE);
+    }
+    if !host.nested && (host.scoped || host.supervised) {
+        lines.push(crate::sandbox::LINUX_PROCESS_LIST_LINE);
+    } else if !host.nested {
+        lines.push(crate::sandbox::LINUX_SIGNALS_LINE);
+    }
+    assert!((1..=3).contains(&lines.len()));
+    lines
 }
 
 /// One toolchain family: whether the owner has it, the project uses it and agents may

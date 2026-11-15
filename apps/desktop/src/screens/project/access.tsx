@@ -61,9 +61,6 @@ export function networkGap(view: Pick<PolicyView, "networks"> | null | undefined
 /** What a limited network can't hold on Linux, shown there only, the engine's LINUX_PORTS_ANY_HOST_LINE. */
 export const LINUX_PORTS_ANY_HOST = "On Linux, network limits hold ports, not hosts: a port agents may reach on this computer, such as the model's proxy port or a port you allow, is open to them on every host.";
 
-/** What a writable project folder can't hold on Linux, shown there only, the engine's LINUX_NESTED_GIT_LINE. */
-export const LINUX_NESTED_GIT = "On Linux, agents can make a git repository inside any project folder they may change, and your own git or IDE runs its settings when you open that folder. Check agent-made folders for a .git before you open them.";
-
 /** Why the network choice has no effect under Full access. */
 export const NETWORK_IGNORED_UNDER_FULL = "Full access runs agents without a sandbox, so this choice does not apply.";
 
@@ -275,12 +272,12 @@ function toolchainNote(row: PolicyView["toolchains"][number]): string {
 }
 
 /** The access level choice as radio cards, with the reason a level can't run here, the Full
- * access warning when it is chosen and, on Linux below Full access, the nested git gap and
- * the lines the engine gives for what this Linux can't hold at the chosen level. Inputs: the
- * radio group name, the chosen level, each level's unavailable reason (null when it runs) and
- * gap lines, the change handler and this desktop's platform. Output: the fieldset. */
-export function AccessLevels({ name, value, unavailable, gaps, onChange, platform = desktopPlatform() }: {
-  name: string; value: AgentAccess; unavailable: (access: AgentAccess) => string | null; gaps?: (access: AgentAccess) => string[]; onChange: (access: AgentAccess) => void; platform?: string;
+ * access warning when it is chosen and the lines the engine gives for what this Linux can't
+ * hold at the chosen level. Inputs: the radio group name, the chosen level, each level's
+ * unavailable reason (null when it runs) and gap lines, and the change handler. Output: the
+ * fieldset. */
+export function AccessLevels({ name, value, unavailable, gaps, onChange }: {
+  name: string; value: AgentAccess; unavailable: (access: AgentAccess) => string | null; gaps?: (access: AgentAccess) => string[]; onChange: (access: AgentAccess) => void;
 }) {
   return <fieldset className="pj-field">
     <legend>Agent access</legend>
@@ -298,7 +295,6 @@ export function AccessLevels({ name, value, unavailable, gaps, onChange, platfor
       })}
     </div>
     {value === "full" && <p className="pj-note warn" role="alert">{FULL_ACCESS_WARNING} {FULL_ACCESS_IDE}</p>}
-    {value !== "full" && platform === "linux" && <p className="pj-note" role="note">{LINUX_NESTED_GIT}</p>}
     {(gaps?.(value) ?? []).map((gap) => <p className="pj-note" role="note" key={gap}>{gap}</p>)}
   </fieldset>;
 }

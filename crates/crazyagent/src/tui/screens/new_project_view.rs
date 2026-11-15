@@ -6,7 +6,6 @@ use super::new_project_input::{TextInput, cells, char_cells};
 use super::project_access::FULL_ACCESS_WARNING;
 use super::project_markdown::sanitize;
 use crate::project_setup::ResearchKind;
-use crate::sandbox::LINUX_NESTED_GIT_LINE;
 use crate::sandbox::policy::AgentAccess;
 #[cfg(all(test, unix))]
 use ratatui::style::Modifier;
@@ -1410,8 +1409,6 @@ fn review_summary(draw: &mut Draw) {
         ));
         if wizard.access == AgentAccess::Full {
             draw.note(FULL_ACCESS_WARNING, look.warning);
-        } else if wizard.linux {
-            draw.note(LINUX_NESTED_GIT_LINE, look.warning);
         }
         for gap in wizard.gaps() {
             draw.note(gap, look.warning);

@@ -968,9 +968,10 @@ pub fn linux_unbridged_notice(
 /// host, so a port an agent may reach on this computer is open to it on every host.
 pub const LINUX_PORTS_ANY_HOST_LINE: &str = "On Linux, network limits hold ports, not hosts: a port agents may reach on this computer, such as the model's proxy port or a port you allow, is open to them on every host.";
 
-/// What a writable project folder cannot hold on Linux, shown there only, under the access
-/// level in the desktop and the TUI (RV-DS241-85): no Landlock rule stops an agent from
-/// making a git repository inside a folder it may change.
+/// What a writable project folder cannot hold on a Linux where no call supervisor runs,
+/// among the engine's lines under the access level in the desktop and the TUI (RV-DS241-85,
+/// DEC-179 T4c): no Landlock rule stops an agent from making a git repository inside a
+/// folder it may change.
 pub const LINUX_NESTED_GIT_LINE: &str = "On Linux, agents can make a git repository inside any project folder they may change, and your own git or IDE runs its settings when you open that folder. Check agent-made folders for a .git before you open them.";
 
 /// What a Linux agent can still do to the owner's other programs where this machine gives
@@ -1023,8 +1024,16 @@ impl LinuxHost {
     /// only while it is On, and run as root only while it is not Off, so the root line says
     /// why no supervisor runs. Input: the setting, none when it cannot be read, which shows
     /// every line. Output: the facts the access lines read; what is kept is never changed.
-    pub fn under(self, _calls: Option<LinuxSupervisor>) -> Self {
-        self
+    pub fn under(self, calls: Option<LinuxSupervisor>) -> Self {
+        assert!(!(self.root && self.supervised));
+        let held = Self {
+            supervised: self.supervised && calls == Some(LinuxSupervisor::On),
+            root: self.root && calls != Some(LinuxSupervisor::Off),
+            ..self
+        };
+        assert!(self.supervised || !held.supervised);
+        assert!(!(held.root && held.supervised));
+        held
     }
 }
 

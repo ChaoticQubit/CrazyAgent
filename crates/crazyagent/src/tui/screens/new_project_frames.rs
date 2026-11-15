@@ -125,7 +125,6 @@ pub(super) fn check_frames(drawn: &[(String, String)]) {
 
 fn about() -> Wizard {
     let mut wizard = wizard();
-    wizard.linux = false;
     type_text(&mut wizard, "Tidepool");
     wizard.key(key(KeyCode::Tab));
     type_text(
@@ -283,7 +282,6 @@ fn state_frames(home: &std::path::Path) -> Vec<(String, String)> {
         pool_choices(&super::new_project_tests::config()),
         Some(home.to_path_buf()),
     );
-    wizard.linux = false;
     type_text(&mut wizard, "Tidepool");
     wizard.key(key(KeyCode::Tab));
     type_text(

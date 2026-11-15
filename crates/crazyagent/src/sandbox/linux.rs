@@ -5,7 +5,7 @@ use super::{
     LinuxSockets, LinuxSupervisor, OWNER_PORTS, ProjectSandbox, Sandbox, SandboxError,
     SandboxNetwork, SandboxRemote, agent_env, clean_absolute, invalid,
 };
-use crazyagent_linux_supervisor::rules::{GitOwn, Reach};
+use crazyagent_linux_supervisor::rules::{GitOwn, Reach, is_git};
 use crazyagent_linux_supervisor::serve::{self, Supervised};
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
@@ -1584,11 +1584,13 @@ pub fn read_host(helper: &Path) -> super::LinuxHost {
     let apart = |bwrap: &Path| !held || nests(bwrap, helper, &[PROBE.into()]);
     let nested = usable && bwrap.is_some_and(apart);
     let supervised = held && supervises(helper, bwrap.filter(|_| nested));
+    let root = rustix::process::geteuid().is_root();
+    assert!(!(root && supervised));
     super::LinuxHost {
         nested,
         scoped,
         supervised,
-        root: false,
+        root,
     }
 }
 
@@ -1596,7 +1598,39 @@ pub fn read_host(helper: &Path) -> super::LinuxHost {
 /// an entry of any kind that is `.git` to some filesystem below the top, or one at the top
 /// not spelled `.git`. A folder it cannot read, or more entries than it reads, answers yes.
 /// Links are not followed. Input: the project folder. Output: true when one may be there.
-pub(crate) fn holds_other_git(_project: &Path) -> bool {
+pub(crate) fn holds_other_git(project: &Path) -> bool {
+    let mut folders = vec![project.to_path_buf()];
+    let mut seen: usize = 0;
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = fs::read_dir(&folder) else {
+            return true;
+        };
+        for entry in entries {
+            seen += 1;
+            let Ok(entry) = entry else {
+                return true;
+            };
+            if seen > GIT_SEARCH_ENTRIES_MAX {
+                return true;
+            }
+            let name = entry.file_name();
+            if is_git(&name) {
+                let own = folder == project && name.as_os_str() == OsStr::new(".git");
+                if !own {
+                    return true;
+                }
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                return true;
+            };
+            if kind.is_dir() {
+                folders.push(entry.path());
+            }
+            assert!(folders.len() <= seen);
+        }
+    }
+    assert!(seen <= GIT_SEARCH_ENTRIES_MAX);
     false
 }
 
