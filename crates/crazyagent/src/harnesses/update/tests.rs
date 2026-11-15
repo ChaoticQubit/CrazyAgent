@@ -2798,3 +2798,78 @@ fn the_user_agent_version_read_never_runs_a_node_others_can_change() {
     assert_eq!(version_under_home(&entry), None);
     assert!(!marker.exists(), "a node others can change never runs");
 }
+
+fn shown(recipe: &Recipe) -> String {
+    let own = recipe.own.as_ref().map_or_else(String::new, |own| {
+        let format = match own.pointer.format {
+            PointerFormat::PlainVersion => "plain".to_owned(),
+            PointerFormat::JsonTag { field, prefix } => format!("json {field} {prefix}"),
+        };
+        format!(
+            "{} {} {} {format} {}",
+            own.root,
+            own.args.join(" "),
+            own.pointer.url,
+            own.pointer.bytes_max
+        )
+    });
+    let brews: Vec<String> = recipe
+        .brews
+        .iter()
+        .map(|brew| format!("{} {} {}", flag(brew.kind), brew.name, brew.install))
+        .collect();
+    let npm = recipe.npm.as_ref().map_or_else(String::new, |npm| {
+        format!(
+            "{} {} {} {} {}",
+            npm.scope,
+            npm.name,
+            npm.package,
+            npm.spec,
+            npm.flags.join(" ")
+        )
+    });
+    format!(
+        "{}|{own}|{}|{npm}|{}",
+        recipe.id,
+        brews.join(","),
+        recipe.guide
+    )
+}
+
+const RECIPES_FROZEN: [&str; 17] = [
+    "codex|.codex/packages/standalone update https://releases.openai.com/codex/channels/latest json tag_name rust-v 262144|--cask codex true|@openai codex @openai/codex @openai/codex |https://developers.openai.com/codex/cli",
+    "claude-code|.local/share/claude/versions update https://downloads.claude.ai/claude-code-releases/latest plain 64|--cask claude-code true,--cask claude-code@latest false|@anthropic-ai claude-code @anthropic-ai/claude-code @anthropic-ai/claude-code@latest |https://code.claude.com/docs/en/setup",
+    "opencode||--formula opencode true|@opencode cli @opencode/cli @opencode/cli |https://opencode.ai/docs/",
+    "gemini-cli||--formula gemini-cli false|@google gemini-cli @google/gemini-cli @google/gemini-cli |https://github.com/google-gemini/gemini-cli#readme",
+    "fx||||https://vercel.com/docs/ai-gateway/coding-agents/fx",
+    "openclaw||--formula openclaw-cli true| openclaw openclaw openclaw@latest --allow-scripts=openclaw|https://docs.openclaw.ai/install",
+    "pi||--formula pi-coding-agent true|@earendil-works pi-coding-agent @earendil-works/pi-coding-agent @earendil-works/pi-coding-agent --ignore-scripts|https://pi.dev/",
+    "goose||--formula block-goose-cli true||https://goose-docs.ai/docs/getting-started/installation",
+    "aider||--formula aider true||https://aider.chat/docs/install.html",
+    "qwen-code||--formula qwen-code true|@qwen-code qwen-code @qwen-code/qwen-code @qwen-code/qwen-code@latest |https://github.com/QwenLM/qwen-code#readme",
+    "crush|||@charmland crush @charmland/crush @charmland/crush |https://github.com/charmbracelet/crush#readme",
+    "droid||--cask droid true| droid droid droid |https://docs.factory.ai/cli/getting-started/quickstart",
+    "copilot||--cask copilot-cli true,--cask copilot-cli@prerelease false|@github copilot @github/copilot @github/copilot |https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli",
+    "cline||--formula cline false| cline cline cline |https://docs.cline.bot/usage/cli-overview",
+    "continue|||@continuedev cli @continuedev/cli @continuedev/cli |https://github.com/continuedev/continue/tree/main/extensions/cli",
+    "openhands||||https://docs.openhands.dev/openhands/usage/cli/installation",
+    "kimi||--formula kimi-code true,--formula kimi-cli false|@moonshot-ai kimi-code @moonshot-ai/kimi-code @moonshot-ai/kimi-code |https://moonshotai.github.io/kimi-code/en/guides/getting-started",
+];
+
+#[test]
+fn the_install_and_update_recipes_read_as_they_did_before_the_manifests() {
+    let listed: Vec<&str> = crate::harnesses::specs()
+        .iter()
+        .map(|spec| spec.id)
+        .filter(|id| recipe(id).is_some())
+        .collect();
+    assert_eq!(listed.len(), RECIPES_FROZEN.len());
+    for (id, frozen) in listed.iter().zip(RECIPES_FROZEN) {
+        assert_eq!(shown(recipe(id).unwrap()), frozen);
+    }
+    assert!(recipe("rcli").is_none());
+    assert!(
+        recipe("claude").is_none(),
+        "a recipe is found by catalog id only"
+    );
+}

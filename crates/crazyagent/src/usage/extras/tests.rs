@@ -73,29 +73,20 @@ fn name(harness: &str) -> &'static str {
 
 #[test]
 fn every_catalog_harness_has_exactly_one_adapter_entry() {
-    let mut catalog: Vec<&str> = crate::harnesses::specs()
-        .iter()
-        .map(|spec| spec.id)
-        .collect();
-    let mut table: Vec<&str> = ADAPTERS.iter().map(|(id, _)| *id).collect();
-    catalog.sort_unstable();
-    table.sort_unstable();
-    assert_eq!(
-        table, catalog,
-        "a harness added to the catalog needs its own entry"
-    );
-    table.dedup();
-    assert_eq!(table.len(), ADAPTERS.len());
-    for (id, entry) in ADAPTERS {
-        assert!(
-            matches!(
-                entry,
-                Adapter::Codex | Adapter::Claude | Adapter::NotReported
-            ),
-            "{id}: key adapters are chosen by the account's host, never by its harness"
+    for spec in crate::harnesses::specs() {
+        let wanted = match spec.id {
+            "codex" => Adapter::Codex,
+            "claude-code" => Adapter::Claude,
+            _ => Adapter::NotReported,
+        };
+        assert_eq!(
+            adapter(spec.id),
+            Some(wanted),
+            "{}: key adapters are chosen by the account's host, never by its harness",
+            spec.id
         );
-        assert_eq!(adapter(id), Some(entry), "{id}");
     }
+    assert_eq!(crate::harnesses::specs().len(), 18);
     assert_eq!(adapter("codex"), Some(Adapter::Codex));
     assert_eq!(adapter("claude"), Some(Adapter::Claude));
     assert_eq!(adapter("claude-code"), Some(Adapter::Claude));

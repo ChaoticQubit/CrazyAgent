@@ -11,6 +11,8 @@ pub mod update;
 
 #[cfg(test)]
 mod account_fit_tests;
+#[cfg(test)]
+mod catalog_tests;
 #[cfg(all(test, unix))]
 mod finding_tests;
 #[cfg(test)]
