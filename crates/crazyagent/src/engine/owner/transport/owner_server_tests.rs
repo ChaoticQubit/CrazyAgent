@@ -588,6 +588,38 @@ fn a_grant_found_stale_after_the_disk_changed_is_an_outcome_to_reconcile() {
     assert!(projects_home::regranted(Ok(admission(1)), &admission(1), true).is_ok());
 }
 
+/// RV-DS241-141: a Delete everything counts as having reached the Trash, so a project whose
+/// records stay shows "A delete was cut short" instead of Failed, when every folder moved,
+/// when some moved before a later one failed (`delete_trash_partial`), and when its admitted
+/// disk work ended with no answer (its blocking task panicked or was cancelled). A refusal
+/// with nothing moved, or no disk work run, counts as not reached.
+#[test]
+fn a_delete_that_moved_any_folder_or_lost_its_disk_work_counts_as_reaching_the_trash() {
+    use projects_home::reached_trash;
+    assert!(reached_trash(Some(Ok(())), true), "every folder moved");
+    assert!(
+        reached_trash(Some(Err("delete_trash_partial")), true),
+        "one folder moved, a later one failed"
+    );
+    assert!(
+        reached_trash(None, true),
+        "the admitted disk work panicked or was cancelled"
+    );
+    assert!(
+        !reached_trash(Some(Err("home_trash_failed")), true),
+        "the first move failed"
+    );
+    assert!(
+        !reached_trash(Some(Err("delete_agents_running")), true),
+        "refused before any move"
+    );
+    assert!(
+        !reached_trash(Some(Err("delete_in_progress")), false),
+        "refused at the plan"
+    );
+    assert!(!reached_trash(None, false), "no disk work ran");
+}
+
 /// RV-CODE combo-five r1 move F1 r1 (rv-code3 F1): the first grant check of an answer counts
 /// the disk as changed once a Delete reached the Trash or a move's disk work ran, for the
 /// projects home and for one project, so a grant found stale there is an outcome to
