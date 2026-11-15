@@ -436,7 +436,7 @@ pub fn check_file(
 /// an absolute path. Output: those places, or none when the path does not resolve within
 /// that bound.
 #[cfg(unix)]
-fn link_hops(path: &Path) -> Option<Vec<PathBuf>> {
+pub(crate) fn link_hops(path: &Path) -> Option<Vec<PathBuf>> {
     use std::path::Component;
     assert!(path.is_absolute());
     let queue = |pending: &mut Vec<PathBuf>, from: &Path| {
@@ -486,7 +486,7 @@ fn link_hops(path: &Path) -> Option<Vec<PathBuf>> {
 /// Reads no links off Unix, where the checks rest on the two ends of a chain as before.
 /// Input: the path, unused. Output: no links.
 #[cfg(not(unix))]
-fn link_hops(_path: &Path) -> Option<Vec<PathBuf>> {
+pub(crate) fn link_hops(_path: &Path) -> Option<Vec<PathBuf>> {
     Some(Vec::new())
 }
 

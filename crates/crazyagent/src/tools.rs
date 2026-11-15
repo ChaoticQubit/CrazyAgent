@@ -399,6 +399,23 @@ impl Places {
         !self.agent_writable(folder) && !(self.temp_refused && in_temp_of(folder, &self.temps))
     }
 
+    /// Whether a path run as written meets only links no one else can move: every link and
+    /// `..` folder on its way to the real file ([`crate::harnesses::finding::link_hops`]) is
+    /// one agents cannot write, no other user or group can change and, on the engine's
+    /// places, not one in a temp folder the path itself lies outside ([`leads_into_temp`]).
+    /// Input: the absolute path. Output: the answer, false past the link bound.
+    pub(crate) fn link_hops_kept(&self, path: &Path) -> bool {
+        assert!(path.is_absolute());
+        let Some(hops) = crate::harnesses::finding::link_hops(path) else {
+            return false;
+        };
+        hops.iter().all(|hop| {
+            !self.agent_writable(hop)
+                && crate::service::changeable_past_sticky(hop).is_none()
+                && !(self.temp_refused && leads_into_temp(path, hop, &self.temps))
+        })
+    }
+
     /// Whether agents can write a folder or file, read as written and with its links
     /// resolved: inside a `.crazyagent` folder, inside a project ([`in_project`]), inside a
     /// project the engine set up ([`Places::in_set_up_project`]), inside the engine's data

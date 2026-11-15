@@ -801,12 +801,16 @@ fn npm_install_args(npm: &'static Npm) -> Vec<&'static str> {
 
 /// Passes a built command only when its program is a tool this user can trust and one the
 /// tool resolver would run: no part of its path, as written or real, that agents or another
-/// user can change, and an interpreter its first line names vetted the same way.
-/// Inputs: the command and the resolver's places. Output: the same command, or the refusal
-/// code of the tool check.
+/// user can change, an interpreter its first line names vetted the same way, and no link on
+/// its way to the real file that could be moved before the command runs the path as written
+/// ([`crate::tools::Places::link_hops_kept`]). Inputs: the command and the resolver's
+/// places. Output: the same command, or the refusal code of the tool check.
 fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'static str> {
     trusted(&fixed.program)?;
     vetted(&fixed, places)?;
+    if !places.link_hops_kept(&fixed.program) {
+        return Err(TOOL_UNSAFE);
+    }
     assert!(fixed.program.is_absolute());
     assert!(fixed.args.len() <= ARGS_MAX);
     assert!(fixed.search.iter().all(|folder| folder.is_absolute()));
