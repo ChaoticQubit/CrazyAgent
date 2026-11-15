@@ -24,6 +24,8 @@ pub mod ide_shell;
 pub mod linux;
 pub mod model_proxy;
 pub mod policy;
+#[cfg(all(test, target_os = "macos"))]
+mod power_tests;
 pub mod shared_folders;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod test_agent;

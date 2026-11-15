@@ -160,3 +160,57 @@ test("Keep awake: the panel's Mode switch saves at once, closes on Escape and a 
   assert.equal(await page.evaluate("location.hash"), "#/settings/keep-awake");
   await until("the panel closed after its link", false, () => page.evaluate(`document.querySelector(${JSON.stringify(PANEL)}) !== null`));
 }));
+
+/** Whether a button in the open panel is disabled. Inputs: the page and the button's words.
+ * Output: true or false, or null when the panel has no such button. */
+async function panelButtonOff(page, label) {
+  return page.evaluate(`(() => {
+    const button = [...document.querySelectorAll(${JSON.stringify(`${PANEL} button`)})].find((entry) => entry.innerText.trim() === ${JSON.stringify(label)});
+    return button ? button.disabled : null;
+  })()`);
+}
+
+test("Keep awake: in mode Off the panel's Starts are off and it says how to start a timer", { timeout: 600000 }, (t) => onEngine(t, "ca-ka-panel-off-", async ({ bridge, me, page, open }) => {
+  await engineAct(bridge, { set: { settings: { ...KEEP_AWAKE_DEFAULTS, mode: "off" } } });
+  await open("#/home", "Home", (text) => text.includes("Projects"));
+  await until("the control for mode off", IDLE.off, () => controlLabel(page));
+  await openPanel(me, page);
+  for (const label of ["Start 1 h", "Start 4 h", "Custom...", "Extend 1 h", "End now"]) assert.equal(await panelButtonOff(page, label), true, label);
+  assert.ok((await panelText(page)).includes("Keep awake is Off. Pick Auto or Manual to start a timer."));
+  assert.equal((await panelText(page)).includes("Something went wrong"), false);
+  await me.click("Manual", `${PANEL} fieldset[data-setting="mode"] label`);
+  await until("the engine stores mode manual", "manual", async () => (await engineView(bridge)).settings.mode);
+  await until("Start 1 h comes back", false, () => panelButtonOff(page, "Start 1 h"));
+  assert.equal((await panelText(page)).includes("Keep awake is Off."), false);
+}));
+
+test("Keep awake: a Settings save keeps a mode changed in the panel or by another client while the page was open", { timeout: 600000 }, (t) => onEngine(t, "ca-ka-settings-stale-", async ({ bridge, me, page, open }) => {
+  const grace = KEEP_AWAKE_SETTINGS.find((setting) => setting.id === "grace").options.find((option) => option.value === "min30");
+  const cap = KEEP_AWAKE_SETTINGS.find((setting) => setting.id === "cap").options.find((option) => option.value === "h4");
+  await settingsPage(me, open);
+  await until("the page shows mode auto", "auto", () => shown(page, "mode"));
+  await openPanel(me, page);
+  await me.click("Off", `${PANEL} fieldset[data-setting="mode"] label`);
+  await until("the engine stores mode off", "off", async () => (await engineView(bridge)).settings.mode);
+  await until("the page shows the panel's mode without a reload", "off", () => shown(page, "mode"));
+  for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await until("the panel closed", false, () => page.evaluate(`document.querySelector(${JSON.stringify(PANEL)}) !== null`));
+  await me.click(grace.label, `fieldset[data-setting="grace"] label`);
+  await until("30 min picked", "min30", () => shown(page, "grace"));
+  await me.follow(SAVE);
+  await me.waitFor("the saved note", (text) => text.includes(SAVED));
+  await until("the save kept the panel's mode", { mode: "off", grace: "min30" }, async () => {
+    const stored = (await engineView(bridge)).settings;
+    return { mode: stored.mode, grace: stored.grace };
+  });
+
+  await me.click(cap.label, `fieldset[data-setting="cap"] label`);
+  await until("4 h picked", "h4", () => shown(page, "cap"));
+  await engineAct(bridge, { set: { settings: { ...(await engineView(bridge)).settings, mode: "manual" } } });
+  assert.equal(await shown(page, "cap"), "h4", "the pick is still on the page");
+  await me.follow(SAVE);
+  await until("the save kept the other client's mode", { mode: "manual", grace: "min30", cap: "h4" }, async () => {
+    const stored = (await engineView(bridge)).settings;
+    return { mode: stored.mode, grace: stored.grace, cap: stored.cap };
+  });
+}));

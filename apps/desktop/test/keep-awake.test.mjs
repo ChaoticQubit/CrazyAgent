@@ -5,6 +5,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+const core = await import("../src/api.ts");
 const api = await import("../src/api-keep-awake.ts");
 const model = await import("../src/screens/keep-awake/model.ts");
 const control = await import("../src/screens/keep-awake/control.tsx");
@@ -24,6 +25,7 @@ const API = source("../src/api-keep-awake.ts");
 const SHELL = source("../src/ui/shell.tsx");
 const APP = source("../src/app.tsx");
 const NOTICE_CSS = source("../src/screens/notifications/notifications.css");
+const SETTINGS_PAGE = source("../src/screens/settings/keep-awake.tsx");
 
 const NOW = 1_800_000_000_000;
 const MINUTE = 60_000;
@@ -48,7 +50,9 @@ const view = (state = {}, extra = {}) => ({
 });
 const working = (count, extra = {}) => view({ want: HELD, reason: "work" }, { work: count, ...extra });
 const timer = (left, extra = {}) => view({ want: HELD, reason: "timer", ends_at_ms: NOW + left }, extra);
-const ended = (kind, extra = {}) => view({ ended: { kind, ...(kind === "battery" ? { pct: 9 } : {}) } }, extra);
+const ended = (kind, extra = {}) => view({ ended: { kind, ...(kind === "battery" ? { pct: 9 } : {}), ...(kind === "cap" ? { hours: 24 } : {}) } }, extra);
+const capped = (hours, cap) => view({ ended: { kind: "cap", hours } }, { settings: { cap } });
+const OFF = view({ reason: "off" }, { settings: { mode: "off" } });
 const ok = (value) => ({ kind: "ok", value });
 
 const STATES = [
@@ -141,10 +145,31 @@ test("an end the owner made is not an end by itself", () => {
   assert.equal(model.keepAwakeTone(ended("off", { settings: { mode: "off" } })), "plain");
 });
 
-test("the cap's end names the cap that was set", () => {
-  assert.equal(model.keepAwakeLabel(ended("cap", { settings: { cap: "h4" } }), NOW), "Ended: 4 h limit");
-  assert.equal(model.keepAwakeLabel(ended("cap", { settings: { cap: "h8" } }), NOW), "Ended: 8 h limit");
-  assert.equal(model.keepAwakeLabel(ended("cap", { settings: { cap: "none" } }), NOW), "Ended: time limit");
+test("the cap's end names the cap the hold ran with, whatever the setting says now", () => {
+  assert.match(ENGINE_STATE, /^ {4}Cap \{ hours: u8 \},$/m);
+  assert.equal(model.keepAwakeLabel(capped(4, "h4"), NOW), "Ended: 4 h limit");
+  assert.equal(model.keepAwakeLabel(capped(8, "h8"), NOW), "Ended: 8 h limit");
+  assert.equal(model.keepAwakeLabel(capped(24, "h24"), NOW), "Ended: 24 h limit");
+  assert.equal(model.keepAwakeLabel(capped(24, "h4"), NOW), "Ended: 24 h limit", "a later, shorter cap does not rename the end");
+  assert.equal(model.keepAwakeLabel(capped(24, "none"), NOW), "Ended: 24 h limit", "No limit set later does not rename the end");
+  assert.equal(model.keepAwakeTone(capped(24, "none")), "ended");
+  for (const cap of ["h4", "h8", "h24", "none"]) assert.doesNotMatch(model.keepAwakeLabel(capped(8, cap), NOW), /time limit/);
+});
+
+test("every refusal of a Keep awake change has its own sentence, the engine's sentence", () => {
+  const words = {
+    keep_awake_off: "Keep awake is Off. Pick Auto or Manual first.",
+    keep_awake_no_timer: "The timer already ended. Start a new one.",
+    keep_awake_not_holding: "Nothing is held right now.",
+    keep_awake_minutes_invalid: "Enter whole minutes from 1 to 1440.",
+  };
+  const refused = new Set([...ENGINE.matchAll(/return Some\("(keep_awake_[a-z_]+)"\);/g)].map(([, code]) => code));
+  assert.deepEqual([...refused].sort(), Object.keys(words).sort(), "the engine refuses with these codes and no other");
+  for (const [code, sentence] of Object.entries(words)) {
+    assert.equal(core.plainError(code), sentence, code);
+    assert.doesNotMatch(core.plainError(code), /Something went wrong/, code);
+    assert.ok(ENGINE.includes(`"${sentence}"`), `the engine has the same words for ${code}`);
+  }
 });
 
 test("time left rounds up to the minute and never reads zero", () => {
@@ -319,6 +344,22 @@ test("Extend is offered while a timer runs, End only while something is held, an
   assert.match(busy, /<fieldset class="notice-choices" data-setting="mode" disabled="">/);
 });
 
+test("in mode Off the three Starts are off and the panel says how to start one", () => {
+  const off = panelView(ok(OFF));
+  for (const label of ["Start 1 h", "Start 4 h", "Custom..."]) assert.equal(disabled(off, label), true, label);
+  assert.equal(disabled(off, "Extend 1 h"), true);
+  assert.equal(disabled(off, "End now"), true);
+  assert.ok(text(off).includes("Keep awake is Off. Pick Auto or Manual to start a timer."));
+  assert.equal(text(off).includes("Extend works while a timer runs."), false, "one hint at a time");
+  assert.equal(disabled(panelView(ok(OFF), { custom: true, typed: "90" }), "Start"), true, "an open custom field cannot start one either");
+  assert.match(off, /<fieldset class="notice-choices" data-setting="mode"(?! disabled)/, "the mode stays pickable");
+  for (const mode of ["auto", "manual"]) {
+    const on = panelView(ok(view({}, { settings: { mode } })));
+    for (const label of ["Start 1 h", "Start 4 h", "Custom..."]) assert.equal(disabled(on, label), false, `${mode} ${label}`);
+    assert.equal(text(on).includes("Keep awake is Off."), false, mode);
+  }
+});
+
 test("Custom opens a minutes field that starts only a whole number from 1 to 1440", () => {
   const closed = panelView(ok(view()));
   assert.equal(closed.includes('id="keep-awake-minutes"'), false);
@@ -442,6 +483,17 @@ test("a save sends every setting with the picks applied, and refuses a name the 
   assert.deepEqual(Object.keys(settings.savedKeepAwake(stored, { cap: "h4" })), Object.keys(api.KEEP_AWAKE_DEFAULTS));
   assert.throws(() => settings.savedKeepAwake(stored, { cap: "h12" }), /cap cannot be h12/);
   assert.throws(() => settings.savedKeepAwake(stored, { volume: "loud" }), /no setting volume/);
+});
+
+test("a Settings save keeps what changed elsewhere while the page was open", () => {
+  const changedElsewhere = { ...api.KEEP_AWAKE_DEFAULTS, mode: "off", lid: "always" };
+  const sent = settings.savedKeepAwake(changedElsewhere, { grace: "min30" });
+  assert.deepEqual(sent, { ...changedElsewhere, grace: "min30" }, "only the picked line differs from the engine's settings");
+  assert.match(SETTINGS_PAGE, /window\.addEventListener\(KEEP_AWAKE_CHANGED, /, "the page reads again after a change made in the panel");
+  assert.match(SETTINGS_PAGE, /window\.removeEventListener\(KEEP_AWAKE_CHANGED, /);
+  assert.doesNotMatch(SETTINGS_PAGE, /\[view\]\)/, "a read never drops the picks");
+  assert.match(SETTINGS_PAGE, /const fresh = await loadKeepAwake\(\);/, "a save reads the engine's settings first");
+  assert.match(SETTINGS_PAGE, /savedKeepAwake\(fresh\.value\.settings, picks\)/, "and sends the picks over those");
 });
 
 test("Settings shows the reason on a setting this computer cannot honour and keeps it editable", () => {

@@ -306,14 +306,14 @@ fn the_cap_ends_a_hold_that_runs_longer_than_the_cap() {
     assert_eq!(nearly.state.want, IDLE);
     let capped = evaluate(&connection, NOW_MS + 4 * HOUR_MS, None).unwrap();
     assert_eq!(capped.state.want, Want::Nothing);
-    assert_eq!(capped.state.ended, Some(EndReason::Cap));
+    assert_eq!(capped.state.ended, Some(EndReason::Cap { hours: 4 }));
     let still = evaluate(&connection, NOW_MS + 4 * HOUR_MS + 5 * SECOND_MS, None).unwrap();
     assert_eq!(
         still.state.want,
         Want::Nothing,
         "Auto stands down while that work runs"
     );
-    assert_eq!(still.state.ended, Some(EndReason::Cap));
+    assert_eq!(still.state.ended, Some(EndReason::Cap { hours: 4 }));
     mark(&connection, worker, "idle");
     let rested = evaluate(&connection, NOW_MS + 5 * HOUR_MS, None).unwrap();
     assert_eq!(rested.state.want, Want::Nothing, "no grace follows a cap");
@@ -336,13 +336,104 @@ fn the_cap_ends_a_hold_that_runs_longer_than_the_cap() {
     );
     let capped_timer = evaluate(&connection, NOW_MS + 10 * HOUR_MS, None).unwrap();
     assert_eq!(capped_timer.state.want, Want::Nothing);
-    assert_eq!(capped_timer.state.ended, Some(EndReason::Cap));
+    assert_eq!(capped_timer.state.ended, Some(EndReason::Cap { hours: 4 }));
     let after = evaluate(&connection, NOW_MS + 11 * HOUR_MS, None).unwrap();
     assert_eq!(
         after.state.want,
         Want::Nothing,
         "the cap also drops the timer"
     );
+}
+
+#[test]
+fn a_cap_end_names_the_cap_the_hold_ran_with_after_the_setting_changes() {
+    for (cap, hours) in [(Cap::H4, 4_u8), (Cap::H8, 8), (Cap::H24, 24)] {
+        let (_folder, connection) = engine();
+        let ran_with = KeepAwakeSettings {
+            cap,
+            ..KeepAwakeSettings::DEFAULT
+        };
+        set(&connection, ran_with);
+        agent(&connection, "working");
+        assert_eq!(evaluate(&connection, NOW_MS, None).unwrap().state.want, IDLE);
+        let end_ms = NOW_MS + i64::from(hours) * HOUR_MS;
+        let capped = evaluate(&connection, end_ms, None).unwrap();
+        assert_eq!(capped.state.ended, Some(EndReason::Cap { hours }));
+        for later in [Cap::H4, Cap::H8, Cap::H24, Cap::None] {
+            let outcome = act(
+                &connection,
+                KeepAwakeAction::Set {
+                    settings: KeepAwakeSettings {
+                        cap: later,
+                        ..ran_with
+                    },
+                },
+                end_ms + SECOND_MS,
+            );
+            assert_eq!(outcome, Outcome::Applied);
+            let shown = evaluate(&connection, end_ms + 2 * SECOND_MS, None).unwrap();
+            assert_eq!(shown.settings.cap, later);
+            assert_eq!(
+                shown.state.ended,
+                Some(EndReason::Cap { hours }),
+                "{cap:?} then {later:?}"
+            );
+        }
+    }
+    let text = serde_json::to_string(&EndReason::Cap { hours: 24 }).unwrap();
+    assert_eq!(text, r#"{"kind":"cap","hours":24}"#);
+    assert_eq!(Cap::None.hours(), None);
+    assert_eq!(Cap::H8.ms(), Some(8 * HOUR_MS));
+}
+
+#[test]
+fn every_refusal_of_an_owner_change_has_plain_words() {
+    let (_folder, connection) = engine();
+    let off = KeepAwakeSettings {
+        mode: Mode::Off,
+        ..KeepAwakeSettings::DEFAULT
+    };
+    let start = KeepAwakeAction::Start { minutes: 60 };
+    let extend = KeepAwakeAction::Extend { minutes: 60 };
+    let far = KeepAwakeAction::Extend { minutes: 1440 };
+    assert_eq!(
+        act(&connection, extend, NOW_MS),
+        rejected("keep_awake_no_timer")
+    );
+    assert_eq!(
+        act(&connection, KeepAwakeAction::End, NOW_MS),
+        rejected("keep_awake_not_holding")
+    );
+    assert_eq!(act(&connection, start, NOW_MS), Outcome::Applied);
+    assert_eq!(
+        act(&connection, far, NOW_MS + SECOND_MS),
+        rejected("keep_awake_minutes_invalid")
+    );
+    set(&connection, off);
+    assert_eq!(
+        act(&connection, start, NOW_MS + 2 * SECOND_MS),
+        rejected("keep_awake_off")
+    );
+    let words = [
+        (
+            "keep_awake_off",
+            "Keep awake is Off. Pick Auto or Manual first.",
+        ),
+        (
+            "keep_awake_no_timer",
+            "The timer already ended. Start a new one.",
+        ),
+        ("keep_awake_not_holding", "Nothing is held right now."),
+        (
+            "keep_awake_minutes_invalid",
+            "Enter whole minutes from 1 to 1440.",
+        ),
+    ];
+    for (code, sentence) in words {
+        assert_eq!(refusal_words(code), Some(sentence), "{code}");
+    }
+    assert_eq!(refusal_words("owner_busy"), None);
+    assert_eq!(refusal_words(""), None);
 }
 
 #[test]
@@ -728,6 +819,26 @@ fn the_keeper_looks_each_second_and_evaluates_on_a_change_or_every_five_seconds(
         after, unchanged,
         "an evaluation that changes nothing writes nothing"
     );
+}
+
+#[cfg(target_os = "linux")]
+mod on_linux {
+    use super::hold_linux::close_on_exec;
+    use rustix::io::{FdFlags, fcntl_getfd, fcntl_setfd};
+
+    /// rv-sec2 KA F1: the descriptor logind hands out arrives without close-on-exec; the
+    /// hold marks every descriptor of the reply inside the spawn gate, so no child the
+    /// engine starts later inherits the lock.
+    #[test]
+    fn a_descriptor_the_bus_hands_over_is_marked_close_on_exec() {
+        let (received, _peer) = crate::spawn_gate::unix_pair_std().unwrap();
+        fcntl_setfd(&received, FdFlags::empty()).unwrap();
+        assert!(!fcntl_getfd(&received).unwrap().contains(FdFlags::CLOEXEC));
+        close_on_exec(&received).unwrap();
+        assert!(fcntl_getfd(&received).unwrap().contains(FdFlags::CLOEXEC));
+        close_on_exec(&received).unwrap();
+        assert!(fcntl_getfd(&received).unwrap().contains(FdFlags::CLOEXEC));
+    }
 }
 
 #[cfg(target_os = "macos")]
