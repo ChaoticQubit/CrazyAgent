@@ -46,7 +46,9 @@ pub struct Schema {
 /// of the rows past the last sequence read. Holds the database path, its query set, the last
 /// sequence read and how many reads in a row found it busy. SQLite refuses a link in any part
 /// of the path, so the caller passes the path by its real name; a path through a link is
-/// refused as [`UNSAFE`].
+/// refused as [`UNSAFE`]. SQLite opens the database and its journal with no wait bound, and
+/// a file swapped for a FIFO after this reader's checks can hold a read, so the caller runs
+/// each read on a thread of its own with a deadline.
 pub struct SqlitePoll {
     path: PathBuf,
     schema: &'static Schema,
@@ -170,7 +172,8 @@ impl SqlitePoll {
 
 /// How one read opens the database: read-only through the WAL index the harness keeps, or,
 /// for a WAL database no process has open, as immutable, so the read makes no WAL or index
-/// file beside it.
+/// file beside it. A harness on the macOS system SQLite keeps its side files after a clean
+/// close, so read-only is the usual mode there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     ReadOnly,

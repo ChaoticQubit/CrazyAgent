@@ -15,8 +15,9 @@ pub const MARK_BYTES_MAX: usize = 64;
 /// it, then stayed the same for [`QUIET`] with its last line an empty prompt mark (the mark
 /// with nothing typed after it). The reply is the text between the last line before that
 /// one that starts with the mark, where the prompt was typed, and the empty mark. It gives
-/// no tool names and can cut or repeat text. Holds the mark, the last screen, when it last
-/// changed and the open turn, with whether the screen has changed since it started.
+/// no tool names and can cut or repeat text. A turn opened before any capture is measured
+/// from the first capture after it. Holds the mark, the last screen, when it last changed
+/// and the open turn, with whether the screen has changed since it started.
 pub struct ScreenReader {
     mark: String,
     last: Vec<u8>,
@@ -25,11 +26,13 @@ pub struct ScreenReader {
 }
 
 impl ScreenReader {
-    /// A reader for one prompt mark. Input: the manifest's `prompt_mark`, 1 to
-    /// [`MARK_BYTES_MAX`] bytes and not only spaces, which the caller checks. Output: the
-    /// reader.
+    /// A reader for one prompt mark. Input: the manifest's `prompt_mark`. Output: the
+    /// reader, or none for a mark that is empty, only spaces or longer than
+    /// [`MARK_BYTES_MAX`] bytes.
     pub fn new(mark: &str) -> Option<Self> {
-        assert!(!mark.trim_end().is_empty() && mark.len() <= MARK_BYTES_MAX);
+        if mark.trim_end().is_empty() || mark.len() > MARK_BYTES_MAX {
+            return None;
+        }
         Some(Self {
             mark: mark.to_owned(),
             last: Vec::new(),
@@ -52,11 +55,11 @@ impl ScreenReader {
         let screen = tail(screen);
         assert!(screen.len() <= SCREEN_BYTES_MAX);
         if screen != self.last.as_slice() {
-            self.last = screen.to_vec();
-            self.changed = Some(now);
-            if self.turn == Some(false) {
+            if self.turn == Some(false) && !self.last.is_empty() {
                 self.turn = Some(true);
             }
+            self.last = screen.to_vec();
+            self.changed = Some(now);
             return Vec::new();
         }
         let quiet = self
