@@ -22,8 +22,9 @@ pub const KINDS: [&str; 9] = [
     "markdown-history",
     "screen",
 ];
-/// How long a row waits for one line of output, or for a stand-in to exit.
-pub const WAIT: Duration = Duration::from_secs(10);
+/// How long a row waits for one line of output, or for a stand-in to exit. It leaves room
+/// for the first exec of a newly written program, which macOS may hold in a queue.
+pub const WAIT: Duration = Duration::from_secs(30);
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/harness");
 const FILE_NAME_BYTES_MAX: usize = 64;
 const CHUNK_BYTES: usize = 64 * 1024;
@@ -66,8 +67,9 @@ impl Standin {
         self.bin().join(format!("standin-{}", self.kind))
     }
 
-    /// The folder that holds the program, for a row that puts it on a search path.
-    /// Output: the path.
+    /// The folder that holds the program. It is under `/private/tmp`, and the engine's tool
+    /// resolver refuses a temp folder on a search path (`tools.rs`), so a row hands the
+    /// program by its full path or installs it outside temp first. Output: the path.
     pub fn bin(&self) -> PathBuf {
         self.folder.path().join("bin")
     }
@@ -110,7 +112,11 @@ impl Standin {
     /// `--home <home>` followed by these arguments, as most rows run the stand-in.
     /// Input: the arguments. Output: the whole argument list.
     pub fn at_home(&self, args: &[&str]) -> Vec<String> {
-        let home = self.home().to_str().expect("a UTF-8 scratch path").to_owned();
+        let home = self
+            .home()
+            .to_str()
+            .expect("a UTF-8 scratch path")
+            .to_owned();
         ["--home".to_owned(), home]
             .into_iter()
             .chain(args.iter().map(|arg| (*arg).to_owned()))
@@ -209,7 +215,10 @@ impl Live {
     /// Writes these bytes to the stand-in's stdin. A stand-in that already ended is not an
     /// error here: the row's next look at its output shows it. Input: the bytes.
     pub fn write(&mut self, bytes: &[u8]) {
-        let stdin = self.stdin.as_mut().expect("the stand-in's stdin is still open");
+        let stdin = self
+            .stdin
+            .as_mut()
+            .expect("the stand-in's stdin is still open");
         match stdin.write_all(bytes).and_then(|()| stdin.flush()) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::BrokenPipe => {}

@@ -18,7 +18,8 @@ const PROMPT_TWO: &str = r#"{"type":"prompt","message":"two"}"#;
 const ABORT: &str = r#"{"type":"abort"}"#;
 const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}"#;
 const INITIALIZED: &str = r#"{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[]}}"#;
-const NEW: &str = r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}"#;
+const NEW: &str =
+    r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}"#;
 const NEW_REPLY: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"sessionId":"sess_standin"}}"#;
 const PROMPT: &str = r#"{"jsonrpc":"2.0","id":"p-2","method":"session/prompt","params":{"sessionId":"sess_standin","prompt":[{"type":"text","text":"say \"id\":99 hi"}]}}"#;
 const PROMPT_REPLY: &str = r#"{"jsonrpc":"2.0","id":"p-2","result":{"stopReason":"end_turn"}}"#;
@@ -31,16 +32,19 @@ const TOOL_DONE: &str = r#"{"jsonrpc":"2.0","method":"session/update","params":{
 const TOOL_PROMPT: &str = r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"sess_standin","prompt":[{"type":"text","text":"tool"}]}}"#;
 const TOOL_REPLY: &str = r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}"#;
 const LONG_PROMPT: &str = r#"{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"sess_standin","prompt":[{"type":"text","text":"cancel me"}]}}"#;
-const CANCEL: &str = r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess_standin"}}"#;
+const CANCEL: &str =
+    r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess_standin"}}"#;
 const CANCELLED: &str = r#"{"jsonrpc":"2.0","id":4,"result":{"stopReason":"cancelled"}}"#;
 const HISTORY: &str = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_standin","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"old"}}}}"#;
 const LOAD: &str = r#"{"jsonrpc":"2.0","id":5,"method":"session/load","params":{"sessionId":"sess_standin","cwd":"/tmp","mcpServers":[]}}"#;
 const LOADED: &str = r#"{"jsonrpc":"2.0","id":5,"result":{}}"#;
 const AUTH_REQUIRED: &str = r#"{"code":-32000,"message":"Authentication required"}"#;
-const NEW_REFUSED: &str = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"Authentication required"}}"#;
+const NEW_REFUSED: &str =
+    r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"Authentication required"}}"#;
 const NOTICE: &str = r#"{"jsonrpc":"2.0","method":"x/notice","params":{}}"#;
 const UNKNOWN: &str = r#"{"jsonrpc":"2.0","id":7,"method":"x/unknown","params":{}}"#;
-const UNKNOWN_REPLY: &str = r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32601,"message":"Method not found"}}"#;
+const UNKNOWN_REPLY: &str =
+    r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32601,"message":"Method not found"}}"#;
 const ESCAPE: &str = r#"{"jsonrpc":"2.0","id":8,"method":"../../escape","params":{}}"#;
 const DYING_PROMPT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"sess_standin","prompt":[]}}"#;
 const SESSION_REFUSAL: &str =
@@ -145,7 +149,7 @@ fn a_filled_terminal_argv_writes_its_record_where_the_manifest_record_path_says(
     let ended = standin.run(&argv, b"hello\n");
     assert_eq!(ended.status.code(), Some(0));
     assert_eq!(
-        fs::read_to_string(&record).unwrap_or_default(),
+        fs::read_to_string(record).unwrap_or_default(),
         lines(&[turn])
     );
     assert_eq!(standin.log("stdin-1"), "hello\n");
@@ -335,7 +339,7 @@ fn json_rewrite_replaces_the_whole_record_each_turn_and_leaves_no_temporary_file
         fs::read_to_string(&record).unwrap_or_default(),
         "[{\"n\":1},{\"n\":2}]\n"
     );
-    let after = fs::metadata(&record).map(|found| found.ino()).unwrap_or(0);
+    let after = fs::metadata(record).map(|found| found.ino()).unwrap_or(0);
     assert_ne!(
         before, after,
         "the record was written in place, not replaced"
@@ -367,7 +371,7 @@ fn sqlite_poll_writes_rows_a_read_only_reader_sees_in_order() {
         "the sqlite-poll record was not written"
     );
     let connection = rusqlite::Connection::open_with_flags(
-        &database,
+        database,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
@@ -398,7 +402,7 @@ fn markdown_history_appends_each_turn_to_the_record_it_is_told() {
     let ended = standin.run(&standin.at_home(&["--record", path]), b"hello\nagain\n");
     assert_eq!(ended.status.code(), Some(0));
     assert_eq!(
-        fs::read_to_string(&record).unwrap_or_default(),
+        fs::read_to_string(record).unwrap_or_default(),
         "#### hello\n\nreply one\n\n#### again\n\nreply two\n\n"
     );
     assert!(!standin.state().join("records").exists());
