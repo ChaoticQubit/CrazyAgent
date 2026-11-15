@@ -10,6 +10,8 @@ account_kinds:
   - "api_key"
   - "open_ai_compatible_url"
   - "local"
+account_protocols:
+  - "*"
 tools_limited: "runs without tools"
 cannot_start: "runs only as a CrazyAgent master"
 roles:

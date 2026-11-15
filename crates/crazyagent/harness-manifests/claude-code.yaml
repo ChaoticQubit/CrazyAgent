@@ -13,6 +13,30 @@ model_selection: true
 account_kinds:
   - "subscription"
   - "api_key"
+account_protocols:
+  - "anthropic-messages"
+limits: "claude"
+version:
+  sign_in_minimum: "2.1.268"
+update:
+  own:
+    root: ".local/share/claude/versions"
+    args:
+      - "update"
+    pointer:
+      url: "https://downloads.claude.ai/claude-code-releases/latest"
+      format: "plain-version"
+      bytes_max: 64
+  casks:
+    - "claude-code"
+  known_casks:
+    - "claude-code@latest"
+  npm:
+    scope: "@anthropic-ai"
+    name: "claude-code"
+    package: "@anthropic-ai/claude-code"
+    spec: "@anthropic-ai/claude-code@latest"
+  guide: "https://code.claude.com/docs/en/setup"
 roles:
   - "agent"
   - "master"

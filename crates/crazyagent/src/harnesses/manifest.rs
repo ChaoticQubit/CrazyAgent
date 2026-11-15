@@ -1,5 +1,6 @@
 use super::AccountKind;
 use crate::app_plugins::yaml::{self, Value};
+use serde::{Deserialize, Serialize};
 
 /// The most bytes of a harness id, an alias or a program name in a manifest.
 pub const NAME_BYTES_MAX: usize = 64;
@@ -39,7 +40,7 @@ pub const PLACEHOLDER: &str = "harness_manifest_placeholder";
 /// The code of an id, alias or program name two manifests share.
 pub const DUPLICATE: &str = "harness_manifest_duplicate";
 
-const TYPED: [&str; 16] = [
+const TYPED: [&str; 18] = [
     "schema",
     "kind",
     "id",
@@ -50,6 +51,8 @@ const TYPED: [&str; 16] = [
     "headless",
     "model_selection",
     "account_kinds",
+    "account_protocols",
+    "limits",
     "tools_limited",
     "cannot_start",
     "roles",
@@ -165,12 +168,35 @@ pub struct Rule {
 }
 
 /// How a lead on a harness gets sub-agents: the harness's own agent team, its own threads,
-/// or workers the app starts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// or workers the app starts. The catalog serves it to both apps as `teams`, `threads` or
+/// `app`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SubAgents {
     Teams,
     Threads,
     App,
+}
+
+/// How the engine reads the free resets, credits and spend of a sign-in of a harness beyond
+/// its usage windows: by the Codex reader or by the Claude reader. A manifest that names
+/// neither has a sign-in whose limits are not reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitsKind {
+    Codex,
+    Claude,
+}
+
+impl LimitsKind {
+    /// Reads a limits reader by its manifest name. Input: the name, `codex` or `claude`.
+    /// Output: the kind, or none for a name the engine has no limits reader for.
+    pub fn of(name: &str) -> Option<Self> {
+        match name {
+            "codex" => Some(Self::Codex),
+            "claude" => Some(Self::Claude),
+            _ => None,
+        }
+    }
 }
 
 /// What a harness can be in a project.
@@ -190,6 +216,8 @@ pub struct Refused {
 
 /// One harness as its manifest describes it. The catalog fields mirror `HarnessSpec`;
 /// `cannot_start` is the plain reason CrazyAgent has no way to start it, none when it has.
+/// `account_protocols` are the wire formats of the endpoint accounts it runs on, where a
+/// name that ends in `*` stands for every format that starts with the text before it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     pub id: String,
@@ -200,6 +228,8 @@ pub struct Manifest {
     pub headless: String,
     pub model_selection: bool,
     pub account_kinds: Vec<AccountKind>,
+    pub account_protocols: Vec<String>,
+    pub limits: Option<LimitsKind>,
     pub tools_limited: Option<String>,
     pub cannot_start: Option<String>,
     pub roles: Vec<Role>,
@@ -208,6 +238,7 @@ pub struct Manifest {
     pub record: RecordKind,
     pub owner_folders: Vec<String>,
     pub minimum_version: Option<String>,
+    pub sign_in_minimum: Option<String>,
     source: Value,
 }
 
@@ -247,6 +278,13 @@ fn relative(text: &str) -> bool {
         && text
             .split('/')
             .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+fn protocol(text: &str) -> bool {
+    text.strip_suffix('*')
+        .unwrap_or(text)
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 fn entries<'a>(value: &'a Value, path: &str) -> Result<&'a [(String, Value)], Refused> {
@@ -382,6 +420,19 @@ fn account_kinds(map: &Value) -> Result<Vec<AccountKind>, Refused> {
             )
         })
         .collect()
+}
+
+fn limits(map: &Value) -> Result<Option<LimitsKind>, Refused> {
+    let Some(name) = text(map, "limits", "limits", NAME_BYTES_MAX)? else {
+        return Ok(None);
+    };
+    match LimitsKind::of(&name) {
+        Some(kind) => Ok(Some(kind)),
+        None => refuse(
+            KIND,
+            format!("limits: CrazyAgent has no limits reader named {name}."),
+        ),
+    }
 }
 
 fn roles(map: &Value) -> Result<Vec<Role>, Refused> {
@@ -536,10 +587,43 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, Refused> {
         )?,
         None => Vec::new(),
     };
-    let minimum_version = match block(&source, "version")? {
-        Some(version) => text(version, "minimum", "version.minimum", NAME_BYTES_MAX)?,
-        None => None,
+    let (minimum_version, sign_in_minimum) = match block(&source, "version")? {
+        Some(found) => (
+            text(found, "minimum", "version.minimum", NAME_BYTES_MAX)?,
+            text(
+                found,
+                "sign_in_minimum",
+                "version.sign_in_minimum",
+                NAME_BYTES_MAX,
+            )?,
+        ),
+        None => (None, None),
     };
+    for (floor, path) in [
+        (&minimum_version, "version.minimum"),
+        (&sign_in_minimum, "version.sign_in_minimum"),
+    ] {
+        if let Some(floor) = floor
+            .as_deref()
+            .filter(|floor| !super::update::plain_version(floor))
+        {
+            return refuse(
+                VALUE,
+                format!("{path}: {floor} is not a version of two to six numbers joined by dots."),
+            );
+        }
+    }
+    let account_protocols = shaped(
+        texts(
+            &source,
+            "account_protocols",
+            "account_protocols",
+            NAME_BYTES_MAX,
+        )?,
+        "account_protocols",
+        protocol,
+        "a wire format name, with * allowed only as its last character",
+    )?;
     let manifest = Manifest {
         name: needed(text(&source, "name", "name", NAME_BYTES_MAX)?, "name")?,
         headless: needed(
@@ -547,6 +631,7 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, Refused> {
             "headless",
         )?,
         account_kinds: account_kinds(&source)?,
+        limits: limits(&source)?,
         tools_limited: text(
             &source,
             "tools_limited",
@@ -565,6 +650,8 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, Refused> {
         model_selection,
         owner_folders,
         minimum_version,
+        sign_in_minimum,
+        account_protocols,
         source,
     };
     assert!(word(&manifest.id) && !manifest.binaries.is_empty());

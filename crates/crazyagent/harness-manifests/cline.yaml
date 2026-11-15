@@ -11,4 +11,12 @@ account_kinds:
   - "api_key"
   - "open_ai_compatible_url"
   - "local"
+update:
+  known_formulae:
+    - "cline"
+  npm:
+    name: "cline"
+    package: "cline"
+    spec: "cline"
+  guide: "https://docs.cline.bot/usage/cli-overview"
 cannot_start: "installed, but CrazyAgent cannot start it yet"

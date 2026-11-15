@@ -10,5 +10,9 @@ account_kinds:
   - "api_key"
   - "open_ai_compatible_url"
   - "local"
+update:
+  formulae:
+    - "aider"
+  guide: "https://aider.chat/docs/install.html"
 tools_limited: "file edits cannot be switched off apart from a dry run"
 cannot_start: "installed, but CrazyAgent cannot start it yet"

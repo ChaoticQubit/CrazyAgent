@@ -12,4 +12,12 @@ account_kinds:
   - "subscription"
   - "api_key"
   - "open_ai_compatible_url"
+update:
+  casks:
+    - "droid"
+  npm:
+    name: "droid"
+    package: "droid"
+    spec: "droid"
+  guide: "https://docs.factory.ai/cli/getting-started/quickstart"
 cannot_start: "installed, but CrazyAgent cannot start it yet"

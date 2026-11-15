@@ -43,7 +43,10 @@ fn every_bundled_manifest_loads_in_catalog_order_under_its_own_file_name() {
     for (file, text) in BUNDLED {
         let manifest = manifest::parse(text.as_bytes()).unwrap();
         assert_eq!(manifest.id, file);
-        assert!(!text.contains('#'), "{file} holds no comment");
+        assert!(
+            text.lines().all(|line| !line.trim_start().starts_with('#')),
+            "{file} holds no comment"
+        );
     }
     assert_eq!(specs().len(), ids.len());
     for (harness, listed) in registry().all().iter().zip(specs()) {
@@ -247,6 +250,50 @@ fn a_file_not_named_after_its_id_or_holding_a_refused_manifest_names_the_file() 
         refusal(&[("one", "")]),
         (manifest::YAML, "one: The file has no settings.".to_owned())
     );
+}
+
+#[test]
+fn a_harness_speaks_the_wire_formats_its_manifest_lists_and_a_star_ends_a_prefix() {
+    let speaks = |id: &str, protocol: &str| registry().get(id).unwrap().speaks(protocol);
+    for protocol in [
+        "openai",
+        "openai-chat",
+        "openai-responses",
+        "openai-compatible",
+    ] {
+        assert!(speaks("codex", protocol), "{protocol}");
+        assert!(!speaks("claude-code", protocol), "{protocol}");
+        assert!(speaks("rcli", protocol), "{protocol}");
+    }
+    assert!(speaks("claude-code", "anthropic-messages"));
+    assert!(speaks("claude", "anthropic-messages"));
+    assert!(!speaks("claude-code", "anthropic-messages-2"));
+    assert!(!speaks("claude-code", "anthropic"));
+    assert!(!speaks("codex", "anthropic-messages"));
+    assert!(!speaks("codex", "native"));
+    assert!(!speaks("codex", "open"));
+    assert!(speaks("rcli", "anthropic-messages"));
+    assert!(speaks("rcli", ""));
+    let mut silent = 0;
+    for harness in registry().all() {
+        if harness.account_protocols().is_empty() {
+            silent += 1;
+            assert!(!harness.speaks("openai-chat"), "{}", harness.id());
+            assert!(!harness.speaks(""), "{}", harness.id());
+        }
+    }
+    assert_eq!(silent, 15);
+    assert_eq!(
+        registry().get("codex").unwrap().account_protocols(),
+        ["openai*"]
+    );
+}
+
+#[test]
+fn a_harness_is_named_by_its_id_and_its_aliases_only() {
+    let claude = registry().get("claude-code").unwrap();
+    assert!(claude.named("claude-code") && claude.named("claude"));
+    assert!(!claude.named("Claude") && !claude.named("codex") && !claude.named(""));
 }
 
 #[test]
