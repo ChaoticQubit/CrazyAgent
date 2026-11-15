@@ -414,11 +414,12 @@ pub const NO_CHANNEL: &str = "Messages come as a task of their own once it is id
 pub const LISTED_NO_CHANNEL: &str = "Messages come as a task of their own once it is idle: Native only never types, and this harness has no channel of its own.";
 
 /// Tells whether a team agent has no channel for its messages while it works under the
-/// project's Delivery setting: a tools-off Codex sub-agent in a kept session has no bridge
-/// and is never typed into under Native only, so its messages wait Sent until the engine
-/// wakes it with a task of their own. Takes the database, the project, the agent's role,
-/// harness and tools switch, and whether it runs a kept session. Returns [`NO_CHANNEL`] for
-/// it, none otherwise.
+/// project's Delivery setting: a sub-agent in a kept session that is a tools-off Codex agent,
+/// which has no bridge, or runs on a listed harness, which has no channel of its own, is
+/// never typed into under Native only, so its messages wait Sent until the engine wakes it
+/// with a task of their own. Takes the database, the project, the agent's role, harness and
+/// tools switch, and whether it runs a kept session. Returns [`NO_CHANNEL`] or
+/// [`LISTED_NO_CHANNEL`] for it, none otherwise.
 pub fn no_channel(
     db: &Connection,
     project: &ProjectId,
@@ -427,15 +428,16 @@ pub fn no_channel(
     tools: bool,
     kept: bool,
 ) -> Result<Option<&'static str>, EngineError> {
-    if role != crate::team::AgentRole::Sub
-        || tools
-        || !kept
-        || HarnessKind::from_harness(harness) != Some(HarnessKind::Codex)
-    {
+    if role != crate::team::AgentRole::Sub || !kept {
         return Ok(None);
     }
-    let delivery = settings::delivery(db, project, HarnessKind::Codex)?;
-    Ok((delivery == Delivery::NativeOnly).then_some(NO_CHANNEL))
+    let (kind, note) = match HarnessKind::from_harness(harness) {
+        Some(HarnessKind::Codex) if !tools => (HarnessKind::Codex, NO_CHANNEL),
+        Some(kind @ HarnessKind::Listed(_)) => (kind, LISTED_NO_CHANNEL),
+        _ => return Ok(None),
+    };
+    let delivery = settings::delivery(db, project, kind)?;
+    Ok((delivery == Delivery::NativeOnly).then_some(note))
 }
 
 /// Hands a project master its waiting messages through the engine's own master input
