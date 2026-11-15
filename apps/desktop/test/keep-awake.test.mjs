@@ -10,6 +10,8 @@ const api = await import("../src/api-keep-awake.ts");
 const model = await import("../src/screens/keep-awake/model.ts");
 const control = await import("../src/screens/keep-awake/control.tsx");
 const panel = await import("../src/screens/keep-awake/panel.tsx");
+const TUI_SETTINGS = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/settings/keep_awake.rs", import.meta.url), "utf8");
+const DISPLAY_HELP = "Whether a hold also keeps the display on. While it does, the screen stays unlocked.";
 const settings = await import("../src/screens/settings/keep-awake.tsx");
 const bar = await import("../src/ui/top-bar.tsx");
 const shell = await import("../src/ui/shell.tsx");
@@ -109,6 +111,9 @@ test("the settings matrix words are the plan's, with the default of each", () =>
     "Display awake with the lid open": ["Off", "While holding"],
   });
   assert.equal(api.KEEP_AWAKE_SETTINGS.reduce((count, setting) => count + setting.options.length, 0), 27);
+  const display = api.KEEP_AWAKE_SETTINGS.find((setting) => setting.id === "display_awake");
+  assert.equal(display.help, DISPLAY_HELP, "the help says plainly that the screen stays unlocked");
+  assert.ok(TUI_SETTINGS.includes(JSON.stringify(DISPLAY_HELP)), "the TUI says the same words");
 });
 
 test("every decision and lid support gives the approved label and its tone", () => {

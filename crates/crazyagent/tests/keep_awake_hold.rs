@@ -190,14 +190,25 @@ mod macos {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use crazyagent::keep_awake::{Want, platform_hold};
-    use std::process::{Command, Stdio};
+    use crazyagent::keep_awake::{REASON, Want, platform_hold};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::fd::AsFd;
+    use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     const HOLDER: &str = "CRAZYAGENT_KEEP_AWAKE_ROW_HOLDER";
     const WAIT: Duration = Duration::from_secs(5);
     const STEP: Duration = Duration::from_millis(100);
     const HOLDER_SECONDS_MAX: u64 = 60;
+    const DISPLAY_HOLDER: &str = "CRAZYAGENT_KEEP_AWAKE_ROW_DISPLAY_HOLDER";
+    const DBUS_DAEMON: &str = "/usr/bin/dbus-daemon";
+    const SESSION: &str = "DBUS_SESSION_BUS_ADDRESS";
+    const COOKIE: u32 = 7;
+    const ASKS_MAX: usize = 16;
+    const LINES_MAX: usize = 64;
+    const FDS_MAX: usize = 4096;
+    const REFUSED: &str = "org.freedesktop.DBus.Error.NotSupported";
 
     type Inhibitor = (String, String, String, String, u32, u32);
 
@@ -270,12 +281,239 @@ mod linux {
         assert!(listed);
         assert!(until(|| !ours(pid)));
     }
+
+    type Call = (String, String, String, u32);
+
+    /// A stand-in screensaver service on the private session bus: it records each call with
+    /// its sender and answers `Inhibit` with `COOKIE`.
+    #[derive(Clone, Default)]
+    struct ScreenSaver {
+        calls: Arc<Mutex<Vec<Call>>>,
+    }
+
+    #[zbus::interface(name = "org.freedesktop.ScreenSaver")]
+    impl ScreenSaver {
+        fn inhibit(
+            &self,
+            #[zbus(header)] header: zbus::message::Header<'_>,
+            application_name: String,
+            reason_for_inhibit: String,
+        ) -> u32 {
+            let sender = header
+                .sender()
+                .map(|name| name.to_string())
+                .unwrap_or_default();
+            let words = format!("{application_name}: {reason_for_inhibit}");
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("Inhibit".into(), sender, words, COOKIE));
+            COOKIE
+        }
+
+        fn un_inhibit(&self, #[zbus(header)] header: zbus::message::Header<'_>, cookie: u32) {
+            let sender = header
+                .sender()
+                .map(|name| name.to_string())
+                .unwrap_or_default();
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("UnInhibit".into(), sender, String::new(), cookie));
+        }
+    }
+
+    /// A private session bus: a real `dbus-daemon` on a socket in a temporary folder, so no
+    /// row touches the owner's own session. It ends with the value.
+    struct SessionBus {
+        daemon: Child,
+        address: String,
+        _folder: tempfile::TempDir,
+    }
+
+    impl SessionBus {
+        fn start() -> Self {
+            let folder = tempfile::tempdir().unwrap();
+            let socket = folder.path().join("bus");
+            let address = format!("unix:path={}", socket.display());
+            let daemon = crazyagent::spawn_gate::spawn(
+                Command::new(DBUS_DAEMON)
+                    .args(["--session", "--nofork", "--nopidfile"])
+                    .arg(format!("--address={address}"))
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .unwrap();
+            assert!(until(|| socket.exists()), "the private bus listens");
+            Self {
+                daemon,
+                address,
+                _folder: folder,
+            }
+        }
+
+        /// Serves the stand-in screensaver on this bus. Output: its connection and its calls.
+        fn screensaver(&self) -> (zbus::blocking::Connection, Arc<Mutex<Vec<Call>>>) {
+            let service = ScreenSaver::default();
+            let calls = service.calls.clone();
+            let connection = zbus::blocking::connection::Builder::address(self.address.as_str())
+                .unwrap()
+                .name("org.freedesktop.ScreenSaver")
+                .unwrap()
+                .serve_at("/org/freedesktop/ScreenSaver", service)
+                .unwrap()
+                .build()
+                .unwrap();
+            (connection, calls)
+        }
+    }
+
+    impl Drop for SessionBus {
+        fn drop(&mut self) {
+            let _ = self.daemon.kill();
+            let _ = self.daemon.wait();
+        }
+    }
+
+    /// Runs only as the child of the display rows: for each "on" or "off" line on stdin it
+    /// applies the hold with or without the display and answers "held true" or "held false";
+    /// it ends when stdin closes.
+    #[test]
+    fn display_holder_process() {
+        if std::env::var_os(DISPLAY_HOLDER).is_none() {
+            return;
+        }
+        let mut hold = platform_hold(std::process::id());
+        for line in std::io::stdin().lines().take(ASKS_MAX) {
+            let display = line.unwrap() == "on";
+            let held = hold.apply(&Want::Idle { display }).unwrap();
+            println!("held {}", held.display);
+        }
+        hold.release();
+    }
+
+    /// The display holder child on a given session bus, driven through its stdin.
+    struct Holder {
+        child: Child,
+        input: ChildStdin,
+        output: BufReader<ChildStdout>,
+    }
+
+    impl Holder {
+        fn start(address: &str) -> Self {
+            let mut child = crazyagent::spawn_gate::spawn(
+                Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "linux::display_holder_process", "--nocapture"])
+                    .env(DISPLAY_HOLDER, "1")
+                    .env(SESSION, address)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null()),
+            )
+            .unwrap();
+            let input = child.stdin.take().unwrap();
+            let output = BufReader::new(child.stdout.take().unwrap());
+            Self {
+                child,
+                input,
+                output,
+            }
+        }
+
+        /// Asks for the display on or off. Input: "on" or "off". Output: whether the hold
+        /// reports the display held.
+        fn ask(&mut self, wanted: &str) -> bool {
+            writeln!(self.input, "{wanted}").unwrap();
+            self.input.flush().unwrap();
+            for _ in 0..LINES_MAX {
+                let mut line = String::new();
+                assert!(
+                    self.output.read_line(&mut line).unwrap() > 0,
+                    "the holder ended"
+                );
+                if let Some(at) = line.find("held ") {
+                    return line[at + "held ".len()..].trim() == "true";
+                }
+            }
+            panic!("the holder never answered");
+        }
+
+        fn end(mut self) {
+            drop(self.input);
+            let _ = self.child.kill();
+            self.child.wait().unwrap();
+        }
+    }
+
+    #[test]
+    fn display_awake_takes_a_session_inhibit_and_gives_it_back() {
+        let bus = SessionBus::start();
+        let (_service, calls) = bus.screensaver();
+        let mut holder = Holder::start(&bus.address);
+
+        assert!(holder.ask("on"), "the display is held");
+        let taken = calls.lock().unwrap().clone();
+        assert_eq!(taken.len(), 1, "{taken:?}");
+        assert_eq!(taken[0].0, "Inhibit");
+        assert_eq!(taken[0].2, format!("CrazyAgent: {REASON}"));
+        let sender = taken[0].1.clone();
+        assert!(sender.starts_with(':'), "{sender}");
+
+        assert!(!holder.ask("off"), "the display is no longer held");
+        let given = calls.lock().unwrap().clone();
+        assert_eq!(given.len(), 2, "{given:?}");
+        assert_eq!(
+            given[1],
+            ("UnInhibit".into(), sender, String::new(), COOKIE)
+        );
+        holder.end();
+    }
+
+    #[test]
+    fn the_engines_session_connection_takes_no_descriptor() {
+        let bus = SessionBus::start();
+        let (service, calls) = bus.screensaver();
+        let mut holder = Holder::start(&bus.address);
+        assert!(holder.ask("on"));
+        let taken = calls.lock().unwrap().clone();
+        assert_eq!(taken.len(), 1, "{taken:?}");
+        let sender = taken[0].1.clone();
+
+        let probe = tempfile::NamedTempFile::new().unwrap();
+        let file = std::fs::File::open(probe.path()).unwrap();
+        let sent = service.call_method(
+            Some(sender.as_str()),
+            "/",
+            Some("dev.crazyagent.Probe"),
+            "Take",
+            &(zbus::zvariant::Fd::from(file.as_fd()),),
+        );
+        let refused = match &sent {
+            Err(zbus::Error::MethodError(name, _, _)) => name.as_str() == REFUSED,
+            _ => false,
+        };
+        assert!(
+            refused,
+            "the bus refuses a descriptor for the engine: {sent:?}"
+        );
+        let pid = holder.child.id();
+        let open = std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .unwrap()
+            .take(FDS_MAX)
+            .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+            .any(|target| target == probe.path());
+        assert!(!open, "the holder never holds the probe file");
+        holder.end();
+    }
 }
 
 #[cfg(windows)]
 mod windows {
     use crazyagent::keep_awake::{REASON, Want, platform_hold};
     use std::process::Command;
+
+    const LINES_MAX: usize = 4096;
 
     /// Tells whether `powercfg /requests` lists our reason. It needs an elevated prompt, so
     /// this row runs on the Windows probe machine as an administrator.
@@ -284,6 +522,43 @@ mod windows {
             crazyagent::spawn_gate::output(Command::new("powercfg").arg("/requests")).unwrap();
         assert!(output.status.success());
         String::from_utf8_lossy(&output.stdout).contains(REASON)
+    }
+
+    /// The request kinds `powercfg /requests` lists our reason under, in its order (DISPLAY
+    /// before SYSTEM). Needs an elevated prompt, as `listed` does.
+    fn kinds_listing_us() -> Vec<String> {
+        let output =
+            crazyagent::spawn_gate::output(Command::new("powercfg").arg("/requests")).unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut kind = String::new();
+        let mut kinds: Vec<String> = Vec::new();
+        for line in text.lines().take(LINES_MAX).map(str::trim) {
+            let heading = line.len() > 1
+                && line.ends_with(':')
+                && line[..line.len() - 1]
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase());
+            if heading {
+                kind = line[..line.len() - 1].to_owned();
+            } else if line.contains(REASON) && !kinds.contains(&kind) {
+                kinds.push(kind.clone());
+            }
+        }
+        kinds
+    }
+
+    #[test]
+    fn powercfg_requests_lists_our_display_request_while_display_awake_is_on() {
+        let mut hold = platform_hold(std::process::id());
+        let held = hold.apply(&Want::Idle { display: true }).unwrap();
+        assert!(held.display);
+        assert_eq!(kinds_listing_us(), ["DISPLAY", "SYSTEM"]);
+        let held = hold.apply(&Want::Idle { display: false }).unwrap();
+        assert!(!held.display);
+        assert_eq!(kinds_listing_us(), ["SYSTEM"]);
+        hold.release();
+        assert!(kinds_listing_us().is_empty());
     }
 
     #[test]

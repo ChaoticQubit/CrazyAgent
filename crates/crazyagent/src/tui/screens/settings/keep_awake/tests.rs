@@ -108,7 +108,7 @@ fn the_page_lists_the_nine_settings_in_the_desktops_sections_and_words() {
         "What a hold does with the display.",
         "Display awake with the lid open",
         "[Off]  While holding",
-        "Whether a hold also keeps the display on.",
+        "Whether a hold also keeps the display on. While it does, the screen stays unlocked.",
     ];
     let mut from = 0;
     for part in in_order {
