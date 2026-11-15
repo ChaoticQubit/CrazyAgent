@@ -6,12 +6,15 @@ pub mod json_files;
 pub mod json_rewrite;
 pub mod jsonl_append;
 
-/// The record readers the engine runs today: the Codex rollouts and the Claude Code session
-/// transcript. Each shared reader kind a manifest names joins this list when its task lands.
+/// The record readers the engine runs today: the Codex rollouts, the Claude Code session
+/// transcript, and the JSON lines and rewritten JSON records a manifest's terminal settings
+/// name. Each other shared reader kind a manifest names joins this list when its task lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reader {
     CodexRollouts,
     ClaudeSession,
+    JsonlAppend,
+    JsonRewrite,
 }
 
 /// The record of one run of a manifest harness as a launch follows it: the harness, its
@@ -35,8 +38,8 @@ pub fn of(kind: RecordKind) -> Result<Reader, LaunchError> {
     match kind {
         RecordKind::CodexRollouts => Ok(Reader::CodexRollouts),
         RecordKind::ClaudeSession => Ok(Reader::ClaudeSession),
-        RecordKind::JsonlAppend => Err(failure("launch_harness_unsupported")),
-        RecordKind::JsonRewrite => Err(failure("launch_harness_unsupported")),
+        RecordKind::JsonlAppend => Ok(Reader::JsonlAppend),
+        RecordKind::JsonRewrite => Ok(Reader::JsonRewrite),
         RecordKind::SqlitePoll => Err(failure("launch_harness_unsupported")),
         RecordKind::MarkdownHistory => Err(failure("launch_harness_unsupported")),
         RecordKind::Screen => Err(failure("launch_harness_unsupported")),

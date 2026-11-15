@@ -77,6 +77,13 @@ impl JsonlAppend {
         held.taken - pending
     }
 
+    /// Looks for the record now without reading it, as a resumed run checks the record it
+    /// was handed. Output: the record's full path, or none while there is none.
+    pub fn find(&mut self) -> Option<PathBuf> {
+        self.follow();
+        self.record()
+    }
+
     /// Moves past everything the record holds now, looking for the record first when none
     /// is held, so the next read returns only lines written after this call. Output:
     /// nothing, or a plain code when the record cannot be read.

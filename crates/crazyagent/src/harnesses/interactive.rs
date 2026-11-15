@@ -443,6 +443,9 @@ pub fn command(
                     .join(format!("{}.jsonl", session_id_checked(run.session_id)?)),
             }
         }
+        Ok(Reader::JsonlAppend | Reader::JsonRewrite) => {
+            return Err(failure("launch_harness_unsupported"));
+        }
         Err(_) => {
             argv.extend(launch);
             argv.extend(plain(harness_id(request), request, installed)?);

@@ -2,7 +2,7 @@ use super::super::drivers::jsonl_turn::ARG_BYTES_MAX;
 use super::super::drivers::rules;
 use super::super::launch::{LaunchError, failure};
 use super::super::manifest::{self, Manifest, RecordKind, Refused, Rule};
-use super::super::records::Records;
+use super::super::records::{self, Reader, Records};
 use super::super::records::json_files::Pattern;
 use crate::app_plugins::yaml::Value as Yaml;
 use std::path::Path;
@@ -198,8 +198,19 @@ impl TerminalSettings {
     /// Fills the record path for one run. Inputs: the run's private home, absolute, and
     /// its session id. Output: the record as the run's transcript follows it, or a plain
     /// refusal code.
-    pub fn records(&self, _home: &Path, _session: &str) -> Result<Records, LaunchError> {
-        Err(failure("launch_transcript_unavailable"))
+    pub fn records(&self, home: &Path, session: &str) -> Result<Records, LaunchError> {
+        assert!(home.is_absolute());
+        let reader = records::of(self.record)?;
+        assert!(matches!(reader, Reader::JsonlAppend | Reader::JsonRewrite));
+        let pattern = Pattern::read(&self.manifest, home, session)
+            .map_err(|_| failure("launch_session_id_invalid"))?;
+        Ok(Records {
+            harness: self.manifest.id.clone(),
+            kind: self.record,
+            pattern,
+            rules: self.rules.clone(),
+            session: session.to_owned(),
+        })
     }
 
     /// Gives the arguments of one run, `terminal.resume` for a resumed run, else
