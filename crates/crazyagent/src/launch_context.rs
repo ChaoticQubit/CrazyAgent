@@ -256,16 +256,35 @@ pub fn for_project(
     project: &ProjectId,
     layout: Layout,
 ) -> Result<AgentContext, LaunchError> {
+    for_project_skills(connection, project, layout, None)
+}
+
+/// Reads what agents launched for one project receive as [`for_project`] does, keeping only
+/// the approved skills `chosen` names (DEC-111 R3), none for every one, before the hooks are
+/// picked, so a hook follows only a skill the launch gives (RV-DS241-196); a chosen name
+/// that is not approved adds nothing. Inputs: a connection to `engine.db`, the project, the
+/// git layout and the chosen names. Output: the context, or a plain code.
+fn for_project_skills(
+    connection: &Connection,
+    project: &ProjectId,
+    layout: Layout,
+    chosen: Option<&[String]>,
+) -> Result<AgentContext, LaunchError> {
     let root = engine_root(connection)?;
     let tx = connection.unchecked_transaction().map_err(unavailable)?;
-    let plugins = crate::storage::plugins::launch_set(&tx, &root, project)
+    let mut plugins = crate::storage::plugins::launch_set(&tx, &root, project)
         .map_err(|problem| LaunchError(problem.0, None))?;
+    if let Some(names) = chosen {
+        let before = plugins.skills.len();
+        plugins.skills.retain(|skill| names.contains(&skill.name));
+        assert!(plugins.skills.len() <= before.min(names.len()));
+    }
     let instructions = project_instructions(&tx, project, layout)?;
     let home_project = agent_project(&tx, project)?;
     let transcripts = crate::instruction_files::load(&tx, project)
         .map_err(failure)?
         .transcripts;
-    let hooks = crate::storage::plugins::effective_hooks(&tx, &root, project, &plugins.left_out)
+    let hooks = crate::storage::plugins::effective_hooks(&tx, &root, project, &plugins)
         .map_err(|problem| LaunchError(problem.0, None))?;
     let off_tools = off_tools(&tx, project, &plugins)?;
     let catch_up_main = crate::team::catch_up_main(&tx, project)
@@ -294,9 +313,10 @@ pub fn for_project(
 }
 
 /// Reads what one team role's agents launched for a project receive (DEC-111 R3): the
-/// project's context with only the approved skills the owner chose for that role. Inputs: a
-/// connection to the engine's `engine.db`, the project, the agent's git layout and its
-/// role. Output: the context, or a plain code.
+/// project's context with only the approved skills the owner chose for that role and only
+/// the hooks that follow what it keeps (RV-DS241-196). Inputs: a connection to the
+/// engine's `engine.db`, the project, the agent's git layout and its role. Output: the
+/// context, or a plain code.
 pub fn for_team_role(
     connection: &Connection,
     project: &ProjectId,
@@ -306,7 +326,7 @@ pub fn for_team_role(
     let chosen = crate::coord::settings::read(connection, project)
         .map_err(|problem| LaunchError(problem.0, None))?
         .role_skills;
-    Ok(for_project(connection, project, layout)?.for_role(chosen.of(role)))
+    for_project_skills(connection, project, layout, chosen.of(role))
 }
 
 /// Reads the tools the owner switched off, for the project or app-wide, on each approved MCP
@@ -681,20 +701,6 @@ impl AgentContext {
         text.push('.');
         assert!(text.len() <= TASK_START_BYTES_MAX);
         Some(text)
-    }
-
-    /// Keeps only the approved skills the owner chose for one team role (DEC-111 R3); a
-    /// chosen name that is not approved adds nothing. Input: the role's chosen names, or
-    /// none for All approved skills, which keeps every one. Output: the context.
-    pub fn for_role(mut self, chosen: Option<&[String]>) -> Self {
-        if let Some(names) = chosen {
-            let before = self.plugins.skills.len();
-            self.plugins
-                .skills
-                .retain(|skill| names.contains(&skill.name));
-            assert!(self.plugins.skills.len() <= before.min(names.len()));
-        }
-        self
     }
 
     /// Whether this launch's project has "Catch up with main" on, as read once with the rest

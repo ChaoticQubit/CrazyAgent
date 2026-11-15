@@ -1046,10 +1046,36 @@ fn seed(
     )
 }
 
+/// The launch set a project's agents get, as the effective set gives it with no secret read,
+/// for rows that ask about a project with no stored row, which the engine's own launch set
+/// refuses. Inputs: the transaction, the engine root and the project. Output: the set.
+fn launch_of(
+    tx: &Transaction<'_>,
+    root: &Path,
+    project: &crate::protocol::ProjectId,
+) -> crate::plugins::LaunchPlugins {
+    let effective = plugins::effective(tx, root, project).unwrap();
+    let servers = effective
+        .servers
+        .into_iter()
+        .map(|server| crate::plugins::LaunchServer {
+            name: server.name,
+            spec: server.spec,
+            secrets: Vec::new(),
+        })
+        .collect();
+    crate::plugins::LaunchPlugins {
+        skills: effective.skills,
+        servers,
+        ..crate::plugins::LaunchPlugins::default()
+    }
+}
+
 fn effective_events(connection: &mut Connection, root: &Path, project: &str) -> Vec<String> {
     let project = crate::protocol::ProjectId::new(project).unwrap();
     let tx = connection.transaction().unwrap();
-    let hooks = plugins::effective_hooks(&tx, root, &project, &[]).unwrap();
+    let launch = launch_of(&tx, root, &project);
+    let hooks = plugins::effective_hooks(&tx, root, &project, &launch).unwrap();
     for hook in &hooks {
         assert!(hook.folder.join("hooks/start.sh").is_file(), "{hook:?}");
     }
@@ -1166,7 +1192,8 @@ fn seeded_hooks_follow_their_entry_and_turn_off_per_hook_per_project_or_with_the
     let folders: Vec<PathBuf> = {
         let tx = connection.transaction().unwrap();
         let project = crate::protocol::ProjectId::new("project-2").unwrap();
-        plugins::effective_hooks(&tx, root, &project, &[])
+        let launch = launch_of(&tx, root, &project);
+        plugins::effective_hooks(&tx, root, &project, &launch)
             .unwrap()
             .into_iter()
             .map(|hook| hook.folder)
