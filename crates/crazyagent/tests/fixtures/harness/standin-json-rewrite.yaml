@@ -1,0 +1,30 @@
+schema: 1
+kind: harness
+id: "standin-json-rewrite"
+name: "Stand-in rewritten JSON record"
+binaries:
+  - "standin-json-rewrite"
+headless: "none: standin-json-rewrite runs in a terminal pane only"
+model_selection: true
+account_kinds:
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+roles:
+  - "agent"
+  - "master"
+sub_agents: "app"
+terminal:
+  argv:
+    - "--home"
+    - "{home}"
+    - "--session"
+    - "{session}"
+  resume:
+    - "--home"
+    - "{home}"
+    - "--resume"
+    - "{session}"
+  record:
+    reader: "json-rewrite"
+    path: "{home}/standin/records/{session}.json"
