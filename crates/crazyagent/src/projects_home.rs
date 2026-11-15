@@ -1404,6 +1404,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "move_project_in_progress" => {
             "A project is still being moved into your projects folder. Try again when it finishes."
         }
+        "home_add_in_progress" => {
+            "A folder is being added to your projects folder. Try again when it finishes."
+        }
         "move_project_old_folder_left" => {
             "The project moved, but part of its old folder couldn't be deleted. What's left there may be newer than the copy, so check it before you delete anything."
         }

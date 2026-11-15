@@ -239,7 +239,8 @@ pub(super) fn read(
 /// Plans an AddExistingFolder before the owner transport moves or copies it.
 /// Input: the connection, database path, owner admission, the revision the
 /// owner saw, source and mode. Output: the checked plan, or the refusal code
-/// (`stale_revision` when the engine moved on); nothing on disk changes.
+/// (`stale_revision` when the engine moved on, `move_project_in_progress` while
+/// a project move is pending); nothing on disk changes.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn add_plan(
     db: &mut Connection,
@@ -260,6 +261,9 @@ pub(super) fn add_plan(
     }
     if pending_move(&tx)?.is_some() {
         return Err(error("home_move_in_progress"));
+    }
+    if home::pending(&tx)?.is_some() {
+        return Err(error("move_project_in_progress"));
     }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
     let plan = home::plan_add(
@@ -1000,8 +1004,8 @@ pub(super) fn move_plan(
 /// owner's overrides, the request and the transport exchange that will run the move.
 /// Output: the checked plan, or the refusal code (`stale_revision` when the engine moved
 /// on, `home_move_in_progress` or `home_move_delete_in_progress` while the projects home
-/// itself is being changed, else what `crate::projects_home::plan` names); nothing on disk
-/// changes.
+/// itself is being changed, `home_add_in_progress` while an add runs, else what
+/// `crate::projects_home::plan` names); nothing on disk changes.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn project_move_plan(
     db: &mut Connection,
@@ -1028,6 +1032,9 @@ pub(super) fn project_move_plan(
     if delete_planned(&tx)? {
         return Err(error("home_move_delete_in_progress"));
     }
+    if adding(&tx)? {
+        return Err(error("home_add_in_progress"));
+    }
     let plan = home::plan(
         &tx,
         path,
@@ -1047,8 +1054,9 @@ pub(super) fn project_move_plan(
 
 /// Checks a project move job before it starts, as far as the move can be checked without
 /// reading inside the folder, writing nothing: the owner's admission, a projects home move
-/// or delete under way (`home_move_in_progress`, `home_move_delete_in_progress`), then what
-/// `crate::projects_home::project_move_check` names. Inputs: the connection, the owner
+/// or delete under way (`home_move_in_progress`, `home_move_delete_in_progress`), an add
+/// running (`home_add_in_progress`), then what `crate::projects_home::project_move_check`
+/// names. Inputs: the connection, the owner
 /// admission, the project and the mode. Output: the project's real folder as text, or the
 /// refusal code.
 pub(super) fn project_move_check(
@@ -1064,6 +1072,9 @@ pub(super) fn project_move_check(
     }
     if delete_planned(&tx)? {
         return Err(error("home_move_delete_in_progress"));
+    }
+    if adding(&tx)? {
+        return Err(error("home_add_in_progress"));
     }
     let real = home::project_move_check(&tx, &guarded(&tx)?, project, mode)?;
     let source = real

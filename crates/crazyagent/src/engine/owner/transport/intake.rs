@@ -18,9 +18,29 @@ pub(super) struct Asked {
 }
 
 /// The engine's one job, of any kind: the running job, or the last one ended until it is
-/// dismissed or another starts.
+/// dismissed or another starts; and how many direct client folder adds and project moves
+/// run, read and changed only under the job's lock, so a job and a direct change never run
+/// at once.
 #[derive(Default)]
-pub(super) struct Intake(Mutex<Option<Held>>);
+pub(super) struct Intake {
+    held: Mutex<Option<Held>>,
+    direct: std::sync::atomic::AtomicUsize,
+}
+
+/// A direct client folder add or project move under way, which keeps any job from starting
+/// until it is dropped.
+pub(super) struct Direct<'a>(&'a Intake);
+
+impl Drop for Direct<'_> {
+    fn drop(&mut self) {
+        let _held = self.0.lock();
+        let before = self
+            .0
+            .direct
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(before > 0, "a direct hold ends once");
+    }
+}
 
 struct Held {
     job: Arc<IntakeJob>,
@@ -63,8 +83,8 @@ impl Intake {
     /// as far as it can be without reading inside the folder, so a move the engine refuses
     /// is answered at once and the held job stays as it was. Inputs: the engine, the
     /// authority, the client packet, its admission and what to do. Output: the job's view,
-    /// `job_busy` while another job runs or the id runs as a client change, or the folder,
-    /// override or move check's code.
+    /// `job_busy` while another job, a direct client add or project move, or the id as a
+    /// client change runs, or the folder, override or move check's code.
     pub(super) async fn start(
         engine: &Arc<Engine>,
         authority: &Arc<Authority>,
@@ -110,6 +130,9 @@ impl Intake {
         let mut held = authority.intake.lock();
         if let Some(answer) = found(held.as_ref(), &asked.request_id, &asked.subject, &real) {
             return answer;
+        }
+        if authority.intake.directs() > 0 {
+            return Err(failure("job_busy"));
         }
         let Some(claim) = Running::claim(authority, &a.owner_id, &asked.request_id) else {
             return Err(failure("job_busy"));
@@ -211,8 +234,30 @@ impl Intake {
         }
     }
 
+    /// Holds the slot for a direct client folder add or project move while it runs, so it
+    /// never runs beside a job and no job starts until it ends. Output: the hold, dropped
+    /// when the change ends, or `job_busy` while a job runs.
+    pub(super) fn direct(&self) -> Result<Direct<'_>, EngineError> {
+        let held = self.lock();
+        if held.as_ref().is_some_and(|current| !current.job.ended()) {
+            return Err(failure("job_busy"));
+        }
+        let before = self
+            .direct
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(before < usize::MAX);
+        drop(held);
+        Ok(Direct(self))
+    }
+
+    /// How many direct client folder adds and project moves run; read under the job's lock
+    /// by a start. Output: the count.
+    fn directs(&self) -> usize {
+        self.direct.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<Held>> {
-        self.0
+        self.held
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }

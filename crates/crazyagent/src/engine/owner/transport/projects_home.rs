@@ -305,7 +305,9 @@ pub(super) fn disk_changed(trashed: bool, moving: bool, moving_project: bool, ra
 /// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, SetupProject, CreateDemo
 /// and FolderSize for one owner. A client's change claims its request id first: a resend of
 /// one this engine still runs answers `InProgress` and plans nothing (DEC-159); the intake
-/// job holds its own claim. Input: the sink (the client's stream, or the intake job, which
+/// job holds its own claim. A client's AddExistingFolder or MoveProjectHome then holds the
+/// job slot until it ends, answering `job_busy` while a job runs, so no job starts beside
+/// it. Input: the sink (the client's stream, or the intake job, which
 /// keeps the reply and lends its tally to the copy), engine, authority, owner packet and
 /// admission, the validated request and the exchange deadline. Output: the
 /// reply written under the owner egress barrier. The exchange deadline bounds
@@ -358,6 +360,20 @@ pub(super) async fn serve(
                         });
                 return sink.reply(reply, id, mutation).await;
             }
+        },
+        false => None,
+    };
+    let folder = matches!(
+        &request.operation,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::AddExistingFolder { .. }
+                | OwnerMutation::MoveProjectHome { .. }
+        }
+    );
+    let _direct = match client && folder {
+        true => match authority.intake.direct() {
+            Ok(direct) => Some(direct),
+            Err(busy) => return sink.reply(Err(busy), id, mutation).await,
         },
         false => None,
     };
