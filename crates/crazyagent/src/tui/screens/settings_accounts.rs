@@ -58,6 +58,7 @@ pub fn provider_word(provider: Provider) -> &'static str {
         Provider::AnthropicApi => "Anthropic API",
         Provider::OpenaiCompatible => "OpenAI-compatible URL",
         Provider::Local => "Local model",
+        Provider::Gemini => "Gemini API",
     }
 }
 
