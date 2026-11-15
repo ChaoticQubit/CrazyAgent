@@ -1,3 +1,4 @@
+use super::drivers::{self, Piped};
 use super::interactive::KEY_FILE;
 use super::leftovers::{Follower, LINEAGE_VARIABLE, LineageToken, Unstopped};
 use super::terminal_session::{KeyFile, write_key_file};
@@ -575,10 +576,10 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
     else {
         return Ok((request, None));
     };
-    let default = match harness_id(&request) {
-        "codex" => CODEX_DEFAULT_BASE_URL,
-        "claude-code" => CLAUDE_DEFAULT_BASE_URL,
-        _ => return Err(failure("launch_key_relay_unsupported")),
+    let default = match drivers::piped(&request.harness) {
+        Ok(Piped::Codex) => CODEX_DEFAULT_BASE_URL,
+        Ok(Piped::Claude) => CLAUDE_DEFAULT_BASE_URL,
+        Err(_) => return Err(failure("launch_key_relay_unsupported")),
     };
     let upstream = request.account.base_url().unwrap_or(default).to_owned();
     let secret = SecretString::new(key.reveal().as_bytes().to_vec())
@@ -642,10 +643,9 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         .key()
         .map(|_| key_file_text(&home.join(KEY_FILE)))
         .transpose()?;
-    let (arguments, environment) = match harness_id(request) {
-        "codex" => codex_invocation(request, installed, key_file.as_deref())?,
-        "claude-code" => claude_invocation(request, installed, key_file.as_deref()),
-        _ => return Err(failure("launch_harness_unsupported")),
+    let (arguments, environment) = match drivers::piped(&request.harness)? {
+        Piped::Codex => codex_invocation(request, installed, key_file.as_deref())?,
+        Piped::Claude => claude_invocation(request, installed, key_file.as_deref()),
     };
     if !cfg!(target_os = "macos") {
         return Err(failure("launch_sandbox_unavailable"));
@@ -1122,9 +1122,10 @@ impl Driver {
         request: &LaunchRequest,
         native_threads: bool,
     ) -> Result<(Self, Vec<Vec<u8>>), LaunchError> {
-        assert!(!native_threads || (harness_id(request) == "codex" && request.tools));
-        match harness_id(request) {
-            "codex" => {
+        let piped = drivers::piped(&request.harness);
+        assert!(!native_threads || (matches!(piped, Ok(Piped::Codex)) && request.tools));
+        match piped? {
+            Piped::Codex => {
                 let mut protocol = CodexProtocol::new();
                 let start = protocol
                     .initialize()
@@ -1140,7 +1141,7 @@ impl Driver {
                 };
                 Ok((driver, vec![start]))
             }
-            "claude-code" => {
+            Piped::Claude => {
                 let local = |name: &str| format!("launch-{name}-{}", std::process::id());
                 let action = NativeAction::Launch {
                     session_id: SessionId::new(local("session"))
@@ -1165,7 +1166,6 @@ impl Driver {
                     Vec::new(),
                 ))
             }
-            _ => Err(failure("launch_harness_unsupported")),
         }
     }
 

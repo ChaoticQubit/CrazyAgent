@@ -1,6 +1,5 @@
 use super::*;
 use crate::coord::settings::{HarnessKind, NativeSubAgents, native_sub_agents};
-use crate::harnesses::interactive::{Support, support};
 use crate::harnesses::{spec, specs};
 
 fn sample(id: &str, alias: Option<&str>, binary: &str) -> String {
@@ -96,14 +95,6 @@ fn every_harness_runs_an_agent_a_master_and_research_and_switches_tools_off_as_l
         assert_eq!(spec(id).unwrap().launch.is_none(), agent, "{id}");
         assert!(harness.owner_folders().is_empty(), "{id}");
         assert_eq!(harness.minimum_version(), None, "{id}");
-    }
-}
-
-#[test]
-fn the_terminal_table_starts_a_live_terminal_for_the_harnesses_the_registry_can_run() {
-    for harness in registry().all() {
-        let id = harness.id();
-        assert_eq!(harness.runnable(), support(id) == Support::Terminal, "{id}");
     }
 }
 

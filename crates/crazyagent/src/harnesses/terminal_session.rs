@@ -1,10 +1,11 @@
 use super::codex_folder::{self, Screen};
 use super::interactive::{self, Run, Support, Transcript};
 use super::launch::{
-    Ending, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, harness_id,
-    route, validate,
+    Ending, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, route,
+    validate,
 };
 use super::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
+use super::records::{self, Reader};
 use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::coord::delivery::typing::APP_QUIET;
 use crate::launch_context::{AgentContext, Installed};
@@ -270,7 +271,7 @@ impl TerminalSession {
             .working_dir
             .canonicalize()
             .map_err(|_| failure("launch_working_dir_unavailable"))?;
-        let claude = harness_id(&request) == "claude-code";
+        let claude = matches!(records::reader(&request.harness), Ok(Reader::ClaudeSession));
         if claude {
             interactive::prepare_claude_home(&home, &cwd)?;
         }

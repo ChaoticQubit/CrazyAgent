@@ -2069,3 +2069,16 @@ fn a_claude_terminal_launch_takes_the_owner_retry_cap() {
         }
     }
 }
+
+#[test]
+fn a_name_outside_the_catalog_keeps_its_headless_reason() {
+    for name in ["unknown", "Codex", ""] {
+        assert_eq!(
+            support(name),
+            Support::HeadlessOnly {
+                reason: "not in the harness catalog"
+            },
+            "{name}"
+        );
+    }
+}

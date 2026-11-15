@@ -1,9 +1,11 @@
 pub(crate) mod codex_folder;
+pub mod drivers;
 pub mod finding;
 pub mod interactive;
 pub mod launch;
 pub mod leftovers;
 pub mod manifest;
+pub mod records;
 pub mod registry;
 pub mod terminal_session;
 pub mod transcript;
