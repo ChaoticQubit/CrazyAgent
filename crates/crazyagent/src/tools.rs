@@ -1000,6 +1000,9 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         Some(Err(why)) => return Err(refused(program.as_path(), why)),
         _ => return Err(not_there()),
     }
+    if places.temp_refused && leads_into_temp(entry, &program, &places.temps) {
+        return Err(refused(program.as_path(), Refusal::InTemp));
+    }
     assert!(program.is_absolute());
     let Some(shebang) = shebang(&program) else {
         return Ok(Resolved {
