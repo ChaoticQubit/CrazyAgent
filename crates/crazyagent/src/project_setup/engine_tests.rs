@@ -1537,8 +1537,8 @@ async fn a_job_run_again_after_the_rate_limit_cap_takes_a_limit_as_a_new_job_doe
 }
 
 /// RV-DS241-159: Plan roadmap now starts the planning job's rate-limited ends in a row again.
-/// A plan that was saved after two limits takes a limit when it is planned again, as a new
-/// job does, instead of failing on the first one.
+/// A plan that was saved after two limits, and then one the cap ended failed, takes a limit
+/// when it is planned again, as a new job does, instead of failing on the first one.
 #[tokio::test]
 async fn a_roadmap_planned_again_takes_a_rate_limit_as_a_new_job_does() {
     use crate::research::jobs::ResearchStatus as QueueStatus;
@@ -1590,6 +1590,19 @@ async fn a_roadmap_planned_again_takes_a_rate_limit_as_a_new_job_does() {
         store.rate_limited(&claim(), &account).unwrap().0,
         QueueStatus::Queued,
         "a roadmap planned again waits for the pool's next account on its first limit"
+    );
+
+    let ends = [
+        store.rate_limited(&claim(), &account).unwrap().0,
+        store.rate_limited(&claim(), &account).unwrap().0,
+    ];
+    assert_eq!(ends, [QueueStatus::Queued, QueueStatus::Failed]);
+    let planned = owner.plan_roadmap(project.clone(), 5).await.unwrap();
+    assert_eq!(result(planned), OwnerResult::Applied);
+    assert_eq!(
+        store.rate_limited(&claim(), &account).unwrap().0,
+        QueueStatus::Queued,
+        "a roadmap planned again after the cap failed it takes a limit as a new job does"
     );
     drop(owner);
     engine.stop().await;
