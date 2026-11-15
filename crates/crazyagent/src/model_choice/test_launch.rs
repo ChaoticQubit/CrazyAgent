@@ -386,7 +386,9 @@ mod run {
         };
         let account = match picked {
             AccountPick::NeedsPool => return Err(POOL_UNKNOWN),
-            AccountPick::NoUsableAccount => return pending(NotStarted::NoAccount),
+            AccountPick::NoUsableAccount | AccountPick::Unreached { .. } => {
+                return pending(NotStarted::NoAccount);
+            }
             AccountPick::Paused { .. } => return pending(NotStarted::Paused),
             AccountPick::Account { account, .. } => match *account {
                 ResearchAccount::ManagedCodex { connection, .. } => ResearchAccount::ManagedCodex {

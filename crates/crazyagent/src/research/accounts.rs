@@ -460,7 +460,7 @@ impl SettingsResolver {
         let Some(chosen) = access.pools.iter().find(|candidate| &candidate.id == pool) else {
             return AccountPick::NeedsPool;
         };
-        self.members_pick_for(project, &access, &chosen.members, &[pool], harnesses)
+        self.members_pick_for(project, &access, &chosen.members, &[pool], harnesses, reach)
     }
 
     /// The account one named member gives the first of `harnesses` for `project`, with the
@@ -488,7 +488,14 @@ impl SettingsResolver {
             return AccountPick::NoUsableAccount;
         }
         let members = std::slice::from_ref(connection);
-        let pick = self.members_pick_for(project, &access, members, &pools, harnesses);
+        let pick = self.members_pick_for(
+            project,
+            &access,
+            members,
+            &pools,
+            harnesses,
+            Reach::Unprobed,
+        );
         assert!(
             !matches!(&pick, AccountPick::Account { connection: picked, .. } if picked != connection)
         );
@@ -497,9 +504,9 @@ impl SettingsResolver {
 
     /// Picks the first of `members` the first of `harnesses` can use for `project`, with
     /// the engine's sign-ins, account pauses, project holds and the schedule choice read
-    /// over `pools`. Takes the project, the model access, the members, their pools and the
-    /// harnesses. Returns the account, else the earliest pause, else no usable account;
-    /// [`AccountPick::NeedsPool`] when the schedule cannot be read.
+    /// over `pools`. Takes the project, the model access, the members, their pools, the
+    /// harnesses and the reach rule. Returns the account, else the wait that stands for the
+    /// members; [`AccountPick::NeedsPool`] when the schedule cannot be read.
     fn members_pick_for(
         &self,
         project: &str,
@@ -507,6 +514,7 @@ impl SettingsResolver {
         members: &[CredentialRef],
         pools: &[&CredentialRef],
         harnesses: &[ResearchHarness],
+        reach: Reach,
     ) -> AccountPick {
         let database = self.engine();
         let choice = match database.as_ref() {
