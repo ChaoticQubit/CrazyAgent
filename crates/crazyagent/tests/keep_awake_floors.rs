@@ -1,5 +1,5 @@
-use crazyagent::keep_awake::power::{heat_unavailable, read_power};
-use crazyagent::keep_awake::{Heat, PowerSource, power_linux, power_macos};
+use crazyagent::keep_awake::power::{PowerReading, heat_unavailable, read_power};
+use crazyagent::keep_awake::{Heat, LidSupport, PowerSource, power_linux, power_macos};
 use crazyagent::paths::Platform;
 use std::path::Path;
 
@@ -105,12 +105,6 @@ fn put(folder: &Path, name: &str, value: &str) {
 fn linux_power_supply_files_give_ac_and_percent() {
     let root = tempfile::tempdir().unwrap();
     let root = root.path();
-    assert_eq!(power_linux::supplies(root), (PowerSource::Unknown, None));
-    assert_eq!(
-        power_linux::supplies(&root.join("missing")),
-        (PowerSource::Unknown, None)
-    );
-
     put(&root.join("AC"), "type", "Mains");
     put(&root.join("AC"), "online", "1");
     put(&root.join("BAT0"), "type", "Battery");
@@ -178,7 +172,60 @@ fn only_a_mouse_battery_discharging_does_not_put_a_desktop_on_battery() {
     put(&root.join("hidpp_battery_0"), "scope", "Device");
     put(&root.join("hidpp_battery_0"), "status", "Discharging");
     put(&root.join("hidpp_battery_0"), "capacity", "5");
-    assert_eq!(power_linux::supplies(root), (PowerSource::Unknown, None));
+    assert_eq!(
+        power_linux::supplies(root),
+        (PowerSource::Ac, None),
+        "a desktop with a wireless mouse runs on AC"
+    );
+}
+
+#[test]
+fn a_computer_without_a_system_battery_reads_ac() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    assert_eq!(
+        power_linux::supplies(root),
+        (PowerSource::Ac, None),
+        "no supply entries at all: a desktop or a virtual machine"
+    );
+    assert_eq!(
+        power_linux::supplies(&root.join("missing")),
+        (PowerSource::Ac, None)
+    );
+    put(&root.join("AC"), "type", "Mains");
+    put(&root.join("AC"), "online", "0");
+    assert_eq!(
+        power_linux::supplies(root),
+        (PowerSource::Ac, None),
+        "nothing drains where there is no battery"
+    );
+}
+
+#[test]
+fn a_silent_system_battery_with_nothing_online_stays_unknown() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    put(&root.join("BAT0"), "type", "Battery");
+    put(&root.join("BAT0"), "capacity", "40");
+    assert_eq!(
+        power_linux::supplies(root),
+        (PowerSource::Unknown, Some(40)),
+        "a battery with no status file"
+    );
+    put(&root.join("BAT0"), "status", "Unknown");
+    assert_eq!(
+        power_linux::supplies(root),
+        (PowerSource::Unknown, Some(40))
+    );
+    put(&root.join("AC"), "type", "Mains");
+    put(&root.join("AC"), "online", "0");
+    assert_eq!(
+        power_linux::supplies(root),
+        (PowerSource::Unknown, Some(40)),
+        "a charger that is not online decides nothing"
+    );
+    put(&root.join("AC"), "online", "1");
+    assert_eq!(power_linux::supplies(root), (PowerSource::Ac, Some(40)));
 }
 
 #[test]
@@ -257,6 +304,150 @@ fn linux_trip_points_map_to_serious_and_critical() {
         power_linux::heat(root),
         Heat::Nominal,
         "a zone without a temperature is left out"
+    );
+}
+
+#[test]
+fn the_lid_state_files_say_open_closed_or_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    assert_eq!(power_linux::lid(root), None);
+    assert_eq!(power_linux::lid(&root.join("missing")), None);
+
+    put(&root.join("LID0"), "state", "state:      open");
+    assert_eq!(power_linux::lid(root), Some(false));
+    put(&root.join("LID1"), "state", "state:      closed");
+    assert_eq!(
+        power_linux::lid(root),
+        Some(true),
+        "one closed lid is a closed lid"
+    );
+    put(&root.join("LID1"), "state", "state:      ajar");
+    assert_eq!(
+        power_linux::lid(root),
+        Some(false),
+        "a word this reader does not know says nothing"
+    );
+    put(&root.join("LID0"), "state", "closed");
+    assert_eq!(
+        power_linux::lid(root),
+        None,
+        "a file that is not a state line says nothing"
+    );
+    let long = format!("state: closed{}", " ".repeat(200));
+    put(&root.join("LID0"), "state", &long);
+    assert_eq!(
+        power_linux::lid(root),
+        None,
+        "a value longer than a sysfs value is not read"
+    );
+}
+
+#[test]
+fn the_linux_reader_reads_one_root_folder_and_no_bus() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let unknown = PowerReading::unknown();
+    assert_ne!(unknown.lid_support, LidSupport::Held);
+    assert_eq!(
+        power_linux::read_under(root),
+        PowerReading {
+            source: PowerSource::Ac,
+            ..unknown.clone()
+        },
+        "an empty root has no battery, and nothing else is known"
+    );
+
+    let supplies = root.join("sys/class/power_supply");
+    put(&supplies.join("AC"), "type", "Mains");
+    put(&supplies.join("AC"), "online", "0");
+    put(&supplies.join("BAT0"), "type", "Battery");
+    put(&supplies.join("BAT0"), "status", "Discharging");
+    put(&supplies.join("BAT0"), "capacity", "31");
+    let trips = [("hot", "90000"), ("critical", "100000")];
+    zone(
+        &root.join("sys/class/thermal"),
+        "thermal_zone0",
+        "95000",
+        &trips,
+    );
+    put(
+        &root.join("proc/acpi/button/lid/LID0"),
+        "state",
+        "state:      closed",
+    );
+    assert_eq!(
+        power_linux::read_under(root),
+        PowerReading {
+            source: PowerSource::Battery,
+            battery_pct: Some(31),
+            heat: Heat::Serious,
+            lid_closed: Some(true),
+            lid_support: unknown.lid_support.clone(),
+        },
+        "without logind's seats folder the closed lid cannot be held"
+    );
+
+    let seats = root.join("run/systemd/seats");
+    put(&root.join("run/systemd"), "seats", "not a folder");
+    assert_eq!(
+        power_linux::read_under(root).lid_support,
+        unknown.lid_support,
+        "a file of that name is not logind's folder"
+    );
+    std::fs::remove_file(&seats).unwrap();
+    std::fs::create_dir(&seats).unwrap();
+    assert_eq!(power_linux::read_under(root).lid_support, LidSupport::Held);
+
+    let source = include_str!("../src/keep_awake/power_linux.rs");
+    assert!(
+        !source.contains("zbus"),
+        "the reader opens no bus connection (rv-sec3 ka-task3 F1)"
+    );
+}
+
+#[test]
+fn many_other_entries_never_hide_a_thermal_zone() {
+    let trips = [("critical", "100000")];
+    let stands = [
+        ("thermal_zone0", true),
+        ("thermal_zone3", false),
+        ("thermal_zone7", true),
+        ("thermal_zone12", false),
+    ];
+    for (name, zone_first) in stands {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        if zone_first {
+            zone(root, name, "100000", &trips);
+        }
+        for index in 0..200 {
+            std::fs::create_dir(root.join(format!("cooling_device{index}"))).unwrap();
+        }
+        if !zone_first {
+            zone(root, name, "100000", &trips);
+        }
+        assert_eq!(
+            power_linux::heat(root),
+            Heat::Critical,
+            "{name} beside 200 cooling devices"
+        );
+    }
+}
+
+#[test]
+fn with_more_zones_than_the_reader_keeps_the_first_by_name_are_read() {
+    let trips = [("critical", "100000")];
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    for index in (1..70).rev() {
+        zone(root, &format!("thermal_zone{index}"), "50000", &trips);
+    }
+    zone(root, "thermal_zone0", "100000", &trips);
+    assert_eq!(
+        power_linux::heat(root),
+        Heat::Critical,
+        "thermal_zone0 is first by name wherever the folder lists it"
     );
 }
 

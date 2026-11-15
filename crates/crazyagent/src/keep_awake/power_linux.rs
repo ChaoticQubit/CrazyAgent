@@ -1,3 +1,4 @@
+use super::power::PowerReading;
 use super::state::{Heat, PowerSource};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -139,6 +140,18 @@ pub fn heat(root: &Path) -> Heat {
     } else {
         Heat::Nominal
     }
+}
+
+/// Reads the lid below a `/proc/acpi/button/lid` shaped folder. Not written yet: says
+/// nothing. Input: the folder. Output: none.
+pub fn lid(_root: &Path) -> Option<bool> {
+    None
+}
+
+/// Reads a Linux computer from files below `root`. Not written yet: knows nothing.
+/// Input: the file system root, or a stand shaped like it. Output: an unknown reading.
+pub fn read_under(_root: &Path) -> PowerReading {
+    PowerReading::unknown()
 }
 
 #[cfg(target_os = "linux")]
