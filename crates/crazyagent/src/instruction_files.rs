@@ -47,9 +47,32 @@ const NAMES: [&str; 6] = [
 
 const CODEX_OVERRIDE: &str = "AGENTS.override.md";
 const HARNESS_FOLDERS: [&str; 2] = [".claude", ".codex"];
-const HFS_IGNORED: [char; 16] = [
+/// The code points a case-insensitive HFS+ volume ignores in names (git's
+/// `core.protectHFS` list), so `HE\u{200c}AD` opens `HEAD` there: the one list every name
+/// compare that must match such a volume leaves out (RV-DS241-148).
+pub(crate) const HFS_IGNORED: [char; 16] = [
     '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
     '\u{202E}', '\u{206A}', '\u{206B}', '\u{206C}', '\u{206D}', '\u{206E}', '\u{206F}', '\u{FEFF}',
+];
+
+/// The code points outside ASCII that a case-insensitive APFS volume folds onto ASCII,
+/// with the ASCII they fold onto: the full case fold of their canonical decomposition,
+/// each checked on the volume (probe 2026-10-28). Every other code point stays outside ASCII.
+/// The one list the landing checks and the Seatbelt name spellings share (SA vid 202).
+pub(crate) const ASCII_FOLDS: [(char, &str); 13] = [
+    ('\u{DF}', "ss"),
+    ('\u{17F}', "s"),
+    ('\u{37E}', ";"),
+    ('\u{1E9E}', "ss"),
+    ('\u{1FEF}', "`"),
+    ('\u{212A}', "k"),
+    ('\u{FB00}', "ff"),
+    ('\u{FB01}', "fi"),
+    ('\u{FB02}', "fl"),
+    ('\u{FB03}', "ffi"),
+    ('\u{FB04}', "ffl"),
+    ('\u{FB05}', "st"),
+    ('\u{FB06}', "st"),
 ];
 
 /// The project's own instruction files an import copies into the project instructions and

@@ -3625,59 +3625,182 @@ fn teammates_clone_denies(clone: &Path, lead: Option<&str>) -> String {
     text
 }
 
-/// Spells plain text as a Seatbelt regex that matches it in any letter case, for names a
-/// case-insensitive volume finds however they are typed. APFS folds case by Unicode rules,
-/// so `k` also matches U+212A KELVIN SIGN and `s` U+017F LATIN SMALL LETTER LONG S, the
-/// only other letters that fold to ASCII; those two are spelled as groups, so each matches
-/// its whole UTF-8 sequence (LL2S-2). Input: text without a quote or backslash. Output: the
+/// Spells plain text as a Seatbelt regex that matches every name a case-insensitive volume
+/// finds under it: each letter in both cases with every code point that folds onto it or
+/// onto a run of two or three letters ([`spelled`]), so the rule never leans on how Seatbelt
+/// folds names itself (SA vid 202). Input: text without a quote or backslash. Output: the
 /// pattern text, without anchors.
 pub(crate) fn any_case(text: &str) -> String {
-    regex_escape(text)
-        .chars()
-        .map(|character| {
-            if character.eq_ignore_ascii_case(&'k') {
-                "(k|K|\u{212a})".to_owned()
-            } else if character.eq_ignore_ascii_case(&'s') {
-                "(s|S|\u{17f})".to_owned()
-            } else if character.is_ascii_alphabetic() {
-                format!(
-                    "[{}{}]",
-                    character.to_ascii_lowercase(),
-                    character.to_ascii_uppercase()
-                )
-            } else {
-                character.to_string()
-            }
-        })
-        .collect()
+    spelled(&regex_escape(text), false)
 }
 
-/// Escapes plain text for a Seatbelt regex, so every character matches itself. Input: text
-/// without a quote or backslash. Output: the pattern text, without anchors.
-/// A Seatbelt regex fragment matched in any letter case, as [`any_case`] does for plain
-/// text: each ASCII letter becomes both cases, `k` also the Kelvin sign and `s` the long s,
-/// which a case-insensitive volume folds the same; every other character, regex syntax
-/// included, stays as written. Input: a fragment with no bracket class. Output: the pattern.
+/// A Seatbelt regex fragment matched as [`any_case`] matches plain text, every character
+/// that is not a letter, regex syntax included, staying as written; a letter run next to a
+/// wildcard also takes a fold reaching into it ([`spelled_run`]). Input: a fragment with no
+/// bracket class or quote. Output: the pattern.
 pub(crate) fn fold_case(pattern: &str) -> String {
     assert!(!pattern.contains('[') && !pattern.contains('"'));
+    spelled(pattern, true)
+}
+
+/// The most spellings one stretch of letters between two places no fold spans may list.
+const SPELLINGS_MAX: usize = 64;
+
+/// Spells text run by run from [`crate::instruction_files::ASCII_FOLDS`]: each run of ASCII
+/// letters through [`spelled_run`], every other character through [`spelled_char`]. In a
+/// regex fragment a letter a quantifier follows stands alone, and no fold may join it to a
+/// letter beside it. Inputs: the text and whether it is a regex fragment. Output: the pattern.
+fn spelled(text: &str, regex: bool) -> String {
+    let characters: Vec<char> = text.chars().collect();
+    let letter = |at: usize| characters.get(at).is_some_and(char::is_ascii_alphabetic);
+    let quantified =
+        |at: usize| regex && matches!(characters.get(at + 1), Some('?' | '*' | '+' | '{'));
+    let mut pattern = String::with_capacity(text.len() * 8);
+    let mut at = 0;
+    while at < characters.len() {
+        if !letter(at) || quantified(at) {
+            assert!(!letter(at) || !joins_fold(&characters, at));
+            pattern.push_str(&spelled_char(characters[at]));
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while letter(at) && !quantified(at) {
+            at += 1;
+        }
+        let before = regex && start > 0 && matches!(characters[start - 1], '*' | '+');
+        let after = regex
+            && characters.get(at) == Some(&'.')
+            && matches!(characters.get(at + 1), Some('*' | '+'));
+        pattern.push_str(&spelled_run(&characters[start..at], before, after));
+    }
     pattern
-        .chars()
-        .map(|character| {
-            if character.eq_ignore_ascii_case(&'k') {
-                "(k|K|\u{212a})".to_owned()
-            } else if character.eq_ignore_ascii_case(&'s') {
-                "(s|S|\u{17f})".to_owned()
-            } else if character.is_ascii_alphabetic() {
-                format!(
-                    "[{}{}]",
-                    character.to_ascii_lowercase(),
-                    character.to_ascii_uppercase()
-                )
-            } else {
-                character.to_string()
+}
+
+/// Tells whether a fold of two or three letters would join the letter at `at` to the letter
+/// before it or to the one after its quantifier. Inputs: the characters and the letter's
+/// place. Output: true when one would.
+fn joins_fold(characters: &[char], at: usize) -> bool {
+    let joined = |left: Option<&char>, right: Option<&char>| match (left, right) {
+        (Some(left), Some(right)) if left.is_ascii_alphabetic() && right.is_ascii_alphabetic() => {
+            let pair = format!("{left}{right}").to_ascii_lowercase();
+            crate::instruction_files::ASCII_FOLDS
+                .iter()
+                .any(|(_, folded)| folded.contains(pair.as_str()))
+        }
+        _ => false,
+    };
+    let previous = at.checked_sub(1).and_then(|before| characters.get(before));
+    joined(previous, characters.get(at)) || joined(characters.get(at), characters.get(at + 2))
+}
+
+/// Spells one character as a case-insensitive volume finds it: an ASCII letter in both
+/// cases, with every code point that folds onto it alone, the non-ASCII ones in a group so
+/// each matches its whole UTF-8 sequence (LL2S-2). Input: the character. Output: the pattern.
+fn spelled_char(character: char) -> String {
+    let lower = character.to_ascii_lowercase();
+    let mut alternatives = vec![lower.to_string()];
+    if character.is_ascii_alphabetic() {
+        alternatives.push(character.to_ascii_uppercase().to_string());
+    }
+    for (point, folded) in crate::instruction_files::ASCII_FOLDS {
+        if folded.len() == 1 && folded.starts_with(lower) {
+            alternatives.push(point.to_string());
+        }
+    }
+    if alternatives.len() == 1 {
+        character.to_string()
+    } else if alternatives.iter().all(|alternative| alternative.is_ascii()) {
+        format!("[{}]", alternatives.concat())
+    } else {
+        format!("({})", alternatives.join("|"))
+    }
+}
+
+/// Spells one run of ASCII letters with every fold of two or three letters inside it and,
+/// next to a wildcard, every fold reaching past its first or last letter into the wildcard.
+/// The run splits where no fold spans, each stretch listing all its spellings. Inputs: the
+/// letters and whether a wildcard comes before and after them. Output: the pattern text.
+fn spelled_run(run: &[char], before: bool, after: bool) -> String {
+    let lower: String = run.iter().map(char::to_ascii_lowercase).collect();
+    let count = run.len();
+    let mut folds: Vec<(usize, usize, char)> = Vec::new();
+    for (point, folded) in crate::instruction_files::ASCII_FOLDS {
+        let width = folded.len();
+        if width < 2 {
+            continue;
+        }
+        for at in (0..count).filter(|&at| lower[at..].starts_with(folded)) {
+            folds.push((at, at + width, point));
+        }
+        for split in 1..width {
+            if before && lower.starts_with(&folded[split..]) {
+                folds.push((0, width - split, point));
             }
-        })
-        .collect()
+            if after && lower.ends_with(&folded[..split]) {
+                folds.push((count - split, count, point));
+            }
+        }
+        for inner in 1..width.saturating_sub(count) {
+            if before && after && folded[inner..inner + count] == lower {
+                folds.push((0, count, point));
+            }
+        }
+    }
+    folds.sort_unstable();
+    folds.dedup();
+    let mut pieces: Vec<(usize, usize, String)> = (0..count)
+        .map(|at| (at, at + 1, spelled_char(run[at])))
+        .collect();
+    pieces.extend(
+        folds
+            .into_iter()
+            .map(|(start, end, point)| (start, end, point.to_string())),
+    );
+    let cuts: Vec<usize> = (0..=count)
+        .filter(|&cut| !pieces.iter().any(|(start, end, _)| *start < cut && cut < *end))
+        .collect();
+    let mut pattern = String::new();
+    for stretch in cuts.windows(2) {
+        let mut spellings = Vec::new();
+        spell_stretch(
+            &pieces,
+            stretch[0],
+            stretch[1],
+            String::new(),
+            &mut spellings,
+        );
+        assert!(!spellings.is_empty() && spellings.len() <= SPELLINGS_MAX);
+        if let [only] = spellings.as_slice() {
+            pattern.push_str(only);
+        } else {
+            pattern.push_str(&format!("({})", spellings.join("|")));
+        }
+    }
+    pattern
+}
+
+/// Lists every spelling of the letters from `at` to `to` that the pieces give, in order.
+/// Inputs: the pieces as start, end and pattern, the stretch, the spelling so far and the
+/// list it adds to. Output: none; the list grows.
+fn spell_stretch(
+    pieces: &[(usize, usize, String)],
+    at: usize,
+    to: usize,
+    so_far: String,
+    spellings: &mut Vec<String>,
+) {
+    if at == to {
+        spellings.push(so_far);
+        return;
+    }
+    assert!(at < to);
+    for (start, end, piece) in pieces {
+        if *start == at && *end <= to {
+            assert!(start < end);
+            spell_stretch(pieces, *end, to, format!("{so_far}{piece}"), spellings);
+        }
+    }
 }
 
 /// Whether `name` can be one top-level name [`ProjectSandbox::open_only_tops`] keeps open:
@@ -3737,6 +3860,8 @@ pub(crate) fn sbpl_overlong(profile: &str) -> Vec<&str> {
     overlong
 }
 
+/// Escapes plain text for a Seatbelt regex, so every character matches itself. Input: text
+/// without a quote or backslash. Output: the pattern text, without anchors.
 fn regex_escape(text: &str) -> String {
     assert!(!text.contains('"') && !text.contains('\\'));
     let mut pattern = String::with_capacity(text.len() * 2);
