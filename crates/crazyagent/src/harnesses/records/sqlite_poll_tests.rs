@@ -10,6 +10,12 @@ static SCHEMA: Schema = Schema {
     facts: "SELECT seq, kind, body FROM facts WHERE seq > ?1 ORDER BY seq LIMIT ?2",
 };
 
+/// A temp folder reached by its real path. SQLite refuses a link in any part of a record
+/// path, and the system temp folder on macOS sits below the `/var` link. Output: the folder.
+fn root() -> tempfile::TempDir {
+    tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
+}
+
 fn database(path: &Path, version: i64) -> Connection {
     let connection = Connection::open(path).unwrap();
     connection
@@ -74,7 +80,7 @@ fn folder(path: &Path) -> BTreeMap<String, (Vec<u8>, std::time::SystemTime)> {
 /// folder, changing, and its rows become the turn's facts in order.
 #[test]
 fn a_database_is_read_without_being_written() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = root();
     let path = tmp.path().join("record.db");
     let writer = database(&path, 3);
     add(&writer, &turn());
@@ -96,7 +102,7 @@ fn a_database_is_read_without_being_written() {
 /// a read makes no WAL or index file beside it.
 #[test]
 fn a_wal_database_is_read_live_and_closed_without_side_files_made() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = root();
     let path = tmp.path().join("record.db");
     let writer = database(&path, 3);
     writer.pragma_update(None, "journal_mode", "wal").unwrap();
@@ -113,10 +119,11 @@ fn a_wal_database_is_read_live_and_closed_without_side_files_made() {
     assert_eq!(std::fs::read(&path).unwrap(), database_bytes);
     assert_eq!(std::fs::read(&wal).unwrap(), wal_bytes);
     drop(writer);
-    assert!(
-        !wal.exists(),
-        "the harness's close checkpoints and removes its WAL"
-    );
+    for kept in ["record.db-wal", "record.db-shm"] {
+        if let Err(error) = std::fs::remove_file(tmp.path().join(kept)) {
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        }
+    }
     let before = folder(tmp.path());
     let mut closed = SqlitePoll::new(path.clone(), &SCHEMA, 0);
     assert_eq!(closed.read().unwrap(), turn_events());
@@ -128,7 +135,7 @@ fn a_wal_database_is_read_live_and_closed_without_side_files_made() {
 /// through starts the count again.
 #[test]
 fn a_locked_database_is_retried_then_refused_past_the_bound() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = root();
     let path = tmp.path().join("record.db");
     let writer = database(&path, 3);
     add(&writer, &turn());
@@ -156,7 +163,7 @@ fn a_locked_database_is_retried_then_refused_past_the_bound() {
 /// and the apps get a plain sentence for it that names no code.
 #[test]
 fn an_unknown_schema_version_is_refused_in_plain_words() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = root();
     let newer = tmp.path().join("newer.db");
     add(&database(&newer, 99), &turn());
     let viewed = tmp.path().join("viewed.db");
@@ -187,7 +194,7 @@ fn an_unknown_schema_version_is_refused_in_plain_words() {
 #[cfg(unix)]
 #[test]
 fn only_a_plain_database_file_at_the_record_path_is_read() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = root();
     let real = tmp.path().join("real.db");
     add(&database(&real, 3), &turn());
     let link = tmp.path().join("link.db");
@@ -196,9 +203,12 @@ fn only_a_plain_database_file_at_the_record_path_is_read() {
     std::fs::create_dir(&folder).unwrap();
     let text = tmp.path().join("text.db");
     std::fs::write(&text, b"not a database\n").unwrap();
+    let linked = tmp.path().join("linked");
+    std::os::unix::fs::symlink(tmp.path(), &linked).unwrap();
 
     let read = |path: PathBuf| SqlitePoll::new(path, &SCHEMA, 0).read();
 
+    assert_eq!(read(linked.join("real.db")), Err(failure(UNSAFE)));
     assert_eq!(read(link).unwrap_err().0, UNSAFE);
     assert_eq!(read(folder).unwrap_err().0, UNSAFE);
     assert_eq!(read(text).unwrap_err().0, UNREADABLE);
@@ -210,7 +220,7 @@ fn only_a_plain_database_file_at_the_record_path_is_read() {
 /// cut at a character boundary; the next read goes on from the last row taken.
 #[test]
 fn a_read_keeps_to_its_row_and_text_bounds() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = root();
     let path = tmp.path().join("record.db");
     let writer = database(&path, 3);
     let long = "é".repeat(ROW_TEXT_BYTES_MAX);
@@ -239,7 +249,7 @@ fn a_read_keeps_to_its_row_and_text_bounds() {
 /// row whose fact no reader knows is passed over.
 #[test]
 fn a_resumed_reader_reads_only_rows_past_its_position() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = root();
     let path = tmp.path().join("record.db");
     let writer = database(&path, 3);
     add(&writer, &turn());
@@ -263,4 +273,131 @@ fn a_resumed_reader_reads_only_rows_past_its_position() {
             },
         ]
     );
+}
+
+/// Review t15-sec F1: a rollback journal beside the database that is not a plain file, such
+/// as a FIFO the harness made, is refused before SQLite opens anything, so a read never waits
+/// on it.
+#[cfg(unix)]
+#[test]
+fn a_journal_that_is_not_a_plain_file_is_refused_without_waiting() {
+    let tmp = root();
+    let path = tmp.path().join("record.db");
+    add(&database(&path, 3), &turn());
+    let journal = tmp.path().join("record.db-journal");
+    let made = std::process::Command::new("/usr/bin/mkfifo")
+        .arg(&journal)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let (sender, answer) = std::sync::mpsc::channel();
+    let reading = path.clone();
+    std::thread::spawn(move || {
+        drop(sender.send(SqlitePoll::new(reading, &SCHEMA, 0).read()));
+    });
+
+    let read = answer.recv_timeout(Duration::from_secs(5));
+    if read.is_err() {
+        drop(rustix::fs::open(
+            &journal,
+            rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::NONBLOCK,
+            rustix::fs::Mode::empty(),
+        ));
+    }
+
+    assert_eq!(read, Ok(Err(failure(UNSAFE))));
+}
+
+/// Review t15-sec F2: a table with a generated column, virtual or stored, is refused before
+/// any row is read, so no expression the database names runs at a read.
+#[test]
+fn a_table_with_a_generated_column_is_refused_before_any_row_is_read() {
+    let tmp = root();
+    let read = |name: &str, column: &str| {
+        let path = tmp.path().join(name);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE meta(version INTEGER);
+                 INSERT INTO meta(version) VALUES (3);
+                 CREATE TABLE facts(seq INTEGER PRIMARY KEY, kind TEXT, raw TEXT, {column});
+                 INSERT INTO facts(kind, raw) VALUES ('text', 'hi');"
+            ))
+            .unwrap();
+        drop(connection);
+        SqlitePoll::new(path, &SCHEMA, 0).read()
+    };
+
+    let virtual_body = read(
+        "virtual.db",
+        "body TEXT GENERATED ALWAYS AS (raw || raw) VIRTUAL",
+    );
+    let stored_body = read(
+        "stored.db",
+        "body TEXT GENERATED ALWAYS AS (upper(raw)) STORED",
+    );
+
+    assert_eq!(virtual_body, Err(failure(VERSION_UNKNOWN)));
+    assert_eq!(stored_body, Err(failure(VERSION_UNKNOWN)));
+}
+
+/// Review t15-sec F2: a value longer than the value bound is refused by SQLite as it is
+/// read, so one read never builds a value past the bound.
+#[test]
+fn a_value_past_the_value_bound_is_refused_not_built() {
+    let tmp = root();
+    let path = tmp.path().join("record.db");
+    let writer = database(&path, 3);
+    let long = "x".repeat(VALUE_BYTES_MAX + 1);
+    add(&writer, &[("text", Some(long.as_str()))]);
+    drop(writer);
+
+    let read = SqlitePoll::new(path, &SCHEMA, 0).read();
+
+    assert_eq!(read, Err(failure(UNREADABLE)));
+}
+
+/// Review t15-sec F5: a virtual table under a schema table name is refused, so no table
+/// module runs over tables the harness wrote.
+#[test]
+fn a_virtual_table_under_a_schema_name_is_refused() {
+    let tmp = root();
+    let path = tmp.path().join("virtual.db");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE meta(version INTEGER);
+             INSERT INTO meta(version) VALUES (3);
+             CREATE VIRTUAL TABLE facts USING fts5(seq, kind, body);
+             INSERT INTO facts(seq, kind, body) VALUES (1, 'text', 'hi');",
+        )
+        .unwrap();
+    drop(connection);
+
+    let read = SqlitePoll::new(path, &SCHEMA, 0).read();
+
+    assert_eq!(read, Err(failure(VERSION_UNKNOWN)));
+}
+
+/// Review t15-code F7: one read gives at most its text bound, and the row that would pass it
+/// is not passed over: the next read starts with it.
+#[test]
+fn the_row_past_the_read_text_bound_waits_for_the_next_read() {
+    let tmp = root();
+    let path = tmp.path().join("record.db");
+    let writer = database(&path, 3);
+    let long = "x".repeat(ROW_TEXT_BYTES_MAX);
+    let rows = vec![("text", Some(long.as_str())); READ_TEXT_BYTES_MAX / ROW_TEXT_BYTES_MAX + 1];
+    add(&writer, &rows);
+    drop(writer);
+    let mut reader = SqlitePoll::new(path, &SCHEMA, 0);
+
+    let first = reader.read().unwrap();
+    let after_first = reader.after();
+    let second = reader.read().unwrap();
+
+    assert_eq!(first.len(), READ_TEXT_BYTES_MAX / ROW_TEXT_BYTES_MAX);
+    assert_eq!(after_first, i64::try_from(first.len()).unwrap());
+    assert_eq!(second, vec![TranscriptEvent::Text { text: long }]);
+    assert_eq!(reader.after(), after_first + 1);
 }

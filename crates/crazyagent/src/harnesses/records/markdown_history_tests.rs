@@ -1,4 +1,5 @@
 use super::*;
+use crate::harnesses::transcript::EVENTS_PER_READ_MAX;
 use std::io::Write;
 use std::path::Path;
 
@@ -10,6 +11,14 @@ fn append(path: &Path, text: &str) {
         .unwrap()
         .write_all(text.as_bytes())
         .unwrap();
+}
+
+/// A reader of the history file at `path`, held below the folder that holds it. Inputs: the
+/// file, the offset and the time now. Output: the reader.
+fn history(path: PathBuf, offset: u64, now: Instant) -> MarkdownHistory {
+    let base = path.parent().unwrap().to_owned();
+    let below = PathBuf::from(path.file_name().unwrap());
+    MarkdownHistory::new(base, below, offset, now)
 }
 
 fn text(line: &str) -> TranscriptEvent {
@@ -32,7 +41,7 @@ fn a_history_file_gives_a_turn_for_each_user_heading() {
         &path,
         "\n# aider chat started at 2026-11-15 18:00:00\n\n#### hello\n\nHi there.\nSecond line.\n\n#### next\n",
     );
-    let mut reader = MarkdownHistory::new(path.clone(), 0, start);
+    let mut reader = history(path.clone(), 0, start);
 
     let first = reader.read(start).unwrap();
     let thinking = reader.read(start + QUIET * 4).unwrap();
@@ -70,7 +79,7 @@ fn quoted_tool_output_is_not_reply_text() {
     let path = tmp.path().join("history.md");
     let start = Instant::now();
     append(&path, "#### run it\n> $ ls\n> a.txt\n");
-    let mut reader = MarkdownHistory::new(path.clone(), 0, start);
+    let mut reader = history(path.clone(), 0, start);
 
     let tools = reader.read(start).unwrap();
     let quiet = reader.read(start + QUIET * 3).unwrap();
@@ -90,7 +99,7 @@ fn a_half_written_line_waits_for_its_end() {
     let path = tmp.path().join("history.md");
     let start = Instant::now();
     append(&path, "#### hi\nHal");
-    let mut reader = MarkdownHistory::new(path.clone(), 0, start);
+    let mut reader = history(path.clone(), 0, start);
 
     let half = reader.read(start).unwrap();
     let held = reader.offset();
@@ -111,7 +120,7 @@ fn a_prompt_over_several_heading_lines_is_one_turn() {
     let start = Instant::now();
     append(&path, "#### line one\n#### line two\n\nOk.\n");
 
-    let events = MarkdownHistory::new(path, 0, start).read(start).unwrap();
+    let events = history(path, 0, start).read(start).unwrap();
 
     assert_eq!(events, vec![TranscriptEvent::TurnStarted, text("Ok.")]);
 }
@@ -128,7 +137,7 @@ fn a_new_session_header_interrupts_an_open_turn() {
         "# aider chat started at 2026-11-15 17:00:00\n#### hi\nWorking\n\n# aider chat started at 2026-11-15 18:00:00\n\n#### again\n",
     );
 
-    let events = MarkdownHistory::new(path, 0, start).read(start).unwrap();
+    let events = history(path, 0, start).read(start).unwrap();
 
     assert_eq!(
         events,
@@ -155,7 +164,7 @@ fn only_a_plain_history_file_is_read() {
     let folder = tmp.path().join("folder.md");
     std::fs::create_dir(&folder).unwrap();
 
-    let read = |path: PathBuf| MarkdownHistory::new(path, 0, start).read(start);
+    let read = |path: PathBuf| history(path, 0, start).read(start);
 
     assert_eq!(read(link).unwrap_err().0, UNSAFE);
     assert_eq!(read(folder).unwrap_err().0, UNSAFE);
@@ -174,9 +183,9 @@ fn a_line_past_the_line_bound_is_passed_over() {
     append(&whole, &format!("#### hi\n{long}\nShort.\n"));
     let split = tmp.path().join("split.md");
     append(&split, &format!("#### hi\n{long}"));
-    let mut reader = MarkdownHistory::new(split.clone(), 0, start);
+    let mut reader = history(split.clone(), 0, start);
 
-    let one = MarkdownHistory::new(whole, 0, start).read(start).unwrap();
+    let one = history(whole, 0, start).read(start).unwrap();
     let first = reader.read(start).unwrap();
     append(&split, "tail\nShort.\n");
     let second = reader.read(start + Duration::from_millis(10)).unwrap();
@@ -195,7 +204,7 @@ fn a_read_keeps_to_its_byte_bound() {
     let start = Instant::now();
     let line = format!("{}\n", "y".repeat(1023));
     append(&path, &format!("#### hi\n{}", line.repeat(2048)));
-    let mut reader = MarkdownHistory::new(path.clone(), 0, start);
+    let mut reader = history(path.clone(), 0, start);
 
     let first = reader.read(start).unwrap();
     let mut texts = first.len() - 1;
@@ -220,9 +229,59 @@ fn a_resumed_reader_starts_at_its_offset() {
     append(&path, &format!("{earlier}#### two\nB.\n"));
     let offset = u64::try_from(earlier.len()).unwrap();
 
-    let events = MarkdownHistory::new(path, offset, start)
-        .read(start)
-        .unwrap();
+    let events = history(path, offset, start).read(start).unwrap();
 
     assert_eq!(events, vec![TranscriptEvent::TurnStarted, text("B.")]);
+}
+
+/// Review t15-sec F4: the history file is opened one part at a time below the folder the
+/// engine holds, so a folder on the way that was swapped for a link is refused, not followed.
+#[cfg(unix)]
+#[test]
+fn a_linked_folder_below_the_held_folder_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let start = Instant::now();
+    let project = tmp.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let other = tmp.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    append(&other.join("history.md"), "#### hi\nsecret\n");
+    std::os::unix::fs::symlink(&other, project.join("sub")).unwrap();
+    std::fs::create_dir(project.join("real")).unwrap();
+    append(&project.join("real").join("history.md"), "#### hi\n");
+
+    let read = |below: &str| {
+        MarkdownHistory::new(project.clone(), PathBuf::from(below), 0, start).read(start)
+    };
+
+    assert_eq!(read("sub/history.md"), Err(failure(UNSAFE)));
+    assert_eq!(
+        read("real/history.md"),
+        Ok(vec![TranscriptEvent::TurnStarted])
+    );
+    assert_eq!(read("missing/history.md"), Ok(Vec::new()));
+}
+
+/// Review t15-sec F6: one read gives at most `EVENTS_PER_READ_MAX` facts and stops at a whole
+/// line, and the reads after it go on from there until every line is read once.
+#[test]
+fn a_read_keeps_to_its_fact_bound() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("history.md");
+    let start = Instant::now();
+    append(&path, &format!("#### hi\n{}", "x\n".repeat(10_000)));
+    let mut reader = history(path.clone(), 0, start);
+
+    let first = reader.read(start).unwrap();
+    let held = reader.offset();
+    let mut texts = first.len() - 1;
+    for _ in 0..4 {
+        texts += reader.read(start).unwrap().len();
+    }
+
+    assert!(first.len() <= EVENTS_PER_READ_MAX, "{}", first.len());
+    assert_eq!(first[0], TranscriptEvent::TurnStarted);
+    assert_eq!((held - 8) % 2, 0);
+    assert_eq!(texts, 10_000);
+    assert_eq!(reader.offset(), std::fs::metadata(&path).unwrap().len());
 }
