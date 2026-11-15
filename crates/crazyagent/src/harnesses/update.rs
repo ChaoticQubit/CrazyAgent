@@ -68,7 +68,7 @@ const _: () = assert!(VERSION_PARTS_MAX * 2 <= VERSION_BYTES_MAX);
 
 /// How a harness on this machine was installed, which decides the one updater the engine may
 /// run for it. Built from the real path of its PATH entry only; nothing is executed to tell.
-/// The names inside are always names from the compiled table.
+/// The names inside are always names from the recipes of the bundled harness manifests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Method {
@@ -219,7 +219,7 @@ pub struct NpmInstall {
 }
 
 /// One command the engine may start: an absolute program, arguments that are all strings of
-/// the compiled table, and the folders that go first on the child's search path. `prefix`
+/// the recipes read from the bundled harness manifests, and the folders that go first on the child's search path. `prefix`
 /// is set for npm alone: the prefix the harness was found in, which the runner pins as
 /// npm's global prefix so a prefix in the owner's npmrc never moves the install.
 /// Nothing in it ever comes from a file, the environment or the wire.
