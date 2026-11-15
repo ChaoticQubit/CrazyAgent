@@ -12,8 +12,10 @@ pub(super) const TEXT_BYTES_MAX: usize = 240;
 const NAME: &str =
     "a name of lower-case letters, digits and @ . _ - that starts with a letter or a digit";
 const SCOPE: &str = "an npm scope such as @vendor";
-const PACKAGE: &str =
-    "a package name such as name or @scope/name, of lower-case letters, digits and @ . _ -";
+const PART: &str = "an npm name of lower-case letters, digits and . _ - that starts with a letter or a digit and does not end in .tgz, .tar or .gz";
+const VERSION: &str = "a version or a tag of lower-case letters, digits and . _ - that starts with a letter or a digit and does not end in .tgz, .tar or .gz";
+/// The endings npm reads as an archive file instead of a package name or a version.
+const ARCHIVES: [&str; 3] = [".tgz", ".tar", ".gz"];
 const OPTION: &str = "an option that starts with -- and holds lower-case letters, digits, - and =";
 const WORD: &str = "a word of lower-case letters, digits and dashes";
 const FIELD: &str = "a field name of lower-case letters, digits and _";
@@ -72,15 +74,15 @@ fn plain(text: &str) -> bool {
         })
 }
 
-fn scope_name(text: &str) -> bool {
-    text.strip_prefix('@').is_some_and(plain)
+/// Whether a text is one part of an npm package name, or a version or tag after it, that
+/// npm can only read as a registry name: plain characters without `@`, and no archive ending.
+/// Input: the text. Output: true when npm cannot read it as a folder, a file or an address.
+fn part(text: &str) -> bool {
+    plain(text) && !text.contains('@') && !ARCHIVES.iter().any(|end| text.ends_with(end))
 }
 
-fn package(text: &str) -> bool {
-    match text.split_once('/') {
-        Some((scope, name)) => scope_name(scope) && plain(name),
-        None => plain(text),
-    }
+fn scope_name(text: &str) -> bool {
+    text.strip_prefix('@').is_some_and(part)
 }
 
 fn option(text: &str) -> bool {
@@ -280,33 +282,47 @@ fn npm_of(npm: &'static Value) -> Result<Npm, String> {
     for flag in flags.iter().copied() {
         held(flag, "update.npm.flags", option, OPTION)?;
     }
+    let name = held(needed(npm, path, "name")?, "update.npm.name", part, PART)?;
+    let whole = if scope.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{scope}/{name}")
+    };
+    let package = needed(npm, path, "package")?;
+    if package != whole {
+        return Err(format!(
+            "update.npm.package: {package} is not {whole}, the scope and name of this block."
+        ));
+    }
+    let spec = needed(npm, path, "spec")?;
+    let versioned = spec
+        .strip_prefix(package)
+        .is_some_and(|rest| rest.is_empty() || rest.strip_prefix('@').is_some_and(part));
+    if !versioned {
+        return Err(format!(
+            "update.npm.spec: {spec} is not {package}, alone or followed by @ and {VERSION}."
+        ));
+    }
     let found = Npm {
         scope,
-        name: held(needed(npm, path, "name")?, "update.npm.name", plain, NAME)?,
-        package: held(
-            needed(npm, path, "package")?,
-            "update.npm.package",
-            package,
-            PACKAGE,
-        )?,
-        spec: held(
-            needed(npm, path, "spec")?,
-            "update.npm.spec",
-            package,
-            PACKAGE,
-        )?,
+        name,
+        package,
+        spec,
         flags: Vec::leak(flags),
     };
+    assert!(found.spec.starts_with(found.package) && found.package.ends_with(found.name));
+    assert!(!found.spec.contains(['\\', ':']) && found.spec.matches('/').count() <= 1);
     assert!(found.flags.len() <= NPM_FLAGS_MAX);
     Ok(found)
 }
 
 /// Reads the `update` block of one manifest into a recipe. Every Homebrew and npm name is
-/// one path part of plain characters that starts with a letter or a digit, a package or an
-/// install spec is such a name or `@scope/name`, so none can be read as an option, a folder
-/// or an address; every flag starts with two dashes, every address is https, and a key the
-/// block does not have is refused, because these values become arguments of install and
-/// update commands. The lists are copied once into memory
+/// one path part of plain characters that starts with a letter or a digit; the npm package
+/// is the block's own scope and name, and the install spec is that package alone or with
+/// `@` and a version or tag, so npm reads neither as an option, a folder, an archive, an
+/// address or another package; every flag starts with two dashes, every address is https,
+/// and a key the block does not have is refused, because these values become arguments of
+/// install and update commands. The lists are copied once into memory
 /// that lives as long as the process. Inputs: the catalog id and the block. Output: the
 /// recipe, or one plain sentence that names the setting.
 pub(super) fn read(id: &'static str, block: &'static Value) -> Result<Recipe, String> {
