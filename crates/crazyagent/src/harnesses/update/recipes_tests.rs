@@ -2,7 +2,10 @@ use super::*;
 use crate::app_plugins::yaml;
 
 const GUIDE: &str = "guide: \"https://example.com/install\"\n";
-const PACKAGE_SHAPE: &str = "a package name of lower-case letters, digits and @ / . _ -";
+const NAME_SHAPE: &str =
+    "a name of lower-case letters, digits and @ . _ - that starts with a letter or a digit";
+const PACKAGE_SHAPE: &str =
+    "a package name such as name or @scope/name, of lower-case letters, digits and @ . _ -";
 
 fn block(text: &str) -> &'static Value {
     Box::leak(Box::new(yaml::parse(text).unwrap()))
@@ -159,12 +162,12 @@ fn a_homebrew_name_that_could_be_read_as_an_option_or_is_not_plain_is_refused() 
     ] {
         assert_eq!(
             refusal(&format!("formulae:\n  - \"{name}\"\n{GUIDE}")),
-            format!("update.formulae: {name} is not {PACKAGE_SHAPE}."),
+            format!("update.formulae: {name} is not {NAME_SHAPE}."),
             "{name}"
         );
         assert_eq!(
             refusal(&format!("known_casks:\n  - \"{name}\"\n{GUIDE}")),
-            format!("update.known_casks: {name} is not {PACKAGE_SHAPE}."),
+            format!("update.known_casks: {name} is not {NAME_SHAPE}."),
             "{name}"
         );
     }
@@ -210,7 +213,7 @@ fn an_npm_package_spec_or_flag_that_is_not_plain_is_refused() {
     );
     assert_eq!(
         refusal(&npm("  spec: \"@sample/cli\"\n  scope: \"@Sample\"\n")),
-        format!("update.npm.scope: @Sample is not {PACKAGE_SHAPE}.")
+        "update.npm.scope: @Sample is not an npm scope such as @vendor."
     );
     for flag in ["-g", "--", "--Global", "--prefix /tmp", "global"] {
         assert_eq!(

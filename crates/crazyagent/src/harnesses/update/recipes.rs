@@ -9,7 +9,11 @@ pub(super) const BREWS_MAX: usize = 4;
 /// The most bytes of one name, folder or address in a recipe.
 pub(super) const TEXT_BYTES_MAX: usize = 240;
 
-const PACKAGE: &str = "a package name of lower-case letters, digits and @ / . _ -";
+const NAME: &str =
+    "a name of lower-case letters, digits and @ . _ - that starts with a letter or a digit";
+const SCOPE: &str = "an npm scope such as @vendor";
+const PACKAGE: &str =
+    "a package name such as name or @scope/name, of lower-case letters, digits and @ . _ -";
 const OPTION: &str = "an option that starts with -- and holds lower-case letters, digits, - and =";
 const WORD: &str = "a word of lower-case letters, digits and dashes";
 const FIELD: &str = "a field name of lower-case letters, digits and _";
@@ -59,11 +63,24 @@ pub(super) struct Recipe {
     pub(super) guide: &'static str,
 }
 
-fn package(text: &str) -> bool {
-    !text.starts_with('-')
+fn plain(text: &str) -> bool {
+    text.as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
         && text.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"@/._-".contains(&byte)
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"@._-".contains(&byte)
         })
+}
+
+fn scope_name(text: &str) -> bool {
+    text.strip_prefix('@').is_some_and(plain)
+}
+
+fn package(text: &str) -> bool {
+    match text.split_once('/') {
+        Some((scope, name)) => scope_name(scope) && plain(name),
+        None => plain(text),
+    }
 }
 
 fn option(text: &str) -> bool {
@@ -192,7 +209,7 @@ fn pointer_of(pointer: &'static Value) -> Result<Pointer, String> {
         ("plain-version", None, None) => PointerFormat::PlainVersion,
         ("json-tag", Some(name), Some(prefix)) => PointerFormat::JsonTag {
             field: held(name, "update.own.pointer.field", field, FIELD)?,
-            prefix: held(prefix, "update.own.pointer.prefix", package, PACKAGE)?,
+            prefix: held(prefix, "update.own.pointer.prefix", plain, NAME)?,
         },
         _ => {
             return Err(format!(
@@ -256,7 +273,7 @@ fn npm_of(npm: &'static Value) -> Result<Npm, String> {
     let path = "update.npm";
     keys(npm, path, &["scope", "name", "package", "spec", "flags"])?;
     let scope = match text(npm, path, "scope")? {
-        Some(scope) => held(scope, "update.npm.scope", package, PACKAGE)?,
+        Some(scope) => held(scope, "update.npm.scope", scope_name, SCOPE)?,
         None => "",
     };
     let flags = texts(npm, path, "flags", NPM_FLAGS_MAX)?;
@@ -265,12 +282,7 @@ fn npm_of(npm: &'static Value) -> Result<Npm, String> {
     }
     let found = Npm {
         scope,
-        name: held(
-            needed(npm, path, "name")?,
-            "update.npm.name",
-            package,
-            PACKAGE,
-        )?,
+        name: held(needed(npm, path, "name")?, "update.npm.name", plain, NAME)?,
         package: held(
             needed(npm, path, "package")?,
             "update.npm.package",
@@ -289,10 +301,12 @@ fn npm_of(npm: &'static Value) -> Result<Npm, String> {
     Ok(found)
 }
 
-/// Reads the `update` block of one manifest into a recipe. Every name is held to plain
-/// package characters and never starts with a dash, every flag starts with two dashes, every
-/// address is https, and a key the block does not have is refused, because these values
-/// become arguments of install and update commands. The lists are copied once into memory
+/// Reads the `update` block of one manifest into a recipe. Every Homebrew and npm name is
+/// one path part of plain characters that starts with a letter or a digit, a package or an
+/// install spec is such a name or `@scope/name`, so none can be read as an option, a folder
+/// or an address; every flag starts with two dashes, every address is https, and a key the
+/// block does not have is refused, because these values become arguments of install and
+/// update commands. The lists are copied once into memory
 /// that lives as long as the process. Inputs: the catalog id and the block. Output: the
 /// recipe, or one plain sentence that names the setting.
 pub(super) fn read(id: &'static str, block: &'static Value) -> Result<Recipe, String> {
@@ -322,7 +336,7 @@ pub(super) fn read(id: &'static str, block: &'static Value) -> Result<Recipe, St
         ("known_casks", BrewKind::Cask, false),
     ] {
         for name in texts(block, path, key, BREWS_MAX)? {
-            let name = held(name, &format!("{path}.{key}"), package, PACKAGE)?;
+            let name = held(name, &format!("{path}.{key}"), plain, NAME)?;
             if brews.iter().any(|brew| brew.name == name) {
                 return Err(format!("{path}.{key}: {name} is listed twice."));
             }
