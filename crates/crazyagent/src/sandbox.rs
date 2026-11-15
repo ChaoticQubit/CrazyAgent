@@ -364,13 +364,16 @@ const REFUSED_SUFFIXES: &[&str] = &[
 ];
 
 /// The git settings every agent process gets, sandboxed or at Full access: no system git
-/// config (whose `credential.helper=osxkeychain` would ask the owner's Keychain), no
-/// credential helper at all, no terminal prompt, and no bare repository found by
+/// config (whose `credential.helper=osxkeychain` would ask the owner's Keychain), no global
+/// config either, as the engine's own git runs, so a `.gitconfig` or `.config/git/config`
+/// an earlier run left in the agent home never runs its hooks or programs (RV-DS241-137),
+/// no credential helper at all, no terminal prompt, and no bare repository found by
 /// discovery (`safe.bareRepository=explicit`, SR1-2), so a folder another agent laid out
 /// as one never runs its config, while `--git-dir` still opens it. They are set after the
 /// harness's own variables, so a harness cannot replace them.
-pub const AGENT_GIT_ENV: [(&str, &str); 7] = [
+pub const AGENT_GIT_ENV: [(&str, &str); 8] = [
     ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
     ("GIT_TERMINAL_PROMPT", "0"),
     ("GIT_CONFIG_COUNT", "2"),
     ("GIT_CONFIG_KEY_0", "credential.helper"),
@@ -378,6 +381,12 @@ pub const AGENT_GIT_ENV: [(&str, &str); 7] = [
     ("GIT_CONFIG_KEY_1", "safe.bareRepository"),
     ("GIT_CONFIG_VALUE_1", "explicit"),
 ];
+
+/// The Python setting every agent process gets, sandboxed or at Full access: no user site,
+/// so a `.pth` file or `usercustomize` module an earlier run left in the agent home's user
+/// site never runs as Python starts (RV-DS241-137). It is set after the harness's own
+/// variables, so a harness cannot turn the user site back on.
+pub const AGENT_PYTHON_ENV: [(&str, &str); 1] = [("PYTHONNOUSERSITE", "1")];
 
 /// The root certificates every sandboxed agent process trusts for TLS on macOS: the system
 /// bundle, named in `SSL_CERT_FILE`. A harness that reads its roots from the keychain, as
@@ -457,7 +466,8 @@ pub fn shell_tmp_prefix(tmp: &Path) -> PathBuf {
 /// harness's variables (a later value replaces an earlier one and None removes it, but
 /// `HOME`, `TMPDIR` and `TMPPREFIX`, and the tool cache's [`TOOL_CACHE_ENV`] when `base`
 /// sets them, always stay as `base` set them), then `TMPPREFIX` from
-/// [`shell_tmp_prefix`] when `TMPDIR` is set, then [`AGENT_GIT_ENV`] and [`AGENT_TLS_ENV`].
+/// [`shell_tmp_prefix`] when `TMPDIR` is set, then [`AGENT_GIT_ENV`], [`AGENT_TLS_ENV`] and
+/// [`AGENT_PYTHON_ENV`].
 /// Inputs: the base and harness variables. Output: the variables, or `Invalid` when any
 /// one fails [`agent_variable_allowed`].
 pub fn agent_env<'a>(
@@ -501,7 +511,11 @@ pub fn agent_env<'a>(
     if let Some(prefix) = prefix {
         set(&mut env, OsStr::new("TMPPREFIX"), Some(prefix.as_os_str()));
     }
-    for (name, value) in AGENT_GIT_ENV.into_iter().chain(AGENT_TLS_ENV) {
+    let fixed = AGENT_GIT_ENV
+        .into_iter()
+        .chain(AGENT_TLS_ENV)
+        .chain(AGENT_PYTHON_ENV);
+    for (name, value) in fixed {
         set(&mut env, OsStr::new(name), Some(OsStr::new(value)));
     }
     if env.len() > AGENT_ENV_MAX {
@@ -3966,9 +3980,13 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
 /// keychain and keychain settings, which the engine sets up with `security` calls before a
 /// launch, out of its reach (DEC-146): no write under `Library/Keychains` nor to
 /// `Library/Preferences/com.apple.security.plist`, and no move, removal, mode change or link
-/// in place of `Library` or `Library/Preferences`, so no link an agent plants leads one of
-/// those calls to another keychain or settings file. They must follow every write allow.
-/// Input: the home. Output: the rule text.
+/// in place of `Library`, `Library/Preferences` or any other folder a launch keeps only part
+/// of ([`crate::agent_home::walked_folders`]), nor of the home itself, so no link an agent
+/// plants leads one of those calls, or a launch's removal of what it does not keep, outside
+/// the home. They deny writes to cargo's and git's own config in the home (`.cargo/config`,
+/// `.cargo/config.toml`, `.config/git`) and any file flag in it, so a run neither plants
+/// config its own tools run nor pins what the next launch removes (RV-DS241-137, -138).
+/// They must follow every write allow. Input: the home. Output: the rule text.
 fn launch_denies(home: &Path) -> String {
     use crate::agent_home::Harness;
     use crate::launch_context::STATE;
@@ -3983,6 +4001,9 @@ fn launch_denies(home: &Path) -> String {
         "rules",
         ".agents",
         "Library/Keychains",
+        ".cargo/config",
+        ".cargo/config.toml",
+        ".config/git",
     ];
     let files = [
         Harness::Claude.instruction_file(),
@@ -4009,11 +4030,23 @@ fn launch_denies(home: &Path) -> String {
         other_than(crate::launch_context::CODEX_SYSTEM_SKILLS)
     ));
     let library = format!("{home}/{}", any_case("Library"));
-    let preferences = format!("{library}/{}", any_case("Preferences"));
+    let mut walked: Vec<String> = crate::agent_home::walked_folders()
+        .map(|folder| format!("{home}/{}", any_case(folder)))
+        .collect();
+    assert!(walked.contains(&library));
+    walked.push(format!("{library}/{}", any_case("Preferences")));
+    let spelled = |indent: &str| {
+        walked
+            .iter()
+            .map(|folder| format!("\n{indent}(regex #\"^{folder}$\")"))
+            .collect::<String>()
+    };
     text.push_str(&format!(
-        "(deny {PINNED_WRITES}\n  (regex #\"^{library}$\")\n  (regex #\"^{preferences}$\"))\n(deny file-write-create\n  (require-all\n    (require-any\n      (regex #\"^{library}$\")\n      (regex #\"^{preferences}$\"))\n    (vnode-type SYMLINK)))\n"
+        "(deny {PINNED_WRITES}\n  (regex #\"^{home}$\"){})\n(deny file-write-create\n  (require-all\n    (require-any{})\n    (vnode-type SYMLINK)))\n(deny file-write-flags (regex #\"^{home}(/.*)?$\"))\n",
+        spelled("  "),
+        spelled("      "),
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 23);
+    assert_eq!(text.matches("(regex #\"^/").count(), 34);
     text
 }
 

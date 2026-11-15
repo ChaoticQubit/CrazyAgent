@@ -918,7 +918,7 @@ fn owner_text_up_to_the_cap_is_given_inline_and_more_is_refused_by_its_larger_pa
     assert!(given.text.len() <= GIVEN_BYTES_MAX);
 
     let claude = home(&root, "claude");
-    let stale = claude.join(STALE_CONTEXT_FOLDER);
+    let stale = claude.join("crazyagent-context");
     fs::create_dir(&stale).unwrap();
     fs::write(stale.join("app-instructions.md"), &app).unwrap();
     prepare(&claude, Harness::Claude, &project, &given).unwrap();

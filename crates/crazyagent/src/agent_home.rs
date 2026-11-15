@@ -25,7 +25,6 @@ pub const PROCESS_BYTES_MAX: usize = TITLE.len()
 /// app and project instructions and the instruction files together. A launch over it is
 /// refused with a code naming the largest part, never cut or moved out of the prompt.
 pub const GIVEN_BYTES_MAX: usize = 64 * 1024;
-const STALE_CONTEXT_FOLDER: &str = "crazyagent-context";
 /// The startup files zsh reads from `$HOME` ahead of a command, as every zsh a harness starts
 /// in an agent home does, since no `ZDOTDIR` reaches it (SA vid 12).
 pub(crate) const ZSH_STARTUP: [&str; 5] = [".zshenv", ".zprofile", ".zshrc", ".zlogin", ".zlogout"];
@@ -42,9 +41,55 @@ pub(crate) const SH_STARTUP: [&str; 5] = [
 /// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
 /// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
 pub(crate) const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
-/// The folder of a Codex home holding the shell snapshots Codex 0.167 sources ahead of its
-/// shell commands.
-const CODEX_SHELL_SNAPSHOTS: &str = "shell_snapshots";
+/// The most entries a launch lists in one folder of an agent home it keeps only part of; a
+/// folder holding more refuses the launch, since only an agent's own run makes that many.
+const HOME_ENTRIES_MAX: usize = 100_000;
+/// What a launch keeps in an agent home (RV-DS241-137), every other entry going: the
+/// engine's launch state, lock, relay plugin and key file; both harnesses' instruction and
+/// Codex config files, which the launch rewrites, and the skills; Claude Code's sign-in,
+/// transcripts and team, task, todo and plan state; Codex's sign-in and sessions; the
+/// per-agent keychain; and the download caches. No entry kept holds config a tool runs.
+const HOME_KEPT: &[(&str, Kept)] = &[
+    (crate::launch_context::STATE, Kept::Folder),
+    (crate::launch_context::LOCK, Kept::File),
+    (crate::coord::relay::PLUGIN_FOLDER, Kept::Folder),
+    (crate::harnesses::interactive::KEY_FILE, Kept::File),
+    (Harness::Claude.instruction_file(), Kept::File),
+    (Harness::Codex.instruction_file(), Kept::File),
+    ("config.toml", Kept::File),
+    ("skills", Kept::Folder),
+    (".claude.json", Kept::File),
+    (".credentials.json", Kept::File),
+    ("projects", Kept::Folder),
+    ("teams", Kept::Folder),
+    ("tasks", Kept::Folder),
+    ("todos", Kept::Folder),
+    ("plans", Kept::Folder),
+    (".claude", Kept::Only(CLAUDE_FOLDER_KEPT)),
+    ("auth.json", Kept::File),
+    ("sessions", Kept::Folder),
+    ("Library", Kept::Only(LIBRARY_KEPT)),
+    (".cargo", Kept::Only(CARGO_KEPT)),
+    (".cache", Kept::Folder),
+    (".npm", Kept::Only(NPM_KEPT)),
+];
+/// What a launch keeps in an agent home's `.claude`, where some Claude Code versions keep a
+/// native team's config and tasks, which the engine reads there.
+const CLAUDE_FOLDER_KEPT: &[(&str, Kept)] = &[("teams", Kept::Folder), ("tasks", Kept::Folder)];
+/// What a launch keeps in an agent home's `Library`: the per-agent keychain and the one
+/// settings file the engine's `security` calls write (DEC-146), never a Python user site or
+/// another tool's settings.
+const LIBRARY_KEPT: &[(&str, Kept)] = &[
+    ("Keychains", Kept::Folder),
+    ("Preferences", Kept::Only(&[("com.apple.security.plist", Kept::File)])),
+];
+/// What a launch keeps in an agent's cargo home: its crates and git checkouts, which the
+/// engine links to the owner's read-only ones, never a cargo config or the subcommands in
+/// `bin`, which cargo runs ahead of those on the `PATH`.
+const CARGO_KEPT: &[(&str, Kept)] = &[("registry", Kept::Cache), ("git", Kept::Cache)];
+/// What a launch keeps in an agent home's `.npm`: npm's content-addressed cache, never the
+/// packages npx installed, which it runs as they are.
+const NPM_KEPT: &[(&str, Kept)] = &[("_cacache", Kept::Folder)];
 const TOO_LARGE: &str = "agent_instructions_too_large_";
 const SKILLS_FOLDER: &str = "agent-skills";
 const FILES_FOLDER: &str = "agent-instruction-files";
@@ -56,6 +101,22 @@ const SKILLS_RECORD_BYTES_MAX: usize =
     SKILLS_RECORD_MAX * (crate::plugins::skill_folder::NAME_BYTES_MAX + 1);
 
 static TEMPORARY: AtomicU64 = AtomicU64::new(0);
+
+/// What a launch keeps of one entry of an agent home, judged without following a link
+/// (RV-DS241-137). An entry of another kind than the one its name keeps, such as a link
+/// where a folder belongs, goes like an entry no list names.
+#[derive(Clone, Copy)]
+enum Kept {
+    /// A plain file.
+    File,
+    /// A real folder with all it holds.
+    Folder,
+    /// A real folder with all it holds or a link, never followed: a cache the engine links
+    /// to the owner's read-only one.
+    Cache,
+    /// A real folder holding only the entries its list keeps.
+    Only(&'static [(&'static str, Kept)]),
+}
 
 /// The CrazyAgent default process the owner can seed the Process page with: the owner's
 /// working rules for every master and sub-agent, without machine-only tools.
@@ -139,7 +200,7 @@ impl Harness {
     }
 
     /// Returns the file name of this harness's global instruction file in its home.
-    pub fn instruction_file(self) -> &'static str {
+    pub const fn instruction_file(self) -> &'static str {
         match self {
             Self::Claude => "CLAUDE.md",
             Self::Codex => "AGENTS.md",
@@ -725,8 +786,9 @@ pub fn with_agent(mut text: String, agent: &str) -> String {
 /// Writes the owner's instructions into one agent's private home for one launch: the
 /// harness's global instruction file holds exactly the given text, and is removed when it
 /// is empty, so a stale copy never outlives a cleared page; the engine's own record of the
-/// instruction files it found, kept outside the home, replaces the last launch's; no shell
-/// code an earlier run left in the home stays for this one ([`remove_shell_code`]).
+/// instruction files it found, kept outside the home, replaces the last launch's; nothing
+/// an earlier run left in the home but what its harness keeps stays for this one
+/// ([`keep_only`] with [`HOME_KEPT`]).
 /// Input: the agent's 0700 home (its CLAUDE_CONFIG_DIR or CODEX_HOME), the harness, the
 /// project and what `text` built. Output: unit, or a plain code.
 pub fn prepare(
@@ -744,8 +806,7 @@ pub fn prepare(
     real_folder(home)?;
     record_files(&project.data, home, &given.files)?;
     write_record(&project.data, GIVEN_FOLDER, home, &given.text)?;
-    remove_entry(&home.join(STALE_CONTEXT_FOLDER))?;
-    remove_shell_code(home)?;
+    keep_only(home, HOME_KEPT)?;
     let name = harness.instruction_file();
     if given.text.is_empty() {
         return remove_entry(&home.join(name));
@@ -1026,36 +1087,102 @@ fn real_folder(folder: &Path) -> Result<(), AgentHomeError> {
     Ok(())
 }
 
+/// Removes one entry of an agent home without following a link in its last part, so a link
+/// goes and what it names stays. An entry an agent pinned with the immutable or append-only
+/// flag, in a folder it may have pinned too, or a folder it left without write, is first
+/// made removable: the flags of its parent, of the entry and of all it holds are cleared and
+/// its folders opened up, each through a handle that follows no link (RV-DS241-138). Input:
+/// the entry. Output: unit, or `agent_home_unwritable` when it stays, refusing the launch.
 pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
-    let removed = match fs::symlink_metadata(path) {
+    let folder = match fs::symlink_metadata(path) {
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(_) => return Err(failure("agent_home_unwritable")),
-        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path),
-        Ok(_) => fs::remove_file(path),
+        Ok(metadata) => metadata.is_dir(),
     };
-    removed.map_err(|_| failure("agent_home_unwritable"))
+    let removed = if folder {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    if removed.is_ok() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        unpin(parent);
+    }
+    if folder {
+        return crate::team::cleanup::remove_agent_tree(path)
+            .map_err(|_| failure("agent_home_unwritable"));
+    }
+    unpin(path);
+    fs::remove_file(path).map_err(|_| failure("agent_home_unwritable"))
 }
 
-/// Removes from an agent home what a shell its harness starts there runs ahead of its
-/// command: the zsh, bash and sh startup files, zsh's compiled forms of its own, and the
-/// folders whose scripts Claude Code and Codex source before each shell command, which the
-/// harness writes again as it starts. Nothing an earlier run left there runs in the next
-/// (SA vid 12). Input: the agent home. Output: unit, or `agent_home_unwritable` when one
-/// cannot be removed, which refuses the launch.
-fn remove_shell_code(home: &Path) -> Result<(), AgentHomeError> {
-    assert!(home.is_absolute());
-    for name in ZSH_STARTUP {
-        remove_entry(&home.join(name))?;
-        remove_entry(&home.join(format!("{name}{ZSH_COMPILED}")))?;
+/// Removes from one real folder of an agent home every entry `kept` does not name with its
+/// kind, and does the same in each kept folder that has its own list, never following a
+/// link (RV-DS241-137). Flags an agent set on the folder are cleared first (RV-DS241-138).
+/// Inputs: the folder and what stays in it. Output: unit, or `agent_home_unwritable` when
+/// it cannot be listed, holds over [`HOME_ENTRIES_MAX`] entries or one of them stays.
+fn keep_only(folder: &Path, kept: &[(&str, Kept)]) -> Result<(), AgentHomeError> {
+    assert!(folder.is_absolute());
+    assert!(!kept.is_empty());
+    unpin(folder);
+    let names = fs::read_dir(folder)
+        .map_err(|_| failure("agent_home_unwritable"))?
+        .take(HOME_ENTRIES_MAX + 1)
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| failure("agent_home_unwritable"))?;
+    if names.len() > HOME_ENTRIES_MAX {
+        return Err(failure("agent_home_unwritable"));
     }
-    let folders = CLAUDE_BASH_PRELUDES
-        .iter()
-        .chain(std::iter::once(&CODEX_SHELL_SNAPSHOTS));
-    for name in SH_STARTUP.iter().chain(folders) {
-        remove_entry(&home.join(name))?;
+    for name in names {
+        let path = folder.join(&name);
+        let metadata = match fs::symlink_metadata(&path) {
+            Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(failure("agent_home_unwritable")),
+            Ok(metadata) => metadata,
+        };
+        let link = metadata.file_type().is_symlink();
+        let wanted = kept
+            .iter()
+            .find(|(known, _)| name == *known)
+            .map(|(_, kind)| *kind);
+        match wanted {
+            Some(Kept::File) if metadata.is_file() => {}
+            Some(Kept::Folder) if metadata.is_dir() => {}
+            Some(Kept::Cache) if metadata.is_dir() || link => {}
+            Some(Kept::Only(inner)) if metadata.is_dir() => keep_only(&path, inner)?,
+            _ => remove_entry(&path)?,
+        }
     }
     Ok(())
 }
+
+/// Names the folders of an agent home a launch keeps only part of, which the agent's
+/// profile keeps it from moving, removing or replacing with a link, so the launch never
+/// walks through a link a running process swapped in after its check. Output: the names,
+/// in [`HOME_KEPT`] order.
+pub(crate) fn walked_folders() -> impl Iterator<Item = &'static str> {
+    HOME_KEPT
+        .iter()
+        .filter(|(_, kind)| matches!(kind, Kept::Only(_)))
+        .map(|(name, _)| *name)
+}
+
+/// Clears the immutable and append-only flags an agent may set on one entry of its home,
+/// without following a link ([`crate::team::cleanup::unpin`]), so they keep nothing from
+/// going (RV-DS241-138). Input: the entry. An entry that will not open keeps its flags, and
+/// its removal then fails.
+#[cfg(target_os = "macos")]
+fn unpin(path: &Path) {
+    crate::team::cleanup::unpin(rustix::fs::CWD, path);
+}
+
+/// Leaves flags alone where no flag an agent may set keeps an entry from going. Input:
+/// unused.
+#[cfg(not(target_os = "macos"))]
+fn unpin(_path: &Path) {}
 
 /// Clears a directory planted where a file is about to be written; a file or link stays
 /// for the rename to replace atomically, so a reader never finds the name missing.

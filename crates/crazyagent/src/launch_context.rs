@@ -120,8 +120,8 @@ const TEAMMATE_INSTRUCTIONS: &str = "teammate.md";
 const MATES_HOME: &str = "mates-home";
 /// The most switched-off tools one launch passes to its harness, across every server.
 pub const DENIED_TOOLS_MAX: usize = 256;
-#[cfg(unix)]
-const LOCK: &str = "crazyagent.lock";
+/// The launch lock file in an agent home, held while one launch uses it.
+pub(crate) const LOCK: &str = "crazyagent.lock";
 const PLUGIN_MANIFEST: &str = "{\"name\":\"crazyagent\",\"version\":\"1.0.0\",\"description\":\"Skills the owner approved for this project in CrazyAgent\"}\n";
 const HOOK_PLUGINS: &str = "hook-plugins";
 const HOOK_ROOT: &str = "CRAZYAGENT_HOOK_ROOT";

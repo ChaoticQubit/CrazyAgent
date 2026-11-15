@@ -141,6 +141,7 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
         crazyagent::sandbox::AGENT_GIT_ENV
             .into_iter()
             .chain(crazyagent::sandbox::AGENT_TLS_ENV)
+            .chain(crazyagent::sandbox::AGENT_PYTHON_ENV)
             .map(|(name, value)| (name.to_owned(), value.to_owned())),
     );
     assert_eq!(environment(&built), expected);
