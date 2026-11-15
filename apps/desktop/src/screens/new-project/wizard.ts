@@ -349,7 +349,7 @@ export function removeHarnessRow(team: TeamDraft, row: number): TeamDraft {
   return { ...team, sub_harnesses: team.sub_harnesses.filter((_, index) => index !== row) };
 }
 
-const harnessName = (harnesses: HarnessEntry[] | null, id: string) => entry(harnesses, id)?.name ?? id;
+const harnessName = (harnesses: HarnessEntry[] | null, id: string) => entry(harnesses, id)?.name ?? REMOVED_HARNESSES.get(id) ?? id;
 
 /** Lists the plain notes for limited harnesses the team uses.
  * Inputs: the team and the catalog. Output: one sentence per limitation, each once. */
