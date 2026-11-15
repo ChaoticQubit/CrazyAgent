@@ -976,6 +976,82 @@ fn a_reader_resumed_inside_a_line_passes_over_the_rest_of_it() {
     }
 }
 
+/// RV-DS241-143: a reader skipped to its record's end passes over every line written before
+/// the skip, the turn open among them included, and reads the first line written after it:
+/// the model's work in that turn starts it again, as for a dropped turn. A reader with no
+/// record yet skips nothing and later reads its record from the start.
+#[test]
+fn a_reader_skipped_to_the_end_reads_only_the_lines_written_after_it() {
+    let prompt = concat!(
+        r#"{"type":"user","message":{"content":"Fix the build"}}"#,
+        "\n"
+    );
+    let reply = concat!(
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Reviewed"}],"stop_reason":"end_turn"}}"#,
+        "\n"
+    );
+    let ended = vec![
+        TranscriptEvent::TurnStarted,
+        text("Reviewed\n"),
+        TranscriptEvent::TurnFinished { success: true },
+    ];
+
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    reader.skip_to_end().unwrap();
+    assert_eq!(reader.bytes(), 0);
+    append(&file, prompt);
+    append(&file, reply);
+    assert_eq!(reader.read().unwrap(), ended);
+    for _ in 0..3 {
+        append(&file, prompt);
+        append(&file, reply);
+    }
+    append(&file, prompt);
+    let length = std::fs::metadata(&file).unwrap().len();
+    reader.skip_to_end().unwrap();
+    assert_eq!(reader.bytes(), length);
+    assert_eq!(reader.unread(), Some(0));
+    assert_eq!(reader.read().unwrap(), Vec::new());
+    append(&file, reply);
+    assert_eq!(
+        reader.read().unwrap(),
+        ended,
+        "the skipped open turn starts again by the model's work and ends"
+    );
+    append(&file, prompt);
+    append(&file, reply);
+    assert_eq!(reader.read().unwrap(), ended);
+}
+
+/// RV-DS241-143: a reader skipped to an end inside a line, one the harness is still writing,
+/// passes over the rest of that line and reads the next, whether the line's start was
+/// already read or not.
+#[test]
+fn a_reader_skipped_inside_a_line_passes_over_the_rest_of_it() {
+    let prompt = r#"{"type":"user","message":{"content":"Fix the build"}}"#;
+    for read_first in [true, false] {
+        let case = Case::new();
+        let (file, mut reader) = case.claude();
+        append(&file, &format!("{prompt}\n"));
+        assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+        append(&file, r#"{"type":"user","message":{"content":"Old "#);
+        if read_first {
+            assert_eq!(reader.read().unwrap(), Vec::new());
+        }
+        let length = std::fs::metadata(&file).unwrap().len();
+        reader.skip_to_end().unwrap();
+        assert_eq!(reader.bytes(), length, "read first {read_first}");
+        append(&file, "prompt\"}}\n");
+        append(&file, &format!("{prompt}\n"));
+        assert_eq!(
+            reader.read().unwrap(),
+            vec![TranscriptEvent::TurnStarted],
+            "read first {read_first}"
+        );
+    }
+}
+
 fn rollout(sessions: &Path, day: &str, name: &str, cwd: &Path, lines: &[&str]) -> PathBuf {
     let folder = sessions.join(day);
     std::fs::create_dir_all(&folder).unwrap();
