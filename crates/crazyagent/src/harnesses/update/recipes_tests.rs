@@ -4,8 +4,7 @@ use crate::app_plugins::yaml;
 const GUIDE: &str = "guide: \"https://example.com/install\"\n";
 const NAME_SHAPE: &str =
     "a name of lower-case letters, digits and @ . _ - that starts with a letter or a digit";
-const PACKAGE_SHAPE: &str =
-    "a package name such as name or @scope/name, of lower-case letters, digits and @ . _ -";
+const SPEC_SHAPE: &str = "@sample/cli, alone or followed by @ and a version or a tag of lower-case letters, digits and . _ - that starts with a letter or a digit and does not end in .tgz, .tar or .gz";
 
 fn block(text: &str) -> &'static Value {
     Box::leak(Box::new(yaml::parse(text).unwrap()))
@@ -197,23 +196,40 @@ fn a_homebrew_name_that_could_be_read_as_an_option_or_is_not_plain_is_refused() 
 
 #[test]
 fn an_npm_package_spec_or_flag_that_is_not_plain_is_refused() {
-    let npm =
-        |rest: &str| format!("npm:\n  name: \"cli\"\n  package: \"@sample/cli\"\n{rest}{GUIDE}");
+    let npm = |rest: &str| {
+        format!(
+            "npm:\n  scope: \"@sample\"\n  name: \"cli\"\n  package: \"@sample/cli\"\n{rest}{GUIDE}"
+        )
+    };
     assert_eq!(
         refusal(&npm("")),
         "update.npm.spec: this setting is needed."
     );
     assert_eq!(
         refusal(&npm("  spec: \"@sample/cli; id\"\n")),
-        format!("update.npm.spec: @sample/cli; id is not {PACKAGE_SHAPE}.")
+        format!("update.npm.spec: @sample/cli; id is not {SPEC_SHAPE}.")
     );
     assert_eq!(
         refusal(&npm("  spec: \"--global\"\n")),
-        format!("update.npm.spec: --global is not {PACKAGE_SHAPE}.")
+        format!("update.npm.spec: --global is not {SPEC_SHAPE}.")
     );
     assert_eq!(
-        refusal(&npm("  spec: \"@sample/cli\"\n  scope: \"@Sample\"\n")),
+        refusal(&format!(
+            "npm:\n  scope: \"@Sample\"\n  name: \"cli\"\n  package: \"@Sample/cli\"\n  spec: \"@Sample/cli\"\n{GUIDE}"
+        )),
         "update.npm.scope: @Sample is not an npm scope such as @vendor."
+    );
+    assert_eq!(
+        refusal(&format!(
+            "npm:\n  name: \"cli\"\n  package: \"@sample/cli\"\n  spec: \"@sample/cli\"\n{GUIDE}"
+        )),
+        "update.npm.package: @sample/cli is not cli, the scope and name of this block."
+    );
+    assert_eq!(
+        refusal(&format!(
+            "npm:\n  name: \"cli.tgz\"\n  package: \"cli.tgz\"\n  spec: \"cli.tgz\"\n{GUIDE}"
+        )),
+        "update.npm.name: cli.tgz is not an npm name of lower-case letters, digits and . _ - that starts with a letter or a digit and does not end in .tgz, .tar or .gz."
     );
     for flag in ["-g", "--", "--Global", "--prefix /tmp", "global"] {
         assert_eq!(
@@ -353,15 +369,14 @@ fn a_name_that_names_a_folder_or_a_path_instead_of_a_package_is_refused() {
             "scope {scope}"
         );
     }
-    for kept in [
-        "openclaw@latest",
-        "@sample/cli@latest",
-        "claude-code",
-        "pi.dev_cli",
+    for (name, spec) in [
+        ("openclaw", "openclaw@latest"),
+        ("claude-code", "claude-code"),
+        ("pi.dev_cli", "pi.dev_cli"),
     ] {
         assert!(
-            read("sample", block(&npm("cli", kept, kept))).is_ok(),
-            "{kept}"
+            read("sample", block(&npm(name, name, spec))).is_ok(),
+            "{spec}"
         );
     }
     assert!(
