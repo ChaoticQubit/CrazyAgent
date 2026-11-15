@@ -370,8 +370,7 @@ fn project_folder(path: &Path, database: &Path) -> Result<PathBuf, &'static str>
     }
     if let Some(home) = owner_home()
         && (home.starts_with(&repo)
-            || [".codex", ".claude"]
-                .iter()
+            || crate::sandbox::harness_folders()
                 .any(|private| repo.starts_with(home.join(private))))
     {
         return Err("onboarding_folder_unsafe");

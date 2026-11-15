@@ -254,7 +254,7 @@ const KEYCHAIN_SERVICES: &[&str] = &[
     "com.apple.security.keychain-circle-notification",
 ];
 
-const OWNER_SECRET_PATHS: &[&str] = &[
+const OWNER_SECRET_PATHS_BEFORE_HARNESSES: &[&str] = &[
     "Library/Keychains",
     ".ssh",
     ".gnupg",
@@ -265,9 +265,9 @@ const OWNER_SECRET_PATHS: &[&str] = &[
     ".aws",
     ".docker",
     ".kube",
-    ".codex",
-    ".claude",
-    ".claude.json",
+];
+
+const OWNER_SECRET_PATHS_AFTER_HARNESSES: &[&str] = &[
     ".cargo/credentials",
     ".cargo/credentials.toml",
     ".npmrc",
@@ -967,8 +967,8 @@ struct Checkout {
 
 impl ProjectSandbox {
     /// Validates canonical, existing, quote-free directories that do not contain the
-    /// owner's home, do not sit inside `~/.codex` or `~/.claude`, and neither hold nor sit
-    /// inside an owner or system secret path. Output: the sandbox, or `Invalid`.
+    /// owner's home, do not sit inside a harness's own folder there, and neither hold nor
+    /// sit inside an owner or system secret path. Output: the sandbox, or `Invalid`.
     pub fn new(
         project_root: &Path,
         agent_home: &Path,
@@ -4028,10 +4028,8 @@ fn owner_home() -> Result<PathBuf, SandboxError> {
 /// owner's under the home, the system's without their leading `/` and the credential names
 /// no allowed root may hold. Takes nothing. Returns the names.
 pub(crate) fn credential_places() -> impl Iterator<Item = &'static str> {
-    OWNER_SECRET_PATHS
-        .iter()
-        .chain(CREDENTIAL_NAMES)
-        .copied()
+    owner_secret_paths()
+        .chain(CREDENTIAL_NAMES.iter().copied())
         .chain(
             SYSTEM_SECRET_PATHS
                 .iter()
@@ -4039,9 +4037,26 @@ pub(crate) fn credential_places() -> impl Iterator<Item = &'static str> {
         )
 }
 
-fn owner_secrets(owner: &Path) -> impl Iterator<Item = PathBuf> {
-    OWNER_SECRET_PATHS
+/// The folders and files in the owner's home that belong to a harness, as every harness
+/// manifest names them, in catalog order: agents never read them and no project or sandbox
+/// root may sit inside one. Takes nothing. Returns the names, relative to the home.
+pub(crate) fn harness_folders() -> impl Iterator<Item = &'static str> {
+    crate::harnesses::registry::registry()
+        .all()
         .iter()
+        .flat_map(|harness| harness.owner_folders().iter().map(String::as_str))
+}
+
+fn owner_secret_paths() -> impl Iterator<Item = &'static str> {
+    OWNER_SECRET_PATHS_BEFORE_HARNESSES
+        .iter()
+        .copied()
+        .chain(harness_folders())
+        .chain(OWNER_SECRET_PATHS_AFTER_HARNESSES.iter().copied())
+}
+
+fn owner_secrets(owner: &Path) -> impl Iterator<Item = PathBuf> {
+    owner_secret_paths()
         .map(move |path| {
             path.split('/')
                 .fold(owner.to_path_buf(), |at, part| at.join(part))
@@ -4341,7 +4356,7 @@ fn granted_root(root: &Path, owner: &Path, secrets: &[PathBuf]) -> Result<(), Sa
     if owner.starts_with(root) {
         return Err(invalid("sandbox roots must not contain the owner home"));
     }
-    for private in [".codex", ".claude"] {
+    for private in harness_folders() {
         if root.starts_with(owner.join(private)) {
             return Err(invalid("sandbox roots must not be owner harness homes"));
         }
