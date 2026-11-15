@@ -1,5 +1,8 @@
 use super::http::{Reply, Request};
-use super::{GitHubDeviceCode, GitHubRepo, GitHubRepoPage, REPO_PAGE_MAX, REPOS_PER_PAGE, SCOPES};
+use super::{
+    GitHubCreated, GitHubDeviceCode, GitHubNewRepo, GitHubOwner, GitHubOwners, GitHubRepo,
+    GitHubRepoPage, REPO_PAGE_MAX, REPOS_PER_PAGE, SCOPES,
+};
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
 use serde::Deserialize;
@@ -10,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const JSON: &str = "application/json";
-const API_JSON: &str = "application/vnd.github+json";
+pub(super) const API_JSON: &str = "application/vnd.github+json";
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const INTERVAL_MIN: Duration = Duration::from_secs(1);
 const INTERVAL_MAX: Duration = Duration::from_secs(60);
@@ -20,6 +23,11 @@ const GH_TIME: Duration = Duration::from_secs(10);
 const LOGIN_BYTES_MAX: usize = 39;
 const REPO_NAME_SHOWN_MAX: usize = 201;
 const BRANCH_SHOWN_MAX: usize = 255;
+const ORGS_PER_PAGE: usize = 100;
+const ORG_PAGES_MAX: usize = 10;
+const DESCRIPTION_CHARS_MAX: usize = 350;
+const NODE_ID_BYTES_MAX: usize = 100;
+const READ_ORG: [&str; 3] = ["read:org", "write:org", "admin:org"];
 
 /// Where the engine talks to GitHub: the REST API and the web host that serves the device
 /// flow and git. `allow_http` is true only for a loopback server on 127.0.0.1.
@@ -54,7 +62,7 @@ impl Endpoints {
         self.web.host_str().expect("web address has a host")
     }
 
-    fn api(&self, path: &str) -> Result<url::Url, EngineError> {
+    pub(super) fn api(&self, path: &str) -> Result<url::Url, EngineError> {
         self.api
             .join(path)
             .map_err(|_| failure("github_request_invalid"))
@@ -66,7 +74,7 @@ impl Endpoints {
             .map_err(|_| failure("github_request_invalid"))
     }
 
-    fn request<'a>(
+    pub(super) fn request<'a>(
         &self,
         url: url::Url,
         accept: &'a str,
@@ -97,7 +105,7 @@ fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
 }
 
-fn json<T: for<'de> Deserialize<'de>>(reply: &Reply) -> Result<T, EngineError> {
+pub(super) fn json<T: for<'de> Deserialize<'de>>(reply: &Reply) -> Result<T, EngineError> {
     serde_json::from_slice(&reply.body).map_err(|_| failure("github_reply_invalid"))
 }
 
@@ -114,7 +122,7 @@ fn short_text(value: &str, max: usize) -> Result<String, EngineError> {
 /// Shows text from GitHub the way the owner can read it: control and hidden characters,
 /// line breaks and tabs included, escaped, then cut to at most `max` bytes on a character
 /// boundary. Inputs: the text and the byte bound. Output: the visible text.
-fn shown(value: &str, max: usize) -> String {
+pub(super) fn shown(value: &str, max: usize) -> String {
     let flat = value.replace('\n', "\\u000a").replace('\t', "\\u0009");
     let mut text = crate::memory::visible_text(&flat);
     let mut end = text.len().min(max);
@@ -127,7 +135,7 @@ fn shown(value: &str, max: usize) -> String {
     text
 }
 
-/// Asks GitHub for a device code with the `repo read:user` scopes.
+/// Asks GitHub for a device code with the scopes in `SCOPES`.
 /// Inputs: endpoints and the OAuth App's public client id. Output: the started sign-in, or
 /// `github_device_flow_refused` when GitHub does not offer the device flow for this app.
 pub fn start_device(endpoints: &Endpoints, client_id: &str) -> Result<DeviceStart, EngineError> {
@@ -274,6 +282,17 @@ pub fn finish_device(
 /// Reads the login name the token belongs to, which also proves GitHub accepts it.
 /// Output: the login, or `github_token_refused` for a token GitHub does not accept.
 pub fn login(endpoints: &Endpoints, token: &SecretString) -> Result<String, EngineError> {
+    user(endpoints, token).map(|(login, _)| login)
+}
+
+/// Reads the account the token belongs to: its login, which also proves GitHub accepts
+/// the token, and the scopes GitHub names for a classic token. Inputs: endpoints and
+/// token. Output: the login and the scopes, None when GitHub names none, or
+/// `github_token_refused`.
+fn user(
+    endpoints: &Endpoints,
+    token: &SecretString,
+) -> Result<(String, Option<Vec<String>>), EngineError> {
     #[derive(Deserialize)]
     struct User {
         login: String,
@@ -287,14 +306,245 @@ pub fn login(endpoints: &Endpoints, token: &SecretString) -> Result<String, Engi
         _ => return Err(failure("github_unreachable")),
     }
     let user: User = json(&reply)?;
-    let login = short_text(&user.login, LOGIN_BYTES_MAX)?;
-    if !login
+    Ok((account_name(&user.login)?, reply.scopes))
+}
+
+/// Checks an account name GitHub sent: at most 39 letters, digits and hyphens.
+/// Input: the name. Output: the name, or `github_reply_invalid`.
+fn account_name(value: &str) -> Result<String, EngineError> {
+    let name = short_text(value, LOGIN_BYTES_MAX)?;
+    if !name
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     {
         return Err(failure("github_reply_invalid"));
     }
-    Ok(login)
+    Ok(name)
+}
+
+/// Tells whether a token's scopes cover a need, a broader scope included, such as
+/// `admin:org` for `read:org`. Inputs: the scopes and those that cover the need.
+/// Output: true when one of them is held.
+fn grants(scopes: &[String], covering: &[&str]) -> bool {
+    scopes
+        .iter()
+        .any(|scope| covering.contains(&scope.as_str()))
+}
+
+/// Lists the accounts a new repository can go under: the own account first, then each
+/// active admin or member organization from up to 10 pages of 100, with a sentence when
+/// that cap left some out. When the scopes lack `read:org`, or GitHub refuses a page,
+/// the accounts read so far come back with the sentence that says which.
+/// Inputs: endpoints and token. Output: the accounts.
+pub fn owners(endpoints: &Endpoints, token: &SecretString) -> Result<GitHubOwners, EngineError> {
+    #[derive(Deserialize)]
+    struct Membership {
+        state: String,
+        role: String,
+        organization: Organization,
+    }
+    #[derive(Deserialize)]
+    struct Organization {
+        login: String,
+    }
+    let (login, scopes) = user(endpoints, token)?;
+    let mut owners = vec![GitHubOwner {
+        login,
+        personal: true,
+    }];
+    let without_orgs = |owners: Vec<GitHubOwner>, code: &str| GitHubOwners {
+        owners,
+        problem: Some(super::problem(code)),
+    };
+    if scopes
+        .as_deref()
+        .is_some_and(|scopes| !grants(scopes, &READ_ORG))
+    {
+        return Ok(without_orgs(owners, "github_scope_missing_read_org"));
+    }
+    let mut seen = std::collections::BTreeSet::from([owners[0].login.to_ascii_lowercase()]);
+    let mut cut = false;
+    for page in 1..=ORG_PAGES_MAX {
+        let mut url = endpoints.api("user/memberships/orgs")?;
+        url.query_pairs_mut()
+            .append_pair("state", "active")
+            .append_pair("per_page", &ORGS_PER_PAGE.to_string())
+            .append_pair("page", &page.to_string());
+        let reply = endpoints.request(url, API_JSON, Some(token), None).send()?;
+        match reply.status {
+            200 => {}
+            403 if scopes.is_none() => {
+                return Ok(without_orgs(owners, "github_scope_missing_read_org"));
+            }
+            403 => return Ok(without_orgs(owners, "github_orgs_refused")),
+            401 => return Err(failure("github_token_refused")),
+            _ => return Err(failure("github_unreachable")),
+        }
+        let listed: Vec<Membership> = json(&reply)?;
+        if listed.len() > ORGS_PER_PAGE {
+            return Err(failure("github_reply_invalid"));
+        }
+        let full = listed.len() == ORGS_PER_PAGE;
+        for membership in listed {
+            let member = membership.state == "active"
+                && matches!(membership.role.as_str(), "admin" | "member");
+            let Ok(org) = account_name(&membership.organization.login) else {
+                continue;
+            };
+            if member && seen.insert(org.to_ascii_lowercase()) {
+                owners.push(GitHubOwner {
+                    login: org,
+                    personal: false,
+                });
+            }
+        }
+        if !full {
+            break;
+        }
+        cut = page == ORG_PAGES_MAX;
+    }
+    assert!(owners[0].personal && owners[1..].iter().all(|owner| !owner.personal));
+    assert!(owners.len() <= ORGS_PER_PAGE * ORG_PAGES_MAX + 1);
+    assert_eq!(owners.len(), seen.len());
+    Ok(GitHubOwners {
+        owners,
+        problem: cut.then(|| super::problem("github_orgs_cut")),
+    })
+}
+
+/// Checks the account and name of a repository to make before any request: an account
+/// of at most 39 letters, digits and hyphens not starting with one, and a name the clone
+/// accepts. Inputs: the account and the name. Output: `owner/name`, or
+/// `github_repo_name_invalid`.
+fn repo_name(owner: &str, name: &str) -> Result<String, EngineError> {
+    let owner_valid = !owner.is_empty()
+        && owner.len() <= LOGIN_BYTES_MAX
+        && !owner.starts_with('-')
+        && owner
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    if !owner_valid {
+        return Err(failure("github_repo_name_invalid"));
+    }
+    let full_name = format!("{owner}/{name}");
+    super::clone::full_name(&full_name)?;
+    Ok(full_name)
+}
+
+/// Checks whether `owner/name` is free on GitHub: 404 is free, while a repository or the
+/// redirect a rename leaves is taken. The name is checked before any request.
+/// Inputs: endpoints, token, the account and the name. Output: true when free, or
+/// `github_repo_name_invalid`, `github_token_refused`.
+pub fn name_free(
+    endpoints: &Endpoints,
+    token: &SecretString,
+    owner: &str,
+    name: &str,
+) -> Result<bool, EngineError> {
+    let full_name = repo_name(owner, name)?;
+    let reply = endpoints
+        .request(
+            endpoints.api(&format!("repos/{full_name}"))?,
+            API_JSON,
+            Some(token),
+            None,
+        )
+        .send()?;
+    match reply.status {
+        404 => Ok(true),
+        200 | 301 => Ok(false),
+        401 | 403 => Err(failure("github_token_refused")),
+        _ => Err(failure("github_unreachable")),
+    }
+}
+
+/// Makes an empty repository with CrazyAgent's standard settings under the own account
+/// or an organization, checking the name and description before any request. A reply
+/// with another name or visibility than asked is refused so nothing is pushed into it.
+/// Inputs: endpoints, token and the repository. Output: what GitHub made, or the
+/// refusal code.
+pub fn create(
+    endpoints: &Endpoints,
+    token: &SecretString,
+    repo: &GitHubNewRepo,
+) -> Result<GitHubCreated, EngineError> {
+    #[derive(Deserialize)]
+    struct Made {
+        full_name: String,
+        node_id: String,
+        private: bool,
+    }
+    #[derive(Deserialize)]
+    struct Refused {
+        #[serde(default)]
+        errors: Vec<Problem>,
+    }
+    #[derive(Deserialize)]
+    struct Problem {
+        #[serde(default)]
+        field: String,
+        #[serde(default)]
+        message: String,
+    }
+    let full_name = repo_name(&repo.owner, &repo.name)?;
+    if repo.description.chars().count() > DESCRIPTION_CHARS_MAX
+        || repo.description.chars().any(char::is_control)
+    {
+        return Err(failure("github_repo_description_invalid"));
+    }
+    let (login, _) = user(endpoints, token)?;
+    let path = if repo.owner.eq_ignore_ascii_case(&login) {
+        "user/repos".to_owned()
+    } else {
+        format!("orgs/{}/repos", repo.owner)
+    };
+    let body = serde_json::json!({
+        "name": repo.name,
+        "description": repo.description,
+        "private": repo.private,
+        "has_issues": true,
+        "has_wiki": false,
+        "has_projects": false,
+        "allow_squash_merge": true,
+        "allow_merge_commit": false,
+        "allow_rebase_merge": false,
+        "delete_branch_on_merge": true,
+        "allow_auto_merge": false,
+        "auto_init": false,
+    });
+    let reply = endpoints
+        .request(endpoints.api(&path)?, API_JSON, Some(token), None)
+        .send_json(&body.to_string())?;
+    match reply.status {
+        201 => {}
+        422 => {
+            let taken = json::<Refused>(&reply).is_ok_and(|refused| {
+                refused.errors.iter().any(|problem| {
+                    problem.field == "name" && problem.message.contains("already exists")
+                })
+            });
+            return Err(failure(if taken {
+                "github_repo_name_taken"
+            } else {
+                "github_repo_create_refused"
+            }));
+        }
+        401 => return Err(failure("github_token_refused")),
+        403 | 404 => return Err(failure("github_repo_create_refused")),
+        _ => return Err(failure("github_unreachable")),
+    }
+    let made: Made = json(&reply)?;
+    if !made.full_name.eq_ignore_ascii_case(&full_name) {
+        return Err(failure("github_reply_invalid"));
+    }
+    if made.private != repo.private {
+        return Err(failure("github_repo_visibility_mismatch"));
+    }
+    Ok(GitHubCreated {
+        full_name: made.full_name,
+        node_id: short_text(&made.node_id, NODE_ID_BYTES_MAX)?,
+        private: made.private,
+    })
 }
 
 /// Lists one page of the repositories the token can read, most recently pushed first.

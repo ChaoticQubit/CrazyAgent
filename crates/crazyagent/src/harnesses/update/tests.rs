@@ -2146,7 +2146,10 @@ fn an_agent_written_link_to_an_owner_harness_never_starts_a_node_planted_beside_
         versions.needs.as_ref().map(|needs| needs.line.clone()),
         Some(refused.line())
     );
-    assert!(!ran.exists(), "a node planted beside a refused link is never run");
+    assert!(
+        !ran.exists(),
+        "a node planted beside a refused link is never run"
+    );
 }
 
 /// security-audit vid 1 (NEXT-02:50 step 1): a harness file the resolver refuses as one
@@ -2247,7 +2250,10 @@ fn a_version_read_runs_the_file_it_checked_when_a_middle_link_moves_before_the_r
     std::os::unix::fs::symlink(&owned, &middle).unwrap();
     std::fs::create_dir_all(link.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&middle, &link).unwrap();
-    assert!(matches!(method("codex", &owned, &roots), Method::Npm { .. }));
+    assert!(matches!(
+        method("codex", &owned, &roots),
+        Method::Npm { .. }
+    ));
     assert!(crate::tools::resolve_entry(&link, &roots.places).is_ok());
     let (moved, to) = (middle.clone(), planted.clone());
     let step: super::state::Step = Box::new(move || {

@@ -660,6 +660,7 @@ pub(in crate::tui) enum ProjectReply {
     AccountOrder(Option<crate::scheduling::Strategy>),
     RefreshOverview,
     MoveHome(crate::projects_home::AddMode),
+    DeleteEverything(String),
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.
@@ -1347,12 +1348,6 @@ impl ProjectScreen {
                 action: SetupAction::Remove { .. } | SetupAction::Delete { .. },
                 ..
             } => self.removed = applied,
-            SetupQuery::MoveHome { .. } => {
-                self.setup_due = true;
-                if !applied && self.problem.is_none() {
-                    self.problem = Some(plain_problem("change_outcome_unknown"));
-                }
-            }
             SetupQuery::Change {
                 action: SetupAction::SetReadPaths { .. },
                 ..
@@ -2470,10 +2465,7 @@ impl ProjectScreen {
                             return ProjectReply::Handled;
                         };
                         self.close_remove();
-                        return ProjectReply::Change(Box::new(SetupAction::Delete {
-                            project_id: self.project.clone(),
-                            name,
-                        }));
+                        return ProjectReply::DeleteEverything(name);
                     }
                     KeyCode::Backspace => {
                         self.remove_typed.pop();
@@ -2518,6 +2510,18 @@ impl ProjectScreen {
         self.remove_choice = RemoveChoice::Dashboard;
         self.remove_everything = false;
         self.remove_typed.clear();
+    }
+
+    /// Shows why the engine refused to start the job that moves this project into the projects
+    /// home or deletes it, as a plain line; a busy refusal names the job that runs, as last read.
+    /// Takes the refusal code and the job read. Returns nothing.
+    pub fn job_refused(&mut self, code: &str, held: Option<&crate::projects_home::job::JobView>) {
+        assert!(!code.is_empty());
+        self.problem = Some(match code {
+            "job_busy" => super::intake_job::busy(held),
+            code => plain_problem(code),
+        });
+        assert!(self.problem.is_some());
     }
 
     /// Opens the remove ask for a delete an engine stop cut short, as x does, on the Settings

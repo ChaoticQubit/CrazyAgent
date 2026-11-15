@@ -221,11 +221,13 @@ fn the_context_mode_check_of_an_npx_the_resolver_does_not_find_says_so_and_never
     for name in ["npx", "node", "npm"] {
         std::fs::write(
             tools.join(name),
-            format!("#!/bin/sh\n/usr/bin/touch '{}'\necho v24.0.0\n", ran.display()),
+            format!(
+                "#!/bin/sh\n/usr/bin/touch '{}'\necho v24.0.0\n",
+                ran.display()
+            ),
         )
         .unwrap();
-        std::fs::set_permissions(tools.join(name), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        std::fs::set_permissions(tools.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     let refused = boundary_check(
         &root,

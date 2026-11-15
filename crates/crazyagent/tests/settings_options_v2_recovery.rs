@@ -31,7 +31,7 @@ const ATTACH_TIME: Duration = Duration::from_secs(10);
 const READY_TIME: Duration = Duration::from_secs(30);
 const STOP_TIME: Duration = Duration::from_secs(40);
 const STDERR_BYTES_MAX: u64 = 65536;
-const STAND_IN: &str = "#!/bin/sh\nwhile IFS= read -r line; do printf '%s\\n' \"$line\" >> \"$CODEX_HOME/heard.log\"; done\n";
+const STAND_IN: &str = "#!/bin/sh\n/bin/mkdir -p \"$CODEX_HOME/.cache\" || exit 1\nwhile IFS= read -r line; do printf '%s\\n' \"$line\" >> \"$CODEX_HOME/.cache/heard.log\"; done\n";
 
 /// The engine's private tmux server, ended when the test ends, also when it fails.
 struct Server {

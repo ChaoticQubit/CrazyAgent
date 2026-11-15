@@ -1049,6 +1049,67 @@ fn step_10_gives_usage_rows_a_model_through_the_upgrade() {
     );
 }
 
+/// Step 11 through the real upgrade (RV-DS241-152): the delete record of an older store
+/// holds engine file names up to the `RECORDED_NAME_BYTES_MAX` bytes of a long project's
+/// run folder and keeps the names it held, still refusing a longer one; a store that never
+/// made the record is stamped with no record made. The name is built from that constant, so
+/// a wider one fails here until a later step widens the record too (G1 code r1 F1).
+#[test]
+fn step_11_lets_the_delete_record_hold_run_names_of_the_recorded_width_keeping_its_rows() {
+    let root = Root::new();
+    let mut db = root.connection();
+    db.execute_batch(
+        "CREATE TABLE projects_delete_files (
+            name TEXT PRIMARY KEY CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64),
+            inode INTEGER NOT NULL
+         );
+         INSERT INTO projects_delete_files VALUES ('agent-a1b2c3', 41);
+         PRAGMA user_version = 10;",
+    )
+    .unwrap();
+
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    let kept: Vec<(String, i64)> = db
+        .prepare("SELECT name, inode FROM projects_delete_files")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(kept, [("agent-a1b2c3".to_owned(), 41)]);
+    let width = crate::projects_home::RECORDED_NAME_BYTES_MAX;
+    let pad = width - "roadmap-status--1794000000000".len();
+    let name = format!("roadmap-status-{}-1794000000000", "a".repeat(pad));
+    assert_eq!(name.len(), width);
+    let insert = "INSERT INTO projects_delete_files VALUES (?1, 42)";
+    assert!(
+        db.execute(insert, [&name]).is_ok(),
+        "a run name of the recorded width is held"
+    );
+    assert!(
+        db.execute(insert, [format!("{name}0")]).is_err(),
+        "a longer name is refused"
+    );
+
+    let bare = Root::new();
+    let mut other = bare.connection();
+    other
+        .execute_batch("CREATE TABLE unrelated (id INTEGER); PRAGMA user_version = 10;")
+        .unwrap();
+    upgrade(&mut other, &bare.database(), None, STEPS).unwrap();
+    assert_eq!(version(&other).unwrap(), latest(STEPS));
+    let tables: i64 = other
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name='projects_delete_files'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0, "no record is made for a store that had none");
+}
+
 /// Step 9: a version 8 trash takes the two account file kinds, keeps each pending note and
 /// still refuses a kind it does not know.
 #[test]

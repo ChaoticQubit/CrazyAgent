@@ -26,6 +26,10 @@ async fn github_selector_reports_signed_out_and_refuses_work_before_sign_in() {
             "github_not_signed_in"
         );
         assert_eq!(
+            client.github_owners().await.unwrap_err().0,
+            "github_not_signed_in"
+        );
+        assert_eq!(
             client
                 .clone_repo("octo-cat/tool".into())
                 .await
@@ -164,6 +168,16 @@ mod slow_remote {
                 if seen.path == "/user" {
                     return Answer::json(200, serde_json::json!({ "login": "octo-cat" }));
                 }
+                if seen.path == "/user/memberships/orgs" {
+                    return Answer::json(
+                        200,
+                        serde_json::json!([{
+                            "state": "active",
+                            "role": "admin",
+                            "organization": { "login": "acme-labs" }
+                        }]),
+                    );
+                }
                 if seen.path == "/user/repos" {
                     std::thread::sleep(SLOW);
                     return Answer::json(
@@ -285,6 +299,17 @@ mod slow_remote {
             assert_eq!(page.repos.len(), 1);
             assert_eq!(page.repos[0].full_name, "octo-cat/tool");
             assert_eq!(page.next, None);
+            let owners = client
+                .github_owners()
+                .await
+                .unwrap_or_else(|error| panic!("the owner list answered {}", error.0));
+            let logins: Vec<&str> = owners
+                .owners
+                .iter()
+                .map(|owner| owner.login.as_str())
+                .collect();
+            assert_eq!(logins, ["octo-cat", "acme-labs"]);
+            assert!(owners.owners[0].personal);
             assert!(!client.github_sign_out().await.unwrap().signed_in);
         })
         .await;

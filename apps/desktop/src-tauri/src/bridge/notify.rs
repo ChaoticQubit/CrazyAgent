@@ -116,11 +116,16 @@ pub fn notice(project: Option<&str>, question: &Question) -> Notice {
     Notice { title, body }
 }
 
-/// The notification text for an intake job that ended, built from the engine's view: the
-/// folder's name and what happened in plain words, never an engine code. Input: the job.
-/// Output: the notice, or None while the job still runs.
+/// The notification text for a job that ended, built from the engine's view: the folder's
+/// name, or a deleted project's name whole, and what happened to an add, a project move or a
+/// delete in plain words, never an engine code. Input: the job. Output: the notice, or None
+/// while the job still runs and for a delete an engine stop cut short, which is shown again at
+/// start, not ended then.
 pub fn intake_notice(job: &JobView) -> Option<Notice> {
-    use crazyagent::projects_home::job::{JobState, Phase};
+    use crazyagent::projects_home::job::{JobKind, JobState, Phase};
+    if job.kind == JobKind::Delete {
+        return delete_notice(job);
+    }
     let folder = std::path::Path::new(&job.source)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -133,8 +138,11 @@ pub fn intake_notice(job: &JobView) -> Option<Notice> {
         crazyagent::projects_home::AddMode::Move => "moved",
         crazyagent::projects_home::AddMode::Copy => "copied",
     };
+    let moving = job.kind == JobKind::MoveProject;
+    let verb = if moving { "Moving" } else { "Adding" };
     let landed = format!("{name} is in your projects folder");
     let (title, body) = match &job.state {
+        JobState::Done if moving => (landed, "Start the team again from Team.".to_owned()),
         JobState::Done => (landed, "Set it up from Home.".to_owned()),
         JobState::Failed {
             phase: Phase::Clearing,
@@ -144,20 +152,61 @@ pub fn intake_notice(job: &JobView) -> Option<Notice> {
             "Part of its old place could not be removed. Check it on Home.".to_owned(),
         ),
         JobState::Failed { .. } => (
-            format!("Adding {name} failed"),
+            format!("{verb} {name} failed"),
             "Open Home in CrazyAgent to see why.".to_owned(),
         ),
         JobState::Cancelled { .. } => (
-            format!("Adding {name} stopped"),
+            format!("{verb} {name} stopped"),
             "Nothing was moved or copied.".to_owned(),
         ),
         JobState::NeedsAnswer { .. } => (
             format!("{name} needs your answer"),
             format!("Open Home in CrazyAgent to decide before it is {way}."),
         ),
-        JobState::Downloading { .. } | JobState::Copying { .. } | JobState::Clearing => {
+        JobState::Downloading { .. }
+        | JobState::Stopping { .. }
+        | JobState::Copying { .. }
+        | JobState::Trashing { .. }
+        | JobState::Clearing
+        | JobState::CutShort { .. } => {
             return None;
         }
+    };
+    assert!(title.chars().count() <= TITLE_CHARS_MAX);
+    assert!(body.chars().count() <= BODY_CHARS_MAX);
+    Some(Notice { title, body })
+}
+
+/// The notification text for a delete that ended: the project's name whole, that its files
+/// are in the Trash, or that it stopped or failed. Input: the delete. Output: the notice, or
+/// None while it runs or once an engine stop cut it short.
+fn delete_notice(job: &JobView) -> Option<Notice> {
+    use crazyagent::projects_home::job::{JobKind, JobState};
+    assert_eq!(job.kind, JobKind::Delete);
+    let name = match plain_line(&job.source, TITLE_CHARS_MAX - 40) {
+        shown if shown.is_empty() => "The project".to_owned(),
+        shown => shown,
+    };
+    let (title, body) = match &job.state {
+        JobState::Done => (
+            format!("{name} is deleted"),
+            "Its files are in the Trash.".to_owned(),
+        ),
+        JobState::Cancelled { .. } => (
+            format!("Deleting {name} stopped"),
+            "Nothing was moved to the Trash.".to_owned(),
+        ),
+        JobState::Failed { .. } => (
+            format!("Deleting {name} failed"),
+            "Open Home in CrazyAgent to see why.".to_owned(),
+        ),
+        JobState::Downloading { .. }
+        | JobState::Stopping { .. }
+        | JobState::Copying { .. }
+        | JobState::Trashing { .. }
+        | JobState::Clearing
+        | JobState::NeedsAnswer { .. }
+        | JobState::CutShort { .. } => return None,
     };
     assert!(title.chars().count() <= TITLE_CHARS_MAX);
     assert!(body.chars().count() <= BODY_CHARS_MAX);
@@ -587,6 +636,8 @@ mod tests {
     fn job(state: crazyagent::projects_home::job::JobState) -> JobView {
         JobView {
             id: crazyagent::protocol::RequestId::new("add-1").unwrap(),
+            kind: crazyagent::projects_home::job::JobKind::Add,
+            project_id: None,
             source: "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop".into(),
             mode: crazyagent::projects_home::AddMode::Move,
             overrides: Vec::new(),
@@ -646,6 +697,99 @@ mod tests {
             said(JobState::Copying {
                 copied: 3,
                 checked: 0
+            }),
+            None
+        );
+    }
+
+    /// DEC-177: an ended project move's notice says the project's folder is in the projects
+    /// folder and the team starts again from Team, and a stopped or failed move says Moving.
+    #[test]
+    fn an_ended_project_move_notice_speaks_of_the_move() {
+        use crazyagent::projects_home::job::{JobKind, JobState, Phase};
+        let moved = |state| {
+            let view = JobView {
+                kind: JobKind::MoveProject,
+                project_id: Some(crazyagent::protocol::ProjectId::new("reading").unwrap()),
+                source: "/Users/mira/Code/reading-list".into(),
+                ..job(state)
+            };
+            intake_notice(&view).map(|notice| (notice.title, notice.body))
+        };
+        let pair = |title: &str, body: &str| Some((title.to_owned(), body.to_owned()));
+        assert_eq!(
+            moved(JobState::Done),
+            pair(
+                "reading-list is in your projects folder",
+                "Start the team again from Team."
+            )
+        );
+        assert_eq!(
+            moved(JobState::Cancelled {
+                phase: Phase::Stopping
+            }),
+            pair(
+                "Moving reading-list stopped",
+                "Nothing was moved or copied."
+            )
+        );
+        assert_eq!(
+            moved(JobState::Failed {
+                code: "move_project_busy".into(),
+                phase: Phase::Stopping
+            }),
+            pair(
+                "Moving reading-list failed",
+                "Open Home in CrazyAgent to see why."
+            )
+        );
+        assert_eq!(moved(JobState::Stopping { agents_left: 1 }), None);
+    }
+
+    /// DEC-177 add.1: an ended delete's notice names the project whole and says its files are
+    /// in the Trash, a stopped or failed delete says Deleting, and a delete still moving folders
+    /// to the Trash or one an engine stop cut short, shown again at start, sends none.
+    #[test]
+    fn an_ended_delete_notice_names_the_project_and_speaks_of_the_trash() {
+        use crazyagent::projects_home::job::{JobKind, JobState, Phase};
+        let deleted = |state| {
+            let view = JobView {
+                kind: JobKind::Delete,
+                project_id: Some(crazyagent::protocol::ProjectId::new("notes").unwrap()),
+                source: "Notes/2026 plans".into(),
+                ..job(state)
+            };
+            intake_notice(&view).map(|notice| (notice.title, notice.body))
+        };
+        let pair = |title: &str, body: &str| Some((title.to_owned(), body.to_owned()));
+        assert_eq!(
+            deleted(JobState::Done),
+            pair("Notes/2026 plans is deleted", "Its files are in the Trash.")
+        );
+        assert_eq!(
+            deleted(JobState::Cancelled {
+                phase: Phase::Stopping
+            }),
+            pair(
+                "Deleting Notes/2026 plans stopped",
+                "Nothing was moved to the Trash."
+            )
+        );
+        assert_eq!(
+            deleted(JobState::Failed {
+                code: "delete_trash_partial".into(),
+                phase: Phase::Trashing
+            }),
+            pair(
+                "Deleting Notes/2026 plans failed",
+                "Open Home in CrazyAgent to see why."
+            )
+        );
+        assert_eq!(deleted(JobState::Trashing { done: 1, total: 2 }), None);
+        assert_eq!(
+            deleted(JobState::CutShort {
+                trashed: 1,
+                total: 2
             }),
             None
         );

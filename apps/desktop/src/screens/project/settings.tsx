@@ -2,9 +2,11 @@ import { nextGeneration, poolSummaries, setApplyHarnessSwitch } from "../../api"
 import type { Result } from "../../api";
 import { useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type HiddenPaths, type ReadPaths } from "../../api-projects";
+import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, startDeleteJob, updateProjectSetup, type HiddenPaths, type ReadPaths } from "../../api-projects";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
-import type { IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
+import type { IntakeJob, IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
+import { loadIntakeJob } from "../../api-intake";
+import { refusalLine } from "../intake/intake";
 import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
 import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
 import { Button, ConfirmDialog, Dialog, Segmented, Select, navigate } from "../../ui";
@@ -238,6 +240,17 @@ export function watchRemoveAsk(projectId: string, onAsk: (choice: RemoveChoice) 
   return () => window.removeEventListener("hashchange", take);
 }
 
+/** Starts the engine's job that deletes a project once its exact name is typed (DEC-177 add.1).
+ * Inputs: the project id, the typed name, the start and the job read a busy refusal names the
+ * running job from. Output: the started job, or the note the dialog's section shows. */
+export async function deleteStart(id: string, typed: string, start = startDeleteJob,
+  read: () => Promise<Result<IntakeJob | null>> = loadIntakeJob): Promise<{ kind: "started"; job: IntakeJob } | { kind: "refused"; note: string }> {
+  const result = await start(id, typed);
+  if (result.kind === "ok") return { kind: "started", job: result.value };
+  if (result.kind === "not_ready") return { kind: "refused", note: "Not ready yet: deleting a project isn't in this build." };
+  return { kind: "refused", note: await refusalLine(result.code, failureCopy(result), read) };
+}
+
 /** Settings' Remove project: the section, and its dialog, opened by the button or by a route
  * asking for it; a route asking for a delete again, after one an engine stop cut short, opens it
  * on Delete everything once the preview offers it. Inputs: the project and its stored setup. */
@@ -268,8 +281,9 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
   async function remove() {
     const deleting = choice === "everything" && removeChoices(read).includes("everything");
     if (deleting && !deleteReady(read, typed)) return;
+    if (deleting) return void deleteEverything();
     setBusy(true);
-    const result = await removeProject(data.id, nextGeneration(), deleting ? typed : null);
+    const result = await removeProject(data.id, nextGeneration());
     setBusy(false);
     setConfirming(false);
     if (result.kind === "not_ready") return setNote("Not ready yet: removing a project isn't in this build.");
@@ -277,12 +291,21 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
     const state = receiptState(result.value);
     if (state.kind === "applied") {
       await session?.refreshProjects();
-      const name = data.name || "The project";
-      data.notify(deleting ? `${name} was deleted. Its folder is in the Trash.` : `${name} was removed. Its folder stays on disk.`);
+      data.notify(`${data.name || "The project"} was removed. Its folder stays on disk.`);
       data.navigate("/home");
       return;
     }
     setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and try again.");
+  }
+  async function deleteEverything() {
+    setBusy(true);
+    const started = await deleteStart(data.id, typed);
+    setBusy(false);
+    setConfirming(false);
+    if (started.kind === "refused") return setNote(started.note);
+    session?.refreshIntake(started.job);
+    data.notify(`Deleting ${data.name || "the project"}. Follow it on Home; you can keep working.`);
+    data.navigate("/home");
   }
   return <div className="pj-stack">
     <h2>Remove project</h2>
