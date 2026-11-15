@@ -2198,3 +2198,67 @@ fn a_layout_names_the_panes_of_every_leaf_cell() {
     assert!(ids("").is_empty());
     assert!(ids("not a layout").is_empty());
 }
+
+/// B6b (Q4 option A): a native lead's server keeper on an engine key relay also holds a
+/// lifeline from the engine, its standard input, so the teammates it keeps end when the
+/// engine dies, a crash included, not only at the deadline. Asked to by its variable, a
+/// keeper whose input closes kills its command from outside and exits.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_keeper_on_a_lifeline_ends_its_command_once_the_engine_side_closes() {
+    use std::os::unix::process::CommandExt;
+    let folder = tempfile::tempdir().unwrap();
+    let started = folder.path().join("started");
+    let mut keeper = crate::spawn_gate::spawn(
+        std::process::Command::new(crate::sandbox::KEEPER[0])
+            .args(&crate::sandbox::KEEPER[1..])
+            .args(["/bin/sh", "-c", "echo $$ > \"$0\"; exec /bin/sleep 600"])
+            .arg(&started)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("CRAZYAGENT_KEEPER_LIFELINE", "0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0),
+    )
+    .unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    let command = loop {
+        let text = std::fs::read_to_string(&started).unwrap_or_default();
+        let pid = text.trim().parse::<i32>().ok();
+        if let Some(pid) = pid.and_then(rustix::process::Pid::from_raw) {
+            break pid;
+        }
+        if Instant::now() >= until {
+            let _ = keeper.kill();
+            let _ = keeper.wait();
+            panic!("the keeper starts its command");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    drop(keeper.stdin.take());
+    let until = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        match keeper.try_wait().unwrap() {
+            Some(status) => break Some(status),
+            None if Instant::now() >= until => break None,
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    };
+    let gone = || rustix::process::test_kill_process(command).is_err();
+    let until = Instant::now() + Duration::from_secs(10);
+    while !gone() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let ended = gone();
+    if status.is_none() {
+        let _ = keeper.kill();
+        let _ = keeper.wait();
+    }
+    if !ended {
+        let _ = rustix::process::kill_process(command, rustix::process::Signal::KILL);
+    }
+    assert!(status.is_some(), "the keeper exits on its lifeline");
+    assert!(ended, "the command the keeper kept ends with it");
+}
