@@ -6921,6 +6921,66 @@ auth = { method = "none" }"#;
         case.close().await;
     }
 
+    /// RV-DS241-50 r1: turn preparation re-pins a moved member only on the home its slot
+    /// pins. An owner-registered home whose config was replaced stays refused even when
+    /// the account's engine-generated home exists, and the slot is never moved onto it.
+    #[tokio::test]
+    async fn a_replaced_config_in_an_owner_home_is_never_moved_onto_the_generated_home() {
+        let case = Fixture::new(true).await;
+        let registered = case.register().await;
+        let connection = case
+            .config
+            .settings
+            .model_access
+            .as_ref()
+            .unwrap()
+            .connections[0]
+            .clone();
+        let profile_ref =
+            super::super::account_profile::configured_profile_ref(&connection).unwrap();
+        let homes = case.root.path().join("configured-sdk-homes");
+        std::fs::create_dir(&homes).unwrap();
+        std::fs::set_permissions(&homes, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let generated = homes.join(format!(
+            "{:x}",
+            Sha256::digest(profile_ref.as_str().as_bytes())
+        ));
+        let config = case.home.join(".backboard/config.json");
+        let bytes = std::fs::read(&config).unwrap();
+        for folder in [generated.clone(), generated.join(".backboard")] {
+            std::fs::create_dir(&folder).unwrap();
+            std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        private_file(&generated.join(".backboard/config.json"), &bytes);
+        let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("the registered owner home must prepare the first turn");
+        };
+        fail_first(&case, &first, MasterReason::RuntimeUnavailable).await;
+        let replacement = case.home.join(".backboard/config.json.new");
+        private_file(&replacement, &bytes);
+        std::fs::rename(&replacement, &config).unwrap();
+
+        let prepare = next_turn(&case, "after-replaced-config").await;
+        if let Ok(MasterRuntimeResult::Prepared(_)) = case.runtime(prepare).await {
+            panic!("a replaced owner config must not prepare on another home");
+        }
+
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        let record = registration(
+            &tx,
+            &case.session.session_id,
+            &case.session.selection.target_profile_ref,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(record.proof.registration_id, registered.registration_id);
+        assert_eq!(record.proof.generation, registered.generation);
+        drop(tx);
+        case.close().await;
+    }
+
     /// KY-M1 (DEC-150 addendum 9a): a keyed RCLI key saved under an rcli builtin provider id
     /// before the fix, already in the pool, left a slot-less generated home naming that id.
     /// The next master turn rewrites it to the hashed id, registers it and prepares, with no
