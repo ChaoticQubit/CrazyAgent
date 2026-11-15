@@ -44,7 +44,7 @@ pub(in crate::tui) enum IntakeQuery {
     },
     JobStart {
         id: RequestId,
-        source: String,
+        subject: JobSubject,
         mode: AddMode,
         overrides: Vec<AddOverride>,
     },
@@ -234,12 +234,12 @@ impl NativeOwner {
             }
             IntakeQuery::JobStart {
                 id,
-                source,
+                subject,
                 mode,
                 overrides,
             } => IntakeView::Job(Some(
                 controller
-                    .job_start(id, JobSubject::Add { path: source }, mode, overrides)
+                    .job_start(id, subject, mode, overrides)
                     .await
                     .map_err(problem)?,
             )),

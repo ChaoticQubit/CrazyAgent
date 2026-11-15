@@ -26,7 +26,7 @@ use super::theme::{Role, Theme};
 use super::widgets::{TextField, buttons};
 use crate::harnesses::HarnessStatus;
 use crate::learning::MarkStep;
-use crate::projects_home::job::{JobState, JobView};
+use crate::projects_home::job::{JobKind, JobState, JobView};
 use crate::terminal::TerminalFrame;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -323,8 +323,9 @@ impl Shell {
 
     /// Keeps the engine's intake job in the store from a status read or a start, says once on
     /// the message line when a running job ended and reads the found folders again so Home
-    /// lists the new one; a stop or a dismiss reads the status at once. A failed read keeps
-    /// the last view. Input: the intake reply. Output: none.
+    /// lists the new one, and the projects too after a project move, whose folder changed; a
+    /// stop or a dismiss reads the status at once. A failed read keeps the last view. Input:
+    /// the intake reply. Output: none.
     fn intake_job(&mut self, event: &IntakeEvent) {
         let view = match (&event.query, &event.result) {
             (IntakeQuery::JobStatus | IntakeQuery::JobStart { .. }, Ok(IntakeView::Job(view))) => {
@@ -348,6 +349,9 @@ impl Shell {
             Message::warning(&text, "")
         });
         intake::ask(&mut self.ctx, IntakeQuery::Found);
+        if view.as_ref().map(|job| job.kind) == Some(JobKind::MoveProject) {
+            self.ctx.request(Request::Projects);
+        }
         assert!(self.ctx.store.intake.is_some());
     }
 

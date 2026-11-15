@@ -1,4 +1,4 @@
-import { ADD_WARNINGS, intakeCopy, measuredLine } from "../../api-intake";
+import { ADD_WARNINGS, intakeCopy, measuredLine, moveCopy } from "../../api-intake";
 import type { Result } from "../../api";
 import { receiptState, type KeptFile, type StoredSetup } from "../../api-projects";
 import type {
@@ -274,7 +274,10 @@ export function jobLine(job: IntakeJob): string {
     case "cancelled":
       return `${moving ? "Moving" : "Adding"} ${name} stopped. Nothing was moved or copied.`;
     case "failed":
-      return `${name}: ${intakeCopy(now.code)}`;
+      if (moving && now.code === "move_project_old_folder_left") {
+        return `${name} is now in your projects folder. Some items in its old folder couldn't be deleted and may be newer than the copy: check ${folderLabel(job.source)} before you delete anything.`;
+      }
+      return `${name}: ${moving ? moveCopy(now.code) : intakeCopy(now.code)}`;
     case "needs_answer":
       return `${name} needs your answer before it is ${job.mode === "move" ? "moved" : "copied"}.`;
   }
@@ -321,7 +324,7 @@ export const SIDEBAR_FOLDERS_MAX = 16;
  * found read, the intake job and the listed project ids. Output: the rows. */
 export function sidebarFolders(found: Loaded<FoundProject[]>, job: IntakeJob | null, projects: ReadonlySet<string>): SidebarProject[] {
   const href = formatRoute({ name: "home" });
-  const adding = job !== null && jobRunning(job) ? folderName(job.source) : null;
+  const adding = job !== null && job.kind === "add" && jobRunning(job) ? folderName(job.source) : null;
   const rows: SidebarProject[] = adding === null || job === null ? [] : [{ id: `intake:${job.id}`, name: adding, note: "Adding...", href }];
   const folders = found.kind === "ok" ? found.value : [];
   const fresh = folders.filter((folder) => folder.state === "found" && folder.name !== adding && !(folder.project_id && projects.has(folder.project_id)))
@@ -329,6 +332,30 @@ export function sidebarFolders(found: Loaded<FoundProject[]>, job: IntakeJob | n
   rows.push(...fresh.map((folder) => ({ id: `found:${folder.path}`, name: folder.name, note: "Not set up", href })));
   if (rows.length > SIDEBAR_FOLDERS_MAX + 1) throw new Error(`sidebar folders ${rows.length} past ${SIDEBAR_FOLDERS_MAX + 1}`);
   return rows;
+}
+
+/** The refusal a change's receipt carries, for a step that must be applied before the next one
+ * runs: null once applied, its rejection code, or the unknown-outcome code while unconfirmed.
+ * Input: the receipt. Output: the code, or null. */
+export function receiptRefusal(receipt: IntentReceipt): string | null {
+  const state = receiptState(receipt);
+  if (state.kind === "applied") return null;
+  return state.kind === "rejected" ? state.code : "owner_outcome_unknown_reconcile_same_identity";
+}
+
+/** How Home starts a job again: an add by its folder, a project move by its project. */
+export interface RestartSteps {
+  add: (path: string, mode: AddFolderMode, overrides: AddOverride[]) => Promise<Result<IntakeJob>>;
+  move: (project: string, mode: AddFolderMode, overrides: AddOverride[]) => Promise<Result<IntakeJob>>;
+}
+
+/** Starts a job again for a retry or an answer to its soft refusal, as the same kind of job: an
+ * add of its folder, or a move of its project, never an add of a project's folder. Inputs: the
+ * job, the overrides to start with and the two starts. Output: the start's result. */
+export function restartJob(job: IntakeJob, overrides: AddOverride[], steps: RestartSteps): Promise<Result<IntakeJob>> {
+  if (job.kind === "add") return steps.add(job.source, job.mode, overrides);
+  if (job.project_id === null) throw new Error(`move job ${job.id} names no project`);
+  return steps.move(job.project_id, job.mode, overrides);
 }
 
 const ANSWER_ISSUES: Record<string, AnywayIssue> = {

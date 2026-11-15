@@ -291,7 +291,7 @@ async fn handle(
             let forgotten = authority.intake.dismiss(&request_id);
             if forgotten {
                 engine
-                    .owner_job(|reply| Job::HomeAddForget(request_id, reply))
+                    .owner_job(|reply| Job::HomeJobForget(request_id, reply))
                     .await?;
             }
             Ok(Reply::Dismissed { forgotten })

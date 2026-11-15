@@ -170,8 +170,9 @@ impl Work {
         }
     }
 
-    /// Runs the disk work. Input: the tally an add reports into and obeys. Output: the step
-    /// to record and, for a project move, what it leaves for after the record.
+    /// Runs the disk work. Input: the tally an add or a project move reports into and obeys.
+    /// Output: the step to record and, for a project move, what it leaves for after the
+    /// record.
     fn run(self, tally: &Tally) -> (Step, After) {
         let step = match self {
             Self::Add(plan) => {
@@ -185,7 +186,7 @@ impl Work {
             Self::Move(plan) => Step::Record(plan.run().map(|()| None).map_err(|e| e.0)),
             Self::MoveProject(plan) => {
                 let source = plan.source().to_path_buf();
-                return match plan.run().map(Moved::into_parts) {
+                return match plan.run(tally).map(Moved::into_parts) {
                     Ok((placed, landing)) => (
                         Step::Record(Ok(Some(source))),
                         After {
@@ -391,6 +392,7 @@ pub(super) async fn serve(
     #[cfg(unix)]
     let mut _moved_ide = None;
     let mut after = After::default();
+    let tally = sink.tally();
     let (step, deadline, ran) = match planned {
         Ok(Planned::Work(work)) => {
             let admitted = tokio::time::timeout_at(deadline, async {
@@ -427,8 +429,8 @@ pub(super) async fn serve(
                             Some(authority.ide_servers.hold_for_delete(plan.project()).await);
                     }
                     let interrupted = work.interrupted();
-                    let tally = sink.tally();
-                    let step = tokio::task::spawn_blocking(move || work.run(&tally))
+                    let tallied = Arc::clone(&tally);
+                    let step = tokio::task::spawn_blocking(move || work.run(&tallied))
                         .await
                         .map_err(|_| failure(interrupted))
                         .map(|(step, left)| {
@@ -473,6 +475,7 @@ pub(super) async fn serve(
             )
         {
             drop(barrier.take());
+            tally.mark_clearing();
             let cleared = tokio::task::spawn_blocking(move || old.clear()).await;
             barrier = Some(engine.owner_egress.write().await);
             result = match regranted(authority.authenticate(packet), a, true) {

@@ -197,12 +197,36 @@ export function measuredLine(bytes: number): string {
   return `It is about ${formatBytes(bytes)}.`;
 }
 
+const MOVE_COPY: Record<string, string> = {
+  move_project_busy: "The team is still stopping, or research or a change is still running. Move again in a few seconds.",
+  move_project_master_session: "The master is still working in its own copy of this project. Let it finish, then move.",
+  move_project_already_home: "This project is already in your CrazyAgent folder.",
+  move_project_copy_worktrees: "An agent works in a git worktree of this project, which a copy would leave behind. Move the project instead.",
+  move_project_folder_link: "This project's folder is reached through a link, so it can't be moved from here.",
+  move_project_in_progress: "A project is being moved. Try again when it is done.",
+  move_project_unavailable: "CrazyAgent couldn't check the team, so nothing was moved. Try again.",
+  move_project_interrupted: "The move stopped part way. Check the project folder before trying again.",
+  move_project_record_invalid: "CrazyAgent couldn't read the move it recorded. Check the project folder before trying again.",
+  move_project_old_folder_left: "The project moved, but part of its old folder couldn't be deleted. What's left there may be newer than the copy, so check it before you delete anything.",
+  home_move_project: "Another project uses this folder too, so it can't be moved or copied.",
+};
+
 /** Plain sentence for one intake, GitHub or setup failure.
  * Input: the code, or the failure with the engine cause behind it. Output: the intake copy, then
- * the project and app copy, then the fallback naming the code; a different cause is named after. */
+ * the project move copy, then the project and app copy, then the fallback naming the code; a
+ * different cause is named after. */
 export function intakeCopy(failure: string | { code: string; cause?: string }): string {
   const { code, cause } = typeof failure === "string" ? { code: failure, cause: undefined } : failure;
-  return Object.hasOwn(COPY, code) ? namedFailure(COPY[code], code, cause) : failureCopy({ code, cause });
+  if (Object.hasOwn(COPY, code)) return namedFailure(COPY[code], code, cause);
+  return Object.hasOwn(MOVE_COPY, code) ? namedFailure(MOVE_COPY[code], code, cause) : failureCopy({ code, cause });
+}
+
+/** Plain sentence for one refusal of a project move, the move's own words first. Input: the code,
+ * or the failure with the engine cause behind it. Output: the move copy, else the intake and app
+ * copy. */
+export function moveCopy(failure: string | { code: string; cause?: string }): string {
+  const code = typeof failure === "string" ? failure : failure.code;
+  return Object.hasOwn(MOVE_COPY, code) ? MOVE_COPY[code] : intakeCopy(failure);
 }
 
 function failure<T>(code: string): Result<T> {

@@ -1347,12 +1347,6 @@ impl ProjectScreen {
                 action: SetupAction::Remove { .. } | SetupAction::Delete { .. },
                 ..
             } => self.removed = applied,
-            SetupQuery::MoveHome { .. } => {
-                self.setup_due = true;
-                if !applied && self.problem.is_none() {
-                    self.problem = Some(plain_problem("change_outcome_unknown"));
-                }
-            }
             SetupQuery::Change {
                 action: SetupAction::SetReadPaths { .. },
                 ..
@@ -2520,6 +2514,14 @@ impl ProjectScreen {
         self.remove_typed.clear();
     }
 
+    /// Shows why the engine refused to start the job that moves this project into the projects
+    /// home, as a plain line. Takes the refusal code. Returns nothing.
+    pub fn move_refused(&mut self, code: &str) {
+        assert!(!code.is_empty());
+        self.problem = Some(plain_problem(code));
+        assert!(self.problem.is_some());
+    }
+
     /// Opens the remove ask for a delete an engine stop cut short, as x does, on the Settings
     /// tab where that ask lives, as the desktop's Delete again opens Settings, with Delete
     /// everything picked once the engine's preview offers it; the exact name is still typed.
@@ -3233,6 +3235,7 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "move_project_busy" => {
             "Stop the team first (Stop all on the Team tab), then move the project. If its agents are still stopping, try again in a few seconds."
         }
+        "job_busy" => "Another job is running. Wait for it to finish on Home.",
         code if code.starts_with("move_project_")
             || code.starts_with("home_")
             || code.starts_with("delete_") =>

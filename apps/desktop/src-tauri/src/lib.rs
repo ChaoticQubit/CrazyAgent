@@ -2221,13 +2221,10 @@ async fn desktop_move_project_home(
     id: String,
     mode: AddMode,
     overrides: Vec<AddOverride>,
-    generation: u64,
-) -> Result<IntentReceipt, BridgeError> {
+) -> Result<crazyagent::projects_home::job::JobView, BridgeError> {
     main_window(&webview)?;
-    lock(&state)
-        .await?
-        .move_project_home(&id, mode, overrides, generation)
-        .await
+    let call = lock(&state).await?.move_project_job(&id, mode, overrides)?;
+    call.await
 }
 
 #[tauri::command]

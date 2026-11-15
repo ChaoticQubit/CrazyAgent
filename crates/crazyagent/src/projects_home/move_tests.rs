@@ -375,7 +375,7 @@ impl Case {
     ) -> Result<Finished, EngineError> {
         let planned = self.plan(mode, overrides)?;
         match planned
-            .run_with(Duration::ZERO)
+            .run_with(Duration::ZERO, &super::Tally::default())
             .map(super::Moved::into_parts)
         {
             Ok((placed, landing)) => {
@@ -398,7 +398,9 @@ impl Case {
     /// the whole old folder still to clear.
     fn copied(&self) -> OldSource {
         let planned = self.plan(AddMode::Move, &[]).unwrap();
-        let moved = planned.run_by_copy(Duration::ZERO).unwrap();
+        let moved = planned
+            .run_by_copy(Duration::ZERO, &super::Tally::default())
+            .unwrap();
         let (Placed::Copied(old), _landing) = moved.into_parts() else {
             panic!("a move by copy leaves its source to clear");
         };
@@ -743,7 +745,9 @@ fn a_move_whose_record_never_came_is_finished_from_disk_and_a_copy_is_not() {
     let moved = Case::new();
     moved.own_clone(7);
     let planned = moved.plan(AddMode::Move, &[]).unwrap();
-    planned.run_with(Duration::ZERO).unwrap();
+    planned
+        .run_with(Duration::ZERO, &super::Tally::default())
+        .unwrap();
     assert_eq!(moved.stored_folder(), moved.repo);
     assert_eq!(moved.finish(false), Some(Finished::Moved { repointed: 1 }));
     assert_eq!(moved.stored_folder(), moved.target());
@@ -751,7 +755,9 @@ fn a_move_whose_record_never_came_is_finished_from_disk_and_a_copy_is_not() {
 
     let copied = Case::new();
     let planned = copied.plan(AddMode::Copy, &[]).unwrap();
-    planned.run_with(Duration::ZERO).unwrap();
+    planned
+        .run_with(Duration::ZERO, &super::Tally::default())
+        .unwrap();
     assert_eq!(copied.finish(false), Some(Finished::Left));
     assert_eq!(copied.stored_folder(), copied.repo);
     assert_eq!(pending(&copied.db).unwrap(), None);
@@ -927,7 +933,7 @@ fn a_main_graph_refresh_in_the_folder_keeps_the_move_waiting_until_it_ends() {
         std::thread::sleep(Duration::from_millis(300));
         drop(refresh);
     });
-    let moved = planned.run_with(Duration::from_secs(30));
+    let moved = planned.run_with(Duration::from_secs(30), &super::Tally::default());
     ends.join().unwrap();
     assert!(moved.is_ok(), "{moved:?}");
     assert!(matches!(case.finish(true), Some(Finished::Moved { .. })));
@@ -1038,7 +1044,10 @@ fn work_that_starts_between_the_plan_and_the_disk_work_refuses_the_move() {
         )
         .unwrap();
     assert_eq!(
-        planned.run_with(Duration::ZERO).unwrap_err().0,
+        planned
+            .run_with(Duration::ZERO, &super::Tally::default())
+            .unwrap_err()
+            .0,
         "move_project_master_session"
     );
     assert_eq!(case.finish(false), Some(Finished::Left));
@@ -1047,7 +1056,10 @@ fn work_that_starts_between_the_plan_and_the_disk_work_refuses_the_move() {
     let planned = case.plan(AddMode::Move, &[]).unwrap();
     case.change_set("updating");
     assert_eq!(
-        planned.run_with(Duration::ZERO).unwrap_err().0,
+        planned
+            .run_with(Duration::ZERO, &super::Tally::default())
+            .unwrap_err()
+            .0,
         "move_project_busy"
     );
     assert_eq!(case.finish(false), Some(Finished::Left));
@@ -1064,7 +1076,10 @@ fn work_that_starts_between_the_plan_and_the_disk_work_refuses_the_move() {
         )
         .unwrap();
     assert_eq!(
-        planned.run_with(Duration::ZERO).unwrap_err().0,
+        planned
+            .run_with(Duration::ZERO, &super::Tally::default())
+            .unwrap_err()
+            .0,
         "move_project_busy"
     );
     assert_eq!(case.finish(false), Some(Finished::Left));
@@ -1123,7 +1138,11 @@ fn landing_work_in_flight_holds_the_folder_and_the_move_holds_it_until_its_recor
     let wait = Duration::from_millis(50);
     let landing = crate::landing::hold_repositories(&repositories, Duration::ZERO).unwrap();
     assert_eq!(
-        planned.clone().run_by_copy(wait).unwrap_err().0,
+        planned
+            .clone()
+            .run_by_copy(wait, &super::Tally::default())
+            .unwrap_err()
+            .0,
         "move_project_busy"
     );
     assert!(case.repo.join("README").is_file());
@@ -1131,7 +1150,10 @@ fn landing_work_in_flight_holds_the_folder_and_the_move_holds_it_until_its_recor
     assert_eq!(case.stored_folder(), case.repo);
     drop(landing);
 
-    let (placed, held) = planned.run_by_copy(wait).unwrap().into_parts();
+    let (placed, held) = planned
+        .run_by_copy(wait, &super::Tally::default())
+        .unwrap()
+        .into_parts();
     assert!(crate::landing::hold_repositories(&repositories, Duration::ZERO).is_none());
     assert!(matches!(case.finish(true), Some(Finished::Moved { .. })));
     assert!(crate::landing::hold_repositories(&repositories, Duration::ZERO).is_none());

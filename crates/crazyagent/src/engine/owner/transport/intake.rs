@@ -4,7 +4,7 @@ use crate::projects_home::icloud;
 use crate::projects_home::job::{IntakeJob, JobKind, JobSubject, JobView};
 use crate::projects_home::{AddMode, AddOverride, HomeAction};
 
-/// How many times a job reads the current revision and plans its add again when another
+/// How many times a job reads the current revision and plans its change again when another
 /// change moved the revision between the read and the plan.
 const REVISION_TRIES: usize = 3;
 
@@ -28,12 +28,43 @@ struct Held {
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
+impl Held {
+    /// Whether this job does what `subject` asks: an add of the same real folder, or a move
+    /// of the same project. Inputs: the subject and its real folder. Output: the answer.
+    fn same(&self, subject: &JobSubject, real: &Path) -> bool {
+        match subject {
+            JobSubject::Add { .. } => self.job.kind() == JobKind::Add && self.real == real,
+            JobSubject::MoveProject { project_id } => self.job.project() == Some(project_id),
+        }
+    }
+}
+
+/// What a start finds in the job the engine holds: the same id, or a running job doing the
+/// same, answers that job's view; another running job answers `job_busy`; an ended job or
+/// none lets the start go on. Inputs: the held job, the asked id, subject and real folder.
+/// Output: the answer, or None to go on.
+fn found(
+    held: Option<&Held>,
+    id: &RequestId,
+    subject: &JobSubject,
+    real: &Path,
+) -> Option<Result<JobView, EngineError>> {
+    let current = held?;
+    let running = !current.job.ended();
+    if current.job.id() == id || (running && current.same(subject, real)) {
+        return Some(Ok(current.job.view()));
+    }
+    running.then(|| Err(failure("job_busy")))
+}
+
 impl Intake {
     /// Starts a job that runs apart from any client, or attaches to the job already running
-    /// for the same real folder or with the same id. Inputs: the engine, the authority, the
-    /// client packet, its admission and what to do. Output: the job's view, `job_busy` while
-    /// another job runs or the id runs as a client change, or the folder or override check's
-    /// code.
+    /// for the same subject or with the same id. A project move is checked before it starts,
+    /// as far as it can be without reading inside the folder, so a move the engine refuses
+    /// is answered at once and the held job stays as it was. Inputs: the engine, the
+    /// authority, the client packet, its admission and what to do. Output: the job's view,
+    /// `job_busy` while another job runs or the id runs as a client change, or the folder,
+    /// override or move check's code.
     pub(super) async fn start(
         engine: &Arc<Engine>,
         authority: &Arc<Authority>,
@@ -41,26 +72,44 @@ impl Intake {
         a: &Admission,
         asked: Asked,
     ) -> Result<JobView, EngineError> {
-        let JobSubject::Add { path } = &asked.subject else {
-            return Err(failure("job_kind_unsupported"));
+        let (project, source, real) = match &asked.subject {
+            JobSubject::Add { path } => {
+                HomeAction::Added {
+                    source: path.clone(),
+                    mode: asked.mode,
+                    overrides: asked.overrides.clone(),
+                }
+                .validate()?;
+                (None, path.clone(), icloud::folder(path)?)
+            }
+            JobSubject::MoveProject { project_id } => {
+                HomeAction::MoveProject {
+                    project_id: project_id.clone(),
+                    mode: asked.mode,
+                    overrides: asked.overrides.clone(),
+                }
+                .validate()?;
+                let early = {
+                    let held = authority.intake.lock();
+                    found(
+                        held.as_ref(),
+                        &asked.request_id,
+                        &asked.subject,
+                        Path::new(""),
+                    )
+                };
+                if let Some(answer) = early {
+                    return answer;
+                }
+                let source = check_move(engine, a, project_id, asked.mode).await?;
+                let real = PathBuf::from(&source);
+                (Some(project_id.clone()), source, real)
+            }
         };
-        let path = path.clone();
-        HomeAction::Added {
-            source: path.clone(),
-            mode: asked.mode,
-            overrides: asked.overrides.clone(),
-        }
-        .validate()?;
-        let real = icloud::folder(&path)?;
+        assert!(real.is_absolute());
         let mut held = authority.intake.lock();
-        if let Some(current) = held.as_ref() {
-            let running = !current.job.ended();
-            if current.job.id() == &asked.request_id || (running && current.real == real) {
-                return Ok(current.job.view());
-            }
-            if running {
-                return Err(failure("job_busy"));
-            }
+        if let Some(answer) = found(held.as_ref(), &asked.request_id, &asked.subject, &real) {
+            return answer;
         }
         let Some(claim) = Running::claim(authority, &a.owner_id, &asked.request_id) else {
             return Err(failure("job_busy"));
@@ -68,9 +117,9 @@ impl Intake {
         let replaced = held.as_ref().map(|ended| ended.job.id().clone());
         let job = Arc::new(IntakeJob::new(
             asked.request_id,
-            JobKind::Add,
-            None,
-            path,
+            asked.subject.kind(),
+            project,
+            source,
             asked.mode,
             asked.overrides,
         ));
@@ -108,33 +157,15 @@ impl Intake {
         }
     }
 
-    /// Reads the newest add an engine stop cut short, so status shows how it ended until
-    /// the owner dismisses it or a new job starts. Runs at server start; a job a client
+    /// Reads the job an engine stop cut short, a project move first, else the newest add, so
+    /// status shows how it ended until the owner dismisses it or a new job starts. Runs at
+    /// server start, after the storage start finished any cut move from disk; a job a client
     /// started first wins. Inputs: the engine and the wait. Output: none; a failed read is
     /// logged and shows nothing.
     pub(super) async fn restore(&self, engine: &Engine, wait: Duration) {
-        let read = engine.owner_job(Job::HomeAddEnded);
-        let ended = match tokio::time::timeout(wait, read).await {
-            Ok(Ok(Some(ended))) => ended,
-            Ok(Ok(None)) => return,
-            Ok(Err(e)) => {
-                eprintln!("home_add_not_restored cause={}", e.0);
-                return;
-            }
-            Err(_) => {
-                eprintln!("home_add_not_restored cause=timeout");
-                return;
-            }
+        let Some((job, real)) = restored(engine, wait).await else {
+            return;
         };
-        let real = PathBuf::from(&ended.source);
-        let job = IntakeJob::restored(
-            ended.request,
-            JobKind::Add,
-            None,
-            ended.source,
-            ended.mode,
-            &ended.ended,
-        );
         assert!(job.ended());
         let mut held = self.lock();
         if held.is_none() {
@@ -187,12 +218,58 @@ impl Intake {
     }
 }
 
-/// Runs one intake job: forgets the ended add it replaced, checks the add before any
-/// download, downloads what of the folder is only in iCloud, then serves the add with the
-/// job as its sink and records how the job ended. The claim on the job's id is dropped
-/// before the end is recorded, so a new job that may start then never finds two job claims
-/// held. Inputs: the engine, the authority, the packet and admission of the client that
-/// started it, the job, its claim and the ended job it replaced.
+/// The job an engine stop cut short, as the storage start kept it: a project move, else the
+/// newest add. Inputs: the engine and the wait for each read. Output: the ended job and its
+/// real folder, or None when there is none or a read failed, which is logged.
+async fn restored(engine: &Engine, wait: Duration) -> Option<(IntakeJob, PathBuf)> {
+    let moved = engine.owner_job(Job::HomeProjectMoveEnded);
+    match tokio::time::timeout(wait, moved).await {
+        Ok(Ok(Some(ended))) => {
+            let real = PathBuf::from(&ended.source);
+            let job = IntakeJob::restored(
+                ended.request,
+                JobKind::MoveProject,
+                Some(ended.project),
+                ended.source,
+                ended.mode,
+                &ended.ended,
+            );
+            return Some((job, real));
+        }
+        Ok(Ok(None)) => {}
+        Ok(Err(e)) => eprintln!("move_project_not_restored cause={}", e.0),
+        Err(_) => eprintln!("move_project_not_restored cause=timeout"),
+    }
+    let read = engine.owner_job(Job::HomeAddEnded);
+    let ended = match tokio::time::timeout(wait, read).await {
+        Ok(Ok(Some(ended))) => ended,
+        Ok(Ok(None)) => return None,
+        Ok(Err(e)) => {
+            eprintln!("home_add_not_restored cause={}", e.0);
+            return None;
+        }
+        Err(_) => {
+            eprintln!("home_add_not_restored cause=timeout");
+            return None;
+        }
+    };
+    let real = PathBuf::from(&ended.source);
+    let job = IntakeJob::restored(
+        ended.request,
+        JobKind::Add,
+        None,
+        ended.source,
+        ended.mode,
+        &ended.ended,
+    );
+    Some((job, real))
+}
+
+/// Runs one job: forgets the ended job it replaced, does the job's work, then records how
+/// the job ended. The claim on the job's id is dropped before the end is recorded, so a new
+/// job that may start then never finds two job claims held. Inputs: the engine, the
+/// authority, the packet and admission of the client that started it, the job, its claim
+/// and the ended job it replaced.
 async fn run(
     engine: Arc<Engine>,
     authority: Arc<Authority>,
@@ -205,31 +282,35 @@ async fn run(
     let ending = Ending(Arc::clone(&job));
     if let Some(old) = replaced
         && let Err(e) = engine
-            .owner_job(|reply| Job::HomeAddForget(old, reply))
+            .owner_job(|reply| Job::HomeJobForget(old, reply))
             .await
     {
-        eprintln!("home_add_not_forgotten cause={}", e.0);
+        eprintln!("job_not_forgotten cause={}", e.0);
     }
-    let result = added(&engine, &authority, &packet, &a, &job).await;
+    let result = worked(&engine, &authority, &packet, &a, &job).await;
     drop(claim);
     ending.end(result);
     assert!(job.ended());
 }
 
-/// The job's work in order: the check, the download, then the add planned in full again
-/// right before its copy. Inputs: as [`run`]. Output: Ok once the add is recorded as
-/// applied, else the first step's code.
-async fn added(
+/// The job's work in order. An add: the check, the download, then the add planned in full
+/// again right before its copy. A project move, checked at its start: the download of what
+/// of the project's folder is only in iCloud, then the move planned in full, which waits
+/// for the project's agents before anything moves. Inputs: as [`run`]. Output: Ok once the
+/// change is recorded as applied, else the first step's code.
+async fn worked(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
     a: &Admission,
     job: &Arc<IntakeJob>,
 ) -> Result<(), EngineError> {
-    check(engine, a, job).await?;
+    if job.kind() == JobKind::Add {
+        check(engine, a, job).await?;
+    }
     fetch(authority, job).await?;
     job.copying();
-    add(engine, authority, packet, a, job).await
+    served(engine, authority, packet, a, job).await
 }
 
 /// Checks the job's add before its download, so a folder the add refuses is not downloaded
@@ -238,6 +319,7 @@ async fn added(
 /// engine, the job's admission and the job. Output: Ok, the refusal code, or the
 /// unknown-outcome code when storage does not answer in time.
 async fn check(engine: &Engine, a: &Admission, job: &IntakeJob) -> Result<(), EngineError> {
+    assert_eq!(job.kind(), JobKind::Add);
     let (id, source) = (job.id().clone(), job.source().to_owned());
     let (mode, overrides) = (job.mode(), job.overrides().to_vec());
     assert!(!source.is_empty());
@@ -247,6 +329,25 @@ async fn check(engine: &Engine, a: &Admission, job: &IntakeJob) -> Result<(), En
         .await
         .map_err(|_| failure(UNKNOWN))?;
     assert!(!matches!(&checked, Err(e) if e.0.is_empty()));
+    checked
+}
+
+/// Checks a project move before its job starts, writing nothing. Inputs: the engine, the
+/// client's admission, the project and the mode. Output: the project's real folder, the
+/// refusal code, or the unknown-outcome code when storage does not answer in time.
+async fn check_move(
+    engine: &Engine,
+    a: &Admission,
+    project: &ProjectId,
+    mode: AddMode,
+) -> Result<String, EngineError> {
+    let ask = engine
+        .owner_job(|reply| Job::HomeProjectMoveCheck(a.clone(), project.clone(), mode, reply));
+    let checked = tokio::time::timeout(engine.timeout, ask)
+        .await
+        .map_err(|_| failure(UNKNOWN))?;
+    assert!(!matches!(&checked, Err(e) if e.0.is_empty()));
+    assert!(!matches!(&checked, Ok(source) if source.is_empty()));
     checked
 }
 
@@ -288,10 +389,10 @@ async fn fetch(authority: &Arc<Authority>, job: &Arc<IntakeJob>) -> Result<(), E
     Ok(())
 }
 
-/// Serves the job's add, planning it again while another change moved the revision between
-/// the read and the plan. Inputs: the engine, the authority, the packet, the admission and
-/// the job. Output: Ok once the add is recorded as applied, else its code.
-async fn add(
+/// Serves the job's change, planning it again while another change moved the revision
+/// between the read and the plan. Inputs: the engine, the authority, the packet, the
+/// admission and the job. Output: Ok once the change is recorded as applied, else its code.
+async fn served(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
@@ -300,7 +401,7 @@ async fn add(
 ) -> Result<(), EngineError> {
     let mut result = Err(failure("stale_revision"));
     for _ in 0..REVISION_TRIES {
-        result = add_once(engine, authority, packet, a, job).await;
+        result = served_once(engine, authority, packet, a, job).await;
         if !matches!(&result, Err(e) if e.0 == "stale_revision") {
             break;
         }
@@ -308,9 +409,10 @@ async fn add(
     result
 }
 
-/// Reads the current revision and serves the add once, with a fresh owner deadline taken
-/// after the download. Inputs: as [`add`]. Output: as [`add`], `stale_revision` included.
-async fn add_once(
+/// Reads the current revision and serves the job's change once, with a fresh owner deadline
+/// taken after the download: an AddExistingFolder for an add, a MoveProjectHome for a
+/// project move. Inputs: as [`served`]. Output: as [`served`], `stale_revision` included.
+async fn served_once(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
@@ -322,17 +424,27 @@ async fn add_once(
     let current = tokio::time::timeout_at(deadline, read)
         .await
         .map_err(|_| failure(UNKNOWN))??;
+    let mutation = match job.project() {
+        None => OwnerMutation::AddExistingFolder {
+            source: job.source().to_owned(),
+            mode: job.mode(),
+            overrides: job.overrides().to_vec(),
+        },
+        Some(project) => OwnerMutation::MoveProjectHome {
+            project_id: project.clone(),
+            mode: job.mode(),
+            overrides: job.overrides().to_vec(),
+        },
+    };
+    assert_eq!(
+        matches!(mutation, OwnerMutation::MoveProjectHome { .. }),
+        job.kind() == JobKind::MoveProject
+    );
     let request = OwnerRequest {
         protocol_version: PROTOCOL_VERSION,
         request_id: job.id().clone(),
         expected_revision: current.revision,
-        operation: OwnerOperation::Apply {
-            mutation: OwnerMutation::AddExistingFolder {
-                source: job.source().to_owned(),
-                mode: job.mode(),
-                overrides: job.overrides().to_vec(),
-            },
-        },
+        operation: OwnerOperation::Apply { mutation },
     };
     request.validate()?;
     assert!(projects_home::handles(&request));
@@ -345,7 +457,7 @@ async fn add_once(
     }
 }
 
-/// The job's result from its add's reply. Input: the kept reply. Output: Ok for an add
+/// The job's result from its change's reply. Input: the kept reply. Output: Ok for a change
 /// recorded as applied, else its refusal code, or the unknown-outcome code.
 fn applied(reply: Result<OwnerReply, EngineError>) -> Result<(), EngineError> {
     let result = match reply?.response {

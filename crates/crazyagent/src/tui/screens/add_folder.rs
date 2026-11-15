@@ -2,11 +2,11 @@ use super::intake::{AddWarning, COPY_WARN_BYTES, ask, copy, event};
 use super::intake_job;
 use super::new_project::{complete, expand, size_label};
 use super::{Flow, Place, Screen, open};
-use crate::projects_home::job::JobState;
+use crate::projects_home::job::{JobKind, JobState, JobSubject, JobView};
 use crate::projects_home::{
     ADD_OVERRIDES_MAX, AddMode, AddOverride, GitLink, Measured, PATH_BYTES_MAX,
 };
-use crate::protocol::RequestId;
+use crate::protocol::{ProjectId, RequestId};
 use crate::tui::client::intake::{IntakeQuery, IntakeView, start_id};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
@@ -125,7 +125,9 @@ struct Icloud {
 /// folder up in place. A folder with files only in iCloud asks first whether to download
 /// them and then move or copy. A Move or Copy starts the engine's intake job, which downloads,
 /// moves or copies apart from this page, and the page goes Home, where the job is followed.
-/// Answering a job's soft refusal opens this page on the job's folder with that question.
+/// Answering a job's soft refusal opens this page on the job's folder with that question; for a
+/// project move the answers are Keep it here, which goes Home, and Move anyway, which moves
+/// that project again.
 pub struct AddFolder {
     field: TextField,
     way: Way,
@@ -139,8 +141,9 @@ pub struct AddFolder {
     agreed: Option<String>,
     kept: Option<(String, AddMode, Vec<AddOverride>)>,
     answering: Option<RequestId>,
+    moving: Option<ProjectId>,
     pending: Option<String>,
-    sent: Option<String>,
+    sent: Option<JobSubject>,
     sent_id: Option<RequestId>,
     refused: Option<String>,
     problem: Option<String>,
@@ -164,6 +167,7 @@ impl AddFolder {
             agreed: None,
             kept: None,
             answering: None,
+            moving: None,
             pending: None,
             sent: None,
             sent_id: None,
@@ -174,8 +178,8 @@ impl AddFolder {
 
     /// The Existing folder page answering the engine's intake job that waits for an answer:
     /// the job's folder, way and overrides are kept and the question for its refusal opens
-    /// once the projects folder is read. A job that no longer waits says so.
-    /// Takes the context and the job's id. Returns the screen.
+    /// once the projects folder is read; a project move's answer moves that project. A job
+    /// that no longer waits says so. Takes the context and the job's id. Returns the screen.
     pub fn answering(ctx: &Ctx, job: &RequestId) -> Self {
         let mut page = Self::new(ctx);
         page.answering = Some(job.clone());
@@ -189,12 +193,17 @@ impl AddFolder {
                 page.field.set(&view.source);
                 page.way = Way::Into(view.mode);
                 page.kept = Some((view.source.clone(), view.mode, view.overrides.clone()));
+                page.moving = match view.kind {
+                    JobKind::MoveProject => view.project_id.clone(),
+                    JobKind::Add => None,
+                };
                 page.pending = Some(code);
                 page.focus = Focus::Add;
             }
             None => page.problem = Some(GONE.into()),
         }
         assert!(page.pending.is_some() != page.problem.is_some());
+        assert!(page.moving.is_none() || page.pending.is_some());
         page
     }
 
@@ -311,9 +320,24 @@ impl AddFolder {
         true
     }
 
-    /// The ways offered: all three, since what a folder's read finds is asked about first.
+    /// The ways offered: all three, since what a folder's read finds is asked about first, or
+    /// Move and Copy for a project move, whose project is already set up where it is.
     fn ways(&self) -> Vec<(Way, &'static str)> {
-        WAYS.to_vec()
+        let ways: Vec<_> = WAYS
+            .into_iter()
+            .filter(|(way, _)| self.moving.is_none() || *way != Way::Here)
+            .collect();
+        assert!(!ways.is_empty());
+        ways
+    }
+
+    /// The first answer to the anyway question: a project move keeps the project where it is,
+    /// an add sets the folder up where it is.
+    fn keep_label(&self) -> &'static str {
+        match self.moving {
+            Some(_) => "Keep it here",
+            None => "Use where it is",
+        }
     }
 
     fn step(&mut self, forward: bool) {
@@ -332,6 +356,7 @@ impl AddFolder {
     }
 
     fn here(&mut self, source: &str, ctx: &mut Ctx) -> Flow {
+        assert!(self.moving.is_none(), "a project move never sets up again");
         let real = match std::fs::canonicalize(source) {
             Ok(real) if real.is_dir() => real,
             _ => {
@@ -464,7 +489,8 @@ impl AddFolder {
 
     /// Starts the engine's intake job with the overrides the owner agreed to, keeping the
     /// start's id, which the job it makes carries, so a failed start can tell that job from an
-    /// older add of the same folder. Takes the folder, the way, the overrides and the context.
+    /// older add of the same folder. A project move's own folder moves that project again; any
+    /// other folder is added. Takes the folder, the way, the overrides and the context.
     /// Returns Handled; the reply arrives later, or the problem shows when no id was made.
     fn send(
         &mut self,
@@ -483,13 +509,20 @@ impl AddFolder {
                 return Flow::Handled;
             }
         };
-        self.sent = Some(source.clone());
+        let own = matches!(&self.kept, Some((folder, ..)) if *folder == source);
+        let subject = match &self.moving {
+            Some(project_id) if own => JobSubject::MoveProject {
+                project_id: project_id.clone(),
+            },
+            _ => JobSubject::Add { path: source },
+        };
+        self.sent = Some(subject.clone());
         self.sent_id = Some(id.clone());
         ask(
             ctx,
             IntakeQuery::JobStart {
                 id,
-                source,
+                subject,
                 mode,
                 overrides,
             },
@@ -498,13 +531,17 @@ impl AddFolder {
         Flow::Handled
     }
 
-    /// The job started: says so and goes Home, where the job is followed. Takes the folder
-    /// and the context. Returns the flow.
-    fn started(&mut self, source: &str, ctx: &mut Ctx) -> Flow {
-        assert!(!source.is_empty());
-        let name = Self::name(source);
+    /// The job started: says so in its kind's words and goes Home, where the job is followed.
+    /// Takes the job and the context. Returns the flow.
+    fn started(&mut self, job: &JobView, ctx: &mut Ctx) -> Flow {
+        assert!(!job.source.is_empty());
+        let name = Self::name(&job.source);
+        let verb = match job.kind {
+            JobKind::Add => "Adding",
+            JobKind::MoveProject => "Moving",
+        };
         ctx.say(Message::success(
-            &format!("Adding {name}."),
+            &format!("{verb} {name}."),
             "Follow it on Home; you can keep working.",
         ));
         self.sent = None;
@@ -524,25 +561,26 @@ impl AddFolder {
         Flow::Handled
     }
 
-    /// Decides a failed start from the read after it: a job for the same folder that runs,
+    /// Decides a failed start from the read after it: a job for the same subject that runs,
     /// or ended done carrying this start's id, is the started one whose reply was lost; an
     /// older ended add of that folder and anything else show the start's refusal. Takes the
     /// read and the context. Returns the flow.
     fn checked(&mut self, result: &Result<IntakeView, String>, ctx: &mut Ctx) -> Flow {
-        let (Some(source), Some(code)) = (self.sent.take(), self.refused.take()) else {
+        let (Some(subject), Some(code)) = (self.sent.take(), self.refused.take()) else {
             return Flow::Handled;
         };
         let sent_id = self.sent_id.take();
         assert!(sent_id.is_some());
         let attached = match result {
-            Ok(IntakeView::Job(Some(job))) if job.source == source => {
-                intake_job::running(job)
-                    || (job.state == JobState::Done && sent_id.as_ref() == Some(&job.id))
+            Ok(IntakeView::Job(Some(job))) if job.subject().as_ref() == Some(&subject) => {
+                let ours = intake_job::running(job)
+                    || (job.state == JobState::Done && sent_id.as_ref() == Some(&job.id));
+                ours.then_some(job)
             }
-            _ => false,
+            _ => None,
         };
-        if attached {
-            return self.started(&source, ctx);
+        if let Some(job) = attached {
+            return self.started(job, ctx);
         }
         self.problem = Some(copy(&code));
         assert!(self.sent.is_none());
@@ -550,7 +588,8 @@ impl AddFolder {
     }
 
     /// Takes one key while the question is open: arrows and Tab pick the answer, Enter
-    /// gives it and Esc closes the question without either. Takes the key and the context.
+    /// gives it and Esc closes the question without either. A project move kept where it is,
+    /// by its first answer or Esc, goes Home sending nothing. Takes the key and the context.
     /// Returns the flow.
     fn answer(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let Some(question) = &mut self.question else {
@@ -560,6 +599,12 @@ impl AddFolder {
             Key::Left | Key::Right | Key::Tab | Key::BackTab => {
                 question.choice = 1 - question.choice;
                 Flow::Handled
+            }
+            Key::Esc | Key::Enter
+                if self.moving.is_some() && (*key == Key::Esc || question.choice == 0) =>
+            {
+                self.question = None;
+                Flow::Go(Place::Home)
             }
             Key::Esc => {
                 self.question = None;
@@ -590,7 +635,7 @@ impl AddFolder {
         }
         if let Some(question) = &self.question {
             return match (question.choice, question.mode) {
-                (0, _) => "Use where it is",
+                (0, _) => self.keep_label(),
                 (_, AddMode::Move) => "Move anyway",
                 (_, AddMode::Copy) => "Copy anyway",
             };
@@ -736,11 +781,11 @@ impl Screen for AddFolder {
                 }
                 Flow::Handled
             }
-            (IntakeQuery::JobStart { source, .. }, result)
-                if self.sent.as_ref() == Some(source) && self.refused.is_none() =>
+            (IntakeQuery::JobStart { subject, .. }, result)
+                if self.sent.as_ref() == Some(subject) && self.refused.is_none() =>
             {
                 match result {
-                    Ok(IntakeView::Job(Some(view))) => self.started(&view.source, ctx),
+                    Ok(IntakeView::Job(Some(view))) => self.started(view, ctx),
                     Ok(_) => self.check_start("intake_change_outcome_unknown", ctx),
                     Err(code) => self.check_start(code, ctx),
                 }
@@ -890,7 +935,7 @@ impl Screen for AddFolder {
         if let Some(icloud) = &self.icloud {
             icloud_lines(icloud, limit, ctx, &mut lines);
         } else if let Some(question) = &self.question {
-            question_lines(question, limit, theme, &mut lines);
+            question_lines(question, self.keep_label(), limit, theme, &mut lines);
         } else if self.sent.is_some() {
             lines.push(ctx.loading("Starting"));
         } else {
@@ -1112,10 +1157,11 @@ fn union(kept: &[AddOverride], new: &[AddOverride]) -> Vec<AddOverride> {
 }
 
 /// Draws the question: its title, each warning block (data loss as warnings) with the
-/// folders it names, and the two answers, Use where it is first. Takes the question, the
-/// width, the theme and the lines to add to.
+/// folders it names, and the two answers, the keep answer first. Takes the question, the keep
+/// answer's label, the width, the theme and the lines to add to.
 fn question_lines(
     question: &Question,
+    keep: &'static str,
     limit: usize,
     theme: &crate::tui::theme::Theme,
     lines: &mut Vec<Line<'static>>,
@@ -1145,11 +1191,7 @@ fn question_lines(
         }
     }
     lines.push(Line::default());
-    lines.push(buttons(
-        &["Use where it is", anyway],
-        Some(question.choice),
-        theme,
-    ));
+    lines.push(buttons(&[keep, anyway], Some(question.choice), theme));
 }
 
 /// Draws the iCloud question: how many files are only in iCloud, that a move takes the folder

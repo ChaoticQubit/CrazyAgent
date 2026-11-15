@@ -22,7 +22,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 75] = [
+pub const INTAKE_CODES: [&str; 86] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -98,6 +98,17 @@ pub const INTAKE_CODES: [&str; 75] = [
     "project_missing",
     "project_folder_missing",
     "pool_missing",
+    "invalid_project",
+    "move_project_already_home",
+    "move_project_busy",
+    "move_project_copy_worktrees",
+    "move_project_folder_link",
+    "move_project_in_progress",
+    "move_project_master_session",
+    "move_project_record_invalid",
+    "move_project_unavailable",
+    "move_project_interrupted",
+    "move_project_old_folder_left",
 ];
 
 const GITHUB_CODES: [&str; 35] = [
@@ -598,6 +609,29 @@ impl NativeBridge {
         let client = self.icloud_client()?;
         Ok(Box::pin(async move {
             let subject = JobSubject::Add { path };
+            let view = client.job_start(request_id, subject, mode, overrides).await;
+            bounded(shown(view.map_err(intake_failure)?))
+        }))
+    }
+
+    /// Starts the engine's job that moves or copies a project kept where it is into the
+    /// projects home, apart from the window: the engine checks the move at once, downloads
+    /// what of the folder is only in iCloud, waits for the project's agents to stop, then
+    /// moves the folder and points the project and its agents' copies at the new place
+    /// (DEC-177). Inputs: the project id, move or copy and the soft refusals the owner chose
+    /// to go past. Output: the job's view, `job_busy` while another job runs, or the move's
+    /// refusal.
+    pub fn move_project_job(
+        &mut self,
+        id: &str,
+        mode: AddMode,
+        overrides: Vec<AddOverride>,
+    ) -> Result<Unlocked<JobView>, BridgeError> {
+        let project_id = project(id)?;
+        let request_id = intake_id(&native_random_id()?)?;
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            let subject = JobSubject::MoveProject { project_id };
             let view = client.job_start(request_id, subject, mode, overrides).await;
             bounded(shown(view.map_err(intake_failure)?))
         }))

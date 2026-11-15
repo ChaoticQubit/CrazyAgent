@@ -242,8 +242,9 @@ impl IntakeJob {
         *stage = Stage::Copying;
     }
 
-    /// Asks the job to stop: the download at its next check, the copy between entries.
-    /// Clearing the old folder never stops, since the copy it follows is complete.
+    /// Asks the job to stop: the download at its next check, a move's wait for its agents at
+    /// its next poll, the copy between entries. Clearing the old folder never stops, since
+    /// the copy it follows is complete.
     pub fn stop(&self) {
         self.download.cancel();
         self.tally.stop();
@@ -256,6 +257,7 @@ impl IntakeJob {
         let phase = match *stage {
             Stage::Downloading => Phase::Downloading,
             Stage::Copying if self.tally.clearing() => Phase::Clearing,
+            Stage::Copying if self.tally.waiting() => Phase::Stopping,
             Stage::Copying => Phase::Copying,
             Stage::Ended(_) => panic!("a job ends once"),
         };
@@ -277,12 +279,16 @@ impl IntakeJob {
                 progress: self.download.progress(),
             },
             Stage::Copying if self.tally.clearing() => JobState::Clearing,
-            Stage::Copying => JobState::Copying {
-                copied: self.tally.copied(),
-                checked: self.tally.checked(),
+            Stage::Copying => match self.tally.waiting_for() {
+                Some(agents_left) => JobState::Stopping { agents_left },
+                None => JobState::Copying {
+                    copied: self.tally.copied(),
+                    checked: self.tally.checked(),
+                },
             },
             Stage::Ended(state) => state.clone(),
         };
+        assert!(!matches!(state, JobState::Stopping { agents_left: 0 }));
         let view = JobView {
             id: self.id.clone(),
             kind: self.kind,

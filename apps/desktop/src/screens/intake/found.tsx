@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { nextGeneration, type Result } from "../../api";
 import { dismissIntake, intakeCopy, loadFolderSize, loadFoundProjects, loadProjectsHome, startIntake, startOnboarding, stopIntake } from "../../api-intake";
-import { loadPools, receiptState, removeProject, type PoolChoice } from "../../api-projects";
+import { loadPools, moveProjectHome, receiptState, removeProject, type PoolChoice } from "../../api-projects";
 import type { AddOverride, FolderSize, FoundProject, IntakeJob, IntakeJobState, ProjectsHome } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, ConfirmDialog, Dialog, Icon, RadioCard, StatusBadge, formatRoute, navigate, type IconName, type Tone } from "../../ui";
@@ -11,7 +11,7 @@ import { folderLabel } from "../project/overview";
 import { NotReady } from "../project/shared";
 import { AnywayDialog } from "./add-folder";
 import { HomeFolderPicker } from "./home-folder";
-import { folderName, foundRow, homeLine, jobActions, jobLine, jobQuestion, pendingFolders, startedProject, type FoundAction } from "./intake";
+import { folderName, foundRow, homeLine, jobActions, jobLine, jobQuestion, pendingFolders, restartJob, startedProject, type FoundAction } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -185,11 +185,11 @@ export function SetUpDialog({ folder, onClose, onStarted }: { folder: SetUpFolde
   </Dialog>;
 }
 
-/** Home's intake job: the row for the job the session reads, Stop, Try again with the same way and
- * overrides, the Move anyway or Copy anyway question for a soft refusal, asked once a fresh read
- * of the folder says which git link or other issue it has, whose Use where it is opens setup in
- * place, and Dismiss. Input: what Use where it is opens. Output: the row and its question, or
- * nothing without a job. */
+/** Home's job: the row for the job the session reads, Stop, Try again as the same kind of job
+ * with the same way and overrides, the Move anyway or Copy anyway question for a soft refusal,
+ * asked once a fresh read of the folder says which git link or other issue it has, whose Use
+ * where it is opens setup in place for an add and keeps a moved project where it is, and Dismiss.
+ * Input: what Use where it is opens. Output: the row and its question, or nothing without a job. */
 function IntakeJobPanel({ onSetUp }: { onSetUp: (folder: SetUpFolder) => void }) {
   const session = useAppSession();
   const job = session.intake;
@@ -207,7 +207,7 @@ function IntakeJobPanel({ onSetUp }: { onSetUp: (folder: SetUpFolder) => void })
   };
   const restart = (overrides: AddOverride[]) => {
     setAnswering(null);
-    void run(() => startIntake(job.source, job.mode, overrides), (view) => view);
+    void run(() => restartJob(job, overrides, { add: startIntake, move: moveProjectHome }), (view) => view);
   };
   const answer = async () => {
     if (busy) return;
@@ -223,7 +223,8 @@ function IntakeJobPanel({ onSetUp }: { onSetUp: (folder: SetUpFolder) => void })
     <IntakeJobView job={job} busy={busy} onStop={() => void run(() => stopIntake(job.id))} onRetry={() => restart(job.overrides)}
       onAnswer={() => void answer()} onDismiss={() => void run(() => dismissIntake(job.id))} />
     {question && <AnywayDialog open way={job.mode} name={name} size={read} refused={null} issues={question.issues} busy={busy}
-      onUseHere={() => { setAnswering(null); onSetUp({ name, path: job.source }); }} onAnyway={() => restart(question.overrides)}
+      keepLabel={job.kind === "move_project" ? "Keep it here" : undefined}
+      onUseHere={() => { setAnswering(null); if (job.kind === "add") onSetUp({ name, path: job.source }); }} onAnyway={() => restart(question.overrides)}
       onCancel={() => setAnswering(null)} />}
   </>;
 }
