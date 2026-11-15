@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 const api = await import("../src/api-notifications.ts");
 const panel = await import("../src/screens/notifications/panel.tsx");
 const settings = await import("../src/screens/settings/notifications.tsx");
+const { KEEP_AWAKE_OPEN } = await import("../src/api-keep-awake.ts");
 const { SETTINGS_GROUPS } = await import("../src/screens/settings/index.tsx");
 const { SETTINGS_TABS } = await import("../src/ui/router.ts");
 
@@ -334,4 +335,22 @@ test("the settings a save sends keep every kind in engine order with the picks a
 test("a not-ready engine and a failed read each say so under the title", () => {
   assert.match(text(settingsView({ kind: "not_ready" })), /Notifications .*not ready/i);
   assert.match(text(settingsView({ kind: "error", code: "owner_read_failed", message: "Couldn't reach the engine." })), /Couldn't load the notification settings\. Couldn't reach the engine\./);
+});
+
+test("a Keep awake item opens the Keep awake panel through its event and changes no page; a page item changes the page and opens no panel", () => {
+  const before = globalThis.window;
+  const sent = [];
+  const location = { hash: "#/projects/p-1/agents" };
+  globalThis.window = { location, dispatchEvent: (event) => { sent.push(event.type); return true; } };
+  try {
+    panel.goTo(null);
+    assert.deepEqual(sent, [KEEP_AWAKE_OPEN], "the event the Keep awake control listens for");
+    assert.equal(location.hash, "#/projects/p-1/agents", "the panel opens over the page the owner is on");
+    panel.goTo("#/home");
+    assert.equal(location.hash, "#/home");
+    assert.deepEqual(sent, [KEEP_AWAKE_OPEN], "a page item sends no Keep awake event");
+  } finally {
+    globalThis.window = before;
+  }
+  assert.equal(KEEP_AWAKE_OPEN, "crazyagent:keep-awake-open");
 });

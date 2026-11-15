@@ -23,6 +23,8 @@ const BELL = "button.notice-bell";
 const PANEL = '[role=dialog][aria-label="Notifications"]';
 const KIND = (kind) => `fieldset[data-kind="${kind}"] label`;
 const BANNERS = 'fieldset[data-setting="banners"] label';
+const KEEP_AWAKE_PANEL = '[role=dialog][aria-label="Keep awake"]';
+const NOT_PUT_BACK = "Keep awake could not put back a sleep setting it changed. It tries again when the engine starts.";
 const ON_TOP = `(() => {
   const bell = document.querySelector("button.notice-bell");
   if (!bell) return false;
@@ -494,4 +496,37 @@ test("Notifications: a click on an agent waiting on the owner opens the Agents t
   await until("the questions drawer open", true, () => page.evaluate(`document.querySelector("dialog.drawer[open]") !== null`));
   await until("the waiting agent highlighted in the drawer", true, () => page.evaluate(`document.querySelector('dialog.drawer[open] [data-notice-anchor="agent-${agent}"].notice-highlight') !== null`));
   await me.capture("notifications-agent-drawer");
+}));
+
+/** Puts one sleep setting an earlier engine could not put back into the Keep awake restore
+ * state, the row the keeper writes after the engine start's undo, so the next reconcile opens
+ * a pending "Sleep not restored" item. Writing it again is harmless. Input: the engine root.
+ * Output: none. */
+function leftRestore(runtime) {
+  const store = new DatabaseSync(join(runtime, "engine.db"));
+  try {
+    store.exec("PRAGMA busy_timeout = 5000");
+    store.prepare("INSERT OR IGNORE INTO keep_awake_restore(subject,unreadable) VALUES (?,0)").run("keep_awake_restore:entry:sleep_disabled");
+  } finally {
+    store.close();
+  }
+}
+
+test("Notifications: a click on a Keep awake item opens the Keep awake panel over the page the owner is on", { timeout: 600000 }, (t) => onEngine(t, "ca-notice-keep-awake-", async ({ me, page, open, projectId, runtime }) => {
+  const agents = `#/projects/${encodeURIComponent(projectId)}/agents`;
+  await open(agents, "the Agents tab", () => true);
+  assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(KEEP_AWAKE_PANEL)}) !== null`), false, "the Keep awake panel starts closed");
+  await until("the Sleep not restored item pending in the bell", true, async () => {
+    leftRestore(runtime);
+    return /\b[1-9][0-9]* pending/.test((await bell(page)) ?? "");
+  });
+  await me.follow(BELL);
+  await me.click("Pending", `${PANEL} label`);
+  await me.waitFor("the Keep awake item in the panel", (text) => text.includes(NOT_PUT_BACK));
+  const row = await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${PANEL} [data-notice]`)})].find((item) => item.textContent.includes(${JSON.stringify(NOT_PUT_BACK)}))?.dataset.notice ?? null`);
+  assert.ok(row !== null, "the Keep awake item has a row");
+  await me.follow(`${PANEL} [data-notice="${row}"] .notice-open`);
+  await until("the Keep awake panel open", true, () => page.evaluate(`document.querySelector(${JSON.stringify(KEEP_AWAKE_PANEL)}) !== null`));
+  assert.equal(await page.evaluate("location.hash"), agents, "no page change");
+  await me.capture("notifications-keep-awake-panel");
 }));
