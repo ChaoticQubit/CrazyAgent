@@ -1119,7 +1119,7 @@ pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
         Err(rustix::io::Errno::NOENT) => return Ok(()),
         opened => opened.map_err(|_| failure("agent_home_unwritable"))?,
     };
-    crate::team::cleanup::remove_home_entry(&folder, name)
+    crate::team::cleanup::remove_home_entry(folder, name)
         .map_err(|_| failure("agent_home_unwritable"))
 }
 
