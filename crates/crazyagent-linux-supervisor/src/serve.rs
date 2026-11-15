@@ -265,15 +265,6 @@ impl Caller {
         }
         Err(Errno::NAMETOOLONG)
     }
-
-    /// Takes a copy of one of the caller's descriptors, so what the supervisor acts on
-    /// cannot be swapped under it. Input: the descriptor register. Output: the copy.
-    fn descriptor(&self, register: u64) -> Result<OwnedFd, Errno> {
-        let number = i32::try_from(register as u32).map_err(|_| Errno::BADF)?;
-        let process = Pid::from_raw(self.tgid).ok_or(Errno::SRCH)?;
-        let held = rustix::process::pidfd_open(process, PidfdFlags::empty())?;
-        rustix::process::pidfd_getfd(&held, number, PidfdGetfdFlags::empty())
-    }
 }
 
 /// One agent's supervisor: what it holds, the architecture's call numbers, its own
@@ -344,11 +335,24 @@ struct Job<'a> {
 }
 
 impl Job<'_> {
-    /// Tells whether the call still waits, after its arguments were read from memory.
+    /// Tells whether the call still waits. Asked after the caller's memory was read and
+    /// after its process or folder is held here, so what was read and what is held are
+    /// the caller's and not those of a process that took its id since.
     fn alive(&self) -> Result<(), Errno> {
         let listener = self.server.listener.as_fd();
         let waits = sys::still_valid(listener, self.notice.id);
         waits.then_some(()).ok_or(Errno::NOENT)
+    }
+
+    /// Takes a copy of one of the caller's descriptors, so what the supervisor acts on
+    /// cannot be swapped under it. The call must still wait once the caller's process is
+    /// held. Input: the descriptor register. Output: the copy.
+    fn taken(&self, register: u64) -> Result<OwnedFd, Errno> {
+        let number = i32::try_from(register as u32).map_err(|_| Errno::BADF)?;
+        let process = Pid::from_raw(self.caller.tgid).ok_or(Errno::SRCH)?;
+        let held = rustix::process::pidfd_open(process, PidfdFlags::empty())?;
+        self.alive()?;
+        rustix::process::pidfd_getfd(&held, number, PidfdGetfdFlags::empty())
     }
 
     /// Connects for the caller: the address is copied, judged against the ports the agent
@@ -362,8 +366,7 @@ impl Job<'_> {
             return Err(Errno::INVAL);
         }
         let bytes = self.caller.bytes(at, len)?;
-        self.alive()?;
-        let socket = self.caller.descriptor(socket)?;
+        let socket = self.taken(socket)?;
         let connected = match rules::dest(&bytes) {
             Dest::Ip(_) if !reach.allows(&rules::address(&bytes)) => Err(Errno::ACCESS),
             Dest::Ip(to) => rustix::net::connect(&socket, &to),
@@ -432,7 +435,7 @@ impl Job<'_> {
         if flags as u32 != 0 {
             return Err(Errno::INVAL);
         }
-        let held = self.caller.descriptor(held)?;
+        let held = self.taken(held)?;
         let about = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", held.as_raw_fd()));
         let about = about.map_err(|_| Errno::BADF)?;
         let pid = rules::field(&about, "Pid").and_then(|pid| pid.parse::<i32>().ok());
@@ -461,7 +464,6 @@ impl Job<'_> {
             return inside.then_some(Answer::Continue).ok_or(Errno::PERM);
         }
         let bytes = self.caller.bytes(value, if fcntl { 8 } else { 4 })?;
-        self.alive()?;
         let word = |at: usize| {
             let word = bytes.get(at..)?.first_chunk::<4>()?;
             Some(i32::from_ne_bytes(*word)).filter(|id| !fcntl || *id >= 0)
@@ -476,7 +478,7 @@ impl Job<'_> {
         if target.is_some_and(|target| !self.inside(target)) {
             return Err(Errno::PERM);
         }
-        let held = self.caller.descriptor(file)?;
+        let held = self.taken(file)?;
         sys::set_owner(held.as_fd(), owner).map_err(errno)?;
         Ok(Answer::Value(0))
     }
@@ -509,9 +511,10 @@ impl Job<'_> {
     }
 
     /// Resolves the folder a path's last name lies in, as the caller would: from its root,
-    /// its working folder or its descriptor, with `/proc/self` read as the caller. Inputs:
-    /// where a relative path starts and the path. Output: the place; `EEXIST` when the
-    /// path names no entry of its own (the root, `.` or `..`).
+    /// its working folder or its descriptor, with `/proc/self` read as the caller. The
+    /// call must still wait once the folder is held. Inputs: where a relative path starts
+    /// and the path. Output: the place; `EEXIST` when the path names no entry of its own
+    /// (the root, `.` or `..`).
     fn place(&self, base: &Base, path: &[u8]) -> Result<Place, Errno> {
         if path.is_empty() {
             return Err(Errno::NOENT);
@@ -545,6 +548,7 @@ impl Job<'_> {
             real = agent;
         }
         assert!(!name.is_empty() && !name.contains(&b'/'));
+        self.alive()?;
         Ok(Place {
             proc: rustix::fs::fstatfs(&held)?.f_type == rustix::fs::PROC_SUPER_MAGIC,
             folder: held,
@@ -594,7 +598,6 @@ impl Job<'_> {
     /// every hop is judged. On procfs, and for a path-only open, nothing new can be made,
     /// so the open runs as asked. Inputs: the folder register, the path, flags and mode.
     fn open(&self, base: u64, path: Vec<u8>, flags: u64, mode: u64) -> Result<Answer, Errno> {
-        self.alive()?;
         let asked = OFlags::from_bits_retain(flags as u32);
         if path.ends_with(b"/") && !asked.contains(OFlags::PATH) {
             return Err(Errno::ISDIR);
@@ -635,7 +638,6 @@ impl Job<'_> {
     /// Makes a folder, a node or a link for the caller in the resolved folder, with the
     /// caller's file mode mask. Inputs: the folder register, the path and what to make.
     fn make(&self, base: u64, path: Vec<u8>, make: Make) -> Result<Answer, Errno> {
-        self.alive()?;
         let place = self.place(&Base::of(base), &path)?;
         self.judged(&place)?;
         let umask = self.caller.umask;
@@ -664,7 +666,6 @@ impl Job<'_> {
     /// judged as a new entry, and a rename also by what it moves away. Inputs: each
     /// path with its folder register, and which call with its flags.
     fn pair(&self, old: (u64, Vec<u8>), new: (u64, Vec<u8>), pair: Pair) -> Result<Answer, Errno> {
-        self.alive()?;
         let from = self.place(&Base::of(old.0), &old.1)?;
         let to = self.place(&Base::of(new.0), &new.1)?;
         self.judged(&to)?;
