@@ -37,23 +37,6 @@ key:
   scheme: Bearer
 ";
 
-const OLD_LINEAR: &str = "schema: 1
-kind: embedding
-name: linear
-title: Linear vectors
-version: 1
-http:
-  url: https://embed.old.example/v1/embed
-  hosts: [embed.old.example]
-  secrets: [api_key]
-  headers:
-    Authorization: \"Bearer {{secret.api_key}}\"
-  body:
-    input: \"{{inputs}}\"
-  vectors: embeddings.*
-  dimensions: 128
-";
-
 const ROLES: [Role; 3] = [
     Role::Master,
     Role::Agent { tools_on: true },
@@ -96,6 +79,14 @@ fn add_project(case: &Case, project: &str) {
     let folder = case.base.join(project);
     std::fs::create_dir_all(&folder).unwrap();
     crate::ide::workspace::tests::add_project(&case.db, project, &folder);
+}
+
+/// The manifest of an older embedding plugin of the owner's named linear: the bundled
+/// OpenAI manifest under that name, so it is known to read as a plugin.
+fn old_linear() -> String {
+    let text = store::bundled()[1].1;
+    assert!(text.contains("name: openai\n"));
+    text.replacen("name: openai\n", "name: linear\n", 1)
 }
 
 fn sha(text: &str) -> String {
@@ -359,7 +350,9 @@ fn deleting_a_project_deletes_its_grants() {
         grants::of_project(&case.db, OTHER).unwrap(),
         board(true, Who::Master)
     );
-    add_project(&case, PROJECT);
+    case.db
+        .execute("INSERT INTO projects(id, body) VALUES(?1, '{}')", [PROJECT])
+        .unwrap();
     for role in ROLES {
         assert!(
             reach(&case, PROJECT, role).is_empty(),
@@ -419,8 +412,9 @@ fn a_bundled_connector_never_inherits_an_older_plugin_of_its_name() {
     add(&case, BOARD, false);
     grants::of_project(&case.db, PROJECT).unwrap();
     crate::semantic::settings::view(&case.db, &case.root).unwrap();
+    let old = old_linear();
     let file = case.root.join(FOLDER).join("linear.yaml");
-    std::fs::write(&file, OLD_LINEAR).unwrap();
+    std::fs::write(&file, &old).unwrap();
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
     let old_key = CredentialRef::new("plugin-key-0123456789abcdef").unwrap();
     accounts::replace_key_in(
@@ -433,8 +427,8 @@ fn a_bundled_connector_never_inherits_an_older_plugin_of_its_name() {
     case.db
         .execute(
             "INSERT INTO app_plugin_trust (name, sha256, hosts, trusted_ms)
-             VALUES ('linear', ?1, 'embed.old.example', 1)",
-            [sha(OLD_LINEAR)],
+             VALUES ('linear', ?1, 'api.openai.com', 1)",
+            [sha(&old)],
         )
         .unwrap();
     case.db
@@ -444,8 +438,8 @@ fn a_bundled_connector_never_inherits_an_older_plugin_of_its_name() {
              VALUES ('linear', 'api_key', 'key', 'plugin-key-0123456789abcdef');
              INSERT INTO connector_grants (project, connector, enabled, who, changed_ms)
              VALUES ('alpha', 'linear', 1, 'both', 1);
-             INSERT INTO search_settings (id, version, plugin, host, sha256, note)
-             VALUES (1, 3, 'linear', 'embed.old.example', NULL, NULL);",
+             INSERT OR REPLACE INTO search_settings (id, version, plugin, host, sha256, note)
+             VALUES (1, 3, 'linear', 'api.openai.com', NULL, NULL);",
         )
         .unwrap();
 

@@ -515,3 +515,48 @@ fn no_by_name_app_plugins_action_reaches_a_connector() {
         "app_plugin_bundled"
     );
 }
+
+#[test]
+fn an_app_plugins_add_never_replaces_a_connector_of_that_name() {
+    let (_tmp, root) = engine();
+    let db = crate::questions::open(&root).unwrap();
+    let board_sha = crate::semantic::sha256_hex(BOARD.as_bytes());
+    store::add(&db, &root, BOARD, &board_sha, false, 1).unwrap();
+    store::set_key(&db, &root, "board", "api_key", b"sk-test-key-0001".to_vec()).unwrap();
+    let taking = NEAR.replacen("name: near", "name: board", 1);
+    let taking_sha = crate::semantic::sha256_hex(taking.as_bytes());
+    match send(
+        &root,
+        request(json!({"kind": "preview", "yaml": taking})),
+        None,
+    )
+    .unwrap()
+    {
+        Reply::Preview { preview } => match *preview {
+            Preview::Refused { problem } => assert_eq!(
+                (problem.code.as_str(), problem.field.as_deref()),
+                ("app_plugin_name_taken", Some("name"))
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        },
+        other => panic!("expected a preview, got {other:?}"),
+    }
+    for replace in [false, true] {
+        assert_eq!(
+            send(
+                &root,
+                request(
+                    json!({"kind": "add", "yaml": taking, "sha256": taking_sha, "replace": replace})
+                ),
+                None
+            )
+            .unwrap_err()
+            .0,
+            "app_plugin_name_taken",
+            "replace {replace}"
+        );
+    }
+    let kept = store::connector_ready(&db, &root, "board").unwrap();
+    assert_eq!(kept.manifest.sha256, board_sha);
+    assert_eq!(kept.bindings.len(), 1, "the connector keeps its key");
+}

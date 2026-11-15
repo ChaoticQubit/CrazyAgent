@@ -485,3 +485,48 @@ fn a_connectors_request_is_bounded_and_every_code_has_a_plain_sentence() {
     }
     assert!(crate::app_plugins::plain_problem("app_plugin_not_connector").is_some());
 }
+
+#[test]
+fn a_connector_add_never_replaces_an_embedding_plugin_of_that_name() {
+    let (_tmp, root) = engine();
+    let db = crate::questions::open(&root).unwrap();
+    store::add(&db, &root, NEAR, &sha(NEAR), false, 1).unwrap();
+    let taking = BOARD.replacen("name: board", "name: near", 1);
+    match send(
+        &root,
+        request(json!({"kind": "preview", "yaml": taking})),
+        None,
+    )
+    .unwrap()
+    {
+        Reply::Preview { preview } => match *preview {
+            Preview::Refused { problem } => assert_eq!(
+                (problem.code.as_str(), problem.field.as_deref()),
+                ("app_plugin_name_taken", Some("name"))
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        },
+        other => panic!("expected a preview, got {other:?}"),
+    }
+    for replace in [false, true] {
+        assert_eq!(
+            refused(
+                &root,
+                json!({"kind": "add", "yaml": taking, "sha256": sha(&taking), "replace": replace})
+            ),
+            "app_plugin_name_taken",
+            "replace {replace}"
+        );
+    }
+    assert_eq!(
+        store::kind_of(&root, "near").unwrap(),
+        Some(PluginKind::Embedding)
+    );
+    let kept = store::list(&db, &root).unwrap();
+    let near = kept
+        .plugins
+        .iter()
+        .find(|plugin| plugin.name == "near")
+        .unwrap();
+    assert_eq!(near.sha256, sha(NEAR));
+}
