@@ -2978,8 +2978,9 @@ impl ProjectSandbox {
     /// does, only by a profile that adds worktrees ([`Self::adding_worktrees`] or a lead's
     /// teammates' setup), since the owner's `git worktree repair` would point a real
     /// checkout at an admin folder planted with them; they are never rewritten, removed,
-    /// re-permissioned, flagged or given an ACL, so the owner's git keeps reading them
-    /// (RV-DS241-185), and no `config.worktree` may be written. No link
+    /// re-permissioned, flagged, given an ACL or hard linked under a name an agent could
+    /// change them through, so the owner's git keeps reading them (RV-DS241-185, rv-sa241
+    /// NV-1), and no `config.worktree` may be written. No link
     /// may be made anywhere in the git folder, in any letter case: git's `worktree prune`,
     /// which the owner's next commit runs as maintenance, empties whatever folder a link at
     /// `.git/worktrees` or `.git/worktrees/<name>` names (SECAUDIT-WORKTREE-ADMIN-PLANT). Each
@@ -3004,7 +3005,7 @@ impl ProjectSandbox {
             " file-write-create"
         };
         let mut links = format!(
-            "(deny file-write-unlink file-write-data file-write-mode file-write-flags file-write-acl{create}\n  (regex #\"^{admin}/({}|{})$\")\n  (regex #\"^{checkouts}/{git}$\")",
+            "(deny file-write-unlink file-write-data file-write-mode file-write-flags file-write-acl file-link{create}\n  (regex #\"^{admin}/({}|{})$\")\n  (regex #\"^{checkouts}/{git}$\")",
             any_case("commondir"),
             any_case("gitdir")
         );
@@ -3549,7 +3550,8 @@ impl Checkout {
     /// objects the owner and the other agents share: no write in `info/` or `pack/`, nor of
     /// either folder entry, in any letter case, no new, moved or removed fan-out folder, no
     /// new object file by any route (create, rename or link) and no rewrite, removal or
-    /// replacement of one, no symlink anywhere in the store, and no mode, flag or ACL change
+    /// replacement of one, no hard link of one under a name it could change it through
+    /// (rv-sa241 NV-1), no symlink anywhere in the store, and no mode, flag or ACL change
     /// of anything in it, which would keep the owner's git and every landing from reading an
     /// object (RV-DS241-185). Git reads a loose object before a packed one without checking
     /// its bytes, so any object an agent could add would stand in for the owner's own;
@@ -3562,11 +3564,12 @@ impl Checkout {
         let pattern = seatbelt_pattern(&self.objects);
         let held = format!("({}|{})", any_case("info"), any_case("pack"));
         let text = format!(
-            "(deny file-write*\n  (regex #\"^{pattern}/{held}(/.*)?$\"))\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (regex #\"^{pattern}/{HEX}{HEX}$\")\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (require-all (subpath \"{objects}\") (vnode-type SYMLINK)))\n(deny file-write-mode file-write-flags file-write-acl\n  (subpath \"{objects}\"))\n"
+            "(deny file-write*\n  (regex #\"^{pattern}/{held}(/.*)?$\"))\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data file-link\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (regex #\"^{pattern}/{HEX}{HEX}$\")\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (require-all (subpath \"{objects}\") (vnode-type SYMLINK)))\n(deny file-write-mode file-write-flags file-write-acl\n  (subpath \"{objects}\"))\n"
         );
         assert!(text.matches("(regex #\"^/").count() == 5);
         assert!(text.contains("(vnode-type SYMLINK)"));
         assert!(text.contains("(deny file-write-mode file-write-flags file-write-acl"));
+        assert!(text.contains("(deny file-write-unlink file-write-data file-link"));
         text
     }
 }
