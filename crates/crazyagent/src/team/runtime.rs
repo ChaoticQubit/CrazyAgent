@@ -789,6 +789,7 @@ pub struct TeamRuntime {
     resuming: Option<(i64, Resume)>,
     settled: bool,
     notices: crate::notifications::reconcile::Ticker,
+    keep_awake: crate::keep_awake::Keeper,
     naming: Option<i64>,
     run_model: Option<String>,
     fresh_start: Option<i64>,
@@ -1069,6 +1070,8 @@ impl TeamRuntime {
         crate::project_setup::initialize(&connection)?;
         crate::notifications::initialize(&connection)?;
         crate::notifications::events::engine_started(&connection, now_ms());
+        crate::keep_awake::initialize(&connection)?;
+        crate::keep_awake::engine_started(&connection)?;
         if let Err(problem) = crate::usage::initialize(&connection) {
             eprintln!(
                 "team usage is not counted: {}",
@@ -1137,6 +1140,7 @@ impl TeamRuntime {
             resuming: None,
             settled: false,
             notices: crate::notifications::reconcile::Ticker::default(),
+            keep_awake: crate::keep_awake::Keeper::default(),
             naming: None,
             run_model: None,
             fresh_start: None,
@@ -1584,8 +1588,13 @@ impl TeamRuntime {
     /// scorecard's daily question when it is due, alerts the owner to new questions and
     /// terminal waits by severity, then brings the notification store in step (DEC-136a).
     /// A project no longer active has its live switch off, so its next switch-on counts as
-    /// a new start.
+    /// a new start. Keep awake (DEC-167) takes its step first, so a failing team step
+    /// never stops it from seeing running work.
     pub fn tick(&mut self) -> Result<(), EngineError> {
+        let awake = self
+            .keep_awake
+            .tick(&self.connection, now_ms())
+            .map(|_view| ());
         self.settle()?;
         self.collect()?;
         self.send_own_rules()?;
@@ -1614,7 +1623,7 @@ impl TeamRuntime {
             .tick(&mut self.connection, &access, now_ms())
             .map(|_ran| ());
         let lanes = self.lanes();
-        questions.and(notices).and(lanes)
+        questions.and(notices).and(lanes).and(awake)
     }
 
     /// Moves every project's heavy lane one step (F28): the lane folders of each project's

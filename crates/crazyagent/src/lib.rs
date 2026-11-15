@@ -40,6 +40,7 @@ pub mod instruction_cleanup;
 pub mod instruction_files;
 #[cfg(unix)]
 pub mod isolation;
+pub mod keep_awake;
 pub mod landing;
 pub mod landing_turns;
 pub mod launch_context;

@@ -237,6 +237,10 @@ pub enum Command {
         action: crate::notifications::NoticeAction,
     },
     #[serde(skip_deserializing)]
+    OwnerKeepAwake {
+        action: crate::keep_awake::KeepAwakeAction,
+    },
+    #[serde(skip_deserializing)]
     OwnerMemory {
         action: crate::memory::library::LibraryAction,
     },

@@ -113,7 +113,10 @@ const IDLE_AND_LID: Want = Want::IdleAndLid { display: false };
 #[test]
 fn auto_holds_while_a_team_agent_works_and_releases_after_the_grace_period() {
     let (_folder, connection) = engine();
-    assert_eq!(view(&connection).unwrap().settings, KeepAwakeSettings::DEFAULT);
+    assert_eq!(
+        view(&connection).unwrap().settings,
+        KeepAwakeSettings::DEFAULT
+    );
     let nobody = evaluate(&connection, NOW_MS, None).unwrap();
     assert_eq!(nobody.state.want, Want::Nothing);
     assert_eq!(nobody.work, 0);
@@ -126,14 +129,16 @@ fn auto_holds_while_a_team_agent_works_and_releases_after_the_grace_period() {
     assert_eq!(held.work, 1);
     assert_eq!(view(&connection).unwrap(), held);
     mark(&connection, worker, "idle");
-    let grace = evaluate(&connection, last_ms + SECOND_MS, None).unwrap();
+    let gone_ms = last_ms + SECOND_MS;
+    let grace = evaluate(&connection, gone_ms, None).unwrap();
     assert_eq!(grace.state.want, IDLE);
     assert_eq!(grace.state.reason, Reason::Grace);
-    assert_eq!(grace.state.ends_at_ms, Some(last_ms + 10 * MINUTE_MS));
+    assert_eq!(grace.state.ends_at_ms, Some(gone_ms + 10 * MINUTE_MS));
     assert_eq!(grace.work, 0);
-    let late = evaluate(&connection, last_ms + 10 * MINUTE_MS - 1, None).unwrap();
+    let late = evaluate(&connection, gone_ms + 10 * MINUTE_MS - 1, None).unwrap();
     assert_eq!(late.state.want, IDLE);
-    let released = evaluate(&connection, last_ms + 10 * MINUTE_MS, None).unwrap();
+    assert_eq!(late.state.ends_at_ms, Some(gone_ms + 10 * MINUTE_MS));
+    let released = evaluate(&connection, gone_ms + 10 * MINUTE_MS, None).unwrap();
     assert_eq!(released.state.want, Want::Nothing);
     assert_eq!(released.state.reason, Reason::Idle);
     assert_eq!(released.state.ended, None);
@@ -162,7 +167,10 @@ fn manual_hold_ends_at_its_deadline_and_extend_moves_it() {
     assert_eq!(held.state.reason, Reason::Timer);
     assert_eq!(held.state.ends_at_ms, Some(NOW_MS + HOUR_MS));
     let extend = KeepAwakeAction::Extend { minutes: 30 };
-    assert_eq!(act(&connection, extend, NOW_MS + MINUTE_MS), Outcome::Applied);
+    assert_eq!(
+        act(&connection, extend, NOW_MS + MINUTE_MS),
+        Outcome::Applied
+    );
     let moved = view(&connection).unwrap();
     assert_eq!(moved.state.ends_at_ms, Some(NOW_MS + 90 * MINUTE_MS));
     let far = KeepAwakeAction::Extend { minutes: 1440 };
@@ -195,12 +203,18 @@ fn a_timer_in_auto_holds_until_the_later_of_the_timer_and_the_work() {
     assert_eq!(after_timer.state.ended, None);
     mark(&connection, worker, "idle");
     let start = KeepAwakeAction::Start { minutes: 60 };
-    assert_eq!(act(&connection, start, NOW_MS + 3 * MINUTE_MS), Outcome::Applied);
+    assert_eq!(
+        act(&connection, start, NOW_MS + 3 * MINUTE_MS),
+        Outcome::Applied
+    );
     let after_grace = evaluate(&connection, NOW_MS + 30 * MINUTE_MS, None).unwrap();
     assert_eq!(after_grace.state.want, IDLE);
     assert_eq!(after_grace.state.reason, Reason::Timer);
     assert_eq!(after_grace.state.ends_at_ms, Some(NOW_MS + 63 * MINUTE_MS));
-    assert_eq!(act(&connection, KeepAwakeAction::End, NOW_MS + 31 * MINUTE_MS), Outcome::Applied);
+    assert_eq!(
+        act(&connection, KeepAwakeAction::End, NOW_MS + 31 * MINUTE_MS),
+        Outcome::Applied
+    );
     let ended = view(&connection).unwrap();
     assert_eq!(ended.state.want, Want::Nothing);
     assert_eq!(ended.state.ended, Some(EndReason::Manual));
@@ -210,8 +224,14 @@ fn a_timer_in_auto_holds_until_the_later_of_the_timer_and_the_work() {
 fn end_in_auto_stands_down_until_the_running_work_finishes() {
     let (_folder, connection) = engine();
     let worker = agent(&connection, "working");
-    assert_eq!(evaluate(&connection, NOW_MS, None).unwrap().state.want, IDLE);
-    assert_eq!(act(&connection, KeepAwakeAction::End, NOW_MS + SECOND_MS), Outcome::Applied);
+    assert_eq!(
+        evaluate(&connection, NOW_MS, None).unwrap().state.want,
+        IDLE
+    );
+    assert_eq!(
+        act(&connection, KeepAwakeAction::End, NOW_MS + SECOND_MS),
+        Outcome::Applied
+    );
     let ended = view(&connection).unwrap();
     assert_eq!(ended.state.want, Want::Nothing);
     assert_eq!(ended.state.ended, Some(EndReason::Manual));
@@ -231,7 +251,10 @@ fn end_in_auto_stands_down_until_the_running_work_finishes() {
 fn off_never_holds_even_with_work() {
     let (_folder, connection) = engine();
     agent(&connection, "working");
-    assert_eq!(evaluate(&connection, NOW_MS, None).unwrap().state.want, IDLE);
+    assert_eq!(
+        evaluate(&connection, NOW_MS, None).unwrap().state.want,
+        IDLE
+    );
     set(
         &connection,
         KeepAwakeSettings {
@@ -257,7 +280,11 @@ fn off_never_holds_even_with_work() {
     };
     set(&connection, manual);
     let waiting = view(&connection).unwrap();
-    assert_eq!(waiting.state.want, Want::Nothing, "Manual ignores running work");
+    assert_eq!(
+        waiting.state.want,
+        Want::Nothing,
+        "Manual ignores running work"
+    );
     assert_eq!(waiting.state.reason, Reason::Idle);
 }
 
@@ -281,7 +308,11 @@ fn the_cap_ends_a_hold_that_runs_longer_than_the_cap() {
     assert_eq!(capped.state.want, Want::Nothing);
     assert_eq!(capped.state.ended, Some(EndReason::Cap));
     let still = evaluate(&connection, NOW_MS + 4 * HOUR_MS + 5 * SECOND_MS, None).unwrap();
-    assert_eq!(still.state.want, Want::Nothing, "Auto stands down while that work runs");
+    assert_eq!(
+        still.state.want,
+        Want::Nothing,
+        "Auto stands down while that work runs"
+    );
     assert_eq!(still.state.ended, Some(EndReason::Cap));
     mark(&connection, worker, "idle");
     let rested = evaluate(&connection, NOW_MS + 5 * HOUR_MS, None).unwrap();
@@ -299,12 +330,19 @@ fn the_cap_ends_a_hold_that_runs_longer_than_the_cap() {
     assert_eq!(decide(&none, &long).want, IDLE_AND_LID);
     assert_eq!(decide(&none, &long).ends_at_ms, None);
     let timer = KeepAwakeAction::Start { minutes: 480 };
-    assert_eq!(act(&connection, timer, NOW_MS + 6 * HOUR_MS), Outcome::Applied);
+    assert_eq!(
+        act(&connection, timer, NOW_MS + 6 * HOUR_MS),
+        Outcome::Applied
+    );
     let capped_timer = evaluate(&connection, NOW_MS + 10 * HOUR_MS, None).unwrap();
     assert_eq!(capped_timer.state.want, Want::Nothing);
     assert_eq!(capped_timer.state.ended, Some(EndReason::Cap));
     let after = evaluate(&connection, NOW_MS + 11 * HOUR_MS, None).unwrap();
-    assert_eq!(after.state.want, Want::Nothing, "the cap also drops the timer");
+    assert_eq!(
+        after.state.want,
+        Want::Nothing,
+        "the cap also drops the timer"
+    );
 }
 
 #[test]
@@ -345,7 +383,10 @@ fn on_battery_the_ac_only_lid_rule_drops_to_idle_only() {
         display_awake: DisplayAwake::WhileHolding,
         ..settings
     };
-    assert_eq!(decide(&shown, &on_ac).want, Want::IdleAndLid { display: true });
+    assert_eq!(
+        decide(&shown, &on_ac).want,
+        Want::IdleAndLid { display: true }
+    );
     let mut closed = on_ac.clone();
     closed.sensors.lid_closed = Some(true);
     assert_eq!(decide(&shown, &closed).want, IDLE_AND_LID);
@@ -356,7 +397,10 @@ fn battery_below_the_floor_ends_the_hold_and_says_why() {
     let settings = KeepAwakeSettings::DEFAULT;
     assert_eq!(settings.battery_floor, BatteryFloor::Pct10);
     for pct in [9, 10] {
-        let low = decide(&settings, &working(sensors(PowerSource::Battery, Some(pct))));
+        let low = decide(
+            &settings,
+            &working(sensors(PowerSource::Battery, Some(pct))),
+        );
         assert_eq!(low.want, Want::Nothing);
         assert_eq!(low.ended, Some(EndReason::Battery { pct }));
         assert_eq!(low.ends_at_ms, None);
@@ -382,7 +426,11 @@ fn battery_below_the_floor_ends_the_hold_and_says_why() {
         for pct in [1, 5, 6, 10, 11, 20, 21] {
             let decision = decide(&chosen, &working(sensors(PowerSource::Battery, Some(pct))));
             let ends = percent.is_some_and(|floor| pct <= floor);
-            assert_eq!(decision.want == Want::Nothing, ends, "{battery_floor:?} at {pct}");
+            assert_eq!(
+                decision.want == Want::Nothing,
+                ends,
+                "{battery_floor:?} at {pct}"
+            );
         }
     }
 }
@@ -399,7 +447,10 @@ fn an_unreadable_battery_twice_on_battery_ends_the_hold() {
     let mut desk = working(sensors(PowerSource::Ac, None));
     desk.sensors.battery_unread_twice = true;
     let no_battery = decide(&settings, &desk);
-    assert_eq!(no_battery.want, IDLE_AND_LID, "a Mac with no battery keeps its hold");
+    assert_eq!(
+        no_battery.want, IDLE_AND_LID,
+        "a Mac with no battery keeps its hold"
+    );
     assert_eq!(no_battery.ended, None);
     let mut unknown = working(sensors(PowerSource::Unknown, None));
     unknown.sensors.battery_unread_twice = true;
@@ -442,7 +493,10 @@ fn critical_heat_ends_and_serious_heat_only_notices_by_default() {
         heat_end: HeatEnd::Serious,
         ..settings
     };
-    assert_eq!(decide(&early, &at(Heat::Serious)).ended, Some(EndReason::Heat));
+    assert_eq!(
+        decide(&early, &at(Heat::Serious)).ended,
+        Some(EndReason::Heat)
+    );
     assert_eq!(decide(&early, &at(Heat::Fair)).want, IDLE_AND_LID);
     let never = KeepAwakeSettings {
         heat_end: HeatEnd::Never,
@@ -507,7 +561,10 @@ fn every_setting_option_round_trips_through_the_owner_protocol() {
         let Command::OwnerKeepAwake { action } = sent.command().unwrap() else {
             panic!("a Keep awake change is its own command");
         };
-        assert_eq!(apply(&connection, &action, NOW_MS).unwrap(), Outcome::Applied);
+        assert_eq!(
+            apply(&connection, &action, NOW_MS).unwrap(),
+            Outcome::Applied
+        );
         assert_eq!(OwnerRead::KeepAwake.command().unwrap(), None);
         let reader = Connection::open_with_flags(
             folder.path().join("engine.db"),
@@ -543,7 +600,11 @@ fn every_setting_option_round_trips_through_the_owner_protocol() {
 #[test]
 fn the_work_count_adds_agents_research_landings_and_master_turns() {
     let bare = Connection::open_in_memory().unwrap();
-    assert_eq!(work::count(&bare).unwrap(), 0, "no tables yet means no work");
+    assert_eq!(
+        work::count(&bare).unwrap(),
+        0,
+        "no tables yet means no work"
+    );
     let (_folder, connection) = engine();
     assert_eq!(work::count(&connection).unwrap(), 0);
     agent(&connection, "working");
@@ -602,19 +663,69 @@ fn a_restarted_engine_starts_with_no_hold() {
 }
 
 #[test]
-fn the_keeper_evaluates_at_once_on_a_change_and_every_five_seconds() {
+fn the_keeper_looks_each_second_and_evaluates_on_a_change_or_every_five_seconds() {
     let (_folder, connection) = engine();
     let mut keeper = Keeper::default();
     assert!(keeper.tick(&connection, NOW_MS).unwrap().is_some());
-    assert!(keeper.tick(&connection, NOW_MS + 250).unwrap().is_none());
     agent(&connection, "working");
-    let seen = keeper.tick(&connection, NOW_MS + 500).unwrap();
-    assert_eq!(seen.unwrap().state.want, IDLE, "a work change is seen at once");
-    assert!(keeper.tick(&connection, NOW_MS + 750).unwrap().is_none());
-    assert_eq!(act(&connection, KeepAwakeAction::End, NOW_MS + 800), Outcome::Applied);
-    let ended = keeper.tick(&connection, NOW_MS + 1000).unwrap();
-    assert_eq!(ended.unwrap().state.want, Want::Nothing, "an owner change is seen at once");
-    assert!(keeper.tick(&connection, NOW_MS + 1250).unwrap().is_none());
-    assert!(keeper.tick(&connection, NOW_MS + 1000 + TICK_MS - 1).unwrap().is_none());
-    assert!(keeper.tick(&connection, NOW_MS + 1000 + TICK_MS).unwrap().is_some());
+    let early = keeper.tick(&connection, NOW_MS + 250).unwrap();
+    assert!(early.is_none(), "the keeper looks once a second");
+    let seen = keeper.tick(&connection, NOW_MS + SECOND_MS).unwrap();
+    assert_eq!(
+        seen.unwrap().state.want,
+        IDLE,
+        "a work change is seen in a second"
+    );
+    assert!(
+        keeper
+            .tick(&connection, NOW_MS + 2 * SECOND_MS)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        act(&connection, KeepAwakeAction::End, NOW_MS + 2500),
+        Outcome::Applied
+    );
+    let ended = keeper.tick(&connection, NOW_MS + 3 * SECOND_MS).unwrap();
+    assert_eq!(
+        ended.unwrap().state.want,
+        Want::Nothing,
+        "an owner change is seen too"
+    );
+    assert!(
+        keeper
+            .tick(&connection, NOW_MS + 4 * SECOND_MS)
+            .unwrap()
+            .is_none()
+    );
+    let evaluated_ms = NOW_MS + 3 * SECOND_MS;
+    assert!(
+        keeper
+            .tick(&connection, evaluated_ms + TICK_MS - 1)
+            .unwrap()
+            .is_none()
+    );
+    let due = keeper
+        .tick(&connection, evaluated_ms + TICK_MS + SECOND_MS)
+        .unwrap();
+    assert!(
+        due.is_some(),
+        "with no change the keeper evaluates every five seconds"
+    );
+    let unchanged: String = connection
+        .query_row("SELECT state FROM keep_awake_state", [], |row| row.get(0))
+        .unwrap();
+    assert!(
+        keeper
+            .tick(&connection, evaluated_ms + 3 * TICK_MS)
+            .unwrap()
+            .is_some()
+    );
+    let after: String = connection
+        .query_row("SELECT state FROM keep_awake_state", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        after, unchanged,
+        "an evaluation that changes nothing writes nothing"
+    );
 }

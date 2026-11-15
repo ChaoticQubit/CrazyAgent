@@ -1105,6 +1105,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::master_frame_limit::initialize(connection)?;
     crate::learning::initialize(connection)?;
     crate::notifications::initialize(connection)?;
+    crate::keep_awake::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     crate::team::log_status_changes(connection)?;
@@ -1475,6 +1476,7 @@ fn apply(
             | Command::OwnerMasterFrames { .. }
             | Command::OwnerLearningMark { .. }
             | Command::OwnerNotifications { .. }
+            | Command::OwnerKeepAwake { .. }
             | Command::OwnerMemory { .. }
             | Command::OwnerSetup { .. }
     ) {
@@ -1668,6 +1670,9 @@ fn execute(
         Command::OwnerLearningMark { step, on } => crate::learning::mark(tx, *step, *on),
         Command::OwnerNotifications { action } => {
             crate::notifications::apply(tx, action, crate::team::now_ms())
+        }
+        Command::OwnerKeepAwake { action } => {
+            crate::keep_awake::apply(tx, action, crate::team::now_ms())
         }
         Command::OwnerMemory { action } => {
             crate::memory::library::execute(tx, config, action, revision)
@@ -2884,6 +2889,7 @@ fn owner_read(
         OwnerRead::NotificationSettings => OwnerData::NotificationSettings {
             settings: crate::notifications::settings(&tx)?,
         },
+        OwnerRead::KeepAwake => crate::keep_awake::read(&tx)?,
         OwnerRead::Memories {
             scope,
             search,

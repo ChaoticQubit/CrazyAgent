@@ -306,6 +306,9 @@ pub enum OwnerMutation {
     Notifications {
         action: crate::notifications::NoticeAction,
     },
+    KeepAwake {
+        action: crate::keep_awake::KeepAwakeAction,
+    },
     Memory {
         action: crate::memory::library::LibraryAction,
     },
@@ -648,6 +651,10 @@ impl OwnerMutation {
             Self::Notifications { action } => Command::OwnerNotifications {
                 action: action.clone(),
             },
+            Self::KeepAwake { action } => {
+                action.validate()?;
+                Command::OwnerKeepAwake { action: *action }
+            }
             Self::Memory { action } => {
                 action.validate()?;
                 Command::OwnerMemory {
@@ -860,6 +867,7 @@ pub enum OwnerRead {
         query: crate::notifications::NoticeQuery,
     },
     NotificationSettings,
+    KeepAwake,
     FoundProjects,
     FolderSize {
         path: String,
@@ -967,6 +975,7 @@ impl OwnerRead {
             | Self::SetupStatus
             | Self::LearningProgress
             | Self::NotificationSettings
+            | Self::KeepAwake
             | Self::FoundProjects
             | Self::Onboarding { .. }
             | Self::Memory { .. }
@@ -1441,6 +1450,9 @@ pub enum OwnerData {
     },
     NotificationSettings {
         settings: crate::notifications::NoticeSettings,
+    },
+    KeepAwake {
+        view: crate::keep_awake::KeepAwakeView,
     },
     ProjectsHome {
         home: crate::projects_home::ProjectsHome,

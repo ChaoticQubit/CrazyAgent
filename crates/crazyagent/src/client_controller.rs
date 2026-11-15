@@ -21,6 +21,7 @@ mod coord;
 mod harness_settings;
 mod ide;
 mod intake;
+mod keep_awake;
 mod memory;
 mod model_choice;
 mod notifications;

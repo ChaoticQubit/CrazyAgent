@@ -27,7 +27,8 @@ fn problem(path: &Path, what: impl std::fmt::Display) -> PathsError {
 }
 
 /// The three desktop platforms the data root and services are defined for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Platform {
     MacOs,
     Linux,

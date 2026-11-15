@@ -658,6 +658,7 @@ impl NativeBridge {
             OwnerMutation::SetMasterFrameSettings { .. } => ("master_frame_settings", None, None),
             OwnerMutation::SetLearningMark { .. } => ("learning_mark", None, None),
             OwnerMutation::Notifications { .. } => ("notifications", None, None),
+            OwnerMutation::KeepAwake { .. } => ("keep_awake", None, None),
             OwnerMutation::CreateProject { project_id, .. } => {
                 ("create_project", Some(project_id.as_str().to_owned()), None)
             }
