@@ -38,7 +38,7 @@ const NAMED_VALUE_MIN: usize = 8;
 const MAIN: &str = "main";
 const ENGINE_EMAIL: &str = "engine@crazyagent.invalid";
 const ENGINE_START: &str = "Start project";
-const GITIGNORE: &str = ".gitignore";
+pub(super) const GITIGNORE: &str = ".gitignore";
 const MESSAGE: &str = "Publish with CrazyAgent";
 const AUTHOR_BYTES_MAX: usize = 256;
 const PUSH_TIME: Duration = Duration::from_secs(1800);
@@ -677,7 +677,7 @@ pub(super) fn lines_valid(approved: &[String]) -> bool {
 /// link or a FIFO, of at most 1 MiB of UTF-8, as `append_lines` then needs it.
 /// Input: the path. Output: its text, None when there is none, or
 /// `github_publish_gitignore_invalid`.
-fn read_gitignore(path: &Path) -> Result<Option<String>, EngineError> {
+pub(super) fn read_gitignore(path: &Path) -> Result<Option<String>, EngineError> {
     let invalid = || failure("github_publish_gitignore_invalid");
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),

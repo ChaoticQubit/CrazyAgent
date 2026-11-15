@@ -34,6 +34,14 @@ pub enum GitHubIgnoreDraft {
     Baseline { reason: String },
 }
 
+/// The draft a record from before the agent draft holds: none was asked for. Input: none.
+/// Output: the baseline draft with `github_publish_draft_not_asked`.
+fn not_asked() -> GitHubIgnoreDraft {
+    GitHubIgnoreDraft::Baseline {
+        reason: draft::NOT_ASKED.to_owned(),
+    }
+}
+
 /// Where a publish job stands: waiting for the owner to approve the .gitignore lines or
 /// to deal with a secret, or the last step it finished on the way to the rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +49,7 @@ pub enum GitHubIgnoreDraft {
 pub enum GitHubPublishStep {
     Lines {
         lines: Vec<String>,
+        #[serde(default = "not_asked")]
         draft: GitHubIgnoreDraft,
     },
     Blocked {
@@ -135,11 +144,14 @@ fn now() -> Result<u64, EngineError> {
 }
 
 impl GitHub {
-    /// Starts a publish: checks the plan, the sign-in and the project's git, and records
-    /// the .gitignore lines the owner is shown first. Nothing is written into the project.
+    /// Starts a publish: checks the plan, the sign-in and the project's git, asks the
+    /// project's agent through `ask` for .gitignore lines from the project's names only,
+    /// and records the lines the owner is shown first: the baseline, then the agent's, or
+    /// the baseline alone with the code `ask` gave. Nothing is written into the project.
     /// A job that made its repository already is gone on with Continue instead, and a
     /// start over an earlier job keeps the paths it wrote, which the commit then takes.
-    /// Inputs: the project folder and the plan. Output: the job at its lines, or
+    /// Inputs: the project folder, the plan and `ask`, which takes the prompt and gives
+    /// the reply or a code. Output: the job at its lines, or
     /// `github_repo_name_invalid`, `github_repo_description_invalid`,
     /// `github_publish_running`, `github_not_signed_in`, `github_publish_in_progress` or the
     /// project's git refusal.
@@ -147,9 +159,8 @@ impl GitHub {
         &self,
         project: &Path,
         plan: &GitHubPublishPlan,
-        draft: impl FnOnce(&str) -> Result<String, &'static str>,
+        ask: impl FnOnce(&str) -> Result<String, &'static str>,
     ) -> Result<GitHubPublishJob, EngineError> {
-        let _ = draft;
         api::check_new(&new_repo(plan))?;
         let _held = publishing(&self.root, project)?;
         self.saved()?;
@@ -166,16 +177,25 @@ impl GitHub {
             None => Vec::new(),
         };
         self.publish_inspect(project)?;
+        let existing = publish::read_gitignore(&project.join(publish::GITIGNORE))?;
+        let (listed, cut) = draft::listing(project)?;
+        let (agent, by) = match ask(&draft::prompt(&listed, cut, existing.as_deref())) {
+            Ok(reply) => (draft::reply_lines(&reply), GitHubIgnoreDraft::Agent),
+            Err(code) => (
+                Vec::new(),
+                GitHubIgnoreDraft::Baseline {
+                    reason: code.to_owned(),
+                },
+            ),
+        };
         let job = GitHubPublishJob {
             project: project.to_path_buf(),
             plan: plan.clone(),
             lines: Vec::new(),
             written,
             step: GitHubPublishStep::Lines {
-                lines: draft::merged(&[], None),
-                draft: GitHubIgnoreDraft::Baseline {
-                    reason: draft::NOT_ASKED.to_owned(),
-                },
+                lines: draft::merged(&agent, existing.as_deref()),
+                draft: by,
             },
             stopped: None,
         };

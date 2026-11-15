@@ -12,6 +12,7 @@ const TOKEN_FRAME_TIME: Duration = Duration::from_secs(5);
 const ACTION_TIME: Duration = Duration::from_secs(75);
 const CLONE_TIME: Duration = Duration::from_secs(1900);
 const PUBLISH_TIME: Duration = Duration::from_secs(1900);
+const DRAFT_AGENT: &str = "gitignore-draft";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -378,6 +379,10 @@ async fn handle(
         Action::Clone { .. } => Some(projects_home(engine, admission).await?),
         _ => None,
     };
+    let drafting = match &action {
+        Action::PublishStart { .. } => Some(draft_tools(engine, authority)),
+        _ => None,
+    };
     let root = engine_root(authority)?;
     tokio::task::spawn_blocking(move || -> Result<Reply, EngineError> {
         let account = GitHub::open(&root)?;
@@ -406,11 +411,26 @@ async fn handle(
             Action::Owners => Reply::Owners {
                 owners: account.owners()?,
             },
-            Action::PublishStart { project, plan } => Reply::Publish {
-                job: account.publish_start(&project_folder(&root, &project)?, &plan, |_| {
-                    Err(crate::instruction_cleanup::UNAVAILABLE)
-                })?,
-            },
+            Action::PublishStart { project, plan } => {
+                let (settings, codex, claude) = drafting.ok_or_else(unknown)?;
+                let folder = project_folder(&root, &project)?;
+                let job = account.publish_start(&folder, &plan, |prompt| {
+                    let (global, local) = settings
+                        .as_ref()
+                        .ok_or(crate::instruction_cleanup::UNAVAILABLE)?;
+                    crate::instruction_cleanup::run(&crate::instruction_cleanup::Request {
+                        root: &root,
+                        settings: (global, local),
+                        codex: codex.as_deref(),
+                        claude: claude.as_deref(),
+                        project: Some(&project),
+                        pool: None,
+                        prompt,
+                        agent: DRAFT_AGENT,
+                    })
+                })?;
+                Reply::Publish { job }
+            }
             Action::PublishApprove { project, lines } => Reply::Publish {
                 job: account.publish_approve(
                     &project_folder(&root, &project)?,
@@ -444,6 +464,24 @@ async fn handle(
     })
     .await
     .map_err(|_| unknown())?
+}
+
+/// What a publish's .gitignore draft runs with: the engine's settings files and the
+/// model harnesses it verified, as Edit with AI runs. Inputs: the engine and the
+/// authority. Output: the settings files and the Codex and Claude Code paths, each none
+/// when the engine has not got it, so the draft falls back to the baseline.
+fn draft_tools(
+    engine: &Engine,
+    authority: &Authority,
+) -> (Option<(PathBuf, PathBuf)>, Option<PathBuf>, Option<PathBuf>) {
+    let (codex, claude) = match authority.native_auth_host.lock() {
+        Ok(host) => host.model_harnesses(),
+        Err(_) => (None, None),
+    };
+    let path = |host: Option<Arc<crate::engine::native_auth_host::RegisteredNativeAuthHost>>| {
+        host.and_then(|host| host.verified_path().ok().map(Path::to_path_buf))
+    };
+    (engine.settings_files(), path(codex), path(claude))
 }
 
 /// Finds the folder a publish works on from the project's stored setup, so a client names
