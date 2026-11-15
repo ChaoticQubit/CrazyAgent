@@ -1162,6 +1162,13 @@ fn real_folder(folder: &Path) -> Result<(), AgentHomeError> {
 /// home. Output: unit, or `agent_home_unwritable` when one stays, refusing the launch.
 pub(crate) fn remove_shell_startup(home: &Path) -> Result<(), AgentHomeError> {
     assert!(home.is_absolute());
+    for name in ZSH_STARTUP {
+        remove_entry(&home.join(name))?;
+        remove_entry(&home.join(format!("{name}{ZSH_COMPILED}")))?;
+    }
+    for name in SH_STARTUP {
+        remove_entry(&home.join(name))?;
+    }
     Ok(())
 }
 
