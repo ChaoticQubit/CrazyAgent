@@ -195,6 +195,23 @@ fn start_trusted(
     Ok(())
 }
 
+#[cfg(test)]
+static BETWEEN_CHECK_AND_CAPTURE: std::sync::Mutex<Vec<(PathBuf, Box<dyn FnOnce() + Send>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Takes the step a row set to run in [`OwnerRuntimeHandle::find_harness`] after the found
+/// entry passed its checks and before its file is captured, so a row can move a link in
+/// the entry's chain in that gap. Input: the entry. Output: the step, none for every other
+/// entry.
+#[cfg(test)]
+fn between_check_and_capture(entry: &Path) -> Option<Box<dyn FnOnce() + Send>> {
+    let mut steps = BETWEEN_CHECK_AND_CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let at = steps.iter().position(|(path, _)| path == entry)?;
+    Some(steps.remove(at).1)
+}
+
 pub(crate) struct NativeAuthDispatchHost {
     #[cfg(unix)]
     engine: Arc<Engine>,
@@ -664,6 +681,10 @@ impl OwnerRuntimeHandle {
             }
         };
         assert!(entry.is_absolute());
+        #[cfg(test)]
+        if let Some(step) = between_check_and_capture(&entry) {
+            step();
+        }
         let captured = RegisteredNativeAuthHost::capture_entry(&entry).and_then(|host| {
             host.verified_path()?;
             Ok(host)

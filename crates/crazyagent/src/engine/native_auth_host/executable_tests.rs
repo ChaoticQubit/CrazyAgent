@@ -5,6 +5,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 /// Passes every entry a re-pin uses, so these rows test the pin alone; the engine-start
 /// checks a re-pin runs are proven in the registry rows. Input: the entry. Output: Ok.
@@ -767,4 +768,78 @@ fn a_host_whose_change_time_alone_moved_keeps_verifying_and_a_later_write_is_sti
         registered.current(trusted).map(|_| ()).unwrap_err().0,
         "native_auth_host_executable_changed"
     );
+}
+
+fn relink(link: &Path, to: &Path) {
+    std::fs::remove_file(link).unwrap();
+    symlink(to, link).unwrap();
+}
+
+#[test]
+fn a_re_pin_checks_the_file_it_pins_not_a_later_resolution_of_its_entry() {
+    use std::sync::atomic::Ordering;
+    let made = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(made.path()).unwrap();
+    let (owner, agent) = (root.join("owner"), root.join("agent"));
+    std::fs::create_dir_all(&owner).unwrap();
+    std::fs::create_dir_all(&agent).unwrap();
+    let installed = executable(&owner, "codex-0.167.1");
+    let planted = executable(&agent, "codex");
+    let middle = agent.join("middle");
+    symlink(&installed, &middle).unwrap();
+    let entry = owner.join("codex");
+    symlink(&middle, &entry).unwrap();
+    let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&entry).unwrap());
+    assert_eq!(registered.verified_path().unwrap(), installed);
+    relink(&middle, &planted);
+    let checks = AtomicUsize::new(0);
+    let check = |path: &Path| -> Result<(), crate::engine::EngineError> {
+        if checks.fetch_add(1, Ordering::SeqCst) == 0 {
+            relink(&middle, &installed);
+        }
+        let real = std::fs::canonicalize(path).unwrap();
+        if path.starts_with(&agent) || real.starts_with(&agent) {
+            return Err(crate::engine::EngineError(
+                crate::harnesses::finding::PATH_AGENT_SPACE.into(),
+            ));
+        }
+        Ok(())
+    };
+    assert_eq!(
+        registered.current(check).map(|_| ()).unwrap_err().0,
+        crate::harnesses::finding::PATH_AGENT_SPACE
+    );
+    assert_eq!(checks.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_re_pin_refuses_an_entry_that_moved_while_its_file_was_pinned() {
+    use std::sync::atomic::Ordering;
+    let made = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(made.path()).unwrap();
+    let (owner, agent) = (root.join("owner"), root.join("agent"));
+    std::fs::create_dir_all(&owner).unwrap();
+    std::fs::create_dir_all(&agent).unwrap();
+    let old = executable(&owner, "codex-0.166.0");
+    let new = executable(&owner, "codex-0.167.1");
+    let planted = executable(&agent, "codex");
+    let middle = agent.join("middle");
+    symlink(&old, &middle).unwrap();
+    let entry = owner.join("codex");
+    symlink(&middle, &entry).unwrap();
+    let registered = Arc::new(RegisteredNativeAuthHost::capture_entry(&entry).unwrap());
+    assert_eq!(registered.verified_path().unwrap(), old);
+    relink(&middle, &new);
+    let checks = AtomicUsize::new(0);
+    let check = |_: &Path| -> Result<(), crate::engine::EngineError> {
+        if checks.fetch_add(1, Ordering::SeqCst) == 1 {
+            relink(&middle, &planted);
+        }
+        Ok(())
+    };
+    assert_eq!(
+        registered.current(check).map(|_| ()).unwrap_err().0,
+        "native_auth_host_executable_changed"
+    );
+    assert_eq!(checks.load(Ordering::SeqCst), 2);
 }

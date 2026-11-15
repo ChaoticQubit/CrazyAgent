@@ -986,3 +986,54 @@ async fn a_re_pin_to_a_new_install_in_an_owner_folder_is_used() {
     })
     .await;
 }
+
+/// RV-DS241-140: Check again pins the file it checked. A link in the found entry's chain
+/// that moves to an agent-planted file between the check and the capture gets the capture
+/// refused with the start check's own code, and nothing is pinned.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn check_again_pins_only_the_file_it_checked_when_a_middle_link_moves() {
+    registry_case(|host, root| async move {
+        let owner = root.join("owner");
+        let planted = root.join("work/.crazyagent/agents/a1/bin");
+        std::fs::create_dir_all(&owner).unwrap();
+        std::fs::create_dir_all(&planted).unwrap();
+        let installed = physical_file(&owner, "codex-0.167.1", b"owner-codex");
+        let dropped = physical_file(&planted, "codex", b"agent-codex");
+        let middle = planted.join("middle");
+        std::os::unix::fs::symlink(&installed, &middle).unwrap();
+        let entry = owner.join("codex");
+        std::os::unix::fs::symlink(&middle, &entry).unwrap();
+        let moved = middle.clone();
+        super::BETWEEN_CHECK_AND_CAPTURE.lock().unwrap().push((
+            entry.clone(),
+            Box::new(move || {
+                std::fs::remove_file(&moved).unwrap();
+                std::os::unix::fs::symlink(&dropped, &moved).unwrap();
+            }),
+        ));
+        let search = Search::new(vec![owner], None, Vec::new());
+        assert_eq!(
+            host.find_harness("codex", None, &search, None).unwrap(),
+            Found::Refused {
+                path: entry.clone(),
+                code: crate::harnesses::finding::PATH_AGENT_SPACE.into(),
+            }
+        );
+        assert!(
+            !super::BETWEEN_CHECK_AND_CAPTURE
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(path, _)| *path == entry)
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .map(|_| ())
+                .unwrap_err()
+                .0,
+            "native_auth_host_unavailable"
+        );
+    })
+    .await;
+}
