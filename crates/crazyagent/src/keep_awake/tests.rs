@@ -824,6 +824,69 @@ fn the_keeper_looks_each_second_and_evaluates_on_a_change_or_every_five_seconds(
     );
 }
 
+/// A platform hold that remembers what it holds and counts how often it was let go.
+#[derive(Debug, Default)]
+struct Counted {
+    held: std::sync::Arc<std::sync::Mutex<Option<Want>>>,
+    releases: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl Hold for Counted {
+    fn apply(&mut self, want: &Want) -> Result<Held, HoldError> {
+        *self.held.lock().unwrap() = Some(*want).filter(|want| *want != Want::Nothing);
+        Ok(Held {
+            idle: *want != Want::Nothing,
+            lid: false,
+            display: false,
+        })
+    }
+
+    fn release(&mut self) {
+        *self.held.lock().unwrap() = None;
+        self.releases
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Reviewer note N4, leader 14:22: a keeper step that fails lets the platform hold go, so
+/// a broken engine fails toward sleep, and the next good step takes the hold again at once.
+#[test]
+fn a_failed_step_drops_the_platform_hold_and_the_next_good_step_takes_it_again() {
+    let (_folder, connection) = engine();
+    let hold = Counted::default();
+    let (held, releases) = (hold.held.clone(), hold.releases.clone());
+    let released = || releases.load(std::sync::atomic::Ordering::SeqCst);
+    let mut keeper = Keeper::with_hold(Box::new(hold));
+    agent(&connection, "working");
+    let view = keeper.tick(&connection, NOW_MS).unwrap().unwrap();
+    assert_eq!(view.state.want, IDLE);
+    assert_eq!(*held.lock().unwrap(), Some(IDLE));
+    assert_eq!(released(), 0);
+
+    connection
+        .execute_batch("ALTER TABLE keep_awake_state RENAME TO keep_awake_state_away")
+        .unwrap();
+    let failed = keeper.tick(&connection, NOW_MS + SECOND_MS);
+    assert!(failed.is_err(), "the step cannot read its state");
+    assert_eq!(*held.lock().unwrap(), None, "the hold is let go");
+    assert_eq!(released(), 1);
+    assert!(keeper.tick(&connection, NOW_MS + 2 * SECOND_MS).is_err());
+    assert_eq!(released(), 2, "every failed step lets go");
+
+    connection
+        .execute_batch("ALTER TABLE keep_awake_state_away RENAME TO keep_awake_state")
+        .unwrap();
+    let back = keeper.tick(&connection, NOW_MS + 3 * SECOND_MS).unwrap();
+    assert_eq!(
+        back.expect("the first good step evaluates at once")
+            .state
+            .want,
+        IDLE
+    );
+    assert_eq!(*held.lock().unwrap(), Some(IDLE), "the hold is taken again");
+    assert_eq!(released(), 2);
+}
+
 mod sensing;
 
 #[cfg(target_os = "linux")]
