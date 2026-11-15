@@ -382,7 +382,7 @@ mod tests {
             "/work/project/a.git",
             "/work/project/.git",
             "/work/project/.git/index.lock",
-            "/work/project/.git/modules/lib/.git/config",
+            "/work/project/.git/modules/lib/config",
             "/work/project/worktrees/a1/.git",
             "/work/clone/teammates/bo/.git",
             "/work/clone/teammates/bo/.git/HEAD",
@@ -393,6 +393,11 @@ mod tests {
             assert!(made(free), "{free}");
         }
         for refused in [
+            "/work/project/.git/modules/lib/.git",
+            "/work/project/.git/modules/lib/.git/config",
+            "/work/project/.git/.git",
+            "/work/clone/teammates/bo/.git/x/.GIT/config",
+            "/work/setup/one/.git/.git",
             "/work/project/sub/.git",
             "/work/project/sub/.git/config",
             "/work/project/sub/.git/hooks/pre-commit",
