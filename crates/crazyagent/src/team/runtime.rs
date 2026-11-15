@@ -11503,14 +11503,16 @@ fn live(
                     Ok(request) => request,
                     Err(problem) => return Some(problem),
                 };
-            let credential = match profile.hand_to_turn(&home, None, &plan.entry) {
-                Ok(credential) => credential,
-                Err(problem) => {
+            let handed = hand_after_check(by, || profile.hand_to_turn(&home, None, &plan.entry));
+            let credential = match handed {
+                Ok(Ok(credential)) => credential,
+                Ok(Err(problem)) => {
                     return Some(with_code(
                         "The signed-in account could not reach the agent",
                         Some(&problem.0),
                     ));
                 }
+                Err(refused) => return Some(start_problem(&refused)),
             };
             (
                 start_session(
@@ -11920,14 +11922,21 @@ fn native_session(
             return Some(problem);
         }
     };
-    let credential = match profile.hand_to_agent(home, plan.limits.run_time, &plan.entry) {
-        Ok(credential) => credential,
-        Err(problem) => {
+    let handed = hand_after_check(by, || {
+        profile.hand_to_agent(home, plan.limits.run_time, &plan.entry)
+    });
+    let credential = match handed {
+        Ok(Ok(credential)) => credential,
+        Ok(Err(problem)) => {
             turn_closed(reports, taken, Some(problem.0.clone()));
             return Some(with_code(
                 "The signed-in account could not reach the agent",
                 Some(&problem.0),
             ));
+        }
+        Err(refused) => {
+            turn_closed(reports, taken, Some(refused.0.clone()));
+            return Some(start_problem(&refused));
         }
     };
     let resume = plan.resume.as_ref();
@@ -12406,9 +12415,10 @@ fn per_turn(
         let process = rules.limit.map_or(plan.limits.run_time, |limit| {
             limit.min(plan.limits.run_time)
         });
-        let credential = match profile.hand_to_agent(home, process, &plan.entry) {
-            Ok(credential) => credential,
-            Err(problem) => {
+        let handed = hand_after_check(by, || profile.hand_to_agent(home, process, &plan.entry));
+        let credential = match handed {
+            Ok(Ok(credential)) => credential,
+            Ok(Err(problem)) => {
                 let _ = reports.send(Report::Finished {
                     text: String::new(),
                     end: TurnEnd::Closed,
@@ -12418,6 +12428,14 @@ fn per_turn(
                     "The signed-in account could not reach the agent",
                     Some(&problem.0),
                 ));
+            }
+            Err(refused) => {
+                let _ = reports.send(Report::Finished {
+                    text: String::new(),
+                    end: TurnEnd::Closed,
+                    cause: Some(refused.0.clone()),
+                });
+                return Some(start_problem(&refused));
             }
         };
         let started = start_session(
@@ -13274,6 +13292,16 @@ fn commands_left(by: &HoldBy) -> Result<(), LaunchError> {
         return Err(LaunchError(COMMANDS_LEFT.to_owned(), None));
     }
     Ok(())
+}
+
+/// Hands an agent's home what its run takes from the account, such as the credential copy,
+/// only once [`commands_left`] finds none of its last run's commands still running under a
+/// hold, so a held process never reads a fresh credential there (rv-code2 B2P2-1). Inputs:
+/// who starts and the hand-off. Output: what the hand-off gave, or [`COMMANDS_LEFT`].
+fn hand_after_check<T>(by: &HoldBy, hand: impl FnOnce() -> T) -> Result<T, LaunchError> {
+    let handed = hand();
+    commands_left(by)?;
+    Ok(handed)
 }
 
 /// Starts an agent's harness as [`AgentSession::start_resuming`] does, once

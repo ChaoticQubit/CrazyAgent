@@ -29736,6 +29736,41 @@ fn an_agent_is_not_started_while_commands_of_its_last_sandboxed_run_stay_held() 
     );
 }
 
+/// rv-code2 B2P2-1: nothing from the account, such as the credential copy, is handed to an
+/// agent's home while a hold still lists commands a sandboxed run of it left, since they
+/// read where the agent reads; another agent of the project is handed its own.
+#[cfg(unix)]
+#[test]
+fn nothing_is_handed_to_an_agent_home_while_commands_of_its_last_sandboxed_run_stay_held() {
+    let by = HoldBy {
+        project: Some("handed-left".into()),
+        who: "team agent 51".into(),
+    };
+    let other = HoldBy {
+        project: Some("handed-left".into()),
+        who: "team agent 52".into(),
+    };
+    let mut left = crate::harnesses::leftovers::tests::held_sandboxed(
+        by.clone(),
+        crate::harnesses::leftovers::LeftoverMode::Keep,
+    );
+    let handed = std::cell::Cell::new(0);
+
+    let refused = hand_after_check(&by, || handed.set(handed.get() + 1)).map_err(|e| e.0);
+    let while_refused = handed.get();
+    let given = hand_after_check(&other, || handed.set(handed.get() + 1)).map_err(|e| e.0);
+    let _ = left.kill();
+    let _ = left.wait();
+
+    assert_eq!(refused, Err(COMMANDS_LEFT.to_owned()));
+    assert_eq!(
+        while_refused, 0,
+        "the refused agent's home was handed the credential"
+    );
+    assert_eq!(given, Ok(()));
+    assert_eq!(handed.get(), 1);
+}
+
 /// A start that a projects home move holds back leaves its work waiting (HMC-N1): a
 /// delegated task stays queued with no attempt spent and no error, the owner's Keep warm
 /// switch stays on with no note, and the owner's restart of the master waits; once the move
