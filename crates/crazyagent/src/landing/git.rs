@@ -641,12 +641,14 @@ impl Repo {
     /// folder (RV-DS241-142). The folder starts empty and is emptied after, before the worktree's
     /// lock goes when the copy is not put back, so a git the step killed never leaves a lock there
     /// that no sweep removes, and the index is copied only from a plain file with one link, opened
-    /// without following a link or waiting on a FIFO. Once git exits 0 having rewritten the copy,
-    /// the copy takes the index's place only when it too is a plain file with one link, so whatever
-    /// a raced step leaves there is never taken, and a step that only reads leaves the index as it
-    /// was; the step itself never writes the git folder ([`Self::confined`]). Input: the step.
-    /// Output: its output, git's [`INDEX_LOCKED`] exit when the lock is already held, or
-    /// `changes_git_failed` when the index cannot be locked, copied or put back.
+    /// without following a link or waiting on a FIFO, and keeps the index's modified time, so an
+    /// entry racy against the index stays racy and git still reads its file (RV-DS241-147). Once
+    /// git exits 0 having rewritten the copy, the copy takes the index's place only when it too is
+    /// a plain file with one link, so whatever a raced step leaves there is never taken, and a step
+    /// that only reads leaves the index as it was; the step itself never writes the git folder
+    /// ([`Self::confined`]). Input: the step. Output: its output, git's [`INDEX_LOCKED`] exit when
+    /// the lock is already held, or `changes_git_failed` when the index cannot be locked, copied or
+    /// put back.
     #[cfg(target_os = "linux")]
     pub(super) fn swapped(
         &self,
@@ -720,12 +722,16 @@ impl Repo {
                 .open(&index)
             {
                 Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-                Ok(mut real) => {
-                    real.metadata().is_ok_and(|meta| plain(&meta))
-                        && std::fs::File::create_new(copy)
-                            .and_then(|mut written| std::io::copy(&mut real, &mut written))
-                            .is_ok()
-                }
+                Ok(mut real) => match real.metadata() {
+                    Ok(meta) if plain(&meta) => std::fs::File::create_new(copy)
+                        .and_then(|mut written| {
+                            std::io::copy(&mut real, &mut written)?;
+                            let modified = std::fs::FileTimes::new().set_modified(meta.modified()?);
+                            written.set_times(modified)
+                        })
+                        .is_ok(),
+                    _ => false,
+                },
             };
         let identity = |meta: &std::fs::Metadata| (meta.dev(), meta.ino());
         let ran = if copied {
