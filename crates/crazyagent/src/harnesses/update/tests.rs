@@ -2150,6 +2150,52 @@ fn an_agent_written_link_to_an_owner_harness_never_starts_a_node_planted_beside_
     assert!(!ran.exists(), "a node planted beside a refused link is never run");
 }
 
+/// security-audit vid 1 (NEXT-02:50 step 1): a harness file the resolver refuses as one
+/// another user can change, or, on the engine's places, as one that leads into a temp
+/// folder, is never run for its version, and what it needs names that refusal.
+#[test]
+fn a_harness_the_resolver_refuses_as_changeable_or_in_temp_is_never_asked_its_version() {
+    use crate::tools::Refusal;
+    let machine = Machine::new();
+    let roots = machine.roots();
+    std::fs::create_dir_all(&roots.home).unwrap();
+    let at = machine.root.path();
+    let text = |ran: &Path| {
+        format!(
+            "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+            ran.display()
+        )
+    };
+    let (open, open_ran) = (at.join("open/codex"), at.join("open-ran"));
+    let (temp, temp_ran) = (at.join("temp/codex"), at.join("temp-ran"));
+    executable(&open, &text(&open_ran));
+    executable(&temp, &text(&temp_ran));
+    let folder = open.parent().unwrap();
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let engine = crate::tools::Places::from_environment(Some(&at.join("engine")));
+    let changeable = crate::tools::resolve_entry(&open, &roots.places).unwrap_err();
+    assert!(matches!(
+        changeable.refused.as_ref().map(|refused| &refused.why),
+        Some(Refusal::OthersCanChange(_))
+    ));
+    let in_temp = crate::tools::resolve_entry(&temp, &engine).unwrap_err();
+    assert_eq!(
+        in_temp.refused.as_ref().map(|refused| refused.why.clone()),
+        Some(Refusal::InTemp),
+        "the engine's places refuse the temp folder this row's machine lies in"
+    );
+    for (file, places, ran, refused) in [
+        (&open, &roots.places, &open_ran, &changeable),
+        (&temp, &engine, &temp_ran, &in_temp),
+    ] {
+        let needs = super::state::needs(file, places).map(|needs| needs.line);
+        assert_eq!(needs, Some(refused.line()), "{}", file.display());
+        let version = super::state::version_if_runs(file, &roots.home, places);
+        assert_eq!(version, None, "{}", file.display());
+        assert!(!ran.exists(), "{} is never run", file.display());
+    }
+}
+
 fn listed(ids: &[&str]) -> Vec<String> {
     ids.iter().map(|id| (*id).to_owned()).collect()
 }
