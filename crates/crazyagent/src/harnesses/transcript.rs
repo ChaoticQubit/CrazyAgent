@@ -285,6 +285,42 @@ impl TranscriptReader {
         self.dropped = true;
     }
 
+    /// Passes over all the open record holds now, unread, as an adoption whose read was cut
+    /// short needs, so no earlier line is reported later as new (RV-DS241-143). Reading goes
+    /// on at the record's current end, past the rest of a line still being written there.
+    /// Whether a turn is open is unknown, so it is forgotten as a dropped one (see
+    /// `drop_turn`). Takes the reader. Returns nothing, or a plain code when the record
+    /// cannot be read.
+    pub fn skip_to_end(&mut self) -> Result<(), LaunchError> {
+        let unavailable = |_: std::io::Error| failure("launch_transcript_unavailable");
+        let Some(file) = self.file.as_mut() else {
+            return Ok(());
+        };
+        let at = self.start + self.consumed;
+        let end = file.seek(SeekFrom::End(0)).map_err(unavailable)?;
+        let inside_line = if end > at {
+            let mut last = [0u8; 1];
+            file.seek(SeekFrom::Start(end - 1)).map_err(unavailable)?;
+            file.read_exact(&mut last).map_err(unavailable)?;
+            last[0] != b'\n'
+        } else {
+            file.seek(SeekFrom::Start(at)).map_err(unavailable)?;
+            self.skipping || self.pending.last().is_some_and(|byte| *byte != b'\n')
+        };
+        let end = end.max(at);
+        assert_eq!(file.stream_position().ok(), Some(end));
+        self.consumed = end - self.start;
+        self.pending.clear();
+        self.scanned = 0;
+        self.skipping = inside_line;
+        self.in_turn = false;
+        self.aside = false;
+        self.dropped = true;
+        self.codex_calls = CodexExecCalls::default();
+        assert_eq!(self.start + self.consumed, end);
+        Ok(())
+    }
+
     /// Reads what the harness appended since the last read, at most `READ_BYTES_MAX` bytes,
     /// scanning on from where the last read stopped and draining the used lines once, so many
     /// short lines cost one pass and a poll with no new bytes scans nothing. A line longer

@@ -26,8 +26,9 @@ pub const KEEPERS_MAX: usize = 2;
 pub const KEEPER_STARTED_MAX: usize = 64;
 const SETTLE_WAIT: Duration = Duration::from_secs(10);
 const REPLAY_READS_MAX: u64 = 4096;
-/// The longest an adoption reads a pane's record before the session exists, when the
-/// launch's run time leaves longer (RV-DS241-72).
+/// The longest an adoption reads a pane's record before the session exists: a live
+/// master's always, any other pane's when the launch's run time leaves longer (RV-DS241-72,
+/// RV-DS241-143).
 const REPLAY_WAIT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(100);
 const ESCAPE: &[u8] = b"\x1b";
@@ -254,15 +255,28 @@ impl PaneRecord {
     }
 }
 
+/// What an adoption's read of a pane's record learned of the turn at the record's end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Replayed {
+    /// A turn is open there.
+    Open,
+    /// No turn is open there, or no fact says.
+    Idle,
+    /// The read was cut before the end and the rest passed over unread (see
+    /// `TranscriptReader::skip_to_end`), so whether a turn is open is unknown.
+    Cut,
+}
+
 /// Reads an adopted pane's record on to its end to learn whether a turn is open there.
 /// No byte count ends it (owner 11-11): it reads until a read finds nothing new, at most
 /// `REPLAY_READS_MAX` reads more than the record held when it was opened, and never past
 /// `until`, so a record an agent grows without end cannot keep its pane from Stop and its
 /// run time (RV-DS241-72). A harness that writes faster, or a record longer than `until`
-/// allows, leaves the rest to the session's own polls. Takes the reader and when to stop.
-/// Returns whether a turn is open, none when no fact says, or the reader's problem.
-fn replay(reader: &mut TranscriptReader, until: Instant) -> Result<Option<bool>, LaunchError> {
-    let mut open = None;
+/// allows, cuts the read: the rest of the record as it stands is passed over unread, so the
+/// session's polls never take an earlier turn for a new one (RV-DS241-143). Takes the reader
+/// and when to stop. Returns what the read learned, or the reader's problem.
+fn replay(reader: &mut TranscriptReader, until: Instant) -> Result<Replayed, LaunchError> {
+    let mut open = false;
     let mut reads_max: Option<u64> = None;
     let mut reads: u64 = 0;
     loop {
@@ -270,13 +284,13 @@ fn replay(reader: &mut TranscriptReader, until: Instant) -> Result<Option<bool>,
         let facts = reader.read()?;
         reads += 1;
         if facts.is_empty() && reader.bytes() == before {
-            return Ok(open);
+            return Ok(if open { Replayed::Open } else { Replayed::Idle });
         }
         for fact in facts {
             match fact {
-                TranscriptEvent::TurnStarted => open = Some(true),
+                TranscriptEvent::TurnStarted => open = true,
                 TranscriptEvent::TurnFinished { .. } | TranscriptEvent::Interrupted => {
-                    open = Some(false);
+                    open = false;
                 }
                 _ => {}
             }
@@ -287,7 +301,8 @@ fn replay(reader: &mut TranscriptReader, until: Instant) -> Result<Option<bool>,
         assert!(max >= REPLAY_READS_MAX);
         if reads >= max || Instant::now() >= until {
             eprintln!("launch_adopt_replay_cut reads={reads}");
-            return Ok(open);
+            reader.skip_to_end()?;
+            return Ok(Replayed::Cut);
         }
     }
 }
@@ -344,7 +359,11 @@ impl TerminalSession {
     /// `launch_adopt_unsettled` once its processes are confirmed gone and
     /// `launch_adopt_cleanup_uncertain` when they are not. The launch's run time and event
     /// budget go on counting from its start, and the record is read only while that run time
-    /// lasts, at most `REPLAY_WAIT`. A pane whose first process is not the record's, before
+    /// lasts, at most `REPLAY_WAIT`. A live master is not bound by the launch's run time (the
+    /// runtime's Master run time bounds it, F01): its pane gets no deadline and its record is
+    /// read for `REPLAY_WAIT`. A read cut short passes over the rest of the record unread;
+    /// nothing is typed, the pane is taken over idle and the unknown turn is dropped and told
+    /// by `took_none` (RV-DS241-143). A pane whose first process is not the record's, before
     /// or after that read, is `launch_closed` and is left as it is. A Codex pane still on its folder access screen
     /// is not ready: it goes on with its launch's one Enter before any prompt is typed. A
     /// failed look at the screen counts as not on it, so it cannot end the pane. The
@@ -365,14 +384,20 @@ impl TerminalSession {
         if !still_recorded(host.as_ref(), &agent, record)? {
             return Err(failure("launch_closed"));
         }
-        let until = Instant::now() + REPLAY_WAIT.min(record.run_time_left(limits.run_time));
+        let budget = if live {
+            REPLAY_WAIT
+        } else {
+            REPLAY_WAIT.min(record.run_time_left(limits.run_time))
+        };
+        let until = Instant::now() + budget;
         let mut reader = match &record.resumed {
             Some((file, from)) => {
                 TranscriptReader::resumed(record.transcript(), &record.cwd, file, Some(*from))?
             }
             None => TranscriptReader::adopted(record.transcript(), &record.cwd, record.since()),
         };
-        let open = replay(&mut reader, until)? == Some(true);
+        let mut replayed = replay(&mut reader, until)?;
+        let open = replayed == Replayed::Open;
         let stale = open
             && reader
                 .silent()
@@ -401,13 +426,14 @@ impl TerminalSession {
                 ));
             }
             if settled {
-                replay(&mut reader, until)?;
+                replayed = replay(&mut reader, until)?;
             }
         }
-        let took_none = open && !settled;
-        if took_none {
+        let dropped = open && !settled;
+        if dropped {
             reader.drop_turn();
         }
+        let took_none = dropped || replayed == Replayed::Cut;
         if !still_recorded(host.as_ref(), &agent, record)? {
             return Err(failure("launch_closed"));
         }
@@ -427,7 +453,7 @@ impl TerminalSession {
             reader,
             queue: VecDeque::new(),
             limits,
-            deadline: Some(Instant::now() + record.run_time_left(limits.run_time)),
+            deadline: (!live).then(|| Instant::now() + record.run_time_left(limits.run_time)),
             checked: Instant::now(),
             ready: !on_menu,
             first: None,
