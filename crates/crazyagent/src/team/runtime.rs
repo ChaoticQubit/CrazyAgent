@@ -3047,21 +3047,23 @@ impl TeamRuntime {
         let mut unconfirmed = BTreeSet::new();
         let deadline = Instant::now() + JOIN_WAIT;
         for (id, worker) in &mut self.workers {
-            if let Some(thread) = worker.thread.take() {
+            let finished = worker.thread.take().is_none_or(|thread| {
                 while !thread.is_finished() && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                if thread.is_finished() {
+                let finished = thread.is_finished();
+                if finished {
                     let _ = thread.join();
                 }
-            }
+                finished
+            });
             let ended_uncertain = worker.reports.try_iter().any(|report| match report {
                 Report::Ended {
                     problem: Some(problem),
                 } => problem.contains(uncertain.as_str()),
                 _ => false,
             });
-            if ended_uncertain && !kept.contains(id) {
+            if (ended_uncertain || !finished) && !kept.contains(id) {
                 unconfirmed.insert(*id);
             }
         }
