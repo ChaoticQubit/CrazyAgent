@@ -1397,9 +1397,9 @@ mod tests {
     }
 
     /// rv-code2 b8 F1: a master turn whose home the owner chose outside the engine's data
-    /// root, as a configured RCLI home may be the owner's own HOME, keeps the links a dotfile
-    /// manager made at `.config` and `.cargo` and what they name, while a turn home below the
-    /// data root still gets both as real folders.
+    /// root, as a configured RCLI home may be one of the owner's own folders, keeps the links
+    /// a dotfile manager made at `.config` and `.cargo` and what they name, while a turn home
+    /// below the data root still gets both as real folders.
     #[test]
     fn a_master_turn_keeps_the_config_links_of_a_home_outside_the_engine_root() {
         let temporary = private_root();
