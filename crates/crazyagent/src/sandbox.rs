@@ -2741,6 +2741,8 @@ impl ProjectSandbox {
             .map(|rule| rule.seatbelt(&self.project_root))
             .unwrap_or_default();
         text.push_str(&agent_files);
+        let ignored = hfs_ignored_deny();
+        text.push_str(&ignored);
         assert_eq!(
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len() + self.granted.len()
@@ -2767,6 +2769,7 @@ impl ProjectSandbox {
         if !agent_files.is_empty() {
             last.push(agent_files);
         }
+        last.push(ignored);
         assert!(
             denies_follow_write_allows(&text, &last),
             "a read-only, root, fixed, shared or teammates' write deny must follow every write allow, since the last match wins"
@@ -4228,6 +4231,29 @@ pub(crate) fn regranted_denies(home: &Path, folders: &[&Path]) -> String {
     }
     text.push_str(&format!("(deny file-write*{nested})\n"));
     text
+}
+
+/// The Seatbelt rule that refuses reading, writing, linking or cloning any path with a part
+/// made of ASCII, [`crate::instruction_files::ASCII_FOLDS`] points and at least one code
+/// point HFS+ ignores in names, since such a volume opens `.g\u{200c}it/config` as
+/// `.git/config` past every name deny (SA vid 202). A part in another script keeps its
+/// joiners. Output: the rule, ending in a line break.
+pub(crate) fn hfs_ignored_deny() -> String {
+    let ignored: Vec<String> = crate::instruction_files::HFS_IGNORED
+        .iter()
+        .map(char::to_string)
+        .collect();
+    let folds: Vec<String> = crate::instruction_files::ASCII_FOLDS
+        .iter()
+        .map(|(point, _)| point.to_string())
+        .collect();
+    let ignored = ignored.join("|");
+    let part = format!("([ -.0-~]|{}|{ignored})", folds.join("|"));
+    let rule = format!(
+        "(deny file-read-data file-write* file-link file-clone\n  (regex #\"^(.*/)?{part}*({ignored}){part}*(/.*)?$\"))\n"
+    );
+    assert!(rule.len() <= SBPL_STRING_MAX && rule.matches('"').count() == 2);
+    rule
 }
 
 /// Whether every deny rule comes after the profile's last write allow, since Seatbelt applies

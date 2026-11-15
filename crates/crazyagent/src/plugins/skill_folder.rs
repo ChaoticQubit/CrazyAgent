@@ -513,14 +513,12 @@ pub(super) fn open_real(path: &Path, last: OFlags) -> rustix::io::Result<OwnedFd
     crate::platform::open_beneath(Path::new("/"), below, last)
 }
 
-/// Whether a name is one the copy leaves out, `.git` or `.DS_Store`, in any letter case,
-/// since the default macOS volume opens `.git` by `.GIT` too. Input: the name. Output:
-/// the answer.
+/// Whether a name is one the copy leaves out, `.git` or `.DS_Store`, in any spelling a
+/// case-insensitive volume opens as one of them, since macOS opens `.git` by `.GIT` and
+/// HFS+ by `\u{feff}.git` too (DS-148 F1). Input: the name. Output: the answer.
 #[cfg(unix)]
 fn left_out(name: &OsStr) -> bool {
-    SKIPPED
-        .iter()
-        .any(|skipped| name.eq_ignore_ascii_case(skipped))
+    crate::instruction_files::names_one_of(&name.to_string_lossy(), &SKIPPED)
 }
 
 /// The path a link in the folder names, its `.` and `..` worked out as text, kept only when

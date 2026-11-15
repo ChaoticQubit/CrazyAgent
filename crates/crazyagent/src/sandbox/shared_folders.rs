@@ -491,14 +491,13 @@ const CHOSEN_LIST_BYTES_MAX: usize = 512;
 
 /// Whether the top-level folder `name` of the project folder `root` stays read-only under
 /// Read-write (L4 r1 M1): a hidden folder, which the owner's own tools load and run unconfined
-/// (`.venv`, `.vscode`, `.claude`, `.codex`), the engine's `context` and every engine name.
+/// (`.venv`, `.vscode`, `.claude`, `.codex`), the engine's `context` and every engine name,
+/// each in any spelling a case-insensitive volume opens as it (DS-148 F1).
 /// Takes the project folder and the name. Returns true when agents never write it.
 pub(crate) fn never_written(root: &Path, name: &str) -> bool {
     name.starts_with('.')
-        || name.eq_ignore_ascii_case(CONTEXT_NAME)
-        || engine_names(root)
-            .iter()
-            .any(|engine| engine.eq_ignore_ascii_case(name))
+        || crate::instruction_files::names_one_of(name, &[CONTEXT_NAME])
+        || crate::instruction_files::names_one_of(name, &engine_names(root))
 }
 
 /// The top-level names in the project folder `root` that belong to the engine: `.git`,
@@ -518,9 +517,7 @@ fn plain_name(name: &str) -> bool {
         && name.len() <= NAME_BYTES_MAX
         && name != "."
         && name != ".."
-        && !ENGINE_NAMES
-            .iter()
-            .any(|engine| engine.eq_ignore_ascii_case(name))
+        && !crate::instruction_files::names_one_of(name, &ENGINE_NAMES)
         && !name
             .chars()
             .any(|c| c.is_control() || matches!(c, '/' | '"' | '\\' | '\''))

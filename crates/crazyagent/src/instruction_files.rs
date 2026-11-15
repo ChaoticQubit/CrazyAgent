@@ -55,12 +55,14 @@ pub(crate) const HFS_IGNORED: [char; 16] = [
     '\u{202E}', '\u{206A}', '\u{206B}', '\u{206C}', '\u{206D}', '\u{206E}', '\u{206F}', '\u{FEFF}',
 ];
 
-/// The code points outside ASCII that a case-insensitive APFS volume folds onto ASCII,
-/// with the ASCII they fold onto: the full case fold of their canonical decomposition,
-/// each checked on the volume (probe 2026-10-28). Every other code point stays outside ASCII.
-/// The one list the landing checks and the Seatbelt name spellings share (SA vid 202).
-pub(crate) const ASCII_FOLDS: [(char, &str); 13] = [
+/// The code points outside ASCII that a case-insensitive volume folds onto ASCII, with the
+/// ASCII they fold onto: on APFS the full case fold of their canonical decomposition, each
+/// checked on the volume (probe 2026-10-28), and U+0131 DOTLESS I, which the NTFS upcase
+/// table maps to `I`. The one list the landing checks, the name compares and the Seatbelt
+/// name spellings share (SA vid 202, DS-148 F1).
+pub(crate) const ASCII_FOLDS: [(char, &str); 14] = [
     ('\u{DF}', "ss"),
+    ('\u{131}', "i"),
     ('\u{17F}', "s"),
     ('\u{37E}', ";"),
     ('\u{1E9E}', "ss"),
@@ -611,21 +613,28 @@ pub fn badges(connection: &Connection, project: &ProjectId) -> rusqlite::Result<
         .collect()
 }
 
+/// Tells whether a name opens one of `names` on a case-insensitive volume, compared as
+/// [`folded`] compares names, so `.GIT`, `\u{feff}.git` and `.g\u{131}t` all open `.git`
+/// (DS-148 F1). Inputs: the name and the plain names. Output: true for one.
+pub(crate) fn names_one_of(name: &str, names: &[&str]) -> bool {
+    let name = folded(name);
+    names.iter().any(|known| folded(known) == name)
+}
+
 /// Folds a file name the way case-insensitive volumes compare names, so a name such a
-/// volume opens as an instruction file matches it: ASCII letters to lower case, U+017F LONG S
-/// to `s` and U+212A KELVIN SIGN to `k` as APFS folds them (probed), U+0131 DOTLESS I to `i` as
-/// the NTFS upcase table maps it to `I`, and the code points HFS+ ignores in names (git's
-/// `core.protectHFS` list) left out. Input: the name or path. Output: the folded text.
+/// volume opens as an instruction file matches it: the code points HFS+ ignores in names
+/// (git's `core.protectHFS` list) left out, each code point in [`ASCII_FOLDS`] spelled as
+/// its ASCII and ASCII letters put in lower case. Input: the name or path. Output: the
+/// folded text.
 fn folded(name: &str) -> String {
-    name.chars()
-        .filter(|c| !HFS_IGNORED.contains(c))
-        .map(|c| match c {
-            '\u{17F}' => 's',
-            '\u{212A}' => 'k',
-            '\u{131}' => 'i',
-            other => other.to_ascii_lowercase(),
-        })
-        .collect()
+    let mut text = String::with_capacity(name.len());
+    for point in name.chars().filter(|point| !HFS_IGNORED.contains(point)) {
+        match ASCII_FOLDS.iter().find(|(from, _)| *from == point) {
+            Some((_, ascii)) => text.push_str(ascii),
+            None => text.push(point.to_ascii_lowercase()),
+        }
+    }
+    text
 }
 
 /// Tells whether a file name is one an instruction file is read under in any folder: a
