@@ -3994,6 +3994,35 @@ fn a_repositorys_negation_never_brings_back_what_an_include_if_owner_ignore_file
     );
 }
 
+/// G6 r2: a folder the repository ignores whose name holds pattern characters is stepped
+/// over alone in the owner's run, so the owner's ignore file never hides a neighbouring
+/// folder that name would match as a pattern: `ab/` stays in the graph with only the file
+/// the owner names kept out.
+#[test]
+fn a_stepped_over_folder_named_like_a_pattern_never_hides_its_neighbour() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let (home, repo) = (root.join("home"), root.join("repo"));
+    for folder in [&home, &repo] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    git::OWNER_HOME.with(|owner| *owner.borrow_mut() = Some(home.clone()));
+    git_in(&home, &repo, &["init", "-q", "--template="]);
+    write(&home.join(".config/git/ignore"), "drafts.txt\n");
+    write(&repo.join(".gitignore"), "/a\\*/\n!drafts.txt\n");
+    write(&repo.join("a*/held.txt"), "Held\n");
+    write(&repo.join("ab/drafts.txt"), "Draft notes\n");
+    write(&repo.join("ab/notes.txt"), "Plain notes\n");
+
+    let kept = crate::onboarding::draft::kept_out(&repo);
+
+    assert_eq!(
+        kept,
+        Some(vec!["a*/".to_owned(), "ab/drafts.txt".to_owned()]),
+        "the owner's run hid a folder the pruned name matches as a pattern"
+    );
+}
+
 /// RV-DS241-145: a change set keeps git's ignore precedence too: a file only the owner
 /// checkout's own `core.excludesFile` names stays out of it while the owner's global ignore
 /// file is present, as the owner's git would leave it unstaged.
