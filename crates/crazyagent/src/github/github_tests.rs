@@ -2643,7 +2643,9 @@ fn publish_job_discarded_short_of_done_starts_fresh_and_names_the_repository_lef
     );
     assert_eq!(
         account.publish_discard(&project).map_err(|error| error.0),
-        Ok(Some("octo-cat/tool".to_owned()))
+        Ok(Some(GitHubPublishLeft::Made {
+            full_name: "octo-cat/tool".into()
+        }))
     );
     assert_eq!(account.publish_status(&project).unwrap(), None);
     std::fs::create_dir_all(&bare).unwrap();
@@ -2668,6 +2670,97 @@ fn publish_job_discarded_short_of_done_starts_fresh_and_names_the_repository_lef
         account.publish_discard(&project).map_err(|error| error.0),
         Err("github_publish_step_invalid".to_owned())
     );
+}
+
+#[test]
+fn publish_job_stopped_at_creating_names_the_repository_a_lost_answer_may_have_made() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    stand.lock().unwrap().create = 500;
+    let lost = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert!(
+        matches!(lost.step, GitHubPublishStep::Creating { .. }),
+        "{lost:?}"
+    );
+    assert_eq!(lost.stopped.as_deref(), Some("github_unreachable"));
+    assert_eq!(
+        account
+            .publish_start(&project, &plan("tool"), no_draft)
+            .map_err(|error| error.0)
+            .err(),
+        Some("github_publish_in_progress".to_owned())
+    );
+    assert_eq!(
+        account.publish_discard(&project).map_err(|error| error.0),
+        Ok(Some(GitHubPublishLeft::Maybe {
+            full_name: "octo-cat/tool".into()
+        }))
+    );
+    assert_eq!(account.publish_status(&project).unwrap(), None);
+    account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    stand.lock().unwrap().create = 403;
+    let refused = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert_eq!(
+        refused.stopped.as_deref(),
+        Some("github_repo_create_refused")
+    );
+    assert!(
+        matches!(
+            account
+                .publish_start(&project, &plan("tool"), no_draft)
+                .map(|job| job.step),
+            Ok(GitHubPublishStep::Lines { .. })
+        ),
+        "a refused create made nothing, so Start runs fresh"
+    );
+    assert_eq!(
+        account.publish_discard(&project).map_err(|error| error.0),
+        Ok(None)
+    );
+}
+
+#[test]
+fn publish_job_at_pushed_is_not_discarded_while_its_rules_are_still_to_apply() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let engine_root = scratch.root.path().canonicalize().unwrap();
+    let pushed = GitHubPublishJob {
+        project: project.clone(),
+        plan: plan("tool"),
+        lines: baseline(),
+        written: vec![".gitignore".into()],
+        step: GitHubPublishStep::Pushed {
+            full_name: "octo-cat/tool".into(),
+            private: true,
+            workflows: false,
+        },
+        stopped: Some("github_token_refused".into()),
+        made: Some("octo-cat/tool".into()),
+    };
+    state::save_job(&engine_root, &pushed).unwrap();
+    assert_eq!(
+        account.publish_discard(&project).map_err(|error| error.0),
+        Err("github_publish_step_invalid".to_owned())
+    );
+    assert_eq!(account.publish_status(&project).unwrap(), Some(pushed));
 }
 
 #[test]

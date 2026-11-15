@@ -24,7 +24,9 @@ pub(crate) mod test_server;
 mod tests;
 
 pub use api::Endpoints;
-pub use job::{GitHubIgnoreDraft, GitHubPublishJob, GitHubPublishPlan, GitHubPublishStep};
+pub use job::{
+    GitHubIgnoreDraft, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan, GitHubPublishStep,
+};
 pub use publish::{
     GitHubCommitted, GitHubHistory, GitHubLocal, GitHubPrepare, GitHubSecretFinding,
     GitHubSecretKind, GitHubSecretScan,

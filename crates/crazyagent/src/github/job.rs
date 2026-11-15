@@ -42,6 +42,16 @@ fn not_asked() -> GitHubIgnoreDraft {
     }
 }
 
+/// What a discarded publish left on GitHub: the repository it made, empty since nothing
+/// was pushed, or the one its create may have made, when GitHub's answer to that create
+/// was lost or refused after the fact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "left", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GitHubPublishLeft {
+    Made { full_name: String },
+    Maybe { full_name: String },
+}
+
 /// Where a publish job stands: waiting for the owner to approve the .gitignore lines or
 /// to deal with a secret, or the last step it finished on the way to the rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -329,7 +339,10 @@ impl GitHub {
     /// changed. Nothing on GitHub or in the project is touched. Input: the project folder.
     /// Output: the `owner/name` of the repository the job left on GitHub, if it made one,
     /// or `github_publish_not_started`, `github_publish_step_invalid` for a job at Done.
-    pub fn publish_discard(&self, project: &Path) -> Result<Option<String>, EngineError> {
+    pub fn publish_discard(
+        &self,
+        project: &Path,
+    ) -> Result<Option<GitHubPublishLeft>, EngineError> {
         let _held = publishing(&self.root, project)?;
         let job = self.job(project)?;
         let left = match &job.step {
@@ -339,7 +352,10 @@ impl GitHub {
             _ => None,
         };
         state::remove_job(&self.root, project)?;
-        Ok(job.made.or(left))
+        Ok(job
+            .made
+            .or(left)
+            .map(|full_name| GitHubPublishLeft::Made { full_name }))
     }
 
     /// Reads a project's publish record, which a run in progress keeps up to date step by

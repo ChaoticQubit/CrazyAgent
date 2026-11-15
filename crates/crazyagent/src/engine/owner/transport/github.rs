@@ -2,8 +2,8 @@ use super::*;
 use crate::credentials::{SECRET_BYTES_MAX, SecretString};
 use crate::engine::owner::AccountSecret;
 use crate::github::{
-    CloneReceipt, GitHub, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishPlan,
-    GitHubRepoPage, GitHubStatus,
+    CloneReceipt, GitHub, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
+    GitHubPublishPlan, GitHubRepoPage, GitHubStatus,
 };
 use crate::protocol::{ProjectId, encode_frame};
 use serde::{Deserialize, Serialize};
@@ -86,7 +86,7 @@ enum Reply {
     Owners { owners: GitHubOwners },
     Publish { job: GitHubPublishJob },
     PublishStatus { job: Option<GitHubPublishJob> },
-    Discarded { left: Option<String> },
+    Discarded { left: Option<GitHubPublishLeft> },
     Rejected { code: String },
 }
 
@@ -238,7 +238,7 @@ impl OwnerClient {
     pub async fn github_publish_discard(
         &self,
         project: ProjectId,
-    ) -> Result<Option<String>, EngineError> {
+    ) -> Result<Option<GitHubPublishLeft>, EngineError> {
         match self
             .github_exchange(Action::PublishDiscard { project }, None)
             .await?
