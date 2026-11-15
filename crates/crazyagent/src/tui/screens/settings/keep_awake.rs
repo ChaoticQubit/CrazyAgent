@@ -22,6 +22,8 @@ const TITLE: &str = "Keep awake";
 const PURPOSE: &str = "When the computer stays awake for your agents, and when that ends.";
 const ROWS: usize = 9;
 const OPTIONS_MAX: usize = 4;
+const DISPLAY_AWAKE_HELP: &str =
+    "Whether a hold also keeps the display on. While it does, the screen stays unlocked.";
 const SECTIONS: [(&str, &str, &[Setting]); 4] = [
     (
         "When it holds",
@@ -129,10 +131,7 @@ fn words(setting: Setting) -> (&'static str, &'static str) {
             "Heat notice",
             "Tells you when the computer gets hot during a hold.",
         ),
-        Setting::DisplayAwake => (
-            "Display awake with the lid open",
-            "Whether a hold also keeps the display on.",
-        ),
+        Setting::DisplayAwake => ("Display awake with the lid open", DISPLAY_AWAKE_HELP),
     }
 }
 

@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+mod display_linux;
 pub mod hold;
 #[cfg(target_os = "linux")]
 mod hold_linux;

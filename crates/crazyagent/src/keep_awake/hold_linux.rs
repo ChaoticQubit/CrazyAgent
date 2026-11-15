@@ -1,3 +1,4 @@
+use super::display_linux::DisplayHold;
 use super::hold::{Held, Hold, HoldError, REASON, wanted};
 use super::state::Want;
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
@@ -13,15 +14,17 @@ const MANAGER: &str = "org.freedesktop.login1.Manager";
 const WHAT_IDLE: &str = "idle:sleep";
 const WHAT_LID: &str = "idle:sleep:handle-lid-switch";
 
-/// The Linux hold: one logind inhibitor lock, for idle and sleep, or for those and the
-/// lid switch, held as the descriptor logind hands out. logind drops the lock when the
-/// descriptor closes, so it ends with the engine process. Once the lid lock is gone,
-/// logind itself looks at a closed lid again and applies the computer's own lid rule
-/// (DEC-167 addendum 9), so the hold asks for no suspend.
+/// The Linux hold: a logind inhibitor lock for idle and sleep, and the lid switch when
+/// wanted, held as its descriptor, which ends with the engine process; logind then applies
+/// the computer's own lid rule (DEC-167 addendum 9). The display part is a session
+/// screensaver inhibit; one it could not take is not asked again until the display is
+/// wanted anew.
 #[derive(Debug, Default)]
 pub(super) struct LinuxHold {
     lock: Option<OwnedFd>,
     lid: bool,
+    display: Option<DisplayHold>,
+    display_refused: bool,
 }
 
 /// Marks one open descriptor close-on-exec and checks that the mark is set. Input: the
@@ -126,6 +129,31 @@ impl LinuxHold {
         self.lid = false;
         Ok(())
     }
+
+    /// Brings the display part to what is wanted. It never fails the hold: a refused
+    /// inhibit is logged once and not asked again while the display stays wanted. Input:
+    /// whether the display is wanted. Output: none.
+    fn show(&mut self, display: bool) {
+        if !display {
+            self.display_refused = false;
+            if let Some(held) = self.display.take() {
+                held.give_back();
+            }
+            assert!(self.display.is_none());
+            return;
+        }
+        if self.display.is_some() || self.display_refused {
+            return;
+        }
+        match DisplayHold::take() {
+            Ok(held) => self.display = Some(held),
+            Err(problem) => {
+                eprintln!("keep awake: the display is not held: {problem}");
+                self.display_refused = true;
+            }
+        }
+        assert!(self.display.is_some() != self.display_refused);
+    }
 }
 
 impl Hold for LinuxHold {
@@ -147,16 +175,19 @@ impl Hold for LinuxHold {
         }
         assert!(self.lock.is_some());
         assert!(lid || !self.lid);
+        self.show(wanted(want) == Some(true));
         Ok(Held {
             idle: true,
             lid: self.lid,
-            display: false,
+            display: self.display.is_some(),
         })
     }
 
     fn release(&mut self) {
+        self.show(false);
         self.lock = None;
         self.lid = false;
         assert!(self.lock.is_none());
+        assert!(self.display.is_none());
     }
 }

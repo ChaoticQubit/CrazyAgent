@@ -101,7 +101,7 @@ export const KEEP_AWAKE_SETTINGS: readonly SettingWords[] = [
     options: [{ value: "serious", label: "At serious heat" }, { value: "off", label: "Off" }] },
   { id: "lid_display", label: "Display with the lid closed (macOS)", help: "What an outside display does while a hold runs with the lid closed.",
     options: [{ value: "sleep", label: "Sleep the display" }, { value: "leave_on", label: "Leave on" }] },
-  { id: "display_awake", label: "Display awake with the lid open", help: "Whether a hold also keeps the display on.",
+  { id: "display_awake", label: "Display awake with the lid open", help: "Whether a hold also keeps the display on. While it does, the screen stays unlocked.",
     options: [{ value: "off", label: "Off" }, { value: "while_holding", label: "While holding" }] },
 ];
 

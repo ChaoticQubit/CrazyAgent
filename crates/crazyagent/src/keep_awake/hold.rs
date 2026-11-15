@@ -92,9 +92,10 @@ impl Hold for NoHold {
     fn release(&mut self) {}
 }
 
-/// Builds this platform's hold: a `caffeinate` child on macOS, a logind inhibitor lock on
-/// Linux, a power request on Windows. Input: the pid of the engine the hold is for, so a
-/// macOS hold ends with that process. Output: the hold, holding nothing yet.
+/// Builds this platform's hold: a `caffeinate` child on macOS, a logind inhibitor lock and
+/// a session screensaver inhibit for the display on Linux, power requests on Windows. Input:
+/// the pid of the engine the hold is for, so a macOS hold ends with that process. Output:
+/// the hold, holding nothing yet.
 pub fn platform_hold(engine_pid: u32) -> Box<dyn Hold + Send> {
     assert!(engine_pid > 1);
     #[cfg(target_os = "macos")]

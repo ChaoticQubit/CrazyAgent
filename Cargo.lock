@@ -776,6 +776,8 @@ dependencies = [
 name = "crazyagent"
 version = "2.3.0"
 dependencies = [
+ "async-io",
+ "async-trait",
  "base64 0.22.1",
  "crazyagent-win-sandbox",
  "crossterm",
