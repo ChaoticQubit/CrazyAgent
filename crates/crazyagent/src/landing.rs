@@ -68,10 +68,21 @@ const LOCAL_ROOTS: [&str; 10] = [
     "/opt/",
 ];
 
-/// The owner's global ignore file setting for an engine git. Other systems: none, as before,
-/// since landing's git reads are Unix only. Takes nothing. Returns none. Written, not tested.
+/// Where the owner's git stands when it resolves a repository's ignore file
+/// (RV-DS241-145): a folder it finds the repository from, as the owner's git run there
+/// does, or a git folder named outright, so no `.git` file in a work tree is followed.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) enum Within<'a> {
+    Folder(&'a Path),
+    GitDir(&'a Path),
+}
+
+/// The owner's ignore file setting for an engine git. Other systems: none, as before,
+/// since landing's git reads are Unix only. Takes where the repository is, unused. Returns
+/// none. Written, not tested.
 #[cfg(not(unix))]
-pub(crate) fn owner_excludes_setting() -> Option<String> {
+pub(crate) fn owner_excludes_setting(_within: Within<'_>) -> Option<String> {
     None
 }
 

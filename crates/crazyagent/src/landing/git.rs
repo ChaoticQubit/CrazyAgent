@@ -11,6 +11,8 @@ const STEP_TIME: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(2);
 const VERSION_MIN: (u32, u32) = (2, 40);
 const EXCLUDES_PATH_BYTES_MAX: usize = 1024;
+/// The longest the owner's ignore file is looked up for in a repository (RV-DS241-145).
+const EXCLUDES_LOOKUP_TIME: Duration = Duration::from_secs(10);
 const CHECK_LINE_BYTES_MAX: usize = 80;
 
 #[cfg(test)]
@@ -220,13 +222,21 @@ fn owner_folders() -> (Option<PathBuf>, Option<PathBuf>) {
     )
 }
 
-/// Finds the ignore file the owner's own git applies in every repository: the global
-/// `core.excludesFile`, read by a git that sees only the owner's home and runs nothing,
-/// else git's default `$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`.
-/// Inputs: the owner's home and XDG config folder. Output: the file's real path when it
+/// Finds the ignore file the owner's own git applies in a repository (RV-DS241-145): the
+/// `core.excludesFile` git resolves there, by git's own precedence, from the repository's
+/// worktree and local config and the owner's global config, whose `includeIf` sections are
+/// matched against that repository, read by a git that sees only the owner's home, no
+/// system config, and runs nothing, given `EXCLUDES_LOOKUP_TIME`; else git's default
+/// `$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`. A repository's own value that
+/// is not usable gives none, never the owner's file in its place. Inputs: the owner's home
+/// and XDG config folder and where the repository is. Output: the file's real path when it
 /// is a regular file owned by the engine's user or root, such as a store-managed link.
 #[cfg(unix)]
-pub(super) fn owner_excludes(home: &Path, xdg: Option<&Path>) -> Option<PathBuf> {
+pub(super) fn owner_excludes(
+    home: &Path,
+    xdg: Option<&Path>,
+    within: super::Within<'_>,
+) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
     if !home.is_absolute() {
         return None;
@@ -239,24 +249,21 @@ pub(super) fn owner_excludes(home: &Path, xdg: Option<&Path>) -> Option<PathBuf>
         .env("LC_ALL", "C")
         .env("HOME", home)
         .envs(crate::research::runner::GIT_SAFE_ENV)
-        .args([
-            "config",
-            "--global",
-            "--type=path",
-            "--get",
-            "core.excludesFile",
-        ])
-        .current_dir("/")
+        .args(["config", "--type=path", "--get", "core.excludesFile"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    match within {
+        super::Within::Folder(folder) => command.current_dir(folder),
+        super::Within::GitDir(git_dir) => command.env("GIT_DIR", git_dir).current_dir(git_dir),
+    };
     if let Some(xdg) = xdg {
         command.env("XDG_CONFIG_HOME", xdg);
     }
-    let output = crate::spawn_gate::output(&mut command).ok()?;
-    let named = match output.status.code() {
-        Some(0) => PathBuf::from(String::from_utf8(output.stdout).ok()?.strip_suffix('\n')?),
-        Some(1) => xdg
+    let (code, stdout) = lookup(&mut command)?;
+    let named = match code {
+        0 => PathBuf::from(String::from_utf8(stdout).ok()?.strip_suffix('\n')?),
+        1 => xdg
             .map_or_else(|| home.join(".config"), Path::to_path_buf)
             .join("git")
             .join("ignore"),
@@ -274,14 +281,55 @@ pub(super) fn owner_excludes(home: &Path, xdg: Option<&Path>) -> Option<PathBuf>
         .then_some(real)
 }
 
-/// The `core.excludesFile=<path>` setting naming the owner's global ignore file
-/// ([`owner_excludes`]), for an engine git that clears its environment yet must keep out what
-/// the owner's own git ignores (RV-DS241-73). Takes nothing. Returns the setting, none when
-/// the owner has no usable ignore file or its path is not UTF-8.
+/// Runs one git lookup that prints a short line, given `EXCLUDES_LOOKUP_TIME`, since the
+/// repository config it reads can name an include that never ends, such as a FIFO. Takes
+/// the command, its output piped. Returns its exit code and at most
+/// `EXCLUDES_PATH_BYTES_MAX + 2` bytes of output, or none when git could not start, ran
+/// over or its output could not be read.
 #[cfg(unix)]
-pub(crate) fn owner_excludes_setting() -> Option<String> {
+fn lookup(command: &mut Command) -> Option<(i32, Vec<u8>)> {
+    let mut child = crate::spawn_gate::spawn(command).ok()?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut source = stdout.take(EXCLUDES_PATH_BYTES_MAX as u64 + 2);
+        let read = source.read_to_end(&mut bytes);
+        let _ = std::io::copy(&mut source.into_inner(), &mut std::io::sink());
+        read.map(|_| bytes)
+    });
+    let deadline = Instant::now() + EXCLUDES_LOOKUP_TIME;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let stdout = reader.join().ok()?.ok()?;
+    assert!(stdout.len() <= EXCLUDES_PATH_BYTES_MAX + 2);
+    Some((status?.code()?, stdout))
+}
+
+/// The `core.excludesFile=<path>` setting naming the ignore file the owner's own git applies
+/// where it is asked ([`owner_excludes`]), for an engine git that clears its environment yet
+/// must keep out what the owner's own git ignores (RV-DS241-73). Asked in a repository, it
+/// names the file git would pick there, a repository's own value first (RV-DS241-145), as
+/// landing applies it; asked outside any repository, as onboarding does from `/`, it names
+/// the owner's unscoped global file, which onboarding applies beside a repository's own
+/// (RV-DS241-145 r2). Takes where to look. Returns the setting, none when there is no usable
+/// ignore file or its path is not UTF-8.
+#[cfg(unix)]
+pub(crate) fn owner_excludes_setting(within: super::Within<'_>) -> Option<String> {
     let (home, xdg) = owner_folders();
-    let path = owner_excludes(&home?, xdg.as_deref())?;
+    let path = owner_excludes(&home?, xdg.as_deref(), within)?;
     Some(format!("core.excludesFile={}", path.to_str()?))
 }
 
@@ -291,7 +339,8 @@ pub(crate) fn owner_excludes_setting() -> Option<String> {
 /// system or global config, no system attributes, hooks, fsmonitor, pager, submodule
 /// recursion, protocols or upkeep, and with every filter
 /// driver the repository's own config names blanked. A work tree also honours the
-/// owner's global ignore file, so what the owner's git ignores the engine never stages.
+/// ignore file the owner's git applies in that repository, its own value first, so what the
+/// owner's git ignores the engine never stages.
 #[derive(Clone)]
 pub(super) struct Repo {
     git_dir: PathBuf,
@@ -324,8 +373,8 @@ pub(super) enum Writes {
 
 impl Repo {
     /// Opens a repository for engine git calls, lists the filter drivers to blank and,
-    /// for a work tree, finds the owner's global ignore file. The git folder is always the
-    /// owner checkout's own `.git` or a linked worktree's folder directly in its
+    /// for a work tree, finds the ignore file the owner's git applies there. The git folder is
+    /// always the owner checkout's own `.git` or a linked worktree's folder directly in its
     /// `.git/worktrees`, never an agent's own clone, whose config is the agent's (CC-N1).
     /// Inputs: the owner checkout root, the git folder and the work tree, none for object
     /// and ref work only. Output: the repository, or `changes_git_unsupported` for a git
@@ -341,7 +390,8 @@ impl Repo {
             git_dir == metadata || git_dir.parent() == Some(metadata.join("worktrees").as_path()),
             "engine git opens only the owner checkout's git folder or a linked worktree's"
         );
-        let excludes = work_tree.and_then(|_| owner_excludes_setting());
+        let excludes =
+            work_tree.and_then(|_| owner_excludes_setting(super::Within::GitDir(git_dir)));
         let mut repo = Self {
             git_dir: git_dir.to_path_buf(),
             work_tree: work_tree.map(Path::to_path_buf),

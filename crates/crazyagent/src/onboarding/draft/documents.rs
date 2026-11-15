@@ -210,10 +210,10 @@ pub(super) fn read(repo: &Path, readme: Option<&str>, hidden: &[String]) -> Opti
 /// mapping evidence (MAP-2): such top-level entries and each README, manifest, overview and
 /// document line or heading scan mark naming one, as a mark may come from past the text
 /// shown, and a code graph line also on any secret word, as its nodes may be bare names.
-/// One `check-ignore` call answers for all; a name git does not clear, or every
-/// name when git could not answer, counts as ignored, and so does a name in one of the
-/// `hidden` folders, given below the project folder, written relative or absolute. Takes
-/// the folder, the evidence and the hidden folders.
+/// One `check-ignore` call per ignore file ([`ignored`]) answers for all; a name git does
+/// not clear, or every name when git could not answer, counts as ignored, and so does a
+/// name in one of the `hidden` folders, given below the project folder, written relative
+/// or absolute. Takes the folder, the evidence and the hidden folders.
 pub(super) fn screen(repo: &Path, evidence: &mut Evidence, hidden: &[String]) {
     let mut names: BTreeSet<String> = evidence.entries.iter().cloned().collect();
     let texts = evidence
@@ -437,10 +437,11 @@ fn named(list: &[&str], name: &str) -> bool {
     list.iter().any(|known| known.eq_ignore_ascii_case(name))
 }
 
-/// Asks the project's own git, in one `check-ignore` call, which of `paths` it ignores by
-/// the repository's ignore files, info/exclude and configured excludes file: the real git
-/// with no system or global config, hooks, fsmonitor or pager, given 20 s and 8 MiB of
-/// output. Each name goes in behind `./`, so one starting with `:` is never pathspec magic.
+/// Asks the project's own git, in one `check-ignore` call per ignore file ([`excludes`]),
+/// which of `paths` it ignores by the repository's ignore files, info/exclude and those
+/// excludes files, a path ignored when any call says so: the real git with no system or
+/// global config, hooks, fsmonitor or pager, each call given 20 s and 8 MiB of output.
+/// Each name goes in behind `./`, so one starting with `:` is never pathspec magic.
 /// Git must name the ignored paths exactly as sent and in order; any other answer counts as
 /// none, so the mapping never guesses which files git keeps out. A folder outside git
 /// ignores nothing, as a repository without ignore files. Takes the project folder and the
@@ -458,32 +459,53 @@ fn ignored(repo: &Path, paths: &[&str]) -> Option<Vec<bool>> {
         .iter()
         .flat_map(|path| path.bytes().chain([0]))
         .collect();
-    let mut command = git(repo, &["check-ignore", "-z", "--stdin", "--no-index"]);
-    let (code, output) = answer(&mut command, input)?;
-    let names: Vec<&[u8]> = match output.split_last() {
-        None => Vec::new(),
-        Some((0, body)) => body.split(|byte| *byte == 0).collect(),
-        Some(_) => return None,
-    };
-    if !matches!((code, names.is_empty()), (0, false) | (1, true)) {
-        return None;
-    }
     let mut ignored = vec![false; paths.len()];
-    let mut next = 0;
-    for name in names {
-        let at = (next..sent.len()).find(|&index| sent[index].as_bytes() == name)?;
-        ignored[at] = true;
-        next = at + 1;
+    for setting in excludes(repo) {
+        let args = ["check-ignore", "-z", "--stdin", "--no-index"];
+        let mut command = git(repo, setting.as_deref(), &args);
+        let (code, output) = answer(&mut command, input.clone())?;
+        let names: Vec<&[u8]> = match output.split_last() {
+            None => Vec::new(),
+            Some((0, body)) => body.split(|byte| *byte == 0).collect(),
+            Some(_) => return None,
+        };
+        if !matches!((code, names.is_empty()), (0, false) | (1, true)) {
+            return None;
+        }
+        let mut next = 0;
+        for name in names {
+            let at = (next..sent.len()).find(|&index| sent[index].as_bytes() == name)?;
+            ignored[at] = true;
+            next = at + 1;
+        }
     }
     Some(ignored)
+}
+
+/// The ignore files the onboarding's git honours, one git run each, a path counting as
+/// ignored when any run says so (RV-DS241-145 r2): the one the owner's git applies in `repo`,
+/// the repository's own first, and the owner's global one, found as from no repository,
+/// which a repository's own `core.excludesFile` never switches off for what is read and
+/// sent to the model provider. Takes the folder. Returns one or two `-c` settings, `None`
+/// for a run that leaves the choice to the repository's git.
+fn excludes(repo: &Path) -> Vec<Option<String>> {
+    use crate::landing::{Within, owner_excludes_setting};
+    let mut settings = vec![owner_excludes_setting(Within::Folder(repo))];
+    let global = owner_excludes_setting(Within::Folder(Path::new("/")));
+    if global.is_some() && !settings.contains(&global) {
+        settings.push(global);
+    }
+    assert!(!settings.is_empty() && settings.len() <= 2);
+    settings
 }
 
 /// The project's own git run in `repo` with `args`: the real git with no system or global
 /// config, hooks, fsmonitor or pager, no lazy fetch and no transport at all whatever the
 /// repository's own config allows (RV-DS241-71), no prompt and the C locale, honouring the
-/// owner's global ignore file as the owner's git does (RV-DS241-73), its input and output
-/// piped and its errors dropped. Takes the folder and the arguments. Returns the command.
-fn git(repo: &Path, args: &[&str]) -> Command {
+/// ignore file `excludes` names, one of [`excludes`] (RV-DS241-73, RV-DS241-145), its input
+/// and output piped and its errors dropped. Takes the folder, the `-c` setting, none to
+/// leave it to the repository's git, and the arguments. Returns the command.
+fn git(repo: &Path, excludes: Option<&str>, args: &[&str]) -> Command {
     let mut command = Command::new(crate::research::runner::setup_git());
     command
         .env_clear()
@@ -494,7 +516,7 @@ fn git(repo: &Path, args: &[&str]) -> Command {
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .arg("--no-optional-locks")
         .args(crate::research::runner::GIT_SAFE);
-    if let Some(excludes) = crate::landing::owner_excludes_setting() {
+    if let Some(excludes) = excludes {
         command.arg("-c").arg(excludes);
     }
     command
@@ -523,20 +545,22 @@ pub(crate) fn outside_git(repo: &Path) -> bool {
 /// a closing `/`, each submodule and nested repository whole with a closing `/`, as their
 /// own ignores are not the project's, and the outermost file or folder of each other path
 /// whose name is secret-like, but for a programming source file, which a word in its name
-/// alone does not keep out. Asks git three times, bounded as [`ignored`]; a folder outside
-/// git is walked instead. Takes the folder. Returns the paths, or `None` when git could not
-/// answer, the walk could not finish or a name is not UTF-8, so no graph is built.
+/// alone does not keep out. Asks git for the ignored paths once per ignore file
+/// ([`excludes`]), then twice more, bounded as [`ignored`]; a folder outside git is walked
+/// instead. Takes the folder. Returns the paths, or `None` when git could not answer, the
+/// walk could not finish or a name is not UTF-8, so no graph is built.
 pub(crate) fn kept_out(repo: &Path) -> Option<Vec<String>> {
     if outside_git(repo) {
         return walked(repo);
     }
-    let ignored = listed(
-        repo,
-        &["-c", "-o", "-i", "--exclude-standard", "--directory"],
-    )?;
-    let mut kept: BTreeSet<String> = ignored.into_iter().collect();
-    let mut visible = listed(repo, &["-o", "--exclude-standard"])?;
-    for record in listed(repo, &["-s"])? {
+    let settings = excludes(repo);
+    let mut kept = BTreeSet::new();
+    for setting in &settings {
+        let args = ["-c", "-o", "-i", "--exclude-standard", "--directory"];
+        kept.extend(listed(repo, setting.as_deref(), &args)?);
+    }
+    let mut visible = listed(repo, settings[0].as_deref(), &["-o", "--exclude-standard"])?;
+    for record in listed(repo, None, &["-s"])? {
         let (mode, path) = record.split_once('\t')?;
         if mode.starts_with(GITLINK_MODE) {
             kept.insert(format!("{path}/"));
@@ -568,7 +592,7 @@ pub(crate) fn kept_out(repo: &Path) -> Option<Vec<String>> {
 /// bounded as [`answer`]. Takes the folder. Returns the paths, or `None` when git fails, runs
 /// over or names a path that is not UTF-8.
 pub(crate) fn untracked(repo: &Path) -> Option<Vec<String>> {
-    listed(repo, &["-o", "--directory"])
+    listed(repo, None, &["-o", "--directory"])
 }
 
 /// The paths below `repo`, a folder outside git, the code graph must never read (MAP-2): the
@@ -617,11 +641,12 @@ fn walked(repo: &Path) -> Option<Vec<String>> {
     Some(kept.into_iter().collect())
 }
 
-/// The paths `git ls-files -z` with `args` names in `repo`, within the bounds of
-/// [`answer`]. Takes the folder and the arguments. Returns the paths, or `None` when git
-/// fails, runs over, answers out of shape or names a path that is not UTF-8.
-fn listed(repo: &Path, args: &[&str]) -> Option<Vec<String>> {
-    let mut command = git(repo, &["ls-files", "-z"]);
+/// The paths `git ls-files -z` with `args` names in `repo`, honouring the ignore file
+/// `excludes` names ([`git`]), within the bounds of [`answer`]. Takes the folder, the
+/// setting and the arguments. Returns the paths, or `None` when git fails, runs over,
+/// answers out of shape or names a path that is not UTF-8.
+fn listed(repo: &Path, excludes: Option<&str>, args: &[&str]) -> Option<Vec<String>> {
+    let mut command = git(repo, excludes, &["ls-files", "-z"]);
     command.args(args);
     let (code, output) = answer(&mut command, Vec::new())?;
     let body = match output.split_last() {
