@@ -424,7 +424,7 @@ fn the_wizard_reads_harness_states_and_limits_from_the_real_catalog() {
         .prefix("ca-tui-harnesses-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
-    for name in ["codex", "opencode", "cursor-agent"] {
+    for name in ["codex", "opencode", "fx"] {
         let path = bin.path().join(name);
         std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -454,14 +454,14 @@ fn the_wizard_reads_harness_states_and_limits_from_the_real_catalog() {
         opencode.limited.as_deref(),
         Some("Limited control: installed, but CrazyAgent cannot start it yet.")
     );
-    let cursor = find("cursor-agent");
-    assert_eq!(cursor.state, HarnessState::CantStart);
+    let limited = find("fx");
+    assert_eq!(limited.state, HarnessState::CantStart);
     assert!(
-        cursor
+        limited
             .limited
             .as_deref()
-            .is_some_and(|text| text.contains("Cursor's permission file")),
-        "{cursor:?}"
+            .is_some_and(|text| text.contains("no documented switch to turn tools off")),
+        "{limited:?}"
     );
     let gemini = find("gemini-cli");
     assert_eq!(

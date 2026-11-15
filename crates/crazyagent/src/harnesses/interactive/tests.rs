@@ -146,26 +146,21 @@ fn no_secret(command: &InteractiveCommand) {
 #[test]
 fn every_catalog_harness_has_its_own_interactive_app_except_rcli() {
     let case = Case::new();
-    let expected: [(&str, &[&str], Option<&str>); 20] = [
+    let expected: [(&str, &[&str], Option<&str>); 15] = [
         ("opencode", &[], Some("--model")),
         ("gemini-cli", &[], Some("--model")),
-        ("cursor-agent", &[], Some("--model")),
         ("fx", &[], None),
-        ("antigravity", &[], None),
         ("openclaw", &["tui"], None),
         ("pi", &[], Some("--model")),
-        ("amp", &[], None),
         ("goose", &["session"], None),
         ("aider", &[], Some("--model")),
         ("qwen-code", &[], Some("--model")),
         ("crush", &[], None),
         ("droid", &[], None),
-        ("kiro", &["chat"], None),
         ("copilot", &[], Some("--model")),
         ("cline", &[], None),
         ("continue", &[], None),
         ("openhands", &[], None),
-        ("auggie", &[], None),
         ("kimi", &[], None),
     ];
     let ids: Vec<&str> = crate::harnesses::specs()

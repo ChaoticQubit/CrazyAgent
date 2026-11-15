@@ -464,7 +464,7 @@ fn every_catalog_harness_but_rcli_has_one_recipe_with_an_https_guide_and_plain_n
         assert!(link.starts_with("https://"), "{}", spec.id);
         seen += 1;
     }
-    assert_eq!(seen, 22);
+    assert_eq!(seen, 17);
     for name in table_names() {
         assert!(
             name.bytes().all(|byte| byte.is_ascii_lowercase()
@@ -502,7 +502,7 @@ fn the_installed_version_is_found_among_the_first_words_of_other_harnesses_too()
     );
     assert_eq!(installed_version("v1.5.2\n").as_deref(), Some("1.5.2"));
     assert_eq!(
-        installed_version("Kiro CLI 3.2.0\n").as_deref(),
+        installed_version("Kimi CLI 3.2.0\n").as_deref(),
         Some("3.2.0")
     );
     assert_eq!(installed_version("2026.11.10-731fb78\n"), None);
@@ -624,7 +624,6 @@ fn install_uses_homebrew_first_with_the_table_name_and_its_kind() {
         ("goose", ["install", "--formula", "block-goose-cli"]),
         ("kimi", ["install", "--formula", "kimi-code"]),
         ("copilot", ["install", "--cask", "copilot-cli"]),
-        ("antigravity", ["install", "--cask", "antigravity-cli"]),
         ("opencode", ["install", "--formula", "opencode"]),
     ] {
         let fixed = install_command(id, &machine.roots()).unwrap();
@@ -692,7 +691,7 @@ fn a_harness_whose_homebrew_formula_is_deprecated_installs_with_npm_even_when_ho
 fn a_homebrew_only_harness_without_homebrew_and_a_harness_with_no_package_get_no_install_command() {
     let machine = Machine::new();
     machine.npm("brew");
-    for id in ["aider", "goose", "cursor-agent", "kiro", "antigravity"] {
+    for id in ["aider", "goose"] {
         assert_eq!(
             install_command(id, &machine.roots()).unwrap_err(),
             NO_INSTALLER,
@@ -700,6 +699,14 @@ fn a_homebrew_only_harness_without_homebrew_and_a_harness_with_no_package_get_no
         );
     }
     machine.program("brew/bin/brew", 0o755);
+    for gone in ["antigravity", "cursor-agent", "amp", "kiro", "auggie"] {
+        assert_eq!(
+            install_command(gone, &machine.roots()).unwrap_err(),
+            UNKNOWN_INSTALL,
+            "{gone}"
+        );
+        assert!(guide(gone).is_none(), "{gone}");
+    }
     for id in ["fx", "openhands"] {
         assert_eq!(
             install_command(id, &machine.roots()).unwrap_err(),
@@ -719,7 +726,7 @@ fn a_homebrew_only_harness_without_homebrew_and_a_harness_with_no_package_get_no
 }
 
 #[test]
-fn where_casks_are_not_supported_a_cask_harness_falls_to_npm_or_to_the_guide() {
+fn where_casks_are_not_supported_a_cask_harness_falls_to_npm() {
     let machine = Machine::new();
     machine.program("brew/bin/brew", 0o755);
     let npm = machine.npm("brew");
@@ -728,10 +735,6 @@ fn where_casks_are_not_supported_a_cask_harness_falls_to_npm_or_to_the_guide() {
         ..machine.roots()
     };
     assert_eq!(install_command("codex", &roots).unwrap().program, npm);
-    assert_eq!(
-        install_command("cursor-agent", &roots).unwrap_err(),
-        NO_INSTALLER
-    );
     assert_eq!(
         install_command("aider", &roots).unwrap().args,
         ["install", "--formula", "aider"]
@@ -781,12 +784,8 @@ fn no_install_command_ever_names_a_look_alike_package_a_script_or_sudo() {
             let package = *fixed.args.last().unwrap();
             for wrong in [
                 "fx",
-                "amp",
                 "goose",
                 "copilot",
-                "cursor-agent",
-                "antigravity",
-                "kiro-cli",
                 "goose-cli",
                 "kimi-cli",
                 "openhands",
@@ -814,7 +813,7 @@ fn no_install_command_ever_names_a_look_alike_package_a_script_or_sudo() {
             }
         }
     }
-    assert_eq!(built, 20 + 15);
+    assert_eq!(built, 15 + 13);
 }
 
 fn executable(path: &Path, text: &str) {
@@ -1933,7 +1932,7 @@ fn an_npm_harness_on_a_mac_with_no_npm_needs_node_and_a_harness_with_no_package_
             "{id}"
         );
     }
-    for id in ["aider", "goose", "cursor-agent"] {
+    for id in ["aider", "goose", "fx"] {
         assert_eq!(
             install_command(id, &machine.roots()).unwrap_err(),
             NO_INSTALLER,

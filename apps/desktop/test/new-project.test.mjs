@@ -14,7 +14,7 @@ const missing = { kind: "not_installed" };
 const catalog = [
   harness("codex", "Codex", ready),
   harness("claude", "Claude Code", ready),
-  harness("cursor", "Cursor CLI", { kind: "limited", reason: "no CrazyAgent launch adapter yet" }, { kind: "limited", reason: "tools can't be turned off" }, undefined, noReader),
+  harness("aider", "Aider", { kind: "limited", reason: "no CrazyAgent launch adapter yet" }, { kind: "limited", reason: "tools can't be turned off" }, undefined, noReader),
   harness("gemini", "Gemini CLI", missing, undefined, undefined, noReader),
 ];
 const engineTeam = (master, agents) => ({
@@ -136,30 +136,30 @@ test("an empty agent list with a team maximum of one says no sub-agent runs", ()
 });
 
 test("a harness whose tools can't be turned off keeps tools on", () => {
-  const team = wizard.setTools({ ...engineTeam("codex", 1), sub_harnesses: [{ harness: "cursor", agents: 1, tools: true }] }, 0, false, catalog);
+  const team = wizard.setTools({ ...engineTeam("codex", 1), sub_harnesses: [{ harness: "aider", agents: 1, tools: true }] }, 0, false, catalog);
   assert.equal(team.sub_harnesses[0].tools, true);
   const codex = wizard.setTools(engineTeam("codex", 1), 0, false, catalog);
   assert.equal(codex.sub_harnesses[0].tools, false);
   const master = wizard.setTools(engineTeam("codex", 1), "master", false, catalog);
   assert.equal(master.master_tools, false);
-  assert.deepEqual(wizard.teamNotes({ ...engineTeam("codex", 1), sub_harnesses: [{ harness: "cursor", agents: 1, tools: true }] }, catalog), [
-    "Cursor CLI: tools can't be turned off.",
-    "Cursor CLI: no CrazyAgent launch adapter yet.",
+  assert.deepEqual(wizard.teamNotes({ ...engineTeam("codex", 1), sub_harnesses: [{ harness: "aider", agents: 1, tools: true }] }, catalog), [
+    "Aider: tools can't be turned off.",
+    "Aider: no CrazyAgent launch adapter yet.",
   ]);
 });
 
 test("switching to a harness whose tools can't be turned off and back restores the owner's choice", () => {
   const off = wizard.setTools(wizard.setTools(engineTeam("codex", 1), "master", false, catalog), 0, false, catalog);
   assert.deepEqual([off.master_tools, off.sub_harnesses[0].tools], [false, false]);
-  const forced = wizard.setRowHarness(wizard.setMaster(off, "cursor", catalog), 0, "cursor", catalog);
+  const forced = wizard.setRowHarness(wizard.setMaster(off, "aider", catalog), 0, "aider", catalog);
   assert.deepEqual([forced.master_tools, forced.sub_harnesses[0].tools], [true, true]);
   const back = wizard.setRowHarness(wizard.setMaster(forced, "claude", catalog), 0, "claude", catalog);
   assert.deepEqual([back.master, back.master_tools, back.sub_harnesses[0].harness, back.sub_harnesses[0].tools], ["claude", false, "claude", false]);
-  const on = wizard.setRowHarness(wizard.setMaster(wizard.setMaster(engineTeam("codex", 1), "cursor", catalog), "codex", catalog), 0, "claude", catalog);
+  const on = wizard.setRowHarness(wizard.setMaster(wizard.setMaster(engineTeam("codex", 1), "aider", catalog), "codex", catalog), 0, "claude", catalog);
   assert.deepEqual([on.master_tools, on.sub_harnesses[0].tools], [true, true]);
   const request = wizard.buildRequest({ ...wizard.emptyDraft(), name: "Harbor", team: forced }).setup.team;
   assert.deepEqual(request, {
-    master: "cursor", master_tools: true, sub_harnesses: [{ harness: "cursor", agents: 1, tools: true }], min_agents: 1, max_agents: 2,
+    master: "aider", master_tools: true, sub_harnesses: [{ harness: "aider", agents: 1, tools: true }], min_agents: 1, max_agents: 2,
   });
   assert.deepEqual(wizard.wireTeam(back), {
     master: "claude", master_tools: false, sub_harnesses: [{ harness: "claude", agents: 1, tools: false }], min_agents: 1, max_agents: 2,
@@ -170,10 +170,10 @@ test("harness choices list every harness and say why one can't be picked", () =>
   assert.deepEqual(wizard.harnessChoices(catalog, "agent").map((choice) => [choice.id, choice.group, choice.disabled]), [
     ["codex", "Ready", false],
     ["claude", "Ready", false],
-    ["cursor", "Limited control", true],
+    ["aider", "Limited control", true],
     ["gemini", "Not installed", true],
   ]);
-  assert.equal(wizard.harnessChoices(catalog, "agent")[2].label, "Cursor CLI - Can't run team agents");
+  assert.equal(wizard.harnessChoices(catalog, "agent")[2].label, "Aider - Can't run team agents");
   assert.equal(wizard.harnessChoices(catalog, "agent")[3].label, "Gemini CLI - Not installed");
 });
 
@@ -206,8 +206,8 @@ test("a master-only harness is offered and valid as the master but never for an 
   assert.deepEqual(pick("master"), { id: "rcli", label: "RCLI - Master only, no live terminal", group: "Limited control", disabled: false });
   assert.deepEqual(pick("agent"), { id: "rcli", label: "RCLI - Runs only as the master", group: "Limited control", disabled: true });
   for (const role of ["master", "agent"]) {
-    const cursor = wizard.harnessChoices(withRcli, role).find((choice) => choice.id === "cursor");
-    assert.deepEqual([cursor.label, cursor.disabled], ["Cursor CLI - Can't run team agents", true], role);
+    const limited = wizard.harnessChoices(withRcli, role).find((choice) => choice.id === "aider");
+    assert.deepEqual([limited.label, limited.disabled], ["Aider - Can't run team agents", true], role);
   }
   const led = engineTeam("rcli");
   assert.deepEqual(wizard.teamErrors(led, withRcli), { rows: [] });
@@ -228,8 +228,15 @@ test("team validation mirrors the engine agent range", () => {
   assert.equal(wizard.teamErrors({ ...ok, min_agents: 5, max_agents: 6 }, catalog).range, "This team has 4 agents. Set At least to 4 or less.");
   assert.equal(wizard.teamErrors({ ...ok, max_agents: 65 }, catalog).range, "At most can be up to 64.");
   assert.equal(wizard.teamErrors({ ...ok, master: "gemini" }, catalog).master, "Gemini CLI isn't installed on this Mac. Pick another harness.");
-  assert.equal(wizard.teamErrors({ ...ok, master: "cursor" }, catalog).master, "Cursor CLI can't run team agents yet. Pick another harness.");
-  assert.deepEqual(wizard.teamErrors({ ...ok, sub_harnesses: [{ harness: "cursor", agents: 1, tools: true }] }, catalog).rows, ["Cursor CLI can't run team agents yet. Pick another harness."]);
+  assert.equal(wizard.teamErrors({ ...ok, master: "aider" }, catalog).master, "Aider can't run team agents yet. Pick another harness.");
+  assert.deepEqual(wizard.teamErrors({ ...ok, sub_harnesses: [{ harness: "aider", agents: 1, tools: true }] }, catalog).rows, ["Aider can't run team agents yet. Pick another harness."]);
+  for (const [gone, name] of [["antigravity", "Antigravity"], ["cursor-agent", "Cursor CLI"], ["amp", "Amp"], ["kiro", "Kiro CLI"], ["auggie", "Auggie"]]) {
+    const sentence = `${name} is no longer supported. Pick another harness.`;
+    assert.equal(wizard.teamErrors({ ...ok, master: gone }, catalog).master, sentence);
+    assert.equal(wizard.teamErrors({ ...ok, master: gone }, null).master, sentence, "the removed list needs no catalog");
+    assert.deepEqual(wizard.teamErrors({ ...ok, sub_harnesses: [{ harness: gone, agents: 1, tools: true }] }, catalog).rows, [sentence]);
+    assert.equal(wizard.teamValid({ ...ok, master: gone }, catalog), false);
+  }
   assert.equal(wizard.teamErrors({ ...ok, master: "" }, catalog).master, "Pick a harness for the master.");
   assert.deepEqual(wizard.teamErrors({ ...ok, sub_harnesses: [{ harness: "codex", agents: 16, tools: true }], max_agents: 17 }, catalog).rows, ["Each harness runs 1 to 15 agents."]);
   assert.deepEqual(wizard.teamErrors({ ...ok, sub_harnesses: [{ harness: "codex", agents: 1.5, tools: true }] }, catalog).rows, ["Each harness runs 1 to 15 agents."]);

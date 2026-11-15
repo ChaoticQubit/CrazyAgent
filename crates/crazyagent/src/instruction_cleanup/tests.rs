@@ -236,7 +236,7 @@ fn edit_with_ai_runs_only_on_a_master_harness_that_can_run_it() {
         edit_harness("claude-code"),
         Some(ResearchHarness::ClaudeCode)
     );
-    for other in ["pi", "opencode", "antigravity", ""] {
+    for other in ["pi", "opencode", "goose", ""] {
         assert_eq!(edit_harness(other), None, "{other}");
     }
 }

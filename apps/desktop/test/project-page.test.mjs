@@ -1007,12 +1007,12 @@ test("Project Settings sends the engine's team fields only, never the tools choi
   const settings = await import("../src/screens/project/settings.tsx");
   const stored = { about: "a", tech_stack: ["Rust"], platforms: ["cli"], research: [], pool: "main" };
   const team = {
-    master: "cursor", master_tools: true, master_tools_wanted: false,
-    sub_harnesses: [{ harness: "cursor", agents: 2, tools: true, tools_wanted: false }], min_agents: 1, max_agents: 3,
+    master: "aider", master_tools: true, master_tools_wanted: false,
+    sub_harnesses: [{ harness: "aider", agents: 2, tools: true, tools_wanted: false }], min_agents: 1, max_agents: 3,
   };
   assert.deepEqual(settings.setupOf(stored, team), {
     about: "a", tech_stack: ["Rust"], platforms: ["cli"], research: [], pool: "main", documents: [],
-    team: { master: "cursor", master_tools: true, sub_harnesses: [{ harness: "cursor", agents: 2, tools: true }], min_agents: 1, max_agents: 3 },
+    team: { master: "aider", master_tools: true, sub_harnesses: [{ harness: "aider", agents: 2, tools: true }], min_agents: 1, max_agents: 3 },
   });
   assert.deepEqual(settings.setupOf({ ...stored, research: ["market_research", "roadmap_planning"] }, team).research, ["market_research", "roadmap_planning"],
     "saving the team keeps the stored roadmap choice");

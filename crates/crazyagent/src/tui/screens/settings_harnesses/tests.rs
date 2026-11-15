@@ -69,17 +69,17 @@ fn engine_table(
         "Subscription, API key",
         "Any account",
         "Subscription, API key",
-        "Subscription, API key",
         "Any API key or URL",
-        "Subscription",
         "Subscription, API key, Local model",
         "Any account",
+        "Any API key or URL",
+        "Any API key or URL",
     ];
     assert!(shown <= words.len());
     for (index, word) in words.iter().enumerate().take(shown) {
         let row = &mut rows[first + index];
         *row = put(row, works, &cut(word, room, "…"), room);
-        if index == 5 || index == 7 {
+        if index == 4 || index == 5 || index == 7 {
             *row = put(row, control, "◧ Limited control", 17);
         }
     }
@@ -120,11 +120,6 @@ fn a_harness_that_is_not_installed_says_how_to_add_it() {
     }
     let mut expected = fixture("harness-limited-80", &[]);
     engine_table(&mut expected, 6, 35, 54, 24, 9);
-    expected[17] = format!(
-        "{:<80}",
-        "  Limited control: tools are allowed or denied only through Cursor's"
-    );
-    expected[18] = format!("{:<80}", "  permission file.");
     assert_eq!(render(&mut shell, 80, 24), expected);
 }
 
@@ -196,24 +191,24 @@ fn words_follow_the_engine_catalog() {
         (status_word(codex), control_word(codex)),
         ("Ready", "Full control")
     );
-    let mut cursor = found
+    let mut limited = found
         .entries
         .iter()
-        .find(|entry| entry.id == "cursor-agent")
+        .find(|entry| entry.id == "fx")
         .unwrap()
         .clone();
     assert_eq!(
-        (status_word(&cursor), control_word(&cursor)),
+        (status_word(&limited), control_word(&limited)),
         ("Not installed", "Limited control")
     );
-    cursor.executable = Some(found.codex.clone());
-    cursor.status = HarnessStatus::Limited {
+    limited.executable = Some(found.codex.clone());
+    limited.status = HarnessStatus::Limited {
         reason: "installed, but CrazyAgent cannot start it yet".into(),
     };
-    assert_eq!(status_word(&cursor), "Can't start");
+    assert_eq!(status_word(&limited), "Can't start");
     assert_eq!(
-        control_sentence(&cursor),
-        "Limited control: installed, but CrazyAgent cannot start it yet; tools are allowed or denied only through Cursor's permission file."
+        control_sentence(&limited),
+        "Limited control: installed, but CrazyAgent cannot start it yet; no documented switch to turn tools off."
     );
     let opencode = found
         .entries
