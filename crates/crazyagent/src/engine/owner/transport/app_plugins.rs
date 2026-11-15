@@ -492,15 +492,60 @@ pub(super) async fn receive_key(stream: &mut UnixStream) -> Result<AccountSecret
     .map_err(|_| failure("app_plugin_key_invalid"))?
 }
 
-/// The App plugins page's view of a trust screen: a connector's is refused there, since
-/// connectors are not managed on that page (DEC-168 addendum 4). Input: the store's
-/// preview. Output: the same preview, or the refusal naming `kind`.
-fn off_page(preview: Preview) -> Preview {
-    match preview {
-        Preview::Ready { trust } if trust.kind == PluginKind::Connector => Preview::Refused {
-            problem: Problem::new("app_plugin_connector_elsewhere", None, Some("kind")),
+/// One page's view of a trust screen. The App plugins page refuses a connector's and the
+/// Connectors page refuses any other kind's (naming `kind`), and neither shows one whose
+/// name a plugin of the other page already has (`app_plugin_name_taken`, naming `name`),
+/// so a replace never crosses pages (DEC-168 addenda 4 and 5). Inputs: the engine root,
+/// the store's preview and whether the page is the Connectors page. Output: the same
+/// preview, the refusal, or the folder's refusal.
+pub(super) fn page_preview(
+    root: &Path,
+    preview: Preview,
+    connectors: bool,
+) -> Result<Preview, EngineError> {
+    let Preview::Ready { trust } = &preview else {
+        return Ok(preview);
+    };
+    let refusal = if (trust.kind == PluginKind::Connector) != connectors {
+        let code = if connectors {
+            "app_plugin_not_connector"
+        } else {
+            "app_plugin_connector_elsewhere"
+        };
+        Some((code, "kind"))
+    } else {
+        match store::kind_of(root, &trust.name)? {
+            Some(kind) if (kind == PluginKind::Connector) != connectors => {
+                Some(("app_plugin_name_taken", "name"))
+            }
+            _ => None,
+        }
+    };
+    Ok(match refusal {
+        Some((code, field)) => Preview::Refused {
+            problem: Problem::new(code, None, Some(field)),
         },
-        other => other,
+        None => preview,
+    })
+}
+
+/// Refuses an add that belongs to the other page: a manifest of the other page's kind
+/// (`app_plugin_refused`), or one whose name a plugin of the other page already has
+/// (`app_plugin_name_taken`), replace or not. Text that does not read as a plugin goes on
+/// to the store, which refuses it. Inputs: the engine root, the manifest text and whether
+/// the page is the Connectors page. Output: Ok, the refusal, or the folder's refusal.
+pub(super) fn page_add(root: &Path, yaml: &str, connectors: bool) -> Result<(), EngineError> {
+    let Ok(manifest) = crate::app_plugins::manifest::parse(yaml) else {
+        return Ok(());
+    };
+    if (manifest.kind == PluginKind::Connector) != connectors {
+        return Err(failure("app_plugin_refused"));
+    }
+    match store::kind_of(root, &manifest.name)? {
+        Some(kind) if (kind == PluginKind::Connector) != connectors => {
+            Err(failure("app_plugin_name_taken"))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -541,22 +586,17 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
     match action {
         Action::List => listing(&db),
         Action::Preview { yaml } => Ok(Reply::Preview {
-            preview: Box::new(off_page(store::preview(root, &yaml)?)),
+            preview: Box::new(page_preview(root, store::preview(root, &yaml)?, false)?),
         }),
         Action::Review { name } => Ok(Reply::Preview {
-            preview: Box::new(off_page(store::review(root, &name)?)),
+            preview: Box::new(page_preview(root, store::review(root, &name)?, false)?),
         }),
         Action::Add {
             yaml,
             sha256,
             replace,
         } => {
-            if matches!(
-                crate::app_plugins::manifest::parse(&yaml),
-                Ok(manifest) if manifest.kind == PluginKind::Connector
-            ) {
-                return Err(failure("app_plugin_refused"));
-            }
+            page_add(root, &yaml, false)?;
             store::add(&db, root, &yaml, &sha256, replace, now)?;
             listing(&db)
         }

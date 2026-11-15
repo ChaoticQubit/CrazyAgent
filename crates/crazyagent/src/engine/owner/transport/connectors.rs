@@ -1,5 +1,5 @@
 use super::*;
-use crate::app_plugins::{PluginKind, Preview, Problem, store};
+use crate::app_plugins::{PluginKind, Preview, store};
 use crate::connectors::{ConnectorSettings, ConnectorsView, Who};
 use crate::engine::owner::AccountSecret;
 use crate::protocol::encode_frame;
@@ -420,18 +420,6 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
     Ok((connectors, secret_present))
 }
 
-/// The Connectors page's view of a trust screen: a plugin of another kind is refused
-/// there, since it is added on the App plugins page. Input: the store's preview. Output:
-/// the same preview, or the refusal naming `kind`.
-fn on_page(preview: Preview) -> Preview {
-    match preview {
-        Preview::Ready { trust } if trust.kind != PluginKind::Connector => Preview::Refused {
-            problem: Problem::new("app_plugin_not_connector", None, Some("kind")),
-        },
-        other => other,
-    }
-}
-
 /// Refuses a name that is not a connector's, so this page never changes an embedding
 /// plugin. Inputs: the engine root and the name. Output: Ok, or `app_plugin_not_found`.
 fn connector(root: &Path, name: &str) -> Result<(), EngineError> {
@@ -456,7 +444,11 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
     match action {
         Action::View { project } => page(&db, project.as_deref()),
         Action::Preview { yaml } => Ok(Reply::Preview {
-            preview: Box::new(on_page(store::preview(root, &yaml)?)),
+            preview: Box::new(super::app_plugins::page_preview(
+                root,
+                store::preview(root, &yaml)?,
+                true,
+            )?),
         }),
         Action::Review { name } => {
             connector(root, &name)?;
@@ -469,12 +461,7 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
             sha256,
             replace,
         } => {
-            if !matches!(
-                crate::app_plugins::manifest::parse(&yaml),
-                Ok(manifest) if manifest.kind == PluginKind::Connector
-            ) {
-                return Err(failure("app_plugin_refused"));
-            }
+            super::app_plugins::page_add(root, &yaml, true)?;
             store::add(&db, root, &yaml, &sha256, replace, now)?;
             page(&db, None)
         }

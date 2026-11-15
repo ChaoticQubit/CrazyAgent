@@ -131,10 +131,6 @@ fn prepare(db: &Connection, root: &Path) -> Result<(), EngineError> {
         let bindings = binding_rows(db, name)?;
         db.execute("DELETE FROM app_plugin_secrets WHERE plugin=?1", [name])
             .map_err(sqlite)?;
-        db.execute("DELETE FROM app_plugin_state WHERE name=?1", [name])
-            .map_err(sqlite)?;
-        forget_grants(db, name)?;
-        crate::semantic::settings::forget(db, name)?;
         for (_, source, reference) in bindings {
             if source == KEY
                 && let Some(key) = plugin_key(&reference)
@@ -142,6 +138,10 @@ fn prepare(db: &Connection, root: &Path) -> Result<(), EngineError> {
                 let _ = accounts::remove_key_in(root, PLUGIN_KEYS, key.as_str());
             }
         }
+        db.execute("DELETE FROM app_plugin_state WHERE name=?1", [name])
+            .map_err(sqlite)?;
+        forget_grants(db, name)?;
+        crate::semantic::settings::forget(db, name)?;
         db.execute("DELETE FROM app_plugin_trust WHERE name=?1", [name])
             .map_err(sqlite)?;
     }
