@@ -71,6 +71,10 @@ const CHECK_TIME: Duration = Duration::from_secs(20);
 const DRAIN_TIME: Duration = Duration::from_secs(2);
 const REMOTES_MAX: usize = 64;
 const HOOKS_MAX: usize = 64;
+/// The key prefix git lists an `includeIf "onbranch:..."` entry under, its section in lower
+/// case as git prints it: the file it includes follows HEAD, which the IDE can write between
+/// the check and the run, so git could read a file the check never saw (RV-DS241-144).
+const BRANCH_INCLUDE: &str = "includeif.onbranch:";
 const DEPTH_DIGITS_MAX: usize = 9;
 const POLL: Duration = Duration::from_millis(20);
 /// The most `ide.git` calls one owner server runs at once, across its projects, and for
@@ -444,11 +448,12 @@ pub(super) fn owner_path(value: &OsStr, denied: &[&Path]) -> OsString {
 }
 
 /// Runs one checked IDE git command in the project folder outside the IDE sandbox, after
-/// three checks against the configuration git will use: every file it reads lies outside
+/// four checks against the configuration git will use: every file it reads lies outside
 /// the project folder or is the folder's own `.git/config` or `.git/config.worktree`, which
-/// the IDE sandbox cannot write; every remote reached is configured there with a URL; and
-/// every URL it fetches from or pushes to, `insteadOf` applied, uses https, http, ssh or
-/// git. git runs the [`engine_args`], so a pull only fetches, with [`HARDENING`] (no hooks,
+/// the IDE sandbox cannot write; no entry includes a file by branch ([`BRANCH_INCLUDE`]);
+/// every remote reached is configured there with a URL; and every URL it fetches from or
+/// pushes to, `insteadOf` applied, uses https, http, ssh or git. git runs the
+/// [`engine_args`], so a pull only fetches, with [`HARDENING`] (no hooks,
 /// fsmonitor, pager, askpass, submodules, replace objects or automatic maintenance), every
 /// config hook of the owner's own config switched off ([`hooks_off`]), the [`owner_env`]
 /// environment and its own process group, which is killed at `limit`. A config hook git
@@ -469,10 +474,9 @@ pub(super) fn run(
             .is_some_and(|first| first == verb_word(plan.verb))
     );
     let entries = config(folder, env)?;
-    if !entries
-        .iter()
-        .all(|entry| origin_allowed(&entry.origin, folder))
-    {
+    if !entries.iter().all(|entry| {
+        origin_allowed(&entry.origin, folder) && !entry.key.starts_with(BRANCH_INCLUDE)
+    }) {
         return Err(failure("ide_git_config_refused"));
     }
     let hooks = match hooks_off(&entries, folder) {
