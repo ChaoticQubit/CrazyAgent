@@ -14,6 +14,10 @@ pub const READ_MAX: usize = 500;
 /// The most rows one launch keeps of lists and calls that sent nothing of an agent's to a
 /// vendor; its oldest go first, so a flood of them never pushes a sent call out.
 pub const QUIET_ROWS_PER_LAUNCH_MAX: usize = 1_000;
+/// The most rows the log keeps of lists and calls that sent nothing to a vendor, across
+/// every launch; they are capped apart from the calls that reached a vendor, so no number
+/// of them pushes one of those out.
+pub const QUIET_ROWS_MAX: usize = 10_000;
 
 /// The most calls one activity view holds.
 pub const VIEW_CALLS_MAX: usize = 100;

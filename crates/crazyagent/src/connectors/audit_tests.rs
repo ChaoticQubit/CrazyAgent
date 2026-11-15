@@ -344,3 +344,44 @@ fn one_launchs_flood_of_calls_that_never_reached_a_vendor_leaves_every_sent_call
             .all(|row| !row.sent || row.launch == "a" || row.launch == "b")
     );
 }
+
+#[test]
+fn refused_calls_past_every_cap_never_evict_a_call_that_reached_a_vendor() {
+    let case = case();
+    let now = crate::semantic::now_ms();
+    record(&case.db, &call("board", "alpha", "a", now - 5_000), KeepLog::Days90).unwrap();
+    record(&case.db, &call("desk", "beta", "b", now - 4_000), KeepLog::Days90).unwrap();
+    case.db
+        .execute(
+            "UPDATE sqlite_sequence SET seq = seq + ?1 WHERE name='connector_calls'",
+            [ROWS_MAX],
+        )
+        .unwrap();
+    record(&case.db, &refused("a", now - 3_000), KeepLog::Days90).unwrap();
+    assert_eq!(
+        count(&case.db, "sent=1"),
+        2,
+        "ids that inserted-then-deleted refusals used up never count as rows"
+    );
+
+    case.db
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
+             INSERT INTO connector_calls
+                 (launch, connector, tool, kind, sent, project, agent, started_ms, ms,
+                  bytes_in, bytes_out, outcome)
+             SELECT 'q' || (i % 50), 'board', '', 'unknown', 0, 'alpha', 'Agent 1', ?2, 0, 2, 0,
+                    'connector_tool_unknown'
+             FROM n",
+            rusqlite::params![QUIET_ROWS_MAX as i64 + 100, now - 2_000],
+        )
+        .unwrap();
+    record(&case.db, &refused("z", now), KeepLog::Days90).unwrap();
+    assert_eq!(count(&case.db, "sent=0"), QUIET_ROWS_MAX as i64);
+    assert_eq!(count(&case.db, "launch='z'"), 1, "the newest refusal stays");
+    assert_eq!(
+        count(&case.db, "sent=1"),
+        2,
+        "refusals from many launches past the quiet cap push out only refusals"
+    );
+}
