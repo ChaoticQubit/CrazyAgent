@@ -7,7 +7,7 @@ import type { IntentReceipt } from "../../engine-client";
 import { Button, ConfirmDialog } from "../../ui";
 import type { Tone } from "../../ui";
 import { displayText } from "../conversation";
-import { changeOutcome, planningJob, researchJobs } from "./research";
+import { changeOutcome, localClock, planningJob, rateLimit, researchJobs } from "./research";
 import { RoadmapStatusPanel } from "./roadmap-status";
 import { Badge, NotReady } from "./shared";
 import type { ProjectData } from "./shared";
@@ -49,13 +49,16 @@ export function planningState(jobs: ResearchJob[]): PlanningState {
   return { kind: "failed", job };
 }
 
-/** Builds the planning line for one state, stating only what the job reports.
+/** Builds the planning line for one state, stating only what the job reports; a job parked on
+ * a rate limit reads its local end and plain reason, as a research row does.
  * Input: the state. Output: the word, tone, line, action and the roadmap path once done. */
 export function planningView(state: PlanningState): PlanningView {
   switch (state.kind) {
     case "idle": return { word: "Not planned", tone: "neutral", line: "No roadmap yet. Plan one from the brief, research and code.", action: "plan", report: null };
     case "waiting": return { word: "Waiting for research", tone: "neutral", line: "The roadmap is planned once research finishes.", action: null, report: null };
     case "planning": {
+      const limit = rateLimit(state.job);
+      if (limit) return { word: `Rate limited until ${localClock(limit.until)}`, tone: "warn", line: limit.reason, action: null, report: null };
       const line = state.job.status === "needs_pool" ? state.job.error?.trim() || "Waiting for a pool"
         : state.job.status === "queued" ? state.job.error?.trim() || "Waiting to start" : "Writing the roadmap and release process";
       return { word: "Planning", tone: "info", line, action: null, report: null };
