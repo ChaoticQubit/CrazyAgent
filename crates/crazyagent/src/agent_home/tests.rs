@@ -1373,6 +1373,159 @@ fn an_acl_an_agent_set_in_its_home_never_blocks_its_next_launch() {
     );
 }
 
+/// Adds one ACL entry to a test path with `/bin/chmod +a` and requires it to hold. Inputs:
+/// the entry and the path.
+#[cfg(target_os = "macos")]
+fn acl(entry: &str, path: &Path) {
+    let done = std::process::Command::new("/bin/chmod")
+        .args(["+a", entry])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(done.status.success(), "{entry} {path:?}: {done:?}");
+}
+
+/// Whether a test path's ACL holds a deny entry, as `/bin/ls -led` lists it. Input: the
+/// path. Output: the answer.
+#[cfg(target_os = "macos")]
+fn denies(path: &Path) -> bool {
+    let listed = std::process::Command::new("/bin/ls")
+        .arg("-led")
+        .arg(path)
+        .output()
+        .unwrap();
+    listed.status.success() && String::from_utf8_lossy(&listed.stdout).contains("deny")
+}
+
+/// Clears a test path's ACL and user flags when dropped, so its temporary folder can be
+/// deleted whatever the test asserted. Holds the path.
+#[cfg(target_os = "macos")]
+struct Released(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for Released {
+    fn drop(&mut self) {
+        let _ = nix::unistd::chflags(self.0.as_path(), nix::sys::stat::FileFlag::empty());
+        let _ = std::process::Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(&self.0)
+            .output();
+    }
+}
+
+/// A launch that clears a home folder an agent left without write never changes the ACL of
+/// a file a link in that folder names (RV-DS241-137 sec r2 F1): the folder and the link go,
+/// and the file outside the home keeps its entry, since a tree's ACLs go only on its
+/// one-link entries that are not links and on links themselves, as a launch context's
+/// release clears them.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_link_in_a_home_folder_the_launch_opens_up_never_carries_an_acl_clear_outside() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let outside = root.join("outside.txt");
+    fs::write(&outside, "the owner's\n").unwrap();
+    let _outside = Released(outside.clone());
+    acl("everyone deny write", &outside);
+    let shut = home.join("d");
+    fs::create_dir(&shut).unwrap();
+    std::os::unix::fs::symlink(&outside, shut.join("x")).unwrap();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o500)).unwrap();
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    let _ = fs::set_permissions(&shut, fs::Permissions::from_mode(0o700));
+    assert_eq!(prepared, Ok(()));
+    assert!(
+        fs::symlink_metadata(&shut).is_err(),
+        "the shut folder stayed"
+    );
+    assert!(denies(&outside), "a file outside the home lost its ACL");
+}
+
+/// A kept name an agent made a second link to a file outside its home never changes that
+/// file at the next launch (RV-DS241-137 sec r2 F1, code r2 F2, V231-ACL): `.claude.json`
+/// linked to a file whose ACL denies writing goes as a plain unlink and the file keeps its
+/// entry, and `.credentials.json` linked to a file pinned immutable, which no unlink takes,
+/// refuses the launch while the file keeps its flag.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_kept_name_linked_to_a_file_outside_the_home_never_changes_that_file() {
+    use nix::sys::stat::FileFlag;
+    use std::os::macos::fs::MetadataExt as _;
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let denied = root.join("denied.json");
+    fs::write(&denied, "{}\n").unwrap();
+    let _denied = Released(denied.clone());
+    acl("everyone deny write", &denied);
+    let claude = home(&root, "claude");
+    fs::hard_link(&denied, claude.join(".claude.json")).unwrap();
+    let pinned = root.join("pinned.json");
+    fs::write(&pinned, "{}\n").unwrap();
+    let _pinned = Released(pinned.clone());
+    let codex = home(&root, "codex");
+    fs::hard_link(&pinned, codex.join(".credentials.json")).unwrap();
+    nix::unistd::chflags(pinned.as_path(), FileFlag::UF_IMMUTABLE).unwrap();
+
+    let linked_acl = prepare(&claude, Harness::Claude, &project, &given);
+    let linked_flag = prepare(&codex, Harness::Codex, &project, &given);
+
+    assert_eq!(linked_acl, Ok(()));
+    assert!(denies(&denied), "a file outside the home lost its ACL");
+    assert_eq!(
+        fs::metadata(&denied).unwrap().nlink(),
+        1,
+        "the second link stayed"
+    );
+    assert_eq!(
+        linked_flag,
+        Err(AgentHomeError("agent_home_unwritable".into()))
+    );
+    let flags = fs::symlink_metadata(&pinned).unwrap().st_flags();
+    assert_ne!(
+        flags & FileFlag::UF_IMMUTABLE.bits(),
+        0,
+        "a file outside the home lost its flag"
+    );
+}
+
+/// A home folder whose ACLs deny listing two folders deep still goes at the next launch
+/// (RV-DS241-137 code r2 F3): each folder's ACL is cleared by its path before the walk reads
+/// it, so a tree a Full run or an earlier version's run left that way never refuses every
+/// later launch. Passes at the base too (scratch probe, DONE r3); it guards the new tree clear.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_folder_whose_acls_deny_listing_two_deep_still_goes() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let outer = home.join("outer");
+    let inner = outer.join("inner");
+    let file = inner.join("file");
+    fs::create_dir_all(&inner).unwrap();
+    fs::write(&file, "planted\n").unwrap();
+    let _file = Released(file.clone());
+    let _inner = Released(inner.clone());
+    let _outer = Released(outer.clone());
+    acl("everyone deny delete", &file);
+    acl("everyone deny list,search", &inner);
+    acl("everyone deny list,search", &outer);
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    assert_eq!(prepared, Ok(()));
+    assert!(
+        fs::symlink_metadata(&outer).is_err(),
+        "a tree whose ACLs deny listing stayed"
+    );
+}
+
 /// A home an agent filled with more entries than one listing of it takes still launches,
 /// and every entry it planted goes while what the harness keeps stays (RV-DS241-137), so a
 /// run that makes a hundred thousand files in its home never refuses every later launch.

@@ -33814,3 +33814,52 @@ fn the_team_runtime_refuses_a_store_that_keeps_a_rollback_journal() {
         Ok(_) => panic!("the team runtime opened a store that keeps a rollback journal"),
     }
 }
+
+/// RV-DS241-137 code r2 F1: a native lead's teammates' home is reset as an agent home is at
+/// each launch, so a crate source a teammate planted in its cargo home where the owner has
+/// none, a package npx installed and a tool config no list names are gone, while the links
+/// to the lead's team and task folders and Claude Code's answered config stay.
+#[cfg(unix)]
+#[test]
+fn a_native_leads_teammates_home_is_reset_at_each_launch() {
+    use std::os::unix::fs::DirBuilderExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let owner = root.join("owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    let homes = ToolHomes::at(&owner);
+    let home = root.join("agent/home");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&home)
+        .unwrap();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let mates = prepare_mates_home(&home, &homes, &project).unwrap();
+    let planted = [
+        mates.join(".cargo/registry/src/index/x-1.0.0/build.rs"),
+        mates.join(".npm/_npx/0/node_modules/x/index.js"),
+        mates.join(".bunfig.toml"),
+    ];
+    for path in &planted {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "planted\n").unwrap();
+    }
+
+    let again = prepare_mates_home(&home, &homes, &project).unwrap();
+
+    assert_eq!(again, mates);
+    let left: Vec<&PathBuf> = planted
+        .iter()
+        .filter(|path| std::fs::symlink_metadata(path).is_ok())
+        .collect();
+    assert!(left.is_empty(), "the teammates' home kept {left:?}");
+    for folder in crate::sandbox::CLAUDE_TEAM_SHARED {
+        assert_eq!(
+            std::fs::read_link(mates.join(folder)).unwrap(),
+            home.join(folder)
+        );
+    }
+    assert!(mates.join(".claude.json").is_file());
+}
