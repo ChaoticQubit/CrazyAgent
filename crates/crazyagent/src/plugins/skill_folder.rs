@@ -513,14 +513,12 @@ pub(super) fn open_real(path: &Path, last: OFlags) -> rustix::io::Result<OwnedFd
     crate::platform::open_beneath(Path::new("/"), below, last)
 }
 
-/// Whether a name is one the copy leaves out, `.git` or `.DS_Store`, in any letter case,
-/// since the default macOS volume opens `.git` by `.GIT` too. Input: the name. Output:
-/// the answer.
+/// Whether a name is one the copy leaves out, `.git` or `.DS_Store`, in any spelling a
+/// case-insensitive volume opens as one of them, since macOS opens `.git` by `.GIT` and
+/// HFS+ by `\u{feff}.git` too (DS-148 F1). Input: the name. Output: the answer.
 #[cfg(unix)]
 fn left_out(name: &OsStr) -> bool {
-    SKIPPED
-        .iter()
-        .any(|skipped| name.eq_ignore_ascii_case(skipped))
+    crate::instruction_files::names_one_of(&name.to_string_lossy(), &SKIPPED)
 }
 
 /// The path a link in the folder names, its `.` and `..` worked out as text, kept only when
@@ -1183,6 +1181,31 @@ mod tests {
                     .any(|part| part.eq_ignore_ascii_case(".git"))),
                 "{rules:?}"
             );
+        }
+    }
+
+    /// DS-148 code F1: a folder named `.git` with a code point HFS+ ignores in names, before
+    /// the dot or inside, is left out like `.git` itself, since such a volume opens it as
+    /// `.git`.
+    #[test]
+    fn a_git_folder_spelled_with_a_code_point_hfs_ignores_is_left_out() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("store")).unwrap();
+        let source = skill(root.path(), GOOD);
+        let spelled = ["\u{feff}.git", ".g\u{200c}it", "scripts/\u{200d}.Git"];
+        for folder in spelled {
+            fs::create_dir(source.join(folder)).unwrap();
+            fs::write(source.join(folder).join("config"), "[core]\n").unwrap();
+        }
+        for (index, rules) in [PICKED, IMPORTED].iter().enumerate() {
+            let destination = root.path().join("store").join(index.to_string());
+            copy_with(&source, &destination, rules).unwrap();
+            for folder in spelled {
+                assert!(
+                    fs::symlink_metadata(destination.join(folder)).is_err(),
+                    "{folder} was copied under {rules:?}"
+                );
+            }
         }
     }
 }

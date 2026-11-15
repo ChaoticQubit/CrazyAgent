@@ -516,6 +516,30 @@ fn a_bare_repository_layout_spelled_with_folded_letters_is_refused_when_its_turn
     }
 }
 
+/// A `HEAD` beside a `commondir` spelled with U+0131 DOTLESS I, which the NTFS upcase table
+/// maps to `I`, is refused like the plain pair, since git on such a volume opens it and
+/// follows it to a store elsewhere in the tree (DS-148 sec F1).
+#[test]
+fn a_head_beside_a_commondir_spelled_with_a_dotless_i_is_refused_when_its_turn_is_committed() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    let case = Case::new();
+    plant_layout(
+        &case.workspace.worktree.join("notes"),
+        &[
+            ("HEAD", "ref: refs/heads/main\n", false),
+            ("commond\u{131}r", "../x\n", false),
+        ],
+    );
+    assert_eq!(
+        refused(record_turn_end(&case.db, &case.workspace, &turn)),
+        "changes_bare_repository"
+    );
+}
+
 /// Two change sets whose folders differ only in letter case, each holding half a bare
 /// repository layout, make the whole layout in one folder of an owner checkout on a
 /// case-insensitive volume, so accepting the second is refused and the branch stays

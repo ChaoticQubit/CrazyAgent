@@ -8,6 +8,7 @@ use super::store::{self, Intent, Record};
 use super::{AgentKind, ChangeSetId, ChangeState, RESTORE_WINDOW_MS, TurnEnd, Workspace};
 use crate::agent_git::{self, Layout};
 use crate::engine::EngineError;
+use crate::instruction_files::ASCII_FOLDS;
 use crate::protocol::ProjectId;
 use crate::worktrees::TreeBounds;
 use rusqlite::Connection;
@@ -1715,25 +1716,6 @@ fn fresh_link_inside(
     }
     !entered(&walk, agents) && !walk.iter().any(|part| part.eq_ignore_ascii_case(".git"))
 }
-
-/// The code points outside ASCII that a case-insensitive APFS volume folds onto ASCII,
-/// with the ASCII they fold onto: the full case fold of their canonical decomposition,
-/// each checked on the volume (probe 2026-10-28). Every other code point stays outside ASCII.
-const ASCII_FOLDS: [(char, &str); 13] = [
-    ('\u{DF}', "ss"),
-    ('\u{17F}', "s"),
-    ('\u{37E}', ";"),
-    ('\u{1E9E}', "ss"),
-    ('\u{1FEF}', "`"),
-    ('\u{212A}', "k"),
-    ('\u{FB00}', "ff"),
-    ('\u{FB01}', "fi"),
-    ('\u{FB02}', "fl"),
-    ('\u{FB03}', "ffi"),
-    ('\u{FB04}', "ffl"),
-    ('\u{FB05}', "st"),
-    ('\u{FB06}', "st"),
-];
 
 /// Folds one path part the way the volume compares names, when the result is ASCII.
 /// Input: the part. Output: the part in ASCII lower case with [`ASCII_FOLDS`] applied and

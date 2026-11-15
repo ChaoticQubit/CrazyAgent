@@ -304,7 +304,7 @@ fn wanted(name: &OsStr, hooks: &[HookSpec]) -> bool {
     let Some(name) = name.to_str() else {
         return false;
     };
-    if SKIPPED.contains(&name) || name.starts_with('.') {
+    if crate::instruction_files::names_one_of(name, &SKIPPED) || name.starts_with('.') {
         return false;
     }
     if ALWAYS.contains(&name) {
@@ -322,8 +322,9 @@ fn named(command: &str, name: &str) -> bool {
     })
 }
 
-/// Copies each entry of an open folder but `.git` and `.DS_Store`. Inputs: the folder, its
-/// copy, its depth, the tally and the bounds. Output: unit, or a plain rejection code.
+/// Copies each entry of an open folder but `.git` and `.DS_Store`, in any spelling a
+/// case-insensitive volume opens as them (DS-148 F1). Inputs: the folder, its copy, its
+/// depth, the tally and the bounds. Output: unit, or a plain rejection code.
 fn copy_children(
     from: &Folder,
     target: &Path,
@@ -332,7 +333,7 @@ fn copy_children(
     bounds: (usize, u64),
 ) -> Result<(), &'static str> {
     for name in names(from, "plugin_store_unavailable")? {
-        if name.to_str().is_some_and(|name| SKIPPED.contains(&name)) {
+        if crate::instruction_files::names_one_of(&name.to_string_lossy(), &SKIPPED) {
             continue;
         }
         copy_child(from, &name, &target.join(&name), depth + 1, tally, bounds)?;

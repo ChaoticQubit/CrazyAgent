@@ -1619,18 +1619,21 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
     );
     let text = sandbox.profile();
     let pattern = case.project.display().to_string().replace('.', "\\.");
-    let dot_git = "\\.[gG][iI][tT]";
+    let any_i = "(i|I|\u{131})";
+    let dot_git = format!("\\.[gG]{any_i}[tT]");
     let state = "\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]";
     let context = "[cC][oO][nN][tT][eE][xX][tT](/.*)?";
     let any_k = "(k|K|\u{212a})";
     let any_s = "(s|S|\u{17f})";
+    let st = format!("({any_s}[tT]|\u{fb05}|\u{fb06})");
+    let fi = format!("([fF]{any_i}|\u{fb01})");
     for path in [
         context.to_owned(),
         format!("{state}/{context}"),
-        format!("{state}/[iI][nN]{any_s}[tT][rR][uU][cC][tT][iI][oO][nN]{any_s}\\.[mM][dD]"),
+        format!("{state}/{any_i}[nN]{st}[rR][uU][cC][tT]{any_i}[oO][nN]{any_s}\\.[mM][dD]"),
         format!("{dot_git}/[hH][oO][oO]{any_k}{any_s}(/.*)?"),
-        format!("{dot_git}/[cC][oO][nN][fF][iI][gG]"),
-        format!("{dot_git}/[cC][oO][nN][fF][iI][gG]\\.[lL][oO][cC]{any_k}"),
+        format!("{dot_git}/[cC][oO][nN]{fi}[gG]"),
+        format!("{dot_git}/[cC][oO][nN]{fi}[gG]\\.[lL][oO][cC]{any_k}"),
         format!(
             "{dot_git}(/[wW][oO][rR]{any_k}[tT][rR][eE][eE]{any_s}/[^/]+)?/[mM][oO][dD][uU][lL][eE]{any_s}(/.*)?"
         ),
@@ -3850,6 +3853,37 @@ fn an_agent_still_runs_framework_python_whose_launcher_starts_its_python_app() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
+}
+
+/// B5 r2 (rv-sec3 F1, rv-code4 F1): a project folder named with long runs of `s` and `f`
+/// gets a profile Seatbelt reads, so the agent starts, and the folder's own app deny still
+/// holds under the bounded spelling of its name: a framework Python app planted there,
+/// which the profile runs anywhere else, does not run.
+#[test]
+fn an_agent_starts_in_a_project_named_with_long_fold_runs_and_runs_no_app_planted_there() {
+    let case = case();
+    let project = case.root.join("Glasssssss-ffffffffff");
+    let bundle = project.join("Py.framework/Versions/3/Resources/Python.app/Contents/MacOS");
+    fs::create_dir_all(&bundle).unwrap();
+    fs::copy("/usr/bin/true", bundle.join("Python")).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
+    let profile = case.profiles.join("runs.sb");
+    let started = run(&sandbox, &profile, "/usr/bin/true");
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let planted = run(&sandbox, &profile, &quoted(&bundle.join("Python")));
+    assert!(!planted.status.success(), "the planted app ran");
+    let stderr = String::from_utf8_lossy(&planted.stderr);
+    assert!(stderr.contains("Operation not permitted"), "{stderr}");
 }
 
 /// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs: a confined child reads neither

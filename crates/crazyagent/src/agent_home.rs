@@ -1070,7 +1070,9 @@ fn remove_folder(path: &Path) -> Result<(), AgentHomeError> {
 /// Reads an instruction file through one open that follows no link in its last part and
 /// never waits on a FIFO, then checks the opened file itself, so nothing swapped in after
 /// a check is read or waited on. Takes the path. Returns the text, empty for a missing
-/// file, `process_text_unsafe` for a link or any other non-regular file, or another code.
+/// file, `process_text_unsafe` for a link, a file with a second hard link (which a write
+/// through the other name rewrites, SA vid 11) or any other non-regular file, or another
+/// code.
 fn read_bounded(path: &Path) -> Result<String, AgentHomeError> {
     let file = match crate::platform::open_plain(path) {
         Ok(file) => file,
@@ -1086,6 +1088,10 @@ fn read_bounded(path: &Path) -> Result<String, AgentHomeError> {
         .metadata()
         .map_err(|_| failure("process_text_unreadable"))?;
     if !held.is_file() {
+        return Err(failure("process_text_unsafe"));
+    }
+    #[cfg(unix)]
+    if held.nlink() > 1 {
         return Err(failure("process_text_unsafe"));
     }
     read_text(file)
