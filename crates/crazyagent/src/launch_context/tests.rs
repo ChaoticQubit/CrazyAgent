@@ -288,6 +288,112 @@ fn a_linux_launch_locks_a_home_whose_lock_has_a_second_name_in_the_home() {
     assert_eq!(locked, Ok(()));
 }
 
+/// A launch locks a home whose lock name an agent took for something that is no plain file
+/// (RV-DS241-137 lock, rv-code2 13:10 note): a folder with a file in it, a link to a file
+/// outside the home and a FIFO each go without being followed, a plain lock is made in their
+/// place and held, and the file the link named stays as it was. Before, each one refused
+/// every later launch of the home, since the open that follows no link never got a file.
+#[cfg(unix)]
+#[test]
+fn a_launch_replaces_a_lock_name_that_is_no_plain_file_and_locks_the_home() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let outside = root.join("owner.txt");
+    fs::write(&outside, "the owner's\n").unwrap();
+    for planted in ["folder", "link", "fifo"] {
+        let home = root.join(planted);
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        let lock = home.join(LOCK);
+        match planted {
+            "folder" => {
+                fs::create_dir(&lock).unwrap();
+                fs::write(lock.join("inside"), "x").unwrap();
+            }
+            "link" => std::os::unix::fs::symlink(&outside, &lock).unwrap(),
+            _ => {
+                let made = crate::spawn_gate::collected(
+                    std::process::Command::new("/usr/bin/mkfifo").arg(&lock),
+                )
+                .unwrap();
+                assert!(made.status.success(), "{made:?}");
+            }
+        }
+
+        let held = lock_only(&home, "claude-code").map_err(|error| error.0);
+        let second = lock_only(&home, "claude-code").err().map(|error| error.0);
+
+        assert_eq!(held.as_ref().err(), None, "{planted}");
+        assert_eq!(second.as_deref(), Some("launch_home_busy"), "{planted}");
+        let found = fs::symlink_metadata(&lock).unwrap();
+        assert!(found.file_type().is_file(), "{planted}");
+        assert_eq!(found.nlink(), 1, "{planted}");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "the owner's\n");
+    }
+}
+
+/// A launch locks a home whose lock an agent left with no owner read or write, which one
+/// `chmod 000` of it does on Linux, where an agent writes its whole home: the lock is this
+/// user's plain file, so it gets its owner-only mode back and is held, and a second launch
+/// is refused as busy. Before, the open failed and every later launch of the home was
+/// refused.
+#[cfg(unix)]
+#[test]
+fn a_launch_locks_a_home_whose_lock_was_left_with_no_owner_read_or_write() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap().join("claude");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let first = lock_only(&home, "claude-code")
+        .map(|_| ())
+        .map_err(|error| error.0);
+    assert_eq!(first, Ok(()));
+    fs::set_permissions(home.join(LOCK), fs::Permissions::from_mode(0o000)).unwrap();
+
+    let held = lock_only(&home, "claude-code").map_err(|error| error.0);
+    let second = lock_only(&home, "claude-code").err().map(|error| error.0);
+
+    assert_eq!(held.as_ref().err(), None);
+    assert_eq!(second.as_deref(), Some("launch_home_busy"));
+    let found = fs::symlink_metadata(home.join(LOCK)).unwrap();
+    assert!(found.file_type().is_file());
+    assert_eq!(found.mode() & 0o777, 0o600);
+}
+
+/// Two launches that find a folder at the lock name of one home never both hold the home:
+/// the one that clears the name holds the home's folder meanwhile, so the other neither
+/// removes the lock the first made nor makes a second one. The step run while the first
+/// clears the name stands in for the second launch.
+#[cfg(unix)]
+#[test]
+fn a_second_launch_never_removes_the_lock_a_first_made_in_place_of_a_folder() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap().join("claude");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    fs::create_dir(home.join(LOCK)).unwrap();
+    let racing = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let seen = racing.clone();
+    let other = home.clone();
+    WHILE_LOCK_NAME_CLEARS.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            let second = lock_only(&other, "claude-code").err().map(|error| error.0);
+            *seen.borrow_mut() = Some(second);
+        }));
+    });
+
+    let held = lock_only(&home, "claude-code").map_err(|error| error.0);
+
+    assert_eq!(held.as_ref().err(), None);
+    assert_eq!(
+        racing.borrow().clone(),
+        Some(Some("launch_home_busy".to_owned()))
+    );
+    assert!(
+        fs::symlink_metadata(home.join(LOCK))
+            .unwrap()
+            .file_type()
+            .is_file()
+    );
+}
+
 /// A launch locks a home an earlier run left with an ACL that denies listing and searching
 /// it (RV-DS241-137 code r2 F3): the retry clears the home's ACL by its path, which needs
 /// neither, where clearing it on the folder itself opens it and fails.
@@ -1900,6 +2006,67 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
     );
 }
 
+/// DEC-173 add.1: a launch hands the level its context names to the home reset, so a launch
+/// at a wider level than the home's last one clears the download caches and one at the same
+/// level keeps them, while a context that names no level clears under the default choice.
+#[cfg(unix)]
+#[test]
+fn a_launch_clears_its_home_caches_when_its_context_names_a_wider_level() {
+    use crate::sandbox::policy::AgentAccess;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let data = root.join("data");
+    fs::create_dir_all(&data).unwrap();
+    let context = || AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: Some(Box::new(Process {
+            project: crate::agent_home::AgentProject {
+                data: data.clone(),
+                id: ProjectId::new("process").unwrap(),
+                folder: None,
+                mode: crate::instruction_files::Mode::Both,
+                repeated: crate::agent_home::Repeated::LeaveOut,
+            },
+            hooks: Vec::new(),
+            agent: String::new(),
+            caches: crate::agent_home::Caches::default(),
+        })),
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        native_threads: None,
+        relay: None,
+        model_proxy: None,
+        freeze_record: None,
+        terminal_display: TerminalDisplay::Classic,
+        catch_up_main: true,
+    };
+    let home = root.join("claude");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let cache = home.join(".cache").join("x");
+    let launch = |context: AgentContext| {
+        fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        fs::write(&cache, "cached\n").unwrap();
+        drop(context.install("claude-code", &home, false).unwrap());
+        cache.exists()
+    };
+
+    assert!(
+        !launch(context()),
+        "a context with no level clears under the default"
+    );
+    assert!(
+        launch(context().at_access(AgentAccess::Sandboxed)),
+        "the launch of unknown level recorded Sandboxed"
+    );
+    assert!(
+        !launch(context().at_access(AgentAccess::OwnBranch)),
+        "a wider level clears"
+    );
+    assert!(launch(context().at_access(AgentAccess::OwnBranch)));
+}
+
 #[test]
 fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
     let directory = tempfile::tempdir().unwrap();
@@ -1924,6 +2091,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
             project,
             hooks: Vec::new(),
             agent: String::new(),
+            caches: Default::default(),
         })),
         transcripts: true,
         off_tools: Vec::new(),
@@ -2575,6 +2743,7 @@ fn context_with(
             },
             hooks: Vec::new(),
             agent: String::new(),
+            caches: Default::default(),
         })),
         transcripts: true,
         off_tools,
@@ -3474,6 +3643,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
                 hook("PreToolUse", Some("Grep|Glob"), Some(5)),
             ],
             agent: String::new(),
+            caches: Default::default(),
         })),
         transcripts: true,
         off_tools: Vec::new(),
@@ -4634,6 +4804,7 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
             },
             hooks: Vec::new(),
             agent: String::new(),
+            caches: Default::default(),
         })),
         transcripts: true,
         off_tools: Vec::new(),

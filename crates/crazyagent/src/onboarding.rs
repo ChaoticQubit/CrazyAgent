@@ -595,6 +595,7 @@ pub(crate) fn execute(
         network: crate::sandbox::policy::AgentNetwork::default(),
         ide_git_hooks: false,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         ..Default::default()

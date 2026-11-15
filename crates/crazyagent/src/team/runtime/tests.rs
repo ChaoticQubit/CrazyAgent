@@ -453,6 +453,7 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
+                home_caches: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
                 ..Default::default()
@@ -559,6 +560,7 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
             }],
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
@@ -688,6 +690,7 @@ fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why
         toolchains: Vec::new(),
         ide_git_hooks: false,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         network: crate::sandbox::policy::AgentNetwork::default(),
@@ -12190,6 +12193,7 @@ fn a_held_own_branch_task_posts_the_commit_its_agent_made() {
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()
@@ -14913,6 +14917,7 @@ fn agent_at_level_running(
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()
@@ -15139,6 +15144,7 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()
@@ -15199,6 +15205,7 @@ fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_go
             }],
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
@@ -15253,6 +15260,7 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()
@@ -15404,6 +15412,7 @@ fn a_task_held_for_an_own_branch_agent_goes_to_the_next_agent_once_the_project_i
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()
@@ -26520,6 +26529,7 @@ fn a_lead_delegates_and_its_worker_starts_at_the_lead_commit() {
                     toolchains: Vec::new(),
                     ide_git_hooks: false,
                     tool_cache: Default::default(),
+                    home_caches: Default::default(),
                     ide_agent_files: Default::default(),
                     shared_folders: Default::default(),
                     ..Default::default()
@@ -29739,6 +29749,75 @@ fn an_agent_refused_for_skills_left_in_its_codex_home_says_what_happened() {
          CrazyAgent could not remove them and Codex would have loaded them. \
          (launch_context_skills_kept)"
     );
+}
+
+/// SA vid 12: an agent is not started while a hold still lists commands a sandboxed run of
+/// it left that the owner has not ended, since they write where the agent does and its next
+/// run would run what they leave in its home. The refusal says what to do, with its code
+/// kept; another agent of the project starts.
+#[cfg(unix)]
+#[test]
+fn an_agent_is_not_started_while_commands_of_its_last_sandboxed_run_stay_held() {
+    let by = HoldBy {
+        project: Some("commands-left".into()),
+        who: "team agent 41".into(),
+    };
+    let other = HoldBy {
+        project: Some("commands-left".into()),
+        who: "team agent 42".into(),
+    };
+    let mut left = crate::harnesses::leftovers::tests::held_sandboxed(
+        by.clone(),
+        crate::harnesses::leftovers::LeftoverMode::Ask,
+    );
+
+    let refused = commands_left(&by).map_err(|problem| problem.0);
+    let started = commands_left(&other).map_err(|problem| problem.0);
+    let _ = left.kill();
+    let _ = left.wait();
+
+    assert_eq!(refused, Err(COMMANDS_LEFT.to_owned()));
+    assert_eq!(started, Ok(()));
+    assert_eq!(
+        start_problem(&LaunchError(COMMANDS_LEFT.into(), None)),
+        "This agent still has commands running from its last run. End them on the team \
+         page, then start it again. (team_commands_left)"
+    );
+}
+
+/// rv-code2 B2P2-1: nothing from the account, such as the credential copy, is handed to an
+/// agent's home while a hold still lists commands a sandboxed run of it left, since they
+/// read where the agent reads; another agent of the project is handed its own.
+#[cfg(unix)]
+#[test]
+fn nothing_is_handed_to_an_agent_home_while_commands_of_its_last_sandboxed_run_stay_held() {
+    let by = HoldBy {
+        project: Some("handed-left".into()),
+        who: "team agent 51".into(),
+    };
+    let other = HoldBy {
+        project: Some("handed-left".into()),
+        who: "team agent 52".into(),
+    };
+    let mut left = crate::harnesses::leftovers::tests::held_sandboxed(
+        by.clone(),
+        crate::harnesses::leftovers::LeftoverMode::Keep,
+    );
+    let handed = std::cell::Cell::new(0);
+
+    let refused = hand_after_check(&by, || handed.set(handed.get() + 1)).map_err(|e| e.0);
+    let while_refused = handed.get();
+    let given = hand_after_check(&other, || handed.set(handed.get() + 1)).map_err(|e| e.0);
+    let _ = left.kill();
+    let _ = left.wait();
+
+    assert_eq!(refused, Err(COMMANDS_LEFT.to_owned()));
+    assert_eq!(
+        while_refused, 0,
+        "the refused agent's home was handed the credential"
+    );
+    assert_eq!(given, Ok(()));
+    assert_eq!(handed.get(), 1);
 }
 
 /// A start that a projects home move holds back leaves its work waiting (HMC-N1): a
