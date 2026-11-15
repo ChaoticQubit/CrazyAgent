@@ -296,3 +296,76 @@ fn an_updater_outside_the_home_folder_or_with_a_pointer_that_is_not_https_is_ref
         "update.own.pointer.field: tag.name is not a field name of lower-case letters, digits and _."
     );
 }
+
+#[test]
+fn a_name_that_names_a_folder_or_a_path_instead_of_a_package_is_refused() {
+    let npm = |name: &str, package: &str, spec: &str| {
+        format!("npm:\n  name: \"{name}\"\n  package: \"{package}\"\n  spec: \"{spec}\"\n{GUIDE}")
+    };
+    for spec in [
+        "../evil",
+        "./evil",
+        "/opt/evil",
+        "evil/..",
+        "a/b",
+        "@a/b/c",
+        "@a/",
+        "@/b",
+        "@a/..",
+        ".hidden",
+        "@a/.b",
+    ] {
+        assert!(
+            read("sample", block(&npm("cli", "cli", spec))).is_err(),
+            "spec {spec}"
+        );
+        assert!(
+            read("sample", block(&npm("cli", spec, "cli"))).is_err(),
+            "package {spec}"
+        );
+    }
+    for name in ["a/b", "..", ".", "@a/b", "@cli", ".cli"] {
+        assert!(
+            read("sample", block(&npm(name, "cli", "cli"))).is_err(),
+            "name {name}"
+        );
+        assert!(
+            read(
+                "sample",
+                block(&format!("formulae:\n  - \"{name}\"\n{GUIDE}"))
+            )
+            .is_err(),
+            "formula {name}"
+        );
+    }
+    for scope in ["sample", "@a/b", "@", "@..", "@.a"] {
+        assert!(
+            read(
+                "sample",
+                block(&format!(
+                    "npm:\n  scope: \"{scope}\"\n  name: \"cli\"\n  package: \"cli\"\n  spec: \"cli\"\n{GUIDE}"
+                ))
+            )
+            .is_err(),
+            "scope {scope}"
+        );
+    }
+    for kept in [
+        "openclaw@latest",
+        "@sample/cli@latest",
+        "claude-code",
+        "pi.dev_cli",
+    ] {
+        assert!(
+            read("sample", block(&npm("cli", kept, kept))).is_ok(),
+            "{kept}"
+        );
+    }
+    assert!(
+        read(
+            "sample",
+            block(&format!("casks:\n  - \"copilot-cli@prerelease\"\n{GUIDE}"))
+        )
+        .is_ok()
+    );
+}
