@@ -310,7 +310,7 @@ test("F08: an extra the owner types is a full plain socket path or a port below 
 
 test("F08: Agent access shows the extras with what each means, the apply choice and the extras log, and every grant refusal has the engine's sentence", () => {
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
-  assert.match(page, /<GrantsEditor prefix="ps" view={view} grants={grants} access={access} onChange={setGrants} \/>/);
+  assert.match(page, /<GrantsEditor prefix="ps" view={view} grants={grants} access={access} network={network} onChange={setGrants} \/>/);
   assert.match(page, /<ApplyChoices name="ps-apply-changes" value={applyChanges} onChange={setApplyChanges} \/>/);
   assert.match(page, /<GrantLog rows={view\.grant_log \?\? \[\]} \/>/);
   assert.ok(page.includes("setGrants(savedGrants(next))"));
@@ -436,6 +436,28 @@ test("only on Linux do the network and access choices say ports hold no host and
   }
 });
 
+test("the network choice shows the ports line the engine sends for it, and this desktop's own only for an engine that sends none (DEC-179 T3b)", () => {
+  const told = "a line the engine sends for this choice";
+  const line = access.LINUX_PORTS_ANY_HOST.replaceAll("'", "&#x27;");
+  const sent = (platform, chosen, gap) => renderToStaticMarkup(createElement(access.NetworkChoices, { name: "n", value: "none", access: chosen, onChange: () => {}, platform, gap }));
+  for (const platform of ["linux", "macos"]) {
+    const page = sent(platform, "sandboxed", told);
+    assert.ok(page.includes(told), page);
+    assert.ok(!page.includes(line), page);
+    assert.ok(!sent(platform, "full", told).includes(told), "Full access has no network limit to speak of");
+  }
+  assert.ok(!sent("linux", "sandboxed", null).includes(line), "the engine says this choice holds here");
+  assert.ok(sent("linux", "sandboxed", undefined).includes(line), "an engine that sends no line");
+  const networks = [{ network: "open", label: "Open", gap: "open line" }, { network: "none", label: "None", gap: null }, { network: "https", label: "Port 443 only" }];
+  assert.equal(access.networkGap({ networks }, "open", "macos"), "open line");
+  assert.equal(access.networkGap({ networks }, "none", "linux"), null);
+  assert.equal(access.networkGap({ networks }, "https", "linux"), access.LINUX_PORTS_ANY_HOST);
+  assert.equal(access.networkGap({ networks }, "https", "macos"), null);
+  assert.equal(access.networkGap(null, "none", "linux"), access.LINUX_PORTS_ANY_HOST);
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(page, /<NetworkChoices[^>]*gap=\{networkGap\(view, network\)\}/);
+});
+
 test("only on Linux below Full access do the allowed extras say a port is open on every host (RV-DS241-83)", () => {
   const shown = (platform, chosen) => renderToStaticMarkup(createElement(access.GrantsEditor, { prefix: "g", view, grants: [], access: chosen, onChange: () => {}, platform }));
   const line = access.LINUX_PORTS_ANY_HOST.replaceAll("'", "&#x27;");
@@ -443,6 +465,12 @@ test("only on Linux below Full access do the allowed extras say a port is open o
   for (const page of [shown("macos", "sandboxed"), shown("windows", "own_branch"), shown("linux", "full")]) {
     assert.ok(!page.includes(line), page);
   }
+  const told = "a line the engine sends for None";
+  const saved = (gap) => ({ ...view, network: "none", networks: view.networks.map((choice) => choice.network === "none" ? { ...choice, gap } : choice) });
+  const sent = (platform, gap, network) => renderToStaticMarkup(createElement(access.GrantsEditor, { prefix: "g", view: saved(gap), grants: [], access: "sandboxed", network, onChange: () => {}, platform }));
+  assert.ok(sent("macos", told).includes(told), "the engine's line for the saved choice");
+  assert.ok(!sent("linux", null).includes(line), "the engine says None holds here");
+  assert.ok(sent("linux", null, "open").includes(line), "the choice being edited, not the saved one");
 });
 
 test("the access choice shows what the engine says this Linux can't hold for the chosen level (SA vid 4)", () => {

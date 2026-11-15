@@ -38,6 +38,7 @@ fn view() -> PolicyView {
             .map(|network| NetworkView {
                 network,
                 label: network.label().to_owned(),
+                gap: None,
             })
             .collect(),
         toolchains: vec![
@@ -614,20 +615,33 @@ fn the_access_box_keeps_shared_back_secrets_and_says_what_stays_closed() {
 }
 
 #[test]
-fn only_on_linux_does_the_box_say_ports_hold_no_host_and_nested_git_is_not_blocked() {
-    let mut edit = AccessEdit::of(&view());
+fn the_box_shows_the_ports_line_the_engine_sends_for_the_chosen_network() {
+    let told = "a line the engine sends for None";
+    let mut view = view();
+    for choice in &mut view.networks {
+        choice.gap = (choice.network == AgentNetwork::None).then(|| told.to_owned());
+    }
+    let mut edit = AccessEdit::of(&view);
     assert_eq!(edit.linux, cfg!(target_os = "linux"));
-    edit.linux = false;
-    let words = shown_words(&edit);
-    assert!(!words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
-    assert!(!words.contains(LINUX_NESTED_GIT_LINE), "{words}");
     edit.linux = true;
+    edit.network = AgentNetwork::None;
     let words = shown_words(&edit);
-    assert!(words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
+    assert!(words.contains(told), "{words}");
+    assert!(!words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
     assert!(words.contains(LINUX_NESTED_GIT_LINE), "{words}");
+    edit.network = AgentNetwork::Open;
+    let words = shown_words(&edit);
+    assert!(!words.contains(told), "{words}");
+    assert!(!words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
+    edit.network = AgentNetwork::None;
     edit.access = AgentAccess::Full;
     let words = shown_words(&edit);
-    assert!(!words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
+    assert!(!words.contains(told), "{words}");
+    assert!(!words.contains(LINUX_NESTED_GIT_LINE), "{words}");
+    edit.access = AgentAccess::Sandboxed;
+    edit.linux = false;
+    let words = shown_words(&edit);
+    assert!(words.contains(told), "the engine decides: {words}");
     assert!(!words.contains(LINUX_NESTED_GIT_LINE), "{words}");
 }
 

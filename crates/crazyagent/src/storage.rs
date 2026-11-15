@@ -2800,6 +2800,7 @@ fn owner_read(
                     &setup.project_folder(),
                     &homes,
                     versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,
+                    crate::sandbox_settings::load(&tx)?.linux_sockets,
                 );
             policy.grant_log =
                 crate::sandbox::grants::history(&tx, project_id.as_str()).map_err(error)?;

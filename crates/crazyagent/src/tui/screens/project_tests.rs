@@ -2672,6 +2672,7 @@ fn access_view(access: AgentAccess, version: u64) -> PolicyView {
             .map(|network| crate::sandbox::policy::NetworkView {
                 network,
                 label: network.label().to_owned(),
+                gap: None,
             })
             .collect(),
         toolchains: Vec::new(),

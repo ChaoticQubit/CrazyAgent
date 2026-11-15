@@ -480,7 +480,13 @@ impl AgentPolicy {
     /// choice with the top-level folders it can pick, and the policy's version, which a save
     /// names. Inputs: the project folder, the
     /// owner's tool homes and the version. Output: the view.
-    pub fn view(&self, project: &Path, homes: &ToolHomes, version: u64) -> PolicyView {
+    pub fn view(
+        &self,
+        project: &Path,
+        homes: &ToolHomes,
+        version: u64,
+        sockets: crate::sandbox::LinuxSockets,
+    ) -> PolicyView {
         let allowed = self.allowed(project);
         let toolchains: Vec<ToolchainView> = Toolchain::ALL
             .into_iter()
@@ -494,6 +500,7 @@ impl AgentPolicy {
             .filter(|row| row.installed || row.used || self.choice(row.toolchain).is_some())
             .collect();
         assert!(toolchains.len() <= Toolchain::ALL.len());
+        let host = crate::sandbox::linux_host_kept();
         PolicyView {
             access: self.access,
             network: self.network,
@@ -503,6 +510,7 @@ impl AgentPolicy {
                 .map(|network| NetworkView {
                     network,
                     label: network.label().to_owned(),
+                    gap: linux_network_gap(network, host, sockets, &self.grants),
                 })
                 .collect(),
             toolchains,
@@ -738,12 +746,28 @@ pub struct ToolCacheView {
     pub label: String,
 }
 
-/// One network choice with the name shown to the owner.
+/// One network choice with the name shown to the owner and, on Linux, the line that says
+/// what the choice cannot hold on this computer ([`linux_network_gap`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkView {
     pub network: AgentNetwork,
     pub label: String,
+    #[serde(default)]
+    pub gap: Option<String>,
+}
+
+/// What a network choice cannot hold on this Linux, for the project's Agent access page:
+/// that a port agents may reach on this computer is open to them on every host. Inputs:
+/// the choice, what this Linux holds, none on another system, the sockets setting and the
+/// project's grants. Output: the line, or none.
+pub fn linux_network_gap(
+    _network: AgentNetwork,
+    _host: Option<crate::sandbox::LinuxHost>,
+    _sockets: crate::sandbox::LinuxSockets,
+    _grants: &[AccessGrant],
+) -> Option<String> {
+    None
 }
 
 /// One access level with the reason it cannot run here, if any.
@@ -1349,6 +1373,7 @@ mod tests {
             Path::new("/nonexistent"),
             &ToolHomes::at(Path::new("/nonexistent")),
             0,
+            Default::default(),
         );
         assert!(view.ide_git_hooks);
         connection
@@ -1513,6 +1538,43 @@ mod tests {
         }
         assert!(state.contains("[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]$"));
         assert!(new.contains("[wW][oO][rR](k|K|\u{212a})[tT][rR][eE][eE](s|S|\u{17f})"));
+    }
+
+    #[test]
+    fn only_a_none_network_this_linux_bridges_drops_the_ports_line() {
+        use crate::sandbox::{LINUX_PORTS_ANY_HOST_LINE, LinuxHost, LinuxSockets};
+        let host = |nested| {
+            Some(LinuxHost {
+                nested,
+                scoped: false,
+            })
+        };
+        let port = |port| AccessGrant::Port { port };
+        let line = Some(LINUX_PORTS_ANY_HOST_LINE.to_owned());
+        let tcp = LinuxSockets::TcpOnly;
+        let none = |nested, sockets, grants: &[AccessGrant]| {
+            linux_network_gap(AgentNetwork::None, host(nested), sockets, grants)
+        };
+        for network in AgentNetwork::ALL {
+            assert_eq!(linux_network_gap(network, None, tcp, &[]), None, "not Linux");
+            assert_eq!(linux_network_gap(network, host(false), tcp, &[]), line);
+        }
+        for network in [AgentNetwork::Open, AgentNetwork::Https] {
+            assert_eq!(linux_network_gap(network, host(true), tcp, &[]), line);
+        }
+        assert_eq!(none(true, tcp, &[]), None);
+        assert_eq!(none(true, tcp, &[port(8080), AccessGrant::TempFolder]), None);
+        assert_eq!(none(true, tcp, &[port(1024)]), None);
+        for sockets in [LinuxSockets::TcpPorts, LinuxSockets::Refuse] {
+            assert_eq!(none(true, sockets, &[]), line, "{sockets:?}");
+        }
+        let named = none(true, tcp, &[port(8080), port(443), port(80)]).unwrap();
+        assert_eq!(named, crate::sandbox::linux_unbridged_line(80));
+        assert!(named.contains("port 80 is below 1024"), "{named}");
+        assert_eq!(none(false, tcp, &[port(80)]), line, "no nest, the plain line");
+        let stored = r#"{"network":"none","label":"None"}"#;
+        let old: NetworkView = serde_json::from_str(stored).unwrap();
+        assert_eq!(old.gap, None, "a view an older engine stored");
     }
 
     #[test]

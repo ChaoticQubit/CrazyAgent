@@ -863,6 +863,16 @@ pub const GIT_STATE_FILES: [&str; 6] = [
 /// own an agent's helper has no capability to listen below it.
 pub const BRIDGE_PORT_MIN: u16 = 1024;
 
+/// What the owner is told when a port below [`BRIDGE_PORT_MIN`] keeps agents on this
+/// computer's network on a Linux that could give them one of their own: on the project's
+/// Agent access page and in the agent's messages at its launch. Input: the port. Output:
+/// the sentences, the port named.
+pub fn linux_unbridged_line(port: u16) -> String {
+    format!(
+        "On this Linux, port {port} is below {BRIDGE_PORT_MIN}, so agents that may reach it share this computer's network: every port they may reach on this computer is open to them on every host. CrazyAgent keeps agents to this computer only for ports {BRIDGE_PORT_MIN} and up."
+    )
+}
+
 /// What a limited network cannot hold on Linux, shown there only, under the network choice
 /// in the desktop and the TUI (RV-DS241-83): Landlock limits outbound TCP by port, not by
 /// host, so a port an agent may reach on this computer is open to it on every host.
@@ -2494,6 +2504,14 @@ impl ProjectSandbox {
         assert!(!ports.is_empty() && ports.len() <= REMOTES_MAX);
         assert!(!self.resolves_over_tcp());
         Some(ports)
+    }
+
+    /// The port that alone keeps this agent on this computer's network on a Linux that
+    /// nests agents: the sockets setting is `TcpOnly` and the limited network names
+    /// loopback ports only, but one lies below [`BRIDGE_PORT_MIN`]. Output: the lowest such
+    /// port, or none when the agent is bridged or shares the network for another reason.
+    pub fn unbridged_port(&self) -> Option<u16> {
+        None
     }
 
     /// True when, on Linux, this agent looks host names up over TCP: the setting is

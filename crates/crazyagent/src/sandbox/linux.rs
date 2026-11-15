@@ -2047,6 +2047,37 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_kept_on_this_network_by_a_low_port_names_the_lowest_one() {
+        use SandboxRemote::{AnyHost, Loopback};
+        let low = |remotes: &[SandboxRemote], sockets: LinuxSockets| {
+            let (_temp, sandbox) = project(SandboxNetwork::Only(remotes.to_vec()));
+            let sandbox = sandbox.limit_sockets(sockets);
+            assert!(sandbox.unbridged_port().is_none() || sandbox.bridged_ports().is_none());
+            sandbox.unbridged_port()
+        };
+        let default = LinuxSockets::TcpOnly;
+        assert_eq!(
+            low(&[Loopback(8080), Loopback(443), Loopback(80)], default),
+            Some(80)
+        );
+        assert_eq!(low(&[Loopback(1023)], default), Some(1023));
+        assert_eq!(low(&[Loopback(1024)], default), None, "bridged");
+        assert_eq!(
+            low(&[Loopback(80), AnyHost(443)], default),
+            None,
+            "a host port"
+        );
+        assert_eq!(low(&[], default), None);
+        assert_eq!(
+            low(&[Loopback(80)], LinuxSockets::TcpPorts),
+            None,
+            "the setting"
+        );
+        let (_temp, open) = project(SandboxNetwork::Open);
+        assert_eq!(open.unbridged_port(), None);
+    }
+
+    #[test]
     fn the_bubblewrap_a_nest_starts_is_checked_as_the_file_it_opened() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
