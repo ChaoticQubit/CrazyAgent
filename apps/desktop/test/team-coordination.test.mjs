@@ -126,11 +126,11 @@ test("Coordination leads with the mockup's rows, each harness's sub-agents toget
   const status = { project_id: "p", coordination: { settings: coord.COORD_DEFAULTS, harnesses: [] } };
   const rows = (markup) => [...markup.matchAll(/data-setting="([^"]*)"/g)].map((match) => match[1]);
   const lead = renderToStaticMarkup(createElement(coord.CoordinationControls, { projectId: "p", status, reload: forbidden }));
-  assert.deepEqual(rows(lead), ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent questions go to", "Overlapping edits", "Terminals per window"]);
+  assert.deepEqual(rows(lead), ["Claude Code sub-agents", "Codex sub-agents", "RCLI sub-agents", "Sub-agent questions go to", "Overlapping edits", "Terminals per window"]);
   const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status, reload: forbidden }));
-  assert.deepEqual(rows(per), ["Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents"]);
+  assert.deepEqual(rows(per), ["Messages to Claude Code agents", "Messages to Codex agents", "Messages to RCLI agents"]);
   assert.doesNotMatch(per, /terminal display/i, "the display is one setting for every harness, not a row of one harness");
-  assert.deepEqual([...per.matchAll(/role="group" aria-label="([^"]*)"/g)].map((match) => match[1]), ["Claude Code", "Codex", "rcli"]);
+  assert.deepEqual([...per.matchAll(/role="group" aria-label="([^"]*)"/g)].map((match) => match[1]), ["Claude Code", "Codex", "RCLI"]);
 });
 
 const BOTH_DISPLAYS = ["classic", "fullscreen"];
@@ -151,7 +151,7 @@ test("one Terminal display row serves every harness with Classic as the default,
   const status = (terminal_display) => ({ project_id: "p", coordination: { settings: { ...coord.COORD_DEFAULTS, terminal_display }, harnesses: ENGINE_ROWS } });
   const words = {
     classic: /Classic: every agent draws on the normal screen, so the mouse wheel scrolls the terminal at once and a plain drag selects text\. A change applies when a terminal next starts\./,
-    fullscreen: /Fullscreen: Claude Code and Codex draw their own view and take the mouse; the wheel scrolls inside that view, and (Option|Shift)-drag selects text\. rcli has no Fullscreen view and stays Classic\. A change applies when a terminal next starts\./,
+    fullscreen: /Fullscreen: Claude Code and Codex draw their own view and take the mouse; the wheel scrolls inside that view, and (Option|Shift)-drag selects text\. RCLI has no Fullscreen view and stays Classic\. A change applies when a terminal next starts\./,
   };
   assert.deepEqual(Object.keys(words), coord.DISPLAY_OPTIONS.map((option) => option.value), "every option has its own words");
   for (const display of Object.keys(words)) {
@@ -171,13 +171,13 @@ test("the Terminal display words name the key that selects on this platform and 
   const classic = coord.displayHelper("classic", ENGINE_ROWS, true);
   assert.doesNotMatch(classic, /stay|Option|Shift/, "Classic holds for every harness and needs no key");
   assert.equal(classic, coord.displayHelper("classic", ENGINE_ROWS, false));
-  assert.match(coord.displayHelper("fullscreen", ENGINE_ROWS, true), /and Option-drag selects text\. rcli has no Fullscreen view and stays Classic\./);
-  assert.match(coord.displayHelper("fullscreen", ENGINE_ROWS, false), /and Shift-drag selects text\. rcli has no Fullscreen view and stays Classic\./);
+  assert.match(coord.displayHelper("fullscreen", ENGINE_ROWS, true), /and Option-drag selects text\. RCLI has no Fullscreen view and stays Classic\./);
+  assert.match(coord.displayHelper("fullscreen", ENGINE_ROWS, false), /and Shift-drag selects text\. RCLI has no Fullscreen view and stays Classic\./);
   const one = [harnessRow("claude-code", BOTH_DISPLAYS), harnessRow("codex", ["classic"]), harnessRow("rcli", ["classic"])];
-  assert.match(coord.displayHelper("fullscreen", one, true), /^Fullscreen: Claude Code draws its own view and takes the mouse; .* Codex and rcli have no Fullscreen view and stay Classic\. A change applies/);
+  assert.match(coord.displayHelper("fullscreen", one, true), /^Fullscreen: Claude Code draws its own view and takes the mouse; .* Codex and RCLI have no Fullscreen view and stay Classic\. A change applies/);
   for (const older of [coord.COORD_HARNESSES.map((harness) => harnessRow(harness, undefined)), coord.COORD_HARNESSES.map((harness) => harnessRow(harness, []))]) {
     const unknown = coord.displayHelper("fullscreen", older, true);
-    assert.match(unknown, /^Fullscreen: Claude Code, Codex and rcli draw their own view and take the mouse; /, "an engine that lists no displays is taken to draw every one");
+    assert.match(unknown, /^Fullscreen: Claude Code, Codex and RCLI draw their own view and take the mouse; /, "an engine that lists no displays is taken to draw every one");
     assert.doesNotMatch(unknown, /stay/);
   }
   for (const row of coord.coordination({ coordination: { settings: coord.COORD_DEFAULTS, harnesses: ENGINE_ROWS } }).harnesses) {
