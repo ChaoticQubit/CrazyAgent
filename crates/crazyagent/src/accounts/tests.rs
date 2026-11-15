@@ -296,32 +296,24 @@ fn statuses_have_plain_labels() {
     assert_eq!(AccountStatus::SigningIn.label(), "Signing in...");
 }
 
-/// Task 17 (DEC-180 addendum 2, answer 3): the pool has a Gemini API key kind. It is one
-/// more Add account provider with one method, a key and a model on Google's own address,
-/// stored in the Gemini wire format, so it fits only a harness that speaks that format.
+/// Task 17 (DEC-180 addendum 2, answer 3): the engine has a Gemini API key kind: one
+/// method, a key and a model on Google's own address, stored in the Gemini wire format, so
+/// it fits only a harness that speaks that format. The Add account tiles of both apps offer
+/// it from Task 21 on, which adds it to the served catalog and turns the last check round.
 #[test]
 fn a_gemini_api_key_is_an_account_kind_on_googles_address_in_its_own_wire_format() {
     let gemini: Provider =
         serde_json::from_value(serde_json::json!("gemini")).expect("the pool has a Gemini kind");
     assert_eq!(provider_name(gemini), "Gemini API");
-    let catalog = catalog();
-    let entry = catalog
-        .iter()
-        .find(|entry| entry.provider == gemini)
-        .expect("the catalog lists the Gemini API");
-    assert_eq!(entry.name, "Gemini API");
-    assert_eq!(entry.methods.len(), 1);
-    let method = &entry.methods[0];
-    assert_eq!(method.method, SignInMethod::ApiKey);
-    assert_eq!(method.label, "Use an API key");
-    assert_eq!(method.url, Field::Hidden);
+    let mut unnamed = draft(gemini, SignInMethod::ApiKey);
     assert_eq!(
-        method.url_preset.as_deref(),
-        Some("https://generativelanguage.googleapis.com")
+        unnamed.build(true, "0123456789abcdef0123").unwrap_err().0,
+        "account_model_required"
     );
+    unnamed.model = Some("bad model".into());
     assert_eq!(
-        (method.key, method.model),
-        (Field::Required, Field::Required)
+        unnamed.build(true, "0123456789abcdef0123").unwrap_err().0,
+        "account_model_invalid"
     );
     assert_eq!(
         draft(gemini, SignInMethod::Subscription)
@@ -364,6 +356,10 @@ fn a_gemini_api_key_is_an_account_kind_on_googles_address_in_its_own_wire_format
     assert_eq!(
         serde_json::to_value(gemini).unwrap(),
         serde_json::json!("gemini")
+    );
+    assert!(
+        catalog().iter().all(|entry| entry.provider != gemini),
+        "the Add account tiles offer the Gemini API from Task 21 on"
     );
 }
 
