@@ -3981,11 +3981,12 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
 /// launch, out of its reach (DEC-146): no write under `Library/Keychains` nor to
 /// `Library/Preferences/com.apple.security.plist`, and no move, removal, mode change or link
 /// in place of `Library`, `Library/Preferences` or any other folder a launch keeps only part
-/// of ([`crate::agent_home::walked_folders`]), nor of the home itself, so no link an agent
-/// plants leads one of those calls, or a launch's removal of what it does not keep, outside
-/// the home. They deny writes to cargo's and git's own config in the home (`.cargo/config`,
-/// `.cargo/config.toml`, `.config/git`) and any file flag in it, so a run neither plants
-/// config its own tools run nor pins what the next launch removes (RV-DS241-137, -138).
+/// of ([`crate::agent_home::walked_folders`]), as [`root_pin`] keeps the home itself, so no
+/// link an agent plants leads one of those calls, or a launch's removal of what it does not
+/// keep, outside the home. They deny writes to cargo's and git's own config in the home
+/// (`.cargo/config`, `.cargo/config.toml`, `.config/git`) and any file flag in it, so a run
+/// neither plants config its own tools run nor pins what the next launch removes
+/// (RV-DS241-137, -138).
 /// They must follow every write allow. Input: the home. Output: the rule text.
 fn launch_denies(home: &Path) -> String {
     use crate::agent_home::Harness;
@@ -4042,11 +4043,11 @@ fn launch_denies(home: &Path) -> String {
             .collect::<String>()
     };
     text.push_str(&format!(
-        "(deny {PINNED_WRITES}\n  (regex #\"^{home}$\"){})\n(deny file-write-create\n  (require-all\n    (require-any{})\n    (vnode-type SYMLINK)))\n(deny file-write-flags (regex #\"^{home}(/.*)?$\"))\n",
+        "(deny {PINNED_WRITES}{})\n(deny file-write-create\n  (require-all\n    (require-any{})\n    (vnode-type SYMLINK)))\n(deny file-write-flags (regex #\"^{home}(/.*)?$\"))\n",
         spelled("  "),
         spelled("      "),
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 34);
+    assert_eq!(text.matches("(regex #\"^/").count(), 33);
     text
 }
 

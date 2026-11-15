@@ -41,9 +41,10 @@ pub(crate) const SH_STARTUP: [&str; 5] = [
 /// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
 /// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
 pub(crate) const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
-/// The most entries a launch lists in one folder of an agent home it keeps only part of; a
-/// folder holding more refuses the launch, since only an agent's own run makes that many.
-const HOME_ENTRIES_MAX: usize = 100_000;
+/// The most passes a launch makes over one folder of an agent home it keeps only part of,
+/// each removing what the last left: a second finds what a listing skipped as entries went,
+/// and only a process still adding entries outlasts them all, which refuses the launch.
+const HOME_PASSES_MAX: usize = 8;
 /// What a launch keeps in an agent home (RV-DS241-137), every other entry going: the
 /// engine's launch state, lock, relay plugin and key file; both harnesses' instruction and
 /// Codex config files, which the launch rewrites, and the skills; Claude Code's sign-in,
@@ -1120,43 +1121,47 @@ pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
 
 /// Removes from one real folder of an agent home every entry `kept` does not name with its
 /// kind, and does the same in each kept folder that has its own list, never following a
-/// link (RV-DS241-137). Flags an agent set on the folder are cleared first (RV-DS241-138).
-/// Inputs: the folder and what stays in it. Output: unit, or `agent_home_unwritable` when
-/// it cannot be listed, holds over [`HOME_ENTRIES_MAX`] entries or one of them stays.
+/// link (RV-DS241-137). Flags an agent set on the folder or on an entry it keeps are cleared
+/// (RV-DS241-138). The folder is listed as it goes, in passes until one removes nothing.
+/// Inputs: the folder and what stays in it. Output: unit, or `agent_home_unwritable` when it
+/// cannot be listed, one entry stays or it still changes after [`HOME_PASSES_MAX`] passes.
 fn keep_only(folder: &Path, kept: &[(&str, Kept)]) -> Result<(), AgentHomeError> {
     assert!(folder.is_absolute());
     assert!(!kept.is_empty());
     unpin(folder);
-    let names = fs::read_dir(folder)
-        .map_err(|_| failure("agent_home_unwritable"))?
-        .take(HOME_ENTRIES_MAX + 1)
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| failure("agent_home_unwritable"))?;
-    if names.len() > HOME_ENTRIES_MAX {
-        return Err(failure("agent_home_unwritable"));
-    }
-    for name in names {
-        let path = folder.join(&name);
-        let metadata = match fs::symlink_metadata(&path) {
-            Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return Err(failure("agent_home_unwritable")),
-            Ok(metadata) => metadata,
-        };
-        let link = metadata.file_type().is_symlink();
-        let wanted = kept
-            .iter()
-            .find(|(known, _)| name == *known)
-            .map(|(_, kind)| *kind);
-        match wanted {
-            Some(Kept::File) if metadata.is_file() => {}
-            Some(Kept::Folder) if metadata.is_dir() => {}
-            Some(Kept::Cache) if metadata.is_dir() || link => {}
-            Some(Kept::Only(inner)) if metadata.is_dir() => keep_only(&path, inner)?,
-            _ => remove_entry(&path)?,
+    for _ in 0..HOME_PASSES_MAX {
+        let mut removed = false;
+        for entry in fs::read_dir(folder).map_err(|_| failure("agent_home_unwritable"))? {
+            let name = entry
+                .map_err(|_| failure("agent_home_unwritable"))?
+                .file_name();
+            let path = folder.join(&name);
+            let metadata = match fs::symlink_metadata(&path) {
+                Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return Err(failure("agent_home_unwritable")),
+                Ok(metadata) => metadata,
+            };
+            let link = metadata.file_type().is_symlink();
+            let wanted = kept
+                .iter()
+                .find(|(known, _)| name == *known)
+                .map(|(_, kind)| *kind);
+            match wanted {
+                Some(Kept::File) if metadata.is_file() => unpin(&path),
+                Some(Kept::Folder) if metadata.is_dir() => unpin(&path),
+                Some(Kept::Cache) if metadata.is_dir() || link => unpin(&path),
+                Some(Kept::Only(inner)) if metadata.is_dir() => keep_only(&path, inner)?,
+                _ => {
+                    remove_entry(&path)?;
+                    removed = true;
+                }
+            }
+        }
+        if !removed {
+            return Ok(());
         }
     }
-    Ok(())
+    Err(failure("agent_home_unwritable"))
 }
 
 /// Names the folders of an agent home a launch keeps only part of, which the agent's
@@ -1172,8 +1177,8 @@ pub(crate) fn walked_folders() -> impl Iterator<Item = &'static str> {
 
 /// Clears the immutable and append-only flags an agent may set on one entry of its home,
 /// without following a link ([`crate::team::cleanup::unpin`]), so they keep nothing from
-/// going (RV-DS241-138). Input: the entry. An entry that will not open keeps its flags, and
-/// its removal then fails.
+/// going or being rewritten (RV-DS241-138). Input: the entry. A link, or an entry that will
+/// not open, keeps its flags, and a removal of it then fails.
 #[cfg(target_os = "macos")]
 fn unpin(path: &Path) {
     crate::team::cleanup::unpin(rustix::fs::CWD, path);
