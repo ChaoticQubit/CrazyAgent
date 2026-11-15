@@ -532,6 +532,24 @@ impl OwnerRuntimeHandle {
         Ok(())
     }
 
+    /// Captures a harness engine start chose or found as a re-pin captures one: once the
+    /// real file pinned passes the start checks ([`start_trusted`]) with the HOME of the
+    /// search set at engine start, and the entry still leads to it, so a link moved after
+    /// engine start checked the entry never gets an agent's file pinned (RV-DS241-140).
+    /// Input: the absolute entry. Output: the host, or the refusal code.
+    pub(crate) fn capture_found(
+        &self,
+        entry: &Path,
+    ) -> Result<RegisteredNativeAuthHost, EngineError> {
+        assert!(entry.is_absolute());
+        let home = self
+            .held_search()?
+            .and_then(|search| search.home().map(Path::to_path_buf));
+        RegisteredNativeAuthHost::capture_entry_checked(entry, |real| {
+            start_trusted(&self.authority, real, home.as_deref())
+        })
+    }
+
     pub(crate) fn register_codex_executable(
         &self,
         host: RegisteredNativeAuthHost,

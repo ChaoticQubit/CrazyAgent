@@ -674,6 +674,36 @@ impl EngineService {
             .register_claude_executable(host)
     }
 
+    /// Registers a Codex engine start chose or found rather than was given by flag, pinned
+    /// only once the real file pinned passes the start checks and the entry still leads to
+    /// it (RV-DS241-140). Input: the absolute entry. Output: Ok, or the refusal code.
+    pub fn register_found_codex_executable(&mut self, entry: &Path) -> Result<(), EngineError> {
+        if self.closed {
+            return Err(fail("engine_service_closed"));
+        }
+        self.live()?;
+        let runtime = self
+            .owner_runtime
+            .as_ref()
+            .ok_or_else(|| fail("owner_runtime_missing"))?;
+        runtime.register_codex_executable(runtime.capture_found(entry)?)
+    }
+
+    /// Registers a Claude Code engine start chose or found rather than was given by flag,
+    /// pinned only once the real file pinned passes the start checks and the entry still
+    /// leads to it (RV-DS241-140). Input: the absolute entry. Output: Ok, or the refusal code.
+    pub fn register_found_claude_executable(&mut self, entry: &Path) -> Result<(), EngineError> {
+        if self.closed {
+            return Err(fail("engine_service_closed"));
+        }
+        self.live()?;
+        let runtime = self
+            .owner_runtime
+            .as_ref()
+            .ok_or_else(|| fail("owner_runtime_missing"))?;
+        runtime.register_claude_executable(runtime.capture_found(entry)?)
+    }
+
     /// Hands the engine the harness search that Check again, Choose file and a sign-in retry
     /// use; an engine never given one looks only at a chosen file. Input: the search engine
     /// start used. Output: Ok, or the refusal code.

@@ -652,38 +652,44 @@ type Register = fn(
 ) -> Result<(), crazyagent::engine::EngineError>;
 
 /// Registers the harness executables of one start. An explicit flag that cannot be
-/// registered stops the engine; a chosen or found one is dropped with a note on stderr
-/// naming the refusal, and Check again reports it. Inputs: the service, the harnesses and
-/// which were not flags. Output: Ok with the harnesses left registered, or the failure.
+/// registered stops the engine; a chosen or found one is pinned only once the real file
+/// pinned passes the start checks (RV-DS241-140), else dropped with a note on stderr naming
+/// the refusal, and Check again reports it. Inputs: the service, the harnesses and which
+/// were not flags. Output: Ok with the harnesses left registered, or the failure.
 fn register_harnesses(
     service: &mut crazyagent::engine::bootstrap::EngineService,
     harnesses: &mut crazyagent::paths::Harnesses,
     found_on_path: [bool; 3],
 ) -> Result<(), String> {
-    let slots: [(&str, &mut Option<PathBuf>, Register, bool); 3] = [
+    use crazyagent::engine::bootstrap::EngineService;
+    let slots: [(&str, &mut Option<PathBuf>, Register, Register, bool); 3] = [
         (
             "codex",
             &mut harnesses.codex,
-            crazyagent::engine::bootstrap::EngineService::register_codex_executable,
+            EngineService::register_codex_executable,
+            EngineService::register_found_codex_executable,
             found_on_path[0],
         ),
         (
             "claude",
             &mut harnesses.claude,
-            crazyagent::engine::bootstrap::EngineService::register_claude_executable,
+            EngineService::register_claude_executable,
+            EngineService::register_found_claude_executable,
             found_on_path[1],
         ),
         (
             crazyagent::paths::RCLI_EXECUTABLE,
             &mut harnesses.rcli,
-            crazyagent::engine::bootstrap::EngineService::register_rcli_executable,
+            EngineService::register_rcli_executable,
+            EngineService::register_rcli_executable,
             found_on_path[2],
         ),
     ];
-    for (name, slot, register, optional) in slots {
+    for (name, slot, told, found, optional) in slots {
         let Some(executable) = slot.clone() else {
             continue;
         };
+        let register = if optional { found } else { told };
         if let Err(error) = register(service, &executable) {
             if !optional {
                 return Err(error.to_string());
@@ -764,12 +770,12 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         .register_native_auth_host(&executable)
                         .map_err(|e| e.to_string())
                 })
-                .and_then(|()| register_harnesses(&mut service, &mut harnesses, found_on_path))
                 .and_then(|()| {
                     service
                         .set_harness_search(search)
                         .map_err(|e| e.to_string())
                 })
+                .and_then(|()| register_harnesses(&mut service, &mut harnesses, found_on_path))
                 .and_then(|()| service.ensure_ready(&stopped).map_err(|e| e.to_string()))
                 .and_then(|()| {
                     if !writable {
