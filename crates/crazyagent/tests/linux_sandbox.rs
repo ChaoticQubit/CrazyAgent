@@ -2842,6 +2842,47 @@ fn a_supervised_agent_signals_only_the_programs_it_started() {
     outside.wait().unwrap();
 }
 
+const TRACED_SUPERVISOR: &str = "import ctypes, os
+libc = ctypes.CDLL(None, use_errno=True)
+parent = os.getppid()
+memory = '/proc/%d/mem' % parent
+def said(result):
+    return 'ok' if result != -1 else str(ctypes.get_errno())
+class Span(ctypes.Structure):
+    _fields_ = [('base', ctypes.c_void_p), ('size', ctypes.c_size_t)]
+held = ctypes.create_string_buffer(8)
+span = Span(ctypes.cast(held, ctypes.c_void_p), 8)
+own = ctypes.byref(span)
+print('attach=' + said(libc.ptrace(0x4206, parent, None, None)))
+try:
+    os.close(os.open(memory, os.O_RDWR))
+    print('memory=ok')
+except OSError as error:
+    print('memory=' + str(error.errno))
+print('memory-owner=' + ('agent' if os.stat(memory).st_uid == os.getuid() else 'other'))
+print('read=' + said(libc.process_vm_readv(parent, own, 1, own, 1, 0)))
+handle = os.pidfd_open(parent)
+taken = {said(libc.syscall(438, handle, number, 0)) for number in range(64)}
+print('taken=' + ','.join(sorted(taken)))
+";
+
+/// The call supervisor is not dumpable, so whatever ptrace scope the machine has, no
+/// program of the agent can trace it, read or write its memory or take its seccomp
+/// listener and answer its own calls; the harness is dumpable again from its own program
+/// on, so the supervisor still reads the agent's calls (rv-sec3 linux-t4b F1).
+#[test]
+fn a_supervised_agent_cannot_trace_its_supervisor_or_take_its_descriptors() {
+    let case = case();
+    let project = case.project.to_str().unwrap();
+    let guard = ["--guard-signals", "--guard-git", "--own-tree", project];
+    let script = ["-I", "-u", "-c", TRACED_SUPERVISOR];
+    let held = finished(supervised(&case, &guard, "/usr/bin/python3", &script));
+    assert_eq!(
+        told(&held),
+        "attach=1\nmemory=13\nmemory-owner=other\nread=1\ntaken=1\n"
+    );
+}
+
 /// The helper stays as the harness's parent under the call supervisor, so the engine sees
 /// the harness through it: its exit code, 128 plus the signal that ended it, and a stop
 /// sent to the launch's group, which the harness handles while the helper waits for it.
