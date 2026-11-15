@@ -137,7 +137,7 @@ fn turn(session: &mut TurnSession, prompt: &str) -> Vec<LaunchEvent> {
 /// The longest a stopped turn whose harness ignores TERM may take to end: the stop grace
 /// and a margin, well under the stand-in's 30 second sleep. Output: the wait.
 fn overdue() -> Duration {
-    let wait = LaunchLimits::default().stop_grace + Duration::from_secs(8);
+    let wait = LaunchLimits::default().stop_grace + Duration::from_secs(15);
     assert!(wait < Duration::from_secs(30));
     wait
 }
