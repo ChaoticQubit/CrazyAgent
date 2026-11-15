@@ -408,8 +408,9 @@ pub enum ContextModeOff {
 pub(crate) const CONTEXT_MODE_PACKAGE: &str = "context-mode";
 const PACKAGE_VERSION_BYTES_MAX: usize = 32;
 
-/// Reads the default pack's pinned context-mode launch from an approved spec: an absolute
-/// `npx` given exactly `-y context-mode@<version>` with an exact version. Input: the spec.
+/// Reads the default pack's pinned context-mode launch from an approved spec: a rooted
+/// `npx`, the leading `/` [`ServerSpec::validate`] asks for on every platform, given exactly
+/// `-y context-mode@<version>` with an exact version (RV-DS241-153). Input: the spec.
 /// Output: npx's folder and the version, or none for any other spec.
 pub(crate) fn pinned_context_mode(spec: &ServerSpec) -> Option<(&Path, &str)> {
     let ServerSpec::Stdio { command, args } = spec else {
@@ -423,7 +424,7 @@ pub(crate) fn pinned_context_mode(spec: &ServerSpec) -> Option<(&Path, &str)> {
         .strip_prefix(CONTEXT_MODE_PACKAGE)
         .and_then(|rest| rest.strip_prefix('@'))
         .filter(|version| flag == "-y" && exact_version(version))?;
-    let npx = command.is_absolute() && npx_program(command);
+    let npx = command.has_root() && npx_program(command);
     command.parent().filter(|_| npx).map(|bin| (bin, version))
 }
 
