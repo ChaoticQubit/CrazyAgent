@@ -12,6 +12,7 @@ use crate::harnesses::launch::{
 #[cfg(unix)]
 use crate::harnesses::launch::{await_group_exit, kill_group};
 use crate::harnesses::leftovers::{self, Unstopped};
+use crate::harnesses::manifest::DriverKind;
 use crate::harnesses::terminal_session::{TerminalSession, end_left_pane};
 use crate::launch_context::AgentContext;
 use crate::project_setup::ResearchKind;
@@ -181,14 +182,24 @@ pub enum ResearchHarness {
 }
 
 impl ResearchHarness {
-    /// Maps a team plan or connection harness id to a research harness.
+    /// Maps a team plan or connection harness id to a research harness: one the registry
+    /// names for research, run by the piped driver the registry names for it. A driver
+    /// kind research has no runner for is listed here by name.
     /// Takes the id, such as `codex`, `claude` or `claude-code`.
     /// Returns `None` for a harness research cannot run on.
     pub fn of(id: &str) -> Option<Self> {
-        match id {
-            "codex" => Some(Self::Codex),
-            "claude" | "claude-code" => Some(Self::ClaudeCode),
-            _ => None,
+        let harness = crate::harnesses::registry::registry().get(id)?;
+        if !harness.research() {
+            return None;
+        }
+        match harness.piped()? {
+            DriverKind::CodexAppServer => Some(Self::Codex),
+            DriverKind::ClaudeStreamJson => Some(Self::ClaudeCode),
+            DriverKind::Rcli
+            | DriverKind::Acp
+            | DriverKind::JsonlTurn
+            | DriverKind::JsonlRpc
+            | DriverKind::TextTurn => None,
         }
     }
 

@@ -2,6 +2,7 @@ use super::prices::Charged;
 use super::rules::{CodexState, Usage, advisor_usages, claude_usage, codex_usage, timestamp_ms};
 use super::{LimitSource, LimitWindow, Observation, failure, record_observation, storage};
 use crate::engine::EngineError;
+use crate::harnesses::manifest::RecordKind;
 use crate::protocol::{CredentialRef, ProjectId};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -207,13 +208,20 @@ pub enum Format {
 }
 
 impl Format {
-    /// The format of a harness id's session records. Input: the harness id.
-    /// Output: the format, None for a harness whose records the engine cannot read.
+    /// The format of a harness's session records, by the record reader the registry names
+    /// for it. A reader kind usage is not counted from is listed here by name. Input: the
+    /// harness id or an alias. Output: the format, None for a harness whose records the
+    /// engine cannot read.
     pub fn of(harness: &str) -> Option<Format> {
-        match crate::harnesses::spec(harness).map(|spec| spec.id) {
-            Some("claude-code") => Some(Format::Claude),
-            Some("codex") => Some(Format::Codex),
-            _ => None,
+        match crate::harnesses::registry::registry().get(harness)?.record() {
+            RecordKind::ClaudeSession => Some(Format::Claude),
+            RecordKind::CodexRollouts => Some(Format::Codex),
+            RecordKind::JsonlAppend
+            | RecordKind::JsonRewrite
+            | RecordKind::SqlitePoll
+            | RecordKind::MarkdownHistory
+            | RecordKind::Screen
+            | RecordKind::Unavailable => None,
         }
     }
 }

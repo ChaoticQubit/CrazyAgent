@@ -1,3 +1,4 @@
+use crate::harnesses::manifest::DriverKind;
 use crate::protocol::ProjectId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -129,12 +130,22 @@ pub enum Harness {
 
 impl Harness {
     /// Maps a harness id to the harness, none for a harness without a known global
-    /// instruction file. Input: the id, such as "claude-code" or "codex".
+    /// instruction file. The registry names the harness's piped driver, and the file
+    /// belongs to the home that driver's harness reads; a driver kind with no such file
+    /// is listed here by name. Input: the id, such as "claude-code" or "codex"; an alias
+    /// is not an id.
     pub fn from_id(id: &str) -> Option<Self> {
-        match id {
-            "claude-code" => Some(Self::Claude),
-            "codex" => Some(Self::Codex),
-            _ => None,
+        let harness = crate::harnesses::registry::registry()
+            .get(id)
+            .filter(|harness| harness.manifest().id == id)?;
+        match harness.piped()? {
+            DriverKind::ClaudeStreamJson => Some(Self::Claude),
+            DriverKind::CodexAppServer => Some(Self::Codex),
+            DriverKind::Rcli
+            | DriverKind::Acp
+            | DriverKind::JsonlTurn
+            | DriverKind::JsonlRpc
+            | DriverKind::TextTurn => None,
         }
     }
 
