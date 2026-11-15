@@ -1,7 +1,6 @@
 use super::*;
 use std::ffi::OsStr;
 use std::io::Cursor;
-use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::Instant;

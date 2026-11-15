@@ -2,7 +2,7 @@ use crate::credentials::SecretString;
 use crate::engine::EngineError;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -507,21 +507,17 @@ fn stop(child: &mut Child) {
 /// folder grant could read or rewrite it (SA vid 201). Inputs: the relay, the request and
 /// the key header form. Output: curl, its config for stdin and the body pipe's write end
 /// (none for an empty body), or the status the harness gets.
-#[cfg(unix)]
 fn upstream_child(
     shared: &Shared,
     incoming: &Incoming,
     scheme: KeyHeader,
 ) -> Result<(Child, Vec<u8>, Option<std::io::PipeWriter>), u16> {
-    use std::os::fd::AsRawFd;
     let pipe = if incoming.body.is_empty() {
         None
     } else {
         Some(crate::spawn_gate::guarded(std::io::pipe).map_err(|_| 500_u16)?)
     };
-    let handed = pipe
-        .as_ref()
-        .map(|(reader, _)| std::path::PathBuf::from(format!("/dev/fd/{}", reader.as_raw_fd())));
+    let handed = pipe.as_ref().map(|(reader, _)| handed_path(reader));
     let mut config = upstream_config(
         &shared.upstream,
         incoming,
@@ -532,10 +528,7 @@ fn upstream_child(
     .map_err(|_| 400_u16)?;
     let mut command = upstream_command(&shared.upstream);
     let (spawned, body) = match pipe {
-        Some((reader, writer)) => (
-            crate::spawn_gate::spawn_handing(&mut command, reader.into()),
-            Some(writer),
-        ),
+        Some((reader, writer)) => (spawn_holding(&mut command, reader), Some(writer)),
         None => (crate::spawn_gate::spawn(&mut command), None),
     };
     match spawned {
@@ -547,15 +540,33 @@ fn upstream_child(
     }
 }
 
+/// The path curl reads a request body from: the body pipe's read end, at the number curl
+/// inherits it under. Input: the read end. Output: `/dev/fd/<n>`.
+#[cfg(unix)]
+fn handed_path(reader: &std::io::PipeReader) -> PathBuf {
+    use std::os::fd::AsRawFd;
+    PathBuf::from(format!("/dev/fd/{}", reader.as_raw_fd()))
+}
+
 /// Never reached: [`Relay::start`] refuses where curl cannot inherit the body pipe.
-/// Inputs: unused. Output: 502.
+/// Input: unused. Output: an empty path.
 #[cfg(not(unix))]
-fn upstream_child(
-    _shared: &Shared,
-    _incoming: &Incoming,
-    _scheme: KeyHeader,
-) -> Result<(Child, Vec<u8>, Option<std::io::PipeWriter>), u16> {
-    Err(502)
+fn handed_path(_reader: &std::io::PipeReader) -> PathBuf {
+    PathBuf::new()
+}
+
+/// Starts curl holding the body pipe's read end at its own number, under the spawn gate, so
+/// no other child ever holds it. Inputs: the curl command and the read end. Output: curl.
+#[cfg(unix)]
+fn spawn_holding(command: &mut Command, reader: std::io::PipeReader) -> std::io::Result<Child> {
+    crate::spawn_gate::spawn_handing(command, reader.into())
+}
+
+/// Never reached: [`Relay::start`] refuses where curl cannot inherit the body pipe.
+/// Inputs: unused. Output: an `Unsupported` error.
+#[cfg(not(unix))]
+fn spawn_holding(_command: &mut Command, _reader: std::io::PipeReader) -> std::io::Result<Child> {
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
 }
 
 /// Lets a relay start where curl can inherit the pipe that carries each request body.

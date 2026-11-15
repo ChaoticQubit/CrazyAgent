@@ -262,14 +262,6 @@ fn a_keyed_live_master_is_stopped_at_quit_so_nothing_dials_its_ended_relay_port(
         live_agent(&f.connection).is_some()
     });
     let master = masters(&fixture.connection)[0];
-    let launched = launches(&fixture, master);
-    let port: u16 = launched[0]
-        .split("base_url=\"http://127.0.0.1:")
-        .nth(1)
-        .and_then(|rest| rest.split('/').next())
-        .and_then(|port| port.parse().ok())
-        .expect("the master runs on its key relay");
-    assert!(crate::sandbox::model_proxy::RELAY_PORTS.contains(&port));
     let dialed = fixture
         .base
         .join("team/agents")
@@ -281,6 +273,14 @@ fn a_keyed_live_master_is_stopped_at_quit_so_nothing_dials_its_ended_relay_port(
     fixture.until(&mut team, "the master's pane is recorded", |f| {
         f.recorded(master)
     });
+    let launched = launches(&fixture, master);
+    let port: u16 = launched[0]
+        .split("base_url=\"http://127.0.0.1:")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|port| port.parse().ok())
+        .expect("the master runs on its key relay");
+    assert!(crate::sandbox::model_proxy::RELAY_PORTS.contains(&port));
 
     let left = team.shutdown().unwrap();
     let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", port)).unwrap();
