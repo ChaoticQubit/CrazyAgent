@@ -133,6 +133,42 @@ fn with_tools_off_a_listed_launch_replaces_an_earlier_server_file_with_an_empty_
     );
 }
 
+/// Task 18: the MCP file a listed harness reads cannot switch off one tool of a server, so
+/// a server with any tool the owner switched off is left out whole, never given with that
+/// tool on; a server with nothing switched off is given.
+#[test]
+fn a_listed_launch_leaves_out_a_server_with_a_tool_the_owner_switched_off() {
+    let (_folder, home) = private_home();
+    let mut context = context();
+    context.plugins.servers.push(LaunchServer {
+        name: "notes".into(),
+        spec: ServerSpec::Http {
+            url: "http://127.0.0.1:4100/mcp".into(),
+        },
+        secrets: Vec::new(),
+    });
+    context.off_tools = vec![
+        ("files".to_owned(), vec!["delete".to_owned()]),
+        ("notes".to_owned(), Vec::new()),
+    ];
+
+    let installed = context.install_listed(&manifest(BLOCKS), &home, true);
+
+    assert!(installed.is_ok(), "{:?}", installed.as_ref().err());
+    assert_eq!(
+        servers_in(&home.join("agent").join("mcp.json")),
+        Some(serde_json::json!({
+            "mcpServers": {
+                "notes": {
+                    "type": "http",
+                    "url": "http://127.0.0.1:4100/mcp",
+                    "headers": {}
+                }
+            }
+        }))
+    );
+}
+
 /// Task 18: a manifest whose blocks do not read starts no launch and writes nothing into
 /// the private home.
 #[test]

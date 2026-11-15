@@ -181,6 +181,27 @@ fn render_blocks_refuse_unknown_kinds_paths_outside_the_home_and_unknown_keys() 
     );
 }
 
+/// Task 18: a render path never names a file or folder CrazyAgent keeps in the private home
+/// (its launch state, the home lock and the key file), in any letter case, as the folder may
+/// not tell cases apart, so a render can never replace the lock or the key.
+#[test]
+fn a_render_path_never_names_a_file_crazyagent_keeps_in_the_home() {
+    let kept = "CrazyAgent keeps its own files there, so a manifest cannot.";
+    for (key, render, path) in [
+        ("mcp", "json-mcp-servers", "{home}/crazyagent/mcp.json"),
+        ("mcp", "json-mcp-servers", "{home}/crazyagent.lock"),
+        ("instructions", "file", "{home}/.crazyagent-key"),
+        ("instructions", "file", "{home}/CrazyAgent.LOCK"),
+    ] {
+        let blocks = format!("{key}:\n  render: \"{render}\"\n  path: \"{path}\"\n");
+        assert_eq!(
+            renders_of(&blocks).err(),
+            Some((VALUE, format!("{key}.path: {kept}"))),
+            "{path}"
+        );
+    }
+}
+
 /// Task 18: every bundled manifest's render blocks read, so no launch of a bundled harness
 /// is refused for its own manifest.
 #[test]
