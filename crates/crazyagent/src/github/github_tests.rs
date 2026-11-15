@@ -1834,3 +1834,30 @@ fn publish_push_refuses_a_moved_head_and_a_refused_push_and_leaves_the_project_a
     assert!(git_out(&["for-each-ref"], &bare).is_empty());
     assert!(publish_homes(scratch.root.path()).is_empty());
 }
+
+#[test]
+fn publish_push_refuses_a_config_hook_in_the_project_before_anything_is_sent() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, bare, server) = pushed_repository("octo-cat/tool", &secret_text, false);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project, committed) = published_project();
+    let marks = tempfile::tempdir().unwrap();
+    let mark = marks.path().join("ran");
+    git(
+        &["config", "hook.mark.event", "reference-transaction"],
+        &project,
+    );
+    let command = format!("/usr/bin/touch '{}'", mark.display());
+    git(&["config", "hook.mark.command", &command], &project);
+    let before = server.seen().len();
+    let pushed = account.publish_push(&project, "octo-cat/tool", &committed);
+    assert!(!mark.exists());
+    assert_eq!(pushed.unwrap_err().0, "github_publish_hooks_set");
+    assert_eq!(server.seen().len(), before);
+    assert!(git_out(&["for-each-ref"], &bare).is_empty());
+    let config = std::fs::read_to_string(project.join(".git/config")).unwrap();
+    assert!(!config.contains("[remote"), "{config}");
+    assert!(publish_homes(scratch.root.path()).is_empty());
+}

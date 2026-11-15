@@ -342,11 +342,22 @@ fn run_within(command: &mut Command, limit: Duration) -> Result<Output, EngineEr
 }
 
 /// Runs a git command that lists files within `limit`, keeping at most
-/// `LISTING_BYTES_MAX` of it. Inputs: the command and the limit. Output: the listing, or
-/// `github_publish_too_large`, `github_publish_failed`.
+/// `LISTING_BYTES_MAX` of it. Inputs: the command and the limit. Output: as
+/// [`listing_within`].
 fn listing(command: &mut Command, limit: Duration) -> Result<Vec<u8>, EngineError> {
-    let (status, bytes) = collect(command, limit, LISTING_BYTES_MAX)?;
-    if bytes.len() as u64 > LISTING_BYTES_MAX {
+    listing_within(command, limit, LISTING_BYTES_MAX)
+}
+
+/// Runs a git command that lists files within `limit`, keeping at most `cap` bytes of it.
+/// Inputs: the command, the limit and the cap. Output: the listing, or
+/// `github_publish_too_large`, `github_publish_failed`.
+fn listing_within(
+    command: &mut Command,
+    limit: Duration,
+    cap: u64,
+) -> Result<Vec<u8>, EngineError> {
+    let (status, bytes) = collect(command, limit, cap)?;
+    if bytes.len() as u64 > cap {
         return Err(failure("github_publish_too_large"));
     }
     if !status.success() {
@@ -1230,6 +1241,20 @@ pub(super) fn commit(
     written: &[String],
     author: &Author,
 ) -> Result<GitHubCommitted, EngineError> {
+    commit_within(git, home, project, written, author, LISTING_BYTES_MAX)
+}
+
+/// Makes the publish commit as [`commit`] does, reading at most `status_max` bytes of the
+/// status that counts what the commit leaves out. Inputs: as [`commit`], and the cap.
+/// Output: as [`commit`], or `github_publish_too_large` past the cap.
+fn commit_within(
+    git: &Path,
+    home: &Path,
+    project: &Path,
+    written: &[String],
+    author: &Author,
+    status_max: u64,
+) -> Result<GitHubCommitted, EngineError> {
     let failed = || failure("github_publish_failed");
     if written.iter().any(|path| !WRITTEN.contains(&path.as_str())) {
         return Err(failure("github_publish_file_invalid"));
@@ -1285,7 +1310,7 @@ pub(super) fn commit(
         succeeded(committing().arg("--allow-empty"))?;
     }
     let commit = head_commit(git, home, project)?;
-    let status = listing(
+    let status = listing_within(
         project_git(git, home, project).args([
             "status",
             "--porcelain",
@@ -1294,6 +1319,7 @@ pub(super) fn commit(
             "--untracked-files=all",
         ]),
         WORK_TIME,
+        status_max,
     )?;
     let left_out = status
         .split(|byte| *byte == 0)

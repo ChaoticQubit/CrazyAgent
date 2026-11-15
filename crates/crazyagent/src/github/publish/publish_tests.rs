@@ -883,3 +883,103 @@ fn a_born_head_whose_history_cannot_be_read_is_not_taken_for_an_empty_one() {
     .unwrap();
     assert_eq!(fixture.inspect().unwrap_err().0, "github_publish_failed");
 }
+
+fn hooks(project: &Path, marks: &Path) {
+    for (name, event) in [
+        ("index", "post-index-change"),
+        ("message", "prepare-commit-msg"),
+        ("committed", "post-commit"),
+        ("refs", "reference-transaction"),
+    ] {
+        git(&["config", &format!("hook.{name}.event"), event], project);
+        let command = format!("/usr/bin/touch '{}'", marks.join(name).display());
+        git(
+            &["config", &format!("hook.{name}.command"), &command],
+            project,
+        );
+    }
+}
+
+#[test]
+fn a_config_hook_in_the_project_never_runs_and_publish_refuses_to_commit() {
+    let owned = fixture();
+    let project = owned.path();
+    git(&["init", "-q", "-b", "main"], &project);
+    owned.write("a.txt", "a\n");
+    git(&["add", "-A"], &project);
+    git(&["commit", "-q", "-m", "first"], &project);
+    let head = owned.lines(&["rev-parse", "HEAD"]);
+    let marks = tempfile::tempdir().unwrap();
+    hooks(&project, marks.path());
+    let local = owned.inspect().unwrap();
+    assert_eq!(local.history, GitHubHistory::Owner);
+    let written = owned.prepare(&local, true, false, &[]).unwrap();
+    assert!(
+        owned
+            .scan(GitHubHistory::Owner)
+            .unwrap()
+            .findings
+            .is_empty()
+    );
+    let written: Vec<&str> = written.iter().map(String::as_str).collect();
+    let refused = owned.commit(&written);
+    let ran: Vec<String> = std::fs::read_dir(marks.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(ran.is_empty(), "{ran:?}");
+    assert_eq!(refused.unwrap_err().0, "github_publish_hooks_set");
+    assert_eq!(owned.lines(&["rev-parse", "HEAD"]), head);
+    let fresh = fixture();
+    git(&["init", "-q", "-b", "main"], &fresh.path());
+    fresh.write("b.txt", "b\n");
+    hooks(&fresh.path(), marks.path());
+    let local = fresh.inspect().unwrap();
+    let written = fresh.prepare(&local, true, false, &[]).unwrap();
+    let written: Vec<&str> = written.iter().map(String::as_str).collect();
+    let refused = fresh.commit(&written);
+    assert!(std::fs::read_dir(marks.path()).unwrap().next().is_none());
+    assert_eq!(refused.unwrap_err().0, "github_publish_hooks_set");
+}
+
+#[test]
+fn a_status_publish_cannot_count_is_refused_before_anything_is_committed() {
+    let owned = fixture();
+    let project = owned.path();
+    git(&["init", "-q", "-b", "main"], &project);
+    owned.write("a.txt", "a\n");
+    git(&["add", "-A"], &project);
+    git(&["commit", "-q", "-m", "first"], &project);
+    for index in 0..8 {
+        owned.write(&format!("untracked-{index}.txt"), "u\n");
+    }
+    let head = owned.lines(&["rev-parse", "HEAD"]);
+    let local = owned.inspect().unwrap();
+    let written = owned.prepare(&local, true, false, &[]).unwrap();
+    assert_eq!(written, [".gitignore"]);
+    let refused = commit_within(
+        Path::new(GIT),
+        owned.home.path(),
+        &project,
+        &written,
+        &ada(),
+        64,
+    );
+    assert_eq!(owned.lines(&["rev-parse", "HEAD"]), head);
+    assert!(owned.lines(&["diff", "--cached", "--name-only"]).is_empty());
+    assert_eq!(refused.unwrap_err().0, "github_publish_too_large");
+    let committed = commit_within(
+        Path::new(GIT),
+        owned.home.path(),
+        &project,
+        &written,
+        &ada(),
+        1 << 20,
+    )
+    .unwrap();
+    assert_eq!(committed.left_out, 8);
+    assert_eq!(
+        owned.lines(&["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]),
+        [".gitignore"]
+    );
+}
