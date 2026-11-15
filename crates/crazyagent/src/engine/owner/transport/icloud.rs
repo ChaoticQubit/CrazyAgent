@@ -1,6 +1,6 @@
 use super::*;
 use crate::projects_home::icloud::{self, DOWNLOAD_TIME_MAX, Progress};
-use crate::projects_home::job::JobView;
+use crate::projects_home::job::{JobSubject, JobView};
 use crate::projects_home::{AddMode, AddOverride};
 use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,7 @@ enum Action {
     Cancel,
     Start {
         request_id: RequestId,
-        path: String,
+        subject: JobSubject,
         mode: AddMode,
         #[serde(default)]
         overrides: Vec<AddOverride>,
@@ -85,21 +85,21 @@ impl OwnerClient {
         }
     }
 
-    /// Starts an intake job that adds a folder apart from this client: it downloads what
-    /// is only in iCloud, then moves or copies the folder into the projects home. A start
-    /// for the folder of the running job, or with its id, attaches to it. Inputs: the add's
-    /// request id, which names the job, the folder, the mode and the overrides. Output: the
-    /// job's view, or `intake_busy` while a job for another folder runs.
-    pub async fn intake_start(
+    /// Starts the engine's one job apart from this client: an add of a folder or a move of a
+    /// project into the projects home. It downloads what is only in iCloud, then moves or
+    /// copies the folder. A start for the subject of the running job, or with its id,
+    /// attaches to it. Inputs: the change's request id, which names the job, the subject, the
+    /// mode and the overrides. Output: the job's view, or `job_busy` while another job runs.
+    pub async fn job_start(
         &self,
         request_id: RequestId,
-        path: String,
+        subject: JobSubject,
         mode: AddMode,
         overrides: Vec<AddOverride>,
     ) -> Result<JobView, EngineError> {
         let action = Action::Start {
             request_id,
-            path,
+            subject,
             mode,
             overrides,
         };
@@ -109,25 +109,25 @@ impl OwnerClient {
         }
     }
 
-    /// Reads the intake job, running or last ended. Output: its view, or None.
-    pub async fn intake_status(&self) -> Result<Option<JobView>, EngineError> {
+    /// Reads the job, running or last ended. Output: its view, or None.
+    pub async fn job_status(&self) -> Result<Option<JobView>, EngineError> {
         match self.icloud_exchange(Action::Status).await? {
             Reply::Job { job } => Ok(job),
             _ => Err(unknown()),
         }
     }
 
-    /// Asks the running intake job to stop between files. Input: its id. Output: whether it
-    /// was running; its view then reads cancelled, or done when its folder had landed.
-    pub async fn intake_stop(&self, request_id: RequestId) -> Result<bool, EngineError> {
+    /// Asks the running job to stop between files. Input: its id. Output: whether it was
+    /// running; its view then reads cancelled, or done when its folder had landed.
+    pub async fn job_stop(&self, request_id: RequestId) -> Result<bool, EngineError> {
         match self.icloud_exchange(Action::Stop { request_id }).await? {
             Reply::Stopped { running } => Ok(running),
             _ => Err(unknown()),
         }
     }
 
-    /// Forgets an ended intake job. Input: its id. Output: whether it was forgotten.
-    pub async fn intake_dismiss(&self, request_id: RequestId) -> Result<bool, EngineError> {
+    /// Forgets an ended job. Input: its id. Output: whether it was forgotten.
+    pub async fn job_dismiss(&self, request_id: RequestId) -> Result<bool, EngineError> {
         match self.icloud_exchange(Action::Dismiss { request_id }).await? {
             Reply::Dismissed { forgotten } => Ok(forgotten),
             _ => Err(unknown()),
@@ -267,17 +267,18 @@ async fn handle(
         }),
         Action::Start {
             request_id,
-            path,
+            subject,
             mode,
             overrides,
         } => {
             let asked = intake::Asked {
                 request_id,
-                path,
+                subject,
                 mode,
                 overrides,
             };
             intake::Intake::start(engine, authority, packet, admission, asked)
+                .await
                 .map(|job| Reply::Job { job: Some(job) })
         }
         Action::Status => Ok(Reply::Job {

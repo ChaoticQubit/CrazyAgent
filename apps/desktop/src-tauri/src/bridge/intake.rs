@@ -7,7 +7,7 @@ use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerData, OwnerMuta
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::onboarding::OnboardingView;
 use crazyagent::projects_home::icloud::Progress;
-use crazyagent::projects_home::job::{JobState, JobView};
+use crazyagent::projects_home::job::{JobState, JobSubject, JobView};
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::{CredentialRef, ProjectId, RequestId};
 use crazyagent::setup::{Dependency, RefusedTool, SetupStatus};
@@ -64,7 +64,7 @@ pub const INTAKE_CODES: [&str; 75] = [
     "home_add_interrupted",
     "home_add_cancelled",
     "home_add_in_progress",
-    "intake_busy",
+    "job_busy",
     "intake_failed",
     "home_record_invalid",
     "home_icloud_not_downloaded",
@@ -585,7 +585,7 @@ impl NativeBridge {
     /// Add folder or quitting the app never stops it. Each start has a fresh id; a start for
     /// the folder already being added attaches to that job. Inputs: the absolute folder, move
     /// or copy and the soft refusals the owner chose to go past. Output: the job's view, or
-    /// `intake_busy` while another folder is being added.
+    /// `job_busy` while another job runs.
     pub fn intake_start(
         &mut self,
         path: String,
@@ -597,7 +597,8 @@ impl NativeBridge {
         let request_id = intake_id(&native_random_id()?)?;
         let client = self.icloud_client()?;
         Ok(Box::pin(async move {
-            let view = client.intake_start(request_id, path, mode, overrides).await;
+            let subject = JobSubject::Add { path };
+            let view = client.job_start(request_id, subject, mode, overrides).await;
             bounded(shown(view.map_err(intake_failure)?))
         }))
     }
@@ -606,7 +607,7 @@ impl NativeBridge {
     pub fn intake_status(&mut self) -> Result<Unlocked<Option<JobView>>, BridgeError> {
         let client = self.icloud_client()?;
         Ok(Box::pin(async move {
-            let view = client.intake_status().await.map_err(intake_failure)?;
+            let view = client.job_status().await.map_err(intake_failure)?;
             bounded(view.map(shown))
         }))
     }
@@ -617,12 +618,7 @@ impl NativeBridge {
         let request_id = intake_id(&id)?;
         let client = self.icloud_client()?;
         Ok(Box::pin(async move {
-            bounded(
-                client
-                    .intake_stop(request_id)
-                    .await
-                    .map_err(intake_failure)?,
-            )
+            bounded(client.job_stop(request_id).await.map_err(intake_failure)?)
         }))
     }
 
@@ -634,7 +630,7 @@ impl NativeBridge {
         Ok(Box::pin(async move {
             bounded(
                 client
-                    .intake_dismiss(request_id)
+                    .job_dismiss(request_id)
                     .await
                     .map_err(intake_failure)?,
             )
@@ -1105,6 +1101,8 @@ mod tests {
     fn an_intake_job_reaches_the_window_with_listed_codes_only() {
         let view = |state| JobView {
             id: RequestId::new("add-1").unwrap(),
+            kind: crazyagent::projects_home::job::JobKind::Add,
+            project_id: None,
             source: "/Users/mira/site".into(),
             mode: AddMode::Copy,
             overrides: vec![AddOverride::TooLarge],
@@ -1132,11 +1130,7 @@ mod tests {
         );
         assert_eq!(asked.overrides, vec![AddOverride::TooLarge]);
         assert_eq!(shown(view(JobState::Done)), view(JobState::Done));
-        for code in [
-            "intake_busy",
-            "home_add_in_progress",
-            "home_add_interrupted",
-        ] {
+        for code in ["job_busy", "home_add_in_progress", "home_add_interrupted"] {
             assert_eq!(intake_code(code), Some(code));
         }
     }

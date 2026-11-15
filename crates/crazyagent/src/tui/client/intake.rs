@@ -3,7 +3,7 @@ use super::*;
 use crate::engine::owner::{AccountSecret, OwnerResult};
 use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::OnboardingView;
-use crate::projects_home::job::JobView;
+use crate::projects_home::job::{JobSubject, JobView};
 use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crate::protocol::{CredentialRef, RequestId};
 
@@ -239,18 +239,18 @@ impl NativeOwner {
                 overrides,
             } => IntakeView::Job(Some(
                 controller
-                    .intake_start(id, source, mode, overrides)
+                    .job_start(id, JobSubject::Add { path: source }, mode, overrides)
                     .await
                     .map_err(problem)?,
             )),
             IntakeQuery::JobStatus => {
-                IntakeView::Job(controller.intake_status().await.map_err(problem)?)
+                IntakeView::Job(controller.job_status().await.map_err(problem)?)
             }
             IntakeQuery::JobStop { id } => {
-                IntakeView::JobStopped(controller.intake_stop(id).await.map_err(problem)?)
+                IntakeView::JobStopped(controller.job_stop(id).await.map_err(problem)?)
             }
             IntakeQuery::JobDismiss { id } => {
-                IntakeView::JobDismissed(controller.intake_dismiss(id).await.map_err(problem)?)
+                IntakeView::JobDismissed(controller.job_dismiss(id).await.map_err(problem)?)
             }
         })
     }

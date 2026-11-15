@@ -1,23 +1,23 @@
 use super::projects_home::{Running, Sink, UNKNOWN};
 use super::*;
 use crate::projects_home::icloud;
-use crate::projects_home::job::{IntakeJob, JobView};
+use crate::projects_home::job::{IntakeJob, JobKind, JobSubject, JobView};
 use crate::projects_home::{AddMode, AddOverride, HomeAction};
 
 /// How many times a job reads the current revision and plans its add again when another
 /// change moved the revision between the read and the plan.
 const REVISION_TRIES: usize = 3;
 
-/// What a client asks an intake job to add: the add's request id, which names the job, the
-/// folder text, the mode and the overrides.
+/// What a client asks a job to do: the change's request id, which names the job, the subject,
+/// the mode and the overrides.
 pub(super) struct Asked {
     pub request_id: RequestId,
-    pub path: String,
+    pub subject: JobSubject,
     pub mode: AddMode,
     pub overrides: Vec<AddOverride>,
 }
 
-/// The engine's one intake job: the running job, or the last one ended until it is
+/// The engine's one job, of any kind: the running job, or the last one ended until it is
 /// dismissed or another starts.
 #[derive(Default)]
 pub(super) struct Intake(Mutex<Option<Held>>);
@@ -29,25 +29,29 @@ struct Held {
 }
 
 impl Intake {
-    /// Starts an intake job that runs apart from any client, or attaches to the job already
-    /// running for the same real folder or with the same id. Inputs: the engine, the
-    /// authority, the client packet, its admission and what to add. Output: the job's view,
-    /// `intake_busy` while a job for another folder runs or the id runs as a client change,
-    /// or the folder or override check's code.
-    pub(super) fn start(
+    /// Starts a job that runs apart from any client, or attaches to the job already running
+    /// for the same real folder or with the same id. Inputs: the engine, the authority, the
+    /// client packet, its admission and what to do. Output: the job's view, `job_busy` while
+    /// another job runs or the id runs as a client change, or the folder or override check's
+    /// code.
+    pub(super) async fn start(
         engine: &Arc<Engine>,
         authority: &Arc<Authority>,
         packet: &[u8; 37],
         a: &Admission,
         asked: Asked,
     ) -> Result<JobView, EngineError> {
+        let JobSubject::Add { path } = &asked.subject else {
+            return Err(failure("job_kind_unsupported"));
+        };
+        let path = path.clone();
         HomeAction::Added {
-            source: asked.path.clone(),
+            source: path.clone(),
             mode: asked.mode,
             overrides: asked.overrides.clone(),
         }
         .validate()?;
-        let real = icloud::folder(&asked.path)?;
+        let real = icloud::folder(&path)?;
         let mut held = authority.intake.lock();
         if let Some(current) = held.as_ref() {
             let running = !current.job.ended();
@@ -55,17 +59,18 @@ impl Intake {
                 return Ok(current.job.view());
             }
             if running {
-                return Err(failure("intake_busy"));
+                return Err(failure("job_busy"));
             }
         }
         let Some(claim) = Running::claim(authority, &a.owner_id, &asked.request_id) else {
-            return Err(failure("intake_busy"));
+            return Err(failure("job_busy"));
         };
         let replaced = held.as_ref().map(|ended| ended.job.id().clone());
         let job = Arc::new(IntakeJob::new(
             asked.request_id,
-            a.owner_id.clone(),
-            asked.path,
+            JobKind::Add,
+            None,
+            path,
             asked.mode,
             asked.overrides,
         ));
@@ -124,7 +129,8 @@ impl Intake {
         let real = PathBuf::from(&ended.source);
         let job = IntakeJob::restored(
             ended.request,
-            ended.owner,
+            JobKind::Add,
+            None,
             ended.source,
             ended.mode,
             &ended.ended,
@@ -245,7 +251,7 @@ async fn check(engine: &Engine, a: &Admission, job: &IntakeJob) -> Result<(), En
 }
 
 /// A job's end, recorded once: by its task, or when the task stops early, an abort at
-/// engine stop included, as stopped and `home_add_interrupted`.
+/// engine stop included, as stopped and its kind's interrupted code.
 struct Ending(Arc<IntakeJob>);
 
 impl Ending {
@@ -259,7 +265,7 @@ impl Drop for Ending {
     fn drop(&mut self) {
         if !self.0.ended() {
             self.0.stop();
-            self.0.end(Err(failure("home_add_interrupted")));
+            self.0.end(Err(failure(self.0.interrupted())));
         }
         assert!(self.0.ended());
     }

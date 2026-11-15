@@ -1641,13 +1641,15 @@ export function icloudCancel(): Promise<boolean> {
   return invoke<boolean>("desktop_icloud_cancel");
 }
 
-/** The part of an intake job that was running when it ended. */
-export type IntakePhase = "downloading" | "copying" | "clearing";
+/** The part of a job that was running when it ended. */
+export type IntakePhase = "downloading" | "stopping" | "copying" | "clearing";
 
-/** What the engine's intake job is doing, or how it ended. Copying counts the files copied,
- * then the files checked; clearing removes a moved folder's old place and never stops. */
+/** What the engine's job is doing, or how it ended. A project move waits for its agents to
+ * stop first; copying counts the files copied, then the files checked; clearing removes a
+ * moved folder's old place and never stops. */
 export type IntakeJobState =
   | { state: "downloading"; progress: IcloudProgress }
+  | { state: "stopping"; agents_left: number }
   | { state: "copying"; copied: number; checked: number }
   | { state: "clearing" }
   | { state: "done" }
@@ -1655,11 +1657,17 @@ export type IntakeJobState =
   | { state: "cancelled"; phase: IntakePhase }
   | { state: "needs_answer"; code: string };
 
-/** The engine's intake job, which adds one folder to the projects folder apart from the window:
- * its id, the folder, move or copy, the soft refusals it goes past, whether a stop was asked and
- * its state. */
+/** What a job does: adds a folder, or moves a project kept elsewhere into the projects
+ * folder. */
+export type JobKind = "add" | "move_project";
+
+/** The engine's one job, which adds a folder or moves a project into the projects folder apart
+ * from the window: its id, its kind, the project a move takes, the folder, move or copy, the
+ * soft refusals it goes past, whether a stop was asked and its state. */
 export interface IntakeJob {
   id: string;
+  kind: JobKind;
+  project_id: string | null;
   source: string;
   mode: AddFolderMode;
   overrides: AddOverride[];

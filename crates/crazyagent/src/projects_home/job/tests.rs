@@ -3,7 +3,8 @@ use super::*;
 fn job() -> IntakeJob {
     IntakeJob::new(
         RequestId::new("add-1").unwrap(),
-        "owner".into(),
+        JobKind::Add,
+        None,
         "/Users/someone/Library/Mobile Documents/com~apple~CloudDocs/site".into(),
         AddMode::Move,
         Vec::new(),
@@ -125,7 +126,8 @@ fn a_job_ends_once() {
 fn a_view_shows_the_overrides_the_job_goes_past_so_an_answer_keeps_them() {
     let job = IntakeJob::new(
         RequestId::new("add-2").unwrap(),
-        "owner".into(),
+        JobKind::Add,
+        None,
         "/Users/someone/site".into(),
         AddMode::Copy,
         vec![AddOverride::TooLarge],
@@ -153,7 +155,14 @@ fn a_view_crosses_the_wire_as_tagged_json() {
 fn a_job_an_engine_stop_cut_short_restores_as_the_disk_read_it() {
     let restored = |ended: &str| {
         let site = "/Users/someone/site".to_owned();
-        IntakeJob::restored(id_of("add-9"), "owner".into(), site, AddMode::Move, ended)
+        IntakeJob::restored(
+            id_of("add-9"),
+            JobKind::Add,
+            None,
+            site,
+            AddMode::Move,
+            ended,
+        )
     };
     assert_eq!(restored("done").view().state, JobState::Done);
     let left = JobState::Failed {

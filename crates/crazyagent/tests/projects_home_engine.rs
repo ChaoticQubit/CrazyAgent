@@ -7,7 +7,7 @@ use crazyagent::engine::owner::{
     OwnerResponse, OwnerResult,
 };
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
-use crazyagent::projects_home::job::{JobState, JobView, Phase};
+use crazyagent::projects_home::job::{JobState, JobSubject, JobView, Phase};
 use crazyagent::projects_home::{
     AddMode, AddOverride, COPY_BOUNDS, FoundProject, FoundState, ProjectsHome,
 };
@@ -1197,7 +1197,7 @@ async fn job_until(owner: &OwnerController, want: impl Fn(&JobView) -> bool) -> 
     let client = owner.owner_client().unwrap();
     let start = Instant::now();
     loop {
-        let job = client.intake_status().await.unwrap().expect("a job");
+        let job = client.job_status().await.unwrap().expect("a job");
         if want(&job) {
             return job;
         }
@@ -1222,6 +1222,11 @@ fn text(path: &Path) -> String {
     path.to_str().unwrap().to_owned()
 }
 
+/// The subject of a job that adds `path`.
+fn folder(path: &Path) -> JobSubject {
+    JobSubject::Add { path: text(path) }
+}
+
 fn id(text: &str) -> RequestId {
     RequestId::new(text).unwrap()
 }
@@ -1237,7 +1242,12 @@ async fn an_intake_job_adds_a_folder_apart_from_its_client_and_records_the_add()
     let owner = homed(&engine, &home).await;
     let client = owner.controller.owner_client().unwrap();
     let started = client
-        .intake_start(id("intake-copy"), text(&source), AddMode::Copy, Vec::new())
+        .job_start(
+            id("intake-copy"),
+            folder(&source),
+            AddMode::Copy,
+            Vec::new(),
+        )
         .await
         .unwrap();
     assert_eq!(started.id, id("intake-copy"));
@@ -1267,8 +1277,8 @@ async fn an_intake_job_adds_a_folder_apart_from_its_client_and_records_the_add()
             if operation.result == OwnerResult::Applied),
         "{recorded:?}"
     );
-    assert!(client.intake_dismiss(id("intake-copy")).await.unwrap());
-    assert_eq!(client.intake_status().await.unwrap(), None);
+    assert!(client.job_dismiss(id("intake-copy")).await.unwrap());
+    assert_eq!(client.job_status().await.unwrap(), None);
     engine.stop().await;
 }
 
@@ -1283,11 +1293,16 @@ async fn a_stopped_intake_job_ends_cancelled_with_no_copy_and_the_source_whole()
     let owner = homed(&engine, &home).await;
     let client = owner.controller.owner_client().unwrap();
     client
-        .intake_start(id("intake-stop"), text(&source), AddMode::Copy, Vec::new())
+        .job_start(
+            id("intake-stop"),
+            folder(&source),
+            AddMode::Copy,
+            Vec::new(),
+        )
         .await
         .unwrap();
     job_until(&owner.controller, copying).await;
-    assert!(client.intake_stop(id("intake-stop")).await.unwrap());
+    assert!(client.job_stop(id("intake-stop")).await.unwrap());
     let ended = job_until(&owner.controller, |job| {
         matches!(job.state, JobState::Cancelled { .. })
     })
@@ -1303,7 +1318,7 @@ async fn a_stopped_intake_job_ends_cancelled_with_no_copy_and_the_source_whole()
         fs::read_to_string(source.join("p99/f99.txt")).unwrap(),
         "99 99\n"
     );
-    assert!(!client.intake_stop(id("intake-stop")).await.unwrap());
+    assert!(!client.job_stop(id("intake-stop")).await.unwrap());
     engine.stop().await;
 }
 
@@ -1321,20 +1336,20 @@ async fn a_second_start_attaches_to_the_running_job_and_another_folder_waits_for
     let client = owner.controller.owner_client().unwrap();
     let copy = AddMode::Copy;
     client
-        .intake_start(id("intake-first"), text(&big), copy, Vec::new())
+        .job_start(id("intake-first"), folder(&big), copy, Vec::new())
         .await
         .unwrap();
     job_until(&owner.controller, copying).await;
     let again = client
-        .intake_start(id("intake-again"), text(&big), copy, Vec::new())
+        .job_start(id("intake-again"), folder(&big), copy, Vec::new())
         .await
         .unwrap();
     assert_eq!(again.id, id("intake-first"), "the same folder attaches");
     let other = client
-        .intake_start(id("intake-other"), text(&small), copy, Vec::new())
+        .job_start(id("intake-other"), folder(&small), copy, Vec::new())
         .await
         .unwrap_err();
-    assert_eq!(other.0, "intake_busy");
+    assert_eq!(other.0, "job_busy");
     let check = OwnerRequest {
         protocol_version: PROTOCOL_VERSION,
         request_id: id("check-intake-first"),
@@ -1351,7 +1366,7 @@ async fn a_second_start_attaches_to_the_running_job_and_another_folder_waits_for
     assert_eq!(checked, still, "a check of the running job");
     job_until(&owner.controller, |job| job.state == JobState::Done).await;
     let next = client
-        .intake_start(id("intake-other"), text(&small), copy, Vec::new())
+        .job_start(id("intake-other"), folder(&small), copy, Vec::new())
         .await
         .unwrap();
     assert_eq!(next.id, id("intake-other"), "an ended job makes room");
@@ -1383,7 +1398,7 @@ async fn an_add_is_refused_the_destination_a_running_add_planned() {
     let owner = homed(&engine, &home).await;
     let client = owner.controller.owner_client().unwrap();
     client
-        .intake_start(id("intake-site"), text(&first), AddMode::Copy, Vec::new())
+        .job_start(id("intake-site"), folder(&first), AddMode::Copy, Vec::new())
         .await
         .unwrap();
     job_until(&owner.controller, copying).await;
@@ -1426,7 +1441,7 @@ async fn one_add_runs_at_a_time_whatever_the_other_folder_is_named() {
     let owner = homed(&engine, &home).await;
     let client = owner.controller.owner_client().unwrap();
     client
-        .intake_start(id("intake-site"), text(&first), AddMode::Copy, Vec::new())
+        .job_start(id("intake-site"), folder(&first), AddMode::Copy, Vec::new())
         .await
         .unwrap();
     job_until(&owner.controller, copying).await;
@@ -1593,7 +1608,7 @@ fn too_deep(place: &Path, name: &str) -> PathBuf {
 async fn ended(owner: &OwnerController, job: &str, source: &Path, mode: AddMode) -> JobState {
     let client = owner.owner_client().unwrap();
     client
-        .intake_start(id(job), text(source), mode, Vec::new())
+        .job_start(id(job), folder(source), mode, Vec::new())
         .await
         .unwrap();
     let end = job_until(owner, |view| {
@@ -1607,7 +1622,7 @@ async fn ended(owner: &OwnerController, job: &str, source: &Path, mode: AddMode)
             )
     })
     .await;
-    assert!(client.intake_dismiss(id(job)).await.unwrap());
+    assert!(client.job_dismiss(id(job)).await.unwrap());
     end.state
 }
 
@@ -1675,7 +1690,7 @@ async fn an_intake_job_past_the_copy_bounds_lands_once_the_owner_goes_past_too_l
     let client = owner.controller.owner_client().unwrap();
     let past = vec![AddOverride::TooLarge];
     client
-        .intake_start(id("intake-deep"), text(&deep), AddMode::Copy, past)
+        .job_start(id("intake-deep"), folder(&deep), AddMode::Copy, past)
         .await
         .unwrap();
     job_until(&owner.controller, |job| job.state == JobState::Done).await;
@@ -1696,9 +1711,9 @@ async fn an_engine_stop_ends_a_running_intake_job_with_no_copy_left() {
     let owner = homed(&engine, &home).await;
     let client = owner.controller.owner_client().unwrap();
     client
-        .intake_start(
+        .job_start(
             id("intake-restart"),
-            text(&source),
+            folder(&source),
             AddMode::Copy,
             Vec::new(),
         )
@@ -1713,7 +1728,7 @@ async fn an_engine_stop_ends_a_running_intake_job_with_no_copy_left() {
         "99 99\n"
     );
     let after = engine.owner().await;
-    let status = after.owner_client().unwrap().intake_status().await.unwrap();
+    let status = after.owner_client().unwrap().job_status().await.unwrap();
     assert_eq!(status, None, "a new engine has no job");
     engine.stop().await;
 }
@@ -1729,7 +1744,12 @@ async fn an_intake_job_finishes_after_the_client_that_started_it_goes() {
     let mut owner = homed(&engine, &home).await;
     let client = owner.controller.owner_client().unwrap();
     client
-        .intake_start(id("intake-left"), text(&source), AddMode::Copy, Vec::new())
+        .job_start(
+            id("intake-left"),
+            folder(&source),
+            AddMode::Copy,
+            Vec::new(),
+        )
         .await
         .unwrap();
     job_until(&owner.controller, copying).await;
@@ -1782,7 +1802,7 @@ async fn an_engine_start_clears_an_add_cut_short_and_shows_how_it_ended() {
     engine.restart().await;
     let after = engine.owner().await;
     let client = after.owner_client().unwrap();
-    let restored = client.intake_status().await.unwrap().expect("the cut add");
+    let restored = client.job_status().await.unwrap().expect("the cut add");
     assert_eq!(restored.id, id("cut-1"));
     let interrupted = JobState::Failed {
         code: "home_add_interrupted".into(),
@@ -1794,19 +1814,15 @@ async fn an_engine_start_clears_an_add_cut_short_and_shows_how_it_ended() {
         fs::read_to_string(source.join("p1/f1.txt")).unwrap(),
         "1 1\n"
     );
-    assert!(client.intake_dismiss(id("cut-1")).await.unwrap());
-    assert_eq!(client.intake_status().await.unwrap(), None);
+    assert!(client.job_dismiss(id("cut-1")).await.unwrap());
+    assert_eq!(client.job_status().await.unwrap(), None);
 
     fs::create_dir(&landed).unwrap();
     sql(&database, &cut("cut-2"));
     engine.restart().await;
     let again = engine.owner().await;
     let client = again.owner_client().unwrap();
-    let restored = client
-        .intake_status()
-        .await
-        .unwrap()
-        .expect("the landed move");
+    let restored = client.job_status().await.unwrap().expect("the landed move");
     let left = JobState::Failed {
         code: "home_move_source_left".into(),
         phase: Phase::Clearing,
@@ -1925,9 +1941,9 @@ async fn an_intake_job_downloads_a_real_icloud_folder_with_moving_counts_and_cop
     let owner = homed(&engine, &home).await;
     let client = owner.controller.owner_client().unwrap();
     client
-        .intake_start(
+        .job_start(
             id("intake-icloud"),
-            text(&source),
+            folder(&source),
             AddMode::Copy,
             Vec::new(),
         )
@@ -1936,7 +1952,7 @@ async fn an_intake_job_downloads_a_real_icloud_folder_with_moving_counts_and_cop
     let start = Instant::now();
     let mut counts = std::collections::BTreeSet::new();
     let ended = loop {
-        let job = client.intake_status().await.unwrap().expect("a job");
+        let job = client.job_status().await.unwrap().expect("a job");
         match &job.state {
             JobState::Downloading { progress } => {
                 counts.insert(progress.done);
@@ -2001,12 +2017,12 @@ async fn an_evicted_icloud_folder_is_not_asked_about_a_linked_checkout_before_it
     let client = owner.controller.owner_client().unwrap();
     let copy = AddMode::Copy;
     client
-        .intake_start(id("intake-evicted"), text(&source), copy, Vec::new())
+        .job_start(id("intake-evicted"), folder(&source), copy, Vec::new())
         .await
         .unwrap();
     let start = Instant::now();
     let ended = loop {
-        let job = client.intake_status().await.unwrap().expect("a job");
+        let job = client.job_status().await.unwrap().expect("a job");
         match &job.state {
             JobState::Downloading { .. } | JobState::Copying { .. } | JobState::Clearing => {}
             _ => break job,

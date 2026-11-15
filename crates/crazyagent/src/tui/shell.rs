@@ -1890,6 +1890,8 @@ mod tests {
     fn shop(state: JobState) -> JobView {
         JobView {
             id: crate::protocol::RequestId::new("add-1").unwrap(),
+            kind: crate::projects_home::job::JobKind::Add,
+            project_id: None,
             source: "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop".into(),
             mode: crate::projects_home::AddMode::Move,
             overrides: Vec::new(),

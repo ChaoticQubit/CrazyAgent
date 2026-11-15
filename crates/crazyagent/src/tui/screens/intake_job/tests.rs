@@ -6,6 +6,8 @@ use crate::protocol::RequestId;
 fn job(state: JobState) -> JobView {
     JobView {
         id: RequestId::new("add-1").unwrap(),
+        kind: crate::projects_home::job::JobKind::Add,
+        project_id: None,
         source: "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop".into(),
         mode: AddMode::Move,
         overrides: vec![AddOverride::TooLarge],
@@ -88,7 +90,7 @@ fn an_intake_job_line_says_what_it_does_now_with_counts_as_files_land() {
 #[test]
 fn every_job_code_the_engine_sends_has_its_own_sentence() {
     for code in [
-        "intake_busy",
+        "job_busy",
         "intake_failed",
         "home_add_cancelled",
         "home_add_in_progress",

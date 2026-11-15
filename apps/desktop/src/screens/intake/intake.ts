@@ -215,11 +215,16 @@ export function icloudProgressLine(progress: IcloudProgress | null): string {
 /** How often the app reads the engine's intake job while one runs. */
 export const INTAKE_POLL_MS = 1000;
 
-/** Whether the intake job is still at work: downloading, copying or clearing. Input: the job,
- * if any. Output: true while it runs. */
+/** Whether the job is still at work: downloading, waiting for agents to stop, copying or
+ * clearing. Input: the job, if any. Output: true while it runs. */
 export function jobRunning(job: IntakeJob | null): boolean {
   const state = job?.state.state;
-  return state === "downloading" || state === "copying" || state === "clearing";
+  return state === "downloading" || state === "stopping" || state === "copying" || state === "clearing";
+}
+
+/** The few words for a count of agents still stopping. Input: the count. Output: the words. */
+function agentCount(left: number): string {
+  return left === 1 ? "1 agent" : `${left} agents`;
 }
 
 /** Whether a start that came back with an error reached the engine all the same, read from the
@@ -240,11 +245,12 @@ export function intakePollMs(job: IntakeJob | null): number {
   return jobRunning(job) ? INTAKE_POLL_MS : FOUND_POLL_MS;
 }
 
-/** What the intake job does now or how it ended, with the folder's name and the counts as files
- * land. Input: the job. Output: one sentence. */
+/** What the job does now or how it ended, with the folder's name and the counts as files land,
+ * in the words of an add or of a project move. Input: the job. Output: one sentence. */
 export function jobLine(job: IntakeJob): string {
   const name = folderName(job.source);
   const now = job.state;
+  const moving = job.kind === "move_project";
   if (jobRunning(job) && job.stopping) return `Stopping ${name}...`;
   switch (now.state) {
     case "downloading": {
@@ -252,6 +258,8 @@ export function jobLine(job: IntakeJob): string {
       if (done > total) throw new Error(`intake download done ${done} is past total ${total}`);
       return total === 0 ? `Downloading ${name} from iCloud...` : `Downloading ${name} from iCloud: ${done} of ${total} files`;
     }
+    case "stopping":
+      return `Waiting for ${agentCount(now.agents_left)} of ${name} to stop...`;
     case "copying": {
       const verb = job.mode === "move" ? "Moving" : "Copying";
       if (now.checked > 0) return `Checking the copy of ${name}: ${now.checked} files checked`;
@@ -260,9 +268,11 @@ export function jobLine(job: IntakeJob): string {
     case "clearing":
       return `Removing ${name} from its old place...`;
     case "done":
-      return `${name} is in your projects folder. Set it up from Home.`;
+      return moving
+        ? `${name} is now in your projects folder. Start the team again from Team.`
+        : `${name} is in your projects folder. Set it up from Home.`;
     case "cancelled":
-      return `Adding ${name} stopped. Nothing was moved or copied.`;
+      return `${moving ? "Moving" : "Adding"} ${name} stopped. Nothing was moved or copied.`;
     case "failed":
       return `${name}: ${intakeCopy(now.code)}`;
     case "needs_answer":
@@ -270,14 +280,15 @@ export function jobLine(job: IntakeJob): string {
   }
 }
 
-/** What Home offers for the intake job. Stop while it downloads or copies; nothing while it
- * clears, since that never stops; Retry only when the folder did not land, since a failure while
+/** What Home offers for the job. Stop while it downloads, waits for agents or copies; nothing
+ * while it clears, since that never stops; Retry only when the folder did not land, since a failure while
  * clearing means it is already in the projects folder; an answer for a soft refusal; Dismiss
  * once it ended. Input: the job. Output: the actions in button order. */
 export function jobActions(job: IntakeJob): ("stop" | "retry" | "answer" | "dismiss")[] {
   const now = job.state;
   switch (now.state) {
     case "downloading":
+    case "stopping":
     case "copying":
       return job.stopping ? [] : ["stop"];
     case "clearing":

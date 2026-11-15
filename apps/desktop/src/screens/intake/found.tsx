@@ -24,10 +24,13 @@ const ACTION_ICONS: Record<Exclude<FoundAction, null>, IconName> = {
 };
 
 const JOB_BADGES: Record<IntakeJobState["state"], { word: string; tone: Tone }> = {
-  downloading: { word: "Downloading", tone: "info" }, copying: { word: "Adding", tone: "info" }, clearing: { word: "Finishing", tone: "info" },
-  done: { word: "Added", tone: "ok" }, failed: { word: "Failed", tone: "danger" }, cancelled: { word: "Stopped", tone: "neutral" },
-  needs_answer: { word: "Needs answer", tone: "warn" },
+  downloading: { word: "Downloading", tone: "info" }, stopping: { word: "Waiting", tone: "info" }, copying: { word: "Adding", tone: "info" },
+  clearing: { word: "Finishing", tone: "info" }, done: { word: "Added", tone: "ok" }, failed: { word: "Failed", tone: "danger" },
+  cancelled: { word: "Stopped", tone: "neutral" }, needs_answer: { word: "Needs answer", tone: "warn" },
 };
+
+/** The badge words a project move shows in place of an add's. */
+const MOVE_BADGES: Partial<Record<IntakeJobState["state"], string>> = { copying: "Moving", done: "Moved" };
 
 const JOB_LABELS: Record<ReturnType<typeof jobActions>[number], string> = { stop: "Stop", retry: "Try again", answer: "Answer", dismiss: "Dismiss" };
 
@@ -42,7 +45,9 @@ export function IntakeJobView({ job, busy, onStop, onRetry, onAnswer, onDismiss 
   onAnswer: () => void;
   onDismiss: () => void;
 }) {
-  const badge = JOB_BADGES[job.state.state];
+  const shown = JOB_BADGES[job.state.state];
+  const moved = job.kind === "move_project" ? MOVE_BADGES[job.state.state] : undefined;
+  const badge = moved === undefined ? shown : { word: moved, tone: shown.tone };
   const handlers = { stop: onStop, retry: onRetry, answer: onAnswer, dismiss: onDismiss };
   return <div className="in-row">
     <span className="in-row-main">

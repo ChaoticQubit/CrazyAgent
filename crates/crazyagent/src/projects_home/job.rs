@@ -1,7 +1,7 @@
 use super::icloud::{Download, Progress};
 use super::{ADD_OVERRIDES_MAX, AddMode, AddOverride, Tally};
 use crate::engine::EngineError;
-use crate::protocol::RequestId;
+use crate::protocol::{ProjectId, RequestId};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -13,20 +13,51 @@ pub const NEEDS_ANSWER: [&str; 3] = [
     "home_copy_too_large",
 ];
 
-/// The part of an intake job that was running.
+/// What a job does: adds an existing folder, or moves a registered project kept outside the
+/// projects home into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobKind {
+    Add,
+    MoveProject,
+}
+
+/// What a client asks a job to bring into the projects home: a folder by the path the owner
+/// gave, or a registered project by its id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum JobSubject {
+    Add { path: String },
+    MoveProject { project_id: ProjectId },
+}
+
+impl JobSubject {
+    /// The kind of job this subject starts.
+    pub fn kind(&self) -> JobKind {
+        match self {
+            Self::Add { .. } => JobKind::Add,
+            Self::MoveProject { .. } => JobKind::MoveProject,
+        }
+    }
+}
+
+/// The part of a job that was running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     Downloading,
+    Stopping,
     Copying,
     Clearing,
 }
 
-/// What an intake job is doing, or how it ended.
+/// What a job is doing, or how it ended. A project move waits in `Stopping` for the
+/// project's agents to stop before anything moves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobState {
     Downloading { progress: Progress },
+    Stopping { agents_left: u64 },
     Copying { copied: u64, checked: u64 },
     Clearing,
     Done,
@@ -35,18 +66,37 @@ pub enum JobState {
     NeedsAnswer { code: String },
 }
 
-/// One intake job as a client sees it: its id, which is the add's request id, the folder,
-/// the mode, the soft refusals it goes past, whether a stop was asked and its state. A client
-/// answering a soft refusal starts again with these overrides and the new one.
+/// One job as a client sees it: its id, which is the change's request id, its kind, the
+/// project a move takes, the folder, the mode, the soft refusals it goes past, whether a stop
+/// was asked and its state. A client answering a soft refusal starts again with these
+/// overrides and the new one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobView {
     pub id: RequestId,
+    pub kind: JobKind,
+    pub project_id: Option<ProjectId>,
     pub source: String,
     pub mode: AddMode,
     pub overrides: Vec<AddOverride>,
     pub stopping: bool,
     pub state: JobState,
+}
+
+impl JobView {
+    /// The subject that starts this job again, for a retry or an answer to its soft refusal.
+    /// Output: the subject, or None for a view whose kind and project do not match.
+    pub fn subject(&self) -> Option<JobSubject> {
+        match (self.kind, &self.project_id) {
+            (JobKind::Add, None) => Some(JobSubject::Add {
+                path: self.source.clone(),
+            }),
+            (JobKind::MoveProject, Some(project_id)) => Some(JobSubject::MoveProject {
+                project_id: project_id.clone(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,13 +106,15 @@ enum Stage {
     Ended(JobState),
 }
 
-/// One add of an existing folder that the engine runs apart from any client: it downloads
-/// what is only in iCloud, then moves or copies the folder into the projects home,
-/// reporting progress as files land and are copied, and stops between files when asked.
+/// One job the engine runs apart from any client: an add of an existing folder, or a move of
+/// a registered project into the projects home. It downloads what is only in iCloud, then
+/// moves or copies the folder into the projects home, reporting progress as files land and
+/// are copied, and stops between files when asked.
 #[derive(Debug)]
 pub struct IntakeJob {
     id: RequestId,
-    owner_id: String,
+    kind: JobKind,
+    project: Option<ProjectId>,
     source: String,
     mode: AddMode,
     overrides: Vec<AddOverride>,
@@ -72,21 +124,24 @@ pub struct IntakeJob {
 }
 
 impl IntakeJob {
-    /// A job not yet started. Inputs: the add's request id, the owner that asked, the
-    /// folder text, the mode and the overrides. Output: the job, downloading.
+    /// A job not yet started. Inputs: the change's request id, the kind, the project a move
+    /// takes (none for an add), the folder text, the mode and the overrides. Output: the job,
+    /// downloading.
     pub fn new(
         id: RequestId,
-        owner_id: String,
+        kind: JobKind,
+        project: Option<ProjectId>,
         source: String,
         mode: AddMode,
         overrides: Vec<AddOverride>,
     ) -> Self {
-        assert!(!owner_id.is_empty());
+        assert_eq!(kind == JobKind::MoveProject, project.is_some());
         assert!(!source.is_empty());
         assert!(overrides.len() <= ADD_OVERRIDES_MAX);
         Self {
             id,
-            owner_id,
+            kind,
+            project,
             source,
             mode,
             overrides,
@@ -102,13 +157,14 @@ impl IntakeJob {
     /// read as failed while copying. Output: the ended job.
     pub fn restored(
         id: RequestId,
-        owner_id: String,
+        kind: JobKind,
+        project: Option<ProjectId>,
         source: String,
         mode: AddMode,
         ended: &str,
     ) -> Self {
         assert!(!ended.is_empty());
-        let job = Self::new(id, owner_id, source, mode, Vec::new());
+        let job = Self::new(id, kind, project, source, mode, Vec::new());
         let state = match ended {
             "done" => JobState::Done,
             "home_move_source_left" => JobState::Failed {
@@ -125,17 +181,32 @@ impl IntakeJob {
         job
     }
 
-    /// The add's request id, which names the job.
+    /// The change's request id, which names the job.
     pub fn id(&self) -> &RequestId {
         &self.id
     }
 
-    /// The owner that started the job.
-    pub fn owner_id(&self) -> &str {
-        &self.owner_id
+    /// What the job does.
+    pub fn kind(&self) -> JobKind {
+        self.kind
     }
 
-    /// The folder being added, as the owner gave it.
+    /// The project a move takes, or None for an add.
+    pub fn project(&self) -> Option<&ProjectId> {
+        self.project.as_ref()
+    }
+
+    /// The code a job its task left before it ended gets: the add's or the move's interrupted
+    /// code.
+    pub fn interrupted(&self) -> &'static str {
+        match self.kind {
+            JobKind::Add => "home_add_interrupted",
+            JobKind::MoveProject => "move_project_interrupted",
+        }
+    }
+
+    /// The folder being added or moved: as the owner gave it for an add, the project's real
+    /// folder for a move.
     pub fn source(&self) -> &str {
         &self.source
     }
@@ -214,6 +285,8 @@ impl IntakeJob {
         };
         let view = JobView {
             id: self.id.clone(),
+            kind: self.kind,
+            project_id: self.project.clone(),
             source: self.source.clone(),
             mode: self.mode,
             overrides: self.overrides.clone(),
@@ -221,6 +294,7 @@ impl IntakeJob {
             state,
         };
         assert!(view.overrides.len() <= ADD_OVERRIDES_MAX);
+        assert_eq!(view.kind == JobKind::MoveProject, view.project_id.is_some());
         view
     }
 }

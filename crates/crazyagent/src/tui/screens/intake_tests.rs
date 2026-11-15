@@ -2832,6 +2832,8 @@ fn with_start_id(query: IntakeQuery) -> IntakeQuery {
 fn job_for(folder: &str, mode: AddMode, state: JobState) -> JobView {
     JobView {
         id: RequestId::new("add-2").unwrap(),
+        kind: crate::projects_home::job::JobKind::Add,
+        project_id: None,
         source: folder.to_owned(),
         mode,
         overrides: Vec::new(),
@@ -2971,7 +2973,7 @@ fn a_failed_start_reads_the_job_and_goes_home_only_when_this_folder_is_being_add
         let sent = sent.clone();
         let compared: Vec<_> = asks.iter().cloned().map(with_start_id).collect();
         assert_eq!(compared, [start(&typed, AddMode::Copy, Vec::new())]);
-        let code = if home { "owner_timeout" } else { "intake_busy" };
+        let code = if home { "owner_timeout" } else { "job_busy" };
         shell.arrive(intake(asks[0].clone(), Err(code.into())));
         assert_eq!(job_asks(&mut shell), [IntakeQuery::JobStatus], "{read:?}");
         let read_job = read.clone().map(|(state, ours)| {
@@ -2989,7 +2991,7 @@ fn a_failed_start_reads_the_job_and_goes_home_only_when_this_folder_is_being_add
         }
         assert_eq!(shell.place(), Some(Place::AddFolder), "{before:?} {read:?}");
         let rows = render(&mut shell, 80, 40);
-        let refusal = "Another folder is being added. Wait for it to finish on Home.";
+        let refusal = "Another job is running. Wait for it to finish on Home.";
         assert!(shows(&rows, refusal), "{rows:#?}");
         assert!(job_asks(&mut shell).is_empty(), "{read:?}");
     }
@@ -2998,6 +3000,8 @@ fn a_failed_start_reads_the_job_and_goes_home_only_when_this_folder_is_being_add
 fn shop_job(state: JobState) -> JobView {
     JobView {
         id: RequestId::new("add-1").unwrap(),
+        kind: crate::projects_home::job::JobKind::Add,
+        project_id: None,
         source: "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop".into(),
         mode: AddMode::Move,
         overrides: vec![AddOverride::TooLarge],
@@ -3073,14 +3077,14 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
     let compared: Vec<_> = asks.iter().cloned().map(with_start_id).collect();
     assert_eq!(compared, [again]);
     let [asked] = <[IntakeQuery; 1]>::try_from(asks).unwrap();
-    shell.arrive(intake(asked, Err("intake_busy".into())));
+    shell.arrive(intake(asked, Err("job_busy".into())));
     let said = shell.ctx.message().expect("a refused start is said");
     assert_eq!(
         (said.tone, said.lead.as_str(), said.rest.as_str()),
         (
             Tone::Error,
             "Adding the folder did not start again.",
-            "Another folder is being added. Wait for it to finish on Home."
+            "Another job is running. Wait for it to finish on Home."
         )
     );
 

@@ -58,7 +58,7 @@ const COPY: Record<string, string> = {
   home_add_interrupted: "Adding the folder stopped part way. Check your projects folder before trying again.",
   home_add_cancelled: "Adding the folder stopped. Nothing was moved or copied.",
   home_add_in_progress: "A folder is being added to your projects folder. Try again when it finishes.",
-  intake_busy: "Another folder is being added. Wait for it to finish on Home.",
+  job_busy: "Another job is running. Wait for it to finish on Home.",
   intake_failed: "Adding the folder failed. Check your projects folder before trying again.",
   home_override_invalid: "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again.",
   home_record_invalid: "CrazyAgent's record of your projects folder can't be read.",
@@ -278,7 +278,7 @@ export function cancelIcloudDownload(): Promise<Result<boolean>> {
  * adding that folder already. The native bridge checks the path by the host's own rule, so a
  * Windows drive or network share folder goes through (RV-DS241-1). Inputs: the absolute folder,
  * move or copy and the overrides. Output: the job, home_source_invalid for a path that is not
- * absolute there, or intake_busy while another folder is being added. */
+ * absolute there, or job_busy while another job runs. */
 export function startIntake(path: string, mode: AddFolderMode, overrides: AddOverride[]): Promise<Result<IntakeJob>> {
   return wrap(() => intakeStart(path, mode, overrides));
 }

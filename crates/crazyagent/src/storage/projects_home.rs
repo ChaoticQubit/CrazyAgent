@@ -425,12 +425,11 @@ fn restart_adds(tx: &Transaction<'_>) -> Result<usize, EngineError> {
     Ok(rows.len())
 }
 
-/// An add an engine stop cut short, as the engine start found it: its request, owner,
-/// source, mode and end code.
+/// An add an engine stop cut short, as the engine start found it: its request, source, mode
+/// and end code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AddEnded {
     pub request: RequestId,
-    pub owner: String,
     pub source: String,
     pub mode: AddMode,
     pub ended: String,
@@ -439,31 +438,22 @@ pub(crate) struct AddEnded {
 /// The newest add an engine stop cut short and the owner has not dismissed. Input: the
 /// connection. Output: it, or None.
 pub(super) fn add_ended(db: &Connection) -> Result<Option<AddEnded>, EngineError> {
-    let row: Option<(String, String, String, String, String)> = db
+    let row: Option<(String, String, String, String)> = db
         .query_row(
-            "SELECT request, owner, source, mode, ended FROM projects_home_add
+            "SELECT request, source, mode, ended FROM projects_home_add
              WHERE ended IS NOT NULL ORDER BY rowid DESC LIMIT 1",
             [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(error)?;
-    row.map(|(request, owner, source, mode, ended)| {
+    row.map(|(request, source, mode, ended)| {
         let mode = match mode.as_str() {
             "move" => AddMode::Move,
             _ => AddMode::Copy,
         };
         Ok(AddEnded {
             request: RequestId::new(request).map_err(|_| error("home_add_row_invalid"))?,
-            owner,
             source,
             mode,
             ended,
