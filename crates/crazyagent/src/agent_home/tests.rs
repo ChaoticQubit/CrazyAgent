@@ -1178,6 +1178,106 @@ fn a_launch_removes_a_link_in_the_place_of_a_kept_entry_without_what_it_names() 
     );
 }
 
+/// A folder a launch keeps only part of, which a process an agent left swaps for a link to
+/// a folder outside the home while the reset walks it, never leads the reset outside
+/// (RV-DS241-137, sec F1 ds137-lock-linux): `.npm` swapped after the reset found it and
+/// before it lists it, `Library` swapped while the reset is in it and about to walk
+/// `Library/Preferences`, and `.npm` swapped while the reset is about to remove `.npm/_npx`.
+/// Every file in the folder the link names stays and the link goes as a link. It runs on
+/// plain folders, without the macOS profile's pin, so it holds where nothing pins them.
+#[cfg(unix)]
+#[test]
+fn a_kept_folder_swapped_for_a_link_mid_reset_never_leads_the_reset_outside() {
+    let legs = [
+        (".npm", ".npm", ".npm/junk"),
+        ("Library/Preferences", "Library", "Library/Preferences/junk"),
+        (".npm/_npx", ".npm", ".npm/_npx/0"),
+    ];
+    let owned = [
+        "owner.txt",
+        "junk/owner.txt",
+        "Preferences/owner.plist",
+        "_npx/owner.js",
+    ];
+    for (step, swapped, planted) in legs {
+        let (_directory, root) = folder();
+        let project = project(&root);
+        let given = text(&project).unwrap();
+        let home = home(&root, "claude");
+        fs::create_dir_all(home.join(planted)).unwrap();
+        let outside = root.join("outside");
+        for file in owned {
+            let path = outside.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "the owner's\n").unwrap();
+        }
+        let (link, moved, named) = (home.join(swapped), root.join("moved"), outside.clone());
+        let swap: Box<dyn FnOnce()> = Box::new(move || {
+            fs::rename(&link, &moved).unwrap();
+            std::os::unix::fs::symlink(&named, &link).unwrap();
+        });
+        BEFORE_HOME_STEP.with(|hook| *hook.borrow_mut() = Some((home.join(step), swap)));
+
+        let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+        let waiting = BEFORE_HOME_STEP.with(|hook| hook.borrow_mut().take());
+        assert!(waiting.is_none(), "{step}: the swap never ran");
+        let lost: Vec<&str> = owned
+            .into_iter()
+            .filter(|file| {
+                fs::read_to_string(outside.join(file)).ok().as_deref() != Some("the owner's\n")
+            })
+            .collect();
+        assert!(
+            lost.is_empty(),
+            "{step}: the reset removed {lost:?} outside the home"
+        );
+        assert_eq!(prepared, Ok(()), "{step}");
+        assert!(
+            fs::symlink_metadata(home.join(swapped)).is_err(),
+            "{step}: {swapped} kept as a link"
+        );
+    }
+}
+
+/// A link an agent left in the place of a folder a launch keeps only part of goes as a
+/// link, at the home and one folder below it, and the reset never walks through it, so
+/// every file in the folder outside the home it names stays (RV-DS241-137, sec F1
+/// ds137-lock-linux). Passes at the base too; it guards the handle walk.
+#[cfg(unix)]
+#[test]
+fn a_link_in_the_place_of_a_kept_folder_goes_at_any_depth_without_what_it_names() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let outside = root.join("outside");
+    fs::create_dir_all(outside.join("sub")).unwrap();
+    fs::write(outside.join("owner.plist"), "the owner's\n").unwrap();
+    fs::write(outside.join("sub/owner.txt"), "the owner's\n").unwrap();
+    let home = home(&root, "claude");
+    fs::create_dir(home.join("Library")).unwrap();
+    let links = [".npm", "Library/Preferences"];
+    for link in links {
+        std::os::unix::fs::symlink(&outside, home.join(link)).unwrap();
+    }
+
+    prepare(&home, Harness::Claude, &project, &given).unwrap();
+
+    for link in links {
+        assert!(
+            fs::symlink_metadata(home.join(link)).is_err(),
+            "{link} kept as a link"
+        );
+    }
+    for file in ["owner.plist", "sub/owner.txt"] {
+        assert_eq!(
+            fs::read_to_string(outside.join(file)).ok().as_deref(),
+            Some("the owner's\n"),
+            "{file}"
+        );
+    }
+}
+
 /// Cargo's `registry` and `git` caches stay in an agent home only as the links the engine
 /// makes to the owner's read-only crates (DEC-173): a cache folder an agent made itself,
 /// which a later run's cargo would build from without checking it again, goes at each

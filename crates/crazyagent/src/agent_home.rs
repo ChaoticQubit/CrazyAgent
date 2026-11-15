@@ -1185,10 +1185,14 @@ fn keep_only(
                 Some(Kept::Folder) if metadata.is_dir() => unpin(&path),
                 Some(Kept::Link) if link => unpin(&path),
                 Some(Kept::Only(inner)) if metadata.is_dir() => {
+                    #[cfg(all(test, unix))]
+                    before_home_step(&path);
                     keep_only(&path, inner, held)?;
                     continue;
                 }
                 _ => {
+                    #[cfg(all(test, unix))]
+                    before_home_step(&path);
                     remove_entry(&path)?;
                     removed = true;
                     continue;
@@ -1201,6 +1205,32 @@ fn keep_only(
         }
     }
     Err(failure("agent_home_unwritable"))
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// A step a reset test runs once, when the reset is about to walk into or remove the
+    /// entry its path names, standing in for a process an agent left that swaps a folder
+    /// meanwhile. None runs nothing.
+    static BEFORE_HOME_STEP: std::cell::RefCell<Option<(PathBuf, Box<dyn FnOnce()>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs the test step [`BEFORE_HOME_STEP`] holds, once, when it names `entry`. Input: the
+/// entry the reset is about to walk into or remove.
+#[cfg(all(test, unix))]
+fn before_home_step(entry: &Path) {
+    let step = BEFORE_HOME_STEP.with(|step| {
+        let mut step = step.borrow_mut();
+        if step.as_ref().is_some_and(|(named, _)| named == entry) {
+            step.take()
+        } else {
+            None
+        }
+    });
+    if let Some((_, step)) = step {
+        step();
+    }
 }
 
 /// Resets a native lead's teammates' home as [`prepare`] resets an agent home: only what
