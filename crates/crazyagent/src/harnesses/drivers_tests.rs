@@ -28,9 +28,9 @@ fn unsupported() -> Result<Piped, LaunchError> {
 fn each_driver_kind_has_its_own_answer() {
     assert_eq!(of(DriverKind::CodexAppServer), Ok(Piped::Codex));
     assert_eq!(of(DriverKind::ClaudeStreamJson), Ok(Piped::Claude));
+    assert_eq!(of(DriverKind::Acp), Ok(Piped::Acp));
     for kind in [
         DriverKind::Rcli,
-        DriverKind::Acp,
         DriverKind::JsonlTurn,
         DriverKind::JsonlRpc,
         DriverKind::TextTurn,

@@ -2,12 +2,16 @@ use super::launch::{LaunchError, failure};
 use super::manifest::DriverKind;
 use super::registry::{Harness, registry};
 
-/// The piped drivers the engine runs today: its own adapters for Codex and Claude Code.
-/// Each shared driver kind a manifest names joins this list when its task lands.
+pub mod acp;
+
+/// The piped drivers the engine runs: its own adapters for Codex and Claude Code, and the
+/// Agent Client Protocol client for any harness whose manifest names `acp`. Each other shared
+/// driver kind a manifest names joins this list when its task lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Piped {
     Codex,
     Claude,
+    Acp,
 }
 
 /// The one dispatch point of piped launches: the driver the engine runs for a driver kind.
