@@ -723,9 +723,10 @@ fn a_chosen_file_in_the_shared_temp_folder_is_refused_as_changeable() {
 }
 
 /// RV-DS241-140 r2: a chain is judged by every link in it, each where it sits, so a link an
-/// agent can move, a folder link placed where agents write, or a link in a folder other
-/// users can change refuses the entry while both ends of the chain pass. A chain of links
-/// the owner alone can move passes.
+/// agent can move, a folder link placed where agents write, a link whose `..` leaves a folder
+/// agents write, or a link in a folder other users can change refuses the entry while both
+/// ends of the chain pass. A chain of links the owner alone can move passes, relative links
+/// and an nvm-style `current` folder link included.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_chosen_or_found_codex_whose_chain_has_a_link_others_can_move_is_refused() {
@@ -748,6 +749,26 @@ fn a_chosen_or_found_codex_whose_chain_has_a_link_others_can_move_is_refused() {
     };
     let kept = chain("kept/codex", &owned.join("codex"), &real);
     assert_eq!(case.check("codex", &kept), Ok(kept.clone()));
+    let relative = case.root.join("relative/codex");
+    std::fs::create_dir_all(relative.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("../tools/codex-0.167.1", &relative).unwrap();
+    assert_eq!(case.check("codex", &relative), Ok(relative.clone()));
+    case.file("nvm/versions/v22/lib/codex.js", 0o755);
+    std::os::unix::fs::symlink("versions/v22", case.root.join("nvm/current")).unwrap();
+    std::fs::create_dir_all(case.root.join("nvm/versions/v22/bin")).unwrap();
+    std::os::unix::fs::symlink(
+        "../lib/codex.js",
+        case.root.join("nvm/versions/v22/bin/codex"),
+    )
+    .unwrap();
+    let current = case.root.join("nvm/current/bin/codex");
+    assert_eq!(case.check("codex", &current), Ok(current.clone()));
+    let dotted = case.root.join("dotted/.crazyagent/step");
+    std::fs::create_dir_all(&dotted).unwrap();
+    let stepped = case.root.join("stepped/codex");
+    std::fs::create_dir_all(stepped.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(dotted.join("../../../tools/codex-0.167.1"), &stepped).unwrap();
+    assert_eq!(case.check("codex", &stepped), Err(PATH_AGENT_SPACE.into()));
     let moved = chain("moved/codex", &agent.join("codex"), &real);
     assert_eq!(case.check("codex", &moved), Err(PATH_AGENT_SPACE.into()));
     let folder = agent.join("tools");
