@@ -1228,7 +1228,7 @@ fn removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_
 fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_folder_points_to() {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let account = root.join("account");
@@ -1255,9 +1255,11 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
         std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o500)).unwrap();
     }
     let stop = Arc::new(AtomicBool::new(false));
+    let planted = Arc::new(AtomicUsize::new(0));
     let swapper = {
-        let (stop, git, owner, parents, names) = (
+        let (stop, planted, git, owner, parents, names) = (
             Arc::clone(&stop),
+            Arc::clone(&planted),
             git.clone(),
             owner.clone(),
             parents.clone(),
@@ -1274,6 +1276,7 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
                             continue;
                         }
                         if std::os::unix::fs::symlink(owner.join(name), &real).is_ok() {
+                            planted.fetch_add(1, Ordering::Relaxed);
                             std::thread::sleep(pause);
                             let _ = std::fs::remove_file(&real);
                         }
@@ -1287,11 +1290,14 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
     let homes = crate::sandbox::toolchains::ToolHomes::at(&account);
     let home = root.join("ide/home");
 
+    let before = planted.load(Ordering::Relaxed);
     let _ = crate::sandbox::toolchains::prepare_cargo_home(&home, &homes);
+    let landed = planted.load(Ordering::Relaxed) - before;
     stop.store(true, Ordering::Relaxed);
     swapper.join().unwrap();
     let cargo = crate::sandbox::toolchains::prepare_cargo_home(&home, &homes).unwrap();
 
+    assert!(landed > 0, "no link was planted while the reset ran");
     assert_eq!(
         std::fs::read_link(cargo.join("git")).unwrap(),
         account.join(".cargo/git")
@@ -1304,6 +1310,68 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
         assert!(denies(folder), "{folder:?} lost its ACL");
         assert_eq!(mode & 0o777, 0o500, "{folder:?} was opened up");
     }
+}
+
+/// rv-sec3 F1 (B12, RV-DS241-204's flag leg): an agent-home entry at mode 000 that will not
+/// open has its immutable flag cleared on the inode its parent's handle read, never on a path,
+/// so a process that swaps its folder for a link to an owner folder holding an entry of the
+/// same name before `/usr/bin/chflags` runs leaves the owner's flag, and the agent's entry,
+/// moved aside, still loses its own.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_entry_that_will_not_open_is_unpinned_by_its_inode_never_through_a_swapped_folder() {
+    use std::os::macos::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let immutable = nix::sys::stat::FileFlag::UF_IMMUTABLE.bits();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let owner = root.join("owner");
+    write(&owner.join("f"), b"the owner's\n");
+    assert!(chflags("uchg", &owner.join("f")));
+    let _owner = Unlocked(owner.join("f"));
+    let git = root.join("home/.cargo/git");
+    let shut = git.join("x");
+    write(&shut.join("f"), b"left by a terminal\n");
+    std::fs::set_permissions(shut.join("f"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(chflags("uchg", &shut.join("f")));
+    let aside = git.join("aside");
+    let _agent = Unlocked(aside.join("f"));
+    let _left = Unlocked(shut.join("f"));
+    let parent = rustix::fs::openat(
+        rustix::fs::CWD,
+        &shut,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .unwrap();
+    let (moved, held, target) = (shut.clone(), aside.clone(), owner.clone());
+    BEFORE_HOME_ENTRY_CHFLAGS.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            std::fs::rename(&moved, &held).unwrap();
+            std::os::unix::fs::symlink(&target, &moved).unwrap();
+        }));
+    });
+
+    unpin_home_entry(&parent, c"f");
+
+    assert!(
+        BEFORE_HOME_ENTRY_CHFLAGS.with(|step| step.borrow().is_none()),
+        "the entry opened, so no flag was cleared without a handle"
+    );
+    let flags = |file: &Path| std::fs::symlink_metadata(file).unwrap().st_flags();
+    assert_eq!(
+        flags(&owner.join("f")) & immutable,
+        immutable,
+        "the owner's file lost its flag"
+    );
+    assert_eq!(
+        flags(&aside.join("f")) & immutable,
+        0,
+        "the agent's entry kept its flag"
+    );
 }
 
 /// RV-DS241-182: removing an agent's tree of many folders that one read-only folder keeps

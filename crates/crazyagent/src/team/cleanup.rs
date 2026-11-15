@@ -1698,6 +1698,12 @@ thread_local! {
     /// Runs once; None runs nothing.
     pub(super) static AFTER_UNPIN_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+
+    /// A step a cleanup test runs in [`unpin_home_entry`] once it has named an entry that
+    /// will not open for `/usr/bin/chflags` and before that runs, standing in for a process
+    /// an agent left that swaps a folder meanwhile. Runs once; None runs nothing.
+    pub(super) static BEFORE_HOME_ENTRY_CHFLAGS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Clears the immutable and append-only flags, which an agent may set on what it owns, from
@@ -1794,6 +1800,10 @@ pub(crate) fn unpin_home_entry<P: rustix::path::Arg + Copy>(
         };
         Path::new(OsStr::from_bytes(folder.to_bytes())).join(name)
     };
+    #[cfg(test)]
+    if let Some(step) = BEFORE_HOME_ENTRY_CHFLAGS.with(|step| step.borrow_mut().take()) {
+        step();
+    }
     let _ = crate::spawn_gate::status(
         std::process::Command::new("/usr/bin/chflags")
             .args(["-h", "nouchg,nouappnd", "--"])
