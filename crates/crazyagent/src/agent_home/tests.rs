@@ -1,5 +1,4 @@
 use super::*;
-use crate::sandbox::policy::{AgentAccess, HomeCaches};
 
 fn folder() -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
@@ -1462,9 +1461,9 @@ fn the_level_record_lives_in_the_engine_folder_never_in_the_home() {
 fn a_lead_that_clears_its_caches_clears_its_teammates_caches_too() {
     let (_directory, root) = folder();
     let project = project(&root);
-    let lead = home(&root, "lead");
+    let lead = home(&project.data, "lead");
     let mates = crate::launch_context::mates_home(&lead);
-    assert_eq!(mates, home(&root, "mates-home"));
+    assert_eq!(mates, home(&project.data, "mates-home"));
     fs::write(mates.join(".credentials.json"), "kept\n").unwrap();
     let launch = |level| {
         launch_caches(
@@ -1500,6 +1499,37 @@ fn a_lead_that_clears_its_caches_clears_its_teammates_caches_too() {
     assert_eq!(
         fs::read_to_string(mates.join(".credentials.json")).unwrap(),
         "kept\n"
+    );
+}
+
+/// A home outside the engine data root, one the owner chose for a headless agent, never
+/// leads a clearing launch into the folder beside it that only shares the teammates' home's
+/// name: that folder may be the owner's, so its entries and caches stay as they were.
+#[cfg(unix)]
+#[test]
+fn a_clearing_launch_leaves_a_folder_beside_a_home_outside_the_engine_root_alone() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let lead = home(&root, "lead");
+    let beside = crate::launch_context::mates_home(&lead);
+    assert_eq!(beside, home(&root, "mates-home"));
+    fs::write(beside.join("note"), "the owner's\n").unwrap();
+    plant_caches(&lead);
+    plant_caches(&beside);
+
+    let left = launch_caches(
+        &lead,
+        Harness::Claude,
+        &project,
+        HomeCaches::ClearEveryLaunch,
+        Some(AgentAccess::Sandboxed),
+    );
+
+    assert_eq!(left, [false, false]);
+    assert_eq!(cached(&beside), [true, true]);
+    assert_eq!(
+        fs::read_to_string(beside.join("note")).unwrap(),
+        "the owner's\n"
     );
 }
 
