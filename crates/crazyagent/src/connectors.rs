@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub mod grants;
+pub mod mcp_client;
 pub mod settings;
 
 pub use grants::{Grant, GrantedConnector, Role, Who};

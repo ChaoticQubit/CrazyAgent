@@ -45,6 +45,21 @@ pub struct McpEndpoint {
     pub hosts: Vec<String>,
 }
 
+#[cfg(test)]
+impl McpEndpoint {
+    /// A stand-in vendor on this machine for rows only: plain http to `127.0.0.1` at the
+    /// port given, which no manifest can name and which the client takes in test builds
+    /// alone. Input: the port. Output: the endpoint, with no read-only mode.
+    pub(crate) fn loopback_for_rows(port: u16) -> Self {
+        Self {
+            url: url::Url::parse(&format!("http://127.0.0.1:{port}/mcp"))
+                .expect("a loopback address parses"),
+            read_only: ReadOnly::None,
+            hosts: vec!["127.0.0.1".to_owned()],
+        }
+    }
+}
+
 /// The vendor's own read-only mode, used while writes are off as a second lock beside the
 /// engine's own filter: another URL, one fixed header on every call, or none.
 #[derive(Debug, Clone, PartialEq)]

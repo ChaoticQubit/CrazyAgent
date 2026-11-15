@@ -770,3 +770,39 @@ mod stored {
         assert_eq!(loaded.bindings.len(), 2);
     }
 }
+
+#[test]
+fn no_manifest_header_may_shadow_a_header_the_mcp_client_sends() {
+    let header = swap(&keyed(), READ_ONLY_LINE, READ_ONLY_HEADER);
+    for name in [
+        "Mcp-Method",
+        "mcp-method",
+        "Mcp-Name",
+        "Mcp-Param-Team",
+        "MCP-PARAM-X",
+        "Mcp-Param-",
+        "Content-Type",
+        "Expect",
+    ] {
+        assert_eq!(
+            refused(&swap(&header, "X-MCP-Readonly", name)),
+            refusal("app_plugin_header_reserved", "mcp.read_only_header.name"),
+            "{name}"
+        );
+        assert_eq!(
+            refused(&swap(
+                &keyed(),
+                "  header: Authorization\n",
+                &format!("  header: {name}\n")
+            )),
+            refusal("app_plugin_header_reserved", "key.header"),
+            "{name}"
+        );
+    }
+    for name in ["Mcp-Parameter", "X-Mcp-Param-Team", "X-MCP-Readonly"] {
+        assert!(
+            manifest::parse(&swap(&header, "X-MCP-Readonly", name)).is_ok(),
+            "{name}"
+        );
+    }
+}

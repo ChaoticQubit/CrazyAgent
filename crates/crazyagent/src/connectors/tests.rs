@@ -43,16 +43,16 @@ const ROLES: [Role; 3] = [
     Role::Agent { tools_on: false },
 ];
 
-struct Case {
+pub(super) struct Case {
     _tmp: tempfile::TempDir,
     base: PathBuf,
-    root: PathBuf,
-    db: Connection,
+    pub(super) root: PathBuf,
+    pub(super) db: Connection,
 }
 
 /// A real engine database with the authority tables and two set-up projects, in an engine
 /// root of its own. Output: the case, which keeps the temporary folder alive.
-fn case() -> Case {
+pub(super) fn case() -> Case {
     let tmp = tempfile::Builder::new()
         .prefix("ca-connectors-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -93,7 +93,7 @@ fn sha(text: &str) -> String {
     crate::semantic::sha256_hex(text.as_bytes())
 }
 
-fn add(case: &Case, text: &str, replace: bool) {
+pub(super) fn add(case: &Case, text: &str, replace: bool) {
     store::add(&case.db, &case.root, text, &sha(text), replace, 1).unwrap();
 }
 
