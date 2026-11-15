@@ -517,6 +517,21 @@ struct Authority {
     intake: intake::Intake,
 }
 
+/// Removes what an earlier engine left at a runner folder's place beside the engine's root
+/// (RV-DS241-77): a folder with all it holds, or a file or link itself, never what a link
+/// names. No runner of this engine owns that place, as each slot's folder is named by its
+/// index and a new slot takes the next free index. Takes the folder's path. Returns Ok once
+/// nothing has that name, or the I/O error.
+fn clear_stale_runner(path: &Path) -> Result<(), EngineError> {
+    let removed = match std::fs::symlink_metadata(path) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(problem) => Err(problem),
+        Ok(found) if found.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+    };
+    removed.map_err(io_error)
+}
+
 impl Authority {
     fn prepare_runner(
         &self,
@@ -562,7 +577,7 @@ impl Authority {
         }
         let registration_id =
             RequestId::new(format!("runner-{}", random_id()?)).map_err(io_error)?;
-        runners.push(None);
+        clear_stale_runner(&path)?;
         parent.create_directory(name.as_str())?;
         parent.verify()?;
         let root = Root::open(&path)?;
@@ -594,8 +609,8 @@ impl Authority {
         };
         slot.verify(&self.root)?;
         parent.directory.sync_all().map_err(io_error)?;
-        assert!(runners[index].is_none());
-        runners[index] = Some(slot);
+        assert_eq!(runners.len(), index);
+        runners.push(Some(slot));
         assert!(runners.len() <= RUNNERS_MAX);
         Ok(prepared)
     }
