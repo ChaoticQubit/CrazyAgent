@@ -275,21 +275,23 @@ fn a_launch_locks_a_home_whose_acl_denies_listing_and_searching_it() {
     let root = directory.path().canonicalize().unwrap();
     let home = root.join("claude");
     fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
-    let added = std::process::Command::new("/bin/chmod")
-        .args(["+a", "everyone deny list,search"])
-        .arg(&home)
-        .output()
-        .unwrap();
+    let added = crate::spawn_gate::collected(
+        std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone deny list,search"])
+            .arg(&home),
+    )
+    .unwrap();
     assert!(added.status.success(), "{added:?}");
 
     let locked = lock_only(&home, "claude-code")
         .map(|_| ())
         .map_err(|error| error.0);
 
-    let _ = std::process::Command::new("/bin/chmod")
-        .arg("-N")
-        .arg(&home)
-        .output();
+    let _ = crate::spawn_gate::collected(
+        std::process::Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(&home),
+    );
     assert_eq!(locked, Ok(()));
 }
 

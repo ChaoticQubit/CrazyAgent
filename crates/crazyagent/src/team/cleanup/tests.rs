@@ -1081,7 +1081,7 @@ struct AclCleared(PathBuf);
 #[cfg(target_os = "macos")]
 impl Drop for AclCleared {
     fn drop(&mut self) {
-        let _ = Command::new("/bin/chmod").arg("-N").arg(&self.0).output();
+        let _ = crate::spawn_gate::collected(Command::new("/bin/chmod").arg("-N").arg(&self.0));
     }
 }
 
@@ -1098,11 +1098,12 @@ fn removing_an_agent_tree_never_clears_an_acl_a_link_in_it_leads_to() {
     let owner = root.join("owner.txt");
     write(&owner, b"the owner's\n");
     let _owner = AclCleared(owner.clone());
-    let added = Command::new("/bin/chmod")
-        .args(["+a", "everyone deny write"])
-        .arg(&owner)
-        .output()
-        .unwrap();
+    let added = crate::spawn_gate::collected(
+        Command::new("/bin/chmod")
+            .args(["+a", "everyone deny write"])
+            .arg(&owner),
+    )
+    .unwrap();
     assert!(added.status.success(), "{added:?}");
     let worktree = root.join("worktree");
     let shut = worktree.join("target");
@@ -1112,11 +1113,8 @@ fn removing_an_agent_tree_never_clears_an_acl_a_link_in_it_leads_to() {
 
     let outcome = remove_agent_tree(&worktree);
 
-    let listed = Command::new("/bin/ls")
-        .arg("-led")
-        .arg(&owner)
-        .output()
-        .unwrap();
+    let listed =
+        crate::spawn_gate::collected(Command::new("/bin/ls").arg("-led").arg(&owner)).unwrap();
     assert_eq!(outcome, Ok(()));
     assert!(!worktree.exists(), "the tree stayed");
     assert!(
