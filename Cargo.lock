@@ -827,6 +827,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "crazyagent-linux-supervisor"
+version = "2.3.0"
+
+[[package]]
 name = "crazyagent-win-sandbox"
 version = "2.3.0"
 dependencies = [
