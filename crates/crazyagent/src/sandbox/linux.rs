@@ -619,7 +619,8 @@ fn die_with_parent(parent: u32) -> Result<(), String> {
 /// exits 0 when this kernel holds them; a run applies the policy, the scope layer and the
 /// filter to itself, moves into a session of its own and then replaces itself with the
 /// harness. Output: the exit code, 2 for refused arguments, 3 when the kernel cannot hold
-/// the policy or the session, 126 when the harness cannot start.
+/// the policy or the session or the process it dies with is gone, 126 when the harness
+/// cannot start.
 pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     let request = match HelperRequest::parse(args) {
         Ok(request) => request,
