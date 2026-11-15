@@ -1046,6 +1046,7 @@ fn changing_sockets_keeps_the_supervisor_off_and_turning_it_on_keeps_the_sockets
     };
     assert_eq!(sent(&mut shell), refused);
     shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
+    let _read_back = jobs(&mut shell);
     stored(&mut shell, refused);
     shell.key(Key::Char('v'));
     find(&render(&mut shell, 120, 60), "> Off");
@@ -1065,6 +1066,7 @@ fn neither_linux_setting_is_saved_while_the_engine_has_not_said_both() {
     let mut shell = Shell::with(ctx(120, 60), Box::new(AppSetup::new(false)));
     let _asked = jobs(&mut shell);
     shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
+    let _read = jobs(&mut shell);
     shell.key(Key::Char('v'));
     assert!(jobs(&mut shell).is_empty());
     assert_eq!(
