@@ -2030,6 +2030,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
                 }],
             }],
             context_mode_off: None,
+            left_out: Vec::new(),
         },
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
@@ -2156,6 +2157,7 @@ impl LeftPane {
                     }],
                 }],
                 context_mode_off: None,
+                left_out: Vec::new(),
             },
             instructions: "# Project context from CrazyAgent\n".into(),
             process: None,
@@ -2548,6 +2550,7 @@ fn the_context_mode_server_is_declared_under_its_plugin_name_for_claude_and_code
         skills: Vec::new(),
         servers: vec![command_server("context-mode"), command_server("graph")],
         context_mode_off: None,
+        left_out: Vec::new(),
     };
 
     let claude = private_home(&root, "claude");
@@ -2582,6 +2585,7 @@ fn switched_off_tools_reach_claude_as_denied_names_and_codex_as_disabled_tools()
         skills: Vec::new(),
         servers: vec![command_server("context-mode"), command_server("graph")],
         context_mode_off: None,
+        left_out: Vec::new(),
     };
     let off = || {
         vec![
@@ -2939,6 +2943,7 @@ fn every_tools_on_launch_delivers_the_tool_rules_as_firm_rules() {
                 }],
                 servers: vec![command_server("context-mode")],
                 context_mode_off: None,
+                left_out: Vec::new(),
             },
             Vec::new(),
         )
@@ -3018,6 +3023,7 @@ fn the_task_start_reminder_names_the_select_string_and_skills_per_harness_and_no
             false => vec![command_server("graph")],
         },
         context_mode_off: None,
+        left_out: Vec::new(),
     };
     let off = |tools: &[&str]| {
         vec![(
@@ -3142,6 +3148,7 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
         },
         servers: vec![command_server("context-mode"), command_server("graph")],
         context_mode_off: None,
+        left_out: Vec::new(),
     };
     let off = || {
         vec![(
@@ -3260,6 +3267,7 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
             skills: Vec::new(),
             servers: vec![command_server("graph")],
             context_mode_off: None,
+            left_out: Vec::new(),
         },
         Vec::new(),
     )
@@ -3828,6 +3836,81 @@ fn on_path(name: &str) -> Option<PathBuf> {
             .map(|folder| folder.join(name))
             .find(|candidate| candidate.is_file())
     })
+}
+
+/// RV-DS241-156: a launch that leaves the context-mode server out, here with no npm beside
+/// npx so no shared install can run, leaves out the hooks that follow that server, from the
+/// same decision, so no agent gets context-mode's hooks without its server; a hook that
+/// follows no item still launches.
+#[test]
+fn a_launch_that_left_context_mode_out_leaves_out_the_hooks_that_follow_it() {
+    use crate::storage::plugins::{Command, execute};
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let root = private_folder(&base.join("engine"));
+    let bin = private_folder(&root.join("setup").join("bin"));
+    for program in ["npx", "node"] {
+        fs::write(bin.join(program), "").unwrap();
+        fs::set_permissions(bin.join(program), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut connection = store_context_mode(&root, &bin);
+    let server: String = connection
+        .query_row(
+            "SELECT id FROM plugin_items WHERE kind='server'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    for (name, follows) in [("context-mode", Some(server)), ("standalone", None)] {
+        let plugin = base.join(name);
+        fs::create_dir_all(plugin.join("hooks")).unwrap();
+        fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
+        fs::write(
+            plugin.join(".claude-plugin/plugin.json"),
+            format!(r#"{{"name":"{name}"}}"#),
+        )
+        .unwrap();
+        fs::write(
+            plugin.join("hooks/hooks.json"),
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/start.sh\""}]}]}}"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("hooks/start.sh"), "exit 0\n").unwrap();
+        execute(
+            &mut connection,
+            &root,
+            Command::AddHooks {
+                scope: crate::plugins::Scope::Global,
+                source: plugin.to_str().unwrap().to_owned(),
+                follows,
+            },
+        )
+        .unwrap();
+    }
+    let context = crate::launch_context::for_project(
+        &connection,
+        &ProjectId::new("app").unwrap(),
+        crate::agent_git::Layout::Linked,
+    )
+    .unwrap();
+    assert!(context.plugins.servers.is_empty(), "the server was left out");
+    assert_eq!(
+        context.plugins.context_mode_off,
+        Some(crate::plugins::ContextModeOff::Failed)
+    );
+    let launched: Vec<&str> = context
+        .process
+        .as_ref()
+        .unwrap()
+        .hooks
+        .iter()
+        .map(|hook| hook.plugin.as_str())
+        .collect();
+    assert_eq!(
+        launched,
+        ["standalone"],
+        "a hook that follows the left-out server never launches"
+    );
 }
 
 /// The engine's shared context-mode install under a test folder: an engine root whose
@@ -4562,6 +4645,7 @@ fn a_launch_whose_context_mode_was_dropped_on_an_old_node_says_why_in_its_tools_
         skills: Vec::new(),
         servers: vec![command_server("graph")],
         context_mode_off: dropped.then_some(crate::plugins::ContextModeOff::NodeTooOld),
+        left_out: Vec::new(),
     };
     let claude = private_home(&root, "claude");
     let installed = context_with(&root, plugins(true), Vec::new())
@@ -4632,6 +4716,7 @@ fn a_launch_that_left_context_mode_out_says_why_in_its_tools_section() {
             skills: Vec::new(),
             servers: vec![command_server("graph")],
             context_mode_off: Some(off),
+            left_out: Vec::new(),
         };
         let home = private_home(&root, &format!("{off:?}").to_lowercase());
         let installed = context_with(&root, plugins, Vec::new())

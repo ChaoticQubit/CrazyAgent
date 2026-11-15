@@ -265,7 +265,7 @@ pub fn for_project(
     let transcripts = crate::instruction_files::load(&tx, project)
         .map_err(failure)?
         .transcripts;
-    let hooks = crate::storage::plugins::effective_hooks(&tx, &root, project)
+    let hooks = crate::storage::plugins::effective_hooks(&tx, &root, project, &plugins.left_out)
         .map_err(|problem| LaunchError(problem.0, None))?;
     let off_tools = off_tools(&tx, project, &plugins)?;
     let catch_up_main = crate::team::catch_up_main(&tx, project)
