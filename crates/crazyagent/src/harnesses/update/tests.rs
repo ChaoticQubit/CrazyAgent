@@ -2341,9 +2341,10 @@ fn a_self_update_is_refused_when_a_middle_link_sits_where_agents_or_others_can_m
         std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&middle, &entry).unwrap();
         assert_eq!(method("codex", &real, &roots), Method::SelfUpdate);
-        assert!(
+        assert_eq!(
             crate::tools::resolve_entry(&entry, &roots.places).is_ok(),
-            "{place}"
+            !refused,
+            "{place}: the resolver judges every link too (B1)"
         );
         let command = update_command("codex", &entry, &real, &roots);
         if refused {
@@ -2382,7 +2383,7 @@ fn a_command_whose_link_chain_passes_through_the_temp_folder_is_refused_on_macos
         search: vec![program.parent().unwrap().to_path_buf()],
         prefix: None,
     };
-    assert!(crate::tools::resolve_entry(&through, &engine).is_ok());
+    assert!(crate::tools::resolve_entry(&through, &engine).is_err());
     assert_eq!(
         checked(command(&through), &engine).unwrap_err(),
         TOOL_UNSAFE

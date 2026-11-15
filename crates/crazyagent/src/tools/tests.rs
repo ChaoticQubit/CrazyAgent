@@ -1430,9 +1430,9 @@ fn unread_projects_make_every_place_under_home_but_the_engine_agent_writable() {
 
 /// rv-code2 r1 F1, vid 1's race in the shared resolver: `entry_at` reads the entry's real file
 /// before it checks the entry, so the file it hands back must pass the check itself. An owner
-/// entry whose chain passes through a link in a project agents can write leads to a planted
-/// file when the real file is read, and back to the owner's file when the entry is checked:
-/// the planted file is refused, never handed back. Once the chain holds still it resolves.
+/// entry whose middle link moves between the two leads to a file planted in a project when the
+/// real file is read, and back to the owner's file when the entry is checked: the planted file
+/// is refused, never handed back. Once the chain holds still it resolves.
 #[test]
 fn an_entry_never_resolves_to_a_file_its_check_did_not_see() {
     let (_folder, root) = scratch();
@@ -1441,7 +1441,8 @@ fn an_entry_never_resolves_to_a_file_its_check_did_not_see() {
     let sh = "#!/bin/sh\necho ran\n";
     let owned = program(&root.join("owner/codex"), sh);
     let planted = program(&work.join("tools/planted/codex"), sh);
-    let middle = work.join("tools/codex");
+    let middle = root.join("links/codex");
+    std::fs::create_dir_all(middle.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&planted, &middle).unwrap();
     let entry = root.join("bin/codex");
     std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
