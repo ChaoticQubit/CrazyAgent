@@ -135,11 +135,15 @@ fn a_team_start_and_a_master_pick_the_harnesses_the_registry_names_for_them() {
 }
 
 #[test]
-fn codex_and_claude_code_name_their_own_folders_in_the_owners_home_and_rcli_names_none() {
-    let folders = |name: &str| registry().get(name).unwrap().owner_folders();
-    assert_eq!(folders("codex"), [".codex"]);
-    assert_eq!(folders("claude-code"), [".claude", ".claude.json"]);
-    assert!(folders("rcli").is_empty());
+fn research_runs_on_the_harnesses_the_registry_names_for_it() {
+    for harness in registry().all() {
+        let id = harness.id();
+        assert_eq!(
+            harness.research(),
+            crate::research::runner::ResearchHarness::of(id).is_some(),
+            "{id}"
+        );
+    }
 }
 
 #[test]
@@ -173,6 +177,14 @@ fn codex_claude_code_and_rcli_name_the_engines_own_drivers_readers_and_sub_agent
         )
     );
     assert_eq!(kinds("pi"), (None, RecordKind::Unavailable, SubAgents::App));
+}
+
+#[test]
+fn codex_and_claude_code_name_their_own_folders_in_the_owners_home_and_rcli_names_none() {
+    let folders = |name: &str| registry().get(name).unwrap().owner_folders();
+    assert_eq!(folders("codex"), [".codex"]);
+    assert_eq!(folders("claude-code"), [".claude", ".claude.json"]);
+    assert!(folders("rcli").is_empty());
 }
 
 #[test]
