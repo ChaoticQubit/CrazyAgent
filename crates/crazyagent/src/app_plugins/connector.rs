@@ -1,9 +1,9 @@
-use super::Problem;
 use super::manifest::{
     DESCRIPTION_BYTES_MAX, Fields, HEADER_VALUE_BYTES_MAX, HOSTS_MAX, RESERVED_HEADERS,
     URL_BYTES_MAX, problem, valid_header_name, valid_host, valid_secret,
 };
 use super::yaml::Value;
+use super::{ConnectorTrust, KeyTrust, OAuthTrust, Problem, ReadOnlyTrust};
 
 /// The most OAuth scopes a connector lists for reading, and for writing.
 pub const SCOPES_MAX: usize = 16;
@@ -103,6 +103,50 @@ pub enum Registration {
     Own,
 }
 
+impl ConnectorSpec {
+    /// What the trust screen shows of this connector beyond its address and hosts: every
+    /// field the engine acts on. Output: the read-only mode, the key's header, scheme and
+    /// secret names, the OAuth sign-in and the read tools.
+    pub fn trust(&self) -> ConnectorTrust {
+        assert!(self.read_tools.len() <= READ_TOOLS_MAX);
+        ConnectorTrust {
+            read_only: match &self.mcp.read_only {
+                ReadOnly::Url(url) => ReadOnlyTrust::Url {
+                    url: url.as_str().to_owned(),
+                },
+                ReadOnly::Header { name, value } => ReadOnlyTrust::Header {
+                    name: name.clone(),
+                    value: value.clone(),
+                },
+                ReadOnly::None => ReadOnlyTrust::None,
+            },
+            key: self.key.as_ref().map(|key| KeyTrust {
+                header: key.header.clone(),
+                scheme: match key.scheme {
+                    Scheme::Bearer => "Bearer".to_owned(),
+                    Scheme::Basic => "Basic".to_owned(),
+                },
+                secrets: key.secrets.clone(),
+            }),
+            oauth: self.oauth.as_ref().map(|oauth| OAuthTrust {
+                hosts: oauth.hosts.clone(),
+                registration: oauth
+                    .registration
+                    .iter()
+                    .map(|way| match way {
+                        Registration::Cimd => "cimd".to_owned(),
+                        Registration::Dcr => "dcr".to_owned(),
+                        Registration::Own => "own".to_owned(),
+                    })
+                    .collect(),
+                scopes_read: oauth.scopes_read.clone(),
+                scopes_write: oauth.scopes_write.clone(),
+            }),
+            read_tools: self.read_tools.clone(),
+        }
+    }
+}
+
 /// Why a connector cannot run yet although its file is fine: one with OAuth and no key
 /// waits for a sign-in this build does not have. Input: the connector. Output: the
 /// refusal code, none when a key is its way in.
@@ -198,7 +242,11 @@ fn address(fields: &Fields<'_>, key: &str) -> Result<url::Url, Problem> {
         return Err(invalid());
     }
     let url = url::Url::parse(&raw).map_err(|_| invalid())?;
-    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.query().is_some()
+    {
         return Err(invalid());
     }
     if url.port() == Some(0) {

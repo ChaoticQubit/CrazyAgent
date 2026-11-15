@@ -263,6 +263,7 @@ impl Manifest {
             secrets: self.secrets().to_vec(),
             sha256: self.sha256.clone(),
             replaces,
+            connector: self.connector().map(|spec| Box::new(spec.trust())),
         }
     }
 }

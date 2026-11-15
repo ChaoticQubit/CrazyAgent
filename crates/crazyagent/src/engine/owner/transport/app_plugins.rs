@@ -504,10 +504,23 @@ fn off_page(preview: Preview) -> Preview {
     }
 }
 
+/// Refuses a by-name change whose name stands for a connector, bundled or the owner's, so
+/// this page never changes one (DEC-168 addendum 5). A name no plugin has, or a file that
+/// does not read as a plugin, goes on to the store. Inputs: the engine root and the name.
+/// Output: Ok, or `app_plugin_not_found`.
+fn on_page(root: &Path, name: &str) -> Result<(), EngineError> {
+    match store::kind_of(root, name)? {
+        Some(PluginKind::Connector) => Err(failure("app_plugin_not_found")),
+        _ => Ok(()),
+    }
+}
+
 /// Runs one authenticated App plugins or Search request against the engine database and
-/// folders in the engine root. The page lists, previews and adds embedding plugins only.
-/// Inputs: the engine root, the action and the key that came with a `set_key`. Output: the
-/// reply, or the store's refusal.
+/// folders in the engine root. The page lists, previews, adds and changes embedding
+/// plugins only; a remove under a bundled name goes to the store, which removes only a
+/// file of the owner's that the bundled plugin shadows. Inputs: the engine root, the
+/// action and the key that came with a `set_key`. Output: the reply, or the store's
+/// refusal.
 fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply, EngineError> {
     let db = crate::questions::open(root)?;
     let now = crate::semantic::now_ms();
@@ -548,14 +561,19 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
             listing(&db)
         }
         Action::Trust { name, sha256 } => {
+            on_page(root, &name)?;
             store::trust_file(&db, root, &name, &sha256, now)?;
             listing(&db)
         }
         Action::SetEnabled { name, enabled } => {
+            on_page(root, &name)?;
             store::set_enabled(&db, root, &name, enabled)?;
             listing(&db)
         }
         Action::Remove { name } => {
+            if !store::bundled().iter().any(|(bundled, _)| *bundled == name) {
+                on_page(root, &name)?;
+            }
             store::remove(&db, root, &name)?;
             listing(&db)
         }
@@ -564,15 +582,18 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
             secret,
             account,
         } => {
+            on_page(root, &name)?;
             store::bind_account(&db, root, &name, &secret, &account)?;
             listing(&db)
         }
         Action::SetKey { name, secret } => {
+            on_page(root, &name)?;
             let key = key.expect("parse admits set_key only with its key frame");
             store::set_key(&db, root, &name, &secret, key.into_bytes())?;
             listing(&db)
         }
         Action::Unbind { name, secret } => {
+            on_page(root, &name)?;
             store::unbind(&db, root, &name, &secret)?;
             listing(&db)
         }

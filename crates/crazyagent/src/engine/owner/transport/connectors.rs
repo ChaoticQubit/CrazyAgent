@@ -435,7 +435,10 @@ fn on_page(preview: Preview) -> Preview {
 /// Refuses a name that is not a connector's, so this page never changes an embedding
 /// plugin. Inputs: the engine root and the name. Output: Ok, or `app_plugin_not_found`.
 fn connector(root: &Path, name: &str) -> Result<(), EngineError> {
-    Err(EngineError("connectors_not_built".into()))
+    match store::kind_of(root, name)? {
+        Some(PluginKind::Connector) => Ok(()),
+        _ => Err(failure("app_plugin_not_found")),
+    }
 }
 
 /// Runs one authenticated Connectors request against the engine database and folders in
@@ -443,7 +446,75 @@ fn connector(root: &Path, name: &str) -> Result<(), EngineError> {
 /// root, the action and the key that came with a `set_key`. Output: the reply, or the
 /// refusal.
 fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply, EngineError> {
-    Err(EngineError("connectors_not_built".into()))
+    let db = crate::questions::open(root)?;
+    let now = crate::semantic::now_ms();
+    let page = |db: &rusqlite::Connection, project: Option<&str>| -> Result<Reply, EngineError> {
+        Ok(Reply::Connectors {
+            view: Box::new(crate::connectors::view(db, root, project)?),
+        })
+    };
+    match action {
+        Action::View { project } => page(&db, project.as_deref()),
+        Action::Preview { yaml } => Ok(Reply::Preview {
+            preview: Box::new(on_page(store::preview(root, &yaml)?)),
+        }),
+        Action::Review { name } => {
+            connector(root, &name)?;
+            Ok(Reply::Preview {
+                preview: Box::new(store::review(root, &name)?),
+            })
+        }
+        Action::Add {
+            yaml,
+            sha256,
+            replace,
+        } => {
+            if !matches!(
+                crate::app_plugins::manifest::parse(&yaml),
+                Ok(manifest) if manifest.kind == PluginKind::Connector
+            ) {
+                return Err(failure("app_plugin_refused"));
+            }
+            store::add(&db, root, &yaml, &sha256, replace, now)?;
+            page(&db, None)
+        }
+        Action::Trust { name, sha256 } => {
+            connector(root, &name)?;
+            store::trust_file(&db, root, &name, &sha256, now)?;
+            page(&db, None)
+        }
+        Action::Remove { name } => {
+            connector(root, &name)?;
+            store::remove(&db, root, &name)?;
+            page(&db, None)
+        }
+        Action::SetKey { name, secret } => {
+            connector(root, &name)?;
+            let key = key.expect("parse admits set_key only with its key frame");
+            store::set_key(&db, root, &name, &secret, key.into_bytes())?;
+            page(&db, None)
+        }
+        Action::ClearKey { name, secret } => {
+            connector(root, &name)?;
+            store::unbind(&db, root, &name, &secret)?;
+            page(&db, None)
+        }
+        Action::Grant {
+            project,
+            connector: name,
+            enabled,
+            who,
+        } => {
+            crate::connectors::grants::set(&db, root, &project, &name, enabled, who, now)?;
+            page(&db, Some(project.as_str()))
+        }
+        Action::Set { settings, version } => {
+            match crate::connectors::settings::save(&db, &settings, version)? {
+                Ok(_) => page(&db, None),
+                Err(current) => Ok(Reply::Stale { current }),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

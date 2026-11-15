@@ -18,6 +18,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS connector_grants (
 /// at once, so rows naming connectors that are gone are dropped before it is reached.
 pub const GRANTS_PER_PROJECT_MAX: usize = 128;
 
+const _: () = assert!(GRANTS_PER_PROJECT_MAX > store::PLUGINS_MAX);
+
 const NOT_READY: [&str; 5] = [
     "app_plugin_not_found",
     "app_plugin_refused",
@@ -140,7 +142,16 @@ fn others(db: &Connection, project: &str, connector: &str) -> Result<usize, Engi
 }
 
 fn drop_gone(db: &Connection, root: &Path, project: &str) -> Result<(), EngineError> {
-    Err(EngineError("connectors_not_built".into()))
+    for grant in names(db, project, false)? {
+        if store::kind_of(root, &grant.connector)? != Some(PluginKind::Connector) {
+            db.execute(
+                "DELETE FROM connector_grants WHERE project=?1 AND connector=?2",
+                [project, grant.connector.as_str()],
+            )
+            .map_err(sqlite)?;
+        }
+    }
+    Ok(())
 }
 
 /// Turns one connector on or off for one project and says who it reaches. Turning on
@@ -157,14 +168,41 @@ pub fn set(
     who: Who,
     now_ms: i64,
 ) -> Result<(), EngineError> {
-    Err(EngineError("connectors_not_built".into()))
+    tables(db)?;
+    if !enabled {
+        db.execute(
+            "UPDATE connector_grants SET enabled=0, who=?3, changed_ms=?4
+             WHERE project=?1 AND connector=?2",
+            params![project, connector, who.stored(), now_ms],
+        )
+        .map_err(sqlite)?;
+        return Ok(());
+    }
+    if !super::project_known(db, project)? {
+        return Err(error(super::PROJECT_UNKNOWN));
+    }
+    store::connector_ready(db, root, connector)?;
+    if others(db, project, connector)? >= GRANTS_PER_PROJECT_MAX {
+        drop_gone(db, root, project)?;
+    }
+    assert!(others(db, project, connector)? < GRANTS_PER_PROJECT_MAX);
+    db.execute(
+        "INSERT INTO connector_grants (project, connector, enabled, who, changed_ms)
+         VALUES (?1, ?2, 1, ?3, ?4)
+         ON CONFLICT(project, connector) DO UPDATE SET enabled=1, who=excluded.who,
+         changed_ms=excluded.changed_ms",
+        params![project, connector, who.stored(), now_ms],
+    )
+    .map_err(sqlite)?;
+    Ok(())
 }
 
 /// Lists a project's connector switches by connector name, on and off. Inputs: database
 /// and project. Output: at most `GRANTS_PER_PROJECT_MAX` rows; a connector with no row is
 /// off.
 pub fn of_project(db: &Connection, project: &str) -> Result<Vec<Grant>, EngineError> {
-    Err(EngineError("connectors_not_built".into()))
+    tables(db)?;
+    names(db, project, false)
 }
 
 /// The connectors one launch may use: those turned on for its project that reach its
@@ -177,13 +215,35 @@ pub fn for_launch(
     project: &str,
     role: Role,
 ) -> Result<Vec<GrantedConnector>, EngineError> {
-    Err(EngineError("connectors_not_built".into()))
+    if role == (Role::Agent { tools_on: false }) {
+        return Ok(Vec::new());
+    }
+    tables(db)?;
+    let mut granted = Vec::new();
+    for grant in names(db, project, true)? {
+        assert!(grant.enabled);
+        if !grant.who.reaches(role) {
+            continue;
+        }
+        match store::connector_ready(db, root, &grant.connector) {
+            Ok(loaded) => granted.push(GrantedConnector {
+                name: grant.connector,
+                loaded,
+            }),
+            Err(refusal) if NOT_READY.contains(&refusal.0.as_str()) => {}
+            Err(refusal) => return Err(refusal),
+        }
+    }
+    assert!(granted.len() <= GRANTS_PER_PROJECT_MAX);
+    Ok(granted)
 }
 
 /// Deletes a project's connector switches when the project is removed, so a project added
 /// again under the same id starts with every connector off. Inputs: the transaction and
 /// the project. Output: done, or the database error.
 pub fn forget_project(db: &Connection, project: &str) -> rusqlite::Result<()> {
+    db.execute_batch(SCHEMA)?;
+    db.execute("DELETE FROM connector_grants WHERE project=?1", [project])?;
     Ok(())
 }
 
@@ -192,5 +252,11 @@ pub fn forget_project(db: &Connection, project: &str) -> rusqlite::Result<()> {
 /// plugin of the owner's had. Inputs: database and the connector's name. Output: Ok, or
 /// `connectors_unavailable`.
 pub fn forget_connector(db: &Connection, connector: &str) -> Result<(), EngineError> {
+    tables(db)?;
+    db.execute(
+        "DELETE FROM connector_grants WHERE connector=?1",
+        [connector],
+    )
+    .map_err(sqlite)?;
     Ok(())
 }

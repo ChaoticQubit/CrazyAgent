@@ -177,10 +177,53 @@ pub struct Listing {
     pub more: bool,
 }
 
+/// A connector's read-only mode at the vendor as its trust screen shows it: a second
+/// address, a header with its exact value, or none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReadOnlyTrust {
+    Url { url: String },
+    Header { name: String, value: String },
+    None,
+}
+
+/// How a connector sends its key, on its trust screen: the header, the scheme and the
+/// secret names, never a value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyTrust {
+    pub header: String,
+    pub scheme: String,
+    pub secrets: Vec<String>,
+}
+
+/// A connector's OAuth sign-in on its trust screen: its hosts, the ways the app may
+/// register in order, and the scopes asked for while reading and when writing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthTrust {
+    pub hosts: Vec<String>,
+    pub registration: Vec<String>,
+    pub scopes_read: Vec<String>,
+    pub scopes_write: Vec<String>,
+}
+
+/// Everything a connector file declares that the engine acts on beyond its address and
+/// hosts, so the owner trusts it seeing all of it: the read-only mode, how the key is
+/// sent, the OAuth sign-in and the tools the file says only read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorTrust {
+    pub read_only: ReadOnlyTrust,
+    pub key: Option<KeyTrust>,
+    pub oauth: Option<OAuthTrust>,
+    pub read_tools: Vec<String>,
+}
+
 /// The trust screen of a manifest before it is added or trusted: what it is, how it runs,
 /// the hosts it reaches, the secrets it asks for by name, the SHA-256 of its exact bytes
-/// (the add or trust request must name it) and whether it replaces a user plugin of the
-/// same name.
+/// (the add or trust request must name it), whether it replaces a user plugin of the same
+/// name, and for a connector every other field the engine acts on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustView {
@@ -193,6 +236,8 @@ pub struct TrustView {
     pub secrets: Vec<String>,
     pub sha256: String,
     pub replaces: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector: Option<Box<ConnectorTrust>>,
 }
 
 /// A manifest read for its trust screen: ready to add, or refused with the line or field.
@@ -537,6 +582,10 @@ const PLAIN: &[(&str, &str)] = &[
     (
         "app_plugin_connector_elsewhere",
         "this is a connector; connectors are not managed on this page.",
+    ),
+    (
+        "app_plugin_not_connector",
+        "this is not a connector; add it on the App plugins page.",
     ),
     (
         "app_plugin_request_invalid",

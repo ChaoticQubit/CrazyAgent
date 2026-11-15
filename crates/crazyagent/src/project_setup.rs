@@ -2810,6 +2810,7 @@ fn remove(
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
     crate::trust::remove(tx, project_id.as_str()).map_err(error)?;
     crate::sandbox::grants::forget_project(tx, project_id.as_str()).map_err(error)?;
+    crate::connectors::grants::forget_project(tx, project_id.as_str()).map_err(error)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
         crate::storage::versioned::hidden_paths_item(project_id),

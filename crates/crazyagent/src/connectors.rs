@@ -60,10 +60,7 @@ pub struct ConnectorsView {
 }
 
 const PLAIN: &[(&str, &str)] = &[
-    (
-        PROJECT_UNKNOWN,
-        "that project is not set up here any more.",
-    ),
+    (PROJECT_UNKNOWN, "that project is not set up here any more."),
     (
         "connector_request_invalid",
         "the request could not be read.",
@@ -103,8 +100,46 @@ pub fn view(
     root: &Path,
     project: Option<&str>,
 ) -> Result<ConnectorsView, EngineError> {
-    Err(EngineError("connectors_not_built".into()))
+    let grants = match project {
+        None => Vec::new(),
+        Some(project) if project_known(db, project)? => grants::of_project(db, project)?,
+        Some(_) => return Err(EngineError(PROJECT_UNKNOWN.into())),
+    };
+    let listing = store::list(db, root)?;
+    let connectors: Vec<ConnectorView> = listing
+        .plugins
+        .into_iter()
+        .filter(|plugin| plugin.kind == PluginKind::Connector)
+        .filter_map(|plugin| {
+            Some(ConnectorView {
+                sign_in: if plugin.secrets.is_empty() {
+                    SignIn::NotYet
+                } else {
+                    SignIn::Key
+                },
+                runs: plugin.runs?,
+                name: plugin.name,
+                title: plugin.title,
+                version: plugin.version,
+                description: plugin.description,
+                origin: plugin.origin,
+                status: plugin.status,
+                secrets: plugin.secrets,
+                sha256: plugin.sha256,
+            })
+        })
+        .collect();
+    assert!(connectors.len() <= store::PLUGINS_MAX);
+    let (settings, version) = settings::load(db)?;
+    Ok(ConnectorsView {
+        connectors,
+        more: listing.more,
+        settings,
+        version,
+        project: project.map(str::to_owned),
+        grants,
+    })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

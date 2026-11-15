@@ -48,7 +48,9 @@ impl OwnerController {
         name: String,
         sha256: String,
     ) -> Result<ConnectorsView, EngineError> {
-        self.connectors_client()?.connector_trust(name, sha256).await
+        self.connectors_client()?
+            .connector_trust(name, sha256)
+            .await
     }
 
     /// Removes one of the owner's connectors with its keys and switches. Input: the name.

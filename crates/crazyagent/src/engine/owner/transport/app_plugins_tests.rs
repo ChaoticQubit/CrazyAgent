@@ -478,10 +478,7 @@ fn no_by_name_app_plugins_action_reaches_a_connector() {
     let folder = root.join(crate::app_plugins::FOLDER);
     for (file, text) in [
         ("broken.yaml", "schema: 1\nkind: connector\nname: broken\n"),
-        (
-            "linear.yaml",
-            "schema: 1\nkind: embedding\nname: linear\n",
-        ),
+        ("linear.yaml", "schema: 1\nkind: embedding\nname: linear\n"),
     ] {
         std::fs::write(folder.join(file), text).unwrap();
         std::fs::set_permissions(folder.join(file), std::fs::Permissions::from_mode(0o600))
@@ -499,11 +496,15 @@ fn no_by_name_app_plugins_action_reaches_a_connector() {
             .iter()
             .find(|plugin| plugin.name == name)
             .unwrap_or_else(|| panic!("the page lists the refused file {name}"));
-        assert!(
-            matches!(row.status, PluginStatus::Refused { .. }),
-            "{name}"
+        assert!(matches!(row.status, PluginStatus::Refused { .. }), "{name}");
+        listing(
+            send(
+                &root,
+                request(json!({"kind": "remove", "name": name})),
+                None,
+            )
+            .unwrap(),
         );
-        listing(send(&root, request(json!({"kind": "remove", "name": name})), None).unwrap());
         assert!(
             !folder.join(format!("{name}.yaml")).exists(),
             "{name}: the owner can remove a refused file from this page"

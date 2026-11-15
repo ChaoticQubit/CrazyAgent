@@ -45,13 +45,13 @@ version: 1
 http:
   url: https://embed.old.example/v1/embed
   hosts: [embed.old.example]
+  secrets: [api_key]
   headers:
-    Authorization: \"Bearer {{secret:api_key}}\"
+    Authorization: \"Bearer {{secret.api_key}}\"
   body:
     input: \"{{inputs}}\"
   vectors: embeddings.*
   dimensions: 128
-secrets: [api_key]
 ";
 
 const ROLES: [Role; 3] = [

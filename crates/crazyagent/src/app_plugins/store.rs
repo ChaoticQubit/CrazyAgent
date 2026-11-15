@@ -56,6 +56,10 @@ const BUNDLED: [(&str, &str); 7] = [
     ),
 ];
 
+/// The most plugins that exist at once: the bundled ones and the listed files of the
+/// owner's folder.
+pub const PLUGINS_MAX: usize = BUNDLED.len() + USER_PLUGINS_MAX;
+
 const HOSTS_KEY_BYTES_MAX: usize = 4096;
 const KEY_PREFIX: &str = "plugin-key-";
 const BINDINGS_MAX: i64 = 64;
@@ -100,8 +104,48 @@ fn sqlite(_: rusqlite::Error) -> EngineError {
     error("app_plugins_unavailable")
 }
 
-fn tables(db: &Connection) -> Result<(), EngineError> {
-    db.execute_batch(SCHEMA).map_err(sqlite)
+fn forget_grants(db: &Connection, name: &str) -> Result<(), EngineError> {
+    crate::connectors::grants::forget_connector(db, name)
+        .map_err(|_| error("app_plugins_unavailable"))
+}
+
+/// Creates the store's tables and drops what an older plugin of the owner's left under a
+/// name a bundled plugin now has: its secret bindings with the keys entered for it, its
+/// switch, its switches in projects, a Search choice naming it and its trust record. A
+/// bundled plugin never gets a trust record, so one is the mark of such a leftover, and it
+/// goes last so an interrupted pass runs again. Inputs: database and engine root.
+/// Output: Ok, or `app_plugins_unavailable`.
+fn prepare(db: &Connection, root: &Path) -> Result<(), EngineError> {
+    db.execute_batch(SCHEMA).map_err(sqlite)?;
+    for (name, _) in BUNDLED {
+        let leftover: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM app_plugin_trust WHERE name=?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .map_err(sqlite)?;
+        if !leftover {
+            continue;
+        }
+        let bindings = binding_rows(db, name)?;
+        db.execute("DELETE FROM app_plugin_secrets WHERE plugin=?1", [name])
+            .map_err(sqlite)?;
+        db.execute("DELETE FROM app_plugin_state WHERE name=?1", [name])
+            .map_err(sqlite)?;
+        forget_grants(db, name)?;
+        crate::semantic::settings::forget(db, name)?;
+        for (_, source, reference) in bindings {
+            if source == KEY
+                && let Some(key) = plugin_key(&reference)
+            {
+                let _ = accounts::remove_key_in(root, PLUGIN_KEYS, key.as_str());
+            }
+        }
+        db.execute("DELETE FROM app_plugin_trust WHERE name=?1", [name])
+            .map_err(sqlite)?;
+    }
+    Ok(())
 }
 
 fn is_bundled(name: &str) -> bool {
@@ -231,6 +275,15 @@ fn find(root: &Path, name: &str) -> Result<Option<Found>, EngineError> {
 
 fn found(root: &Path, name: &str) -> Result<Found, EngineError> {
     find(root, name)?.ok_or_else(|| error("app_plugin_not_found"))
+}
+
+/// The kind of the plugin a name stands for: a bundled plugin, or a file in the owner's
+/// folder that reads as a plugin. Inputs: the engine root and the name. Output: the kind,
+/// none when no plugin has the name or its file is refused, or the folder's refusal.
+pub fn kind_of(root: &Path, name: &str) -> Result<Option<PluginKind>, EngineError> {
+    Ok(find(root, name)?
+        .and_then(|found| found.parsed.ok())
+        .map(|manifest| manifest.kind))
 }
 
 /// Every host a plugin reaches, sorted, as the trust record keeps it: a bound key stays
@@ -475,7 +528,7 @@ pub fn loopback_ports(root: &Path) -> Result<Vec<u16>, EngineError> {
 /// root. Output: the listing with each plugin's status and secret bindings, or the
 /// folder's refusal (`app_plugin_folder_unsafe` for a folder that is not this user's 0700).
 pub fn list(db: &Connection, root: &Path) -> Result<Listing, EngineError> {
-    tables(db)?;
+    prepare(db, root)?;
     let handed = handed_out();
     let mut plugins = Vec::with_capacity(BUNDLED.len() + USER_PLUGINS_MAX);
     for (name, text) in BUNDLED {
@@ -539,9 +592,12 @@ fn settle(
         )
         .optional()
         .map_err(sqlite)?;
+    let moved = trusted_hosts.as_deref() != Some(hosts.as_str());
+    if moved {
+        forget_grants(db, &manifest.name)?;
+    }
     for (secret, source, reference) in binding_rows(db, &manifest.name)? {
-        if trusted_hosts.as_deref() != Some(hosts.as_str()) || !manifest.secrets().contains(&secret)
-        {
+        if moved || !manifest.secrets().contains(&secret) {
             drop_binding(db, root, &manifest.name, &secret, &source, &reference)?;
         }
     }
@@ -556,7 +612,8 @@ fn settle(
 }
 
 /// Saves a user plugin the owner confirmed on its trust screen, trusts it and turns it on.
-/// Keys bound to an older version stay only when its hosts are unchanged. Inputs: database,
+/// Keys bound to an older version and a connector's switches in projects stay only when
+/// its hosts are unchanged. Inputs: database,
 /// engine root, the exact text, the SHA-256 the trust screen showed, whether to replace a
 /// plugin of that name, and the time. Output: Ok, or `app_plugin_changed`, `_refused`,
 /// `_name_taken`, or the folder's refusal.
@@ -568,7 +625,7 @@ pub fn add(
     replace: bool,
     now_ms: i64,
 ) -> Result<(), EngineError> {
-    tables(db)?;
+    prepare(db, root)?;
     if crate::semantic::sha256_hex(text.as_bytes()) != sha256 {
         return Err(error("app_plugin_changed"));
     }
@@ -593,7 +650,7 @@ pub fn trust_file(
     sha256: &str,
     now_ms: i64,
 ) -> Result<(), EngineError> {
-    tables(db)?;
+    prepare(db, root)?;
     if is_bundled(name) {
         return Err(error("app_plugin_bundled"));
     }
@@ -615,7 +672,7 @@ pub fn set_enabled(
     name: &str,
     enabled: bool,
 ) -> Result<(), EngineError> {
-    tables(db)?;
+    prepare(db, root)?;
     let found = found(root, name)?;
     if enabled {
         let manifest = found.parsed.map_err(|_| error("app_plugin_refused"))?;
@@ -648,19 +705,26 @@ fn drop_binding(
     Ok(())
 }
 
-/// Removes a user plugin: first a Search choice naming it (back to full text with a note),
-/// then its file, trust record, state, bindings and the keys entered for it. Account keys
-/// stay. Inputs: database, engine root and name. Output: Ok, or `app_plugin_bundled`,
+/// Removes a user plugin: first a Search choice naming it (back to full text with a note)
+/// and a connector's switches in projects, then its file, trust record, state, bindings
+/// and the keys entered for it. Account keys stay. Under a bundled plugin's name it removes
+/// only a file the owner's folder still holds, which the bundled plugin shadows. Inputs:
+/// database, engine root and name. Output: Ok, or `app_plugin_bundled`,
 /// `app_plugin_not_found`, or the folder's refusal.
 pub fn remove(db: &Connection, root: &Path, name: &str) -> Result<(), EngineError> {
-    tables(db)?;
+    prepare(db, root)?;
     if is_bundled(name) {
-        return Err(error("app_plugin_bundled"));
+        return if folder::remove(root, name)? {
+            Ok(())
+        } else {
+            Err(error("app_plugin_bundled"))
+        };
     }
     if !manifest::valid_name(name) {
         return Err(error("app_plugin_not_found"));
     }
     crate::semantic::settings::forget(db, name)?;
+    forget_grants(db, name)?;
     let removed = folder::remove(root, name)?;
     let known: bool = db
         .query_row(
@@ -730,7 +794,7 @@ pub fn bind_account(
     secret: &str,
     account: &str,
 ) -> Result<(), EngineError> {
-    tables(db)?;
+    prepare(db, root)?;
     bindable(db, root, name, secret)?;
     let id = CredentialRef::new(account).map_err(|_| error("app_plugin_account_not_found"))?;
     let key =
@@ -760,7 +824,7 @@ pub fn set_key(
     mut key: Vec<u8>,
 ) -> Result<(), EngineError> {
     let saved = (|| {
-        tables(db)?;
+        prepare(db, root)?;
         bindable(db, root, name, secret)?;
         if key.is_empty()
             || key.len() > crate::credentials::SECRET_BYTES_MAX
@@ -795,7 +859,7 @@ pub fn set_key(
 /// Inputs: database, engine root, plugin and secret. Output: Ok, including when it was not
 /// bound, or `app_plugin_secret_not_declared`, `app_plugin_not_found`.
 pub fn unbind(db: &Connection, root: &Path, name: &str, secret: &str) -> Result<(), EngineError> {
-    tables(db)?;
+    prepare(db, root)?;
     if let Ok(manifest) = found(root, name)?.parsed
         && !manifest.secrets().iter().any(|declared| declared == secret)
     {
@@ -807,19 +871,17 @@ pub fn unbind(db: &Connection, root: &Path, name: &str, secret: &str) -> Result<
     Ok(())
 }
 
-/// Loads a plugin to run: valid, trusted as it is now, turned on, and every declared secret
-/// bound to a saved key. A connector whose only way in is an OAuth sign-in never loads
-/// until sign-in exists. Inputs: database, engine root and name. Output: the plugin, or
-/// `app_plugin_not_found`, `_refused`, `_needs_review`, `_off`, `_needs_key`,
-/// `_connector_oauth_not_yet`.
-pub fn ready(db: &Connection, root: &Path, name: &str) -> Result<Loaded, EngineError> {
-    tables(db)?;
+fn load(db: &Connection, root: &Path, name: &str, launch: bool) -> Result<Loaded, EngineError> {
+    prepare(db, root)?;
     let found = found(root, name)?;
     let manifest = found.parsed.map_err(|_| error("app_plugin_refused"))?;
+    if launch && manifest.kind != PluginKind::Connector {
+        return Err(error("app_plugin_not_found"));
+    }
     if !reviewed(db, found.origin, &manifest)? {
         return Err(error("app_plugin_needs_review"));
     }
-    if !enabled_flag(db, &manifest.name, found.origin)? {
+    if !launch && !enabled_flag(db, &manifest.name, found.origin)? {
         return Err(error("app_plugin_off"));
     }
     if let Some(code) = manifest.connector().and_then(connector::sign_in_refusal) {
@@ -828,6 +890,7 @@ pub fn ready(db: &Connection, root: &Path, name: &str) -> Result<Loaded, EngineE
     let mut bindings = Vec::with_capacity(manifest.secrets().len());
     for secret in manifest.secrets() {
         let (_, bound) = resolve(db, root, &manifest.name, secret)?;
+        let bound = bound.filter(|bound| !launch || matches!(bound, Bound::Key(_)));
         bindings.push(bound.ok_or_else(|| error("app_plugin_needs_key"))?);
     }
     assert_eq!(bindings.len(), manifest.secrets().len());
@@ -836,6 +899,25 @@ pub fn ready(db: &Connection, root: &Path, name: &str) -> Result<Loaded, EngineE
         origin: found.origin,
         bindings,
     })
+}
+
+/// Loads a plugin to run: valid, trusted as it is now, turned on, and every declared secret
+/// bound to a saved key. A connector whose only way in is an OAuth sign-in never loads
+/// until sign-in exists. Inputs: database, engine root and name. Output: the plugin, or
+/// `app_plugin_not_found`, `_refused`, `_needs_review`, `_off`, `_needs_key`,
+/// `_connector_oauth_not_yet`.
+pub fn ready(db: &Connection, root: &Path, name: &str) -> Result<Loaded, EngineError> {
+    load(db, root, name, false)
+}
+
+/// Loads a connector for a launch its project turned it on for: valid, trusted as it is
+/// now, and every declared secret bound to a key the owner entered for it. The app-wide
+/// plugin switch is not read; a connector's switch is the project's. Inputs: database,
+/// engine root and name. Output: the connector, or `app_plugin_not_found` (also for a
+/// plugin of another kind), `_refused`, `_needs_review`, `_needs_key`,
+/// `_connector_oauth_not_yet`.
+pub fn connector_ready(db: &Connection, root: &Path, name: &str) -> Result<Loaded, EngineError> {
+    load(db, root, name, true)
 }
 
 /// Reads one bound secret's key into engine memory for a single request. Inputs: the

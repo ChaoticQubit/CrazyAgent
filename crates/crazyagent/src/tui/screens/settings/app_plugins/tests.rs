@@ -151,6 +151,7 @@ fn trust(name: &str, title: &str, replaces: bool) -> TrustView {
         secrets: Vec::new(),
         sha256: SHA.into(),
         replaces,
+        connector: None,
     }
 }
 
