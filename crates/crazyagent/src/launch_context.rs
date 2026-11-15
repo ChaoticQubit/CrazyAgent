@@ -221,6 +221,7 @@ pub struct Installed {
     model_proxy: Option<u16>,
     freeze_record: Option<PathBuf>,
     terminal_display: TerminalDisplay,
+    environment: Vec<(OsString, OsString)>,
     _lock: File,
 }
 
@@ -234,13 +235,16 @@ pub struct NativeTeam {
 }
 
 /// Where one launch wrote its files, as a pane record keeps it, so an engine that adopts
-/// the pane later deletes them when the pane stops: the agent home, and whether the launch
-/// was for Codex, which also writes `config.toml` and the skill copies there.
+/// the pane later deletes them when the pane stops: the agent home, whether the launch
+/// was for Codex, which also writes `config.toml` and the skill copies there, and the files
+/// a listed harness's manifest had written, as paths inside the home.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstalledFiles {
     pub home: PathBuf,
     pub codex: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rendered: Vec<String>,
 }
 
 struct Budget {
@@ -1073,6 +1077,7 @@ impl AgentContext {
             files: Some(InstalledFiles {
                 home: home.to_path_buf(),
                 codex,
+                rendered: Vec::new(),
             }),
             transcripts: self.transcripts,
             hooks: false,
@@ -1083,6 +1088,7 @@ impl AgentContext {
             model_proxy: self.model_proxy,
             freeze_record: self.freeze_record.clone(),
             terminal_display: self.terminal_display,
+            environment: Vec::new(),
             _lock: lock,
         };
         remove(&state);
@@ -1305,6 +1311,23 @@ impl AgentContext {
         assert!(budget.files <= SKILL_FILES_MAX && budget.bytes <= SKILL_BYTES_MAX);
         Ok(())
     }
+
+    /// Writes this context into one private home for one launch of a listed harness, as its
+    /// manifest asks: the MCP servers and the instruction text into the files its `mcp` and
+    /// `instructions` blocks name, and the environment its `home` block sets, on the guard.
+    /// Inputs: the manifest, the private home ([`crate::harnesses::home::prepare`]) and the
+    /// tools switch; with tools off the MCP file holds no server. Output: the guard that
+    /// deletes those files, `launch_manifest_invalid` for blocks that do not read,
+    /// `launch_harness_unsupported` for a team agent's project files, or `launch_home_busy`.
+    pub fn install_listed(
+        &self,
+        manifest: &crate::harnesses::manifest::Manifest,
+        home: &Path,
+        tools: bool,
+    ) -> Result<Installed, LaunchError> {
+        let _ = (manifest, home, tools);
+        Err(failure("launch_harness_unsupported"))
+    }
 }
 
 impl Installed {
@@ -1313,6 +1336,12 @@ impl Installed {
     /// <file>`. Codex: none, it reads `config.toml` and `skills/` from its CODEX_HOME.
     pub fn arguments(&self) -> &[OsString] {
         &self.arguments
+    }
+
+    /// The environment a listed harness's manifest sets through its `home` block, the
+    /// private home filled in; empty for Codex and Claude Code. Output: the names and values.
+    pub fn environment(&self) -> &[(OsString, OsString)] {
+        &self.environment
     }
 
     /// Tells whether a headless Claude run of this launch keeps its transcript, as the
@@ -1393,6 +1422,7 @@ impl Installed {
             model_proxy: None,
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
+            environment: Vec::new(),
             _lock: lock,
         })
     }
@@ -2329,6 +2359,7 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         model_proxy: None,
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
+        environment: Vec::new(),
         _lock: lock,
     })
 }
@@ -2858,3 +2889,7 @@ fn copy_file(source: &Path, target: &Path, budget: &mut Budget) -> Result<(), La
 #[cfg(all(test, unix))]
 #[path = "launch_context/tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "launch_context/listed_tests.rs"]
+mod listed_tests;
