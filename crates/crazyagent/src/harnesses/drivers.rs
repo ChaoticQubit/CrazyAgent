@@ -1,5 +1,5 @@
 use super::launch::{LaunchError, failure};
-use super::manifest::DriverKind;
+use super::manifest::{DriverKind, PLACEHOLDERS};
 use super::registry::{Harness, registry};
 
 pub mod acp;
@@ -9,9 +9,9 @@ pub mod text_turn;
 
 /// The piped drivers the engine runs: its own adapters for Codex and Claude Code and the
 /// Agent Client Protocol client ([`acp::Acp`]) for any harness whose manifest names `acp`,
-/// which run in a [`super::launch::Session`], and the shared `jsonl-turn` driver, which runs
-/// one process per turn in a [`super::launch::TurnSession`]. Each other shared driver kind
-/// a manifest names joins this list when its task lands.
+/// which run in a [`super::launch::Session`], and the shared `jsonl-turn` and `text-turn`
+/// drivers, which run one process per turn in a [`super::launch::TurnSession`]. Each other
+/// shared driver kind a manifest names joins this list when its task lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Piped {
     Codex,
@@ -34,7 +34,7 @@ pub fn of(kind: DriverKind) -> Result<Piped, LaunchError> {
         DriverKind::Acp => Ok(Piped::Acp),
         DriverKind::JsonlTurn => Ok(Piped::JsonlTurn),
         DriverKind::JsonlRpc => Err(failure("launch_harness_unsupported")),
-        DriverKind::TextTurn => Err(failure("launch_harness_unsupported")),
+        DriverKind::TextTurn => Ok(Piped::TextTurn),
     }
 }
 
@@ -48,6 +48,38 @@ pub fn piped(harness: &str) -> Result<Piped, LaunchError> {
         .and_then(Harness::piped)
         .ok_or_else(|| failure("launch_harness_unsupported"))
         .and_then(of)
+}
+
+/// Fills the placeholders of one manifest argument for a turn, each once and never again
+/// inside a filled value; a `{` that opens no known placeholder stays as written. Inputs:
+/// the argument and the value of each placeholder it names. Output: the filled argument,
+/// or the first refusal `value` gives.
+fn fill<'a>(
+    argument: &str,
+    value: impl Fn(&str) -> Result<&'a str, LaunchError>,
+) -> Result<String, LaunchError> {
+    let mut filled = String::with_capacity(argument.len());
+    let mut rest = argument;
+    while let Some(open) = rest.find('{') {
+        filled.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let name = after
+            .find('}')
+            .map(|close| &after[..close])
+            .filter(|name| PLACEHOLDERS.contains(name));
+        match name {
+            Some(name) => {
+                filled.push_str(value(name)?);
+                rest = &after[name.len() + 1..];
+            }
+            None => {
+                filled.push('{');
+                rest = after;
+            }
+        }
+    }
+    filled.push_str(rest);
+    Ok(filled)
 }
 
 #[cfg(test)]

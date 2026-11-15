@@ -1,5 +1,5 @@
 use super::super::launch::{LaunchError, LaunchEvent, PROMPT_BYTES_MAX, failure};
-use super::super::manifest::{self, DriverKind, Fact, Manifest, PLACEHOLDERS, Refused, Rule};
+use super::super::manifest::{self, DriverKind, Fact, Manifest, Refused, Rule};
 use super::rules;
 use crate::adapters::LINE_BYTES_MAX;
 use crate::app_plugins::yaml::Value as Yaml;
@@ -335,28 +335,7 @@ impl JsonlTurn {
     }
 
     fn fill(&self, argument: &str, prompt: &str) -> Result<String, LaunchError> {
-        let mut filled = String::with_capacity(argument.len());
-        let mut rest = argument;
-        while let Some(open) = rest.find('{') {
-            filled.push_str(&rest[..open]);
-            let after = &rest[open + 1..];
-            let name = after
-                .find('}')
-                .map(|close| &after[..close])
-                .filter(|name| PLACEHOLDERS.contains(name));
-            match name {
-                Some(name) => {
-                    filled.push_str(self.value(name, prompt)?);
-                    rest = &after[name.len() + 1..];
-                }
-                None => {
-                    filled.push('{');
-                    rest = after;
-                }
-            }
-        }
-        filled.push_str(rest);
-        Ok(filled)
+        super::fill(argument, |name| self.value(name, prompt))
     }
 
     fn value<'a>(&'a self, name: &str, prompt: &'a str) -> Result<&'a str, LaunchError> {
@@ -386,7 +365,7 @@ impl JsonlTurn {
     }
 }
 
-fn arguments(piped: &Yaml, key: &str) -> Result<Option<Vec<String>>, Refused> {
+pub(super) fn arguments(piped: &Yaml, key: &str) -> Result<Option<Vec<String>>, Refused> {
     let place = format!("piped.{key}");
     let items = match piped.get(key) {
         None | Some(Yaml::Null) => return Ok(None),
@@ -421,7 +400,7 @@ fn arguments(piped: &Yaml, key: &str) -> Result<Option<Vec<String>>, Refused> {
         .map(Some)
 }
 
-fn plain_session(id: &str) -> bool {
+pub(super) fn plain_session(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= SESSION_BYTES_MAX
         && !id.starts_with('-')

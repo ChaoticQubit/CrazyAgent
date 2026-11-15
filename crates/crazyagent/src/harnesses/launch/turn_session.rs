@@ -1,5 +1,5 @@
 use super::super::drivers::jsonl_turn::{Config, JsonlTurn};
-use super::super::drivers::text_turn;
+use super::super::drivers::text_turn::{self, TextTurn};
 use super::super::drivers::{self, Piped};
 use super::super::registry::registry;
 use super::{
@@ -13,20 +13,81 @@ use std::process::{Child, Command};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
 use std::time::{Duration, Instant};
 
-/// A piped harness that runs one process per turn, on the `jsonl-turn` driver: each prompt
-/// starts a sandboxed process with that turn's arguments, its output lines become launch
-/// events by the manifest's rules, and its exit ends the turn. The harness session id a turn
-/// reports is passed to the next turn. Between turns no process runs, so the process group
-/// a caller can stop is the running turn's, if any. With tools off, a turn whose harness
-/// reports a tool is stopped at once. A run at Full access, an account with a key and a
-/// project context are refused until the tasks that hand them over land.
+/// A piped harness that runs one process per turn, on the `jsonl-turn` or `text-turn`
+/// driver: each prompt starts a sandboxed process with that turn's arguments, its output
+/// lines become launch events by the driver, and its exit ends the turn. The harness session
+/// id a turn reports is passed to the next turn. Between turns no process runs, so the
+/// process group a caller can stop is the running turn's, if any. A jsonl-turn turn whose
+/// harness reports a tool with tools off, and a text-turn turn whose output passes its
+/// bound, are stopped at once. A run at Full access, an account with a key and a project
+/// context are refused until the tasks that hand them over land.
 pub struct TurnSession {
     request: LaunchRequest,
-    turns: JsonlTurn,
+    turns: Turns,
     running: Option<Running>,
     queue: VecDeque<LaunchEvent>,
     deadline: Instant,
     uncertain: bool,
+}
+
+/// The driver of a session's turns, which gives each turn's arguments and reads its output.
+enum Turns {
+    Jsonl(JsonlTurn),
+    Text(TextTurn),
+}
+
+impl Turns {
+    fn session(&self) -> Option<&str> {
+        match self {
+            Self::Jsonl(turns) => turns.session(),
+            Self::Text(turns) => turns.session(),
+        }
+    }
+
+    fn start(&mut self, prompt: &str) -> Result<Vec<String>, LaunchError> {
+        match self {
+            Self::Jsonl(turns) => turns.start(prompt),
+            Self::Text(turns) => turns.start(prompt),
+        }
+    }
+
+    fn receive(&mut self, line: &[u8]) -> Result<Vec<LaunchEvent>, LaunchError> {
+        match self {
+            Self::Jsonl(turns) => turns.receive(line),
+            Self::Text(turns) => turns.receive(line),
+        }
+    }
+
+    /// Counts a line too long to hold: jsonl-turn passes it over, and on text-turn it is
+    /// output past the bound, which marks the turn for stopping.
+    fn skipped(&mut self) {
+        if let Self::Text(turns) = self {
+            turns.skipped();
+        }
+    }
+
+    fn interrupt(&mut self) -> Result<(), LaunchError> {
+        match self {
+            Self::Jsonl(turns) => turns.interrupt(),
+            Self::Text(turns) => turns.interrupt(),
+        }
+    }
+
+    fn exited(&mut self, code: Option<i32>) -> Result<Vec<LaunchEvent>, LaunchError> {
+        match self {
+            Self::Jsonl(turns) => turns.exited(code),
+            Self::Text(turns) => turns.exited(code),
+        }
+    }
+
+    /// Whether the running turn must be stopped: a tool used with tools off on jsonl-turn,
+    /// output past the bound on text-turn. Output: true until the turn ends.
+    fn stopping(&self) -> bool {
+        match self {
+            Self::Jsonl(turns) => turns.breached(),
+            Self::Text(turns) => turns.over(),
+        }
+    }
 }
 
 /// The process of the running turn, its sandbox warden, its output lines and whether its
@@ -39,20 +100,26 @@ struct Running {
 }
 
 impl TurnSession {
-    /// Starts a conversation with a catalog harness on the `jsonl-turn` driver; no process
-    /// runs until the first prompt. Input: the launch request. Output: the session, whose
-    /// first event is `Ready`, or `launch_harness_unsupported` for a harness on another
-    /// driver or whose settings its manifest does not give, and the refusals of
+    /// Starts a conversation with a catalog harness on the `jsonl-turn` or `text-turn`
+    /// driver; no process runs until the first prompt. Input: the launch request. Output: the
+    /// session, whose first event is `Ready`, or `launch_harness_unsupported` for a harness
+    /// on another driver or whose settings its manifest does not give, and the refusals of
     /// [`TurnSession::start_with`].
     pub fn start(request: LaunchRequest) -> Result<Self, LaunchError> {
-        if drivers::piped(&request.harness)? != Piped::JsonlTurn {
+        let piped = drivers::piped(&request.harness)?;
+        if !matches!(piped, Piped::JsonlTurn | Piped::TextTurn) {
             return Err(failure("launch_harness_unsupported"));
         }
         let harness = registry()
             .get(&request.harness)
             .ok_or_else(|| failure("launch_harness_unsupported"))?;
-        let config =
-            Config::read(harness.manifest()).map_err(|_| failure("launch_harness_unsupported"))?;
+        let manifest = harness.manifest();
+        if piped == Piped::TextTurn {
+            let config = text_turn::Config::read(manifest)
+                .map_err(|_| failure("launch_harness_unsupported"))?;
+            return Self::start_text(request, config);
+        }
+        let config = Config::read(manifest).map_err(|_| failure("launch_harness_unsupported"))?;
         Self::start_with(request, config)
     }
 
@@ -61,29 +128,16 @@ impl TurnSession {
     /// `launch_key_relay_unsupported` for an account that carries a key and
     /// `launch_harness_unsupported` for a run at Full access.
     pub fn start_with(request: LaunchRequest, config: Config) -> Result<Self, LaunchError> {
-        validate(&request)?;
-        if request.account.key().is_some() {
-            return Err(failure("launch_key_relay_unsupported"));
-        }
-        if request.unconfined {
-            return Err(failure("launch_harness_unsupported"));
-        }
-        let (turns, ready) = JsonlTurn::new(
-            config,
-            request.account.home(),
-            &request.working_dir,
-            request.model.as_deref(),
-            request.tools,
-            None,
-        )?;
-        let deadline = Instant::now() + request.limits.run_time;
-        Ok(Self {
-            request,
-            turns,
-            running: None,
-            queue: ready.into(),
-            deadline,
-            uncertain: false,
+        Self::open(request, |request| {
+            let (turns, ready) = JsonlTurn::new(
+                config,
+                request.account.home(),
+                &request.working_dir,
+                request.model.as_deref(),
+                request.tools,
+                None,
+            )?;
+            Ok((Turns::Jsonl(turns), ready))
         })
     }
 
@@ -94,8 +148,43 @@ impl TurnSession {
         request: LaunchRequest,
         config: text_turn::Config,
     ) -> Result<Self, LaunchError> {
-        let _ = (request, config);
-        Err(failure("launch_harness_unsupported"))
+        Self::open(request, |request| {
+            let (turns, ready) = TextTurn::new(
+                config,
+                request.account.home(),
+                &request.working_dir,
+                request.model.as_deref(),
+                request.tools,
+            )?;
+            Ok((Turns::Text(turns), ready))
+        })
+    }
+
+    /// Checks the launch, refuses what no per-turn driver hands over yet, and starts the
+    /// driver. Inputs: the launch request and the driver's start. Output: the session, or
+    /// the launch's own refusals, `launch_key_relay_unsupported`,
+    /// `launch_harness_unsupported` for Full access, and the driver's refusals.
+    fn open(
+        request: LaunchRequest,
+        begin: impl FnOnce(&LaunchRequest) -> Result<(Turns, Vec<LaunchEvent>), LaunchError>,
+    ) -> Result<Self, LaunchError> {
+        validate(&request)?;
+        if request.account.key().is_some() {
+            return Err(failure("launch_key_relay_unsupported"));
+        }
+        if request.unconfined {
+            return Err(failure("launch_harness_unsupported"));
+        }
+        let (turns, ready) = begin(&request)?;
+        let deadline = Instant::now() + request.limits.run_time;
+        Ok(Self {
+            request,
+            turns,
+            running: None,
+            queue: ready.into(),
+            deadline,
+            uncertain: false,
+        })
     }
 
     /// The harness session id the next turn continues. Output: the id, or none before a
@@ -141,8 +230,9 @@ impl TurnSession {
         Ok(())
     }
 
-    /// Waits up to `wait` for the next event. A line too long to hold is passed over with one
-    /// note in the engine log, and a breach of tools off stops the turn's process group.
+    /// Waits up to `wait` for the next event. A line too long to hold is noted in the engine
+    /// log and handed to the driver, and a turn the driver marks for stopping, a breach of
+    /// tools off or output past the text-turn bound, has its process group stopped.
     /// Output: Some(event), None on timeout or between turns, or an
     /// error once the session deadline passes or the driver refuses a line, which also stops
     /// the running turn.
@@ -168,7 +258,7 @@ impl TurnSession {
                 Ok(Line::Bytes(line)) => match self.turns.receive(&line) {
                     Ok(events) => {
                         self.queue.extend(events);
-                        if self.turns.breached() {
+                        if self.turns.stopping() {
                             self.stop_turn();
                         }
                     }
@@ -179,6 +269,10 @@ impl TurnSession {
                 },
                 Ok(Line::Skipped) => {
                     eprintln!("launch_output_line_skipped over={LINE_BYTES_MAX}");
+                    self.turns.skipped();
+                    if self.turns.stopping() {
+                        self.stop_turn();
+                    }
                 }
                 Ok(Line::Closed) | Err(RecvTimeoutError::Disconnected) => {
                     let code = self.end_turn(false);
