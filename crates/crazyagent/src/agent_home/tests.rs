@@ -1047,6 +1047,8 @@ fn a_launch_removes_shell_startup_files_and_shell_prelude_folders_from_the_agent
 /// link among them without what it names, while each
 /// harness's sign-in, transcripts, team and task state, the per-agent keychain, the
 /// launch's own files, the cargo caches linked from the owner's and the shared caches stay.
+/// `.config` itself stays, emptied, so no folder built elsewhere takes its name
+/// (RV-DS241-186).
 #[cfg(unix)]
 #[test]
 fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
@@ -1124,7 +1126,7 @@ fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
             .iter()
             .copied()
             .chain([
-                ".config",
+                ".config/cargo",
                 ".ssh",
                 ".local",
                 "history.jsonl",
@@ -1136,6 +1138,12 @@ fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
             left.is_empty(),
             "a {name} launch kept code-running config in the agent home: {left:?}"
         );
+        let config = home.join(".config");
+        assert!(
+            fs::symlink_metadata(&config).is_ok_and(|metadata| metadata.is_dir()),
+            "a {name} launch did not keep .config as a real folder"
+        );
+        assert_eq!(fs::read_dir(&config).unwrap().count(), 0, "{name}");
         for file in kept {
             assert_eq!(
                 fs::read_to_string(home.join(file)).unwrap(),
