@@ -1047,4 +1047,17 @@ mod tests {
             Some("server_npx_not_found")
         );
     }
+
+    /// RV-DS241-153: the pinned context-mode launch is read from the rooted npx path that
+    /// `validate` accepts on every platform, so on Windows, which counts a path with no drive
+    /// as relative, it is still the pinned launch and is never run through npx as approved.
+    #[test]
+    fn the_pinned_context_mode_launch_is_read_from_the_rooted_npx_validate_accepts() {
+        let spec = stdio("/usr/local/bin/npx", &["-y", "context-mode@1.0.169"]);
+        assert!(spec.validate().is_ok());
+        assert_eq!(
+            pinned_context_mode(&spec),
+            Some((Path::new("/usr/local/bin"), "1.0.169"))
+        );
+    }
 }
