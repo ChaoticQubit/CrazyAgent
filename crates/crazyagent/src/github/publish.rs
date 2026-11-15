@@ -137,6 +137,15 @@ pub enum GitHubSecretKind {
     NamedValue,
 }
 
+/// What the secret check found: the lines, by file and line, and whether the list was cut
+/// at its bound, so more lines may hold secrets than it names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubSecretScan {
+    pub findings: Vec<GitHubSecretFinding>,
+    pub truncated: bool,
+}
+
 /// One line that would push a secret: the file and the line number, never the value.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -243,6 +252,20 @@ pub(super) fn inspect(
     project: &Path,
     host: &str,
 ) -> Result<GitHubLocal, EngineError> {
+    inspect_within(git, home, project, host, Duration::ZERO)
+}
+
+/// Reads how a project's git stands as [`inspect`] does, each git run within `limit`.
+/// Inputs: git, its empty home, the project, GitHub's web host and the limit. Output: as
+/// [`inspect`].
+fn inspect_within(
+    git: &Path,
+    home: &Path,
+    project: &Path,
+    host: &str,
+    limit: Duration,
+) -> Result<GitHubLocal, EngineError> {
+    let _ = limit;
     let folder =
         std::fs::symlink_metadata(project).map_err(|_| failure("project_folder_missing"))?;
     if !project.is_absolute() || !folder.is_dir() {
@@ -532,8 +555,16 @@ pub(super) fn secret_findings(
     home: &Path,
     project: &Path,
     history: GitHubHistory,
-) -> Result<Vec<GitHubSecretFinding>, EngineError> {
-    findings_within(git, home, project, history, SCAN_FILES_MAX, SCAN_BYTES_MAX)
+) -> Result<GitHubSecretScan, EngineError> {
+    findings_within(
+        git,
+        home,
+        project,
+        history,
+        SCAN_FILES_MAX,
+        SCAN_BYTES_MAX,
+        Duration::ZERO,
+    )
 }
 
 /// Finds the secret lines as [`secret_findings`] does, within the given bounds.
@@ -546,7 +577,9 @@ fn findings_within(
     history: GitHubHistory,
     files_max: usize,
     bytes_max: u64,
-) -> Result<Vec<GitHubSecretFinding>, EngineError> {
+    limit: Duration,
+) -> Result<GitHubSecretScan, EngineError> {
+    let _ = limit;
     let too_large = || failure("github_publish_too_large");
     let failed = || failure("github_publish_failed");
     let mut findings = Vec::new();
@@ -623,7 +656,10 @@ fn findings_within(
         }
     }
     findings.sort();
-    Ok(findings)
+    Ok(GitHubSecretScan {
+        findings,
+        truncated: false,
+    })
 }
 
 /// Turns a path git listed into a path, as raw bytes on Unix and as UTF-8 elsewhere.

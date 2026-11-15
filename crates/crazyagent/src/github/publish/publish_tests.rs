@@ -1,11 +1,13 @@
 use super::*;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 const GIT: &str = "/usr/bin/git";
 const HOST: &str = "github.com";
 const OWNER: &str = "owner@example.invalid";
 const TOKEN: &str = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
 const MESSAGE: &str = "Publish with CrazyAgent";
+const LIMIT: Duration = Duration::from_secs(2);
 
 fn git_by(email: &str, args: &[&str], folder: &Path) -> String {
     let output = crate::spawn_gate::output(
@@ -103,6 +105,10 @@ impl Fixture {
     }
 
     fn findings(&self, history: GitHubHistory) -> Result<Vec<GitHubSecretFinding>, EngineError> {
+        self.scan(history).map(|scan| scan.findings)
+    }
+
+    fn scan(&self, history: GitHubHistory) -> Result<GitHubSecretScan, EngineError> {
         secret_findings(Path::new(GIT), self.home.path(), &self.path(), history)
     }
 
@@ -177,6 +183,16 @@ fn inspect_reads_the_repository_state_and_refuses_a_remote_or_a_detached_head() 
         &posed.path(),
     );
     assert_eq!(posed.inspect().unwrap().history, GitHubHistory::Owner);
+    let forged = fixture();
+    git(&["init", "-q"], &forged.path());
+    forged.write("keys.txt", &format!("{TOKEN}\n"));
+    git(&["add", "-A"], &forged.path());
+    git_by(
+        "engine@crazyagent.invalid",
+        &["commit", "-q", "-m", "Start project"],
+        &forged.path(),
+    );
+    assert_eq!(forged.inspect().unwrap().history, GitHubHistory::Owner);
     let owned = fixture();
     git(&["init", "-q", "-b", "trunk"], &owned.path());
     owned.write("a.txt", "a\n");
@@ -533,7 +549,7 @@ fn owner_history_is_scanned_from_heads_tree_and_the_scan_is_bounded() {
     );
     let home = fixture.home.path();
     let within = |history, files, bytes| {
-        findings_within(Path::new(GIT), home, &project, history, files, bytes)
+        findings_within(Path::new(GIT), home, &project, history, files, bytes, LIMIT)
     };
     for (history, files, bytes) in [
         (GitHubHistory::Owner, 1, 1 << 20),
@@ -547,7 +563,13 @@ fn owner_history_is_scanned_from_heads_tree_and_the_scan_is_bounded() {
             "{history:?} {files} {bytes}"
         );
     }
-    assert_eq!(within(GitHubHistory::Owner, 2, 1 << 20).unwrap().len(), 1);
+    assert_eq!(
+        within(GitHubHistory::Owner, 2, 1 << 20)
+            .unwrap()
+            .findings
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -684,5 +706,109 @@ fn the_author_is_the_owners_git_identity_else_the_github_noreply_address() {
     assert_eq!(
         noreply_author("octo-cat", None).email,
         "octo-cat@users.noreply.github.com"
+    );
+}
+
+fn mkfifo(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let status = crate::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(path)).unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn secret_findings_stop_at_the_bound_and_say_the_list_was_cut() {
+    let one = fixture();
+    git(&["init", "-q", "-b", "main"], &one.path());
+    one.write("clean.txt", "nothing\n");
+    assert_eq!(
+        one.scan(GitHubHistory::Empty).unwrap(),
+        GitHubSecretScan {
+            findings: Vec::new(),
+            truncated: false,
+        }
+    );
+    one.write("many.rs", &format!("{TOKEN}\n").repeat(25));
+    let scan = one.scan(GitHubHistory::Empty).unwrap();
+    assert!(scan.truncated);
+    assert_eq!(
+        scan.findings,
+        (1..=20)
+            .map(|line| finding("many.rs", line, GitHubSecretKind::Token))
+            .collect::<Vec<_>>()
+    );
+    let full = fixture();
+    git(&["init", "-q", "-b", "main"], &full.path());
+    for index in 0..60 {
+        full.write(&format!("f{index:02}.rs"), &format!("{TOKEN}\n").repeat(25));
+    }
+    let scan = full.scan(GitHubHistory::Empty).unwrap();
+    assert!(scan.truncated);
+    assert_eq!(scan.findings.len(), 1000);
+    assert!(scan.findings.iter().all(|found| found.line <= 20));
+}
+
+#[test]
+fn a_fifo_in_the_project_or_its_config_never_holds_publish() {
+    let ignore = fixture();
+    git(&["init", "-q", "-b", "main"], &ignore.path());
+    ignore.write("src/a.rs", "a\n");
+    mkfifo(&ignore.path().join("sub/.gitignore"));
+    let started = Instant::now();
+    assert_eq!(
+        findings_within(
+            Path::new(GIT),
+            ignore.home.path(),
+            &ignore.path(),
+            GitHubHistory::Empty,
+            SCAN_FILES_MAX,
+            SCAN_BYTES_MAX,
+            LIMIT,
+        )
+        .unwrap_err()
+        .0,
+        "github_publish_failed"
+    );
+    assert!(started.elapsed() < Duration::from_secs(30));
+    let included = fixture();
+    let project = included.path();
+    git(&["init", "-q", "-b", "main"], &project);
+    let fifo = included.home.path().join("hang");
+    mkfifo(&fifo);
+    let config = project.join(".git/config");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str(&format!("[include]\n\tpath = {}\n", fifo.display()));
+    std::fs::write(&config, text).unwrap();
+    let started = Instant::now();
+    assert_eq!(
+        inspect_within(Path::new(GIT), included.home.path(), &project, HOST, LIMIT)
+            .unwrap_err()
+            .0,
+        "github_publish_failed"
+    );
+    assert!(started.elapsed() < Duration::from_secs(30));
+}
+
+#[test]
+fn the_scan_needs_a_plain_git_folder_and_never_reads_through_a_linked_folder() {
+    let linked = fixture();
+    let project = linked.path();
+    git(&["init", "-q", "-b", "main"], &project);
+    linked.write("dir/secret.txt", "nothing\n");
+    git(&["add", "dir/secret.txt"], &project);
+    std::fs::remove_dir_all(project.join("dir")).unwrap();
+    let outside = fixture();
+    outside.write("secret.txt", &format!("{TOKEN}\n"));
+    std::os::unix::fs::symlink(outside.path(), project.join("dir")).unwrap();
+    linked.write("clean.txt", "nothing\n");
+    assert_eq!(
+        linked.findings(GitHubHistory::Empty).unwrap(),
+        Vec::<GitHubSecretFinding>::new()
+    );
+    let file = fixture();
+    file.write(".git", "gitdir: /elsewhere\n");
+    file.write("a.txt", &format!("{TOKEN}\n"));
+    assert_eq!(
+        file.findings(GitHubHistory::Empty).unwrap_err().0,
+        "github_publish_not_plain_repo"
     );
 }

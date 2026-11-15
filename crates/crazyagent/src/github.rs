@@ -24,7 +24,7 @@ mod tests;
 pub use api::Endpoints;
 pub use publish::{
     GitHubCommitted, GitHubHistory, GitHubLocal, GitHubPrepare, GitHubSecretFinding,
-    GitHubSecretKind,
+    GitHubSecretKind, GitHubSecretScan,
 };
 pub use rules::{GitHubCi, GitHubRepoFacts, GitHubRule, GitHubRuleOutcome, GitHubRuleState};
 
@@ -675,7 +675,7 @@ impl GitHub {
         &self,
         project: &Path,
         history: GitHubHistory,
-    ) -> Result<Vec<GitHubSecretFinding>, EngineError> {
+    ) -> Result<GitHubSecretScan, EngineError> {
         let home = publish::GitHome::new(&self.root)?;
         publish::secret_findings(&publish::git()?, home.path(), project, history)
     }
