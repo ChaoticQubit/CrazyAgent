@@ -74,9 +74,10 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
     spawn(command)?.wait_with_output()
 }
 
-/// Starts a child through the gate with the stdio `Command::output` defaults: no input,
-/// stdout and stderr collected, whatever the command had set. Input: the configured
-/// command. Output: status, stdout and stderr.
+/// Test helper: starts a child through the gate with the stdio `Command::output` defaults,
+/// no input and stdout and stderr collected, replacing whatever the command had set. A
+/// caller that needs its own stdio uses [`output`] with that stdio set. Input: the
+/// configured command. Output: status, stdout and stderr.
 pub fn collected(command: &mut Command) -> io::Result<Output> {
     use std::process::Stdio;
     output(
