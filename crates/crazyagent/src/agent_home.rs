@@ -84,10 +84,11 @@ const LIBRARY_KEPT: &[(&str, Kept)] = &[
     ("Keychains", Kept::Folder),
     ("Preferences", Kept::Only(&[("com.apple.security.plist", Kept::File)])),
 ];
-/// What a launch keeps in an agent's cargo home: its crates and git checkouts, which the
-/// engine links to the owner's read-only ones, never a cargo config or the subcommands in
-/// `bin`, which cargo runs ahead of those on the `PATH`.
-const CARGO_KEPT: &[(&str, Kept)] = &[("registry", Kept::Cache), ("git", Kept::Cache)];
+/// What a launch keeps in an agent's cargo home: its crates and git checkouts only as the
+/// links the engine makes to the owner's read-only ones (DEC-173), never a cache folder the
+/// agent made, whose sources a later run's cargo would build unchecked, a cargo config or
+/// the subcommands in `bin`, which cargo runs ahead of those on the `PATH`.
+const CARGO_KEPT: &[(&str, Kept)] = &[("registry", Kept::Link), ("git", Kept::Link)];
 /// What a launch keeps in an agent home's `.npm`: npm's content-addressed cache, never the
 /// packages npx installed, which it runs as they are.
 const NPM_KEPT: &[(&str, Kept)] = &[("_cacache", Kept::Folder)];
@@ -112,9 +113,10 @@ enum Kept {
     File,
     /// A real folder with all it holds.
     Folder,
-    /// A real folder with all it holds or a link, never followed: a cache the engine links
-    /// to the owner's read-only one.
-    Cache,
+    /// A link, never followed: a cache the engine links to the owner's read-only one
+    /// ([`crate::sandbox::toolchains::prepare_cargo_home`]), which the agent's profile keeps
+    /// it from moving, removing or making itself.
+    Link,
     /// A real folder holding only the entries its list keeps.
     Only(&'static [(&'static str, Kept)]),
 }
@@ -807,7 +809,9 @@ pub fn prepare(
     real_folder(home)?;
     record_files(&project.data, home, &given.files)?;
     write_record(&project.data, GIVEN_FOLDER, home, &given.text)?;
-    keep_only(home, HOME_KEPT)?;
+    let mut held = Vec::new();
+    keep_only(home, HOME_KEPT, &mut held)?;
+    crate::team::cleanup::clear_acls(held.iter().map(PathBuf::as_path));
     let name = harness.instruction_file();
     if given.text.is_empty() {
         return remove_entry(&home.join(name));
@@ -1092,8 +1096,10 @@ fn real_folder(folder: &Path) -> Result<(), AgentHomeError> {
 /// goes and what it names stays. An entry an agent pinned with the immutable or append-only
 /// flag, in a folder it may have pinned too, or a folder it left without write, is first
 /// made removable: the flags of its parent, of the entry and of all it holds are cleared and
-/// its folders opened up, each through a handle that follows no link (RV-DS241-138). Input:
-/// the entry. Output: unit, or `agent_home_unwritable` when it stays, refusing the launch.
+/// its folders opened up, each through a handle that follows no link, or by path where an
+/// entry will not open (RV-DS241-138, -137 code r1 F2), and the ACLs of the parent, the
+/// entry and all it holds go (sec r1 F2). Input: the entry. Output: unit, or
+/// `agent_home_unwritable` when it stays, refusing the launch.
 pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
     let folder = match fs::symlink_metadata(path) {
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1108,28 +1114,41 @@ pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
     if removed.is_ok() {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
+    let parent = path.parent();
+    if let Some(parent) = parent {
         unpin(parent);
     }
+    if !folder {
+        unpin(path);
+    }
+    crate::team::cleanup::clear_acls(parent.into_iter().chain([path]));
     if folder {
-        return crate::team::cleanup::remove_agent_tree(path)
+        return crate::team::cleanup::remove_home_tree(path)
             .map_err(|_| failure("agent_home_unwritable"));
     }
-    unpin(path);
     fs::remove_file(path).map_err(|_| failure("agent_home_unwritable"))
 }
 
 /// Removes from one real folder of an agent home every entry `kept` does not name with its
 /// kind, and does the same in each kept folder that has its own list, never following a
 /// link (RV-DS241-137). Flags an agent set on the folder or on an entry it keeps are cleared
-/// (RV-DS241-138). The folder is listed as it goes, in passes until one removes nothing.
-/// Inputs: the folder and what stays in it. Output: unit, or `agent_home_unwritable` when it
-/// cannot be listed, one entry stays or it still changes after [`HOME_PASSES_MAX`] passes.
-fn keep_only(folder: &Path, kept: &[(&str, Kept)]) -> Result<(), AgentHomeError> {
+/// (RV-DS241-138), and the folder and every entry it keeps are added to `held`, whose ACLs
+/// the caller clears in one step (sec r1 F2). The folder is listed as it goes, in passes
+/// until one removes nothing. Inputs: the folder, what stays in it and the entries held so
+/// far. Output: unit, or `agent_home_unwritable` when it cannot be listed, one entry stays
+/// or it still changes after [`HOME_PASSES_MAX`] passes.
+fn keep_only(
+    folder: &Path,
+    kept: &[(&str, Kept)],
+    held: &mut Vec<PathBuf>,
+) -> Result<(), AgentHomeError> {
     assert!(folder.is_absolute());
     assert!(!kept.is_empty());
     unpin(folder);
+    let before = held.len();
     for _ in 0..HOME_PASSES_MAX {
+        held.truncate(before);
+        held.push(folder.to_path_buf());
         let mut removed = false;
         for entry in fs::read_dir(folder).map_err(|_| failure("agent_home_unwritable"))? {
             let name = entry
@@ -1149,13 +1168,18 @@ fn keep_only(folder: &Path, kept: &[(&str, Kept)]) -> Result<(), AgentHomeError>
             match wanted {
                 Some(Kept::File) if metadata.is_file() => unpin(&path),
                 Some(Kept::Folder) if metadata.is_dir() => unpin(&path),
-                Some(Kept::Cache) if metadata.is_dir() || link => unpin(&path),
-                Some(Kept::Only(inner)) if metadata.is_dir() => keep_only(&path, inner)?,
+                Some(Kept::Link) if link => unpin(&path),
+                Some(Kept::Only(inner)) if metadata.is_dir() => {
+                    keep_only(&path, inner, held)?;
+                    continue;
+                }
                 _ => {
                     remove_entry(&path)?;
                     removed = true;
+                    continue;
                 }
             }
+            held.push(path);
         }
         if !removed {
             return Ok(());
@@ -1164,24 +1188,45 @@ fn keep_only(folder: &Path, kept: &[(&str, Kept)]) -> Result<(), AgentHomeError>
     Err(failure("agent_home_unwritable"))
 }
 
-/// Names the folders of an agent home a launch keeps only part of, which the agent's
-/// profile keeps it from moving, removing or replacing with a link, so the launch never
-/// walks through a link a running process swapped in after its check. Output: the names,
-/// in [`HOME_KEPT`] order.
-pub(crate) fn walked_folders() -> impl Iterator<Item = &'static str> {
-    HOME_KEPT
-        .iter()
-        .filter(|(_, kind)| matches!(kind, Kept::Only(_)))
-        .map(|(name, _)| *name)
+/// Names, as paths below the home, the folders of an agent home a launch keeps only part
+/// of and the links it keeps, which the agent's profile keeps it from moving, removing or
+/// replacing with a link, or making itself as a link, so the launch never walks through a
+/// link a running process swapped in after its check and no cargo cache link leads
+/// elsewhere (DEC-173). Output: the paths, each folder ahead of what it holds.
+pub(crate) fn pinned_entries() -> Vec<String> {
+    let mut pinned = Vec::new();
+    pin_below("", HOME_KEPT, &mut pinned);
+    pinned
+}
+
+/// Adds to `pinned` each folder kept only in part and each link kept in one list, below
+/// `prefix`, and what the folders hold in turn. Inputs: the path of the list's folder below
+/// the home, empty for the home, the list and the paths found so far.
+fn pin_below(prefix: &str, kept: &[(&str, Kept)], pinned: &mut Vec<String>) {
+    for (name, kind) in kept {
+        let path = if prefix.is_empty() {
+            (*name).to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        match kind {
+            Kept::Only(inner) => {
+                pinned.push(path.clone());
+                pin_below(&path, inner, pinned);
+            }
+            Kept::Link => pinned.push(path),
+            Kept::File | Kept::Folder => {}
+        }
+    }
 }
 
 /// Clears the immutable and append-only flags an agent may set on one entry of its home,
-/// without following a link ([`crate::team::cleanup::unpin`]), so they keep nothing from
-/// going or being rewritten (RV-DS241-138). Input: the entry. A link, or an entry that will
-/// not open, keeps its flags, and a removal of it then fails.
+/// without following a link ([`crate::team::cleanup::unpin_home_entry`]), so they keep
+/// nothing from going or being rewritten, also on an entry that will not open (RV-DS241-138,
+/// -137 code r1 F2). Input: the entry.
 #[cfg(target_os = "macos")]
 fn unpin(path: &Path) {
-    crate::team::cleanup::unpin(rustix::fs::CWD, path);
+    crate::team::cleanup::unpin_home_entry(rustix::fs::CWD, path);
 }
 
 /// Leaves flags alone where no flag an agent may set keeps an entry from going. Input:

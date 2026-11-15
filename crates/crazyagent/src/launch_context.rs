@@ -2237,16 +2237,30 @@ fn lock(_home: &Path) -> Result<File, LaunchError> {
     Err(failure("launch_context_unavailable"))
 }
 
+/// Opens and locks the agent home's launch lock, made owner-only and never through a link.
+/// A flag or ACL an earlier run left on the home or on the lock, which would refuse the
+/// open, is cleared once and the open tried again (RV-DS241-137 code r1 F1); a confined
+/// agent can set neither there. Input: the home. Output: the locked file,
+/// `launch_context_unsafe` or `launch_home_busy`.
 #[cfg(unix)]
 fn lock(home: &Path) -> Result<File, LaunchError> {
-    let file = File::from(
+    let path = home.join(LOCK);
+    let open = || {
         rustix::fs::open(
-            home.join(LOCK),
+            &path,
             OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::RUSR | Mode::WUSR,
         )
-        .map_err(|_| failure("launch_context_unsafe"))?,
-    );
+    };
+    let opened = open().or_else(|_| {
+        #[cfg(target_os = "macos")]
+        for entry in [home, path.as_path()] {
+            crate::team::cleanup::unpin_home_entry(rustix::fs::CWD, entry);
+        }
+        crate::team::cleanup::clear_acls([home, path.as_path()]);
+        open()
+    });
+    let file = File::from(opened.map_err(|_| failure("launch_context_unsafe"))?);
     let metadata = file
         .metadata()
         .map_err(|_| failure("launch_context_unsafe"))?;

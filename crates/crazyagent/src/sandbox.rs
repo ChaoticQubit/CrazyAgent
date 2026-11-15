@@ -364,16 +364,13 @@ const REFUSED_SUFFIXES: &[&str] = &[
 ];
 
 /// The git settings every agent process gets, sandboxed or at Full access: no system git
-/// config (whose `credential.helper=osxkeychain` would ask the owner's Keychain), no global
-/// config either, as the engine's own git runs, so a `.gitconfig` or `.config/git/config`
-/// an earlier run left in the agent home never runs its hooks or programs (RV-DS241-137),
-/// no credential helper at all, no terminal prompt, and no bare repository found by
+/// config (whose `credential.helper=osxkeychain` would ask the owner's Keychain), no
+/// credential helper at all, no terminal prompt, and no bare repository found by
 /// discovery (`safe.bareRepository=explicit`, SR1-2), so a folder another agent laid out
 /// as one never runs its config, while `--git-dir` still opens it. They are set after the
 /// harness's own variables, so a harness cannot replace them.
-pub const AGENT_GIT_ENV: [(&str, &str); 8] = [
+pub const AGENT_GIT_ENV: [(&str, &str); 7] = [
     ("GIT_CONFIG_NOSYSTEM", "1"),
-    ("GIT_CONFIG_GLOBAL", "/dev/null"),
     ("GIT_TERMINAL_PROMPT", "0"),
     ("GIT_CONFIG_COUNT", "2"),
     ("GIT_CONFIG_KEY_0", "credential.helper"),
@@ -382,11 +379,20 @@ pub const AGENT_GIT_ENV: [(&str, &str); 8] = [
     ("GIT_CONFIG_VALUE_1", "explicit"),
 ];
 
-/// The Python setting every agent process gets, sandboxed or at Full access: no user site,
-/// so a `.pth` file or `usercustomize` module an earlier run left in the agent home's user
-/// site never runs as Python starts (RV-DS241-137). It is set after the harness's own
-/// variables, so a harness cannot turn the user site back on.
-pub const AGENT_PYTHON_ENV: [(&str, &str); 1] = [("PYTHONNOUSERSITE", "1")];
+/// The settings every agent process gets, sandboxed or at Full access, that keep its tools
+/// from reading config an earlier run left in its home, which a launch resets
+/// (RV-DS241-137, sec r1 F1): no global git config, as the engine's own git runs, so a
+/// `.gitconfig` or `.config/git/config` there never runs its hooks or programs, no Python
+/// user site, so a `.pth` file or `usercustomize` module there never runs as Python starts,
+/// and no npm user config, so an `.npmrc` there never hands its `node-options` or
+/// `script-shell` to a script. They are set after the harness's own variables, so a harness
+/// cannot replace them, and never in the owner's IDE terminal, whose home is the owner's own
+/// and no launch resets ([`owner_terminal_env`], code r1 F3).
+pub const AGENT_HOME_ENV: [(&str, &str); 3] = [
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("PYTHONNOUSERSITE", "1"),
+    ("NPM_CONFIG_USERCONFIG", "/dev/null"),
+];
 
 /// The root certificates every sandboxed agent process trusts for TLS on macOS: the system
 /// bundle, named in `SSL_CERT_FILE`. A harness that reads its roots from the keychain, as
@@ -442,6 +448,7 @@ pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
     }
     if AGENT_GIT_ENV
         .iter()
+        .chain(AGENT_HOME_ENV.iter())
         .any(|(git, fixed)| name == *git && value == *fixed)
     {
         return true;
@@ -467,12 +474,35 @@ pub fn shell_tmp_prefix(tmp: &Path) -> PathBuf {
 /// `HOME`, `TMPDIR` and `TMPPREFIX`, and the tool cache's [`TOOL_CACHE_ENV`] when `base`
 /// sets them, always stay as `base` set them), then `TMPPREFIX` from
 /// [`shell_tmp_prefix`] when `TMPDIR` is set, then [`AGENT_GIT_ENV`], [`AGENT_TLS_ENV`] and
-/// [`AGENT_PYTHON_ENV`].
+/// [`AGENT_HOME_ENV`].
 /// Inputs: the base and harness variables. Output: the variables, or `Invalid` when any
 /// one fails [`agent_variable_allowed`].
 pub fn agent_env<'a>(
     base: &[(&str, &OsStr)],
     harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Vec<(OsString, OsString)>, SandboxError> {
+    built_env(base, harness, &AGENT_HOME_ENV)
+}
+
+/// Builds the environment of the owner's confined IDE terminal as [`agent_env`] does for an
+/// agent, but without [`AGENT_HOME_ENV`]: its home is the owner's own, kept across
+/// terminals, so the global git config, Python user site and npm config the owner sets up
+/// there stay in use (RV-DS241-137 code r1 F3). Inputs: the base and terminal variables.
+/// Output: the variables, or `Invalid` when any one fails [`agent_variable_allowed`].
+pub fn owner_terminal_env<'a>(
+    base: &[(&str, &OsStr)],
+    terminal: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Vec<(OsString, OsString)>, SandboxError> {
+    built_env(base, terminal, &[])
+}
+
+/// Builds the environment [`agent_env`] describes, setting `home` after the fixed git and
+/// TLS settings. Inputs: the base and harness variables and the home settings. Output: the
+/// variables, or `Invalid` when any one fails [`agent_variable_allowed`].
+fn built_env<'a>(
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+    home: &[(&'static str, &'static str)],
 ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
     let refused = || invalid("agent environment holds an owner secret");
     let mut env: Vec<(OsString, OsString)> = Vec::new();
@@ -514,7 +544,7 @@ pub fn agent_env<'a>(
     let fixed = AGENT_GIT_ENV
         .into_iter()
         .chain(AGENT_TLS_ENV)
-        .chain(AGENT_PYTHON_ENV);
+        .chain(home.iter().copied());
     for (name, value) in fixed {
         set(&mut env, OsStr::new(name), Some(OsStr::new(value)));
     }
@@ -3981,12 +4011,15 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
 /// launch, out of its reach (DEC-146): no write under `Library/Keychains` nor to
 /// `Library/Preferences/com.apple.security.plist`, and no move, removal, mode change or link
 /// in place of `Library`, `Library/Preferences` or any other folder a launch keeps only part
-/// of ([`crate::agent_home::walked_folders`]), as [`root_pin`] keeps the home itself, so no
-/// link an agent plants leads one of those calls, or a launch's removal of what it does not
-/// keep, outside the home. They deny writes to cargo's and git's own config in the home
-/// (`.cargo/config`, `.cargo/config.toml`, `.config/git`) and any file flag in it, so a run
-/// neither plants config its own tools run nor pins what the next launch removes
-/// (RV-DS241-137, -138).
+/// of, nor of the cargo cache links the launch keeps, nor a link it makes at their names
+/// ([`crate::agent_home::pinned_entries`], DEC-173), as [`root_pin`] keeps the home itself,
+/// so no link an agent plants leads one of those calls, a launch's removal of what it does
+/// not keep or a later cargo outside the home. They deny writes to cargo's, git's, npm's
+/// and yarn's own config and cargo's subcommands in the home (`.cargo/config`,
+/// `.cargo/config.toml`, `.config/git`, `.npmrc`, `.yarnrc`, `.yarnrc.yml`, `.cargo/bin`)
+/// and any file flag or ACL in it, so a run, or a process of it still alive after the next
+/// launch's reset, neither plants config or programs its own tools run nor pins what the
+/// next launch removes or writes (RV-DS241-137, -138, sec r1 F1, F2).
 /// They must follow every write allow. Input: the home. Output: the rule text.
 fn launch_denies(home: &Path) -> String {
     use crate::agent_home::Harness;
@@ -4004,7 +4037,11 @@ fn launch_denies(home: &Path) -> String {
         "Library/Keychains",
         ".cargo/config",
         ".cargo/config.toml",
+        ".cargo/bin",
         ".config/git",
+        ".npmrc",
+        ".yarnrc",
+        ".yarnrc.yml",
     ];
     let files = [
         Harness::Claude.instruction_file(),
@@ -4031,11 +4068,12 @@ fn launch_denies(home: &Path) -> String {
         other_than(crate::launch_context::CODEX_SYSTEM_SKILLS)
     ));
     let library = format!("{home}/{}", any_case("Library"));
-    let mut walked: Vec<String> = crate::agent_home::walked_folders()
-        .map(|folder| format!("{home}/{}", any_case(folder)))
+    let walked: Vec<String> = crate::agent_home::pinned_entries()
+        .iter()
+        .map(|entry| format!("{home}/{}", any_case(entry)))
         .collect();
     assert!(walked.contains(&library));
-    walked.push(format!("{library}/{}", any_case("Preferences")));
+    assert!(walked.contains(&format!("{home}/{}", any_case(".cargo/registry"))));
     let spelled = |indent: &str| {
         walked
             .iter()
@@ -4043,11 +4081,11 @@ fn launch_denies(home: &Path) -> String {
             .collect::<String>()
     };
     text.push_str(&format!(
-        "(deny {PINNED_WRITES}{})\n(deny file-write-create\n  (require-all\n    (require-any{})\n    (vnode-type SYMLINK)))\n(deny file-write-flags (regex #\"^{home}(/.*)?$\"))\n",
+        "(deny {PINNED_WRITES}{})\n(deny file-write-create\n  (require-all\n    (require-any{})\n    (vnode-type SYMLINK)))\n(deny file-write-flags file-write-acl (regex #\"^{home}(/.*)?$\"))\n",
         spelled("  "),
         spelled("      "),
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 33);
+    assert_eq!(text.matches("(regex #\"^/").count(), 41);
     text
 }
 

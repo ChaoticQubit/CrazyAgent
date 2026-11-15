@@ -6,7 +6,7 @@ use crazyagent::credentials::{Keychain, SecretString, Store, reference};
 use crazyagent::model_gateway::relay::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use crazyagent::sandbox::toolchains::{self, ToolHomes};
 use crazyagent::sandbox::{
-    AGENT_GIT_ENV, AGENT_PYTHON_ENV, AGENT_TLS_ENV, ProjectSandbox, SECRET_ROOT_REFUSED,
+    AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, ProjectSandbox, SECRET_ROOT_REFUSED,
     SandboxError, SandboxNetwork, agent_command, agent_env_refused, agent_variable_allowed,
 };
 use keychain_support::TemporaryKeychain;
@@ -585,7 +585,7 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
     .into_iter()
     .chain(AGENT_GIT_ENV)
     .chain(AGENT_TLS_ENV)
-    .chain(AGENT_PYTHON_ENV)
+    .chain(AGENT_HOME_ENV)
     .map(|(name, value)| (name.to_owned(), value.to_owned()))
     .collect();
     expected.extend(
