@@ -1064,6 +1064,12 @@ fn passes(probe: &mut Command) -> bool {
     .is_ok_and(|status| status.success())
 }
 
+/// Tells whether a bubblewrap is one the helper may nest an agent under. Input: its path.
+/// Output: true for a file.
+fn trusted(bwrap: &Path) -> bool {
+    bwrap.is_file()
+}
+
 /// Tells whether this machine starts the helper inside bubblewrap's namespaces and holds
 /// the same probe there, by running the exact nest: the helper, bubblewrap with
 /// [`NEST_ARGS`], then the helper's probe. A bubblewrap that only exists proves nothing:
@@ -1884,6 +1890,36 @@ mod tests {
         assert_eq!(bridged(&[Loopback(8080)], LinuxSockets::TcpPorts), None);
         let (_temp, open) = project(SandboxNetwork::Open);
         assert_eq!(open.bridged_ports(), None);
+    }
+
+    #[test]
+    fn a_set_user_or_set_group_id_bubblewrap_is_never_nested_under() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let moded = |name: &str, mode: u32| {
+            let path = root.join(name);
+            fs::write(&path, b"").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let plain = moded("plain", 0o755);
+        let marked = [moded("setuid", 0o4755), moded("setgid", 0o2755)];
+        assert!(trusted(&plain));
+        assert!(trusted(Path::new("/bin/sh")), "a program root owns");
+        assert!(!trusted(&root.join("absent")));
+        assert!(!trusted(&root), "a folder");
+        for bwrap in &marked {
+            assert!(!trusted(bwrap), "{}", bwrap.display());
+            let (_temp, sandbox) = project(SandboxNetwork::Open);
+            let backend = LinuxBackend::Nested {
+                bwrap: bwrap.clone(),
+                helper: plain.clone(),
+            };
+            let refused = LinuxSandbox::new(sandbox, backend).is_err();
+            assert!(refused, "{}", bwrap.display());
+            assert!(!nests(bwrap, &plain, &[PROBE.into()]));
+        }
     }
 
     fn nested_words(network: SandboxNetwork) -> (PathBuf, PathBuf, Vec<OsString>) {

@@ -2491,3 +2491,85 @@ fn the_broker_runs_while_the_agent_does_and_ends_with_it() {
     }
     assert!(!broker_runs(port), "the broker ends with the agent");
 }
+
+/// A guard: bubblewrap's outer process, the first process of a nested agent, runs with no
+/// new privileges, so a set-user-ID bubblewrap gains nothing from the engine (rv-sec3 F1).
+/// Bubblewrap sets the flag itself once it runs, so only a set-user-ID one tells the two
+/// apart.
+#[test]
+fn bubblewrap_starts_for_a_nested_agent_with_no_new_privileges() {
+    let case = case();
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    let (mut child, _output) = started(&sandbox, &case, "echo ready; read -r line");
+    let status = fs::read_to_string(format!("/proc/{}/status", child.id())).unwrap();
+    drop(child.stdin.take());
+    assert!(exit_within(&mut child, Duration::from_secs(5)).is_some());
+    let held = status
+        .lines()
+        .find_map(|line| line.strip_prefix("NoNewPrivs:"))
+        .map(str::trim);
+    assert_eq!(held, Some("1"), "{status}");
+}
+
+/// A gate row for a bubblewrap fact taken from memory: `--die-with-parent` must tie the
+/// namespace to bubblewrap's outer process only. Were that outer process tied to the thread
+/// that started it, an agent would end when an engine thread does.
+#[test]
+fn a_nested_agent_outlives_the_thread_that_started_it() {
+    let case = case();
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    let script = "echo ready; read -r line; echo \"got $line\"";
+    let (mut child, mut output) = std::thread::scope(|scope| {
+        scope
+            .spawn(|| started(&sandbox, &case, script))
+            .join()
+            .unwrap()
+    });
+    assert!(
+        exit_within(&mut child, Duration::from_millis(500)).is_none(),
+        "the agent ended with the thread that started it"
+    );
+    child.stdin.take().unwrap().write_all(b"on\n").unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "got on\n");
+    let status = exit_within(&mut child, Duration::from_secs(5));
+    assert_eq!(status.and_then(|status| status.code()), Some(0));
+}
+
+/// A gate row for a bubblewrap fact taken from memory: its outer process exits with the
+/// harness, at once and with its code, and the namespace then ends with everything the
+/// harness left behind, a process in a session of its own too.
+#[test]
+fn a_nested_agent_ends_with_its_harness_and_leaves_nothing_it_started() {
+    let case = case();
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    let token = format!("603.{}", std::process::id());
+    let mut harness = Command::new("/bin/sh");
+    harness
+        .arg("-c")
+        .arg(format!("setsid sleep {token} & exit 5"))
+        .current_dir(case.project.join("worktrees"));
+    let mut child = crazyagent::spawn_gate::spawn(
+        sandbox
+            .wrap(&harness)
+            .unwrap()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let status = exit_within(&mut child, Duration::from_secs(5));
+    assert_eq!(
+        status.and_then(|status| status.code()),
+        Some(5),
+        "the first process waits for more than the harness"
+    );
+    assert!(ended(&token), "a process the harness left outlived it");
+}

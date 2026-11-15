@@ -522,7 +522,7 @@ fn only_on_linux_below_full_access_does_review_say_nested_git_is_not_blocked() {
 
 #[test]
 fn review_says_what_this_linux_cannot_hold_for_the_chosen_level() {
-    use crate::sandbox::{LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE, LinuxHost};
+    use crate::sandbox::{LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE};
     let look = Look::plain();
     let shown = |wizard: &Wizard| {
         compose(&wizard_screen(wizard, 80, 120, &look), 80, 120, "", &look)
@@ -530,26 +530,34 @@ fn review_says_what_this_linux_cannot_hold_for_the_chosen_level() {
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let host = |nested, scoped| Some(LinuxHost { nested, scoped });
+    let told = |wizard: &mut Wizard, gaps: &[&str]| {
+        let levels = &mut wizard.catalog.as_mut().unwrap().agent_access;
+        let level = levels
+            .iter_mut()
+            .find(|level| level.access == AgentAccess::Sandboxed)
+            .unwrap();
+        level.gaps = gaps.iter().map(|gap| (*gap).to_owned()).collect();
+    };
     let mut wizard = about();
     wizard.go(Step::Review);
     wizard.access = AgentAccess::Sandboxed;
-    wizard.host = None;
-    let elsewhere = shown(&wizard);
-    assert!(elsewhere.contains("Agent access"), "{elsewhere}");
-    assert!(!elsewhere.contains(LINUX_SIGNALS_LINE), "{elsewhere}");
-    wizard.host = host(false, false);
-    let open = shown(&wizard);
-    assert!(open.contains(LINUX_SIGNALS_LINE), "{open}");
-    wizard.host = host(false, true);
-    let listed = shown(&wizard);
-    assert!(listed.contains(LINUX_PROCESS_LIST_LINE), "{listed}");
-    assert!(!listed.contains(LINUX_SIGNALS_LINE), "{listed}");
-    wizard.host = host(true, false);
+    let before = shown(&wizard);
+    assert!(before.contains("Agent access"), "{before}");
+    assert!(!before.contains(LINUX_SIGNALS_LINE), "{before}");
+    load_catalog(&mut wizard, &["c-codex"]);
+    wizard.go(Step::Review);
+    wizard.access = AgentAccess::Sandboxed;
     let held = shown(&wizard);
     assert!(!held.contains(LINUX_SIGNALS_LINE), "{held}");
     assert!(!held.contains(LINUX_PROCESS_LIST_LINE), "{held}");
-    wizard.host = host(false, false);
+    told(&mut wizard, &[LINUX_SIGNALS_LINE]);
+    let open = shown(&wizard);
+    assert!(open.contains(LINUX_SIGNALS_LINE), "{open}");
+    told(&mut wizard, &[LINUX_PROCESS_LIST_LINE]);
+    let listed = shown(&wizard);
+    assert!(listed.contains(LINUX_PROCESS_LIST_LINE), "{listed}");
+    assert!(!listed.contains(LINUX_SIGNALS_LINE), "{listed}");
+    told(&mut wizard, &[LINUX_SIGNALS_LINE]);
     wizard.access = AgentAccess::Full;
     let full = shown(&wizard);
     assert!(!full.contains(LINUX_SIGNALS_LINE), "{full}");

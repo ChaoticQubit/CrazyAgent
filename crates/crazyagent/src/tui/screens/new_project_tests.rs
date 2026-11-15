@@ -93,6 +93,9 @@ pub(super) fn load_engine_catalog(wizard: &mut Wizard, signed_in: &[&str]) {
 /// Takes the wizard and the signed-in connection ids. Returns nothing.
 pub(super) fn load_catalog(wizard: &mut Wizard, signed_in: &[&str]) {
     let (pool, research, mut served) = engine_catalog(wizard, signed_in);
+    for level in &mut served.agent_access {
+        level.gaps.clear();
+    }
     let agents = u8::try_from(research.len().min(usize::from(HARNESS_AGENTS_MAX))).unwrap();
     if agents > 0 {
         let team = &mut served.default_team;
