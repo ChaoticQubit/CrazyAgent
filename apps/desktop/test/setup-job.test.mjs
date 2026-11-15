@@ -139,9 +139,10 @@ test("New Project starts the engine's job, follows it on the page and runs its f
   assert.equal((lib.match(/desktop_setup_project_job/g) ?? []).length, 2, "the command's body and its handler entry");
   assert.match(read("src-tauri/src/bridge/intake.rs"), /JobSubject::Setup \{\s*project_id,\s*spec,\s*setup,?\s*\}/);
   const wizard = read("src/screens/new-project/index.tsx");
-  assert.ok(wizard.includes("startSetupJob(request.spec, request.setup)"), "Create starts the engine's job");
+  assert.ok(wizard.includes("await setupStart(request.spec, request.setup)"), "Create starts the engine's job");
+  assert.match(wizard, /start = startSetupJob,/, "the start is the engine's job");
   assert.ok(!wizard.includes("setupProject(request.spec"), "Create is no longer a direct change of the window");
-  assert.ok(wizard.includes("session?.refreshIntake(started.value)"), "the started job shows on Home at once");
+  assert.ok(wizard.includes("session?.refreshIntake(result.job)"), "the started job shows on Home at once");
   assert.ok(wizard.includes("session?.followIntake("), "the page owns the end of the job it follows");
   assert.ok(wizard.includes("dismissIntake("), "a job the page ended leaves Home");
   assert.ok(wizard.includes("mounted.current"), "follow-ups stop once the owner leaves the page");

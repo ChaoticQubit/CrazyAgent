@@ -1,15 +1,16 @@
 use super::{
     ActionOutcome, BridgeError, IntentReceipt, NativeBridge, Unlocked, bounded, caused, failure,
-    native_random_id,
+    native_project_id, native_random_id,
 };
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::onboarding::OnboardingView;
+use crazyagent::project_setup::ProjectSetup;
 use crazyagent::projects_home::icloud::Progress;
-use crazyagent::projects_home::job::{JobState, JobSubject, JobView};
+use crazyagent::projects_home::job::{JobKind, JobState, JobSubject, JobView};
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
-use crazyagent::protocol::{CredentialRef, ProjectId, RequestId};
+use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec, RequestId};
 use crazyagent::setup::{Dependency, RefusedTool, SetupStatus};
 use serde::Serialize;
 use std::path::Path;
@@ -22,7 +23,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 99] = [
+pub const INTAKE_CODES: [&str; 110] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -122,6 +123,17 @@ pub const INTAKE_CODES: [&str; 99] = [
     "delete_research_running",
     "delete_platform_unqualified",
     "delete_outside_home",
+    "setup_cannot_stop",
+    "home_new_project_interrupted",
+    "team_harness_unavailable",
+    "documents_too_many",
+    "document_name_duplicate",
+    "document_name_invalid",
+    "document_too_large",
+    "document_type_not_allowed",
+    "project_documents_too_large",
+    "project_folder_unwritable",
+    "project_folder_unavailable",
 ];
 
 const GITHUB_CODES: [&str; 35] = [
@@ -270,11 +282,17 @@ fn intake_failure(error: EngineError) -> BridgeError {
 }
 
 /// An intake job's view as the window may show it: a failure or question code the window has
-/// no sentence for becomes `intake_failed`, so no raw engine text reaches the window.
-/// Input: the engine's view. Output: the same view with only listed codes.
+/// no sentence for becomes `intake_failed`, or `home_new_project_failed` for a New Project, so
+/// no raw engine text reaches the window. Input: the engine's view. Output: the same view with
+/// only listed codes.
 pub fn shown(mut view: JobView) -> JobView {
+    let unlisted = if view.kind == JobKind::Setup {
+        "home_new_project_failed"
+    } else {
+        "intake_failed"
+    };
     if let JobState::Failed { code, .. } | JobState::NeedsAnswer { code } = &mut view.state {
-        *code = intake_code(code).unwrap_or("intake_failed").to_owned();
+        *code = intake_code(code).unwrap_or(unlisted).to_owned();
     }
     assert!(match &view.state {
         JobState::Failed { code, .. } | JobState::NeedsAnswer { code } => {
@@ -670,6 +688,37 @@ impl NativeBridge {
         let client = self.icloud_client()?;
         Ok(Box::pin(async move {
             let subject = JobSubject::Delete { project_id, name };
+            let view = client
+                .job_start(request_id, subject, AddMode::Move, Vec::new())
+                .await;
+            bounded(shown(view.map_err(intake_failure)?))
+        }))
+    }
+
+    /// Starts the engine's job that sets up a New Project apart from the window: the engine
+    /// checks the answers at once, builds the project's folder in the projects home with its
+    /// documents counted and records it, so leaving New Project never stops it (DEC-177
+    /// add.2). Inputs: the name spec and the setup the wizard gave. Output: the job's view,
+    /// `job_busy` while another job runs, or New Project's refusal.
+    pub fn setup_project_job(
+        &mut self,
+        spec: ProjectSpec,
+        setup: ProjectSetup,
+    ) -> Result<Unlocked<JobView>, BridgeError> {
+        spec.validate()
+            .map_err(|_| failure("project_spec_bounds"))?;
+        setup
+            .validate()
+            .map_err(|_| failure("project_setup_bounds"))?;
+        let project_id = native_project_id()?;
+        let request_id = intake_id(&native_random_id()?)?;
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            let subject = JobSubject::Setup {
+                project_id,
+                spec,
+                setup,
+            };
             let view = client
                 .job_start(request_id, subject, AddMode::Move, Vec::new())
                 .await;

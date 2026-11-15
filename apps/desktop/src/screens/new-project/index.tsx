@@ -1,14 +1,16 @@
-import { checkUnconfirmed, harnessCatalog, nextGeneration, poolSummaries, receiptResult } from "../../api";
+import { harnessCatalog, nextGeneration, poolSummaries } from "../../api";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { dismissIntake, loadIntakeJob, newProjectCopy, stopIntake } from "../../api-intake";
 import {
-  failureCopy, loadAgentPolicy, loadPools, loadProjectCatalog, loadProjects, needsReconcile, pickDocuments, receiptState, saveAgentPolicy, settledReceipt, setProjectPool, setupProject,
+  failureCopy, loadAgentPolicy, loadPools, loadProjectCatalog, loadProjects, pickDocuments, receiptState, saveAgentPolicy, setProjectPool, startSetupJob,
 } from "../../api-projects";
 import type { PoolChoice, ProjectCatalog, ProjectSetup, ProjectSpec } from "../../api-projects";
 import type { IntakeJob } from "../../engine-client";
 import { SessionContext } from "../../state";
 import { Button, ConfirmDialog, Icon, Notice, PageHeader } from "../../ui";
 import { displayText } from "../conversation";
+import { jobActions, jobLine, refusalLine, setupFollow } from "../intake/intake";
 import { flash, go } from "../project/flash";
 import { homePath } from "../settings/harnesses";
 import { NotReady } from "../project/shared";
@@ -24,16 +26,20 @@ import type { ProjectDraft, StepId } from "./wizard";
 import "../project/projects.css";
 
 let kept: { draft: ProjectDraft; step: StepId } | null = null;
+let startedSetup: { id: string; draft: ProjectDraft } | null = null;
 
-/** Forgets the kept New Project draft.
+/** Forgets the kept New Project draft and the job it started, whose follow-ups then never run.
  * Input: none. Output: none. */
 export function discardKeptDraft(): void {
   kept = null;
+  startedSetup = null;
 }
 
 function valueOf<T>(result: Result<T> | undefined): T | null {
   return result?.kind === "ok" ? result.value : null;
 }
+
+const KEPT_LINE = "Couldn't create the project. Your answers are kept.";
 
 /** What Create got from the engine: the started New Project job, or the note the page shows
  * with the answers kept. */
@@ -42,15 +48,33 @@ export type SetupStarted = { kind: "started"; job: IntakeJob } | { kind: "refuse
 /** Starts the engine's New Project job (DEC-177 add.2). Inputs: the name spec, the setup, the
  * start and the job read a busy refusal names the running job from. Output: the started job,
  * or the note the page shows. */
-export async function setupStart(spec: ProjectSpec, setup: ProjectSetup, start: (spec: ProjectSpec, setup: ProjectSetup) => Promise<Result<IntakeJob>>): Promise<SetupStarted> {
+export async function setupStart(spec: ProjectSpec, setup: ProjectSetup, start = startSetupJob,
+  read: () => Promise<Result<IntakeJob | null>> = loadIntakeJob): Promise<SetupStarted> {
   const result = await start(spec, setup);
-  return result.kind === "ok" ? { kind: "started", job: result.value } : { kind: "refused", note: "" };
+  if (result.kind === "ok") return { kind: "started", job: result.value };
+  if (result.kind === "not_ready") return { kind: "refused", note: "Not ready yet: creating a project with research isn't in this build." };
+  return { kind: "refused", note: `${KEPT_LINE} ${await refusalLine(result.code, newProjectCopy(result), read)}` };
+}
+
+/** Reads the New Project job this page started before the owner left it, as the page opens
+ * again: it follows one still building, starts fresh after one that ended done, its follow-ups
+ * skipped, and else lets go with the answers kept, Home saying how it ended (DEC-177 add.2 Q1
+ * A). Input: Home's read of the engine's job. Output: the job id to follow, or null. */
+function resumeSetup(job: IntakeJob | null): string | null {
+  if (startedSetup === null) return null;
+  const now = setupFollow(job, startedSetup.id);
+  if (now.kind === "running") return startedSetup.id;
+  if (now.kind === "done") kept = null;
+  startedSetup = null;
+  return null;
 }
 
 /** The five-step New Project flow: Basics, Documents, Work, Pool and Team, then Create project.
  * Inputs: an optional starting step and a navigate handler for hash routes.
  * Output: the page; answers are kept if the owner leaves and comes back. */
 export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: string; navigate?: (path: string) => void }) {
+  const session = useContext(SessionContext);
+  const [following, setFollowing] = useState<string | null>(() => resumeSetup(session?.intake ?? null));
   const initialStep = STEPS.some((item) => item.id === routeStep) ? routeStep as StepId : kept?.step ?? "basics";
   const [draft, setDraftState] = useState<ProjectDraft>(() => kept?.draft ?? emptyDraft());
   const [step, setStepState] = useState<StepId>(initialStep);
@@ -64,10 +88,13 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   const [docErrors, setDocErrors] = useState<string[]>([]);
   const [docPath, setDocPath] = useState("");
   const [picker, setPicker] = useState<"ready" | "missing" | "failed">("ready");
-  const [creating, setCreating] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [finishing, setFinishing] = useState(false);
   const [createError, setCreateError] = useState("");
   const [discarding, setDiscarding] = useState(false);
-  const session = useContext(SessionContext);
+  const mounted = useRef(true);
+  const follow = following === null ? null : setupFollow(session?.intake ?? null, following);
+  const creating = starting || finishing || following !== null;
 
   const setDraft = (next: ProjectDraft) => {
     setDraftState(next);
@@ -132,6 +159,29 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     return () => window.removeEventListener("keydown", onKey);
   }, [discarding]);
 
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  useEffect(() => {
+    session?.followIntake(following);
+    return () => session?.followIntake(null);
+  }, [following]);
+
+  useEffect(() => {
+    if (following === null || follow === null || follow.kind === "running") return;
+    const snapshot = startedSetup;
+    startedSetup = null;
+    setFollowing(null);
+    if (follow.kind === "done") {
+      if (snapshot?.id === following) void finish(follow.project, following, snapshot.draft);
+      return;
+    }
+    if (follow.kind === "ended") void dismissIntake(following);
+    setCreateError(follow.kind === "ended" ? `${KEPT_LINE} ${follow.words}` : "We couldn't confirm the project was created. Check your projects before trying again.");
+  }, [following, follow?.kind]);
+
   const catalogValue = valueOf(catalog);
   const harnessValue = valueOf(harnesses);
   const poolValue = valueOf(pools);
@@ -144,41 +194,46 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
 
   async function create() {
     if (!canCreate) return;
-    setCreating(true);
+    setStarting(true);
     setCreateError("");
     const request = buildRequest(draft);
-    const result = await setupProject(request.spec, request.setup, nextGeneration());
-    if (result.kind !== "ok") {
-      setCreating(false);
-      setCreateError(result.kind === "not_ready" ? "Not ready yet: creating a project with research isn't in this build." : `Couldn't create the project. Your answers are kept. ${failureCopy(result)}`);
+    const result = await setupStart(request.spec, request.setup);
+    setStarting(false);
+    if (result.kind === "refused") {
+      setCreateError(result.note);
       return;
     }
-    let receipt = result.value;
-    if (needsReconcile(receipt)) {
-      const settled = await checkUnconfirmed();
-      session?.noteResult(settled.kind === "ok" ? receiptResult(settled.value) : settled);
-      receipt = settledReceipt(receipt, settled);
-    }
-    const state = receiptState(receipt);
-    const id = receipt.project_id;
-    if (state.kind !== "applied" || !id) {
-      setCreating(false);
-      setCreateError(state.kind === "unconfirmed" ? "We couldn't confirm your last change. Check your projects before trying again." : `Couldn't create the project. Your answers are kept. ${failureCopy(state.kind === "rejected" ? state.code : "unknown")}`);
-      return;
-    }
+    startedSetup = { id: result.job.id, draft };
+    session?.refreshIntake(result.job);
+    setFollowing(result.job.id);
+  }
+
+  async function stop(job: IntakeJob) {
+    const result = await stopIntake(job.id);
+    if (result.kind === "error") setCreateError(newProjectCopy(result));
+    session?.refreshIntake();
+  }
+
+  /** Runs a New Project's follow-ups once its job is done, only while the page stays open
+   * (DEC-177 add.2 Q1 A): its pool, then its agent access, then the project opens and the job
+   * leaves Home. Inputs: the new project's id, the job's id and the answers it started with. */
+  async function finish(id: string, job: string, draft: ProjectDraft) {
+    setFinishing(true);
+    const request = buildRequest(draft);
+    const chosen = poolValue?.find((choice) => choice.pool.id === draft.pool) ?? null;
     const name = request.spec.name;
     const count = request.setup.research.length;
     let message = draft.pool
       ? `${name} created.${count ? ` ${count} research ${count === 1 ? "agent is" : "agents are"} starting.` : ""}`
       : `${name} created. Research starts when you choose a pool.`;
-    if (draft.pool) {
+    if (draft.pool && mounted.current) {
       const assigned = await setProjectPool(id, draft.pool, nextGeneration());
       if (assigned.kind !== "ok" || assigned.value.kind !== "applied") {
-        message = `${name} created. Couldn't assign ${chosenPool ? poolName(chosenPool.pool) : draft.pool}. Choose it again in the project's Settings, Pool.`;
+        message = `${name} created. Couldn't assign ${chosen ? poolName(chosen.pool) : draft.pool}. Choose it again in the project's Settings, Pool.`;
       }
     }
     const access = draftAccess(draft, catalogValue?.agent_access);
-    if (access !== "sandboxed") {
+    if (access !== "sandboxed" && mounted.current) {
       const read = await loadAgentPolicy(id);
       const saved = read.kind === "ok" ? await saveAgentPolicy(id, policyOf(read.value, access, read.value.network, read.value.toolchains.map((row) => row.allowed), read.value.ide_git_hooks, read.value.ide_agent_files), read.value.version, nextGeneration()) : read;
       const state = saved.kind === "ok" ? receiptState(saved.value) : null;
@@ -187,6 +242,8 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
         message = `${message} Its agents stay Sandboxed: ${accessLabel(access)} wasn't saved.${why} Choose it again in the project's Settings, Agent access.`;
       }
     }
+    if (!mounted.current) return;
+    void dismissIntake(job);
     kept = null;
     await session?.refreshProjects();
     flash(message);
@@ -287,7 +344,6 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
         </div>}
         {step === "team" && <div className="pj-stack">
           <h2 id="pj-step-title">Team</h2>
-          {createError && <Notice tone="danger" alert>{createError}</Notice>}
           {harnesses?.kind === "not_ready" && <NotReady what="the harness list isn't in this build, so installed status isn't checked." />}
           {draft.team ? <TeamEditor prefix="np" team={draft.team} harnesses={harnessValue} pool={chosenPool} research={draft.research}
             onChange={(team) => { setTeamEdited(true); setDraft({ ...draft, team }); }} />
@@ -296,6 +352,12 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
           <AccessLevels name="np-access" value={draftAccess(draft, catalogValue?.agent_access)} unavailable={(level) => levelUnavailable(catalogValue?.agent_access, level)} onChange={(access) => setDraft({ ...draft, access })} />
           <p className="pj-help">You can change agent access later in the project's Settings, Agent access.</p>
           <p className="pj-summary">{summary(draft, chosenPool ? poolName(chosenPool.pool) : null)}</p>
+        </div>}
+        {createError && <Notice tone="danger" alert>{createError}</Notice>}
+        {follow?.kind === "running" && <div className="pj-row" role="status">
+          <span className="pj-small pj-secondary">{displayText(jobLine(follow.job))}</span>
+          {jobActions(follow.job).includes("stop") && <Button size="small" variant="secondary" onClick={() => void stop(follow.job)}>Stop</Button>}
+          <span className="pj-small pj-muted">You can leave this page and it keeps going. If you do, choose its pool and agent access in its Settings afterwards.</span>
         </div>}
         <footer className="pj-footer">
           <Button icon="arrow-left" disabled={index === 0} onClick={() => setStep(STEPS[Math.max(0, index - 1)].id)}>Back</Button>
@@ -307,7 +369,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
       </form>
     </div>
     <ConfirmDialog open={discarding} title="Discard this new project?" confirmLabel="Discard" cancelLabel="Keep editing"
-      onCancel={() => setDiscarding(false)} onConfirm={() => { kept = null; setDiscarding(false); navigate("/home"); }}>
+      onCancel={() => setDiscarding(false)} onConfirm={() => { discardKeptDraft(); setDiscarding(false); navigate("/home"); }}>
       Your answers on every step are thrown away.
     </ConfirmDialog>
   </div>;

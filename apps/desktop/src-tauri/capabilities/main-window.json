@@ -111,6 +111,7 @@
     "allow-desktop-create-demo",
     "allow-desktop-move-project-home",
     "allow-desktop-delete-project-job",
+    "allow-desktop-setup-project-job",
     "allow-desktop-cancel-research",
     "allow-desktop-retry-research",
     "allow-desktop-plan-roadmap",

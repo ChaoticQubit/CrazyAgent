@@ -810,6 +810,14 @@ export function startDeleteJob(id: string, name: string): Promise<Result<IntakeJ
   return call<IntakeJob>("desktop_delete_project_job", { id, name });
 }
 
+/** Starts the engine's job that sets up a New Project, followed on the New Project page and on
+ * Home: it builds the project's folder in the projects folder with its documents counted and
+ * records it, and leaving the page never stops it (DEC-177 add.2). Inputs: the name spec and
+ * the setup. Output: the started job, or New Project's refusal. */
+export function startSetupJob(spec: ProjectSpec, setup: ProjectSetup): Promise<Result<IntakeJob>> {
+  return call<IntakeJob>("desktop_setup_project_job", { spec, setup });
+}
+
 export const PAGES_MAX = 50;
 
 function allRecords(collection: "pools" | "connections"): Promise<ModelAccessRecord[]> {
