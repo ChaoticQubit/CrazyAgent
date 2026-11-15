@@ -223,7 +223,8 @@ impl TurnSession {
 
     /// Stops the running turn: the driver marks it interrupted and its process group gets
     /// TERM; the turn ends as interrupted when its output closes. Output: Ok, or
-    /// `launch_not_running` with no turn or an interrupt already asked.
+    /// `launch_not_running` with no turn, an interrupt already asked or a text-turn turn
+    /// already stopping for output past its bound.
     pub fn interrupt(&mut self) -> Result<(), LaunchError> {
         self.turns.interrupt()?;
         self.stop_turn();
