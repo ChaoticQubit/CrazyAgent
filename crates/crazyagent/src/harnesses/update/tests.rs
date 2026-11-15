@@ -2271,6 +2271,42 @@ fn a_version_read_runs_the_file_it_checked_when_a_middle_link_moves_before_the_r
     assert!(owner_ran.exists(), "the file the resolver checked answers");
 }
 
+/// security-audit vid 1 r2 (rv-secreview, leader 03:29): an update command is checked when
+/// it is built and run later, so the check must bind what runs. A standalone Codex whose
+/// owner entry leads through a link in a project agents can write, which the resolver does
+/// not judge, has that link moved to a planted file after the self-update command passed its
+/// checks: the planted file never runs.
+#[test]
+fn a_self_update_never_runs_a_file_a_middle_link_moved_to_after_its_check() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    std::fs::create_dir_all(&roots.home).unwrap();
+    let at = machine.root.path();
+    let work = at.join("proj");
+    std::fs::create_dir_all(work.join(".crazyagent")).unwrap();
+    let marks = |ran: &Path| format!("#!/bin/sh\necho ran >> {}\n", ran.display());
+    let planted_ran = at.join("planted-ran");
+    let real = at.join("home/.codex/packages/standalone/0.167.1/codex");
+    let planted = work.join("tools/planted/codex");
+    let middle = work.join("tools/codex");
+    let entry = at.join("home/.local/bin/codex");
+    executable(&real, &marks(&at.join("owner-ran")));
+    executable(&planted, &marks(&planted_ran));
+    std::os::unix::fs::symlink(&real, &middle).unwrap();
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&middle, &entry).unwrap();
+    assert_eq!(method("codex", &real, &roots), Method::SelfUpdate);
+    if let Ok(fixed) = update_command("codex", &entry, &real, &roots) {
+        std::fs::remove_file(&middle).unwrap();
+        std::os::unix::fs::symlink(&planted, &middle).unwrap();
+        let _ = run(&fixed, &roots.home, CHECK_TIME);
+    }
+    assert!(
+        !planted_ran.exists(),
+        "a link moved after the check never reaches the update run"
+    );
+}
+
 fn listed(ids: &[&str]) -> Vec<String> {
     ids.iter().map(|id| (*id).to_owned()).collect()
 }
