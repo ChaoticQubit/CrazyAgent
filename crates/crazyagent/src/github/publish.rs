@@ -810,8 +810,8 @@ pub(super) fn secret_findings(
     )
 }
 
-/// Reports whether the scan of a project with no history may pass over a listed file it
-/// could not open: one gone since the listing, or one reached through a link in any part,
+/// Reports whether a scan may pass over a listed or written file it could not open: one
+/// gone since the listing, or one reached through a link in any part,
 /// which `add -A` takes as the link alone. Input: the open error. Output: true for those,
 /// false for any other error, such as a full descriptor table, which stops the scan.
 fn passed_over(error: &std::io::Error) -> bool {
@@ -834,6 +834,48 @@ fn passed_over(error: &std::io::Error) -> bool {
                     || reason == crate::platform::BENEATH_FOLDER_LINKED
             })
     }
+}
+
+/// Adds the secret lines of the working copies of the files publish wrote, which the
+/// commit takes by name (`add -f`) whatever the history or the .gitignore says, so the
+/// scan of HEAD's tree or of the listing may never have read them. A finding already
+/// there is not added twice, and the 1000 bound holds. Inputs: the project, the written
+/// paths and the scan. Output: `()`, or `github_publish_failed`.
+pub(super) fn written_findings(
+    project: &Path,
+    written: &[String],
+    scanned: &mut GitHubSecretScan,
+) -> Result<(), EngineError> {
+    let failed = || failure("github_publish_failed");
+    for path in written {
+        let file = match crate::platform::open_plain_beneath(project, Path::new(path)) {
+            Ok(file) => file,
+            Err(error) if passed_over(&error) => continue,
+            Err(_) => return Err(failed()),
+        };
+        if !file.metadata().map_err(|_| failed())?.is_file() {
+            continue;
+        }
+        let mut head = Vec::new();
+        file.take(SCAN_FILE_BYTES_MAX)
+            .read_to_end(&mut head)
+            .map_err(|_| failed())?;
+        let mut found = Vec::new();
+        scanned.truncated |= scan(path, &head, &mut found);
+        for finding in found {
+            if scanned.findings.contains(&finding) {
+                continue;
+            }
+            if scanned.findings.len() == FINDINGS_MAX {
+                scanned.truncated = true;
+                break;
+            }
+            scanned.findings.push(finding);
+        }
+    }
+    scanned.findings.sort();
+    assert!(scanned.findings.len() <= FINDINGS_MAX);
+    Ok(())
 }
 
 /// Finds the secret lines as [`secret_findings`] does, within the given bounds.

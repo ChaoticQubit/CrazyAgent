@@ -325,11 +325,13 @@ impl GitHub {
         self.checked(job)
     }
 
-    /// Checks what the publish would push for secrets and records the job as checked, or
-    /// blocked on what was found. Input: the job. Output: `()`, or the refusal.
+    /// Checks what the publish would push for secrets, the files publish wrote included,
+    /// and records the job as checked, or blocked on what was found. Input: the job.
+    /// Output: `()`, or the refusal.
     fn checked(&self, job: &mut GitHubPublishJob) -> Result<(), EngineError> {
         let history = self.publish_inspect(&job.project)?.history;
-        let scan = self.publish_secrets(&job.project, history)?;
+        let mut scan = self.publish_secrets(&job.project, history)?;
+        publish::written_findings(&job.project, &job.written, &mut scan)?;
         job.step = if scan.findings.is_empty() {
             assert!(!scan.truncated);
             GitHubPublishStep::Checked
