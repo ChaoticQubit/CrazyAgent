@@ -4,9 +4,10 @@
 /// service-account JSON, `.dockercfg` or `.s3cfg`, and GnuPG keyrings, kept even when
 /// renamed `.txt`. The mapping prompt goes to the project's model provider, and a document
 /// is chosen by its name alone before any text is read, so a name with one of these words,
-/// or two adjacent words joining into one, is neither read nor listed. A few documents with
+/// or two adjacent words joining into one, is neither read nor listed, and so is a word that
+/// joins them with no break at all, such as `apitoken` (RV-DS241-146). A few documents with
 /// such names, such as `key-metrics.md`, are left out with them.
-const SECRET_WORDS: [&str; 41] = [
+const SECRET_WORDS: [&str; 51] = [
     "secret",
     "secrets",
     "credential",
@@ -18,6 +19,16 @@ const SECRET_WORDS: [&str; 41] = [
     "tokens",
     "apikey",
     "apikeys",
+    "apitoken",
+    "apitokens",
+    "authtoken",
+    "authtokens",
+    "accesstoken",
+    "accesstokens",
+    "accesskey",
+    "accesskeys",
+    "secretkey",
+    "secretkeys",
     "privatekey",
     "pem",
     "key",
@@ -59,21 +70,57 @@ const EXTENSION_BYTES_MAX: usize = 8;
 
 /// Whether the file or folder `name` looks like it holds a secret: one of its words, split
 /// at every character that is not an ASCII letter or digit, or two adjacent words joined,
-/// is in [`SECRET_WORDS`], ignoring case. Takes the full name, extensions included.
+/// is in [`SECRET_WORDS`], ignoring case; and so for the parts of those words
+/// ([`sub_words`]), so `awsCredentials`, `myApiKey` and `passwords2` are found while the
+/// unsplit `p12`, `s3cfg` and `id_ed25519` still match (RV-DS241-146). A secret word
+/// inside one unbroken word, as `key` in `keyboard`, is not one. Takes the full name,
+/// extensions included.
 pub(crate) fn secret_like(name: &str) -> bool {
     let words: Vec<&str> = name
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|word| !word.is_empty())
         .collect();
+    let parts: Vec<&str> = words.iter().copied().flat_map(sub_words).collect();
+    assert!(parts.len() >= words.len());
     let secret = |word: &str| {
         SECRET_WORDS
             .iter()
             .any(|known| known.eq_ignore_ascii_case(word))
     };
-    words.iter().any(|word| secret(word))
-        || words
-            .windows(2)
-            .any(|pair| secret(&format!("{}{}", pair[0], pair[1])))
+    let found = |list: &[&str]| {
+        list.iter().any(|word| secret(word))
+            || list
+                .windows(2)
+                .any(|pair| secret(&format!("{}{}", pair[0], pair[1])))
+    };
+    found(words.as_slice()) || found(parts.as_slice())
+}
+
+/// The parts of `word`, ASCII letters and digits only, split before an upper-case letter
+/// that follows a lower-case one or that ends an upper-case run before a lower-case letter
+/// (`myAPIKey` gives `my`, `API`, `Key`), and wherever letters and digits meet
+/// (`passwords2` gives `passwords` and `2`). Takes the word. Returns its parts in order,
+/// the word alone when it has no such break.
+fn sub_words(word: &str) -> Vec<&str> {
+    assert!(word.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+    let bytes = word.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for at in 1..bytes.len() {
+        let (before, here) = (bytes[at - 1], bytes[at]);
+        let lower_next = bytes.get(at + 1).is_some_and(u8::is_ascii_lowercase);
+        let split = (before.is_ascii_lowercase() && here.is_ascii_uppercase())
+            || (before.is_ascii_uppercase() && here.is_ascii_uppercase() && lower_next)
+            || before.is_ascii_alphabetic() != here.is_ascii_alphabetic();
+        if split {
+            parts.push(&word[start..at]);
+            start = at;
+        }
+    }
+    parts.push(&word[start..]);
+    assert!(parts.iter().all(|part| !part.is_empty()));
+    assert_eq!(parts.concat(), word);
+    parts
 }
 
 /// File extensions of programming source. A source file is not kept out of the code graph
