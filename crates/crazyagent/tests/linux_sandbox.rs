@@ -2396,12 +2396,14 @@ fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
     )
     .unwrap();
     assert_eq!(asked.code(), Some(if scoped { 0 } else { 1 }));
-    let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER));
+    let temp = tempfile::tempdir().unwrap();
+    let data = Some(temp.path());
+    let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER), data);
     assert_eq!(host.scoped, scoped);
     assert_eq!(host.nested, nesting_bwrap().is_some());
     assert!(host.supervised, "the call supervisor probe row needs the same of this machine");
     assert!(!host.root, "the gate runs as its own user, where the supervisor starts");
-    let absent = crazyagent::sandbox::linux::read_host(Path::new("/nonexistent/helper"));
+    let absent = crazyagent::sandbox::linux::read_host(Path::new("/nonexistent/helper"), data);
     assert!(!absent.scoped && !absent.nested, "{absent:?}");
     assert!(!absent.supervised, "{absent:?}");
 }
@@ -2412,10 +2414,51 @@ fn a_host_whose_landlock_does_not_hold_reports_the_process_namespace_bubblewrap_
     assert!(refusing.is_file(), "the row needs /bin/false as a helper that holds nothing");
     let bwrap = BWRAP_PATHS.iter().any(|path| Path::new(path).is_file());
     assert!(bwrap, "Linux test machines need bubblewrap installed");
-    let host = crazyagent::sandbox::linux::read_host(refusing);
+    let data = tempfile::tempdir().unwrap();
+    let host = crazyagent::sandbox::linux::read_host(refusing, Some(data.path()));
     assert!(!host.scoped, "{host:?}");
     assert!(host.nested, "{host:?}");
     assert!(!host.supervised, "bubblewrap alone runs no call supervisor: {host:?}");
+}
+
+/// The supervisor probe never runs in a folder another process names: folders planted
+/// where the old probe made its own, in the shared temp folder for the nested probe's pid
+/// and a range after the helper's, leave it holding, as read for the page and as a plain
+/// launch starts it, and two reads at once both hold (rv-secreview linux-t4c F1).
+#[test]
+fn planted_or_concurrent_probe_folders_never_turn_the_call_supervisor_off() {
+    let next = std::process::id();
+    let planted: Vec<PathBuf> = [2]
+        .into_iter()
+        .chain(next..next + 512)
+        .map(|pid| Path::new("/tmp").join(format!("crazyagent-probe-{pid}")))
+        .filter(|folder| fs::create_dir(folder).is_ok())
+        .collect();
+    assert!(Path::new("/tmp/crazyagent-probe-2").is_dir());
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().canonicalize().unwrap();
+    let read = || crazyagent::sandbox::linux::read_host(Path::new(HELPER), Some(data.as_path()));
+    let alone = read();
+    let both = std::thread::scope(|scope| {
+        let one = scope.spawn(read);
+        let two = scope.spawn(read);
+        [one.join().unwrap(), two.join().unwrap()]
+    });
+    let case = case();
+    let sandbox = pinned(policy(&case, SandboxNetwork::Only(Vec::new())))
+        .supervise(LinuxSupervisor::On, Some(data.as_path()));
+    let folder = case.project.join("worktrees").join("nested");
+    let nested = quoted(&folder);
+    let script = format!("mkdir {nested} && (mkdir {nested}/.git || true)");
+    let output = run(&sandbox, &case, &script);
+    for planted in &planted {
+        fs::remove_dir(planted).unwrap();
+    }
+    assert!(alone.supervised, "{alone:?}");
+    assert!(both.iter().all(|host| host.supervised), "{both:?}");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(!folder.join(".git").exists(), "the plain probe held with the folders planted");
+    assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "every probe folder removed");
 }
 
 /// This computer's address on its default route, which is never loopback. No input.
@@ -2888,7 +2931,9 @@ fn a_supervised_agent_signals_only_the_programs_it_started() {
 fn the_call_supervisor_setting_on_guards_a_launch_and_off_keeps_it_as_before() {
     for (calls, made) in [(LinuxSupervisor::On, false), (LinuxSupervisor::Off, true)] {
         let case = case();
-        let sandbox = pinned(policy(&case, SandboxNetwork::Only(Vec::new()))).supervise(calls);
+        let data = tempfile::tempdir().unwrap();
+        let sandbox = pinned(policy(&case, SandboxNetwork::Only(Vec::new())))
+            .supervise(calls, Some(data.path()));
         let folder = case.project.join("worktrees").join("nested");
         let nested = quoted(&folder);
         let script = format!("mkdir {nested} && (mkdir {nested}/.git || true)");

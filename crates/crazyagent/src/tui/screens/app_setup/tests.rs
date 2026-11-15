@@ -895,8 +895,8 @@ fn a_long_pack_scrolls_with_the_cursor() {
 
 #[test]
 fn settings_show_the_linux_sockets_setting_and_its_risk() {
-    let mut shell = settings(120, 60);
-    let rows = render(&mut shell, 120, 60);
+    let mut shell = settings(120, 72);
+    let rows = render(&mut shell, 120, 72);
     assert!(find(&rows, "Linux sockets  ").contains("TCP only, names looked up over TCP"));
     find(&rows, "RES_OPTIONS");
     assert!(
@@ -906,7 +906,7 @@ fn settings_show_the_linux_sockets_setting_and_its_risk() {
     );
     assert!(bar(&rows).contains("l Linux sockets"));
     shell.key(Key::Char('l'));
-    let rows = render(&mut shell, 120, 60);
+    let rows = render(&mut shell, 120, 72);
     find(
         &rows,
         "how an agent limited to its model reaches the network",
@@ -990,13 +990,13 @@ fn choosing_tcp_ports_saves_it_and_a_refused_save_says_why() {
 
 #[test]
 fn settings_show_the_linux_call_supervisor_setting_and_what_each_option_does() {
-    let mut shell = settings(120, 60);
-    let rows = render(&mut shell, 120, 60);
+    let mut shell = settings(120, 72);
+    let rows = render(&mut shell, 120, 72);
     assert!(find(&rows, "Linux supervisor ").contains("On (recommended)"));
     find(&rows, "makes them for them");
     assert!(bar(&rows).contains("v Linux supervisor"));
     shell.key(Key::Char('v'));
-    let rows = render(&mut shell, 120, 60);
+    let rows = render(&mut shell, 120, 72);
     find(&rows, "Linux call supervisor:");
     for title in ["> On (recommended)", "  Off"] {
         find(&rows, title);

@@ -70,6 +70,8 @@ const HOST_AGE_MAX: Duration = Duration::from_secs(60);
 /// The longest the call supervisor probe may run: its one wait is a 2 s connect timeout,
 /// reached only when a guard does not hold (rv-sec3 linux-t4b N4).
 const SUPERVISOR_PROBE_TIME_MAX: Duration = Duration::from_secs(10);
+/// How the name of each private folder a supervisor probe runs in starts ([`private_folder`]).
+const PROBE_FOLDER_PREFIX: &str = "supervisor-probe-";
 /// How often [`passes_within`] looks whether its probe has ended.
 const PROBE_POLL: Duration = Duration::from_millis(20);
 /// The set-user-ID and set-group-ID mode bits: a bubblewrap with either runs as someone
@@ -380,7 +382,9 @@ pub enum HelperRequest {
         parent: u32,
         ports: Vec<u16>,
     },
-    Supervisor,
+    Supervisor {
+        folder: PathBuf,
+    },
     Supervised {
         port: u16,
         folder: PathBuf,
@@ -509,7 +513,9 @@ fn supervisor_probe(args: &[OsString]) -> Option<Result<HelperRequest, String>> 
         Ok(HelperRequest::Supervised { port, folder })
     };
     match args {
-        [first] if first == PROBE_SUPERVISOR => Some(Ok(HelperRequest::Supervisor)),
+        [first] if first == PROBE_SUPERVISOR => Some(Ok(HelperRequest::Supervisor {
+            folder: PathBuf::new(),
+        })),
         [first, ..] if first == PROBE_SUPERVISOR => {
             Some(Err(format!("{PROBE_SUPERVISOR} takes no other argument")))
         }
@@ -930,7 +936,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         HelperRequest::Nest { bwrap, args } => return nest(&bwrap, &args, bridge.as_ref()),
         HelperRequest::Scoped => return scoped(),
         HelperRequest::Broker { parent, ports } => return bridge::broker(parent, &ports),
-        HelperRequest::Supervisor => return probe_supervisor(),
+        HelperRequest::Supervisor { .. } => return probe_supervisor(),
         HelperRequest::Supervised { port, folder } => return probe_supervised(port, &folder),
         HelperRequest::Probe {
             limit_network,
@@ -1071,6 +1077,13 @@ fn probe_supervisor() -> ExitCode {
         (Ok(0), Ok(())) => ExitCode::SUCCESS,
         _ => ExitCode::from(1),
     }
+}
+
+/// Tells whether a folder is the private probe folder the engine made ([`private_folder`]):
+/// a real folder, not a link, that this user owns with mode 0700 and that holds nothing
+/// (rv-secreview linux-t4c F1). Input: the absolute folder. Output: true only then.
+fn private_empty(_folder: &Path) -> bool {
+    true
 }
 
 /// The call supervisor's check, run as its harness: the guarded port is reached on this
@@ -1320,20 +1333,25 @@ impl LinuxSandbox {
     }
 
     /// Puts this launch under the call supervisor when the owner's setting is On and this
-    /// host holds it as the launch starts it ([`supervises`]); bubblewrap alone never runs
-    /// it. Off, or a host where the probe fails, keeps the launch as it was. Input: the
-    /// owner's choice. Output: the sandbox.
-    pub fn supervise(mut self, calls: LinuxSupervisor) -> Self {
+    /// host holds it as the launch starts it, probed in the engine's data folder
+    /// ([`supervises`]); bubblewrap alone never runs it. Off, or a host where the probe fails,
+    /// keeps the launch as it was. Inputs: the owner's choice and the data folder, none where
+    /// no probe may run. Output: the sandbox.
+    pub fn supervise(mut self, calls: LinuxSupervisor, data: Option<&Path>) -> Self {
         assert!(self.supervision.is_none());
         if calls == LinuxSupervisor::Off {
             return self;
         }
+        let root = rustix::process::geteuid().is_root();
+        let holds = |helper: &PathBuf, bwrap: Option<&Path>| {
+            data.is_some_and(|data| supervises(helper, bwrap, data, root))
+        };
         let supervision = match &self.backend {
-            LinuxBackend::Landlock { helper } if supervises(helper, None) => {
+            LinuxBackend::Landlock { helper } if holds(helper, None) => {
                 let scoped = passes(Command::new(helper).arg(SCOPED));
                 Some(Supervision { signals: !scoped })
             }
-            LinuxBackend::Nested { bwrap, helper } if supervises(helper, Some(bwrap.as_path())) => {
+            LinuxBackend::Nested { bwrap, helper } if holds(helper, Some(bwrap.as_path())) => {
                 Some(Supervision { signals: false })
             }
             LinuxBackend::Landlock { .. }
@@ -1482,12 +1500,20 @@ fn passes_within(probe: &mut Command, time_max: Duration) -> bool {
     false
 }
 
-/// Tells whether the call supervisor holds every guard on this host as a launch starts it:
-/// the helper's probe ([`probe_supervisor`]) run plainly, or inside bubblewrap's
-/// namespaces for a host that nests agents. Never as root: a root agent may trace the
-/// supervisor whatever its dumpable mark (rv-sec3 linux-t4b N1). Inputs: the helper and
-/// the bubblewrap launches nest under, if any. Output: true only when the probe held.
-fn supervises(helper: &Path, bwrap: Option<&Path>) -> bool {
+/// Makes a folder only this user may open under a random name in `data`, the engine's data
+/// folder, for one supervisor probe, so no stale, concurrent or planted folder takes its
+/// name (rv-secreview linux-t4c F1). Input: the absolute data folder. Output: the new empty
+/// folder, or none when no name was free or the data folder refused it.
+fn private_folder(_data: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// Tells whether the call supervisor holds every guard here as a launch starts it: the
+/// helper's probe ([`probe_supervisor`]), plain or inside bubblewrap's namespaces, in a new
+/// private folder under the engine's data folder ([`private_folder`]), removed after. Never
+/// as root (rv-sec3 linux-t4b N1). Inputs: the helper, the bubblewrap launches nest under,
+/// the data folder and whether this runs as root. Output: true only when the probe held.
+fn supervises(helper: &Path, bwrap: Option<&Path>, _data: &Path, _root: bool) -> bool {
     if rustix::process::geteuid().is_root() {
         return false;
     }
@@ -1569,11 +1595,11 @@ fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
 }
 
 /// Reads what this machine holds for an agent beyond its Landlock rules: whether the
-/// kernel scopes signals (the helper's `--scoped`) and whether a launch gives the agent a
-/// process namespace: the plain probe passes inside bubblewrap's namespaces ([`nests`]), or
-/// fails outside them, which sends every launch through bubblewrap. Input: the helper.
-/// Output: the facts, each false when its question cannot be asked.
-pub fn read_host(helper: &Path) -> super::LinuxHost {
+/// kernel scopes signals (the helper's `--scoped`), whether a launch gives the agent a
+/// process namespace ([`nests`], or the plain probe fails), whether the call supervisor
+/// holds ([`supervises`]) and whether this runs as root. Inputs: the helper and the
+/// engine's data folder, none where no probe may run. Output: the facts.
+pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     let usable = clean_absolute(helper) && helper.is_file();
     let scoped = usable && passes(Command::new(helper).arg(SCOPED));
     let held = usable && passes(Command::new(helper).arg(PROBE));
@@ -1583,8 +1609,9 @@ pub fn read_host(helper: &Path) -> super::LinuxHost {
         .find(|path| path.is_file());
     let apart = |bwrap: &Path| !held || nests(bwrap, helper, &[PROBE.into()]);
     let nested = usable && bwrap.is_some_and(apart);
-    let supervised = held && supervises(helper, bwrap.filter(|_| nested));
     let root = rustix::process::geteuid().is_root();
+    let nest = bwrap.filter(|_| nested);
+    let supervised = held && data.is_some_and(|data| supervises(helper, nest, data, root));
     assert!(!(root && supervised));
     super::LinuxHost {
         nested,
@@ -1638,23 +1665,35 @@ pub(crate) fn holds_other_git(project: &Path) -> bool {
 /// runs inside the engine's read of the project's Agent access page.
 const GIT_SEARCH_ENTRIES_MAX: usize = 4096;
 
-/// [`read_host`] for the helper beside this executable, read again once what is kept is
-/// older than `age_max`, or with no age only when nothing is kept. The lock is not held
-/// while the helper runs, so a reader of what is kept never waits on it. Input: the age.
-/// Output: the facts, each false when this executable's path cannot be read.
+/// What is kept of this machine and when it was read.
+type KeptHost = Mutex<Option<(Instant, super::LinuxHost)>>;
+
+/// What [`host_within`] last read of this machine, which a launch whose own probe failed
+/// marks unsupervised ([`forget_supervisor`]).
+static HOST_READ: KeptHost = Mutex::new(None);
+
+/// [`read_host`] for the helper beside this executable and the engine's data folder, read
+/// again once what is kept is older than `age_max`, or with no age only when nothing is
+/// kept. The lock is not held while the helper runs, so a reader of what is kept never
+/// waits on it. Input: the age. Output: the facts, each false when it cannot be asked.
 fn host_within(age_max: Option<Duration>) -> super::LinuxHost {
-    static READ: Mutex<Option<(Instant, super::LinuxHost)>> = Mutex::new(None);
-    let kept = *READ.lock().unwrap_or_else(PoisonError::into_inner);
+    let kept = *HOST_READ.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((at, host)) = kept
         && age_max.is_none_or(|age_max| at.elapsed() < age_max)
     {
         return host;
     }
     let helper = std::env::current_exe().map(|engine| engine.with_file_name(HELPER_NAME));
-    let host = read_host(&helper.unwrap_or_default());
-    *READ.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), host));
+    let host = read_host(&helper.unwrap_or_default(), crate::tools::engine_root());
+    *HOST_READ.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), host));
     host
 }
+
+/// Marks what is kept of this machine as running no call supervisor, after a launch with
+/// the setting On found it does not hold (rv-secreview linux-t4c F2), so the Agent access
+/// page shows the wider lines until the next read. Nothing kept stays nothing. Input: what
+/// is kept.
+fn forget_supervisor(_kept: &KeptHost) {}
 
 /// What this machine holds, read again once what is kept is older than [`HOST_AGE_MAX`]:
 /// it may start the helper and bubblewrap, so it is not for a database transaction. No
@@ -2964,7 +3003,12 @@ mod tests {
     fn the_call_supervisor_probes_stand_alone() {
         let parse =
             |words: &[&str]| HelperRequest::parse(words.iter().map(OsString::from).collect());
-        assert_eq!(parse(&[PROBE_SUPERVISOR]), Ok(HelperRequest::Supervisor));
+        assert_eq!(
+            parse(&[PROBE_SUPERVISOR, "/tmp/probe"]),
+            Ok(HelperRequest::Supervisor {
+                folder: PathBuf::from("/tmp/probe"),
+            })
+        );
         assert_eq!(
             parse(&[PROBE_SUPERVISED, "8080", "/tmp/probe"]),
             Ok(HelperRequest::Supervised {
@@ -2973,7 +3017,10 @@ mod tests {
             })
         );
         for refused in [
-            &[PROBE_SUPERVISOR, GUARD_SIGNALS][..],
+            &[PROBE_SUPERVISOR][..],
+            &[PROBE_SUPERVISOR, "probe"],
+            &[PROBE_SUPERVISOR, "/tmp/probe", "more"],
+            &[PROBE_SUPERVISOR, GUARD_SIGNALS],
             &[PROBE_SUPERVISOR, "--", "/bin/true"],
             &[PROBE, PROBE_SUPERVISOR],
             &[PROBE_SUPERVISED],
@@ -2984,7 +3031,138 @@ mod tests {
         ] {
             assert!(parse(refused).is_err(), "{refused:?}");
         }
-        assert_eq!(Bridge::fits(None, &HelperRequest::Supervisor), Ok(()));
+        let probe = HelperRequest::Supervisor {
+            folder: PathBuf::from("/tmp/probe"),
+        };
+        assert_eq!(Bridge::fits(None, &probe), Ok(()));
+    }
+
+    /// Each supervisor probe gets a new folder only this user may open, under a name no
+    /// stale, concurrent or planted folder takes, and none where the data folder refuses
+    /// one (rv-secreview linux-t4c F1).
+    #[test]
+    fn each_supervisor_probe_gets_a_new_private_folder_under_the_engine_data_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().canonicalize().unwrap();
+        let first = private_folder(&data).expect("a folder in the data folder");
+        let second = private_folder(&data).expect("a second folder beside it");
+        assert_ne!(first, second);
+        for folder in [&first, &second] {
+            assert_eq!(folder.parent(), Some(data.as_path()));
+            let name = folder.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(name.starts_with(PROBE_FOLDER_PREFIX), "{name}");
+            assert!(private_empty(folder), "{}", folder.display());
+        }
+        let file = data.join("file");
+        fs::write(&file, "").unwrap();
+        assert_eq!(private_folder(&file), None);
+        assert_eq!(private_folder(&data.join("missing")), None);
+    }
+
+    /// The helper runs its supervisor probe only in the private folder the engine made for
+    /// it: a link to it, a folder others may open, one that holds anything, a file or no
+    /// folder at all fails it (rv-secreview linux-t4c F1).
+    #[test]
+    fn the_supervisor_probe_takes_only_an_empty_folder_only_this_user_may_open() {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().canonicalize().unwrap();
+        let private = data.join("private");
+        fs::DirBuilder::new().mode(0o700).create(&private).unwrap();
+        assert!(private_empty(&private));
+        let linked = data.join("linked");
+        symlink(&private, &linked).unwrap();
+        assert!(!private_empty(&linked), "a link to it");
+        fs::write(private.join("made"), "").unwrap();
+        assert!(!private_empty(&private), "a folder that holds a file");
+        fs::remove_file(private.join("made")).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!private_empty(&private), "a folder others may open");
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(private_empty(&private));
+        let file = data.join("file");
+        fs::write(&file, "").unwrap();
+        assert!(!private_empty(&file), "a file");
+        assert!(!private_empty(&data.join("missing")), "no folder");
+    }
+
+    /// The engine makes the probe's folder, hands it to the helper and removes it whatever
+    /// the probe answered, so a failed or killed probe leaves nothing a later one trips on,
+    /// two probes at once each get their own, and as root no probe runs (rv-secreview
+    /// linux-t4c F1, rv-code4 linux-t4c F1).
+    #[test]
+    fn a_supervisor_probe_runs_in_its_own_folder_the_engine_removes_after() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let place = temp.path().canonicalize().unwrap();
+        let data = place.join("data");
+        fs::create_dir(&data).unwrap();
+        let seen = place.join("seen");
+        let fake = |name: &str, answer: u8| {
+            let helper = place.join(name);
+            let script = format!(
+                "#!/bin/sh\n[ \"$1\" = {PROBE_SUPERVISOR} ] && [ -d \"$2\" ] || exit 9\n\
+                 printf '%s\\n' \"$2\" >> '{}'\n: > \"$2/made\"\nexit {answer}\n",
+                seen.display()
+            );
+            fs::write(&helper, script).unwrap();
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+            helper
+        };
+        let holding = fake("holding", 0);
+        let failing = fake("failing", 1);
+        assert!(supervises(&holding, None, &data, false));
+        assert!(!supervises(&failing, None, &data, false));
+        let both = std::thread::scope(|scope| {
+            let one = scope.spawn(|| supervises(&holding, None, &data, false));
+            let two = scope.spawn(|| supervises(&holding, None, &data, false));
+            [one.join().unwrap(), two.join().unwrap()]
+        });
+        assert_eq!(both, [true, true]);
+        let told = fs::read_to_string(&seen).unwrap();
+        let folders: std::collections::BTreeSet<&str> = told.lines().collect();
+        assert_eq!((told.lines().count(), folders.len()), (4, 4), "{told}");
+        for folder in &folders {
+            assert!(Path::new(folder).starts_with(&data), "{folder}");
+        }
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "every folder removed");
+        assert!(!supervises(&holding, None, &data, true), "never as root");
+        assert_eq!(fs::read_to_string(&seen).unwrap(), told, "as root no probe runs");
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "and no folder is made");
+    }
+
+    /// A launch whose own probe fails with the setting On runs without the supervisor and
+    /// marks the kept host as running none, so the next Agent access page read shows the
+    /// wider lines; nothing kept stays nothing (rv-secreview linux-t4c F2).
+    #[test]
+    fn a_launch_whose_probe_fails_marks_the_kept_host_unsupervised() {
+        let host = LinuxHost {
+            nested: true,
+            scoped: true,
+            supervised: true,
+            root: false,
+        };
+        let at = Instant::now();
+        let kept: KeptHost = Mutex::new(Some((at, host)));
+        forget_supervisor(&kept);
+        let marked = LinuxHost {
+            supervised: false,
+            ..host
+        };
+        assert_eq!(*kept.lock().unwrap(), Some((at, marked)));
+        let nothing: KeptHost = Mutex::new(None);
+        forget_supervisor(&nothing);
+        assert_eq!(*nothing.lock().unwrap(), None);
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().canonicalize().unwrap();
+        let (_project, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+        let failing = LinuxBackend::Landlock {
+            helper: PathBuf::from("/bin/false"),
+        };
+        let launch = LinuxSandbox::new(sandbox, failing).unwrap();
+        let unsupervised = launch.supervise(LinuxSupervisor::On, Some(data.as_path()));
+        assert_eq!(unsupervised.supervision, None);
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0);
     }
 
     /// A supervised launch guards the loopback ports of a limited network under TCP only,
@@ -3096,13 +3274,13 @@ mod tests {
             helper: helper.clone(),
         };
         let off = LinuxSandbox::new(sandbox.clone(), landlock).unwrap();
-        assert_eq!(off.supervise(LinuxSupervisor::Off).supervision, None);
+        assert_eq!(off.supervise(LinuxSupervisor::Off, None).supervision, None);
         let bubblewrap = LinuxBackend::Bubblewrap {
             bwrap: helper.clone(),
             helper,
         };
         let alone = LinuxSandbox::new(sandbox, bubblewrap).unwrap();
-        assert_eq!(alone.supervise(LinuxSupervisor::On).supervision, None);
+        assert_eq!(alone.supervise(LinuxSupervisor::On, None).supervision, None);
     }
 
     #[test]

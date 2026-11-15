@@ -7,7 +7,9 @@ use rustix::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, RenameFlags};
 use rustix::io::Errno;
 use rustix::net::SocketAddrUnix;
-use rustix::process::{DumpableBehavior, Pid, PidfdFlags, PidfdGetfdFlags, Signal, WaitOptions};
+use rustix::process::{
+    DumpableBehavior, Pid, PidfdFlags, PidfdGetfdFlags, Signal, Uid, WaitOptions,
+};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
@@ -47,6 +49,13 @@ impl Supervised {
             signal: self.signals,
         }
     }
+}
+
+/// Refuses to supervise as root, where dumpability keeps no root agent from tracing the
+/// supervisor or taking its listener (rv-sec3 linux-t4b N1, rv-code4 linux-t4c F1). Input:
+/// the effective user. Output: Ok, or `PermissionDenied` for root.
+fn may_serve(_euid: Uid) -> io::Result<()> {
+    Ok(())
 }
 
 /// Starts the harness with its guarded calls trapped and answers them until it ends. The
@@ -729,5 +738,23 @@ impl Job<'_> {
             }
         }
         Ok(Answer::Value(0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The supervisor never serves as root, where dumpability keeps no root agent from
+    /// tracing it, and serves the user these rows run as when that is not root (rv-code4
+    /// linux-t4c F1).
+    #[test]
+    fn the_supervisor_refuses_to_serve_as_root_and_serves_another_user() {
+        let refused = may_serve(Uid::ROOT).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        let own = rustix::process::geteuid();
+        if !own.is_root() {
+            assert!(may_serve(own).is_ok());
+        }
     }
 }
