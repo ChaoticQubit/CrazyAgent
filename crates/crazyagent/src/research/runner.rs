@@ -3530,6 +3530,14 @@ impl Lifeline {
         }
         let _ = self.child.wait();
     }
+
+    /// Closes the lifeline's pipe without `done`, as the engine's death does, and waits
+    /// until the lifeline has acted. For rows only.
+    #[cfg(test)]
+    pub(crate) fn sever(&mut self) {
+        drop(self.child.stdin.take());
+        let _ = self.child.wait();
+    }
 }
 
 #[cfg(unix)]

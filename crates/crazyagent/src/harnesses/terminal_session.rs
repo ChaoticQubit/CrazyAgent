@@ -86,6 +86,8 @@ pub struct TerminalSession {
     _key: Option<KeyFile>,
     _context: Option<Installed>,
     _relay: Option<Relay>,
+    #[cfg(unix)]
+    lifeline: Option<crate::research::runner::Lifeline>,
 }
 
 /// The most bytes a key file the engine reads back may hold: the longest key it writes.
@@ -400,6 +402,8 @@ impl TerminalSession {
             _key: key,
             _context: installed,
             _relay: relay,
+            #[cfg(unix)]
+            lifeline: None,
         })
     }
 
@@ -961,6 +965,10 @@ impl TerminalSession {
         }
         let _ = self.host.kill(&self.agent);
         self.end_group(seen, held);
+        #[cfg(unix)]
+        if let Some(lifeline) = self.lifeline.as_mut() {
+            lifeline.release();
+        }
     }
 
     /// Kills what the harness left in the pane's process group once the pane is gone, as a
