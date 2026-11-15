@@ -1,5 +1,6 @@
 use crate::agent_git::Layout;
 use crate::coord::settings::{RoleSkills, SkillRole, TerminalDisplay};
+use crate::harnesses::drivers::{self, Piped};
 use crate::harnesses::launch::{LaunchError, SecretInCommand};
 use crate::plugins::{
     EffectiveHook, EffectivePlugins, EffectiveSkill, LaunchPlugins, LaunchSecret, LaunchServer,
@@ -619,10 +620,10 @@ impl AgentContext {
     /// tools off, for another harness, or with no context-mode tool and no skill to name.
     pub fn task_start(&self, harness: &str, tools: bool) -> Option<String> {
         const MORE: &str = ", and the other skills in the Skills section";
-        let id = crate::harnesses::spec(harness)
-            .map(|spec| spec.id)
-            .filter(|id| matches!(*id, "codex" | "claude-code"))?;
-        let claude = id == "claude-code";
+        let claude = match drivers::piped(harness).ok()? {
+            Piped::Codex => false,
+            Piped::Claude => true,
+        };
         let names = context_mode_names(claude, &self.off_tools);
         let context_mode = !names.is_empty()
             && self
@@ -1046,7 +1047,8 @@ impl AgentContext {
     }
 
     /// Writes this context into one agent's private home for one launch of `harness`.
-    /// Input: the harness id ("codex" or "claude-code"), the agent's 0700 home (its
+    /// Input: a harness id or alias whose manifest names the Codex or Claude Code driver
+    /// ([`drivers::piped`]), else `launch_harness_unsupported`, the agent's 0700 home (its
     /// CODEX_HOME or CLAUDE_CONFIG_DIR) and the tools switch; with tools off no skill or
     /// MCP server is given. On macOS the files hold the agent's own `getconf`
     /// ([`crate::sandbox::toolchains::write_getconf`]). Output: the guard holding the files
@@ -1057,10 +1059,10 @@ impl AgentContext {
         home: &Path,
         tools: bool,
     ) -> Result<Installed, LaunchError> {
-        let id = crate::harnesses::spec(harness)
-            .map(|spec| spec.id)
-            .filter(|id| matches!(*id, "codex" | "claude-code"))
-            .ok_or_else(|| failure("launch_harness_unsupported"))?;
+        let codex = match drivers::piped(harness)? {
+            Piped::Codex => true,
+            Piped::Claude => false,
+        };
         crate::harnesses::launch::validate_home(home)?;
         let lock = lock(home)?;
         let state = home.join(STATE);
@@ -1068,7 +1070,7 @@ impl AgentContext {
             arguments: Vec::new(),
             files: Some(InstalledFiles {
                 home: home.to_path_buf(),
-                codex: id == "codex",
+                codex,
             }),
             transcripts: self.transcripts,
             hooks: false,
@@ -1085,7 +1087,8 @@ impl AgentContext {
         directory(&state, true)?;
         let given = match &self.process {
             Some(process) => {
-                let harness = crate::agent_home::Harness::from_id(id)
+                let harness = crate::harnesses::spec(harness)
+                    .and_then(|spec| crate::agent_home::Harness::from_id(spec.id))
                     .ok_or_else(|| failure("launch_harness_unsupported"))?;
                 let mut given = crate::agent_home::text(&process.project)
                     .map_err(|problem| LaunchError(problem.0, None))?;
@@ -1122,7 +1125,7 @@ impl AgentContext {
         }
         let first_skill = names.first().copied();
         assert_eq!(first_skill.is_some(), skills);
-        if id == "codex" {
+        if codex {
             let config = home.join("config.toml");
             let copies = home.join("skills").join(STATE);
             remove_copies(home)?;
@@ -1274,9 +1277,9 @@ impl AgentContext {
         assert!(!installed.hooks || !hooks.is_empty());
         assert!(!installed.relay || self.relay.is_some());
         assert!(installed.denied.len() <= DENIED_TOOLS_MAX);
-        assert!(installed.denied.is_empty() || (id == "claude-code" && tools));
-        assert!(installed.native.is_none() || (id == "claude-code" && tools));
-        assert!(!installed.native_threads || (id == "codex" && tools));
+        assert!(installed.denied.is_empty() || (!codex && tools));
+        assert!(installed.native.is_none() || (!codex && tools));
+        assert!(!installed.native_threads || (codex && tools));
         assert!(installed.model_proxy.is_none() || tools);
         Ok(installed)
     }
@@ -2270,7 +2273,7 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
 pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
     crate::harnesses::launch::validate_home(home)?;
     let lock = lock(home)?;
-    if crate::harnesses::spec(harness).is_some_and(|spec| spec.id == "codex") {
+    if drivers::piped(harness) == Ok(Piped::Codex) {
         remove_copies(home)?;
     }
     Ok(Installed {

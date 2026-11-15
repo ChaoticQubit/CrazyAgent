@@ -6,6 +6,7 @@ use super::launch::{
     TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied, codex_launch_settings, failure,
     harness_id, key_file_text, validate,
 };
+use super::records::{self, Reader};
 use crate::coord::settings::{HarnessKind, TerminalDisplay};
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
@@ -23,6 +24,8 @@ const CLAUDE_CONFIG_BYTES_MAX: u64 = 1024 * 1024;
 #[cfg(unix)]
 const CLAUDE_KEY_TAIL_CHARS: usize = 20;
 const LOCALE: &str = "en_US.UTF-8";
+/// Why a catalog harness has no live terminal while the engine has no reader for its record.
+const REPLIES_UNREAD: &str = "CrazyAgent cannot read its replies yet";
 /// Runs a tools-on Codex agent as an app-server and a TUI attached to it with `--remote`, so
 /// the engine can steer the agent's thread natively (DEC-104 K2b). The app-server starts on
 /// the home's `unix://` control socket; when it has not bound within 5 s, or exits, the
@@ -279,21 +282,31 @@ const PLAIN: [Plain; 15] = [
     },
 ];
 
-/// Tells whether a catalog harness runs as its own interactive app in a terminal pane.
-/// Input: a catalog id or a connection harness name. Output: `Terminal` when the engine reads
-/// its session record, `Unavailable` for the other apps until a reader exists, or
-/// `HeadlessOnly` with the reason for RCLI, which runs only as a master, and unknown names.
+/// Tells whether a catalog harness runs as its own interactive app in a terminal pane, from
+/// the record reader its manifest names. Input: a catalog id or a connection harness name.
+/// Output: `Terminal` when the engine reads its session record; `HeadlessOnly` for a harness
+/// with a piped driver and no record the engine reads, with its manifest's reason, such as
+/// RCLI's "runs only as a CrazyAgent master", and for unknown names; `Unavailable` for the
+/// other apps until a reader exists.
 pub fn support(harness: &str) -> Support {
-    match super::spec(harness).map(|spec| spec.id) {
-        Some("codex" | "claude-code") => Support::Terminal,
-        Some(id) if PLAIN.iter().any(|plain| plain.id == id) => Support::Unavailable {
-            reason: "CrazyAgent cannot read its replies yet",
-        },
-        Some("rcli") => Support::HeadlessOnly {
-            reason: "runs only as a CrazyAgent master",
-        },
-        _ => Support::HeadlessOnly {
+    let Some(found) = super::registry::registry().get(harness) else {
+        return Support::HeadlessOnly {
             reason: "not in the harness catalog",
+        };
+    };
+    if records::of(found.record()).is_ok() {
+        return Support::Terminal;
+    }
+    match found.piped() {
+        Some(_) => Support::HeadlessOnly {
+            reason: found
+                .manifest()
+                .cannot_start
+                .as_deref()
+                .unwrap_or(REPLIES_UNREAD),
+        },
+        None => Support::Unavailable {
+            reason: REPLIES_UNREAD,
         },
     }
 }
@@ -349,13 +362,14 @@ pub fn command(
         );
     }
     let launch = launch_words(&request.executable)?;
-    let native_lead =
-        harness_id(request) == "claude-code" && installed.and_then(Installed::native).is_some();
+    let reader = records::reader(&request.harness);
+    let native_lead = matches!(reader, Ok(Reader::ClaudeSession))
+        && installed.and_then(Installed::native).is_some();
     let display = installed
         .map(Installed::terminal_display)
         .unwrap_or_default();
-    let transcript = match harness_id(request) {
-        "codex" => {
+    let transcript = match reader {
+        Ok(Reader::CodexRollouts) => {
             let resume = if run.resume {
                 Some(session_id_checked(run.session_id)?.to_owned())
             } else {
@@ -394,7 +408,7 @@ pub fn command(
                 sessions: request.account.home().join("sessions"),
             }
         }
-        "claude-code" => {
+        Ok(Reader::ClaudeSession) => {
             argv.extend(launch);
             argv.extend(claude(request, installed, run, key_file.as_deref())?);
             let team = installed.and_then(Installed::native);
@@ -425,9 +439,9 @@ pub fn command(
                     .join(format!("{}.jsonl", session_id_checked(run.session_id)?)),
             }
         }
-        id => {
+        Err(_) => {
             argv.extend(launch);
-            argv.extend(plain(id, request, installed)?);
+            argv.extend(plain(harness_id(request), request, installed)?);
             Transcript::Unavailable
         }
     };
