@@ -9693,11 +9693,12 @@ impl TeamRuntime {
         Ok((root, plan, mode))
     }
 
-    /// Keeps in an agent's Messages timeline, as the engine's notice, that a port below 1024
-    /// leaves this launch on this computer's network on a Linux that nests agents
-    /// ([`crate::sandbox::linux_unbridged_notice`]), so the agent view says why its ports
-    /// are open on every host. Takes the project, the agent and its sandbox as launched.
-    /// Returns nothing; a notice that cannot be kept is logged, never a reason not to start.
+    /// Keeps in an agent's Messages timeline, as the engine's notice, that this launch stays
+    /// on this computer's network on a Linux that nests agents, where the Agent access page
+    /// does not say so ([`crate::sandbox::linux_unbridged_notice`]), so the agent view says
+    /// why its ports are open on every host. Takes the project, the agent, the project's
+    /// network choice and the agent's sandbox as launched. Returns nothing; a notice that
+    /// cannot be kept is logged, never a reason not to start.
     fn note_unbridged(
         &self,
         project: &ProjectId,

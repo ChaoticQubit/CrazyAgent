@@ -873,23 +873,33 @@ pub fn linux_unbridged_line(port: u16) -> String {
     )
 }
 
-/// What an agent's launch tells the owner when a port below [`BRIDGE_PORT_MIN`] alone keeps
-/// it on this computer's network on a Linux that nests agents: [`linux_unbridged_line`] for
-/// that port, kept in the agent's messages. Inputs: what this Linux holds, none on another
-/// system, and the agent's sandbox as launched. Output: the sentences, or none.
+/// What an agent's launch tells the owner, in the agent's messages, when it may reach a port
+/// on this computer and a Linux that nests agents still leaves it on this computer's
+/// network: [`linux_unbridged_line`] when a port below [`BRIDGE_PORT_MIN`] alone does, and
+/// [`LINUX_PORTS_ANY_HOST_LINE`] for any other reason under None, the one choice whose page
+/// drops that line. Inputs: what this Linux holds, the project's network choice and the
+/// agent's sandbox as launched. Output: the sentences, or none.
 pub fn linux_unbridged_notice_on(
     host: Option<LinuxHost>,
-    _choice: policy::AgentNetwork,
+    choice: policy::AgentNetwork,
     sandbox: &ProjectSandbox,
 ) -> Option<String> {
-    let nests = host.is_some_and(|host| host.nested);
-    let port = sandbox.unbridged_port().filter(|_| nests)?;
-    assert!(port < BRIDGE_PORT_MIN);
-    Some(linux_unbridged_line(port))
+    if !host.is_some_and(|host| host.nested) {
+        return None;
+    }
+    if let Some(port) = sandbox.unbridged_port() {
+        assert!(port < BRIDGE_PORT_MIN);
+        return Some(linux_unbridged_line(port));
+    }
+    let reaches = matches!(&sandbox.network, SandboxNetwork::Only(remotes)
+        if remotes.iter().any(|remote| matches!(remote, SandboxRemote::Loopback(_))));
+    let unsaid = choice == policy::AgentNetwork::None && sandbox.bridged_ports().is_none();
+    (reaches && unsaid).then(|| LINUX_PORTS_ANY_HOST_LINE.to_owned())
 }
 
-/// [`linux_unbridged_notice_on`] for this computer as it was last read. Input: the agent's
-/// sandbox as launched. Output: the sentences, or none.
+/// [`linux_unbridged_notice_on`] for this computer as it was last read. Inputs: the
+/// project's network choice and the agent's sandbox as launched. Output: the sentences, or
+/// none.
 pub fn linux_unbridged_notice(
     choice: policy::AgentNetwork,
     sandbox: &ProjectSandbox,
