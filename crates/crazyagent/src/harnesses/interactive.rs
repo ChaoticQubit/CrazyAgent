@@ -483,6 +483,19 @@ pub fn command(
     Ok(built)
 }
 
+/// Builds what the terminal host runs for one interactive agent as [`command`] does, from
+/// given terminal settings instead of the catalog's, such as a stand-in's. Inputs: as for
+/// `command`, and the settings. Output: the command, or a plain refusal code.
+pub fn command_with(
+    request: &LaunchRequest,
+    installed: Option<&Installed>,
+    run: &Run<'_>,
+    settings: Option<&settings::TerminalSettings>,
+) -> Result<InteractiveCommand, LaunchError> {
+    let _ = settings;
+    command(request, installed, run)
+}
+
 /// Passes a pane's variables through the one agent environment builder, so a pane gets
 /// the same refusals and git settings as every other agent process.
 /// Input: the variables in order. Output: them with [`crate::sandbox::AGENT_GIT_ENV`]

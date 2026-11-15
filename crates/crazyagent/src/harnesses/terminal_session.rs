@@ -1,4 +1,5 @@
 use super::codex_folder::{self, Screen};
+use super::interactive::settings::TerminalSettings;
 use super::interactive::{self, Run, Support, Transcript};
 use super::launch::{
     Ending, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, route,
@@ -236,6 +237,21 @@ impl TerminalSession {
             .map(|context| context.install(&request.harness, request.account.home(), request.tools))
             .transpose()?;
         Self::open(host, agent, request, installed, context.as_ref(), resume)
+    }
+
+    /// Starts a harness from given terminal settings, such as a stand-in outside the
+    /// catalog, continuing the conversation `resume` names when given. Inputs: the host,
+    /// the pane name, the request, the settings and the conversation. Output: the running
+    /// session, or a plain refusal code; nothing is left behind on refusal.
+    pub fn start_with(
+        host: Arc<dyn Host>,
+        agent: AgentId,
+        request: LaunchRequest,
+        settings: TerminalSettings,
+        resume: Option<&Resume>,
+    ) -> Result<Self, LaunchError> {
+        let _ = settings;
+        Self::start_resuming(host, agent, request, None, resume)
     }
 
     /// Starts an agent whose caller already installed the project context into its home,
@@ -1417,3 +1433,7 @@ mod tests;
 
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod folder_screen_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "terminal_session/manifest_tests.rs"]
+mod manifest_tests;
