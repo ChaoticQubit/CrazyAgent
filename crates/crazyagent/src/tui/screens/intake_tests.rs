@@ -570,7 +570,7 @@ fn git_in(folder: &Path, args: &[&str]) {
     assert!(done.status.success(), "{done:?}");
 }
 
-fn repo_with_worktree(source: &Path, linked: &Path) {
+pub(super) fn repo_with_worktree(source: &Path, linked: &Path) {
     std::fs::create_dir_all(source).unwrap();
     std::fs::write(source.join("README.md"), "shop\n").unwrap();
     git_in(source, &["init", "-q", "-b", "main"]);
