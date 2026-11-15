@@ -595,6 +595,8 @@ pub struct EngineService {
     temporary: Option<Identity>,
     locator: Option<PinnedLocator>,
     tasks: JoinSet<Result<(), EngineError>>,
+    /// The failure of the first listener found ended, given again by every later check.
+    listener_ended: Option<EngineError>,
     stops: Vec<oneshot::Sender<()>>,
     closed: bool,
 }
@@ -859,6 +861,7 @@ impl EngineService {
             temporary: None,
             locator: None,
             tasks: JoinSet::new(),
+            listener_ended: None,
             stops: Vec::new(),
             closed: false,
         };
@@ -1288,13 +1291,22 @@ impl EngineService {
         )
     }
 
+    /// Says whether both listeners still run. The first listener found ended is kept and
+    /// every later call gives its failure again, so a caller that goes on past one refusal
+    /// never meets a set with a listener missing. Output: Ok, or the kept failure.
     fn live(&mut self) -> Result<(), EngineError> {
         if let Some(result) = self.tasks.try_join_next() {
-            return match result {
-                Ok(Err(error)) => Err(error),
-                Err(error) => Err(io_error(error)),
-                Ok(Ok(())) => Err(fail("engine_listener_stopped_before_ready")),
+            let ended = match result {
+                Ok(Err(error)) => error,
+                Err(error) => io_error(error),
+                Ok(Ok(())) => fail("engine_listener_stopped_before_ready"),
             };
+            if self.listener_ended.is_none() {
+                self.listener_ended = Some(ended);
+            }
+        }
+        if let Some(ended) = &self.listener_ended {
+            return Err(ended.clone());
         }
         assert_eq!(self.tasks.len(), 2);
         Ok(())
@@ -1305,7 +1317,9 @@ impl EngineService {
             .owner_runtime
             .as_ref()
             .map(OwnerRuntimeHandle::reprove_in_background);
-        let result = if *shutdown.borrow() {
+        let result = if let Some(ended) = self.listener_ended.clone() {
+            Err(ended)
+        } else if *shutdown.borrow() {
             Ok(())
         } else {
             tokio::select! {
