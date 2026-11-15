@@ -94,7 +94,7 @@ fn session_bus_env(
 /// for Windows needs for its shell and network stack, and Linux keeps the two variables
 /// that name the session bus. Inputs: git and the empty home.
 /// Output: the command, without arguments.
-fn git_command(git: &Path, empty_home: &Path) -> Command {
+pub(super) fn git_command(git: &Path, empty_home: &Path) -> Command {
     let mut command = Command::new(git);
     command
         .env_clear()

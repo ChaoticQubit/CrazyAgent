@@ -1,12 +1,94 @@
+use super::clone;
 use crate::engine::EngineError;
+use crate::project_setup::SECRET_PREFIXES;
+use crate::research::runner::GIT_SAFE;
 use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdout, Command, Output, Stdio};
 
 #[cfg(all(test, target_os = "macos"))]
 mod publish_tests;
 
 const SCAN_FILES_MAX: usize = 20_000;
 const SCAN_BYTES_MAX: u64 = 200 << 20;
+const SCAN_FILE_BYTES_MAX: u64 = 1 << 20;
+const BINARY_PROBE_BYTES: usize = 8 << 10;
+const LISTING_BYTES_MAX: u64 = 16 << 20;
+const CONFIG_BYTES_MAX: u64 = 64 << 10;
+const BATCH_HEADER_BYTES_MAX: u64 = 256;
+const BRANCH_BYTES_MAX: usize = 255;
+const IGNORE_LINES_MAX: usize = 1000;
+const IGNORE_LINE_BYTES_MAX: usize = 1024;
+const TOKEN_BODY_MIN: usize = 16;
+const NAMED_VALUE_MIN: usize = 8;
+const MAIN: &str = "main";
+const ENGINE_EMAIL: &str = "engine@crazyagent.invalid";
+const ENGINE_START: &str = "Start project";
+const GITIGNORE: &str = ".gitignore";
+const DOCS_OFF: [&str; 2] = ["/.crazyagent/", "/graphify-out/"];
+const DOCS_ON: [&str; 4] = [
+    "!/.crazyagent/",
+    "/.crazyagent/*",
+    "!/.crazyagent/context/",
+    "/graphify-out/",
+];
+const OLDER_LAYOUT: [&str; 1] = ["/graphify-out/"];
+const SECURITY_PATHS: [&str; 3] = ["SECURITY.md", ".github/SECURITY.md", "docs/SECURITY.md"];
+const SECURITY_POLICY: &str = "# Security Policy\n\n## Reporting a Vulnerability\n\nPlease report a vulnerability privately through GitHub's private vulnerability reporting: open this repository's Security tab and choose \"Report a vulnerability\". Please do not open a public issue for it.\n";
+const DEPENDABOT: &str = ".github/dependabot.yml";
+const DEPENDABOT_PATHS: [&str; 2] = [DEPENDABOT, ".github/dependabot.yaml"];
+const ECOSYSTEMS: [(&str, &str); 6] = [
+    ("Cargo.toml", "cargo"),
+    ("package.json", "npm"),
+    ("requirements.txt", "pip"),
+    ("pyproject.toml", "pip"),
+    ("go.mod", "gomod"),
+    (".github/workflows", "github-actions"),
+];
+const KEY_ENDS: [&str; 14] = [
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "token",
+    "apikey",
+    "privatekey",
+    "secretkey",
+    "accesskey",
+    "credential",
+    "credentials",
+    "_pass",
+    "_pwd",
+    "_key",
+];
+const KEY_NAMES: [&str; 2] = ["pass", "pwd"];
+const SETTINGS_NAMES: [&str; 6] = [
+    ".env",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    ".pgpass",
+    "credentials",
+];
+const SETTINGS_EXTENSIONS: [&str; 8] = [
+    ".properties",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".json",
+];
+const PLACEHOLDERS: [&str; 6] = [
+    "changeit",
+    "password",
+    "undefined",
+    "notasecret",
+    "secretkey",
+    "yoursecret",
+];
 
 /// What a project's history holds before it is published: no commit yet, only the empty
 /// start commit the engine makes in a project it creates, or the owner's own commits.
@@ -40,7 +122,7 @@ pub struct GitHubPrepare {
 
 /// The kind of secret found on a line: a known token, a private key block, or a
 /// credential-named setting holding a value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GitHubSecretKind {
     Token,
@@ -49,7 +131,7 @@ pub enum GitHubSecretKind {
 }
 
 /// One line that would push a secret: the file and the line number, never the value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubSecretFinding {
     pub path: String,
@@ -73,7 +155,7 @@ impl GitHome {
         getrandom::fill(&mut token).map_err(|_| failure("github_publish_failed"))?;
         let name: String = token.iter().map(|byte| format!("{byte:02x}")).collect();
         let path = root.join(format!(".publish-home-{name}"));
-        super::clone::private_folder(&path).map_err(|_| failure("github_publish_failed"))?;
+        clone::private_folder(&path).map_err(|_| failure("github_publish_failed"))?;
         Ok(Self(path))
     }
 
@@ -91,8 +173,57 @@ impl Drop for GitHome {
 /// The git the engine runs for a publish, as for a clone. Output: its path, or
 /// `github_git_missing`.
 pub(super) fn git() -> Result<PathBuf, EngineError> {
-    super::clone::git_program(std::env::var_os("PATH").as_deref())
+    clone::git_program(std::env::var_os("PATH").as_deref())
         .ok_or_else(|| failure("github_git_missing"))
+}
+
+/// Starts a git command in the project's own repository with the engine's safe options and
+/// the empty home, so no hook, pager, fsmonitor or owner configuration outside the
+/// repository runs, and git never looks for a repository above the project.
+/// Inputs: git, its empty home and the project. Output: the command, without arguments.
+fn project_git(git: &Path, home: &Path, project: &Path) -> Command {
+    let mut command = clone::git_command(git, home);
+    command
+        .current_dir(project)
+        .env("GIT_DIR", project.join(".git"))
+        .env("GIT_WORK_TREE", project)
+        .args(GIT_SAFE)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+/// Runs a git command whose output is small and fixed. Input: the command. Output: what
+/// it printed and its status, or `github_publish_failed` when it could not start.
+fn run(command: &mut Command) -> Result<Output, EngineError> {
+    crate::spawn_gate::output(command.stdout(Stdio::piped()))
+        .map_err(|_| failure("github_publish_failed"))
+}
+
+/// Runs a git command that lists files, reading at most `LISTING_BYTES_MAX` of it.
+/// Input: the command. Output: the listing, or `github_publish_too_large`,
+/// `github_publish_failed`.
+fn listing(command: &mut Command) -> Result<Vec<u8>, EngineError> {
+    let failed = || failure("github_publish_failed");
+    let mut child =
+        crate::spawn_gate::spawn(command.stdout(Stdio::piped())).map_err(|_| failed())?;
+    let mut bytes = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .expect("git stdout is piped")
+        .take(LISTING_BYTES_MAX + 1)
+        .read_to_end(&mut bytes);
+    if bytes.len() as u64 > LISTING_BYTES_MAX {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(failure("github_publish_too_large"));
+    }
+    let status = child.wait().map_err(|_| failed())?;
+    if read.is_err() || !status.success() {
+        return Err(failed());
+    }
+    Ok(bytes)
 }
 
 /// Reads how a project's git stands. Inputs: git, its empty home, the project folder and
@@ -105,12 +236,142 @@ pub(super) fn inspect(
     project: &Path,
     host: &str,
 ) -> Result<GitHubLocal, EngineError> {
-    let _ = (git, home, project, host);
-    Err(failure("github_publish_unbuilt"))
+    let folder =
+        std::fs::symlink_metadata(project).map_err(|_| failure("project_folder_missing"))?;
+    if !project.is_absolute() || !folder.is_dir() {
+        return Err(failure("project_folder_missing"));
+    }
+    match std::fs::symlink_metadata(project.join(".git")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(GitHubLocal {
+                repository: false,
+                branch: None,
+                history: GitHubHistory::Empty,
+            });
+        }
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        _ => return Err(failure("github_publish_not_plain_repo")),
+    }
+    remotes(git, home, project, host)?;
+    let head = run(project_git(git, home, project).args(["symbolic-ref", "-q", "HEAD"]))?;
+    match head.status.code() {
+        Some(0) => {}
+        Some(1) => return Err(failure("github_publish_detached")),
+        _ => return Err(failure("github_publish_not_plain_repo")),
+    }
+    let branch = String::from_utf8(head.stdout)
+        .ok()
+        .as_deref()
+        .map(str::trim_end)
+        .and_then(|reference| reference.strip_prefix("refs/heads/"))
+        .filter(|branch| {
+            !branch.is_empty()
+                && branch.len() <= BRANCH_BYTES_MAX
+                && !branch.chars().any(char::is_control)
+        })
+        .ok_or_else(|| failure("github_publish_detached"))?
+        .to_owned();
+    let log = run(project_git(git, home, project).args([
+        "log",
+        "-2",
+        "--format=%ae%x00%s%x00",
+        "HEAD",
+        "--",
+    ]))?;
+    let history = if log.status.success() {
+        let text = String::from_utf8_lossy(&log.stdout);
+        let mut fields: Vec<&str> = text
+            .split('\0')
+            .map(|field| field.trim_matches('\n'))
+            .collect();
+        if fields.last() == Some(&"") {
+            fields.pop();
+        }
+        if fields == [ENGINE_EMAIL, ENGINE_START] {
+            GitHubHistory::EngineStart
+        } else {
+            GitHubHistory::Owner
+        }
+    } else {
+        GitHubHistory::Empty
+    };
+    Ok(GitHubLocal {
+        repository: true,
+        branch: Some(branch),
+        history,
+    })
 }
 
-/// Gets a project ready for its first commit. Inputs: git, its empty home, the project
-/// folder, its state and the owner's choices. Output: the paths publish wrote.
+/// Refuses a repository that already has a remote: one on GitHub is published already,
+/// and any other is another host's. git lists the keys of `.git/config` alone, includes
+/// left out. Inputs: git, its empty home, the project and GitHub's web host.
+/// Output: `()`, or `github_publish_on_github`, `github_publish_other_host`.
+fn remotes(git: &Path, home: &Path, project: &Path, host: &str) -> Result<(), EngineError> {
+    let config = project.join(".git").join("config");
+    match std::fs::symlink_metadata(&config) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Ok(metadata) if metadata.is_file() && metadata.len() <= CONFIG_BYTES_MAX => {}
+        _ => return Err(failure("github_publish_not_plain_repo")),
+    }
+    let listed = run(clone::git_command(git, home)
+        .args(["config", "--file"])
+        .arg(&config)
+        .args(["--no-includes", "-z", "--list"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null()))?;
+    if !listed.status.success() {
+        return Err(failure("github_publish_failed"));
+    }
+    let mut remote = false;
+    let mut on_github = false;
+    for entry in listed.stdout.split(|byte| *byte == 0) {
+        let (key, value) = match entry.iter().position(|byte| *byte == b'\n') {
+            Some(at) => (&entry[..at], &entry[at + 1..]),
+            None => (entry, &entry[entry.len()..]),
+        };
+        if !key.starts_with(b"remote.") {
+            continue;
+        }
+        remote = true;
+        if key.ends_with(b".url") || key.ends_with(b".pushurl") {
+            on_github |= github_url(&String::from_utf8_lossy(value), host);
+        }
+    }
+    match (remote, on_github) {
+        (false, _) => Ok(()),
+        (true, true) => Err(failure("github_publish_on_github")),
+        (true, false) => Err(failure("github_publish_other_host")),
+    }
+}
+
+/// Tells whether a remote URL points at GitHub: its host, from a URL or the scp-like
+/// `user@host:path` form, is GitHub's web host or one of its subdomains.
+/// Inputs: the URL and the web host. Output: true for GitHub.
+fn github_url(url: &str, host: &str) -> bool {
+    let found = if url.contains("://") {
+        url::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_owned))
+    } else {
+        url.split_once(':')
+            .filter(|(before, _)| !before.contains('/'))
+            .map(|(before, _)| before.rsplit('@').next().unwrap_or(before).to_owned())
+    };
+    found.is_some_and(|found| {
+        let found = found.to_ascii_lowercase();
+        found == host || found.ends_with(&format!(".{host}"))
+    })
+}
+
+/// Gets a project ready for its first publish commit. Everything is checked before
+/// anything is written: the approved lines, `.gitignore` and the `.github` folder.
+/// Then git init on main when there is no repository, CrazyAgent's folders hidden in
+/// `.git/info/exclude`, the docs and approved lines added to `.gitignore` once, and the
+/// security policy (public only) and Dependabot files written where none exists.
+/// Inputs: git, its empty home, the project folder, its state and the owner's choices.
+/// Output: the paths publish wrote, or `github_publish_ignore_invalid`,
+/// `github_publish_gitignore_invalid`, `github_publish_file_invalid`,
+/// `github_publish_failed`.
 pub(super) fn prepare(
     git: &Path,
     home: &Path,
@@ -118,13 +379,128 @@ pub(super) fn prepare(
     local: &GitHubLocal,
     choices: &GitHubPrepare,
 ) -> Result<Vec<String>, EngineError> {
-    let _ = (git, home, project, local, choices);
-    Err(failure("github_publish_unbuilt"))
+    let approved = &choices.approved;
+    let fine = approved.len() <= IGNORE_LINES_MAX
+        && approved.iter().all(|line| {
+            !line.is_empty()
+                && line.len() <= IGNORE_LINE_BYTES_MAX
+                && !line.chars().any(char::is_control)
+                && !line.ends_with(char::is_whitespace)
+        });
+    if !fine {
+        return Err(failure("github_publish_ignore_invalid"));
+    }
+    let ignore = project.join(GITIGNORE);
+    match std::fs::symlink_metadata(&ignore) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(metadata) if metadata.is_file() => {}
+        _ => return Err(failure("github_publish_gitignore_invalid")),
+    }
+    let files = generated(project, choices.private)?;
+    if !local.repository {
+        let made = run(project_git(git, home, project)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .args(["init", "-q", "--template=", "-b", MAIN]))?;
+        if !made.status.success() {
+            return Err(failure("github_publish_failed"));
+        }
+    }
+    let hidden = crate::projects_home::exclude_from_git(project)?
+        && crate::projects_home::exclude_agents(project)?;
+    if !hidden {
+        return Err(failure("github_publish_not_plain_repo"));
+    }
+    let docs: &[&str] = if crate::projects_home::state_folder(project).as_path() == project {
+        &OLDER_LAYOUT
+    } else if choices.docs {
+        &DOCS_ON
+    } else {
+        &DOCS_OFF
+    };
+    let mut lines: Vec<&str> = docs.to_vec();
+    lines.extend(approved.iter().map(String::as_str));
+    let mut written = Vec::new();
+    if crate::projects_home::append_lines(&ignore, &lines, "github_publish_gitignore_invalid")? > 0
+    {
+        written.push(GITIGNORE.to_owned());
+    }
+    for (path, text) in files {
+        write_new(project, path, &text)?;
+        written.push(path.to_owned());
+    }
+    Ok(written)
 }
 
-/// Finds the lines that would push a secret. Inputs: git, its empty home, the project
-/// folder and its history. Output: the findings by file and line, or
-/// `github_publish_too_large`.
+/// The files publish writes into a project where none of their kind exists: the
+/// security policy on a public repository, and Dependabot version updates for each
+/// ecosystem the project's top level shows. A `.github` that is not a plain folder is
+/// refused. Inputs: the project and whether the repository is private.
+/// Output: each file's path and text, or `github_publish_file_invalid`.
+fn generated(project: &Path, private: bool) -> Result<Vec<(&'static str, String)>, EngineError> {
+    let present = |path: &str| std::fs::symlink_metadata(project.join(path)).is_ok();
+    let mut files: Vec<(&'static str, String)> = Vec::new();
+    if !private && !SECURITY_PATHS.iter().any(|path| present(path)) {
+        files.push((SECURITY_PATHS[0], SECURITY_POLICY.to_owned()));
+    }
+    let mut ecosystems: Vec<&str> = Vec::new();
+    for (marker, ecosystem) in ECOSYSTEMS {
+        if present(marker) && !ecosystems.contains(&ecosystem) {
+            ecosystems.push(ecosystem);
+        }
+    }
+    if !ecosystems.is_empty() && !DEPENDABOT_PATHS.iter().any(|path| present(path)) {
+        let mut text = String::from("version: 2\nupdates:\n");
+        for ecosystem in &ecosystems {
+            text.push_str(&format!(
+                "  - package-ecosystem: \"{ecosystem}\"\n    directory: \"/\"\n    schedule:\n      interval: \"weekly\"\n"
+            ));
+        }
+        files.push((DEPENDABOT, text));
+    }
+    if files.iter().any(|(path, _)| path.starts_with(".github/")) {
+        match std::fs::symlink_metadata(project.join(".github")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            _ => return Err(failure("github_publish_file_invalid")),
+        }
+    }
+    Ok(files)
+}
+
+/// Writes a new file publish makes, never over or through an existing entry, making its
+/// one parent folder when missing. Inputs: the project, the relative path and the text.
+/// Output: `()`, or `github_publish_file_invalid`.
+fn write_new(project: &Path, path: &str, text: &str) -> Result<(), EngineError> {
+    let invalid = || failure("github_publish_file_invalid");
+    let target = project.join(path);
+    if let Some(parent) = target.parent().filter(|parent| *parent != project) {
+        match std::fs::create_dir(parent) {
+            Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+                return Err(invalid());
+            }
+            _ => {}
+        }
+        let metadata = std::fs::symlink_metadata(parent).map_err(|_| invalid())?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(invalid());
+        }
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .map_err(|_| invalid())?;
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|_| invalid())
+}
+
+/// Finds the lines that would push a secret: with no owner history, the files the first
+/// commit would take, from the working tree; with owner history, the files of HEAD's
+/// tree, from git, since that is what is pushed. Older commits are not read. Inputs: git,
+/// its empty home, the project folder and its history. Output: the findings by file and
+/// line, or `github_publish_too_large` past 20,000 files or 200 MiB.
 pub(super) fn secret_findings(
     git: &Path,
     home: &Path,
@@ -134,6 +510,9 @@ pub(super) fn secret_findings(
     findings_within(git, home, project, history, SCAN_FILES_MAX, SCAN_BYTES_MAX)
 }
 
+/// Finds the secret lines as [`secret_findings`] does, within the given bounds.
+/// Inputs: git, its empty home, the project, its history, the most files and the most
+/// bytes read. Output: the findings, or `github_publish_too_large`, `github_publish_failed`.
 fn findings_within(
     git: &Path,
     home: &Path,
@@ -142,6 +521,331 @@ fn findings_within(
     files_max: usize,
     bytes_max: u64,
 ) -> Result<Vec<GitHubSecretFinding>, EngineError> {
-    let _ = (git, home, project, history, files_max, bytes_max);
-    Err(failure("github_publish_unbuilt"))
+    let too_large = || failure("github_publish_too_large");
+    let failed = || failure("github_publish_failed");
+    let mut findings = Vec::new();
+    let mut total: u64 = 0;
+    if history == GitHubHistory::Owner {
+        let listed = listing(project_git(git, home, project).args([
+            "ls-tree",
+            "-r",
+            "-z",
+            "-l",
+            "--full-tree",
+            "HEAD",
+        ]))?;
+        let mut blobs: Vec<(String, String)> = Vec::new();
+        for entry in listed
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+        {
+            let tab = entry
+                .iter()
+                .position(|byte| *byte == b'\t')
+                .ok_or_else(failed)?;
+            let meta = std::str::from_utf8(&entry[..tab]).map_err(|_| failed())?;
+            let mut words = meta.split_whitespace();
+            let (mode, kind, object, size) =
+                (words.next(), words.next(), words.next(), words.next());
+            if kind != Some("blob") || mode == Some("120000") {
+                continue;
+            }
+            let size: u64 = size.and_then(|size| size.parse().ok()).ok_or_else(failed)?;
+            total = total.saturating_add(size);
+            let object = object.ok_or_else(failed)?.to_owned();
+            blobs.push((
+                object,
+                String::from_utf8_lossy(&entry[tab + 1..]).into_owned(),
+            ));
+            if total > bytes_max || blobs.len() > files_max {
+                return Err(too_large());
+            }
+        }
+        read_blobs(git, home, project, &blobs, &mut findings)?;
+    } else {
+        let listed = listing(project_git(git, home, project).args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ]))?;
+        let paths: Vec<&[u8]> = listed
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .collect();
+        if paths.len() > files_max {
+            return Err(too_large());
+        }
+        for path in paths {
+            let full = project.join(listed_path(path).ok_or_else(failed)?);
+            let Ok(metadata) = std::fs::symlink_metadata(&full) else {
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            total = total.saturating_add(metadata.len());
+            if total > bytes_max {
+                return Err(too_large());
+            }
+            let mut head = Vec::new();
+            std::fs::File::open(&full)
+                .and_then(|file| file.take(SCAN_FILE_BYTES_MAX).read_to_end(&mut head))
+                .map_err(|_| failed())?;
+            scan(&String::from_utf8_lossy(path), &head, &mut findings);
+        }
+    }
+    findings.sort();
+    Ok(findings)
+}
+
+/// Turns a path git listed into a path, as raw bytes on Unix and as UTF-8 elsewhere.
+/// Input: the listed bytes. Output: the relative path, or None when it cannot be one.
+#[cfg(unix)]
+fn listed_path(bytes: &[u8]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+}
+
+/// Turns a path git listed into a path, as raw bytes on Unix and as UTF-8 elsewhere.
+/// Input: the listed bytes. Output: the relative path, or None when it cannot be one.
+#[cfg(not(unix))]
+fn listed_path(bytes: &[u8]) -> Option<PathBuf> {
+    std::str::from_utf8(bytes).ok().map(PathBuf::from)
+}
+
+/// Reads blobs through one `git cat-file --batch`, scanning the first 1 MiB of each.
+/// Inputs: git, its empty home, the project, each blob's id and path, and the findings to
+/// add to. Output: `()`, or `github_publish_failed`.
+fn read_blobs(
+    git: &Path,
+    home: &Path,
+    project: &Path,
+    blobs: &[(String, String)],
+    findings: &mut Vec<GitHubSecretFinding>,
+) -> Result<(), EngineError> {
+    if blobs.is_empty() {
+        return Ok(());
+    }
+    let failed = || failure("github_publish_failed");
+    let mut command = project_git(git, home, project);
+    command
+        .args(["cat-file", "--batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    let mut child: Child = crate::spawn_gate::spawn(&mut command).map_err(|_| failed())?;
+    let mut stdin = child.stdin.take().expect("cat-file stdin is piped");
+    let names: Vec<u8> = blobs
+        .iter()
+        .flat_map(|(object, _)| format!("{object}\n").into_bytes())
+        .collect();
+    let writer = std::thread::spawn(move || stdin.write_all(&names));
+    let mut reader = BufReader::new(child.stdout.take().expect("cat-file stdout is piped"));
+    let read = read_batch(&mut reader, blobs, findings);
+    if read.is_err() {
+        let _ = child.kill();
+    }
+    drop(reader);
+    let written = writer.join();
+    let status = child.wait().map_err(|_| failed())?;
+    read?;
+    if !matches!(written, Ok(Ok(()))) || !status.success() {
+        return Err(failed());
+    }
+    Ok(())
+}
+
+/// Reads each blob `cat-file --batch` prints, in the order asked: its header, the first
+/// 1 MiB scanned and the rest skipped. Inputs: the reader, the blobs and the findings.
+/// Output: `()`, or `github_publish_failed` for a reply that does not match.
+fn read_batch(
+    reader: &mut BufReader<ChildStdout>,
+    blobs: &[(String, String)],
+    findings: &mut Vec<GitHubSecretFinding>,
+) -> Result<(), EngineError> {
+    let failed = || failure("github_publish_failed");
+    for (object, path) in blobs {
+        let mut header = Vec::new();
+        reader
+            .by_ref()
+            .take(BATCH_HEADER_BYTES_MAX)
+            .read_until(b'\n', &mut header)
+            .map_err(|_| failed())?;
+        let header = std::str::from_utf8(&header).map_err(|_| failed())?;
+        let mut words = header.split_whitespace();
+        if !header.ends_with('\n')
+            || words.next() != Some(object.as_str())
+            || words.next() != Some("blob")
+        {
+            return Err(failed());
+        }
+        let size: u64 = words
+            .next()
+            .and_then(|size| size.parse().ok())
+            .ok_or_else(failed)?;
+        let kept = size.min(SCAN_FILE_BYTES_MAX);
+        let mut head = Vec::new();
+        reader
+            .by_ref()
+            .take(kept)
+            .read_to_end(&mut head)
+            .map_err(|_| failed())?;
+        let rest = size - kept + 1;
+        let skipped = std::io::copy(&mut reader.by_ref().take(rest), &mut std::io::sink())
+            .map_err(|_| failed())?;
+        if head.len() as u64 != kept || skipped != rest {
+            return Err(failed());
+        }
+        scan(path, &head, findings);
+    }
+    Ok(())
+}
+
+/// Adds a finding for each line of a file's first bytes that holds a secret: a private
+/// key block, a known token, or, in a settings file only, a credential-named key with a
+/// literal value. A file with a NUL in its first 8 KiB is binary and skipped.
+/// Inputs: the path, the bytes and the findings.
+fn scan(path: &str, head: &[u8], findings: &mut Vec<GitHubSecretFinding>) {
+    if head[..head.len().min(BINARY_PROBE_BYTES)].contains(&0) {
+        return;
+    }
+    let settings = settings_file(path);
+    for (number, line) in (1u32..).zip(head.split(|byte| *byte == b'\n')) {
+        let line = String::from_utf8_lossy(line);
+        let kind = if line.contains("-----BEGIN ") && line.contains("PRIVATE KEY-----") {
+            GitHubSecretKind::PrivateKey
+        } else if token(&line) {
+            GitHubSecretKind::Token
+        } else if settings && named_value(&line) {
+            GitHubSecretKind::NamedValue
+        } else {
+            continue;
+        };
+        findings.push(GitHubSecretFinding {
+            path: path.to_owned(),
+            line: number,
+            kind,
+        });
+    }
+}
+
+/// Tells whether a line holds a known token: a run of letters, digits, `-` and `_` that
+/// starts with a known prefix and has at least 16 more bytes holding a digit and an
+/// uppercase letter, as generated tokens do and identifiers do not; a JSON Web Token
+/// prefix also needs the `.eyJ` of its second part, which a base64 source map lacks.
+/// Input: the line. Output: true when it holds one.
+fn token(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let name = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_';
+    let mut start = 0;
+    while start < bytes.len() {
+        if !name(bytes[start]) {
+            start += 1;
+            continue;
+        }
+        let end = start
+            + bytes[start..]
+                .iter()
+                .take_while(|byte| name(**byte))
+                .count();
+        let run = &line[start..end];
+        let found = SECRET_PREFIXES.iter().any(|prefix| {
+            run.strip_prefix(prefix).is_some_and(|body| {
+                body.len() >= TOKEN_BODY_MIN
+                    && body.bytes().any(|byte| byte.is_ascii_digit())
+                    && body.bytes().any(|byte| byte.is_ascii_uppercase())
+                    && (*prefix != "eyJ" || line[end..].starts_with(".eyJ"))
+            })
+        });
+        if found {
+            return true;
+        }
+        start = end;
+    }
+    false
+}
+
+/// Tells whether a file is a settings file, where a credential-named key's value is a
+/// literal rather than code: env files, package manager and netrc credentials, and
+/// properties, ini, cfg, conf, TOML, YAML and JSON files. Input: the path.
+/// Output: true for a settings file.
+fn settings_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    SETTINGS_NAMES.contains(&name.as_str())
+        || name.starts_with(".env.")
+        || name.ends_with(".env")
+        || SETTINGS_EXTENSIONS
+            .iter()
+            .any(|extension| name.ends_with(extension))
+}
+
+/// Tells whether a settings line sets a credential-named key to a literal value: the
+/// first `=` or `:` whose key, quotes trimmed, ends like a credential name, followed by a
+/// quoted or bare value that is not a placeholder. Comment lines are skipped.
+/// Input: the line. Output: true when it holds such a value.
+fn named_value(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    if trimmed.starts_with(['#', ';', '!']) {
+        return false;
+    }
+    for (at, separator) in trimmed.match_indices(['=', ':']) {
+        let key = trimmed[..at].trim_end().trim_end_matches(['"', '\'']);
+        let start = key
+            .bytes()
+            .rposition(|byte| !(byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'))
+            .map_or(0, |at| at + 1);
+        let name = key[start..].to_ascii_lowercase().replace('-', "_");
+        let credential = KEY_NAMES.contains(&name.as_str())
+            || KEY_ENDS.iter().any(|ending| name.ends_with(ending));
+        if credential {
+            return literal(&trimmed[at + separator.len()..]);
+        }
+    }
+    false
+}
+
+/// Tells whether a setting's value is a literal secret: the quoted text or the bare word,
+/// at least 8 bytes, not a placeholder or a reference, and not a plain lowercase word,
+/// name or path, since it holds a digit, mixed case or a symbol. Input: the text after
+/// the separator. Output: true for a literal secret.
+fn literal(rest: &str) -> bool {
+    let rest = rest.trim_start();
+    let value = match rest.chars().next() {
+        Some(quote @ ('"' | '\'')) => rest[1..].split(quote).next().unwrap_or(""),
+        _ => rest
+            .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+            .next()
+            .unwrap_or(""),
+    };
+    let lower = value.to_ascii_lowercase();
+    let placeholder = value.starts_with(['$', '%', '<', '{', '[', '!', '*'])
+        || lower.starts_with("your")
+        || lower.starts_with("process.env")
+        || lower.starts_with("os.environ")
+        || lower.starts_with("env(")
+        || [
+            "example",
+            "changeme",
+            "change_me",
+            "placeholder",
+            "redacted",
+        ]
+        .iter()
+        .any(|word| lower.contains(word))
+        || PLACEHOLDERS.contains(&lower.as_str())
+        || value
+            .bytes()
+            .all(|byte| matches!(byte, b'x' | b'X' | b'*' | b'.' | b'-' | b'_' | b'0'));
+    if value.len() < NAMED_VALUE_MIN || placeholder {
+        return false;
+    }
+    let digit = value.bytes().any(|byte| byte.is_ascii_digit());
+    let mixed = value.bytes().any(|byte| byte.is_ascii_uppercase())
+        && value.bytes().any(|byte| byte.is_ascii_lowercase());
+    let symbol = value
+        .bytes()
+        .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'-' | b'.' | b'/'));
+    digit || mixed || symbol
 }

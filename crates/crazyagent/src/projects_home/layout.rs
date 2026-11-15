@@ -110,28 +110,36 @@ fn append_excludes(folder: &Path, lines: &[&str]) -> Result<bool, EngineError> {
         }
         Err(_) => return Err(refused("git_exclude_invalid")),
     }
-    let path = info.join("exclude");
+    append_lines(&info.join("exclude"), lines, "git_exclude_invalid")?;
+    Ok(true)
+}
+
+/// Appends each of `lines` a text file lacks, each at most once, creating the file and
+/// never writing through a link. Inputs: the file, the lines and the refusal code for a
+/// file that is a link, not a plain file or past 1 MiB. Output: how many lines were added.
+pub(crate) fn append_lines(path: &Path, lines: &[&str], code: &str) -> Result<usize, EngineError> {
     let mut existing = String::new();
-    match fs::symlink_metadata(&path) {
+    match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
             if metadata.len() > EXCLUDE_BYTES_MAX {
-                return Err(refused("git_exclude_invalid"));
+                return Err(refused(code));
             }
-            fs::File::open(&path)
+            fs::File::open(path)
                 .and_then(|file| file.take(EXCLUDE_BYTES_MAX).read_to_string(&mut existing))
-                .map_err(|_| refused("git_exclude_invalid"))?;
+                .map_err(|_| refused(code))?;
         }
-        Ok(_) => return Err(refused("git_exclude_invalid")),
+        Ok(_) => return Err(refused(code)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(refused("git_exclude_invalid")),
+        Err(_) => return Err(refused(code)),
     }
-    let missing: Vec<&str> = lines
-        .iter()
-        .copied()
-        .filter(|line| !existing.lines().any(|present| present.trim_end() == *line))
-        .collect();
+    let mut missing: Vec<&str> = Vec::new();
+    for line in lines.iter().copied() {
+        if !existing.lines().any(|present| present.trim_end() == line) && !missing.contains(&line) {
+            missing.push(line);
+        }
+    }
     if missing.is_empty() {
-        return Ok(true);
+        return Ok(0);
     }
     let mut text = String::new();
     if !existing.is_empty() && !existing.ends_with('\n') {
@@ -141,10 +149,10 @@ fn append_excludes(folder: &Path, lines: &[&str]) -> Result<bool, EngineError> {
         text.push_str(line);
         text.push('\n');
     }
-    let mut file = open_append(&path).map_err(|_| refused("git_exclude_invalid"))?;
+    let mut file = open_append(path).map_err(|_| refused(code))?;
     file.write_all(text.as_bytes())
         .and_then(|()| file.sync_all())
-        .map_err(|_| refused("git_exclude_invalid"))?;
+        .map_err(|_| refused(code))?;
     assert!(!missing.is_empty() && missing.len() <= lines.len());
-    Ok(true)
+    Ok(missing.len())
 }

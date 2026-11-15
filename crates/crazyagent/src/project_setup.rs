@@ -101,7 +101,7 @@ const KEY_BLOCK_END: &str = "-----end";
 const BASE64_RUN_MIN: usize = 20;
 const WRAPPED_TAIL_MIN: usize = 8;
 const PGPASS_FIELDS_MIN: usize = 5;
-const SECRET_PREFIXES: [&str; 14] = [
+pub(crate) const SECRET_PREFIXES: [&str; 14] = [
     "sk-",
     "sk_",
     "pk_",
