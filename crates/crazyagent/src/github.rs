@@ -263,6 +263,10 @@ pub fn problem(code: &str) -> String {
              sign-in lacks. Sign in to GitHub again, or run gh auth refresh -s read:org and \
              use the GitHub CLI again."
         }
+        "github_orgs_refused" => {
+            "GitHub refused to list your organizations, so only your own account is offered. \
+             Try again later."
+        }
         "credential_missing" => {
             "The saved GitHub token is gone from the credential store. Sign in again."
         }

@@ -330,11 +330,10 @@ fn grants(scopes: &[String], covering: &[&str]) -> bool {
         .any(|scope| covering.contains(&scope.as_str()))
 }
 
-/// Lists the accounts a new repository can go under: the token's own account first, then
-/// each organization from one page of at most 100 active memberships whose role is admin
-/// or member. Without `read:org`, named by the token's scopes or shown by GitHub refusing
-/// the list, only the own account comes back, with the sentence that says why.
-/// Inputs: endpoints and token. Output: the accounts, or `github_token_refused`.
+/// Lists the accounts a new repository can go under: the own account first, then each
+/// active admin or member organization from one page of at most 100. When the scopes
+/// lack `read:org`, or GitHub refuses the list, only the own account comes back with the
+/// sentence that says which. Inputs: endpoints and token. Output: the accounts.
 pub fn owners(endpoints: &Endpoints, token: &SecretString) -> Result<GitHubOwners, EngineError> {
     #[derive(Deserialize)]
     struct Membership {
@@ -351,15 +350,15 @@ pub fn owners(endpoints: &Endpoints, token: &SecretString) -> Result<GitHubOwner
         login,
         personal: true,
     }];
-    let without_orgs = |owners: Vec<GitHubOwner>| GitHubOwners {
+    let without_orgs = |owners: Vec<GitHubOwner>, code: &str| GitHubOwners {
         owners,
-        problem: Some(super::problem("github_scope_missing_read_org")),
+        problem: Some(super::problem(code)),
     };
     if scopes
         .as_deref()
         .is_some_and(|scopes| !grants(scopes, &READ_ORG))
     {
-        return Ok(without_orgs(owners));
+        return Ok(without_orgs(owners, "github_scope_missing_read_org"));
     }
     let mut url = endpoints.api("user/memberships/orgs")?;
     url.query_pairs_mut()
@@ -368,7 +367,10 @@ pub fn owners(endpoints: &Endpoints, token: &SecretString) -> Result<GitHubOwner
     let reply = endpoints.request(url, API_JSON, Some(token), None).send()?;
     match reply.status {
         200 => {}
-        403 => return Ok(without_orgs(owners)),
+        403 if scopes.is_none() => {
+            return Ok(without_orgs(owners, "github_scope_missing_read_org"));
+        }
+        403 => return Ok(without_orgs(owners, "github_orgs_refused")),
         401 => return Err(failure("github_token_refused")),
         _ => return Err(failure("github_unreachable")),
     }
@@ -447,14 +449,11 @@ pub fn name_free(
     }
 }
 
-/// Makes an empty repository with CrazyAgent's standard settings (issues on, wiki and
-/// projects off, squash merges only, head branches deleted after merge, auto-merge off)
-/// under the token's own account or an organization. The name and description are
-/// checked before any request, and a repository GitHub made with another name or
-/// visibility than asked is refused so nothing is pushed into it.
-/// Inputs: endpoints, token and the repository. Output: what GitHub made, or
-/// `github_repo_name_taken`, `github_repo_create_refused`,
-/// `github_repo_description_invalid`, `github_repo_visibility_mismatch`.
+/// Makes an empty repository with CrazyAgent's standard settings under the own account
+/// or an organization, checking the name and description before any request. A reply
+/// with another name or visibility than asked is refused so nothing is pushed into it.
+/// Inputs: endpoints, token and the repository. Output: what GitHub made, or the
+/// refusal code.
 pub fn create(
     endpoints: &Endpoints,
     token: &SecretString,
