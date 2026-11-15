@@ -30,6 +30,7 @@ fn view() -> PolicyView {
                 access,
                 label: access.label().to_owned(),
                 unavailable: access.unavailable().map(str::to_owned),
+                gaps: Vec::new(),
             })
             .collect(),
         networks: AgentNetwork::ALL
@@ -628,4 +629,20 @@ fn only_on_linux_does_the_box_say_ports_hold_no_host_and_nested_git_is_not_block
     let words = shown_words(&edit);
     assert!(!words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
     assert!(!words.contains(LINUX_NESTED_GIT_LINE), "{words}");
+}
+
+#[test]
+fn the_box_shows_what_the_engine_says_this_linux_cannot_hold_for_the_level() {
+    use crate::sandbox::LINUX_SIGNALS_LINE;
+    let mut told = view();
+    assert_eq!(told.levels[0].access, AgentAccess::Sandboxed);
+    told.levels[0].gaps = vec![LINUX_SIGNALS_LINE.to_owned()];
+    let mut edit = AccessEdit::of(&told);
+    let words = shown_words(&edit);
+    assert!(words.contains(LINUX_SIGNALS_LINE), "{words}");
+    edit.access = AgentAccess::Full;
+    let words = shown_words(&edit);
+    assert!(!words.contains(LINUX_SIGNALS_LINE), "{words}");
+    let words = shown_words(&AccessEdit::of(&view()));
+    assert!(!words.contains(LINUX_SIGNALS_LINE), "{words}");
 }

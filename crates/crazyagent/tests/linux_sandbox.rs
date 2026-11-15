@@ -2356,3 +2356,28 @@ fn the_first_nested_process_outlives_every_signal_but_kill() {
     let status = exit_within(&mut child, Duration::from_secs(5));
     assert_eq!(status.and_then(|status| status.code()), Some(0));
 }
+
+/// SA vid 4: the lines both clients show about this Linux follow what it holds. The
+/// helper's scope question agrees with the kernel, and the host report agrees with it and
+/// with the control that says whether this machine nests an agent.
+#[test]
+fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
+    let scoped = Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .scope(Scope::Signal)
+        .is_ok();
+    let asked = crazyagent::spawn_gate::status(
+        Command::new(HELPER)
+            .arg("--scoped")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert_eq!(asked.code(), Some(if scoped { 0 } else { 1 }));
+    let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER));
+    assert_eq!(host.scoped, scoped);
+    assert_eq!(host.nested, nesting_bwrap().is_some());
+    let absent = crazyagent::sandbox::linux::read_host(Path::new("/nonexistent/helper"));
+    assert!(!absent.scoped && !absent.nested, "{absent:?}");
+}

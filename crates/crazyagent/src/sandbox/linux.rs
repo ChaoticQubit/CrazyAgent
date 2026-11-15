@@ -44,6 +44,7 @@ const FILTER_SOCKETS: &str = "--filter-sockets";
 const DIE_WITH: &str = "--die-with";
 const NEST: &str = "--nest";
 const NESTED: &str = "--nested";
+const SCOPED: &str = "--scoped";
 /// The bubblewrap arguments a nested agent starts under, before its working folder: user,
 /// process, IPC and host-name namespaces of its own and a fresh `/proc`, with the whole
 /// root bound through, devices too, so the helper's Landlock rules stay the only file
@@ -277,6 +278,7 @@ pub enum HelperRequest {
         bwrap: PathBuf,
         args: Vec<OsString>,
     },
+    Scoped,
 }
 
 impl HelperRequest {
@@ -701,6 +703,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     let (policy, launch) = match request {
         HelperRequest::Filter { program, args } => return filtered(&program, args),
         HelperRequest::Nest { bwrap, args } => return nest(&bwrap, &args),
+        HelperRequest::Scoped => return ExitCode::from(2),
         HelperRequest::Probe {
             limit_network,
             open_sockets,
@@ -1040,6 +1043,20 @@ fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
                 .arg(helper)
                 .args(flags),
         )
+}
+
+/// Reads what this machine holds for an agent beyond its Landlock rules. Input: the
+/// helper. Output: the facts, each false when it cannot be read.
+pub fn read_host(helper: &Path) -> super::LinuxHost {
+    let (nested, scoped) = (false, helper.as_os_str() == SCOPED);
+    super::LinuxHost { nested, scoped }
+}
+
+/// [`read_host`] for the helper beside this executable. No input. Output: the facts, each
+/// false when this executable's path cannot be read.
+pub(crate) fn host_now() -> super::LinuxHost {
+    let helper = std::env::current_exe().map(|engine| engine.with_file_name(HELPER_NAME));
+    read_host(&helper.unwrap_or_default())
 }
 
 /// Refuses a policy neither Linux backend starts: one confined to its own worktree, or a
@@ -1729,6 +1746,17 @@ mod tests {
         assert!(parse(&[FILTER_SOCKETS, READ, "/usr", "--", "/bin/true"]).is_err());
         assert!(parse(&[FILTER_SOCKETS, "--", "bin/true"]).is_err());
         assert!(parse(&[PROBE, FILTER_SOCKETS]).is_err());
+    }
+
+    #[test]
+    fn the_scope_question_stands_alone() {
+        let parse =
+            |words: &[&str]| HelperRequest::parse(words.iter().map(OsString::from).collect());
+        assert_eq!(parse(&[SCOPED]), Ok(HelperRequest::Scoped));
+        assert!(parse(&[SCOPED, PROBE]).is_err());
+        assert!(parse(&[PROBE, SCOPED]).is_err());
+        assert!(parse(&[SCOPED, "--", "/bin/true"]).is_err());
+        assert!(parse(&[READ, "/usr", SCOPED, "--", "/bin/true"]).is_err());
     }
 
     #[test]

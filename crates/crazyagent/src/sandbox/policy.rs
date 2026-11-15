@@ -753,6 +753,8 @@ pub struct LevelView {
     pub access: AgentAccess,
     pub label: String,
     pub unavailable: Option<String>,
+    #[serde(default)]
+    pub gaps: Vec<String>,
 }
 
 impl LevelView {
@@ -760,17 +762,39 @@ impl LevelView {
     /// cannot run agents on this computer. Takes nothing. Returns one view for each level,
     /// as a project's policy and the New Project catalog both show them.
     pub fn all() -> Vec<Self> {
+        Self::on(crate::sandbox::linux_host())
+    }
+
+    /// Every access level as [`LevelView::all`] gives them, for a computer that holds
+    /// `host`. Input: what a Linux holds, none on another system. Output: one view for
+    /// each level, with the lines [`linux_gaps`] gives it.
+    pub fn on(host: Option<crate::sandbox::LinuxHost>) -> Vec<Self> {
         let levels: Vec<Self> = AgentAccess::ALL
             .into_iter()
             .map(|access| Self {
                 access,
                 label: access.label().to_owned(),
                 unavailable: access.unavailable().map(str::to_owned),
+                gaps: linux_gaps(access, host)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
             })
             .collect();
         assert_eq!(levels.len(), AgentAccess::ALL.len());
         levels
     }
+}
+
+/// What a Linux cannot hold for agents at one access level, as plain lines both clients
+/// show under the level. Inputs: the level and what this Linux holds, none on another
+/// system. Output: the lines, none where nothing is open.
+pub fn linux_gaps(
+    access: AgentAccess,
+    host: Option<crate::sandbox::LinuxHost>,
+) -> Vec<&'static str> {
+    let _ = (access, host);
+    Vec::new()
 }
 
 /// One toolchain family: whether the owner has it, the project uses it and agents may
@@ -1469,5 +1493,30 @@ mod tests {
         }
         assert!(state.contains("[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]$"));
         assert!(new.contains("[wW][oO][rR](k|K|\u{212a})[tT][rR][eE][eE](s|S|\u{17f})"));
+    }
+
+    #[test]
+    fn a_level_says_what_this_linux_cannot_hold_for_it_and_nothing_elsewhere() {
+        use crate::sandbox::{LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE, LinuxHost};
+        let host = |nested, scoped| Some(LinuxHost { nested, scoped });
+        let gaps = |access, nested, scoped| linux_gaps(access, host(nested, scoped));
+        for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+            assert!(linux_gaps(access, None).is_empty(), "not Linux");
+            assert!(gaps(access, true, true).is_empty());
+            assert!(gaps(access, true, false).is_empty());
+            assert_eq!(gaps(access, false, true), [LINUX_PROCESS_LIST_LINE]);
+            assert_eq!(gaps(access, false, false), [LINUX_SIGNALS_LINE]);
+        }
+        assert!(gaps(AgentAccess::Full, false, false).is_empty());
+        let levels = LevelView::on(host(false, false));
+        assert_eq!(levels.len(), AgentAccess::ALL.len());
+        for level in &levels {
+            let told: Vec<&str> = level.gaps.iter().map(String::as_str).collect();
+            assert_eq!(told, gaps(level.access, false, false), "{:?}", level.access);
+        }
+        assert!(LevelView::on(None).iter().all(|level| level.gaps.is_empty()));
+        let stored = r#"{"access":"sandboxed","label":"Sandboxed","unavailable":null}"#;
+        let old: LevelView = serde_json::from_str(stored).unwrap();
+        assert!(old.gaps.is_empty(), "a view an older engine stored");
     }
 }

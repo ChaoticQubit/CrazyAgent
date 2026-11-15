@@ -444,3 +444,18 @@ test("only on Linux below Full access do the allowed extras say a port is open o
     assert.ok(!page.includes(line), page);
   }
 });
+
+test("the access choice shows what the engine says this Linux can't hold for the chosen level (SA vid 4)", () => {
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
+  const line = /pub const LINUX_SIGNALS_LINE: &str = "([^"]+)";/.exec(engine)?.[1];
+  assert.ok(line, "the engine states the signal gap");
+  const told = (level) => level === "sandboxed" ? [line] : [];
+  const shown = (chosen, gaps) => renderToStaticMarkup(createElement(access.AccessLevels, { name: "a", value: chosen, unavailable: () => null, gaps, onChange: () => {}, platform: "linux" }));
+  const escaped = line.replaceAll("'", "&#x27;");
+  assert.ok(shown("sandboxed", told).includes(escaped), shown("sandboxed", told));
+  assert.ok(!shown("own_branch", told).includes(escaped));
+  assert.ok(!shown("sandboxed", undefined).includes(escaped), "an older engine sends no gap line");
+  for (const page of ["../src/screens/project/settings.tsx", "../src/screens/new-project/index.tsx"]) {
+    assert.match(readFileSync(new URL(page, import.meta.url), "utf8"), /<AccessLevels [^\n]* gaps=\{/, page);
+  }
+});

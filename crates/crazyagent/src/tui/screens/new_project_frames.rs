@@ -517,3 +517,38 @@ fn only_on_linux_below_full_access_does_review_say_nested_git_is_not_blocked() {
     let full = shown(&wizard);
     assert!(!full.contains(LINUX_NESTED_GIT_LINE), "{full}");
 }
+
+#[test]
+fn review_says_what_this_linux_cannot_hold_for_the_chosen_level() {
+    use crate::sandbox::{LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE, LinuxHost};
+    let look = Look::plain();
+    let shown = |wizard: &Wizard| {
+        compose(&wizard_screen(wizard, 80, 120, &look), 80, 120, "", &look)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let host = |nested, scoped| Some(LinuxHost { nested, scoped });
+    let mut wizard = about();
+    wizard.go(Step::Review);
+    wizard.access = AgentAccess::Sandboxed;
+    wizard.host = None;
+    let elsewhere = shown(&wizard);
+    assert!(elsewhere.contains("Agent access"), "{elsewhere}");
+    assert!(!elsewhere.contains(LINUX_SIGNALS_LINE), "{elsewhere}");
+    wizard.host = host(false, false);
+    let open = shown(&wizard);
+    assert!(open.contains(LINUX_SIGNALS_LINE), "{open}");
+    wizard.host = host(false, true);
+    let listed = shown(&wizard);
+    assert!(listed.contains(LINUX_PROCESS_LIST_LINE), "{listed}");
+    assert!(!listed.contains(LINUX_SIGNALS_LINE), "{listed}");
+    wizard.host = host(true, false);
+    let held = shown(&wizard);
+    assert!(!held.contains(LINUX_SIGNALS_LINE), "{held}");
+    assert!(!held.contains(LINUX_PROCESS_LIST_LINE), "{held}");
+    wizard.host = host(false, false);
+    wizard.access = AgentAccess::Full;
+    let full = shown(&wizard);
+    assert!(!full.contains(LINUX_SIGNALS_LINE), "{full}");
+}

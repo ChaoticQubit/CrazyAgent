@@ -869,6 +869,40 @@ pub const LINUX_PORTS_ANY_HOST_LINE: &str = "On Linux, network limits hold ports
 /// making a git repository inside a folder it may change.
 pub const LINUX_NESTED_GIT_LINE: &str = "On Linux, agents can make a git repository inside any project folder they may change, and your own git or IDE runs its settings when you open that folder. Check agent-made folders for a .git before you open them.";
 
+/// What a Linux agent can still do to the owner's other programs where this machine gives
+/// it neither a process namespace of its own nor the Landlock signal scope (Linux before
+/// 6.12 without usable user namespaces), shown there only, under the access level in the
+/// desktop and the TUI (SA vid 4, DEC-089).
+pub const LINUX_SIGNALS_LINE: &str = "On this Linux, agents can see which programs you run and stop or signal them, such as a dev server or CrazyAgent itself. Linux 6.12 or newer stops the signals.";
+
+/// What a Linux agent can still see where the kernel scopes its signals but this machine
+/// gives it no process namespace of its own, shown there only, under the access level in
+/// the desktop and the TUI (RV-DS241-86).
+pub const LINUX_PROCESS_LIST_LINE: &str = "On this Linux, agents can see which programs you run and how they were started.";
+
+/// What this Linux holds for an agent beyond its Landlock file and network rules: `nested`
+/// when it starts agents in a process namespace of their own, `scoped` when the kernel
+/// keeps their signals inside their own Landlock domain (Linux 6.12 or newer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinuxHost {
+    pub nested: bool,
+    pub scoped: bool,
+}
+
+/// What this computer holds as [`LinuxHost`] says, read through the sandbox helper beside
+/// this executable. No input. Output: none on another system; on Linux the facts, each
+/// false when it cannot be read, so its gap line is shown.
+pub fn linux_host() -> Option<LinuxHost> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(linux::host_now())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// Refusal to build or install a project sandbox, with a plain reason.
 #[derive(Debug)]
 pub enum SandboxError {

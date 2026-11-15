@@ -354,6 +354,7 @@ pub(in crate::tui) struct Wizard {
     pub phase: Phase,
     pub access: AgentAccess,
     pub linux: bool,
+    pub host: Option<crate::sandbox::LinuxHost>,
 }
 
 impl Wizard {
@@ -403,6 +404,7 @@ impl Wizard {
                 .filter(|level| level.unavailable().is_none())
                 .unwrap_or_default(),
             linux: cfg!(target_os = "linux"),
+            host: crate::sandbox::linux_host(),
         };
         wizard.assert_consistent();
         wizard
