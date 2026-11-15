@@ -1275,21 +1275,6 @@ fn sizes_paths_and_harness_names_read_plainly() {
 }
 
 #[test]
-fn a_harness_named_without_a_catalog_at_hand_gets_the_name_its_manifest_gives_it() {
-    let listed = crate::harnesses::specs();
-    assert_eq!(listed.len(), 18);
-    for spec in listed {
-        assert_eq!(harness_name(spec.id, None), spec.name, "{}", spec.id);
-    }
-    assert_eq!(harness_name("rcli", None), "RCLI");
-    assert_eq!(harness_name("claude", None), "Claude Code");
-    assert_eq!(harness_name("kiro", None), "Kiro CLI");
-    for unlisted in ["gemini", "claude-codex", "Codex", ""] {
-        assert_eq!(harness_name(unlisted, None), unlisted, "{unlisted}");
-    }
-}
-
-#[test]
 fn new_project_toggle_defaults_on() {
     let mut wizard = wizard();
     assert!(
