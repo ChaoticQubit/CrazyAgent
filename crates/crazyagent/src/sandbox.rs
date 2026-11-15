@@ -879,6 +879,7 @@ pub fn linux_unbridged_line(port: u16) -> String {
 /// system, and the agent's sandbox as launched. Output: the sentences, or none.
 pub fn linux_unbridged_notice_on(
     host: Option<LinuxHost>,
+    _choice: policy::AgentNetwork,
     sandbox: &ProjectSandbox,
 ) -> Option<String> {
     let nests = host.is_some_and(|host| host.nested);
@@ -889,8 +890,11 @@ pub fn linux_unbridged_notice_on(
 
 /// [`linux_unbridged_notice_on`] for this computer as it was last read. Input: the agent's
 /// sandbox as launched. Output: the sentences, or none.
-pub fn linux_unbridged_notice(sandbox: &ProjectSandbox) -> Option<String> {
-    linux_unbridged_notice_on(linux_host_kept(), sandbox)
+pub fn linux_unbridged_notice(
+    choice: policy::AgentNetwork,
+    sandbox: &ProjectSandbox,
+) -> Option<String> {
+    linux_unbridged_notice_on(linux_host_kept(), choice, sandbox)
 }
 
 /// What a limited network cannot hold on Linux, shown there only, under the network choice

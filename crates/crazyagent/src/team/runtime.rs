@@ -9628,7 +9628,7 @@ impl TeamRuntime {
                 .map_err(sandboxed)?;
         }
         sandbox.install(&profile).map_err(sandboxed)?;
-        self.note_unbridged(&stored.project_id, id, &sandbox);
+        self.note_unbridged(&stored.project_id, id, policy.network, &sandbox);
         let terminal_display = crate::coord::settings::read(&self.connection, &stored.project_id)
             .map_err(|e| {
                 with_code(
@@ -9698,8 +9698,14 @@ impl TeamRuntime {
     /// ([`crate::sandbox::linux_unbridged_notice`]), so the agent view says why its ports
     /// are open on every host. Takes the project, the agent and its sandbox as launched.
     /// Returns nothing; a notice that cannot be kept is logged, never a reason not to start.
-    fn note_unbridged(&self, project: &ProjectId, id: i64, sandbox: &ProjectSandbox) {
-        let Some(text) = crate::sandbox::linux_unbridged_notice(sandbox) else {
+    fn note_unbridged(
+        &self,
+        project: &ProjectId,
+        id: i64,
+        choice: AgentNetwork,
+        sandbox: &ProjectSandbox,
+    ) {
+        let Some(text) = crate::sandbox::linux_unbridged_notice(choice, sandbox) else {
             return;
         };
         let kept = id > 0
