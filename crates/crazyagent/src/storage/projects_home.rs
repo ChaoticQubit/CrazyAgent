@@ -364,23 +364,25 @@ fn adding(db: &Connection) -> Result<bool, EngineError> {
 const ADDS_MAX: usize = 64;
 
 /// How an add a record never reached is settled. With a request (after its exchange
-/// replied, its disk work already settled there): a running row whose folder landed in the
-/// home, as when the grant was found stale after the disk changed, gets the end its disk
-/// shows, so the owner reads where the folder went as after an engine stop (RV-DS241-198);
-/// one that landed nothing is forgotten. With none (engine start, before any add plans, so
-/// no staging is live): each running row gets its staging folders removed and the end its
-/// disk shows. Nothing else is deleted either way, and only the newest ended row is kept for
-/// the owner to read. Inputs: the connection and the request. Output: how many running rows
-/// were settled.
+/// replied, its disk work already settled there) and whether that add placed its folder: a
+/// running row whose add placed its folder in the home, as when the grant was found stale
+/// after the disk changed, gets the end its disk shows, so the owner reads where the folder
+/// went as after an engine stop (RV-DS241-198); one that placed nothing, also when another
+/// folder took its destination after the plan (rv-sec2 b9 F1), or whose folder is gone, is
+/// forgotten. With none (engine start, before any add plans, so no staging is live): each
+/// running row gets its staging folders removed and the end its disk shows. Nothing else is
+/// deleted either way, and only the newest ended row is kept for the owner to read. Inputs:
+/// the connection, and the request with whether its add placed its folder. Output: how many
+/// running rows were settled.
 pub(super) fn add_settle(
     db: &mut Connection,
-    request: Option<&RequestId>,
+    request: Option<(&RequestId, bool)>,
 ) -> Result<usize, EngineError> {
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
     let settled = match request {
-        Some(request) => settle_add(&tx, request)?,
+        Some((request, placed)) => settle_add(&tx, request, placed)?,
         None => restart_adds(&tx)?,
     };
     assert!(request.is_some() || !adding(&tx)?);
@@ -423,9 +425,14 @@ fn restart_adds(tx: &Transaction<'_>) -> Result<usize, EngineError> {
 }
 
 /// Settles one add after its exchange replied, as [`add_settle`] says. A record already
-/// removed the running row of an add it reached. Inputs: the transaction and the request.
-/// Output: 1 when a running row was ended or forgotten, else 0.
-fn settle_add(tx: &Transaction<'_>, request: &RequestId) -> Result<usize, EngineError> {
+/// removed the running row of an add it reached. Inputs: the transaction, the request and
+/// whether its add placed its folder. Output: 1 when a running row was ended or forgotten,
+/// else 0.
+fn settle_add(
+    tx: &Transaction<'_>,
+    request: &RequestId,
+    placed: bool,
+) -> Result<usize, EngineError> {
     let row: Option<(String, String, String)> = tx
         .query_row(
             "SELECT source, destination, mode FROM projects_home_add
@@ -438,20 +445,24 @@ fn settle_add(tx: &Transaction<'_>, request: &RequestId) -> Result<usize, Engine
     let Some((source, destination, mode)) = row else {
         return Ok(0);
     };
-    let ended = home::add_left(Path::new(&source), Path::new(&destination), mode == "move");
-    let changed = if ended == "home_add_interrupted" {
-        tx.execute(
-            "DELETE FROM projects_home_add WHERE request=?1 AND ended IS NULL",
-            [request.as_str()],
-        )
-        .map_err(error)?
-    } else {
-        eprintln!("home_add_unrecorded ended={ended}");
-        tx.execute(
-            "UPDATE projects_home_add SET ended=?1 WHERE request=?2 AND ended IS NULL",
-            params![ended, request.as_str()],
-        )
-        .map_err(error)?
+    let ended = placed
+        .then(|| home::add_left(Path::new(&source), Path::new(&destination), mode == "move"))
+        .filter(|ended| *ended != "home_add_interrupted");
+    let changed = match ended {
+        Some(ended) => {
+            eprintln!("home_add_unrecorded ended={ended}");
+            tx.execute(
+                "UPDATE projects_home_add SET ended=?1 WHERE request=?2 AND ended IS NULL",
+                params![ended, request.as_str()],
+            )
+            .map_err(error)?
+        }
+        None => tx
+            .execute(
+                "DELETE FROM projects_home_add WHERE request=?1 AND ended IS NULL",
+                [request.as_str()],
+            )
+            .map_err(error)?,
     };
     assert_eq!(changed, 1, "the running row read above is settled once");
     keep_newest_end(tx)?;

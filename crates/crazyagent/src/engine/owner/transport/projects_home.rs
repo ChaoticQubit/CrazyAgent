@@ -497,6 +497,8 @@ pub(super) async fn serve(
         _ => None,
     };
     let trashed = deleting && reached_trash(outcome, ran);
+    let placed =
+        adding.is_some() && ran && (matches!(&step, Ok(Step::Record(Ok(_)))) || tally.clearing());
     let answer = async {
         let mut barrier = Some(engine.owner_egress.write().await);
         let changed = disk_changed(trashed, moving, moving_project, adding.is_some(), ran);
@@ -574,7 +576,7 @@ pub(super) async fn serve(
     }
     if let Some(added) = adding {
         settled(engine, "home_add_not_settled", |reply| {
-            Job::HomeAddSettle(added.clone(), reply)
+            Job::HomeAddSettle(added.clone(), placed, reply)
         })
         .await;
     }
