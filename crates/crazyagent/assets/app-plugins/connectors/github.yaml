@@ -1,0 +1,15 @@
+schema: 1
+kind: connector
+name: github
+title: GitHub
+version: 1.0.0
+description: Repositories, issues and pull requests on GitHub through GitHub's hosted MCP server. While writes are off the app calls its read-only address.
+mcp:
+  url: https://api.githubcopilot.com/mcp/
+  read_only_url: https://api.githubcopilot.com/mcp/readonly
+  hosts: [api.githubcopilot.com]
+key:
+  secret: token
+  header: Authorization
+  scheme: Bearer
+  help: Create a fine-grained personal access token on GitHub with read-only permissions on the repositories you choose.

@@ -156,6 +156,26 @@ pub(in crate::tui) fn runs_line(runs: &RunsView) -> String {
                 ""
             }
         ),
+        RunsView::Connector {
+            hosts, oauth_hosts, ..
+        } => {
+            let names = |hosts: &[String]| {
+                hosts
+                    .iter()
+                    .map(|host| safe(host))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            if oauth_hosts.is_empty() {
+                format!("Reaches {}", names(hosts))
+            } else {
+                format!(
+                    "Reaches {}; signs in at {}",
+                    names(hosts),
+                    names(oauth_hosts)
+                )
+            }
+        }
     }
 }
 
@@ -818,11 +838,12 @@ fn trust_lines(trust: &TrustView, room: usize) -> Vec<Line<'static>> {
         "Kind: {}",
         match trust.kind {
             PluginKind::Embedding => "Embedding",
+            PluginKind::Connector => "Connector",
         }
     ));
     texts.push(format!("Version {}", safe(&trust.version)));
     texts.push(runs_line(&trust.runs));
-    if let RunsView::Http { url, .. } = &trust.runs {
+    if let RunsView::Http { url, .. } | RunsView::Connector { url, .. } = &trust.runs {
         texts.push(format!("Address: {}", safe(url)));
     }
     texts.push(format!(

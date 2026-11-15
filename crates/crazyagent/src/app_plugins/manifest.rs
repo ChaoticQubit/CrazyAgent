@@ -1,3 +1,4 @@
+use super::connector::{self, ConnectorSpec};
 use super::yaml::{self, Value};
 use super::{PluginKind, Problem, RunsView, TrustView};
 
@@ -8,22 +9,22 @@ pub const BATCH_MAX: u16 = 128;
 /// The fewest and most numbers in one embedding vector.
 pub const DIMENSIONS_MIN: u16 = 64;
 pub const DIMENSIONS_MAX: u16 = 1024;
-const HOSTS_MAX: usize = 4;
+pub(super) const HOSTS_MAX: usize = 4;
 const SECRETS_MAX: usize = 4;
 const HEADERS_MAX: usize = 16;
 const NAME_BYTES_MAX: usize = 40;
 const TITLE_BYTES_MAX: usize = 64;
 const VERSION_BYTES_MAX: usize = 32;
-const DESCRIPTION_BYTES_MAX: usize = 400;
-const URL_BYTES_MAX: usize = 2048;
+pub(super) const DESCRIPTION_BYTES_MAX: usize = 400;
+pub(super) const URL_BYTES_MAX: usize = 2048;
 const HOST_BYTES_MAX: usize = 253;
 const SECRET_BYTES_MAX: usize = 32;
 const HEADER_NAME_BYTES_MAX: usize = 64;
-const HEADER_VALUE_BYTES_MAX: usize = 1024;
+pub(super) const HEADER_VALUE_BYTES_MAX: usize = 1024;
 const VECTOR_STEPS_MAX: usize = 8;
 const INPUTS: &str = "{{inputs}}";
 const PURPOSE: &str = "{{purpose}}";
-const RESERVED_HEADERS: [&str; 12] = [
+pub(super) const RESERVED_HEADERS: [&str; 12] = [
     "host",
     "content-length",
     "content-type",
@@ -38,6 +39,29 @@ const RESERVED_HEADERS: [&str; 12] = [
     "proxy-connection",
 ];
 const LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "[::1]", "localhost"];
+const CONNECTOR: &str = "connector";
+const EMBEDDING_FIELDS: [&str; 8] = [
+    "schema",
+    "kind",
+    "name",
+    "title",
+    "version",
+    "description",
+    "local",
+    "http",
+];
+const CONNECTOR_FIELDS: [&str; 10] = [
+    "schema",
+    "kind",
+    "name",
+    "title",
+    "version",
+    "description",
+    "mcp",
+    "key",
+    "oauth",
+    "tools",
+];
 
 /// A local runtime the app itself runs; its download source and hashes live in engine
 /// code, never in a manifest.
@@ -162,11 +186,13 @@ fn fill(value: &serde_json::Value, inputs: &[&str], purpose: Purpose) -> serde_j
     }
 }
 
-/// How a plugin runs: the app's local runtime, or an HTTP API.
+/// How a plugin runs: the app's local runtime, an HTTP embedding API, or for a connector
+/// the vendor's remote MCP server the engine calls for agents.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Runs {
     Local { runtime: Runtime },
     Http(Box<HttpSpec>),
+    Connector(Box<ConnectorSpec>),
 }
 
 /// A validated plugin manifest and the SHA-256 of its exact bytes.
@@ -195,14 +221,33 @@ impl Manifest {
                 local_unencrypted: http.local_unencrypted,
                 dimensions: http.dimensions,
             },
+            Runs::Connector(spec) => RunsView::Connector {
+                url: spec.mcp.url.as_str().to_owned(),
+                hosts: spec.mcp.hosts.clone(),
+                oauth_hosts: spec
+                    .oauth
+                    .as_ref()
+                    .map_or_else(Vec::new, |oauth| oauth.hosts.clone()),
+                vendor_read_only: spec.mcp.read_only != connector::ReadOnly::None,
+            },
         }
     }
 
-    /// The declared secret names, none for a local plugin.
+    /// The declared secret names, none for a local plugin; a connector's are its key's
+    /// secret, then the user secret of a Basic key.
     pub fn secrets(&self) -> &[String] {
         match &self.runs {
             Runs::Local { .. } => &[],
             Runs::Http(http) => &http.secrets,
+            Runs::Connector(spec) => spec.key.as_ref().map_or(&[], |key| key.secrets.as_slice()),
+        }
+    }
+
+    /// What a connector plugin declares. Output: the connector, none for any other kind.
+    pub fn connector(&self) -> Option<&ConnectorSpec> {
+        match &self.runs {
+            Runs::Connector(spec) => Some(spec),
+            Runs::Local { .. } | Runs::Http(_) => None,
         }
     }
 
@@ -222,7 +267,7 @@ impl Manifest {
     }
 }
 
-fn problem(code: &'static str, field: &str) -> Problem {
+pub(super) fn problem(code: &'static str, field: &str) -> Problem {
     Problem::new(code, None, Some(field))
 }
 
@@ -232,16 +277,11 @@ fn problem(code: &'static str, field: &str) -> Problem {
 pub fn parse(text: &str) -> Result<Manifest, Problem> {
     let value = yaml::parse(text).map_err(|error| error.problem())?;
     let fields = Fields::new(&value, "")?;
-    fields.only(&[
-        "schema",
-        "kind",
-        "name",
-        "title",
-        "version",
-        "description",
-        "local",
-        "http",
-    ])?;
+    let known: &[&str] = match fields.optional("kind") {
+        Some(Value::Str(kind)) if kind == CONNECTOR => &CONNECTOR_FIELDS,
+        _ => &EMBEDDING_FIELDS,
+    };
+    fields.only(known)?;
     match fields.required("schema")? {
         Value::Int(1) => {}
         Value::Int(_) => return Err(problem("app_plugin_schema_unknown", "schema")),
@@ -249,6 +289,7 @@ pub fn parse(text: &str) -> Result<Manifest, Problem> {
     }
     let kind = match fields.required("kind")? {
         Value::Str(kind) if kind == "embedding" => PluginKind::Embedding,
+        Value::Str(kind) if kind == CONNECTOR => PluginKind::Connector,
         Value::Str(_) => return Err(problem("app_plugin_kind_unknown", "kind")),
         _ => return Err(problem("app_plugin_field_invalid", "kind")),
     };
@@ -277,11 +318,19 @@ pub fn parse(text: &str) -> Result<Manifest, Problem> {
         None | Some(Value::Null) => String::new(),
         Some(_) => fields.text("description", DESCRIPTION_BYTES_MAX)?,
     };
-    let runs = match (fields.optional("local"), fields.optional("http")) {
-        (Some(local), None) => local_runs(local)?,
-        (None, Some(http)) => Runs::Http(Box::new(http_spec(http)?)),
-        _ => return Err(problem("app_plugin_runs_invalid", "local")),
+    let runs = match kind {
+        PluginKind::Embedding => match (fields.optional("local"), fields.optional("http")) {
+            (Some(local), None) => local_runs(local)?,
+            (None, Some(http)) => Runs::Http(Box::new(http_spec(http)?)),
+            _ => return Err(problem("app_plugin_runs_invalid", "local")),
+        },
+        PluginKind::Connector => Runs::Connector(Box::new(connector::spec(&fields)?)),
     };
+    assert_eq!(
+        kind == PluginKind::Connector,
+        matches!(runs, Runs::Connector(_)),
+        "a connector manifest and only it runs as a connector"
+    );
     Ok(Manifest {
         name,
         title,
@@ -304,13 +353,15 @@ pub fn valid_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-struct Fields<'a> {
+/// The entries of one manifest map with the field path they sit under, read by key with
+/// each refusal naming the full path.
+pub(super) struct Fields<'a> {
     entries: &'a [(String, Value)],
     prefix: String,
 }
 
 impl<'a> Fields<'a> {
-    fn new(value: &'a Value, path: &str) -> Result<Self, Problem> {
+    pub(super) fn new(value: &'a Value, path: &str) -> Result<Self, Problem> {
         match value {
             Value::Map(entries) => Ok(Self {
                 entries,
@@ -327,11 +378,11 @@ impl<'a> Fields<'a> {
         }
     }
 
-    fn path(&self, key: &str) -> String {
+    pub(super) fn path(&self, key: &str) -> String {
         format!("{}{key}", self.prefix)
     }
 
-    fn only(&self, known: &[&str]) -> Result<(), Problem> {
+    pub(super) fn only(&self, known: &[&str]) -> Result<(), Problem> {
         match self
             .entries
             .iter()
@@ -342,19 +393,19 @@ impl<'a> Fields<'a> {
         }
     }
 
-    fn optional(&self, key: &str) -> Option<&'a Value> {
+    pub(super) fn optional(&self, key: &str) -> Option<&'a Value> {
         self.entries
             .iter()
             .find(|(name, _)| name == key)
             .map(|(_, value)| value)
     }
 
-    fn required(&self, key: &str) -> Result<&'a Value, Problem> {
+    pub(super) fn required(&self, key: &str) -> Result<&'a Value, Problem> {
         self.optional(key)
             .ok_or_else(|| problem("app_plugin_field_missing", &self.path(key)))
     }
 
-    fn text(&self, key: &str, bytes_max: usize) -> Result<String, Problem> {
+    pub(super) fn text(&self, key: &str, bytes_max: usize) -> Result<String, Problem> {
         match self.required(key)? {
             Value::Str(text)
                 if !text.is_empty()
@@ -367,7 +418,7 @@ impl<'a> Fields<'a> {
         }
     }
 
-    fn list(&self, key: &str) -> Result<Vec<&'a str>, Problem> {
+    pub(super) fn list(&self, key: &str) -> Result<Vec<&'a str>, Problem> {
         match self.optional(key) {
             None => Ok(Vec::new()),
             Some(Value::List(items)) => items
@@ -488,13 +539,7 @@ fn secret_names(fields: &Fields<'_>) -> Result<Vec<String>, Problem> {
     }
     let mut secrets: Vec<String> = Vec::with_capacity(names.len());
     for name in names {
-        let valid = !name.is_empty()
-            && name.len() <= SECRET_BYTES_MAX
-            && name.as_bytes()[0].is_ascii_lowercase()
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
-        if !valid {
+        if !valid_secret(name) {
             return Err(problem("app_plugin_secret_invalid", "http.secrets"));
         }
         if secrets.iter().any(|known| known == name) {
@@ -505,7 +550,30 @@ fn secret_names(fields: &Fields<'_>) -> Result<Vec<String>, Problem> {
     Ok(secrets)
 }
 
-fn valid_host(host: &str) -> bool {
+/// Whether a secret name is 1 to 32 lowercase letters, digits or `_`, starting with a
+/// letter. Input: the name. Output: true when valid.
+pub(super) fn valid_secret(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= SECRET_BYTES_MAX
+        && name.as_bytes()[0].is_ascii_lowercase()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// Whether a header name is 1 to 64 letters, digits or `-`. Input: the name. Output: true
+/// when valid; a reserved name is judged by the caller.
+pub(super) fn valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= HEADER_NAME_BYTES_MAX
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+/// Whether a host is an exact lowercase name of dot-separated labels, or `[::1]`. Input:
+/// the host. Output: true when valid.
+pub(super) fn valid_host(host: &str) -> bool {
     if host == "[::1]" {
         return true;
     }
@@ -556,12 +624,7 @@ fn headers(fields: &Fields<'_>, secrets: &[String]) -> Result<Vec<Header>, Probl
     let mut used = vec![false; secrets.len()];
     for (name, value) in entries {
         let field = format!("http.headers.{name}");
-        let valid_name = !name.is_empty()
-            && name.len() <= HEADER_NAME_BYTES_MAX
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
-        if !valid_name
+        if !valid_header_name(name)
             || headers
                 .iter()
                 .any(|known| known.name.eq_ignore_ascii_case(name))

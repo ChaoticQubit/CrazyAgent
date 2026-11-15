@@ -1,0 +1,15 @@
+schema: 1
+kind: connector
+name: linear
+title: Linear
+version: 1.0.0
+description: Issues, projects and documents in Linear through Linear's own MCP server. While writes are off the app calls Linear's read-only address.
+mcp:
+  url: https://mcp.linear.app/mcp
+  read_only_url: https://mcp.linear.app/mcp/readonly
+  hosts: [mcp.linear.app]
+key:
+  secret: api_key
+  header: Authorization
+  scheme: Bearer
+  help: Create a Linear API key with only the Read permission enabled.

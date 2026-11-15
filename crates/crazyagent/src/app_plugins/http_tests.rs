@@ -58,7 +58,7 @@ fn loaded(text: &str) -> Loaded {
 fn spec(loaded: &Loaded) -> &manifest::HttpSpec {
     match &loaded.manifest.runs {
         Runs::Http(http) => http,
-        Runs::Local { .. } => panic!("an HTTP plugin"),
+        Runs::Local { .. } | Runs::Connector(_) => panic!("an HTTP plugin"),
     }
 }
 

@@ -21,7 +21,7 @@ fn option(
         title: title.into(),
         sends: match runs {
             RunsView::Http { .. } => vec!["Session text".into(), "Memories".into()],
-            RunsView::Local { .. } => Vec::new(),
+            RunsView::Local { .. } | RunsView::Connector { .. } => Vec::new(),
         },
         runs: Some(runs),
         usable,

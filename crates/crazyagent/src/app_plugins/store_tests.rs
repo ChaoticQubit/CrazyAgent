@@ -96,7 +96,18 @@ fn bundled_plugins_list_first_with_only_the_local_one_on() {
         .iter()
         .map(|plugin| plugin.name.as_str())
         .collect();
-    assert_eq!(names, ["local", "openai", "voyage", "ollama"]);
+    assert_eq!(
+        names,
+        [
+            "local",
+            "openai",
+            "voyage",
+            "ollama",
+            "linear",
+            "github",
+            "atlassian"
+        ]
+    );
     assert!(!listing.more);
     let local = plugin(&listing, "local");
     assert_eq!(

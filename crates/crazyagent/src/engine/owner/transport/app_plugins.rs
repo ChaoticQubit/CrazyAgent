@@ -1,5 +1,5 @@
 use super::*;
-use crate::app_plugins::{Listing, Preview, store};
+use crate::app_plugins::{Listing, PluginKind, Preview, Problem, store};
 use crate::engine::owner::AccountSecret;
 use crate::protocol::encode_frame;
 use crate::semantic::{SearchChoice, SearchView};
@@ -492,15 +492,32 @@ async fn receive_key(stream: &mut UnixStream) -> Result<AccountSecret, EngineErr
     .map_err(|_| failure("app_plugin_key_invalid"))?
 }
 
+/// The App plugins page's view of a trust screen: a connector's is refused there, since
+/// connectors are not managed on that page (DEC-168 addendum 4). Input: the store's
+/// preview. Output: the same preview, or the refusal naming `kind`.
+fn off_page(preview: Preview) -> Preview {
+    match preview {
+        Preview::Ready { trust } if trust.kind == PluginKind::Connector => Preview::Refused {
+            problem: Problem::new("app_plugin_connector_elsewhere", None, Some("kind")),
+        },
+        other => other,
+    }
+}
+
 /// Runs one authenticated App plugins or Search request against the engine database and
-/// folders in the engine root. Inputs: the engine root, the action and the key that came
-/// with a `set_key`. Output: the reply, or the store's refusal.
+/// folders in the engine root. The page lists, previews and adds embedding plugins only.
+/// Inputs: the engine root, the action and the key that came with a `set_key`. Output: the
+/// reply, or the store's refusal.
 fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply, EngineError> {
     let db = crate::questions::open(root)?;
     let now = crate::semantic::now_ms();
     let listing = |db: &rusqlite::Connection| -> Result<Reply, EngineError> {
+        let mut listing = store::list(db, root)?;
+        listing
+            .plugins
+            .retain(|plugin| plugin.kind != PluginKind::Connector);
         Ok(Reply::Plugins {
-            listing: Box::new(store::list(db, root)?),
+            listing: Box::new(listing),
         })
     };
     let search = |db: &rusqlite::Connection| -> Result<Reply, EngineError> {
@@ -511,16 +528,22 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
     match action {
         Action::List => listing(&db),
         Action::Preview { yaml } => Ok(Reply::Preview {
-            preview: Box::new(store::preview(root, &yaml)?),
+            preview: Box::new(off_page(store::preview(root, &yaml)?)),
         }),
         Action::Review { name } => Ok(Reply::Preview {
-            preview: Box::new(store::review(root, &name)?),
+            preview: Box::new(off_page(store::review(root, &name)?)),
         }),
         Action::Add {
             yaml,
             sha256,
             replace,
         } => {
+            if matches!(
+                crate::app_plugins::manifest::parse(&yaml),
+                Ok(manifest) if manifest.kind == PluginKind::Connector
+            ) {
+                return Err(failure("app_plugin_refused"));
+            }
             store::add(&db, root, &yaml, &sha256, replace, now)?;
             listing(&db)
         }

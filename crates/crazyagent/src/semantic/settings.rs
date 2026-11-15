@@ -1,7 +1,7 @@
 use super::{ModelState, SENDS, SearchChoice, SearchOption, SearchView};
 use crate::app_plugins::manifest::Runs;
 use crate::app_plugins::store::{self, Loaded};
-use crate::app_plugins::{LOCAL_PLUGIN, PluginStatus, Problem, RunsView};
+use crate::app_plugins::{LOCAL_PLUGIN, PluginKind, PluginStatus, Problem, RunsView};
 use crate::engine::EngineError;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
@@ -96,7 +96,7 @@ fn save(db: &Connection, current: u64, saved: &Saved) -> Result<bool, EngineErro
 
 fn http_host(loaded: &Loaded) -> Option<&str> {
     match &loaded.manifest.runs {
-        Runs::Local { .. } => None,
+        Runs::Local { .. } | Runs::Connector(_) => None,
         Runs::Http(http) => http.url.host_str(),
     }
 }
@@ -112,14 +112,15 @@ fn confirmed(saved: &Saved, loaded: &Loaded) -> bool {
 }
 
 /// The plugin agents' search embeds with now, if any: the saved choice, still ready to
-/// run, and for an HTTP plugin still the exact file the owner confirmed at its host (its
-/// trust hash, so a same-name replacement needs a new confirm). Read it before every request
-/// so turning it off or choosing full text stops sends at once. Inputs: database and engine
-/// root. Output: the loaded plugin, or none for full text or any refusal.
+/// run, still an embedding plugin (a same-name file of another kind, such as a connector,
+/// is never used), and for an HTTP plugin still the exact file the owner confirmed at its
+/// host (its trust hash, so a same-name replacement needs a new confirm). Read it before
+/// every request so turning it off or choosing full text stops sends at once. Inputs:
+/// database and engine root. Output: the loaded plugin, or none for full text or any refusal.
 pub fn chosen(db: &Connection, root: &Path) -> Option<Loaded> {
     let saved = load(db).ok()?;
     let loaded = store::ready(db, root, saved.plugin.as_deref()?).ok()?;
-    confirmed(&saved, &loaded).then_some(loaded)
+    (loaded.manifest.kind == PluginKind::Embedding && confirmed(&saved, &loaded)).then_some(loaded)
 }
 
 fn reason(code: &'static str) -> Option<String> {
@@ -150,9 +151,11 @@ pub fn forget(db: &Connection, name: &str) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn unlisted(name: &str, refused: Option<String>) -> SearchOption {
+fn unlisted(name: &str, refused: Option<String>, other_kind: bool) -> SearchOption {
     let code = if refused.is_some() {
         "app_plugin_refused"
+    } else if other_kind {
+        "search_choice_unavailable"
     } else {
         "app_plugin_not_found"
     };
@@ -177,6 +180,7 @@ pub fn view(db: &Connection, root: &Path) -> Result<SearchView, EngineError> {
     let model = super::local::state(root);
     let mut options = Vec::new();
     let mut chosen_refused = None;
+    let mut chosen_other_kind = false;
     for plugin in listing.plugins {
         let is_chosen = saved.plugin.as_deref() == Some(plugin.name.as_str());
         let Some(runs) = plugin.runs else {
@@ -184,6 +188,14 @@ pub fn view(db: &Connection, root: &Path) -> Result<SearchView, EngineError> {
                 chosen_refused = Some(plugin.title);
             }
             continue;
+        };
+        let sends = match &runs {
+            RunsView::Local { .. } => Vec::new(),
+            RunsView::Http { .. } => SENDS.iter().map(|send| (*send).to_owned()).collect(),
+            RunsView::Connector { .. } => {
+                chosen_other_kind |= is_chosen;
+                continue;
+            }
         };
         if !plugin.enabled && !is_chosen {
             continue;
@@ -202,12 +214,8 @@ pub fn view(db: &Connection, root: &Path) -> Result<SearchView, EngineError> {
                 (PluginStatus::Refused { .. }, _) => reason("app_plugin_refused"),
                 (PluginStatus::Ready, _) if unconfirmed => reason("search_confirm_required"),
                 (PluginStatus::Ready, RunsView::Local { .. }) => model_reason(&model),
-                (PluginStatus::Ready, RunsView::Http { .. }) => None,
+                (PluginStatus::Ready, _) => None,
             }
-        };
-        let sends = match runs {
-            RunsView::Local { .. } => Vec::new(),
-            RunsView::Http { .. } => SENDS.iter().map(|send| (*send).to_owned()).collect(),
         };
         options.push(SearchOption {
             name: plugin.name,
@@ -221,7 +229,7 @@ pub fn view(db: &Connection, root: &Path) -> Result<SearchView, EngineError> {
     if let Some(name) = saved.plugin.as_deref()
         && options.iter().all(|option| option.name != name)
     {
-        options.push(unlisted(name, chosen_refused));
+        options.push(unlisted(name, chosen_refused, chosen_other_kind));
     }
     let note = match saved.note.as_deref() {
         Some(REMOVED) => reason(REMOVED),
@@ -267,8 +275,10 @@ pub fn set(
             note: None,
         },
         SearchChoice::Plugin { name } => {
-            let loaded =
-                store::ready(db, root, name).map_err(|_| error("search_choice_unavailable"))?;
+            let loaded = store::ready(db, root, name)
+                .ok()
+                .filter(|loaded| loaded.manifest.kind == PluginKind::Embedding)
+                .ok_or_else(|| error("search_choice_unavailable"))?;
             let host = http_host(&loaded).map(str::to_owned);
             if host.is_some() && host.as_deref() != confirm_host {
                 return Err(error("search_confirm_required"));

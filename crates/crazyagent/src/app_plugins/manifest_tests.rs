@@ -39,11 +39,28 @@ fn with(old: &str, new: &str) -> String {
 fn every_bundled_manifest_is_valid_and_named_as_its_entry() {
     let bundled = super::super::store::bundled();
     let names: Vec<&str> = bundled.iter().map(|(name, _)| *name).collect();
-    assert_eq!(names, ["local", "openai", "voyage", "ollama"]);
-    for (name, text) in bundled {
+    assert_eq!(
+        names,
+        [
+            "local",
+            "openai",
+            "voyage",
+            "ollama",
+            "linear",
+            "github",
+            "atlassian"
+        ]
+    );
+    for (index, (name, text)) in bundled.iter().enumerate() {
         let manifest = parse(text).unwrap_or_else(|problem| panic!("{name}: {problem:?}"));
         assert_eq!(manifest.name, *name);
-        assert_eq!(manifest.kind, PluginKind::Embedding);
+        let kind = if index < 4 {
+            PluginKind::Embedding
+        } else {
+            PluginKind::Connector
+        };
+        assert_eq!(manifest.kind, kind, "{name}");
+        assert_eq!(manifest.connector().is_some(), index >= 4, "{name}");
     }
     let local = parse(bundled[0].1).unwrap();
     assert_eq!(

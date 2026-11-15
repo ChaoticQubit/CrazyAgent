@@ -1,7 +1,7 @@
 use super::manifest::{self, Manifest, Runs};
 use super::{
     Binding, LOCAL_PLUGIN, Listing, Origin, PluginKind, PluginStatus, PluginView, Preview, Problem,
-    SecretView, USER_PLUGINS_MAX, yaml,
+    SecretView, USER_PLUGINS_MAX, connector, yaml,
 };
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS app_plugin_secrets (
     PRIMARY KEY (plugin, secret)
 );";
 
-const BUNDLED: [(&str, &str); 4] = [
+const BUNDLED: [(&str, &str); 7] = [
     ("local", include_str!("../../assets/app-plugins/local.yaml")),
     (
         "openai",
@@ -42,8 +42,21 @@ const BUNDLED: [(&str, &str); 4] = [
         "ollama",
         include_str!("../../assets/app-plugins/ollama.yaml"),
     ),
+    (
+        "linear",
+        include_str!("../../assets/app-plugins/connectors/linear.yaml"),
+    ),
+    (
+        "github",
+        include_str!("../../assets/app-plugins/connectors/github.yaml"),
+    ),
+    (
+        "atlassian",
+        include_str!("../../assets/app-plugins/connectors/atlassian.yaml"),
+    ),
 ];
 
+const HOSTS_KEY_BYTES_MAX: usize = 4096;
 const KEY_PREFIX: &str = "plugin-key-";
 const BINDINGS_MAX: i64 = 64;
 const ACCOUNT: &str = "account";
@@ -220,13 +233,31 @@ fn found(root: &Path, name: &str) -> Result<Found, EngineError> {
     find(root, name)?.ok_or_else(|| error("app_plugin_not_found"))
 }
 
+/// Every host a plugin reaches, sorted, as the trust record keeps it: a bound key stays
+/// only while this is unchanged. A connector's are its MCP hosts and its sign-in hosts, the
+/// two groups apart so a host moving between them counts as a change.
+/// Input: the manifest. Output: the hosts, one per line.
 fn hosts_key(manifest: &Manifest) -> String {
     let mut hosts = match &manifest.runs {
         Runs::Local { .. } => Vec::new(),
         Runs::Http(http) => http.hosts.clone(),
+        Runs::Connector(spec) => spec
+            .mcp
+            .hosts
+            .iter()
+            .map(|host| format!("mcp {host}"))
+            .chain(
+                spec.oauth
+                    .iter()
+                    .flat_map(|oauth| &oauth.hosts)
+                    .map(|host| format!("oauth {host}")),
+            )
+            .collect(),
     };
     hosts.sort();
-    hosts.join("\n")
+    let key = hosts.join("\n");
+    assert!(key.len() <= HOSTS_KEY_BYTES_MAX);
+    key
 }
 
 fn reviewed(db: &Connection, origin: Origin, manifest: &Manifest) -> Result<bool, EngineError> {
@@ -777,8 +808,10 @@ pub fn unbind(db: &Connection, root: &Path, name: &str, secret: &str) -> Result<
 }
 
 /// Loads a plugin to run: valid, trusted as it is now, turned on, and every declared secret
-/// bound to a saved key. Inputs: database, engine root and name. Output: the plugin, or
-/// `app_plugin_not_found`, `_refused`, `_needs_review`, `_off`, `_needs_key`.
+/// bound to a saved key. A connector whose only way in is an OAuth sign-in never loads
+/// until sign-in exists. Inputs: database, engine root and name. Output: the plugin, or
+/// `app_plugin_not_found`, `_refused`, `_needs_review`, `_off`, `_needs_key`,
+/// `_connector_oauth_not_yet`.
 pub fn ready(db: &Connection, root: &Path, name: &str) -> Result<Loaded, EngineError> {
     tables(db)?;
     let found = found(root, name)?;
@@ -788,6 +821,9 @@ pub fn ready(db: &Connection, root: &Path, name: &str) -> Result<Loaded, EngineE
     }
     if !enabled_flag(db, &manifest.name, found.origin)? {
         return Err(error("app_plugin_off"));
+    }
+    if let Some(code) = manifest.connector().and_then(connector::sign_in_refusal) {
+        return Err(error(code));
     }
     let mut bindings = Vec::with_capacity(manifest.secrets().len());
     for secret in manifest.secrets() {

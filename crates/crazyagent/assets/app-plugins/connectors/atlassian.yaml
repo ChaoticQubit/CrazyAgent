@@ -1,0 +1,15 @@
+schema: 1
+kind: connector
+name: atlassian
+title: Atlassian
+version: 1.0.0
+description: Jira and Confluence through the Atlassian Rovo MCP server. Your organization admin must allow API tokens for it. Atlassian has no read-only address, so the app's own filter keeps write tools away.
+mcp:
+  url: https://mcp.atlassian.com/v2/mcp
+  hosts: [mcp.atlassian.com]
+key:
+  secret: api_token
+  user_secret: email
+  header: Authorization
+  scheme: Basic
+  help: Create an Atlassian API token with read-only scopes, then enter your Atlassian email and the token.

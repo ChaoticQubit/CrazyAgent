@@ -1,4 +1,5 @@
 use crate::app_plugins::manifest::{Manifest, Purpose, Runs};
+use crate::app_plugins::store::Loaded;
 use crate::app_plugins::{Problem, RunsView};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
@@ -105,12 +106,12 @@ pub const SENDS: [&str; 4] = [
 /// Search settings page. Inputs: the connection and the engine root. Output: the counts,
 /// none of none for full text.
 pub fn progress(connection: &Connection, root: &Path) -> Progress {
-    settings::chosen(connection, root).map_or(
+    chosen_plugin(connection, root).map_or(
         Progress {
             embedded: 0,
             total: 0,
         },
-        |loaded| vectors::progress(connection, &plugin_of(&loaded.manifest).key),
+        |(_, plugin)| vectors::progress(connection, &plugin.key),
     )
 }
 
@@ -157,19 +158,33 @@ static HTTP: Mutex<HttpQueue> = Mutex::new(HttpQueue {
 });
 
 /// The plugin as the vectors see it: its key, dimensions and batch, the built-in runtime's
-/// from [`local::DIMS`]. Input: the loaded manifest. Output: the plugin.
-fn plugin_of(manifest: &Manifest) -> vectors::Plugin {
+/// from [`local::DIMS`]. Input: the loaded manifest. Output: the plugin, none for a plugin
+/// that does not embed, such as a connector.
+fn plugin_of(manifest: &Manifest) -> Option<vectors::Plugin> {
     match &manifest.runs {
-        Runs::Local { .. } => {
-            vectors::Plugin::new(&manifest.name, &manifest.sha256, local::DIMS, LOCAL_BATCH)
-        }
-        Runs::Http(http) => vectors::Plugin::new(
+        Runs::Local { .. } => Some(vectors::Plugin::new(
+            &manifest.name,
+            &manifest.sha256,
+            local::DIMS,
+            LOCAL_BATCH,
+        )),
+        Runs::Http(http) => Some(vectors::Plugin::new(
             &manifest.name,
             &manifest.sha256,
             usize::from(http.dimensions),
             usize::from(http.batch),
-        ),
+        )),
+        Runs::Connector(_) => None,
     }
+}
+
+/// The chosen embedding plugin with what the vectors need of it, read again on every call
+/// as [`settings::chosen`] is. Inputs: the connection and the engine root. Output: the
+/// loaded plugin and its vector facts, none for full text or a choice that does not embed.
+fn chosen_plugin(connection: &Connection, root: &Path) -> Option<(Loaded, vectors::Plugin)> {
+    let loaded = settings::chosen(connection, root)?;
+    let plugin = plugin_of(&loaded.manifest)?;
+    Some((loaded, plugin))
 }
 
 /// What identifies the local runtime's files on disk: per pinned file its size, inode where
@@ -288,11 +303,10 @@ fn close_local() {
 /// runtime. Inputs: the indexer's connection, the engine root and the project. Output: how
 /// many chunks were embedded here.
 pub fn embed_pending(connection: &mut Connection, root: &Path, project: &ProjectId) -> usize {
-    let Some(loaded) = settings::chosen(connection, root) else {
+    let Some((loaded, plugin)) = chosen_plugin(connection, root) else {
         close_local();
         return 0;
     };
-    let plugin = plugin_of(&loaded.manifest);
     if matches!(loaded.manifest.runs, Runs::Http(_)) {
         close_local();
         want_http(root, project, &plugin.key);
@@ -414,16 +428,14 @@ fn http_thread(root: &Path) {
 /// and the project. Output: what the turn did.
 fn http_turn(connection: &mut Connection, root: &Path, project: &ProjectId) -> Turn {
     let http_chosen = |connection: &Connection| {
-        settings::chosen(connection, root)
-            .filter(|loaded| matches!(loaded.manifest.runs, Runs::Http(_)))
+        chosen_plugin(connection, root)
+            .filter(|(loaded, _)| matches!(loaded.manifest.runs, Runs::Http(_)))
     };
-    let Some(loaded) = http_chosen(connection) else {
+    let Some((loaded, plugin)) = http_chosen(connection) else {
         return Turn::Idle;
     };
-    let plugin = plugin_of(&loaded.manifest);
-    let still = |connection: &Connection| {
-        http_chosen(connection).is_some_and(|now| plugin_of(&now.manifest) == plugin)
-    };
+    let still =
+        |connection: &Connection| http_chosen(connection).is_some_and(|(_, now)| now == plugin);
     let mut failed = false;
     let mut sent = false;
     let per_call = plugin.batch.min(vectors::QUERY_ROUND_MAX);
@@ -488,13 +500,12 @@ pub fn hybrid(
         ids: full_text.to_vec(),
         note,
     };
-    let Some(loaded) = settings::chosen(connection, root) else {
+    let Some((loaded, plugin)) = chosen_plugin(connection, root) else {
         return words_only(None);
     };
     let Some(text) = vectors::query_text(query) else {
         return words_only(None);
     };
-    let plugin = plugin_of(&loaded.manifest);
     let vector = match &loaded.manifest.runs {
         Runs::Local { .. } => {
             let Some(model) = opened_local(root) else {
@@ -513,6 +524,7 @@ pub fn hybrid(
                 return words_only(Some(vectors::NOTE_QUERY_PENDING));
             }
         },
+        Runs::Connector(_) => return words_only(None),
     };
     if vector.iter().all(|value| *value == 0.0) {
         return words_only(None);

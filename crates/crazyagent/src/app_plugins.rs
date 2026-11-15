@@ -77,11 +77,13 @@ fn upper_first(text: &str) -> String {
     })
 }
 
-/// What a plugin does for the app. Only embedding plugins exist now (DEC-156).
+/// What a plugin does for the app: an embedding plugin ranks search (DEC-156), a connector
+/// reaches a vendor's remote MCP server for agents through the engine (DEC-168).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginKind {
     Embedding,
+    Connector,
 }
 
 /// Where a plugin comes from: shipped inside the app, or a file in the owner's folder.
@@ -93,8 +95,10 @@ pub enum Origin {
 }
 
 /// How a plugin runs, as its trust screen shows it: the app's own local runtime with the
-/// size of its one-time download, or the HTTP API it calls, with the exact hosts it reaches,
-/// whether that is plain http to this computer ("local, not encrypted") and the vector size.
+/// size of its one-time download, the HTTP API it calls, with the exact hosts it reaches,
+/// whether that is plain http to this computer ("local, not encrypted") and the vector size,
+/// or a connector's MCP address with its hosts, the hosts its sign-in happens on and whether
+/// the vendor has its own read-only mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RunsView {
@@ -107,6 +111,12 @@ pub enum RunsView {
         hosts: Vec<String>,
         local_unencrypted: bool,
         dimensions: u16,
+    },
+    Connector {
+        url: String,
+        hosts: Vec<String>,
+        oauth_hosts: Vec<String>,
+        vendor_read_only: bool,
     },
 }
 
@@ -285,7 +295,10 @@ const PLAIN: &[(&str, &str)] = &[
         "app_plugin_schema_unknown",
         "this app reads schema: 1 plugins only.",
     ),
-    ("app_plugin_kind_unknown", "the only kind is embedding."),
+    (
+        "app_plugin_kind_unknown",
+        "the kinds are embedding and connector.",
+    ),
     (
         "app_plugin_field_unknown",
         "this field is not part of a plugin file.",
@@ -476,6 +489,54 @@ const PLAIN: &[(&str, &str)] = &[
     (
         "app_plugin_reply_invalid",
         "the plugin's reply was not the vectors its file declares.",
+    ),
+    (
+        "app_plugin_connector_url_not_https",
+        "a connector's URL must use https.",
+    ),
+    (
+        "app_plugin_connector_host_public",
+        "a connector's host is a public domain name, not an address or localhost.",
+    ),
+    (
+        "app_plugin_connector_auth_missing",
+        "a connector needs key, oauth or both.",
+    ),
+    (
+        "app_plugin_connector_read_only_both",
+        "use read_only_url or read_only_header, not both.",
+    ),
+    (
+        "app_plugin_connector_user_secret",
+        "user_secret goes with scheme Basic only.",
+    ),
+    (
+        "app_plugin_connector_scheme_unknown",
+        "scheme is Bearer or Basic.",
+    ),
+    (
+        "app_plugin_connector_registration_invalid",
+        "registration lists cimd, dcr or own, each once.",
+    ),
+    (
+        "app_plugin_connector_scope_invalid",
+        "a scope is 1 to 128 printable characters with no space, quote or backslash; at most 16, each once.",
+    ),
+    (
+        "app_plugin_connector_tools_limit",
+        "a connector lists at most 256 read tools.",
+    ),
+    (
+        "app_plugin_connector_tool_invalid",
+        "a tool name is 1 to 128 letters, digits, _ . or -, each once.",
+    ),
+    (
+        connector::OAUTH_NOT_YET,
+        "sign-in for this connector is not in this build yet; it needs a key.",
+    ),
+    (
+        "app_plugin_connector_elsewhere",
+        "this is a connector; connectors are not managed on this page.",
     ),
     (
         "app_plugin_request_invalid",
