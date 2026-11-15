@@ -5,8 +5,8 @@ use crate::app_plugins::store;
 use crate::connectors::audit::{self, CallKind, CallRow};
 use crate::connectors::grants::{self, Who};
 use crate::connectors::mcp_client::tests::{
-    BOARD, DESK, KEY, Seen, USER, Vendor, json_reply, legacy, no_lookup, result, rpc_error, send,
-    text_result, tool,
+    BOARD, DESK, KEY, Seen, USER, Vendor, empty, json_reply, legacy, no_lookup, result, rpc_error,
+    send, text_result, tool,
 };
 use crate::connectors::settings::KeepLog;
 use crate::connectors::shim::{self, Ask};
@@ -824,6 +824,14 @@ fn the_audit_row_has_sizes_and_outcome_and_no_content() {
         )
     );
     assert!(rows[0].bytes_out > 0 && rows[0].bytes_in == 0);
+    let id = launch.folder.file_name().unwrap().to_str().unwrap();
+    assert!(rows.iter().all(|row| row.launch == id));
+    let sent: Vec<bool> = rows.iter().map(|row| row.sent).collect();
+    assert_eq!(
+        sent,
+        [false, true, false, false],
+        "only the read call reached the vendor"
+    );
 
     let columns: Vec<String> = bench
         .case
@@ -861,9 +869,11 @@ fn the_activity_log_keeps_at_most_its_days_and_its_row_cap() {
     let now = crate::semantic::now_ms();
     let day = 24 * 60 * 60 * 1000;
     let row = |started_ms: i64| CallRow {
+        launch: "l1".into(),
         connector: "board".into(),
         tool: "list_issues".into(),
         kind: CallKind::Read,
+        sent: true,
         project: PROJECT.into(),
         agent: AGENT.into(),
         started_ms,
@@ -885,8 +895,10 @@ fn the_activity_log_keeps_at_most_its_days_and_its_row_cap() {
         .execute(
             "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
              INSERT INTO connector_calls
-                 (connector, tool, kind, project, agent, started_ms, ms, bytes_in, bytes_out, outcome)
-             SELECT 'board', 'list_issues', 'read', 'alpha', 'Agent 1', ?2, 1, 1, 1, 'ok' FROM n",
+                 (launch, connector, tool, kind, sent, project, agent, started_ms, ms, bytes_in,
+                  bytes_out, outcome)
+             SELECT 'l1', 'board', 'list_issues', 'read', 1, 'alpha', 'Agent 1', ?2, 1, 1, 1, 'ok'
+             FROM n",
             rusqlite::params![audit::ROWS_MAX + 10, now],
         )
         .unwrap();
@@ -1322,4 +1334,150 @@ fn every_gateway_code_has_a_plain_sentence_and_the_list_is_sorted() {
         let plain = crate::connectors::plain_problem(code);
         assert!(plain.is_some_and(|plain| !plain.is_empty()), "{code}");
     }
+}
+
+#[test]
+fn leftover_launch_records_never_starve_a_new_launch_and_the_oldest_are_ended() {
+    use std::os::unix::fs::DirBuilderExt;
+    let vendor = serving(vec![read_tool("list_issues")]);
+    let bench = bench();
+    bench.gateway.stand_in("board", vendor.endpoint());
+    grant(&bench, "board", true);
+    let oldest = format!("{:032x}", 1);
+    let folder = bench.case.root.join(LAUNCHES_FOLDER).join(&oldest);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(folder.join(shim::MAILBOX))
+        .unwrap();
+    bench.case.db.execute_batch(SCHEMA).unwrap();
+    bench
+        .case
+        .db
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
+             INSERT INTO connector_launches(id, project, role, agent, connectors, created_ms)
+             SELECT printf('%032x', i), ?2, 'agent', ?3, '[\"board\"]', i FROM n",
+            rusqlite::params![LAUNCHES_MAX, PROJECT, AGENT],
+        )
+        .unwrap();
+
+    let launch = launch(&bench);
+    assert_eq!(listed(&bench, &launch), ["board__list_issues"]);
+    assert_eq!(
+        count(&bench, "SELECT COUNT(*) FROM connector_launches"),
+        LAUNCHES_MAX
+    );
+    assert_eq!(
+        count(
+            &bench,
+            &format!("SELECT COUNT(*) FROM connector_launches WHERE id='{oldest}'")
+        ),
+        0,
+        "the oldest record past the bound is ended"
+    );
+    assert!(!folder.exists(), "and its folder with it");
+}
+
+#[test]
+fn an_ended_launchs_sessions_close_off_the_answering_thread() {
+    let vendor = Vendor::start(|seen, _, stream| {
+        if seen.verb == "DELETE" {
+            std::thread::sleep(Duration::from_secs(3));
+            send(stream, &empty("200 OK", &[]));
+            return;
+        }
+        let reply =
+            legacy(seen, Some("session-1"), "2025-06-18").unwrap_or_else(|| match seen.rpc() {
+                "tools/list" => result(seen, json!({"tools": [read_tool("list_issues")]})),
+                other => panic!("{other}"),
+            });
+        send(stream, &reply);
+    });
+    let (bench, launch) = board_bench(&vendor);
+    assert_eq!(listed(&bench, &launch), ["board__list_issues"]);
+    let id = launch.folder.file_name().unwrap().to_str().unwrap();
+    end(&bench.case.db, &bench.case.root, id).unwrap();
+
+    let clock = Instant::now();
+    bench.gateway.answer_pending();
+    assert!(
+        clock.elapsed() < Duration::from_secs(2),
+        "a slow session close held up the answering thread for {:?}",
+        clock.elapsed()
+    );
+    let deadline = Instant::now() + WAIT;
+    while !vendor.seen().iter().any(|seen| seen.verb == "DELETE") {
+        assert!(Instant::now() < deadline, "the ended session was never closed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_call_that_waits_past_its_connectors_lock_is_refused_as_busy() {
+    let vendor = serving(vec![read_tool("list_issues")]);
+    let (mut bench, launch) = board_bench(&vendor);
+    assert_eq!(listed(&bench, &launch), ["board__list_issues"]);
+    bench.gateway.lock_wait = Duration::from_millis(200);
+    let lock = bench.gateway.lock_for("board");
+    let held = lock.lock().unwrap();
+    let clock = Instant::now();
+    let (text, error) = called(&bench, &launch, "board__list_issues", json!({}));
+    assert!(error, "{text}");
+    assert!(text.starts_with("connector_busy"), "{text}");
+    assert!(clock.elapsed() < WAIT, "the worker was freed at the lock wait");
+    assert!(vendor_calls(&vendor).is_empty());
+    drop(held);
+    let (text, error) = called(&bench, &launch, "board__list_issues", json!({}));
+    assert!(!error, "{text}");
+    assert_eq!(text.lines().last(), Some("ran list_issues"));
+    let rows = audit::recent(&bench.case.db, 10).unwrap();
+    assert_eq!(
+        (rows[1].outcome.as_str(), rows[1].sent),
+        ("connector_busy", false)
+    );
+}
+
+#[test]
+fn one_launchs_flood_of_refused_calls_leaves_every_call_that_reached_a_vendor_in_place() {
+    let case = case();
+    let now = crate::semantic::now_ms();
+    let row = |launch: &str, sent: bool, started_ms: i64| CallRow {
+        launch: launch.into(),
+        connector: "board".into(),
+        tool: if sent { "list_issues".into() } else { String::new() },
+        kind: if sent { CallKind::Read } else { CallKind::Unknown },
+        sent,
+        project: PROJECT.into(),
+        agent: AGENT.into(),
+        started_ms,
+        ms: 1,
+        bytes_in: 2,
+        bytes_out: 3,
+        outcome: if sent { "ok" } else { "connector_tool_unknown" }.into(),
+    };
+    audit::record(&case.db, &row("a", true, now - 3), KeepLog::Days90).unwrap();
+    audit::record(&case.db, &row("b", true, now - 2), KeepLog::Days90).unwrap();
+    audit::record(&case.db, &row("b", false, now - 1), KeepLog::Days90).unwrap();
+    let quiet = audit::QUIET_ROWS_PER_LAUNCH_MAX as i64;
+    for at in 0..quiet + 50 {
+        audit::record(&case.db, &row("a", false, now + at), KeepLog::Days90).unwrap();
+    }
+    let count = |filter: &str| -> i64 {
+        case.db
+            .query_row(
+                &format!("SELECT COUNT(*) FROM connector_calls WHERE {filter}"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(count("launch='a' AND sent=0"), quiet);
+    assert_eq!(count("launch='a' AND sent=1"), 1);
+    assert_eq!(count("launch='b'"), 2, "another launch keeps every row");
+    assert_eq!(
+        count(&format!("launch='a' AND sent=0 AND started_ms < {}", now + 50)),
+        0,
+        "the oldest refused calls go first"
+    );
 }
