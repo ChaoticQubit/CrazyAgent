@@ -626,10 +626,9 @@ pub(super) fn hooks_follow(tx: &Transaction<'_>, item: &str) -> Result<bool, Eng
         .any(|hook| hook.follows.as_deref() == Some(item)))
 }
 
-/// The hooks that follow one skill or MCP server as a new pin keeps them: each hook's
-/// name, whether it is on and the projects it is switched off in. Inputs: the transaction
-/// and the item id. Output: the hooks.
-#[cfg(unix)]
+/// The hooks that follow one skill or MCP server as a pack entry keeps them when the item
+/// goes: each hook's name, whether it is on and the projects it is switched off in. Inputs:
+/// the transaction and the item id. Output: the hooks.
 pub(super) fn following_hooks(
     tx: &Transaction<'_>,
     item: &str,
