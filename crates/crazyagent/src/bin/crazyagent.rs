@@ -770,12 +770,12 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         .register_native_auth_host(&executable)
                         .map_err(|e| e.to_string())
                 })
+                .and_then(|()| register_harnesses(&mut service, &mut harnesses, found_on_path))
                 .and_then(|()| {
                     service
                         .set_harness_search(search)
                         .map_err(|e| e.to_string())
                 })
-                .and_then(|()| register_harnesses(&mut service, &mut harnesses, found_on_path))
                 .and_then(|()| service.ensure_ready(&stopped).map_err(|e| e.to_string()))
                 .and_then(|()| {
                     if !writable {
@@ -1432,7 +1432,7 @@ mod tests {
         let root = made.path();
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.join("global.toml");
-        std::fs::write(&global, b"timeout_ms = 1000\n").unwrap();
+        std::fs::write(&global, b"version = 1\ntimeout_ms = 2000\n").unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (_stop, stopped) = tokio::sync::watch::channel(false);
         let mut service =

@@ -195,8 +195,12 @@ fn start_trusted(
     Ok(())
 }
 
+/// A step a row runs once inside [`OwnerRuntimeHandle::find_harness`].
 #[cfg(test)]
-static BETWEEN_CHECK_AND_CAPTURE: std::sync::Mutex<Vec<(PathBuf, Box<dyn FnOnce() + Send>)>> =
+type Step = Box<dyn FnOnce() + Send>;
+
+#[cfg(test)]
+static BETWEEN_CHECK_AND_CAPTURE: std::sync::Mutex<Vec<(PathBuf, Step)>> =
     std::sync::Mutex::new(Vec::new());
 
 /// Takes the step a row set to run in [`OwnerRuntimeHandle::find_harness`] after the found
@@ -204,7 +208,7 @@ static BETWEEN_CHECK_AND_CAPTURE: std::sync::Mutex<Vec<(PathBuf, Box<dyn FnOnce(
 /// the entry's chain in that gap. Input: the entry. Output: the step, none for every other
 /// entry.
 #[cfg(test)]
-fn between_check_and_capture(entry: &Path) -> Option<Box<dyn FnOnce() + Send>> {
+fn between_check_and_capture(entry: &Path) -> Option<Step> {
     let mut steps = BETWEEN_CHECK_AND_CAPTURE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -533,20 +537,19 @@ impl OwnerRuntimeHandle {
     }
 
     /// Captures a harness engine start chose or found as a re-pin captures one: once the
-    /// real file pinned passes the start checks ([`start_trusted`]) with the HOME of the
-    /// search set at engine start, and the entry still leads to it, so a link moved after
-    /// engine start checked the entry never gets an agent's file pinned (RV-DS241-140).
+    /// real file pinned passes the start checks ([`start_trusted`]) with the HOME engine
+    /// start checked the entry with, and the entry still leads to it, so a link moved after
+    /// engine start checked the entry never gets an agent's file pinned (RV-DS241-140). HOME
+    /// is read as the start search reads it, which is handed over only after registration.
     /// Input: the absolute entry. Output: the host, or the refusal code.
     pub(crate) fn capture_found(
         &self,
         entry: &Path,
     ) -> Result<RegisteredNativeAuthHost, EngineError> {
         assert!(entry.is_absolute());
-        let home = self
-            .held_search()?
-            .and_then(|search| search.home().map(Path::to_path_buf));
+        let search = crate::harnesses::Search::from_environment();
         RegisteredNativeAuthHost::capture_entry_checked(entry, |real| {
-            start_trusted(&self.authority, real, home.as_deref())
+            start_trusted(&self.authority, real, search.home())
         })
     }
 
