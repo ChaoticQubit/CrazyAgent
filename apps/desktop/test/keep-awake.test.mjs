@@ -221,6 +221,8 @@ test("the Lid closed line says the rule, and why this computer cannot hold it", 
   assert.equal(model.lidReason(view({}, { lid_support: { kind: "helper_missing" } })), "Not set up on this computer yet");
   assert.equal(model.lidReason(view({}, { lid_support: { kind: "locked_by_policy" } })), "Locked by your organization");
   assert.equal(model.lidReason(view({}, { lid_support: { kind: "not_available", reason: "Lid-closed hold is not set up on this computer" } })), "Lid-closed hold is not set up on this computer");
+  const refused = /pub const LID_REFUSED: &str = "([^"]+)";/.exec(source("../../../crates/crazyagent/src/keep_awake/power.rs"))[1];
+  assert.equal(model.lidReason(view({}, { lid_support: { kind: "not_available", reason: refused } })), refused, "the engine's reason for a refused lid lock shows whole");
   assert.equal(model.lidReason(view({}, { lid_support: { kind: "off" }, settings: { lid: "off" } })), null);
 });
 

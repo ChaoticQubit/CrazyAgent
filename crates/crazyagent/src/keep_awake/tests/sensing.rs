@@ -34,8 +34,9 @@ impl Fake {
     fn reader(&self) -> Reader {
         let fake = self.clone();
         Box::new(move || {
+            let reading = fake.reading.lock().unwrap().clone();
             fake.reads.fetch_add(1, Ordering::SeqCst);
-            fake.reading.lock().unwrap().clone()
+            reading
         })
     }
 }
@@ -241,8 +242,8 @@ fn one_unread_battery_keeps_the_hold_and_the_next_one_ends_it() {
 
     fake.set(on_battery(Some(50)));
     steps(&mut keeper, &connection, &mut now_ms, 35);
-    fake.set(on_battery(None));
     assert!(until(|| fake.reads() >= 4));
+    fake.set(on_battery(None));
     assert_eq!(
         act(&connection, KeepAwakeAction::Start { minutes: 60 }, now_ms),
         Outcome::Applied
@@ -322,6 +323,40 @@ fn a_refused_lid_lock_keeps_the_idle_hold_and_the_status_says_why() {
         .filter(|want| **want == IDLE_AND_LID)
         .count();
     assert_eq!(lid_asks, 1, "the lid lock is not tried again");
+}
+
+#[test]
+fn a_reader_that_dies_leaves_unknown_readings_and_the_hold_goes_on() {
+    let (_folder, connection) = engine();
+    let reads = Arc::new(AtomicU32::new(0));
+    let counted = reads.clone();
+    let reader: Reader = Box::new(move || {
+        let read = counted.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(read, 0, "the stand-in reader breaks on its second call");
+        on_ac()
+    });
+    let mut keeper = Keeper::default().with_reader(reader);
+    let mut now_ms = NOW_MS;
+    agent(&connection, "working");
+    step_until(&mut keeper, &connection, &mut now_ms, |view| {
+        view.state.want == IDLE_AND_LID
+    });
+
+    let unknown = step_until(&mut keeper, &connection, &mut now_ms, |view| {
+        view.lid_support != LidSupport::Held
+    });
+    assert_eq!(reads.load(Ordering::SeqCst), 2);
+    assert_eq!(unknown.lid_support, PowerReading::unknown().lid_support);
+    assert_eq!(unknown.state.want, IDLE, "the hold goes on without the lid");
+    assert_eq!(unknown.state.ended, None);
+
+    let later = steps(&mut keeper, &connection, &mut now_ms, 65).unwrap();
+    assert_eq!(later.state.want, IDLE);
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        2,
+        "a dead reader is not asked again"
+    );
 }
 
 #[test]
