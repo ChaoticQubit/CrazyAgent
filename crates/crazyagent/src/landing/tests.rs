@@ -3613,6 +3613,111 @@ fn the_onboarding_listing_keeps_out_what_the_owners_global_ignore_file_names() {
     assert_eq!(kept, Some(vec!["scratch.txt".to_owned()]));
 }
 
+/// Checks that the onboarding listing of `repo` keeps out `name` alone: the code graph's
+/// keep-out list is exactly that file, no gathered document is it, and the plain
+/// `notes.txt` beside it is still read. Takes the folder and the file's path below it.
+fn listing_keeps_out_only(repo: &Path, name: &str) {
+    assert_eq!(
+        crate::onboarding::draft::kept_out(repo),
+        Some(vec![name.to_owned()])
+    );
+    let documents = crate::onboarding::draft::gather(repo, &[]).documents;
+    assert!(
+        documents.iter().all(|document| document.path != name),
+        "{name} was read as a document"
+    );
+    assert!(
+        documents
+            .iter()
+            .any(|document| document.path == "notes.txt"),
+        "the plain document beside it is still read"
+    );
+}
+
+/// RV-DS241-145: the onboarding listing keeps git's ignore precedence, so a repository's own
+/// `core.excludesFile` wins over the owner's global ignore file, which is present: a .txt
+/// file only the repository's file names is kept out of the graph and never read.
+#[test]
+fn the_onboarding_listing_keeps_a_repositorys_own_excludes_file_over_the_owners_global_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let (home, repo) = (root.join("home"), root.join("repo"));
+    for folder in [&home, &repo] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    git::OWNER_HOME.with(|owner| *owner.borrow_mut() = Some(home.clone()));
+    git_in(&home, &repo, &["init", "-q", "--template="]);
+    write(&home.join(".config/git/ignore"), "scratch.log\n");
+    let local = root.join("repo-ignore");
+    write(&local, "roster.txt\n");
+    git_in(
+        &home,
+        &repo,
+        &["config", "core.excludesFile", local.to_str().unwrap()],
+    );
+    write(&repo.join("roster.txt"), "ROSTER_CANARY_145\n");
+    write(&repo.join("notes.txt"), "Plain notes\n");
+
+    listing_keeps_out_only(&repo, "roster.txt");
+}
+
+/// RV-DS241-145: the owner's excludes file that an `includeIf "gitdir:..."` section of the
+/// owner's global config scopes to this repository is the one the onboarding listing
+/// honours, as the owner's own git in this repository does.
+#[test]
+fn the_onboarding_listing_keeps_out_what_a_gitdir_scoped_owner_excludes_file_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let (home, repo) = (root.join("home"), root.join("repo"));
+    for folder in [&home, &repo] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    git::OWNER_HOME.with(|owner| *owner.borrow_mut() = Some(home.clone()));
+    git_in(&home, &repo, &["init", "-q", "--template="]);
+    let (scoped, work) = (home.join("work-ignore"), home.join(".gitconfig-work"));
+    write(&scoped, "client.txt\n");
+    write(
+        &work,
+        &format!("[core]\n\texcludesFile = {}\n", scoped.display()),
+    );
+    write(
+        &home.join(".gitconfig"),
+        &format!(
+            "[includeIf \"gitdir:{}/\"]\n\tpath = {}\n",
+            repo.display(),
+            work.display()
+        ),
+    );
+    write(&repo.join("client.txt"), "CLIENT_CANARY_145\n");
+    write(&repo.join("notes.txt"), "Plain notes\n");
+
+    listing_keeps_out_only(&repo, "client.txt");
+}
+
+/// RV-DS241-145: a change set keeps git's ignore precedence too: a file only the owner
+/// checkout's own `core.excludesFile` names stays out of it while the owner's global ignore
+/// file is present, as the owner's git would leave it unstaged.
+#[test]
+fn files_the_repositorys_own_excludes_file_names_stay_out_of_change_sets() {
+    let case = Case::new();
+    write(&case.home.join(".config/git/ignore"), "scratch.log\n");
+    let local = case.home.join("repo-ignore");
+    write(&local, "private.env\n");
+    case.owner(&["config", "core.excludesFile", local.to_str().unwrap()]);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.edit("private.env", "TOKEN=x\n");
+
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+
+    let view = case.view(&id);
+    assert_eq!(view.files, 1);
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &view.head]),
+        "README\n"
+    );
+    assert_eq!(case.agent(&["ls-files", "--", "private.env"]), "");
+}
+
 #[test]
 fn files_the_owners_global_ignore_file_excludes_stay_out_of_change_sets() {
     let configured: [(&str, Option<&str>); 2] = [
