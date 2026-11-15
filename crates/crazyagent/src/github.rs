@@ -23,7 +23,8 @@ mod tests;
 
 pub use api::Endpoints;
 pub use publish::{
-    GitHubHistory, GitHubLocal, GitHubPrepare, GitHubSecretFinding, GitHubSecretKind,
+    GitHubCommitted, GitHubHistory, GitHubLocal, GitHubPrepare, GitHubSecretFinding,
+    GitHubSecretKind,
 };
 pub use rules::{GitHubCi, GitHubRepoFacts, GitHubRule, GitHubRuleOutcome, GitHubRuleState};
 
@@ -677,5 +678,54 @@ impl GitHub {
     ) -> Result<Vec<GitHubSecretFinding>, EngineError> {
         let home = publish::GitHome::new(&self.root)?;
         publish::secret_findings(&publish::git()?, home.path(), project, history)
+    }
+
+    /// Makes the publish commit with the identity the owner's own git uses in the
+    /// project, else the GitHub account's noreply address, which needs the sign-in.
+    /// Inputs: the project folder, the owner's home folder, whose git settings name that
+    /// identity, and the paths `publish_prepare` wrote. Output: the commit to push.
+    pub fn publish_commit(
+        &self,
+        project: &Path,
+        owner_home: &Path,
+        written: &[String],
+    ) -> Result<GitHubCommitted, EngineError> {
+        let git = publish::git()?;
+        let home = publish::GitHome::new(&self.root)?;
+        let author = match publish::configured_author(&git, owner_home, project) {
+            Some(author) => author,
+            None => {
+                let token = self.store.get(&self.saved()?.credential)?;
+                let (login, id) = api::identity(&self.endpoints, &token)?;
+                publish::noreply_author(&login, id)
+            }
+        };
+        publish::commit(&git, home.path(), project, written, &author)
+    }
+
+    /// Pushes the publish commit to its new GitHub repository through the store's git
+    /// helper, then points the project at it. Inputs: the project folder, `owner/name`
+    /// and the commit `publish_commit` made. Output: `()`, or the refusal.
+    pub fn publish_push(
+        &self,
+        project: &Path,
+        full_name: &str,
+        committed: &GitHubCommitted,
+    ) -> Result<(), EngineError> {
+        let saved = self.saved()?;
+        let helper = self
+            .store
+            .git_credential_helper(&saved.credential, clone::GIT_USER)?;
+        let git = publish::git()?;
+        let home = publish::GitHome::new(&self.root)?;
+        publish::push(
+            &self.endpoints,
+            &helper,
+            &git,
+            home.path(),
+            project,
+            full_name,
+            committed,
+        )
     }
 }

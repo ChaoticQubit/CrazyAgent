@@ -285,6 +285,17 @@ pub fn login(endpoints: &Endpoints, token: &SecretString) -> Result<String, Engi
     user(endpoints, token).map(|(login, _)| login)
 }
 
+/// Reads the account the token belongs to for a publish commit's noreply identity.
+/// Inputs: endpoints and token. Output: the login and the numeric id when GitHub sent it,
+/// or `github_token_refused`, `github_unreachable`.
+pub fn identity(
+    endpoints: &Endpoints,
+    token: &SecretString,
+) -> Result<(String, Option<u64>), EngineError> {
+    let _ = (endpoints, token);
+    Err(failure("github_publish_unbuilt"))
+}
+
 /// Reads the account the token belongs to: its login, which also proves GitHub accepts
 /// the token, and the scopes GitHub names for a classic token. Inputs: endpoints and
 /// token. Output: the login and the scopes, None when GitHub names none, or

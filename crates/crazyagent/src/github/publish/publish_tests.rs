@@ -5,6 +5,7 @@ const GIT: &str = "/usr/bin/git";
 const HOST: &str = "github.com";
 const OWNER: &str = "owner@example.invalid";
 const TOKEN: &str = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
+const MESSAGE: &str = "Publish with CrazyAgent";
 
 fn git_by(email: &str, args: &[&str], folder: &Path) -> String {
     let output = crate::spawn_gate::output(
@@ -43,6 +44,13 @@ fn fixture() -> Fixture {
     Fixture {
         project: tempfile::tempdir().unwrap(),
         home: tempfile::tempdir().unwrap(),
+    }
+}
+
+fn ada() -> Author {
+    Author {
+        name: "Ada Lovelace".into(),
+        email: "ada@example.invalid".into(),
     }
 }
 
@@ -96,6 +104,28 @@ impl Fixture {
 
     fn findings(&self, history: GitHubHistory) -> Result<Vec<GitHubSecretFinding>, EngineError> {
         secret_findings(Path::new(GIT), self.home.path(), &self.path(), history)
+    }
+
+    fn commit(&self, written: &[&str]) -> Result<GitHubCommitted, EngineError> {
+        let written: Vec<String> = written.iter().map(|path| (*path).to_owned()).collect();
+        commit(
+            Path::new(GIT),
+            self.home.path(),
+            &self.path(),
+            &written,
+            &ada(),
+        )
+    }
+
+    fn lines(&self, args: &[&str]) -> Vec<String> {
+        git(args, &self.path()).lines().map(str::to_owned).collect()
+    }
+
+    fn published(&self, private: bool, approved: &[&str]) -> GitHubCommitted {
+        let local = self.inspect().unwrap();
+        let written = self.prepare(&local, private, false, approved).unwrap();
+        let written: Vec<&str> = written.iter().map(String::as_str).collect();
+        self.commit(&written).unwrap()
     }
 }
 
@@ -518,4 +548,141 @@ fn owner_history_is_scanned_from_heads_tree_and_the_scan_is_bounded() {
         );
     }
     assert_eq!(within(GitHubHistory::Owner, 2, 1 << 20).unwrap().len(), 1);
+}
+
+#[test]
+fn commit_takes_everything_kept_when_the_history_is_empty_or_only_the_engine_start() {
+    let fresh = fixture();
+    fresh.write("src/a.rs", "a\n");
+    fresh.write(".env", "PORT=1\n");
+    fresh.write(".crazyagent/context/roadmap.md", "plan\n");
+    let committed = fresh.published(true, &[".env*"]);
+    assert_eq!(committed.branch, "main");
+    assert_eq!(committed.left_out, 0);
+    assert_eq!(committed.commit, fresh.lines(&["rev-parse", "HEAD"])[0]);
+    assert_eq!(
+        fresh.lines(&["log", "--format=%an|%ae|%cn|%ce|%s"]),
+        [format!(
+            "Ada Lovelace|ada@example.invalid|Ada Lovelace|ada@example.invalid|{MESSAGE}"
+        )]
+    );
+    assert_eq!(
+        fresh.lines(&["ls-tree", "-r", "--name-only", "HEAD"]),
+        [".gitignore", "src/a.rs"]
+    );
+    assert!(fresh.lines(&["status", "--porcelain"]).is_empty());
+    let engine = fixture();
+    git(&["init", "-q"], &engine.path());
+    git_by(
+        "engine@crazyagent.invalid",
+        &["commit", "-q", "--allow-empty", "-m", "Start project"],
+        &engine.path(),
+    );
+    engine.write("b.txt", "b\n");
+    let committed = engine.published(true, &[]);
+    assert_eq!(committed.branch, "master");
+    assert_eq!(
+        engine.lines(&["log", "--format=%s"]),
+        [MESSAGE, "Start project"]
+    );
+    assert_eq!(
+        engine.lines(&["ls-tree", "-r", "--name-only", "HEAD"]),
+        [".gitignore", "b.txt"]
+    );
+    let unborn = fixture();
+    git(&["init", "-q", "-b", "main"], &unborn.path());
+    unborn.write("c.txt", "c\n");
+    let committed = unborn.published(true, &[]);
+    assert_eq!(committed.branch, "main");
+    assert_eq!(unborn.lines(&["log", "--format=%s"]), [MESSAGE]);
+    assert_eq!(
+        unborn.lines(&["ls-tree", "-r", "--name-only", "HEAD"]),
+        [".gitignore", "c.txt"]
+    );
+}
+
+#[test]
+fn commit_on_owner_history_takes_only_the_files_publish_wrote() {
+    let owned = fixture();
+    let project = owned.path();
+    git(&["init", "-q", "-b", "trunk"], &project);
+    owned.write("a.txt", "a\n");
+    owned.write("Cargo.toml", "[package]\n");
+    git(&["add", "-A"], &project);
+    git(&["commit", "-q", "-m", "first"], &project);
+    owned.write("a.txt", "changed\n");
+    owned.write("staged.txt", "staged\n");
+    git(&["add", "staged.txt"], &project);
+    owned.write("u.txt", "untracked\n");
+    let committed = owned.published(false, &[]);
+    assert_eq!(committed.branch, "trunk");
+    assert_eq!(committed.left_out, 3);
+    assert_eq!(
+        owned.lines(&["log", "--format=%an|%s"]),
+        [format!("Ada Lovelace|{MESSAGE}"), "Someone|first".into()]
+    );
+    assert_eq!(
+        owned.lines(&["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]),
+        [".github/dependabot.yml", ".gitignore", "SECURITY.md"]
+    );
+    assert_eq!(
+        owned.lines(&["diff", "--cached", "--name-only"]),
+        ["staged.txt"]
+    );
+    assert_eq!(owned.lines(&["diff", "--name-only"]), ["a.txt"]);
+    assert_eq!(owned.read("a.txt"), "changed\n");
+    assert_eq!(owned.commit(&[]).unwrap(), committed);
+    for bad in ["src/evil.rs", "../x", ".git/config", "u.txt"] {
+        assert_eq!(
+            owned.commit(&[bad]).unwrap_err().0,
+            "github_publish_file_invalid",
+            "{bad:?}"
+        );
+    }
+    assert_eq!(
+        owned.lines(&["rev-parse", "HEAD"]),
+        [committed.commit.clone()]
+    );
+    git(&["checkout", "-q", "--detach"], &project);
+    assert_eq!(owned.commit(&[]).unwrap_err().0, "github_publish_detached");
+}
+
+#[test]
+fn the_author_is_the_owners_git_identity_else_the_github_noreply_address() {
+    let fixture = fixture();
+    let project = fixture.path();
+    git(&["init", "-q", "-b", "main"], &project);
+    let owner_home = tempfile::tempdir().unwrap();
+    let author = || configured_author(Path::new(GIT), owner_home.path(), &project);
+    assert_eq!(author(), None);
+    std::fs::write(
+        owner_home.path().join(".gitconfig"),
+        "[user]\n\tname = Grace Hopper\n\temail = grace@example.invalid\n",
+    )
+    .unwrap();
+    assert_eq!(
+        author(),
+        Some(Author {
+            name: "Grace Hopper".into(),
+            email: "grace@example.invalid".into(),
+        })
+    );
+    git(&["config", "user.name", "Ada Lovelace"], &project);
+    git(&["config", "user.email", "ada@example.invalid"], &project);
+    assert_eq!(author(), Some(ada()));
+    for bad in ["not an email", "<ada@example.invalid>"] {
+        git(&["config", "user.email", bad], &project);
+        assert_eq!(author(), None, "{bad}");
+    }
+    assert_eq!(
+        noreply_author("octo-cat", Some(583_231)),
+        Author {
+            name: "octo-cat".into(),
+            email: "583231+octo-cat@users.noreply.github.com".into(),
+        }
+    );
+    assert_eq!(
+        noreply_author("octo-cat", None).email,
+        "octo-cat@users.noreply.github.com"
+    );
 }

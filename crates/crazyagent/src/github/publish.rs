@@ -849,3 +849,67 @@ fn literal(rest: &str) -> bool {
         .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'-' | b'.' | b'/'));
     digit || mixed || symbol
 }
+
+/// The commit a publish pushes: the branch it is on, its id, and how many changed files
+/// publish left out of it because they are the owner's work in progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubCommitted {
+    pub branch: String,
+    pub commit: String,
+    pub left_out: usize,
+}
+
+/// The name and email a publish commit is made with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Author {
+    pub(super) name: String,
+    pub(super) email: String,
+}
+
+/// The identity the owner's own git commits with in the project. Inputs: git, the
+/// owner's home folder and the project. Output: the author, or None when git names none
+/// that is valid.
+pub(super) fn configured_author(git: &Path, owner_home: &Path, project: &Path) -> Option<Author> {
+    let _ = (git, owner_home, project);
+    None
+}
+
+/// The GitHub account's noreply identity. Inputs: the login and the numeric id when
+/// GitHub sent it. Output: the author.
+pub(super) fn noreply_author(login: &str, id: Option<u64>) -> Author {
+    let _ = (login, id);
+    Author {
+        name: String::new(),
+        email: String::new(),
+    }
+}
+
+/// Makes the publish commit. Inputs: git, its empty home, the project, the paths prepare
+/// wrote and the author. Output: the commit to push.
+pub(super) fn commit(
+    git: &Path,
+    home: &Path,
+    project: &Path,
+    written: &[String],
+    author: &Author,
+) -> Result<GitHubCommitted, EngineError> {
+    let _ = (git, home, project, written, author);
+    Err(failure("github_publish_unbuilt"))
+}
+
+/// Pushes the publish commit and points the project at the repository. Inputs: the
+/// endpoints, the store's helper, git, its empty home, the project, `owner/name` and the
+/// commit. Output: `()`, or the refusal.
+pub(super) fn push(
+    endpoints: &super::Endpoints,
+    helper: &str,
+    git: &Path,
+    home: &Path,
+    project: &Path,
+    full_name: &str,
+    committed: &GitHubCommitted,
+) -> Result<(), EngineError> {
+    let _ = (endpoints, helper, git, home, project, full_name, committed);
+    Err(failure("github_publish_unbuilt"))
+}

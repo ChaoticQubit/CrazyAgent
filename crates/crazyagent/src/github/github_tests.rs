@@ -67,7 +67,10 @@ fn bearer(seen: &Seen, token: &str) -> bool {
 
 fn user(seen: &Seen, token: &str) -> Answer {
     if bearer(seen, token) {
-        Answer::json(200, serde_json::json!({ "login": "octo-cat" }))
+        Answer::json(
+            200,
+            serde_json::json!({ "login": "octo-cat", "id": 583_231 }),
+        )
     } else {
         Answer::json(401, serde_json::json!({ "message": "Bad credentials" }))
     }
@@ -1521,4 +1524,313 @@ fn a_repository_record_is_found_in_any_case_and_a_tampered_one_is_refused() {
         );
         assert_eq!(server.seen().len(), before, "{tampered}");
     }
+}
+
+fn git_out(args: &[&str], directory: &Path) -> String {
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/git")
+            .args(args)
+            .current_dir(directory)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", directory)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(output.status.success(), "git {args:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn http_backend(served: &Path, seen: &Seen) -> Answer {
+    let mut command = Command::new("/usr/bin/git");
+    command
+        .arg("http-backend")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_PROJECT_ROOT", served)
+        .env("GIT_HTTP_EXPORT_ALL", "1")
+        .env("REMOTE_USER", "x-access-token")
+        .env("REQUEST_METHOD", &seen.method)
+        .env("PATH_INFO", &seen.path)
+        .env("QUERY_STRING", &seen.query)
+        .env("CONTENT_TYPE", seen.header("content-type").unwrap_or(""))
+        .env("CONTENT_LENGTH", seen.body.len().to_string())
+        .env(
+            "HTTP_CONTENT_ENCODING",
+            seen.header("content-encoding").unwrap_or(""),
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let body = seen.body.clone();
+    let writer = std::thread::spawn(move || {
+        let _ = std::io::Write::write_all(&mut stdin, &body);
+    });
+    let output = child.wait_with_output().unwrap();
+    writer.join().unwrap();
+    let end = output
+        .stdout
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap();
+    let mut answer = Answer {
+        status: 200,
+        headers: Vec::new(),
+        body: output.stdout[end + 4..].to_vec(),
+    };
+    for line in String::from_utf8_lossy(&output.stdout[..end]).split("\r\n") {
+        let (name, value) = line.split_once(':').unwrap();
+        if name.eq_ignore_ascii_case("status") {
+            answer.status = value.trim()[..3].parse().unwrap();
+        } else if !name.eq_ignore_ascii_case("content-length") {
+            answer
+                .headers
+                .push((name.to_owned(), value.trim().to_owned()));
+        }
+    }
+    answer
+}
+
+fn pushed_repository(
+    full_name: &str,
+    secret_text: &str,
+    refuse_push: bool,
+) -> (tempfile::TempDir, PathBuf, Server) {
+    let served = tempfile::tempdir().unwrap();
+    let root = served.path().canonicalize().unwrap();
+    let bare = root.join(format!("{full_name}.git"));
+    std::fs::create_dir_all(&bare).unwrap();
+    git(&["init", "--quiet", "--bare"], &bare);
+    let basic = format!(
+        "Basic {}",
+        base64(format!("x-access-token:{secret_text}").as_bytes())
+    );
+    let expected = secret_text.to_owned();
+    let server = Server::start(move |seen, _| {
+        if seen.path == "/user" {
+            return user(seen, &expected);
+        }
+        if seen.header("authorization") != Some(basic.as_str()) {
+            let mut answer = Answer::bytes(401, Vec::new());
+            answer
+                .headers
+                .push(("WWW-Authenticate".into(), "Basic realm=\"git\"".into()));
+            return answer;
+        }
+        if refuse_push && seen.method == "POST" {
+            return Answer::bytes(403, Vec::new());
+        }
+        http_backend(&root, seen)
+    });
+    (served, bare, server)
+}
+
+fn published_project() -> (tempfile::TempDir, PathBuf, GitHubCommitted) {
+    let folder = tempfile::tempdir().unwrap();
+    let project = folder.path().canonicalize().unwrap();
+    git(&["init", "--quiet", "--initial-branch=main"], &project);
+    std::fs::write(project.join("README.md"), "hello\n").unwrap();
+    git(&["add", "README.md"], &project);
+    git(&["commit", "--quiet", "-m", "first"], &project);
+    let commit = git_out(&["rev-parse", "HEAD"], &project).trim().to_owned();
+    let committed = GitHubCommitted {
+        branch: "main".into(),
+        commit,
+        left_out: 0,
+    };
+    (folder, project, committed)
+}
+
+fn publish_homes(root: &Path) -> Vec<String> {
+    std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".publish-home-"))
+        .collect()
+}
+
+#[test]
+fn publish_commit_uses_the_owners_identity_else_the_github_noreply_address() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let expected = secret_text.clone();
+    let server = Server::start(move |seen, _| user(seen, &expected));
+    let account = scratch.account(&server);
+    let folder = tempfile::tempdir().unwrap();
+    let project = folder.path().canonicalize().unwrap();
+    let owner_home = tempfile::tempdir().unwrap();
+    std::fs::write(project.join("a.txt"), "a\n").unwrap();
+    let local = account.publish_inspect(&project).unwrap();
+    let choices = GitHubPrepare {
+        private: true,
+        docs: false,
+        approved: Vec::new(),
+    };
+    let written = account.publish_prepare(&project, &local, &choices).unwrap();
+    assert_eq!(
+        account
+            .publish_commit(&project, owner_home.path(), &written)
+            .unwrap_err()
+            .0,
+        "github_not_signed_in"
+    );
+    account.use_token(secret(&secret_text)).unwrap();
+    let committed = account
+        .publish_commit(&project, owner_home.path(), &written)
+        .unwrap();
+    assert_eq!(committed.branch, "main");
+    assert_eq!(
+        git_out(&["log", "--format=%an|%ae|%s"], &project),
+        "octo-cat|583231+octo-cat@users.noreply.github.com|Publish with CrazyAgent\n"
+    );
+    std::fs::write(
+        owner_home.path().join(".gitconfig"),
+        "[user]\n\tname = Ada Lovelace\n\temail = ada@example.invalid\n",
+    )
+    .unwrap();
+    std::fs::write(project.join(".gitignore"), "/graphify-out/\nnew/\n").unwrap();
+    let again = account
+        .publish_commit(&project, owner_home.path(), &[String::from(".gitignore")])
+        .unwrap();
+    assert_ne!(again.commit, committed.commit);
+    assert_eq!(
+        git_out(&["log", "-1", "--format=%an|%ae"], &project),
+        "Ada Lovelace|ada@example.invalid\n"
+    );
+    assert!(publish_homes(scratch.root.path()).is_empty());
+}
+
+#[test]
+fn publish_push_sends_from_a_staging_repository_and_points_the_project_at_github() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, bare, server) = pushed_repository("octo-cat/tool", &secret_text, false);
+    let account = scratch.account(&server);
+    let (_folder, project, committed) = published_project();
+    let remote = format!("http://127.0.0.1:{}/octo-cat/tool.git", server.port);
+    git(
+        &[
+            "config",
+            "url.http://127.0.0.1:9/.insteadOf",
+            &format!("http://127.0.0.1:{}/", server.port),
+        ],
+        &project,
+    );
+    git(&["config", "http.extraHeader", "X-Planted: yes"], &project);
+    git(
+        &[
+            "config",
+            "credential.helper",
+            "!f() { echo password=planted; }; f",
+        ],
+        &project,
+    );
+    assert_eq!(
+        account
+            .publish_push(&project, "octo-cat/tool", &committed)
+            .unwrap_err()
+            .0,
+        "github_not_signed_in"
+    );
+    account.use_token(secret(&secret_text)).unwrap();
+    account
+        .publish_push(&project, "octo-cat/tool", &committed)
+        .unwrap();
+    assert_eq!(
+        git_out(&["rev-parse", "refs/heads/main"], &bare).trim(),
+        committed.commit
+    );
+    let seen = server.seen();
+    assert!(seen.iter().any(|request| {
+        request.method == "POST" && request.path == "/octo-cat/tool.git/git-receive-pack"
+    }));
+    assert!(
+        seen.iter()
+            .all(|request| request.header("x-planted").is_none())
+    );
+    let config = |key: &str| {
+        git_out(&["config", "--get", key], &project)
+            .trim()
+            .to_owned()
+    };
+    assert_eq!(config("remote.origin.url"), remote);
+    assert_eq!(
+        config("remote.origin.fetch"),
+        "+refs/heads/*:refs/remotes/origin/*"
+    );
+    assert_eq!(config("branch.main.remote"), "origin");
+    assert_eq!(config("branch.main.merge"), "refs/heads/main");
+    assert_eq!(
+        git_out(&["rev-parse", "refs/remotes/origin/main"], &project).trim(),
+        committed.commit
+    );
+    assert!(!tree_holds(&project, &secret_text));
+    assert!(publish_homes(scratch.root.path()).is_empty());
+    account
+        .publish_push(&project, "octo-cat/tool", &committed)
+        .unwrap();
+    assert_eq!(config("remote.origin.url"), remote);
+}
+
+#[test]
+fn publish_push_refuses_a_moved_head_and_a_refused_push_and_leaves_the_project_alone() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, bare, server) = pushed_repository("octo-cat/tool", &secret_text, true);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project, committed) = published_project();
+    let before = server.seen().len();
+    for moved in [
+        GitHubCommitted {
+            branch: "other".into(),
+            ..committed.clone()
+        },
+        GitHubCommitted {
+            commit: "0".repeat(40),
+            ..committed.clone()
+        },
+        GitHubCommitted {
+            commit: "zz".into(),
+            ..committed.clone()
+        },
+    ] {
+        assert_eq!(
+            account
+                .publish_push(&project, "octo-cat/tool", &moved)
+                .unwrap_err()
+                .0,
+            "github_publish_head_moved",
+            "{moved:?}"
+        );
+    }
+    assert_eq!(
+        account
+            .publish_push(&project, "../tool", &committed)
+            .unwrap_err()
+            .0,
+        "github_repo_name_invalid"
+    );
+    assert_eq!(server.seen().len(), before);
+    assert_eq!(
+        account
+            .publish_push(&project, "octo-cat/tool", &committed)
+            .unwrap_err()
+            .0,
+        "github_publish_push_failed"
+    );
+    assert!(server.seen().len() > before);
+    let config = std::fs::read_to_string(project.join(".git/config")).unwrap();
+    assert!(!config.contains("remote"), "{config}");
+    assert!(!config.contains("[branch"), "{config}");
+    assert!(git_out(&["for-each-ref", "refs/remotes"], &project).is_empty());
+    assert!(git_out(&["for-each-ref"], &bare).is_empty());
+    assert!(publish_homes(scratch.root.path()).is_empty());
 }
