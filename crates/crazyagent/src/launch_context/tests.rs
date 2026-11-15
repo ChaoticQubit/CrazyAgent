@@ -331,6 +331,33 @@ fn a_launch_replaces_a_lock_name_that_is_no_plain_file_and_locks_the_home() {
     }
 }
 
+/// A launch locks a home whose lock an agent left with no owner read or write, which one
+/// `chmod 000` of it does on Linux, where an agent writes its whole home: the lock is this
+/// user's plain file, so it gets its owner-only mode back and is held, and a second launch
+/// is refused as busy. Before, the open failed and every later launch of the home was
+/// refused.
+#[cfg(unix)]
+#[test]
+fn a_launch_locks_a_home_whose_lock_was_left_with_no_owner_read_or_write() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap().join("claude");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let first = lock_only(&home, "claude-code")
+        .map(|_| ())
+        .map_err(|error| error.0);
+    assert_eq!(first, Ok(()));
+    fs::set_permissions(home.join(LOCK), fs::Permissions::from_mode(0o000)).unwrap();
+
+    let held = lock_only(&home, "claude-code").map_err(|error| error.0);
+    let second = lock_only(&home, "claude-code").err().map(|error| error.0);
+
+    assert_eq!(held.as_ref().err(), None);
+    assert_eq!(second.as_deref(), Some("launch_home_busy"));
+    let found = fs::symlink_metadata(home.join(LOCK)).unwrap();
+    assert!(found.file_type().is_file());
+    assert_eq!(found.mode() & 0o777, 0o600);
+}
+
 /// Two launches that find a folder at the lock name of one home never both hold the home:
 /// the one that clears the name holds the home's folder meanwhile, so the other neither
 /// removes the lock the first made nor makes a second one. The step run while the first
