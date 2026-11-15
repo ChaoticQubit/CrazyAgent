@@ -331,6 +331,42 @@ fn a_launch_replaces_a_lock_name_that_is_no_plain_file_and_locks_the_home() {
     }
 }
 
+/// Two launches that find a folder at the lock name of one home never both hold the home:
+/// the one that clears the name holds the home's folder meanwhile, so the other neither
+/// removes the lock the first made nor makes a second one. The step run while the first
+/// clears the name stands in for the second launch.
+#[cfg(unix)]
+#[test]
+fn a_second_launch_never_removes_the_lock_a_first_made_in_place_of_a_folder() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap().join("claude");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    fs::create_dir(home.join(LOCK)).unwrap();
+    let racing = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let seen = racing.clone();
+    let other = home.clone();
+    WHILE_LOCK_NAME_CLEARS.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            let second = lock_only(&other, "claude-code").err().map(|error| error.0);
+            *seen.borrow_mut() = Some(second);
+        }));
+    });
+
+    let held = lock_only(&home, "claude-code").map_err(|error| error.0);
+
+    assert_eq!(held.as_ref().err(), None);
+    assert_eq!(
+        racing.borrow().clone(),
+        Some(Some("launch_home_busy".to_owned()))
+    );
+    assert!(
+        fs::symlink_metadata(home.join(LOCK))
+            .unwrap()
+            .file_type()
+            .is_file()
+    );
+}
+
 /// A launch locks a home an earlier run left with an ACL that denies listing and searching
 /// it (RV-DS241-137 code r2 F3): the retry clears the home's ACL by its path, which needs
 /// neither, where clearing it on the folder itself opens it and fails.

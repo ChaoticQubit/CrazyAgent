@@ -2244,9 +2244,12 @@ fn lock(_home: &Path) -> Result<File, LaunchError> {
 /// A flag or ACL an earlier run left on the home or on the lock, which would refuse the
 /// open, is cleared once, the ACL by path so one that denies listing or searching goes too,
 /// and the open tried again (RV-DS241-137 code r1 F1, r2 F3); a confined agent can set
-/// neither there. Only a lock [`lock_kept`] passes is held, the one the reset that follows
-/// keeps, so the reset never takes the lock this launch holds. Input: the home. Output: the
-/// locked file, `launch_context_unsafe` or `launch_home_busy`.
+/// neither there. An open that gets no plain file also clears the lock name of whatever an
+/// agent put there ([`clear_lock_name`]) before that second try, so a folder, link or FIFO
+/// at the name never refuses every later launch of the home. Only a lock [`lock_kept`]
+/// passes is held, the one the reset that follows keeps, so the reset never takes the lock
+/// this launch holds. Input: the home. Output: the locked file, `launch_context_unsafe` or
+/// `launch_home_busy`.
 #[cfg(unix)]
 fn lock(home: &Path) -> Result<File, LaunchError> {
     let path = home.join(LOCK);
@@ -2256,23 +2259,84 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
             OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::RUSR | Mode::WUSR,
         )
+        .ok()
+        .map(File::from)
+        .filter(plain_file)
     };
-    let opened = open().or_else(|_| {
-        #[cfg(target_os = "macos")]
-        for entry in [home, path.as_path()] {
-            crate::team::cleanup::unpin_home_entry(rustix::fs::CWD, entry);
+    let (file, clearing) = match open() {
+        Some(file) => (file, None),
+        None => {
+            #[cfg(target_os = "macos")]
+            for entry in [home, path.as_path()] {
+                crate::team::cleanup::unpin_home_entry(rustix::fs::CWD, entry);
+            }
+            crate::team::cleanup::release_acls([home, path.as_path()]);
+            let folder = clear_lock_name(home)?;
+            let file = open().ok_or_else(|| failure("launch_context_unsafe"))?;
+            (file, Some(folder))
         }
-        crate::team::cleanup::release_acls([home, path.as_path()]);
-        open()
-    });
-    let file = File::from(opened.map_err(|_| failure("launch_context_unsafe"))?);
+    };
     let found = rustix::fs::fstat(&file).map_err(|_| failure("launch_context_unsafe"))?;
     if !lock_kept(&found) {
         return Err(failure("launch_context_unsafe"));
     }
     rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
         .map_err(|_| failure("launch_home_busy"))?;
+    drop(clearing);
     Ok(file)
+}
+
+/// Whether an open entry is a plain file, which a launch lock is and a folder, FIFO or
+/// device an agent put at its name is not. Input: the open entry. Output: the answer.
+#[cfg(unix)]
+fn plain_file(file: &File) -> bool {
+    rustix::fs::fstat(file).is_ok_and(|found| {
+        rustix::fs::FileType::from_raw_mode(found.st_mode) == rustix::fs::FileType::RegularFile
+    })
+}
+
+/// Clears a home's lock name of an entry that is no plain file, with all it holds, through
+/// the home's open folder and never following a link
+/// ([`crate::team::cleanup::remove_home_entry`]), so what a link there names stays. A plain
+/// file is never removed: it may be the lock another launch holds. The home's folder is
+/// locked meanwhile and stays locked until the caller holds the lock file, so of two
+/// launches that find the same entry one clears it and makes the lock and the other is
+/// refused, never removing the lock the first made. Input: the home. Output: the home's
+/// locked folder, `launch_context_unsafe` for a home that does not open or an entry that
+/// stays, or `launch_home_busy` while another launch clears the name.
+#[cfg(unix)]
+fn clear_lock_name(home: &Path) -> Result<std::os::fd::OwnedFd, LaunchError> {
+    use rustix::fs::{AtFlags, FileType};
+    let folder = rustix::fs::open(
+        home,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| failure("launch_context_unsafe"))?;
+    rustix::fs::flock(&folder, FlockOperation::NonBlockingLockExclusive)
+        .map_err(|_| failure("launch_home_busy"))?;
+    #[cfg(test)]
+    if let Some(step) = WHILE_LOCK_NAME_CLEARS.with(|step| step.borrow_mut().take()) {
+        step();
+    }
+    let found = match rustix::fs::statat(&folder, LOCK, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(rustix::io::Errno::NOENT) => return Ok(folder),
+        found => found.map_err(|_| failure("launch_context_unsafe"))?,
+    };
+    if FileType::from_raw_mode(found.st_mode) != FileType::RegularFile {
+        crate::team::cleanup::remove_home_entry(&folder, LOCK)
+            .map_err(|_| failure("launch_context_unsafe"))?;
+    }
+    Ok(folder)
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// A step a launch test runs in [`clear_lock_name`] once the home's folder is locked and
+    /// before the lock name is read, standing in for a second launch of the same home that
+    /// arrives meanwhile. Runs once; None runs nothing.
+    pub(super) static WHILE_LOCK_NAME_CLEARS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Whether a home's launch lock is held and kept: this user's plain file, on macOS with no
