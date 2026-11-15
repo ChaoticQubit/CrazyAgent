@@ -1,7 +1,6 @@
 use super::*;
 #[cfg(target_os = "macos")]
 use crate::harnesses::interactive::InteractiveCommand;
-use crate::harnesses::interactive::settings::TerminalSettings;
 #[cfg(target_os = "macos")]
 use crate::terminal::FOLDER;
 #[cfg(target_os = "macos")]
@@ -930,4 +929,45 @@ fn a_manifest_pane_record_keeps_its_harness_home_and_session_and_refuses_a_relat
     let relative = stored.replace(r#""home":"/agent/home""#, r#""home":"agent/home""#);
     assert_ne!(relative, stored);
     assert_eq!(PaneRecord::decode(&relative), None);
+}
+
+/// DEC-180 Task 16: a manifest pane's record is found again only through the settings of
+/// its own harness, for an absolute home; with none, another harness's, or a relative home
+/// it is refused, and settings never stand in for a Codex or Claude Code record.
+#[test]
+fn a_manifest_pane_record_is_found_again_only_through_its_own_harness_s_settings() {
+    let append = include_str!("../../../../tests/fixtures/harness/standin-jsonl-append.yaml");
+    let rewrite = include_str!("../../../../tests/fixtures/harness/standin-json-rewrite.yaml");
+    let [append, rewrite] = [append, rewrite].map(|text| {
+        let manifest = crate::harnesses::manifest::parse(text.as_bytes()).unwrap();
+        TerminalSettings::read(&manifest).unwrap()
+    });
+    let home = Path::new("/agent/home");
+    let records = append.records(home, "s-1");
+    assert!(records.is_ok(), "{records:?}");
+    let transcript = Transcript::Records(records.unwrap());
+    let (cwd, since) = (Path::new("/work"), SystemTime::now());
+    let record = PaneRecord::new(&transcript, cwd, since, 4242, None);
+    assert!(record.is_some());
+    let record = record.unwrap();
+    assert_eq!(record.transcript(Some(&append)), Ok(transcript));
+    let unsupported = Err(failure("launch_harness_unsupported"));
+    assert_eq!(record.transcript(Some(&rewrite)), unsupported);
+    assert_eq!(record.transcript(None), unsupported);
+    let relative = PaneRecord {
+        source: RecordSource::Manifest {
+            harness: append.harness().to_owned(),
+            home: PathBuf::from("agent/home"),
+            session: "s-1".to_owned(),
+        },
+        ..record.clone()
+    };
+    assert_eq!(relative.transcript(Some(&append)), unsupported);
+    let sessions = home.join("sessions");
+    let codex = PaneRecord {
+        source: RecordSource::CodexRollouts { sessions },
+        ..record
+    };
+    assert_eq!(codex.transcript(Some(&append)), unsupported);
+    assert!(codex.transcript(None).is_ok());
 }

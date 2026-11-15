@@ -3,8 +3,7 @@ use super::{
     RUNS_PER_PROJECT_MAX, RunState, unavailable,
 };
 use crate::engine::EngineError;
-use crate::harnesses::interactive::Transcript;
-use crate::harnesses::terminal_session::{PaneRecord, RecordSource};
+use crate::harnesses::terminal_session::PaneRecord;
 use crate::harnesses::transcript::TranscriptReader;
 use crate::protocol::ProjectId;
 use crate::team::{AgentRole, bound_text, now_ms};
@@ -135,12 +134,7 @@ fn record_file(pane: &PaneRecord) -> Option<PathBuf> {
     if let Some((file, _)) = &pane.resumed {
         return Some(file.clone());
     }
-    let source = match &pane.source {
-        RecordSource::CodexRollouts { sessions } => Transcript::CodexRollouts {
-            sessions: sessions.clone(),
-        },
-        RecordSource::ClaudeSession { file } => Transcript::ClaudeSession { file: file.clone() },
-    };
+    let source = pane.transcript(None).ok()?;
     let since = UNIX_EPOCH.checked_add(Duration::from_millis(pane.since_ms))?;
     let mut reader = TranscriptReader::adopted(source, &pane.cwd, since);
     reader.read().ok()?;

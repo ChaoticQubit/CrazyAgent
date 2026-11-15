@@ -48,6 +48,15 @@ const PASTE_END: &str = "\x1b[201~";
 const ENTER: &[u8] = b"\r";
 const ESCAPE: &[u8] = b"\x1b";
 
+/// Gives the keys that submit a prompt and interrupt a turn: those the settings of a
+/// harness run from its manifest name, else Enter and Escape. Input: the settings, if any.
+/// Output: the submit key's bytes and the interrupt key's.
+fn keys(settings: Option<&TerminalSettings>) -> (&'static [u8], &'static [u8]) {
+    settings.map_or((ENTER, ESCAPE), |settings| {
+        (settings.submit().bytes(), settings.interrupt().bytes())
+    })
+}
+
 /// A harness running its own interactive app in a terminal pane of the engine's host.
 /// Prompts are typed into the pane; replies, tool use and turn ends are read from the
 /// harness's own session record, never from the screen. Stop or drop ends the pane.
@@ -332,10 +341,7 @@ impl TerminalSession {
             },
             settings.as_ref(),
         )?;
-        let (submit_key, interrupt_key) = match &settings {
-            Some(settings) => (settings.submit().bytes(), settings.interrupt().bytes()),
-            None => (ENTER, ESCAPE),
-        };
+        let (submit_key, interrupt_key) = keys(settings.as_ref());
         let steps: VecDeque<Step> = settings
             .as_ref()
             .map(|settings| settings.first_screen().iter().cloned().collect())
