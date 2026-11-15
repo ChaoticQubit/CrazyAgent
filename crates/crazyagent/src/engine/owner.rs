@@ -28,6 +28,7 @@ pub use transport::checks::{
     RUNS_LATEST_MAX,
 };
 pub use transport::cleanup::CLEANUP_CODES;
+pub use transport::connectors::{CONNECTORS_CODES, ConnectorsSaved};
 pub use transport::harness_settings::HARNESS_SETTINGS_CODES;
 pub use transport::ide::IDE_CODES;
 pub use transport::ide_extensions::IDE_EXTENSIONS_CODES;

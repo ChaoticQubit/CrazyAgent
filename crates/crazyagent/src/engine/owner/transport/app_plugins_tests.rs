@@ -410,3 +410,107 @@ fn connectors_stay_off_the_app_plugins_page() {
         .collect();
     assert_eq!(names, ["local", "openai", "voyage", "ollama"]);
 }
+
+#[test]
+fn no_by_name_app_plugins_action_reaches_a_connector() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_tmp, root) = engine();
+    let db = crate::questions::open(&root).unwrap();
+    store::add(
+        &db,
+        &root,
+        BOARD,
+        &crate::semantic::sha256_hex(BOARD.as_bytes()),
+        false,
+        1,
+    )
+    .unwrap();
+    let code = |action: serde_json::Value| send(&root, request(action), None).unwrap_err().0;
+    for name in ["board", "linear"] {
+        for action in [
+            json!({"kind": "trust", "name": name, "sha256": "0".repeat(64)}),
+            json!({"kind": "set_enabled", "name": name, "enabled": true}),
+            json!({"kind": "set_enabled", "name": name, "enabled": false}),
+            json!({"kind": "bind_account", "name": name, "secret": "api_key", "account": "a"}),
+            json!({"kind": "unbind", "name": name, "secret": "api_key"}),
+        ] {
+            assert_eq!(code(action.clone()), "app_plugin_not_found", "{action}");
+        }
+        let keyed = json!({
+            "app_plugins": {"kind": "set_key", "name": name, "secret": "api_key"},
+            "secret_present": true,
+        });
+        assert_eq!(
+            send(&root, keyed, Some(b"pa-secret-key-000001"))
+                .unwrap_err()
+                .0,
+            "app_plugin_not_found",
+            "{name}"
+        );
+    }
+    assert_eq!(
+        code(json!({"kind": "remove", "name": "board"})),
+        "app_plugin_not_found"
+    );
+    assert_eq!(
+        code(json!({"kind": "remove", "name": "linear"})),
+        "app_plugin_bundled"
+    );
+    let rows: i64 = db
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM app_plugin_secrets)
+             + (SELECT COUNT(*) FROM app_plugin_state WHERE name='linear')
+             + (SELECT COUNT(*) FROM app_plugin_state WHERE name='board' AND enabled=0)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0, "no refused action left a row");
+    assert!(!root.join(crate::storage::accounts::PLUGIN_KEYS).exists());
+    assert!(
+        store::list(&db, &root)
+            .unwrap()
+            .plugins
+            .iter()
+            .any(|plugin| plugin.name == "board")
+    );
+
+    let folder = root.join(crate::app_plugins::FOLDER);
+    for (file, text) in [
+        ("broken.yaml", "schema: 1\nkind: connector\nname: broken\n"),
+        (
+            "linear.yaml",
+            "schema: 1\nkind: embedding\nname: linear\n",
+        ),
+    ] {
+        std::fs::write(folder.join(file), text).unwrap();
+        std::fs::set_permissions(folder.join(file), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+    }
+    assert_eq!(
+        code(json!({"kind": "set_enabled", "name": "linear", "enabled": true})),
+        "app_plugin_not_found",
+        "the old file's row never switches the bundled connector"
+    );
+    let page = listing(send(&root, request(json!({"kind": "list"})), None).unwrap());
+    for name in ["broken", "linear"] {
+        let row = page
+            .plugins
+            .iter()
+            .find(|plugin| plugin.name == name)
+            .unwrap_or_else(|| panic!("the page lists the refused file {name}"));
+        assert!(
+            matches!(row.status, PluginStatus::Refused { .. }),
+            "{name}"
+        );
+        listing(send(&root, request(json!({"kind": "remove", "name": name})), None).unwrap());
+        assert!(
+            !folder.join(format!("{name}.yaml")).exists(),
+            "{name}: the owner can remove a refused file from this page"
+        );
+    }
+    assert_eq!(
+        code(json!({"kind": "remove", "name": "linear"})),
+        "app_plugin_bundled"
+    );
+}

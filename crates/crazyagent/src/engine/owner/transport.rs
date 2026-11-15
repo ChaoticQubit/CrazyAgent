@@ -47,6 +47,7 @@ pub(crate) mod app_plugins;
 pub(crate) mod changes;
 pub(crate) mod checks;
 pub(crate) mod cleanup;
+pub(crate) mod connectors;
 mod github;
 mod harness_catalog;
 pub(crate) mod harness_settings;
@@ -2247,6 +2248,7 @@ enum Protocol {
     Tracker,
     Scorecard,
     AppPlugins,
+    Connectors,
     Roadmap,
     NativeAuth,
     Process,
@@ -2288,6 +2290,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("tracker", Protocol::Tracker),
         ("scorecard", Protocol::Scorecard),
         ("app_plugins", Protocol::AppPlugins),
+        ("connectors", Protocol::Connectors),
         ("roadmap", Protocol::Roadmap),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
@@ -2370,6 +2373,7 @@ async fn serve_admitted(
             Protocol::ModelChoice => return Ok(Some(Deferred::ModelChoice(a))),
             Protocol::Scorecard => return Ok(Some(Deferred::Scorecard(a))),
             Protocol::AppPlugins => return Ok(Some(Deferred::AppPlugins(a))),
+            Protocol::Connectors => return Ok(Some(Deferred::Connectors(a))),
             Protocol::Roadmap => return Ok(Some(Deferred::Roadmap(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
@@ -2590,6 +2594,10 @@ async fn serve_admitted(
             let served = app_plugins::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(app_plugins::APP_PLUGINS_TIMEOUT, served).await;
         }
+        Deferred::Connectors(a) => {
+            let served = connectors::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(connectors::CONNECTORS_TIMEOUT, served).await;
+        }
         Deferred::Roadmap(a) => {
             let served = roadmap::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(roadmap::ROADMAP_TIMEOUT, served).await;
@@ -2703,6 +2711,7 @@ enum Deferred {
     Tracker(Admission),
     Scorecard(Admission),
     AppPlugins(Admission),
+    Connectors(Admission),
     Roadmap(Admission),
     Cleanup(Admission),
     Overview(Admission),
@@ -2760,6 +2769,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Tracker => tracker::refusal(code)?,
         Protocol::Scorecard => scorecard::refusal(code)?,
         Protocol::AppPlugins => app_plugins::refusal(code)?,
+        Protocol::Connectors => connectors::refusal(code)?,
         Protocol::Roadmap => roadmap::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,

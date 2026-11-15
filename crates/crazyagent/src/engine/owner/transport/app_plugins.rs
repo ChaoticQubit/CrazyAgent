@@ -474,7 +474,7 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
     Ok((app_plugins, secret_present))
 }
 
-async fn receive_key(stream: &mut UnixStream) -> Result<AccountSecret, EngineError> {
+pub(super) async fn receive_key(stream: &mut UnixStream) -> Result<AccountSecret, EngineError> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let invalid = || failure("app_plugin_key_invalid");
         let size = stream.read_u32().await.map_err(|_| invalid())? as usize;

@@ -456,6 +456,92 @@ fn every_connector_refusal_has_a_plain_sentence() {
     );
 }
 
+#[test]
+fn the_trust_screen_shows_every_field_the_gateway_acts_on() {
+    let view = trust(&full());
+    assert_eq!(
+        view["connector"],
+        json!({
+            "read_only": {"kind": "url", "url": "https://mcp.acme.example/mcp/readonly"},
+            "key": {"header": "Authorization", "scheme": "Bearer", "secrets": ["api_key"]},
+            "oauth": {
+                "hosts": ["acme.example", "api.acme.example"],
+                "registration": ["cimd", "dcr"],
+                "scopes_read": ["read"],
+                "scopes_write": ["write"]
+            },
+            "read_tools": ["list_issues", "get_issue"]
+        })
+    );
+    let header = trust(&swap(&keyed(), READ_ONLY_LINE, READ_ONLY_HEADER));
+    assert_eq!(
+        header["connector"]["read_only"],
+        json!({"kind": "header", "name": "X-MCP-Readonly", "value": "true"})
+    );
+    assert_eq!(header["connector"]["oauth"], json!(null));
+    assert_eq!(header["connector"]["read_tools"], json!([]));
+    let plain = trust(&swap(&keyed(), READ_ONLY_LINE, ""));
+    assert_eq!(plain["connector"]["read_only"], json!({"kind": "none"}));
+    let basic = trust(&swap(
+        &keyed(),
+        "  scheme: Bearer\n",
+        "  scheme: Basic\n  user_secret: email\n",
+    ));
+    assert_eq!(
+        basic["connector"]["key"],
+        json!({"header": "Authorization", "scheme": "Basic", "secrets": ["api_key", "email"]})
+    );
+    assert_eq!(trust(&oauth_only())["connector"]["key"], json!(null));
+    let own = trust(&swap(
+        &oauth_only(),
+        "  registration: [cimd, dcr]\n",
+        "  registration: [own]\n",
+    ));
+    assert_eq!(own["connector"]["oauth"]["registration"], json!(["own"]));
+
+    let embedding = manifest::parse(crate::app_plugins::store::bundled()[1].1).unwrap();
+    assert!(
+        serde_json::to_value(embedding.trust_view(false))
+            .unwrap()
+            .get("connector")
+            .is_none(),
+        "an embedding plugin's trust screen is unchanged"
+    );
+    let linear = manifest::parse(crate::app_plugins::store::bundled()[4].1).unwrap();
+    assert_eq!(
+        serde_json::to_value(linear.trust_view(false)).unwrap()["connector"]["read_only"],
+        json!({"kind": "url", "url": "https://mcp.linear.app/mcp/readonly"})
+    );
+}
+
+#[test]
+fn a_connector_address_with_a_query_is_refused() {
+    assert_eq!(
+        refused(&swap(
+            &keyed(),
+            URL_LINE,
+            "  url: https://mcp.acme.example/mcp?token=abc\n"
+        )),
+        refusal("app_plugin_url_invalid", "mcp.url")
+    );
+    assert_eq!(
+        refused(&swap(
+            &keyed(),
+            READ_ONLY_LINE,
+            "  read_only_url: https://mcp.acme.example/mcp/readonly?mode=ro\n"
+        )),
+        refusal("app_plugin_url_invalid", "mcp.read_only_url")
+    );
+    assert_eq!(
+        refused(&swap(
+            &keyed(),
+            URL_LINE,
+            "  url: https://mcp.acme.example/mcp?\n"
+        )),
+        refusal("app_plugin_url_invalid", "mcp.url")
+    );
+}
+
 #[cfg(unix)]
 mod stored {
     use super::{HOSTS_LINE, READ_ONLY_LINE, URL_LINE, full, keyed, oauth_only, swap};

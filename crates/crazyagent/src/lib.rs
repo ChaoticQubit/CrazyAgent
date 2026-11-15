@@ -17,6 +17,7 @@ pub mod checks;
 pub mod cleanup_settings;
 pub mod client_controller;
 pub mod config;
+pub mod connectors;
 #[cfg(unix)]
 pub mod context_mode;
 pub mod conversation;

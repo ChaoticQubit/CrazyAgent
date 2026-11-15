@@ -17,6 +17,7 @@ mod app_plugins;
 mod changes;
 mod checks;
 mod cleanup;
+mod connectors;
 mod coord;
 mod harness_settings;
 mod ide;
