@@ -162,7 +162,7 @@ const GITHUB_CODES: [&str; 35] = [
     "not_connected",
 ];
 
-const SETUP_CODES: [&str; 43] = [
+const SETUP_CODES: [&str; 48] = [
     "owner_outcome_unknown_reconcile_same_identity",
     "stale_revision",
     "setup_checksum_mismatch",
@@ -177,6 +177,11 @@ const SETUP_CODES: [&str; 43] = [
     "setup_winget_missing",
     "setup_store_unavailable",
     "setup_pin_invalid",
+    "setup_archive_unsafe",
+    "setup_pin_unlocked",
+    "setup_local_app_data_missing",
+    "setup_platform_unsupported",
+    "agent_git_needs_tools",
     "setup_busy",
     "setup_readonly",
     "setup_tool_unsupported",

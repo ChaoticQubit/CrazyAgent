@@ -23,7 +23,7 @@ const APPLY = [
 const REQUESTING_CODEX = String.raw`#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/11/11"
-/bin/mkdir -p "$d" || exit 1
+/bin/mkdir -p "$d" "$CODEX_HOME/.cache" || exit 1
 id=$(printf '%08x-0000-4000-8000-%012x' $$ $$)
 f="$d/rollout-2026-11-11T00-00-00-$id.jsonl"
 printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$(/bin/pwd -P)" > "$f"
@@ -37,12 +37,12 @@ while IFS= read -r line; do
     *) [ "$open" = 1 ] && continue ;;
   esac
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
-  if [ ! -e "$CODEX_HOME/.requested" ]; then
-    : > "$CODEX_HOME/.requested"
+  if [ ! -e "$CODEX_HOME/.cache/.requested" ]; then
+    : > "$CODEX_HOME/.cache/.requested"
     cfg="$CODEX_HOME/config.toml"
     cmd=$(/usr/bin/sed -n '/^\[mcp_servers\.crazyagent-team\]/,/^\[/s/^command = "\(.*\)"$/\1/p' "$cfg")
     args=$(/usr/bin/sed -n '/^\[mcp_servers\.crazyagent-team\]/,/^\[/s/^args = \[\(.*\)\]$/\1/p' "$cfg" | /usr/bin/tr -d '",')
-    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"stand-in","version":"1"}}}' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"request_access","arguments":{"kind":"port","port":6543,"reason":"the e2e database"}}}' | "$cmd" $args >> "$CODEX_HOME/request-access.log" 2>&1
+    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"stand-in","version":"1"}}}' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"request_access","arguments":{"kind":"port","port":6543,"reason":"the e2e database"}}}' | "$cmd" $args >> "$CODEX_HOME/.cache/request-access.log" 2>&1
   fi
   printf '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9200,"cached_input_tokens":8000,"output_tokens":300,"total_tokens":9500}}}}\n' >> "$f"
   printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}\n' >> "$f"

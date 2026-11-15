@@ -828,14 +828,17 @@ pub(super) fn forgotten_caches(
 }
 
 /// Records engine files in the caller's write, for the live and the start-time finish to
-/// remove. Inputs: the transaction and the records. Output: Ok, or any SQLite failure.
+/// remove; a name already recorded stays as it is, and one the record cannot hold fails the
+/// write instead of going unrecorded (RV-DS241-152). Inputs: the transaction and the
+/// records. Output: Ok, or any SQLite failure.
 pub(super) fn record_files(
     tx: &Transaction<'_>,
     files: &[home::RecordedFile],
 ) -> Result<(), EngineError> {
     for (name, inode) in files {
         tx.execute(
-            "INSERT OR IGNORE INTO projects_delete_files(name,inode) VALUES (?1,?2)",
+            "INSERT INTO projects_delete_files(name,inode) VALUES (?1,?2)
+             ON CONFLICT(name) DO NOTHING",
             params![name, inode],
         )
         .map_err(error)?;

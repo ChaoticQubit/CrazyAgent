@@ -259,7 +259,9 @@ fn first_bound(
             Err(error)
                 if matches!(
                     error.kind(),
-                    ErrorKind::AddrInUse | ErrorKind::PermissionDenied | ErrorKind::AddrNotAvailable
+                    ErrorKind::AddrInUse
+                        | ErrorKind::PermissionDenied
+                        | ErrorKind::AddrNotAvailable
                 ) => {}
             bound => return bound,
         }

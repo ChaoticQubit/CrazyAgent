@@ -206,6 +206,50 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
 
+/// B5 r2 (rv-sec3 F1, rv-code4 F1): a project folder named with long runs of `s` and `f`
+/// still gets an IDE profile holding its agent folders rule under the folder's spelled
+/// name, rather than a panic while that name is spelled.
+#[test]
+fn an_ide_profile_builds_for_a_project_folder_named_with_long_fold_runs() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let data = fs::canonicalize(scratch.path()).unwrap();
+    let home = data.join("ide").join("p1").join("server");
+    let build = data.join("ide").join("builds").join("v1");
+    let elsewhere = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = fs::canonicalize(elsewhere.path())
+        .unwrap()
+        .join("Glasssssss-ffffffffff");
+    for path in [&home, &build, &root] {
+        folder(path);
+    }
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let rule = AgentFilesRule {
+        choice: IdeAgentFiles::ReadOnly,
+        older_agents: true,
+    };
+    let text = profile(&grants, PORT, closed(), &[], rule).unwrap();
+    let spelled = crate::sandbox::any_case(root.to_str().unwrap());
+    assert!(text.contains(&format!("(regex #\"^{spelled}")), "{text}");
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}
+
 /// Moves `from` to `to` under the profile, the way a server would rename one of its data
 /// folders into the project it can write. Inputs: the profile, the folder and its new path.
 /// Output: whether the move succeeded.
@@ -3082,6 +3126,49 @@ fn the_ide_plants_no_admin_root_under_a_kelvin_or_long_s_spelling() {
             planted.display()
         );
         assert!(!git.join("worktrees").exists(), "{}", planted.display());
+    }
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
+
+/// SA vid 202 and the ligature half of vid 11 under the installed `server.sb`: the IDE
+/// makes no `.git/config.worktree` and no `.crazyagent/instructions.md` under a spelling
+/// the case-insensitive volume folds onto them through one code point for two letters
+/// (U+FB01 for `fi`, U+FB05 and U+FB06 for `st`), so the owner's own git never reads a
+/// planted `core.fsmonitor` and no later agent reads planted instructions. Nor under a
+/// spelling holding a code point HFS+ ignores in names (U+200C, U+FEFF), which that volume
+/// opens as the plain name, and it reads no project file whose path holds one. A project
+/// file named with such a fold of letters no rule protects stays writable and readable, as
+/// does one whose name holds other letters beside such a code point, as Persian names do.
+#[test]
+fn the_ide_plants_no_git_config_or_instructions_under_a_ligature_or_hfs_ignored_spelling() {
+    let s = server();
+    let git = s.root.join(".git");
+    let state = s.root.join(".crazyagent");
+    folder(&state);
+    let write = r#"printf '[core]\n\tfsmonitor = /usr/bin/true\n' > "$1""#;
+    for planted in [
+        git.join("con\u{fb01}g.worktree"),
+        git.join("CON\u{fb01}G.WORKTREE"),
+        state.join("in\u{fb05}ructions.md"),
+        state.join("IN\u{fb06}RUCTIONS.MD"),
+        git.join("con\u{200c}fig.worktree"),
+        state.join("\u{feff}instructions.md"),
+    ] {
+        assert!(!sh(&s.profile, write, &planted), "{}", planted.display());
+        assert!(!planted.exists(), "{}", planted.display());
+    }
+    assert!(!git.join("config.worktree").exists());
+    assert!(!state.join("instructions.md").exists());
+    let hidden = s.root.join("no\u{200c}tes.md");
+    fs::write(&hidden, "owner\n").unwrap();
+    assert!(!sh(&s.profile, r#"/bin/cat "$1""#, &hidden));
+    for kept in [
+        s.root.join("Gro\u{df}.md"),
+        s.root.join("o\u{fb03}ce.md"),
+        s.root.join("\u{646}\u{627}\u{645}\u{200c}\u{647}\u{627}.md"),
+    ] {
+        assert!(sh(&s.profile, write, &kept), "{}", kept.display());
+        assert!(sh(&s.profile, r#"/bin/cat "$1""#, &kept), "{}", kept.display());
     }
     crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
 }

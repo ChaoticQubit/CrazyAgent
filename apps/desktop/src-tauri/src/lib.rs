@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod ide;
+pub mod theme;
 mod updates;
 
 #[cfg(feature = "native-webdriver")]
@@ -2185,6 +2186,7 @@ fn build_wall(
         })
         .build()
         .map_err(|_| engine_failure("terminal_window_failed"))?;
+    theme::dress(&wall);
     let terminals = Arc::clone(&app.state::<TerminalState>().0);
     let closed = label.to_owned();
     wall.on_window_event(move |event| {
@@ -3087,6 +3089,17 @@ async fn desktop_save_owner_profile(
         .await?
         .save_owner_profile(profile, generation)
         .await
+}
+
+#[tauri::command]
+fn desktop_set_theme<R: Runtime>(
+    webview: Webview<R>,
+    app: AppHandle<R>,
+    choice: theme::ThemeChoice,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    theme::apply(&app, choice)
+        .map_err(|_| engine_failure("theme_not_applied"))
 }
 
 #[tauri::command]
@@ -5200,6 +5213,7 @@ native_commands! {
     desktop_submit_claude_auth_code,
     desktop_owner_profile,
     desktop_save_owner_profile,
+    desktop_set_theme,
     desktop_sandbox_settings,
     desktop_set_sandbox_settings,
     desktop_cleanup_settings,
@@ -5357,6 +5371,7 @@ pub fn run() {
         .manage(UpdateState::default())
         .manage(ide::IdeViews::default())
         .manage(Notices::default())
+        .manage(theme::Mirrored::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(native_handler())
@@ -5383,6 +5398,9 @@ pub fn run() {
                 }
                 if matches!(event, tauri::WindowEvent::Focused(true)) {
                     ide::main_focused(&handle);
+                }
+                if let tauri::WindowEvent::ThemeChanged(shown) = event {
+                    theme::followed(&handle, *shown);
                 }
             });
             let handle = app.handle().clone();
@@ -5513,6 +5531,36 @@ mod tests {
                 "{command} from the IDE page",
             );
         }
+    }
+
+    #[test]
+    fn the_main_window_mirrors_its_theme_choice_and_a_wall_or_a_stray_word_changes_nothing() {
+        let app = mock_builder()
+            .manage(theme::Mirrored::default())
+            .invoke_handler(admit_pages(tauri::generate_handler![desktop_set_theme]))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let page = |label: &str| {
+            WebviewWindowBuilder::new(&app, label, WebviewUrl::default())
+                .build()
+                .unwrap()
+        };
+        let main = page("main");
+        let wall = page("terminals-0123456789abcdef-1");
+        let set = |page: &Webview<MockRuntime>, choice: &str| {
+            ask(page, "desktop_set_theme", json!({ "choice": choice }))
+        };
+        let dark = theme::Mirror {
+            choice: theme::ThemeChoice::Dark,
+            icon: tauri::Theme::Dark,
+        };
+        assert_eq!(set(main.as_ref(), "dark"), Ok(()));
+        assert_eq!(theme::mirrored(app.handle()), Some(dark));
+        let refused = set(wall.as_ref(), "light").unwrap_err();
+        assert_eq!(refused["code"], "window_denied");
+        assert!(set(main.as_ref(), "Light").is_err());
+        assert!(set(main.as_ref(), "blue").is_err());
+        assert_eq!(theme::mirrored(app.handle()), Some(dark));
     }
 
     #[test]

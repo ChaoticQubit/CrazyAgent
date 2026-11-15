@@ -199,6 +199,7 @@ fn main() {
         "desktop_delete_master_session",
         "desktop_owner_profile",
         "desktop_save_owner_profile",
+        "desktop_set_theme",
         "desktop_sandbox_settings",
         "desktop_set_sandbox_settings",
         "desktop_cleanup_settings",

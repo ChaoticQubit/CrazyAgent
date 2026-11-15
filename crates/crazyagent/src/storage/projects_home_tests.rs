@@ -692,3 +692,89 @@ fn a_delete_mark_keeps_its_request_name_and_count_when_it_shows_cut_short() {
         "a 2.4.1 mark names no job"
     );
 }
+
+/// RV-DS241-152: a delete records every engine file name the engine makes, up to the
+/// `RECORDED_NAME_BYTES_MAX` bytes of an Overview or roadmap status run of a long project
+/// id, and a name the record cannot hold fails the write instead of going unrecorded, so no
+/// run folder of a deleted project is left unfound. A name recorded twice stays one record.
+/// The name is built from that constant, so a wider one fails here until the record's
+/// check follows it (G1 code r1 F1).
+#[test]
+fn a_delete_records_run_names_up_to_the_recorded_width_and_refuses_a_longer_one() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let mut connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    let width = crate::projects_home::RECORDED_NAME_BYTES_MAX;
+    let pad = width - "overview--1794000000000".len();
+    let name = format!("overview-{}-1794000000000", "a".repeat(pad));
+    assert_eq!(name.len(), width);
+    let count = |connection: &Connection, name: &str| -> i64 {
+        connection
+            .query_row(
+                "SELECT count(*) FROM projects_delete_files WHERE name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+
+    let twice = [(name.clone(), 7), (name.clone(), 7)];
+    let tx = connection.transaction().unwrap();
+    projects_home::record_files(&tx, &twice).unwrap();
+    tx.commit().unwrap();
+    let longer = format!("{name}0");
+    let tx = connection.transaction().unwrap();
+    let refused = projects_home::record_files(&tx, &[(longer.clone(), 8)]);
+    drop(tx);
+
+    assert_eq!(
+        count(&connection, &name),
+        1,
+        "a run name of the recorded width is recorded once"
+    );
+    assert!(
+        refused.is_err(),
+        "a name the record cannot hold fails the write"
+    );
+    assert_eq!(count(&connection, &longer), 0);
+}
+
+/// RV-DS241-149: an engine start forgets the repository admissions of projects that are no
+/// longer recorded, which removals before the fix left behind, so a project added again
+/// under such an id admits its repository afresh; a recorded project keeps its admission.
+#[test]
+fn an_engine_start_forgets_the_admissions_of_projects_that_are_gone() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    let kept = serde_json::to_string(&crate::protocol::StoredProject {
+        project_id: ProjectId::new("kept").unwrap(),
+        spec: crate::protocol::ProjectSpec {
+            name: "Kept".into(),
+            repositories: vec![],
+        },
+    })
+    .unwrap();
+    connection
+        .execute("INSERT INTO projects(id, body) VALUES('kept', ?1)", [kept])
+        .unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO repository_admissions(project,repository,body) VALUES
+               ('kept','/repos/kept','{}'), ('gone','/repos/gone','{}');",
+        )
+        .unwrap();
+
+    initialize_authority_schemas(&connection).unwrap();
+
+    let left: Vec<String> = connection
+        .prepare("SELECT project FROM repository_admissions ORDER BY project")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(left, ["kept"]);
+}

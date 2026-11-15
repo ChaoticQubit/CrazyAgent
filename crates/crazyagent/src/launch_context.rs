@@ -120,8 +120,8 @@ const TEAMMATE_INSTRUCTIONS: &str = "teammate.md";
 const MATES_HOME: &str = "mates-home";
 /// The most switched-off tools one launch passes to its harness, across every server.
 pub const DENIED_TOOLS_MAX: usize = 256;
-#[cfg(unix)]
-const LOCK: &str = "crazyagent.lock";
+/// The launch lock file in an agent home, held while one launch uses it.
+pub(crate) const LOCK: &str = "crazyagent.lock";
 const PLUGIN_MANIFEST: &str = "{\"name\":\"crazyagent\",\"version\":\"1.0.0\",\"description\":\"Skills the owner approved for this project in CrazyAgent\"}\n";
 const HOOK_PLUGINS: &str = "hook-plugins";
 const HOOK_ROOT: &str = "CRAZYAGENT_HOOK_ROOT";
@@ -265,7 +265,7 @@ pub fn for_project(
     let transcripts = crate::instruction_files::load(&tx, project)
         .map_err(failure)?
         .transcripts;
-    let hooks = crate::storage::plugins::effective_hooks(&tx, &root, project)
+    let hooks = crate::storage::plugins::effective_hooks(&tx, &root, project, &plugins.left_out)
         .map_err(|problem| LaunchError(problem.0, None))?;
     let off_tools = off_tools(&tx, project, &plugins)?;
     let catch_up_main = crate::team::catch_up_main(&tx, project)
@@ -2240,25 +2240,60 @@ fn lock(_home: &Path) -> Result<File, LaunchError> {
     Err(failure("launch_context_unavailable"))
 }
 
+/// Opens and locks the agent home's launch lock, made owner-only and never through a link.
+/// A flag or ACL an earlier run left on the home or on the lock, which would refuse the
+/// open, is cleared once, the ACL by path so one that denies listing or searching goes too,
+/// and the open tried again (RV-DS241-137 code r1 F1, r2 F3); a confined agent can set
+/// neither there. Only a lock [`lock_kept`] passes is held, the one the reset that follows
+/// keeps, so the reset never takes the lock this launch holds. Input: the home. Output: the
+/// locked file, `launch_context_unsafe` or `launch_home_busy`.
 #[cfg(unix)]
 fn lock(home: &Path) -> Result<File, LaunchError> {
-    let file = File::from(
+    let path = home.join(LOCK);
+    let open = || {
         rustix::fs::open(
-            home.join(LOCK),
+            &path,
             OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::RUSR | Mode::WUSR,
         )
-        .map_err(|_| failure("launch_context_unsafe"))?,
-    );
-    let metadata = file
-        .metadata()
-        .map_err(|_| failure("launch_context_unsafe"))?;
-    if !metadata.is_file() || metadata.uid() != rustix::process::geteuid().as_raw() {
+    };
+    let opened = open().or_else(|_| {
+        #[cfg(target_os = "macos")]
+        for entry in [home, path.as_path()] {
+            crate::team::cleanup::unpin_home_entry(rustix::fs::CWD, entry);
+        }
+        crate::team::cleanup::release_acls([home, path.as_path()]);
+        open()
+    });
+    let file = File::from(opened.map_err(|_| failure("launch_context_unsafe"))?);
+    let found = rustix::fs::fstat(&file).map_err(|_| failure("launch_context_unsafe"))?;
+    if !lock_kept(&found) {
         return Err(failure("launch_context_unsafe"));
     }
     rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
         .map_err(|_| failure("launch_home_busy"))?;
     Ok(file)
+}
+
+/// Whether a home's launch lock is held and kept: this user's plain file, on macOS with no
+/// second link, which may be the owner's file an agent linked in and which the profile keeps
+/// a confined agent from making (r3, `sandbox::launch_denies`). On Linux Landlock and
+/// bubblewrap refuse a link from outside an agent's write roots and holding the lock changes
+/// no file, so a second name there stays harmless (code r3 F2). The launch's open and an
+/// agent home's reset both judge it here, so the reset keeps exactly the lock the launch
+/// holds. Input: what was read of it without following a link. Output: the answer.
+#[cfg(unix)]
+pub(crate) fn lock_kept(found: &rustix::fs::Stat) -> bool {
+    rustix::fs::FileType::from_raw_mode(found.st_mode) == rustix::fs::FileType::RegularFile
+        && found.st_uid == rustix::process::geteuid().as_raw()
+        && (cfg!(not(target_os = "macos")) || found.st_nlink == 1)
+}
+
+/// Keeps a home's launch lock where it is a plain file, on systems with no owner-only lock,
+/// whose launches [`lock`] refuses. Input: its metadata. Output: the answer.
+#[cfg(not(unix))]
+pub(crate) fn lock_kept(metadata: &fs::Metadata) -> bool {
+    metadata.is_file()
 }
 
 /// Takes a context-less launch's hold on an agent home: the same per-home lock a full
@@ -2491,10 +2526,46 @@ fn clear(parked: &Path) {
     }
 }
 
+/// The `find -P` expressions that clear the ACLs of what a tree's folders hold: of each
+/// one-link entry that is neither a folder nor a link by its path, and of each one-link link
+/// on the link itself, so a file with a second link, which may be the owner's file an agent
+/// linked in, never changes (V231-ACL). [`RELEASED_TREE`] runs them after its folder and flag
+/// passes, and an agent tree's removal after its own folder pass (RV-DS241-137 sec r2 F1).
+#[cfg(target_os = "macos")]
+pub(crate) const RELEASED_ACLS: [&[&str]; 2] = [
+    &[
+        "!",
+        "-type",
+        "d",
+        "!",
+        "-type",
+        "l",
+        "-links",
+        "1",
+        "-exec",
+        "/bin/chmod",
+        "-N",
+        "{}",
+        "+",
+    ],
+    &[
+        "-type",
+        "l",
+        "-links",
+        "1",
+        "-exec",
+        "/bin/chmod",
+        "-h",
+        "-N",
+        "{}",
+        "+",
+    ],
+];
+
 /// The `find -P` expressions [`release`] runs in order on a tree. First, folders one at a
 /// time, so a folder with no search or a list-denying ACL opens before `find` reads it. Then
-/// one-link entries that are not folders: their flags, the ACL of each that is not a link by
-/// path, and the ACL of each link on the link itself. A file with a second link is never matched.
+/// one-link entries that are not folders: their flags, and their ACLs ([`RELEASED_ACLS`]).
+/// A file with a second link is never matched.
 #[cfg(target_os = "macos")]
 const RELEASED_TREE: [&[&str]; 4] = [
     &[
@@ -2539,33 +2610,8 @@ const RELEASED_TREE: [&[&str]; 4] = [
         "{}",
         "+",
     ],
-    &[
-        "!",
-        "-type",
-        "d",
-        "!",
-        "-type",
-        "l",
-        "-links",
-        "1",
-        "-exec",
-        "/bin/chmod",
-        "-N",
-        "{}",
-        "+",
-    ],
-    &[
-        "-type",
-        "l",
-        "-links",
-        "1",
-        "-exec",
-        "/bin/chmod",
-        "-h",
-        "-N",
-        "{}",
-        "+",
-    ],
+    RELEASED_ACLS[0],
+    RELEASED_ACLS[1],
 ];
 
 /// Clears the immutable and append only flags and every ACL entry of one folder and adds the

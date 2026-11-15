@@ -236,7 +236,10 @@ async fn a_versions_read_that_falls_back_from_a_broken_pin_never_runs_a_planted_
         "the fallback lists the planted Codex and names the resolver's refusal"
     );
     assert!(!planted_ran.exists(), "a planted Codex is never run");
-    assert!(!owner_ran.exists(), "a pinned file rewritten in place is never run");
+    assert!(
+        !owner_ran.exists(),
+        "a pinned file rewritten in place is never run"
+    );
 }
 
 /// security-audit vid 1 with rv-sa241 f-11: a Versions request re-pins a registered Codex

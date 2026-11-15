@@ -1425,6 +1425,77 @@ async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
     claude.close().await.unwrap();
 }
 
+/// The owner's connection-retry choice reaches the running Claude Code master, not only the
+/// command the engine builds: under Stop at once the process reads
+/// `CLAUDE_CODE_MAX_RETRIES=0`, under Harness default the variable is not set
+/// (RV-DS241-48).
+#[tokio::test]
+async fn the_retry_choice_reaches_the_running_claude_master() {
+    use crate::engine::master_host_fixture::MasterFixture;
+    use crate::provider_retry::ProviderRetry;
+
+    for (retry, wanted) in [
+        (ProviderRetry::StopAtOnce, "retries=0\n"),
+        (ProviderRetry::HarnessDefault, "retries=\n"),
+    ] {
+        let mut fixture = MasterFixture::new("claude");
+        let profile = fixture.lease("claude-retry-seen", 1).unwrap();
+        let home = profile.profile_path().unwrap();
+        let harness = fixture.stand_in(
+            "claude",
+            "#!/bin/sh\nprintf 'retries=%s\\n' \"$(/usr/bin/printenv CLAUDE_CODE_MAX_RETRIES)\" > run/retries.txt\n/bin/cat > /dev/null\nexit 1\n",
+        );
+        let engine = fixture.root.path().join("crazyagent");
+        let drop = home.join(crate::team::tool::DROP_FILE);
+        let mut command = tools_launch_command(
+            &harness,
+            &fixture.project,
+            &home,
+            "native-default",
+            None,
+            MasterTools {
+                engine: &engine,
+                drop: &drop,
+                mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+                off: &[],
+            },
+        )
+        .unwrap();
+        limit_retries(&mut command, retry);
+        let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+        let mut claude = ClaudeHost::spawn(
+            command,
+            sandbox,
+            profile,
+            home,
+            NativeAction::Launch {
+                session_id: crate::protocol::SessionId::new("claude-retry-session").unwrap(),
+                harness: NativeHarness::Claude,
+                profile_ref: CredentialRef::new("retry-master-profile").unwrap(),
+                worktree_lease: RequestId::new("claude-retry-lease").unwrap(),
+            },
+            fixture.connection.account_ref.clone(),
+            fixture.project_id.clone(),
+            Some(Duration::from_secs(60)),
+            ResourceBudget::unit(),
+            crate::master_frame_limit::FrameSize::default(),
+        )
+        .await
+        .unwrap();
+        let seen = fixture.project.join("run/retries.txt");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while fs::read_to_string(&seen).map_or(true, |text| !text.ends_with('\n')) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stand-in never started under {retry:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(fs::read_to_string(&seen).unwrap(), wanted, "{retry:?}");
+        claude.close().await.unwrap();
+    }
+}
+
 const TOOL_STEP_HARNESS: &str = r#"#!/bin/sh
 IFS= read -r turn
 printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'

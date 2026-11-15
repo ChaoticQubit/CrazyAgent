@@ -151,7 +151,14 @@ fn force_exit() -> ! {
     std::process::exit(1)
 }
 
-pub fn run_tui(client: Client) -> Result<(), TuiError> {
+/// Runs the terminal app on an engine until the owner quits or a signal arrives.
+/// Inputs: the unbound engine client and the default engine's layout and login service,
+/// which `r` on the engine-down screen starts or repairs, none for an explicit socket.
+/// Output: Ok after a clean exit, or the terminal or connection error.
+pub fn run_tui(
+    client: Client,
+    engine: Option<(crate::paths::Layout, crate::service::Service)>,
+) -> Result<(), TuiError> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(TuiError("TUI requires terminal stdin and stdout".into()));
     }
@@ -189,7 +196,7 @@ pub fn run_tui(client: Client) -> Result<(), TuiError> {
     });
     let result = (|| {
         if !std::env::var("CRAZYAGENT_TUI").is_ok_and(|value| value == "classic") {
-            return run::run(client, &stopped, editor_running);
+            return run::run(client, &stopped, editor_running, engine);
         }
         let mut connection = Connection::connect_paired(client).map_err(TuiError)?;
         let _guard = TerminalGuard::enter()?;

@@ -1,5 +1,7 @@
 use super::diagnostic::StreamDiagnostic;
-use super::{ClaudeHostLimits, Fault, Phase, Status, Turn, validate_command};
+use super::{
+    ClaudeHostLimits, Fault, Phase, Status, Turn, carried_retry, limit_retries, validate_command,
+};
 use crate::adapters::claude::{ClaudeProtocol, State};
 use crate::adapters::events::{EventKind, ObservedEvent};
 use crate::engine::bootstrap::NativeProfileUse;
@@ -78,10 +80,11 @@ struct Process {
     kept: Arc<Mutex<Option<StreamDiagnostic>>>,
 }
 
-/// Runs one Claude Code master under custody until it retires. Inputs: the command, its
-/// sandbox, the account lease with the project whose leftover setting and owner view what
-/// it leaves running follow, the turn's home, the protocol, the limits and the channels.
-/// Output: none; the status channel reports how it ended.
+/// Runs one Claude Code master under custody until it retires, in a cleared environment
+/// that keeps the owner's connection-retry choice the command carried. Inputs: the command,
+/// its sandbox, the account lease with the project whose leftover setting and owner view
+/// what it leaves running follow, the turn's home, the protocol, the limits and the
+/// channels. Output: none; the status channel reports how it ended.
 pub(super) fn run(
     mut command: Command,
     sandbox: InstalledSandbox,
@@ -116,6 +119,7 @@ pub(super) fn run(
         });
         return;
     }
+    let retry = carried_retry(&command);
     command
         .env_clear()
         .env("HOME", &home)
@@ -132,6 +136,8 @@ pub(super) fn run(
             .env("SHELL", super::TOOLS_SHELL)
             .env(super::BACKGROUND_TASKS_OFF.0, super::BACKGROUND_TASKS_OFF.1);
     }
+    limit_retries(&mut command, retry);
+    assert_eq!(carried_retry(&command), retry);
     let mut command = match sandbox.wrap(&command) {
         Ok(command) => command,
         Err(_) => {

@@ -1544,7 +1544,8 @@ fn the_agents_tab_shows_only_the_newest_output_lines_that_fit() {
 
 /// RV-DS241-27 r2 (leader 11:00, DEC-141): a research job sent back to wait shows why on its
 /// status, the line the desktop research row shows, on the Overview's work list as on the
-/// Agents tab, never a bare Queued.
+/// Agents tab, never a bare Queued; r3: every waiting line shows whole, on the wide layout's
+/// 77-cell left side as on the narrow one.
 #[test]
 fn a_queued_research_job_shows_why_it_waits_on_its_status() {
     const REASON: &str = "Waiting for this account to be ready";
@@ -1586,7 +1587,7 @@ fn a_queued_research_job_shows_why_it_waits_on_its_status() {
     let mut screen = ProjectScreen::new(project.clone(), "Tidepool".into(), None);
     screen.setup = Some(stored(&project));
     screen.now_ms = 600_000;
-    screen.jobs = Some(vec![queued]);
+    screen.jobs = Some(vec![queued.clone()]);
     screen.open(Tab::Overview);
     for (width, height) in [(80u16, 24u16), (120, 36)] {
         let shown = text(&project_screen(&mut screen, width, height, &look).rows);
@@ -1596,6 +1597,18 @@ fn a_queued_research_job_shows_why_it_waits_on_its_status() {
                 .any(|line| line.contains("Queued") && line.contains(REASON)),
             "{width}x{height}: {shown}"
         );
+    }
+    for reason in crate::research::runner::WAITING_LINES {
+        let mut waiting = queued.clone();
+        waiting.error = Some(reason.into());
+        screen.jobs = Some(vec![waiting]);
+        for (width, height) in [(80u16, 24u16), (120, 36)] {
+            let shown = text(&project_screen(&mut screen, width, height, &look).rows);
+            assert!(
+                shown.lines().any(|line| line.contains(reason)),
+                "{width}x{height} cuts {reason}: {shown}"
+            );
+        }
     }
 }
 

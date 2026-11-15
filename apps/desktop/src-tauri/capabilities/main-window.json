@@ -201,6 +201,7 @@
     "allow-desktop-delete-master-session",
     "allow-desktop-owner-profile",
     "allow-desktop-save-owner-profile",
+    "allow-desktop-set-theme",
     "allow-desktop-sandbox-settings",
     "allow-desktop-set-sandbox-settings",
     "allow-desktop-cleanup-settings",

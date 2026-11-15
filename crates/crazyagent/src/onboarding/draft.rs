@@ -487,7 +487,7 @@ pub(crate) fn gather(repo: &Path, hidden: &[std::path::PathBuf]) -> Evidence {
             .flatten()
             .filter_map(|entry| {
                 let name = entry.file_name().to_str()?.to_owned();
-                if SKIPPED_ENTRIES.contains(&name.as_str())
+                if crate::instruction_files::names_one_of(&name, &SKIPPED_ENTRIES)
                     || name.starts_with(".env")
                     || name.len() > ENTRY_NAME_BYTES_MAX
                     || name.chars().any(char::is_control)

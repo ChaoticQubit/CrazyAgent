@@ -1046,10 +1046,12 @@ fn private_directory(path: &Path) -> Result<(), EngineError> {
 }
 
 /// Makes the home a native lead's teammates run with (TPH-2 C): a private folder beside the
-/// lead's home, with its own cargo home and Claude Code's first-run questions answered for
-/// the project, whose `teams` and `tasks` are links to the lead's folders of those names,
-/// made here when missing, since Claude Code keeps the team's mailboxes and task lists there
-/// for every member. A changed entry is refused, not replaced. Inputs: the lead's home, the
+/// lead's home, reset first as an agent home is at each launch
+/// ([`crate::agent_home::reset_mates_home`], RV-DS241-137 code r2 F1), with its own cargo
+/// home and Claude Code's first-run questions answered for the project, whose `teams` and
+/// `tasks` are links to the lead's folders of those names, made here when missing, since
+/// Claude Code keeps the team's mailboxes and task lists there for every member. A changed
+/// entry is refused, not replaced. Inputs: the lead's home, the
 /// owner's tool homes and the lead's working folder. Output: the folder.
 #[cfg(unix)]
 fn prepare_mates_home(
@@ -1059,6 +1061,7 @@ fn prepare_mates_home(
 ) -> Result<PathBuf, EngineError> {
     let mates = crate::launch_context::mates_home(home);
     private_directory(&mates)?;
+    crate::agent_home::reset_mates_home(&mates).map_err(|e| EngineError(e.0))?;
     for folder in crate::sandbox::CLAUDE_TEAM_SHARED {
         let shared = home.join(folder);
         match std::fs::DirBuilder::new().mode(0o700).create(&shared) {

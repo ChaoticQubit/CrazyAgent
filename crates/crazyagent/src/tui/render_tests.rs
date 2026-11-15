@@ -335,20 +335,46 @@ fn startup_frames_match_the_design() {
     check("too-small", &render(&mut shell, 50, 12), &[]);
 }
 
-/// RV-DS241-118: the engine-down screen names the command that starts the engine, which also
-/// repairs a login service left naming a gone or temporary app path, as the desktop's
-/// Restart engine does.
+/// DS-118: the engine-down screen of a TUI with no engine of its own to start, as one opened
+/// on an explicit socket, asks for the engine to be started and names no command, as the
+/// desktop's does.
 #[test]
-fn the_engine_down_screen_names_the_command_that_starts_and_repairs_the_engine() {
+fn the_engine_down_screen_asks_to_start_the_engine_and_names_no_command() {
     for (width, height) in [(120, 36), (80, 24)] {
         let mut shell = Shell::new(ctx(width, height));
         shell.ctx.link = Link::Down("engine_unavailable".into());
         let text = render(&mut shell, width, height).join("\n");
         assert!(
-            text.contains("Start it with crazyagent service start, then press r to try again."),
+            text.contains("Start it, then press r to try again."),
             "{text}"
         );
+        assert!(!text.contains("crazyagent service start"), "{text}");
     }
+}
+
+/// DS-118: on a TUI with the default engine the engine-down screen says `r` starts it, and
+/// `r` asks for the start with its reconnect, as the desktop's Try again starts it; with no
+/// engine of its own `r` only reconnects.
+#[test]
+fn r_on_the_engine_down_screen_starts_the_default_engine_and_only_reconnects_without_one() {
+    for (width, height) in [(120, 36), (80, 24)] {
+        let mut shell = Shell::new(ctx(width, height));
+        shell.ctx.link = Link::Down("engine_unavailable".into());
+        shell.ctx.starts_engine = true;
+        let text = render(&mut shell, width, height).join("\n");
+        assert!(
+            text.contains("Press r to start it and try again."),
+            "{text}"
+        );
+        shell.key(Key::Char('r'));
+        assert_eq!(shell.ctx.link, Link::Connecting);
+        assert!(shell.ctx.take_start() && shell.ctx.take_reconnect());
+    }
+    let mut shell = Shell::new(ctx(80, 24));
+    shell.ctx.link = Link::Down("engine_unavailable".into());
+    shell.key(Key::Char('r'));
+    assert!(!shell.ctx.take_start());
+    assert!(shell.ctx.take_reconnect(), "a plain reconnect");
 }
 
 #[test]

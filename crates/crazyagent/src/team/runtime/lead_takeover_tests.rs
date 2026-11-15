@@ -169,7 +169,7 @@ fn a_per_turn_agent_given_no_time_left_times_out_without_a_handoff() {
         .collect();
     assert_eq!(ends, [(TurnEnd::TimedOut, Some(TURN_LIMIT.to_owned()))]);
     assert!(
-        !agent.home.join("typed").exists(),
+        !agent.home.join(".cache/typed").exists(),
         "the harness never starts for a turn with no time left"
     );
 }
