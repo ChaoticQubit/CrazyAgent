@@ -401,6 +401,41 @@ fn an_engine_set_to_stop_team_agents_ends_their_panes_at_shutdown() {
     assert_eq!(again.shutdown().unwrap(), Vec::<AgentId>::new());
 }
 
+/// SA vid 10 r2 (rv-sec2 F1): an agent whose thread is still stopping when shutdown's join
+/// wait ends was never seen to stop, so it is recorded stopped with the note that its
+/// sandbox could not be confirmed empty, never plainly.
+#[test]
+fn an_agent_whose_stop_outlives_the_join_wait_is_not_recorded_plainly_stopped() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let release = Arc::new(AtomicBool::new(false));
+    let held = release.clone();
+    let mut worker = between_turns(&project, AgentRole::Sub, false, false);
+    worker.thread = Some(std::thread::spawn(move || {
+        while !held.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }));
+    team.workers.insert(agent, worker);
+
+    let started = Instant::now();
+    assert!(team.shutdown().unwrap().is_empty());
+    release.store(true, Ordering::SeqCst);
+    assert!(started.elapsed() >= JOIN_WAIT);
+    assert_eq!(
+        fixture.agent_status(agent),
+        (
+            AgentStatus::Stopped,
+            Some(with_code(
+                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                Some(crate::harnesses::leftovers::UNCERTAIN)
+            ))
+        )
+    );
+}
+
 /// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
 /// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
 #[cfg(target_os = "macos")]
