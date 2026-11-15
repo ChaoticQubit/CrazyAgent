@@ -202,6 +202,56 @@ fn an_own_branch_terminal_on_open_reaches_a_local_listener() {
     assert!(output.status.success(), "{output:?}");
 }
 
+/// A Sandboxed terminal starts with no shell startup file in its own home (SA vid 12): its
+/// profile lets nothing inside it write one, so one found there was left by a build from
+/// before that rule or written from outside, and a login shell would run it. The start
+/// removes each zsh, bash and sh startup name, the login shell runs none of them, and every
+/// other entry of the home stays.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_terminal_starts_with_no_shell_startup_file_left_in_its_home() {
+    let case = Case::new();
+    let home = case.root.join("ide-shell").join(PROJECT).join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    for name in [".profile", ".zshenv", ".bashrc"] {
+        std::fs::write(home.join(name), "echo planted\n").unwrap();
+    }
+    std::fs::write(home.join("kept.txt"), "kept\n").unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let shell_arguments = arguments(&["-l", "-c", "echo ran"]);
+    let launch = ide_shell::Launch {
+        root: &case.root,
+        project: &project,
+        folder: &case.folder,
+        cwd: &case.folder,
+        shell: std::path::Path::new("/bin/sh"),
+        arguments: &shell_arguments,
+        incoming: &[],
+        extra_reads: &[],
+        level: AgentAccess::Sandboxed,
+        network: AgentNetwork::Open,
+        kept_ports: &[],
+        agent_files: AgentFilesRule::default(),
+    };
+
+    let mut command = ide_shell::command(&launch).unwrap();
+    let output = crate::spawn_gate::collected(&mut command).unwrap();
+
+    let printed = String::from_utf8_lossy(&output.stdout);
+    assert!(printed.contains("ran"), "{output:?}");
+    assert!(!printed.contains("planted"), "{output:?}");
+    for name in [".profile", ".zshenv", ".bashrc"] {
+        assert!(
+            std::fs::symlink_metadata(home.join(name)).is_err(),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(home.join("kept.txt")).unwrap(),
+        "kept\n"
+    );
+}
+
 /// An Own branch terminal on Port 443 only is refused any other port and holds the 443 rule.
 #[cfg(target_os = "macos")]
 #[test]
