@@ -2489,7 +2489,7 @@ impl Screen for AppSetup {
                     let skip = if self.finished_with_problems {
                         "Continue without it"
                     } else {
-                        "Continue without installing"
+                        "Continue without them"
                     };
                     hints.push(hint("c", skip));
                 }

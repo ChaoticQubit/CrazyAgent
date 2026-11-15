@@ -1586,6 +1586,12 @@ fn a_queued_research_job_shows_why_it_waits_on_its_status() {
 
     let mut screen = ProjectScreen::new(project.clone(), "Tidepool".into(), None);
     screen.setup = Some(stored(&project));
+    screen.pool = Some(PoolInfo {
+        id: CredentialRef::new("pool-main").unwrap(),
+        name: "Main".into(),
+        accounts: 1,
+        assigned: true,
+    });
     screen.now_ms = 600_000;
     screen.jobs = Some(vec![queued]);
     screen.open(Tab::Overview);
