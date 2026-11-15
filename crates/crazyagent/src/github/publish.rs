@@ -601,14 +601,7 @@ pub(super) fn prepare(
     choices: &GitHubPrepare,
 ) -> Result<Vec<String>, EngineError> {
     let approved = &choices.approved;
-    let fine = approved.len() <= IGNORE_LINES_MAX
-        && approved.iter().all(|line| {
-            !line.is_empty()
-                && line.len() <= IGNORE_LINE_BYTES_MAX
-                && !line.chars().any(char::is_control)
-                && !line.ends_with(char::is_whitespace)
-        });
-    if !fine {
+    if !lines_valid(approved) {
         return Err(failure("github_publish_ignore_invalid"));
     }
     let ignore = project.join(GITIGNORE);
@@ -665,6 +658,19 @@ pub(super) fn prepare(
         written.push(path.to_owned());
     }
     Ok(written)
+}
+
+/// Tells whether the .gitignore lines an owner approved can be written: at most 1000, each
+/// one plain line of at most `IGNORE_LINE_BYTES_MAX` bytes with no control character and
+/// no trailing space. Input: the lines. Output: true when every one is fine.
+pub(super) fn lines_valid(approved: &[String]) -> bool {
+    approved.len() <= IGNORE_LINES_MAX
+        && approved.iter().all(|line| {
+            !line.is_empty()
+                && line.len() <= IGNORE_LINE_BYTES_MAX
+                && !line.chars().any(char::is_control)
+                && !line.ends_with(char::is_whitespace)
+        })
 }
 
 /// Reads a project's .gitignore before publish writes anything: a plain file, never a
@@ -1372,6 +1378,31 @@ fn head_commit(git: &Path, home: &Path, project: &Path) -> Result<String, Engine
             matches!(commit.len(), 40 | 64) && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
         });
     commit.ok_or_else(|| failure("github_publish_failed"))
+}
+
+/// Tells whether a commit's tree holds GitHub Actions workflows, which a push needs the
+/// `workflow` scope for. Inputs: git, its empty home, the project and the commit.
+/// Output: true when `.github/workflows` is in it, or `github_publish_failed`.
+pub(super) fn has_workflows(
+    git: &Path,
+    home: &Path,
+    project: &Path,
+    commit: &str,
+) -> Result<bool, EngineError> {
+    if commit.is_empty() || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(failure("github_publish_failed"));
+    }
+    let listed = run(project_git(git, home, project).args([
+        "ls-tree",
+        "--name-only",
+        commit,
+        "--",
+        ".github/workflows",
+    ]))?;
+    if !listed.status.success() {
+        return Err(failure("github_publish_failed"));
+    }
+    Ok(!listed.stdout.is_empty())
 }
 
 /// Pushes the publish commit to `owner/name` and then points the project at it. The push

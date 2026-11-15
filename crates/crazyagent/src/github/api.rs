@@ -27,6 +27,7 @@ const ORGS_PER_PAGE: usize = 100;
 const ORG_PAGES_MAX: usize = 10;
 const DESCRIPTION_CHARS_MAX: usize = 350;
 const NODE_ID_BYTES_MAX: usize = 100;
+const MADE_SKEW_SECONDS: i64 = 300;
 const READ_ORG: [&str; 3] = ["read:org", "write:org", "admin:org"];
 
 /// Where the engine talks to GitHub: the REST API and the web host that serves the device
@@ -295,6 +296,16 @@ pub fn identity(
     user(endpoints, token).map(|(login, id, _)| (login, id))
 }
 
+/// Reads the scopes GitHub names for the token, such as `workflow`. Inputs: endpoints and
+/// token. Output: the scopes, None for a token kind GitHub names none for, or
+/// `github_token_refused`, `github_unreachable`.
+pub fn scopes(
+    endpoints: &Endpoints,
+    token: &SecretString,
+) -> Result<Option<Vec<String>>, EngineError> {
+    user(endpoints, token).map(|(_, _, scopes)| scopes)
+}
+
 /// Reads the account the token belongs to: its login, which also proves GitHub accepts
 /// the token, its numeric id, and the scopes GitHub names for a classic token. Inputs:
 /// endpoints and token. Output: the login, the id and the scopes, each None when GitHub
@@ -337,7 +348,7 @@ fn account_name(value: &str) -> Result<String, EngineError> {
 /// Tells whether a token's scopes cover a need, a broader scope included, such as
 /// `admin:org` for `read:org`. Inputs: the scopes and those that cover the need.
 /// Output: true when one of them is held.
-fn grants(scopes: &[String], covering: &[&str]) -> bool {
+pub(super) fn grants(scopes: &[String], covering: &[&str]) -> bool {
     scopes
         .iter()
         .any(|scope| covering.contains(&scope.as_str()))
@@ -498,12 +509,7 @@ pub fn create(
         #[serde(default)]
         message: String,
     }
-    let full_name = repo_name(&repo.owner, &repo.name)?;
-    if repo.description.chars().count() > DESCRIPTION_CHARS_MAX
-        || repo.description.chars().any(char::is_control)
-    {
-        return Err(failure("github_repo_description_invalid"));
-    }
+    let full_name = check_new(repo)?;
     let (login, _, _) = user(endpoints, token)?;
     let path = if repo.owner.eq_ignore_ascii_case(&login) {
         "user/repos".to_owned()
@@ -557,6 +563,78 @@ pub fn create(
         node_id: short_text(&made.node_id, NODE_ID_BYTES_MAX)?,
         private: made.private,
     })
+}
+
+/// Checks a repository to make before any request: the account and name GitHub takes, and
+/// a description of at most 350 characters with no control character. Input: the
+/// repository. Output: `owner/name`, or `github_repo_name_invalid`,
+/// `github_repo_description_invalid`.
+pub(super) fn check_new(repo: &GitHubNewRepo) -> Result<String, EngineError> {
+    let full_name = repo_name(&repo.owner, &repo.name)?;
+    if repo.description.chars().count() > DESCRIPTION_CHARS_MAX
+        || repo.description.chars().any(char::is_control)
+    {
+        return Err(failure("github_repo_description_invalid"));
+    }
+    Ok(full_name)
+}
+
+/// Finds the repository an earlier create of this publish made when GitHub answered it
+/// was refused or never answered: `owner/name` as asked, the visibility asked, made no
+/// earlier than five minutes before that create was sent, and with no branch yet.
+/// Inputs: endpoints, token, the repository asked for and when its create was sent, in
+/// seconds since the epoch. Output: the repository, None for one that is not that, or
+/// `github_token_refused`, `github_unreachable`, `github_reply_invalid`.
+pub fn made_since(
+    endpoints: &Endpoints,
+    token: &SecretString,
+    repo: &GitHubNewRepo,
+    sent_at: u64,
+) -> Result<Option<GitHubCreated>, EngineError> {
+    #[derive(Deserialize)]
+    struct Found {
+        full_name: String,
+        node_id: String,
+        private: bool,
+        created_at: String,
+    }
+    let full_name = check_new(repo)?;
+    let get = |path: String| -> Result<Reply, EngineError> {
+        let reply = endpoints
+            .request(endpoints.api(&path)?, API_JSON, Some(token), None)
+            .send()?;
+        match reply.status {
+            200 | 404 => Ok(reply),
+            401 => Err(failure("github_token_refused")),
+            _ => Err(failure("github_unreachable")),
+        }
+    };
+    let reply = get(format!("repos/{full_name}"))?;
+    if reply.status == 404 {
+        return Ok(None);
+    }
+    let found: Found = json(&reply)?;
+    let made = crate::usage::poll::rfc3339_ms(&found.created_at)
+        .ok_or_else(|| failure("github_reply_invalid"))?
+        .div_euclid(1000);
+    let earliest = i64::try_from(sent_at)
+        .map_err(|_| failure("github_reply_invalid"))?
+        .saturating_sub(MADE_SKEW_SECONDS);
+    if !found.full_name.eq_ignore_ascii_case(&full_name)
+        || found.private != repo.private
+        || made < earliest
+    {
+        return Ok(None);
+    }
+    let branches = get(format!("repos/{full_name}/branches?per_page=1"))?;
+    if branches.status != 200 || !json::<Vec<serde_json::Value>>(&branches)?.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(GitHubCreated {
+        full_name: found.full_name,
+        node_id: short_text(&found.node_id, NODE_ID_BYTES_MAX)?,
+        private: found.private,
+    }))
 }
 
 /// Lists one page of the repositories the token can read, most recently pushed first.
