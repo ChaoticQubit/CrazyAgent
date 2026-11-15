@@ -1625,3 +1625,321 @@ async fn a_failing_learning_latch_never_blocks_delete_everything() {
     drop(owner);
     engine.stop().await;
 }
+
+/// The Delete everything job of the test project. Output: the subject with the project's
+/// exact name.
+#[cfg(target_os = "macos")]
+fn deleting() -> crate::projects_home::job::JobSubject {
+    crate::projects_home::job::JobSubject::Delete {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        name: NAME.into(),
+    }
+}
+
+/// Starts a Delete everything job of the test project. Inputs: the owner client and the
+/// request id. Output: the start's answer.
+#[cfg(target_os = "macos")]
+async fn delete_job(
+    owner: &OwnerController,
+    id: &str,
+) -> Result<crate::projects_home::job::JobView, crate::engine::EngineError> {
+    owner
+        .owner_client()
+        .unwrap()
+        .job_start(
+            crate::protocol::RequestId::new(id).unwrap(),
+            deleting(),
+            crate::projects_home::AddMode::Move,
+            Vec::new(),
+        )
+        .await
+}
+
+/// Reads the engine's job until `want` holds, within the engine wait. Inputs: the owner
+/// client and the check. Output: the job.
+#[cfg(target_os = "macos")]
+async fn job_until(
+    owner: &OwnerController,
+    want: impl Fn(&crate::projects_home::job::JobView) -> bool,
+) -> crate::projects_home::job::JobView {
+    let client = owner.owner_client().unwrap();
+    let deadline = std::time::Instant::now() + ENGINE_WAIT * 3;
+    loop {
+        let job = client.job_status().await.unwrap();
+        if let Some(job) = job.filter(&want) {
+            return job;
+        }
+        assert!(std::time::Instant::now() < deadline, "no such job");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Seeds the mark a Delete everything job leaves when an engine stop cuts it short, as its
+/// plan writes it: the project, the exchange, the job's request, the project's name and how
+/// many folders it moves. Inputs: the engine, the exchange, the request and the count.
+#[cfg(target_os = "macos")]
+fn cut_short_job(engine: &Engine, exchange: i64, request: &str, total: u64) {
+    drop(crate::ledger::open(engine.root.path()).unwrap());
+    write_db(
+        engine,
+        &format!(
+            "INSERT INTO projects_delete_pending(exchange) VALUES ({exchange});
+             INSERT INTO ledger_actions(kind,action_key,payload,started_ms)
+             VALUES ('project_delete','{PROJECT}',
+                     '{{\"project\":\"{PROJECT}\",\"exchange\":{exchange},\"request\":\"{request}\",\"name\":\"{NAME}\",\"total\":{total}}}',1);"
+        ),
+    );
+}
+
+/// DEC-177 step 2: Delete everything runs as the engine's job, named by the project's name so
+/// the end line still reads after the records went, and ends done with the records gone.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_job_ends_done_with_the_records_gone_and_names_the_project() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    std::fs::remove_dir_all(&folder).unwrap();
+    let started = delete_job(&owner, "delete-1").await.unwrap();
+    assert_eq!(started.kind, crate::projects_home::job::JobKind::Delete);
+    assert_eq!(started.project_id, Some(project.clone()));
+    assert_eq!(started.source, NAME);
+    let done = job_until(&owner, |job| {
+        job.state == crate::projects_home::job::JobState::Done
+    })
+    .await;
+    assert_eq!(done.id.as_str(), "delete-1");
+    assert_eq!(kept(&engine), 0, "the records went");
+    assert_eq!(engine.rows(DELETES_PENDING), 0);
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects_delete_pending"),
+        0
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// DEC-177 step 2: a Delete everything job whose name is not the project's exact name is
+/// refused at its start, with no job held and nothing stopped.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_job_with_a_name_that_is_not_exact_is_refused_with_no_job_held() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    let refused = owner
+        .owner_client()
+        .unwrap()
+        .job_start(
+            crate::protocol::RequestId::new("delete-wrong").unwrap(),
+            crate::projects_home::job::JobSubject::Delete {
+                project_id: project.clone(),
+                name: NAME.to_lowercase(),
+            },
+            crate::projects_home::AddMode::Move,
+            Vec::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused.0, "delete_name_mismatch");
+    assert_eq!(
+        owner.owner_client().unwrap().job_status().await.unwrap(),
+        None
+    );
+    assert_eq!(kept(&engine), 2);
+    assert_eq!(paused(&engine), 0, "nothing was stopped");
+    assert!(folder.is_dir());
+    drop(owner);
+    engine.stop().await;
+}
+
+/// DEC-177 step 2: a Delete everything job waits for the project's agents and says how many
+/// are left; a second start for the project finds the same job, a direct delete from a
+/// client is refused `job_busy`, and a Stop while it waits ends it cancelled with the project
+/// and its folder kept and no notice left.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_job_waits_for_its_agents_and_a_stop_there_keeps_the_project() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    write_db(
+        &engine,
+        &format!(
+            "INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms)
+             VALUES (46,'{PROJECT}','team','codex',1,'{}','working',0,0);",
+            engine.root.path().join("agent-46").display()
+        ),
+    );
+    delete_job(&owner, "delete-wait").await.unwrap();
+    job_until(&owner, |job| {
+        job.state == crate::projects_home::job::JobState::Stopping { agents_left: 1 }
+    })
+    .await;
+    let again = delete_job(&owner, "delete-again").await.unwrap();
+    assert_eq!(
+        again.id.as_str(),
+        "delete-wait",
+        "the same project finds the job"
+    );
+    let direct = owner
+        .delete_project(project.clone(), NAME.into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        direct,
+        OwnerResponse::Rejected {
+            code: "job_busy".into()
+        }
+    );
+    let stopped = owner
+        .owner_client()
+        .unwrap()
+        .job_stop(crate::protocol::RequestId::new("delete-wait").unwrap())
+        .await
+        .unwrap();
+    assert!(stopped, "a stop while the agents stop is taken");
+    let ended = job_until(&owner, |job| {
+        !matches!(
+            job.state,
+            crate::projects_home::job::JobState::Stopping { .. }
+        )
+    })
+    .await;
+    assert_eq!(
+        ended.state,
+        crate::projects_home::job::JobState::Cancelled {
+            phase: crate::projects_home::job::Phase::Stopping
+        }
+    );
+    assert_eq!(kept(&engine), 2);
+    assert!(folder.is_dir(), "nothing moved");
+    assert!(delete_notices(&owner, &project).await.is_empty());
+    assert_eq!(engine.rows(DELETES_PENDING), 0);
+    drop(owner);
+    engine.stop().await;
+}
+
+/// DEC-177 step 2: a Delete everything job whose Trash move fails ends failed while trashing,
+/// the project kept where it was.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_job_whose_trash_move_fails_ends_failed_while_trashing() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (_project, folder) = project(&mut owner).await;
+    let home = engine.home();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o555)).unwrap();
+    delete_job(&owner, "delete-fails").await.unwrap();
+    let ended = job_until(&owner, |job| {
+        matches!(
+            job.state,
+            crate::projects_home::job::JobState::Failed { .. }
+                | crate::projects_home::job::JobState::Done
+                | crate::projects_home::job::JobState::Cancelled { .. }
+        )
+    })
+    .await;
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        ended.state,
+        crate::projects_home::job::JobState::Failed {
+            code: "home_trash_failed".into(),
+            phase: crate::projects_home::job::Phase::Trashing
+        }
+    );
+    assert_eq!(kept(&engine), 2);
+    assert!(folder.join(".crazyagent/context/brief.md").is_file());
+    drop(owner);
+    engine.stop().await;
+}
+
+/// DEC-177 step 2 (answer 3, add.1): an engine start shows a Delete everything an engine stop
+/// cut short as the engine's job, with how many of its folders reached the Trash, and never
+/// continues it. Keep the project on Home is the banner's Dismiss: it clears both and keeps
+/// the project; the banner's Dismiss in turn clears the Home job of the running engine.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_start_shows_a_delete_cut_short_as_the_job_and_keep_clears_it_and_the_banner() {
+    let mut engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    drop(owner);
+    cut_short_job(&engine, 9, "delete-9", 2);
+    engine.restart().await;
+    let owner = engine.owner().await;
+    let client = owner.owner_client().unwrap();
+    let shown = client.job_status().await.unwrap().expect("the cut delete");
+    assert_eq!(shown.id.as_str(), "delete-9");
+    assert_eq!(shown.kind, crate::projects_home::job::JobKind::Delete);
+    assert_eq!(shown.source, NAME);
+    assert_eq!(
+        shown.state,
+        crate::projects_home::job::JobState::CutShort {
+            trashed: 1,
+            total: 2
+        },
+        "one of the two folders is gone, the project's folder is still there"
+    );
+    assert!(folder.is_dir(), "a start moves nothing");
+    assert_eq!(kept(&engine), 2, "a start never continues the delete");
+    assert_eq!(delete_notices(&owner, &project).await.len(), 1);
+    assert!(
+        client
+            .job_dismiss(crate::protocol::RequestId::new("delete-9").unwrap())
+            .await
+            .unwrap()
+    );
+    assert_eq!(client.job_status().await.unwrap(), None);
+    assert!(
+        delete_notices(&owner, &project).await.is_empty(),
+        "Keep the project clears the banner"
+    );
+    assert_eq!(kept(&engine), 2, "Keep the project keeps it");
+    drop(owner);
+
+    cut_short_job(&engine, 10, "delete-10", 1);
+    engine.restart().await;
+    let owner = engine.owner().await;
+    let client = owner.owner_client().unwrap();
+    assert!(client.job_status().await.unwrap().is_some());
+    let notice = delete_notices(&owner, &project).await.remove(0);
+    owner
+        .recovery_dismiss(notice.action_kind, notice.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        client.job_status().await.unwrap(),
+        None,
+        "the banner's Dismiss clears the Home job"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// A mark a 2.4.1 Delete everything left names no job, so an engine start shows it on the
+/// project's banner only, with no job restored.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_mark_from_2_4_1_shows_on_the_banner_and_restores_no_job() {
+    let mut engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, _folder) = project(&mut owner).await;
+    drop(owner);
+    cut_short(&engine, PROJECT, 11);
+    engine.restart().await;
+    let owner = engine.owner().await;
+    assert_eq!(
+        owner.owner_client().unwrap().job_status().await.unwrap(),
+        None
+    );
+    assert_eq!(delete_notices(&owner, &project).await.len(), 1);
+    drop(owner);
+    engine.stop().await;
+}
