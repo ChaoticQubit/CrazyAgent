@@ -539,6 +539,29 @@ fn moving_a_project_kept_in_place_updates_every_stored_folder_and_repoints_its_a
     );
 }
 
+/// rv-code2 b7-rest F1: the record of the project instructions the engine wrote is named by
+/// the folder's real path, so a Move or a Copy carries it to the folder's place in the home,
+/// where the owner's own text is still theirs, never text changed outside CrazyAgent.
+#[test]
+fn project_text_the_engine_wrote_stays_the_owners_after_a_move_or_a_copy() {
+    let text = "# Rules\n- Keep the tests green.\n";
+    for (mode, label) in [(AddMode::Move, "move"), (AddMode::Copy, "copy")] {
+        let case = Case::new();
+        std::fs::create_dir_all(case.repo.join(".crazyagent")).unwrap();
+        crate::agent_home::save_project(&case.repo, text).unwrap();
+        crate::agent_home::mark_written(&case.engine, &case.repo, text).unwrap();
+        assert!(!crate::agent_home::outside(&case.engine, &case.repo, text));
+        let finished = case.move_project(mode, &[]).unwrap();
+        assert!(matches!(finished, Finished::Moved { .. }), "{label}");
+        let target = case.target();
+        assert_eq!(crate::agent_home::read_project(&target).unwrap(), text);
+        assert!(
+            !crate::agent_home::outside(&case.engine, &target, text),
+            "the {label} carried the record"
+        );
+    }
+}
+
 /// A project whose folder is already inside the projects home is refused, with nothing
 /// recorded and nothing moved.
 #[test]
