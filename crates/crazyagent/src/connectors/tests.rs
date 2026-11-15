@@ -603,7 +603,7 @@ fn a_leftover_key_that_cannot_be_deleted_keeps_its_row_until_it_is() {
     case.db
         .execute_batch(
             "INSERT INTO app_plugin_trust (name, sha256, hosts, trusted_ms)
-             VALUES ('linear', 'old', 'api.openai.com', 1);
+             VALUES ('linear', '0000000000000000000000000000000000000000000000000000000000000000', 'api.openai.com', 1);
              INSERT INTO app_plugin_secrets (plugin, secret, source, reference)
              VALUES ('linear', 'api_key', 'key', 'plugin-key-fedcba9876543210');",
         )
