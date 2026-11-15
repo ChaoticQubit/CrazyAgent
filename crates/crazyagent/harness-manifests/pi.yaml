@@ -11,4 +11,15 @@ account_kinds:
   - "api_key"
   - "open_ai_compatible_url"
   - "local"
+update:
+  formulae:
+    - "pi-coding-agent"
+  npm:
+    scope: "@earendil-works"
+    name: "pi-coding-agent"
+    package: "@earendil-works/pi-coding-agent"
+    spec: "@earendil-works/pi-coding-agent"
+    flags:
+      - "--ignore-scripts"
+  guide: "https://pi.dev/"
 cannot_start: "installed, but CrazyAgent cannot start it yet"

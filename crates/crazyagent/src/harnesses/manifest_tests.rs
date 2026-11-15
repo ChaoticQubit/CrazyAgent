@@ -40,6 +40,9 @@ fn the_smallest_manifest_reads_with_plain_defaults() {
     assert_eq!(manifest.record, RecordKind::Unavailable);
     assert!(manifest.owner_folders.is_empty());
     assert_eq!(manifest.minimum_version, None);
+    assert_eq!(manifest.sign_in_minimum, None);
+    assert_eq!(manifest.limits, None);
+    assert!(manifest.account_protocols.is_empty());
     for key in BLOCKS {
         assert_eq!(manifest.block(key), None, "{key}");
     }
@@ -358,6 +361,89 @@ fn a_value_outside_what_a_manifest_allows_is_refused_with_the_value_named() {
         (
             VALUE,
             "aliases: a list holds at most 16 entries.".to_owned()
+        )
+    );
+}
+
+#[test]
+fn the_wire_formats_the_limits_reader_and_the_sign_in_minimum_read_as_written() {
+    let manifest = parse(
+        with(concat!(
+            "account_protocols:\n  - \"openai*\"\n  - \"anthropic-messages\"\n  - \"*\"\n",
+            "limits: \"claude\"\n",
+            "version:\n  minimum: \"1.5.2\"\n  sign_in_minimum: \"2.1.268\"\n",
+        ))
+        .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest.account_protocols,
+        ["openai*", "anthropic-messages", "*"]
+    );
+    assert_eq!(manifest.limits, Some(LimitsKind::Claude));
+    assert_eq!(manifest.sign_in_minimum.as_deref(), Some("2.1.268"));
+    assert_eq!(manifest.minimum_version.as_deref(), Some("1.5.2"));
+    assert_eq!(
+        parse(with("limits: \"codex\"\n").as_bytes())
+            .unwrap()
+            .limits,
+        Some(LimitsKind::Codex)
+    );
+    assert_eq!(LimitsKind::of("moonshot"), None);
+}
+
+#[test]
+fn a_wire_format_a_limits_reader_or_a_sign_in_minimum_that_is_not_allowed_is_refused() {
+    for name in ["Open AI", "open*ai", "**", "openai_chat"] {
+        assert_eq!(
+            refused(&with(&format!("account_protocols:\n  - \"{name}\"\n"))),
+            (
+                VALUE,
+                format!(
+                    "account_protocols: {name} is not a wire format name, with * allowed only as its last character."
+                )
+            ),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        refused(&with("account_protocols: \"openai*\"\n")),
+        (
+            TYPE,
+            "account_protocols: this must be a list of texts.".to_owned()
+        )
+    );
+    assert_eq!(
+        refused(&with("limits: \"moonshot\"\n")),
+        (
+            KIND,
+            "limits: CrazyAgent has no limits reader named moonshot.".to_owned()
+        )
+    );
+    for minimum in ["v2.1", "2.1-beta", ".5"] {
+        assert_eq!(
+            refused(&with(&format!(
+                "version:\n  sign_in_minimum: \"{minimum}\"\n"
+            ))),
+            (
+                VALUE,
+                format!("version.sign_in_minimum: {minimum} is not digits and dots.")
+            ),
+            "{minimum}"
+        );
+    }
+    assert_eq!(
+        refused(&with("version:\n  sign_in_minimum: 2.1\n")),
+        (
+            TYPE,
+            "version.sign_in_minimum: this must be text in quotes.".to_owned()
+        )
+    );
+    assert_eq!(
+        refused(&with("usage:\n  limits: \"codex\"\n")),
+        (
+            UNKNOWN_KEY,
+            "usage: this key is not one a harness manifest has.".to_owned()
         )
     );
 }

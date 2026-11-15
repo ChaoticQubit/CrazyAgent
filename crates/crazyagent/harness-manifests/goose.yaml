@@ -10,4 +10,8 @@ account_kinds:
   - "api_key"
   - "open_ai_compatible_url"
   - "local"
+update:
+  formulae:
+    - "block-goose-cli"
+  guide: "https://goose-docs.ai/docs/getting-started/installation"
 cannot_start: "installed, but CrazyAgent cannot start it yet"

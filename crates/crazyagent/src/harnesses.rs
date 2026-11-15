@@ -143,7 +143,10 @@ pub struct HarnessSpec {
 }
 
 /// One catalog row the engine serves to the clients.
-/// Combines the static spec with what was found on this machine.
+/// Combines the static spec with what was found on this machine and with what the manifest
+/// says the harness can be: read back in a live terminal, a master, a research harness, how
+/// its lead gets sub-agents, and the wire formats of the endpoint accounts it runs on, where
+/// a name that ends in `*` stands for every format that starts with the text before it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessEntry {
@@ -158,6 +161,11 @@ pub struct HarnessEntry {
     pub account_kinds: Vec<AccountKind>,
     pub team: TeamUse,
     pub aliases: Vec<String>,
+    pub terminal: bool,
+    pub master: bool,
+    pub research: bool,
+    pub sub_agents: manifest::SubAgents,
+    pub account_protocols: Vec<String>,
 }
 
 /// Where the catalog looks for harness executables.
@@ -648,11 +656,16 @@ fn runnable(_metadata: &std::fs::Metadata) -> bool {
 }
 
 /// Builds the catalog rows for every known harness, in owner priority order.
-/// Input: the search space. Output: one entry per spec with its detected status.
+/// Input: the search space. Output: one entry per harness of the registry with its
+/// detected status.
 pub fn catalog(search: &Search) -> Vec<HarnessEntry> {
-    let entries: Vec<HarnessEntry> = specs()
+    let harnesses = registry::registry().all();
+    assert_eq!(harnesses.len(), specs().len());
+    let entries: Vec<HarnessEntry> = harnesses
         .iter()
-        .map(|spec| {
+        .zip(specs())
+        .map(|(harness, spec)| {
+            assert_eq!(harness.id(), spec.id);
             let executable = search.locate(spec);
             let status = match (&executable, spec.launch, spec.tools_limited) {
                 (None, _, _) => HarnessStatus::NotInstalled,
@@ -679,9 +692,7 @@ pub fn catalog(search: &Search) -> Vec<HarnessEntry> {
                 account_kinds: spec.account_kinds.to_vec(),
                 team: match interactive::support(spec.id) {
                     interactive::Support::Terminal => TeamUse::Available,
-                    interactive::Support::HeadlessOnly { reason }
-                        if crate::team::master_backend(spec.id).is_some() =>
-                    {
+                    interactive::Support::HeadlessOnly { reason } if harness.master() => {
                         TeamUse::MasterOnly {
                             reason: reason.into(),
                         }
@@ -691,10 +702,12 @@ pub fn catalog(search: &Search) -> Vec<HarnessEntry> {
                         reason: reason.into(),
                     },
                 },
-                aliases: registry::registry()
-                    .get(spec.id)
-                    .map(|harness| harness.aliases().to_vec())
-                    .unwrap_or_default(),
+                aliases: harness.aliases().to_vec(),
+                terminal: harness.record() != manifest::RecordKind::Unavailable,
+                master: harness.master(),
+                research: harness.research(),
+                sub_agents: harness.sub_agents(),
+                account_protocols: harness.account_protocols().to_vec(),
             }
         })
         .collect();
@@ -836,14 +849,10 @@ pub fn spec(id: &str) -> Option<&'static HarnessSpec> {
 }
 
 /// The oldest version of a harness that CrazyAgent can sign in with, from that harness's
-/// adapter (DEC-166). Input: a catalog id or a stored harness name ("claude").
+/// manifest (DEC-166). Input: a catalog id or a stored harness name ("claude").
 /// Output: the plain minimum, or None for a harness that never signs in from CrazyAgent.
 pub fn sign_in_min(id: &str) -> Option<&'static str> {
-    match spec(id)?.id {
-        "claude-code" => Some(crate::adapters::claude::SIGN_IN_MIN),
-        "codex" => Some(crate::adapters::codex::SIGN_IN_MIN),
-        _ => None,
-    }
+    registry::registry().get(id)?.sign_in_minimum()
 }
 
 /// Tells whether a sign-in must be refused because the installed harness is older than its
@@ -877,31 +886,13 @@ pub fn canonical(id: &str) -> &str {
 /// Tells whether a harness can run on one account (DEC-141 PA-4), the one rule every master,
 /// team agent and research job uses. Inputs: a catalog id or alias and the stored connection.
 /// Output: true for a sign-in of that harness itself, or for an HTTP endpoint account whose
-/// wire format it speaks (Codex any OpenAI format, Claude Code Anthropic Messages, RCLI all);
-/// the harness an endpoint account was stored with is ignored.
+/// wire format its manifest lists (Codex any OpenAI format, Claude Code Anthropic Messages,
+/// RCLI all); the harness an endpoint account was stored with is ignored. False for a name
+/// the registry does not know.
 pub fn account_fits(harness: &str, connection: &crate::config::ModelConnection) -> bool {
-    use crate::config::{ModelAuthentication, ModelEndpoint};
-    let Some(id) = spec(harness).map(|spec| spec.id) else {
-        return false;
-    };
-    let protocol = connection.protocol.as_str();
-    match (&connection.endpoint, &connection.auth) {
-        (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { .. }) => {
-            protocol == "native"
-                && id != "rcli"
-                && spec(connection.harness.as_str()).is_some_and(|own| own.id == id)
-        }
-        (
-            ModelEndpoint::Http { .. },
-            ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {},
-        ) => match id {
-            "codex" => protocol.starts_with("openai"),
-            "claude-code" => protocol == "anthropic-messages",
-            "rcli" => true,
-            _ => false,
-        },
-        _ => false,
-    }
+    registry::registry()
+        .get(harness)
+        .is_some_and(|harness| harness.account_fits(connection))
 }
 
 /// The base URL a harness is given for an endpoint account. Claude Code adds `/v1/messages`

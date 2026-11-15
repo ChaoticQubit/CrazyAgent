@@ -171,16 +171,30 @@ fn a_sign_in_fits_only_its_own_harness_and_unknown_harnesses_fit_nothing() {
 }
 
 #[test]
-fn the_registry_asks_the_same_account_rule_for_every_harness_and_every_account() {
-    let accounts = every_account();
+fn a_sign_in_never_fits_a_harness_whose_manifest_lists_no_subscription_account() {
+    let sign_ins: Vec<ModelConnection> = every_account()
+        .into_iter()
+        .map(|(.., connection)| connection)
+        .filter(|connection| connection.endpoint == ModelEndpoint::Native {})
+        .collect();
+    assert_eq!(sign_ins.len(), 2);
+    let mut without = 0;
     for harness in super::registry::registry().all() {
-        for (.., connection) in &accounts {
-            assert_eq!(
-                harness.account_fits(connection),
-                account_fits(harness.id(), connection),
-                "{}",
-                harness.id()
-            );
+        let id = harness.id();
+        if spec(id)
+            .unwrap()
+            .account_kinds
+            .contains(&AccountKind::Subscription)
+        {
+            continue;
+        }
+        without += 1;
+        for connection in &sign_ins {
+            let mut moved = connection.clone();
+            moved.harness = CredentialRef::new(id).unwrap();
+            assert!(!harness.account_fits(&moved), "{id}");
+            assert!(!account_fits(id, &moved), "{id}");
         }
     }
+    assert!(without >= 2, "RCLI and fx list no subscription account");
 }

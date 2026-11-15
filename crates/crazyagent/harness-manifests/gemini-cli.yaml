@@ -9,4 +9,13 @@ model_selection: true
 account_kinds:
   - "subscription"
   - "api_key"
+update:
+  known_formulae:
+    - "gemini-cli"
+  npm:
+    scope: "@google"
+    name: "gemini-cli"
+    package: "@google/gemini-cli"
+    spec: "@google/gemini-cli"
+  guide: "https://github.com/google-gemini/gemini-cli#readme"
 cannot_start: "installed, but CrazyAgent cannot start it yet"

@@ -12,5 +12,7 @@ account_kinds:
   - "api_key"
   - "open_ai_compatible_url"
   - "local"
+update:
+  guide: "https://vercel.com/docs/ai-gateway/coding-agents/fx"
 tools_limited: "no documented switch to turn tools off"
 cannot_start: "installed, but CrazyAgent cannot start it yet"

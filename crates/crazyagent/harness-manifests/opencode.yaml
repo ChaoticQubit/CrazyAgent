@@ -13,4 +13,13 @@ account_kinds:
   - "api_key"
   - "open_ai_compatible_url"
   - "local"
+update:
+  formulae:
+    - "opencode"
+  npm:
+    scope: "@opencode"
+    name: "cli"
+    package: "@opencode/cli"
+    spec: "@opencode/cli"
+  guide: "https://opencode.ai/docs/"
 cannot_start: "installed, but CrazyAgent cannot start it yet"

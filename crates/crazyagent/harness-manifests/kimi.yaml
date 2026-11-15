@@ -9,4 +9,15 @@ model_selection: true
 account_kinds:
   - "subscription"
   - "api_key"
+update:
+  formulae:
+    - "kimi-code"
+  known_formulae:
+    - "kimi-cli"
+  npm:
+    scope: "@moonshot-ai"
+    name: "kimi-code"
+    package: "@moonshot-ai/kimi-code"
+    spec: "@moonshot-ai/kimi-code"
+  guide: "https://moonshotai.github.io/kimi-code/en/guides/getting-started"
 cannot_start: "installed, but CrazyAgent cannot start it yet"
