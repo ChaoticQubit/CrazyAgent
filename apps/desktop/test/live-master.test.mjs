@@ -42,6 +42,20 @@ test("a master runs live when the catalog says its harness is read in a terminal
   assert.equal(live.runsLive(undefined), false);
 });
 
+test("Live terminal says the harness catalog could not be read when it could not, never that the master has no live terminal (rv-code4 t7 F2)", () => {
+  const catalog = { kind: "ok", value: [listed("codex", { terminal: true, master: true }), listed("rcli", { master: true })] };
+  assert.equal(live.noLiveReason("codex", catalog), undefined);
+  assert.equal(live.noLiveReason("rcli", catalog), live.NO_LIVE_TERMINAL);
+  assert.equal(live.noLiveReason("gone", catalog), live.NO_LIVE_TERMINAL);
+  assert.equal(live.NO_LIVE_TERMINAL, "This master has no live terminal: its conversation is the console.");
+  for (const unread of [{ kind: "error", code: "engine_failed", message: "" }, { kind: "not_ready" }]) {
+    assert.equal(live.noLiveReason("codex", unread), live.CATALOG_UNREAD, unread.kind);
+    assert.equal(live.noLiveReason(undefined, unread), undefined, "with no master known the switch stays open");
+  }
+  assert.match(live.CATALOG_UNREAD, /couldn't be read/);
+  assert.doesNotMatch(live.CATALOG_UNREAD, /no live terminal/);
+});
+
 test("only Codex and Claude Code masters run live, and the master is found by kind", () => {
   const catalog = [listed("codex", { terminal: true, master: true, research: true }), listed("claude-code", { terminal: true, master: true, research: true, aliases: ["claude"] }),
     listed("rcli", { master: true }), listed("opencode")];
@@ -800,6 +814,19 @@ test("Live terminal is unavailable with its plain reason for a master with no li
   assert.equal(rows.codex.disabled, null, `codex: available: ${rows.codex.text}`);
   assert.match(rows.codex.text, /You see and type into the master's own terminal\./);
   assert.doesNotMatch(rows.codex.text, /no live terminal/);
+});
+
+test("Live terminal says the harness catalog could not be read when its read failed (rv-code4 t7 F2)", async () => {
+  const row = await inPage(async ({ evaluate }) => {
+    await evaluate('Fixture.mountArea("codex", true, "failed")');
+    await evaluate("Fixture.settle()");
+    await evaluate('Fixture.click("Master settings")');
+    await evaluate("Fixture.settle()");
+    return evaluate("Fixture.liveTerminalRow()");
+  });
+  assert.equal(row.disabled, "true", row.text);
+  assert.match(row.text, /couldn't be read/);
+  assert.doesNotMatch(row.text, /no live terminal|You see and type/);
 });
 
 test("Live terminal stays available with no master known yet (OWNER-Q4-2-L3 F2)", async () => {

@@ -61,7 +61,7 @@ function data(master, on, team = undefined, catalog = undefined) {
       team: { master, master_tools: true, sub_harnesses: [] } },
   };
   return {
-    id: "alpha", name: "Alpha", setup, research: undefined, context: undefined, pools: undefined, harnesses: catalog === undefined ? undefined : { kind: "ok", value: catalog },
+    id: "alpha", name: "Alpha", setup, research: undefined, context: undefined, pools: undefined, harnesses: catalog === undefined ? undefined : Array.isArray(catalog) ? { kind: "ok", value: catalog } : catalog,
     assigned: null, now: 0, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
     team: team !== undefined ? { result: team, at: 0 } : on === undefined ? { result: undefined, at: 0 } : { result: { kind: "ok", value: status(on) }, at: 1 },
     reloadTeam: () => { reloads += 1; },
@@ -77,11 +77,13 @@ const node = { id: "team-1", kind: "master", parent: null, label: "Master", harn
 /** Mounts the project's master area for a team plan whose master is the given harness, or
  * whose setup is still loading when it is undefined, with the engine's live switch read as
  * `on` (true, false or null for never set), or the team not read yet when it is undefined,
- * and the harness catalog read unless `catalog` is false. */
+ * and the harness catalog read unless `catalog` is false, or its read failed when it is
+ * "failed". */
 export function mountArea(master, on, catalog = true) {
   const panel = page();
   root = createRoot(panel);
-  flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, undefined, catalog ? CATALOG : undefined) })));
+  const read = catalog === "failed" ? { kind: "error", code: "engine_failed", message: "" } : catalog ? CATALOG : undefined;
+  flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, undefined, read) })));
 }
 
 /** Mounts the project's master area with no master known yet, the plan not read. Output:

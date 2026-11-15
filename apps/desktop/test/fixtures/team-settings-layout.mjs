@@ -171,9 +171,9 @@ export async function mount(css, view, status, section) {
   };
   const views = {
     page: [team.TeamControls, { projectId: "alpha", status, reload() {}, navigate() {}, data }],
-    drawer: [conversation.MasterSettings, { data, liveHarness: true }],
+    drawer: [conversation.MasterSettings, { data }],
     agents: [agents.AgentsTab, { data, section: section ?? undefined }],
-    button: [conversation.MasterSettingsDrawer, { data, liveHarness: true, children: createElement(conversation.MasterSettingsButton) }],
+    button: [conversation.MasterSettingsDrawer, { data, children: createElement(conversation.MasterSettingsButton) }],
   };
   const [component, props] = views[view];
   if (typeof component !== "function") return false;
