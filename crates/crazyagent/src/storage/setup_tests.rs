@@ -2111,3 +2111,46 @@ fn a_kept_hook_saved_without_what_it_runs_turns_off_every_hook_of_its_event() {
         assert!(kept_for(&kept, &added, hook).is_empty(), "{}", hook.name);
     }
 }
+
+/// A kept hook of the caveman plugin as a pin keeps it, first in its event. Inputs: the
+/// event, whether it is on and what it runs. Output: the kept hook, with no project switch.
+fn kept_hook(event: &str, enabled: bool, command: &str) -> KeptHook {
+    KeptHook {
+        name: format!("caveman/{event}/1"),
+        enabled,
+        projects: Vec::new(),
+        event: event.into(),
+        matcher: None,
+        command: command.into(),
+    }
+}
+
+/// b3b4 r3 (rv-code2 r2 F1): a switched-off hook that a new pin changes into a command
+/// another kept hook still runs exactly in another event keeps its off, since that other hook
+/// has its own successor and was not moved; the other hook keeps its own switches.
+#[test]
+fn a_switched_off_hook_changed_to_a_command_another_event_still_runs_stays_off() {
+    let kept = [
+        kept_hook("SessionStart", false, "sh guard.sh"),
+        kept_hook("UserPromptSubmit", true, "sh d.sh"),
+    ];
+    let added = [
+        added_hook("caveman", "SessionStart", 1, "sh d.sh"),
+        added_hook("caveman", "UserPromptSubmit", 1, "sh d.sh"),
+    ];
+    assert_eq!(kept_for(&kept, &added, &added[0]), [&kept[0]]);
+    assert_eq!(kept_for(&kept, &added, &added[1]), [&kept[1]]);
+}
+
+/// b3b4 r3 (rv-sec2 r2 N1): an added hook that takes the switches of a hook the pin moved
+/// into its event also takes the off of the switched hook it replaced there, so any off the
+/// owner set wins.
+#[test]
+fn an_added_hook_that_both_moved_and_replaced_takes_every_off() {
+    let kept = [
+        kept_hook("SessionStart", false, "sh guard.sh"),
+        kept_hook("UserPromptSubmit", true, "sh d.sh"),
+    ];
+    let added = [added_hook("caveman", "SessionStart", 1, "sh d.sh")];
+    assert_eq!(kept_for(&kept, &added, &added[0]), [&kept[1], &kept[0]]);
+}
