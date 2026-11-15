@@ -2078,6 +2078,32 @@ mod tests {
     }
 
     #[test]
+    fn a_launch_left_on_this_network_by_a_low_port_says_so_with_the_port() {
+        use super::super::{LinuxHost, linux_unbridged_line, linux_unbridged_notice_on};
+        use SandboxRemote::Loopback;
+        let host = |nested| {
+            Some(LinuxHost {
+                nested,
+                scoped: false,
+            })
+        };
+        let launched = |remotes: &[SandboxRemote]| {
+            let (_temp, sandbox) = project(SandboxNetwork::Only(remotes.to_vec()));
+            sandbox
+        };
+        let low = launched(&[Loopback(11434), Loopback(80)]);
+        let said = linux_unbridged_notice_on(host(true), &low);
+        assert_eq!(said, Some(linux_unbridged_line(80)));
+        assert!(said.unwrap().contains("port 80 is below 1024"));
+        assert_eq!(linux_unbridged_notice_on(host(false), &low), None, "no nest");
+        assert_eq!(linux_unbridged_notice_on(None, &low), None, "not Linux");
+        let bridged = launched(&[Loopback(11434)]);
+        assert_eq!(linux_unbridged_notice_on(host(true), &bridged), None);
+        let (_temp, open) = project(SandboxNetwork::Open);
+        assert_eq!(linux_unbridged_notice_on(host(true), &open), None);
+    }
+
+    #[test]
     fn the_bubblewrap_a_nest_starts_is_checked_as_the_file_it_opened() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();

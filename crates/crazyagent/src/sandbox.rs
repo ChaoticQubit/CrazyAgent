@@ -873,6 +873,23 @@ pub fn linux_unbridged_line(port: u16) -> String {
     )
 }
 
+/// What an agent's launch tells the owner when a port below [`BRIDGE_PORT_MIN`] alone keeps
+/// it on this computer's network on a Linux that nests agents: [`linux_unbridged_line`] for
+/// that port, kept in the agent's messages. Inputs: what this Linux holds, none on another
+/// system, and the agent's sandbox as launched. Output: the sentences, or none.
+pub fn linux_unbridged_notice_on(
+    _host: Option<LinuxHost>,
+    _sandbox: &ProjectSandbox,
+) -> Option<String> {
+    None
+}
+
+/// [`linux_unbridged_notice_on`] for this computer as it was last read. Input: the agent's
+/// sandbox as launched. Output: the sentences, or none.
+pub fn linux_unbridged_notice(sandbox: &ProjectSandbox) -> Option<String> {
+    linux_unbridged_notice_on(linux_host_kept(), sandbox)
+}
+
 /// What a limited network cannot hold on Linux, shown there only, under the network choice
 /// in the desktop and the TUI (RV-DS241-83): Landlock limits outbound TCP by port, not by
 /// host, so a port an agent may reach on this computer is open to it on every host.
