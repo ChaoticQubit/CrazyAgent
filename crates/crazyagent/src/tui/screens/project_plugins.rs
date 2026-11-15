@@ -2,8 +2,8 @@ use super::new_project_input::cells;
 use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project_team::{Help, Notice, TABS, window};
 use super::settings_plugins::{
-    HookGroup, HookGroupState, hook_event_runs, hook_group_line, hook_groups, hook_runs,
-    plugin_plain, short_runs,
+    HookGroup, HookGroupState, change_plain, hook_event_runs, hook_group_line, hook_groups,
+    hook_runs, plugin_plain, short_runs,
 };
 use crate::plugins::{HookView, Scope, ServerStatus, ServerView, SkillView};
 use crate::protocol::ProjectId;
@@ -214,7 +214,7 @@ impl ProjectPlugins {
                         server.problem.as_deref().unwrap_or_default()
                     )),
                     Ok(_) => Notice::plain(done),
-                    Err(code) => Notice::problem(plugin_plain(code)),
+                    Err(code) => Notice::problem(change_plain(&done, code)),
                 });
             }
             _ => {}

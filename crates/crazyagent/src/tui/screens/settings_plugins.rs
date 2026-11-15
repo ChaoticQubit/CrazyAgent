@@ -89,6 +89,24 @@ pub fn unused(code: &str) -> String {
     format!("Agents don't get this skill. {}", plugin_plain(code))
 }
 
+/// Says why a plugin list's change was refused. Approve and Check run a stored server through
+/// the add form's checks, which one stored before hidden characters were refused fails only
+/// for hidden or control characters, so those say that and the way out, not the form's fix.
+/// Inputs: the change's done line and the refusal code. Output: the sentence.
+pub fn change_plain(done: &str, code: &str) -> &'static str {
+    let stored = matches!(
+        code,
+        "server_command_invalid" | "server_args_invalid" | "server_url_invalid"
+    );
+    if stored && done.starts_with("Approved.") {
+        return "This server's command or address holds hidden or control characters, so it can't be approved. Remove it, then add it again.";
+    }
+    if stored && done.starts_with("Checked ") {
+        return "This server's command or address holds hidden or control characters, so it can't be checked. Remove it, then add it again.";
+    }
+    plugin_plain(code)
+}
+
 /// A plain sentence for an engine problem code about skills and MCP servers.
 /// Input: the code. Output: the sentence.
 pub fn plugin_plain(code: &str) -> &'static str {
@@ -1247,7 +1265,7 @@ impl Screen for Plugins {
                         ))
                     }
                     Ok(_) => ctx.say(Message::success(&done, "")),
-                    Err(code) => ctx.say(Message::error(plugin_plain(code), "")),
+                    Err(code) => ctx.say(Message::error(change_plain(&done, code), "")),
                 }
                 self.reload(ctx);
             }

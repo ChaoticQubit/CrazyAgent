@@ -58,8 +58,8 @@ fn printable(text: &str) -> bool {
 }
 
 impl ServerSpec {
-    /// Checks the command or URL before it is saved or approved, refusing control and hidden
-    /// characters (`crate::memory::hidden_text`) anywhere in it.
+    /// Checks the command or URL before it is saved, approved or checked, refusing control and
+    /// hidden characters (`crate::memory::hidden_text`) anywhere in it.
     /// Input: an untrusted spec. Output: Ok, or a code naming the first problem:
     /// a relative or oversized command, too many or bad arguments, a command and
     /// arguments over `COMMAND_LINE_BYTES_MAX` together, or a URL that is
