@@ -164,6 +164,15 @@ export type TeamUse = { kind: "available" } | { kind: "master_only"; reason: str
 
 export type AccountKind = "subscription" | "api_key" | "open_ai_compatible_url" | "local";
 
+/** How a harness's lead gets sub-agents, as its manifest says: the harness's own teams, its
+ * own threads, or agents the app starts for it. */
+export type HarnessSubAgents = "teams" | "threads" | "app";
+
+/** One harness as the engine's catalog lists it. Beside what was found on this machine it
+ * says what the manifest lets the harness be: `terminal` when the engine reads its replies
+ * back from a live terminal, `master` and `research` when it can run those, how its lead
+ * gets sub-agents, and the wire formats of the endpoint accounts it runs on, where a name
+ * that ends in `*` stands for every format that starts with the text before it. */
 export interface HarnessEntry {
   id: string;
   name: string;
@@ -176,6 +185,11 @@ export interface HarnessEntry {
   account_kinds: AccountKind[];
   team: TeamUse;
   aliases: string[];
+  terminal: boolean;
+  master: boolean;
+  research: boolean;
+  sub_agents: HarnessSubAgents;
+  account_protocols: string[];
 }
 
 /** Lists every harness the engine knows, in owner order, with its status on this machine.

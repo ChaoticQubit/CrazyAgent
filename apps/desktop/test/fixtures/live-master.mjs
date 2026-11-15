@@ -41,14 +41,18 @@ function page() {
   return document.getElementById("panel");
 }
 
-/** Builds one ready harness catalog entry. Inputs: the id, the name and its aliases.
- * Output: the entry as the engine lists it. */
-const entry = (id, name, aliases = []) => ({ id, name, status: { kind: "ready" }, status_label: "Ready", executable: null, headless: "", tools: { kind: "switchable" },
-  model_selection: false, account_kinds: [], team: { kind: "available" }, aliases });
+/** Builds one ready harness catalog entry. Inputs: the id, the name, its aliases and what
+ * its manifest lets it be. Output: the entry as the engine lists it. */
+const entry = (id, name, aliases = [], can = {}) => ({ id, name, status: { kind: "ready" }, status_label: "Ready", executable: null, headless: "", tools: { kind: "switchable" },
+  model_selection: false, account_kinds: [], team: { kind: "available" }, aliases, terminal: false, master: false, research: false, sub_agents: "app", account_protocols: [], ...can });
+
+const LIVE = { terminal: true, master: true, research: true };
 
 /** The engine's harness catalog as the project page reads it: Claude Code answers to its
- * alias "claude", as plans saved by older builds store it. */
-const CATALOG = [entry("codex", "Codex"), entry("claude-code", "Claude Code", ["claude"]), entry("rcli", "RCLI")];
+ * alias "claude", as plans saved by older builds store it, and Codex and Claude Code are the
+ * two the engine reads back from a live terminal. */
+const CATALOG = [entry("codex", "Codex", [], { ...LIVE, sub_agents: "threads" }), entry("claude-code", "Claude Code", ["claude"], { ...LIVE, sub_agents: "teams" }),
+  entry("rcli", "RCLI", [], { master: true })];
 
 function data(master, on, team = undefined, catalog = undefined) {
   const setup = master === undefined ? undefined : {

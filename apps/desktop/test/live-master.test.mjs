@@ -10,6 +10,7 @@ import { pasteTerminal } from "./native/trial-kit.mjs";
 
 const io = await import("../src/screens/team/terminal-io.ts");
 const live = await import("../src/screens/project/live-master.tsx");
+const wizard = await import("../src/screens/new-project/wizard.ts");
 const loads = await import("../src/state.ts");
 
 const key = (type, extra = {}) => ({ type, key: "Enter", shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, ...extra });
@@ -42,9 +43,11 @@ test("a master runs live when the catalog says its harness is read in a terminal
 });
 
 test("only Codex and Claude Code masters run live, and the master is found by kind", () => {
-  assert.equal(live.runsLive("codex"), true);
-  assert.equal(live.runsLive("claude-code"), true);
-  for (const other of ["rcli", "opencode", "", undefined]) assert.equal(live.runsLive(other), false, String(other));
+  const catalog = [listed("codex", { terminal: true, master: true, research: true }), listed("claude-code", { terminal: true, master: true, research: true, aliases: ["claude"] }),
+    listed("rcli", { master: true }), listed("opencode")];
+  for (const master of ["codex", "claude-code", "claude"]) assert.equal(live.runsLive(wizard.entry(catalog, master)), true, master);
+  for (const other of ["rcli", "opencode", "", "unknown"]) assert.equal(live.runsLive(wizard.entry(catalog, other)), false, other);
+  assert.equal(live.runsLive(wizard.entry(null, "codex")), false, "a catalog that could not be read");
   const node = (id, kind, terminal = null) => ({ id, kind, parent: null, label: id, harness: "codex", status: null, status_label: null, account: null, terminal });
   assert.equal(live.masterNode([node("g", "lead", "team-3"), node("a", "sub", "team-2"), node("t", "teammate", "team-3")]), null);
   assert.equal(live.masterNode([node("a", "sub", "team-2"), node("m", "master", "team-1")]).id, "m");
