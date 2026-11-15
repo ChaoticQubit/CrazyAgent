@@ -1724,8 +1724,9 @@ mod tests {
             preferred_stack: vec!["Rust".into()],
             working_style: Default::default(),
         };
-        shell.arrive(Arrival::Profile(Ok(Some(kept))));
+        shell.arrive(Arrival::Profile(Ok(Some(kept.clone()))));
         assert_eq!(shell.place(), Some(Place::Welcome));
+        assert_eq!(shell.ctx.store.profile, Load::Ready(Some(kept)));
     }
 
     #[test]
