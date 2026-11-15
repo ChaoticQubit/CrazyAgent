@@ -47,7 +47,10 @@ const NAMES: [&str; 6] = [
 
 const CODEX_OVERRIDE: &str = "AGENTS.override.md";
 const HARNESS_FOLDERS: [&str; 2] = [".claude", ".codex"];
-const HFS_IGNORED: [char; 16] = [
+/// The code points a case-insensitive HFS+ volume ignores in names (git's
+/// `core.protectHFS` list), so `HE\u{200c}AD` opens `HEAD` there: the one list every name
+/// compare that must match such a volume leaves out (RV-DS241-148).
+pub(crate) const HFS_IGNORED: [char; 16] = [
     '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
     '\u{202E}', '\u{206A}', '\u{206B}', '\u{206C}', '\u{206D}', '\u{206E}', '\u{206F}', '\u{FEFF}',
 ];
@@ -603,6 +606,13 @@ fn folded(name: &str) -> String {
             other => other.to_ascii_lowercase(),
         })
         .collect()
+}
+
+/// Tells whether a path part opens a `.git` entry on a case-insensitive volume, compared as
+/// [`folded`] compares names, so `.GIT`, `.g\u{200c}it` on HFS+ and `.g\u{131}t` on NTFS all
+/// count (RV-DS241-148). Input: the part. Output: true for one.
+pub(crate) fn names_git(part: &str) -> bool {
+    folded(part) == ".git"
 }
 
 /// Tells whether a file name is one an instruction file is read under in any folder: a

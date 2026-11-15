@@ -560,6 +560,94 @@ fn accepting_halves_of_a_bare_layout_in_folders_that_differ_only_in_case_refuses
     }
 }
 
+/// A bare-repository layout whose `HEAD`, `objects` or `refs` holds a code point a
+/// case-insensitive HFS+ volume ignores in names, here U+200C ZERO WIDTH NON-JOINER or
+/// U+FEFF ZERO WIDTH NO-BREAK SPACE, is refused like the plain one, since the owner's own
+/// git on such a volume opens it (RV-DS241-148).
+#[test]
+fn a_bare_repository_layout_spelled_with_code_points_hfs_ignores_is_refused_when_committed() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    for (head, objects, refs) in [
+        ("HE\u{200c}AD", "objects", "refs"),
+        ("HEAD", "ob\u{feff}jects", "refs"),
+        ("HEAD", "objects", "re\u{200c}fs"),
+        ("\u{feff}HEAD", "objects\u{200c}", "\u{feff}refs\u{feff}"),
+    ] {
+        let case = Case::new();
+        let packs = format!("{objects}/info/packs");
+        let main = format!("{refs}/heads/main");
+        plant_layout(
+            &case.workspace.worktree.join("notes"),
+            &[
+                (head, "ref: refs/heads/main\n", false),
+                (packs.as_str(), "\n", false),
+                (main.as_str(), "\n", false),
+                ("config", "[core]\n\tbare = true\n", false),
+            ],
+        );
+        assert_eq!(
+            refused(record_turn_end(&case.db, &case.workspace, &turn)),
+            "changes_bare_repository",
+            "{head:?} {objects:?} {refs:?}"
+        );
+    }
+}
+
+/// Two change sets that make one bare-repository layout only once a volume ignores a code
+/// point HFS+ ignores in names, in a folder name or in `HEAD`, make the whole layout in
+/// one folder of an owner checkout on such a volume, so accepting the second is refused
+/// and the branch stays (RV-DS241-148).
+#[test]
+fn accepting_halves_of_a_bare_layout_spelled_with_code_points_hfs_ignores_refuses_the_second() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    let store: Vec<(&str, &str, bool)> = vec![
+        ("objects/info/packs", "\n", false),
+        ("refs/heads/main", "\n", false),
+    ];
+    for (folder, other, head) in [
+        ("evil", "e\u{200c}vil", "HEAD"),
+        ("evil", "\u{feff}evil", "HEAD"),
+        ("evil", "evil", "HE\u{feff}AD"),
+        ("evil", "evil", "\u{200c}HEAD"),
+    ] {
+        let case = Case::new();
+        let sibling = second_agent(&case);
+        plant_layout(&case.workspace.worktree.join(folder), &store);
+        plant_layout(
+            &sibling.worktree.join(other),
+            &[
+                (head, "ref: refs/heads/main\n", false),
+                ("config", "[core]\n\tbare = true\n", false),
+            ],
+        );
+        let one = record_turn_end(&case.db, &case.workspace, &turn)
+            .unwrap()
+            .expect("half a layout lands as a change set");
+        let two = record_turn_end(&case.db, &sibling, &turn)
+            .unwrap()
+            .expect("the other half lands as a change set");
+        assert!(matches!(
+            case.accept(&one).unwrap(),
+            AcceptOutcome::Landed { .. }
+        ));
+        let tip = case.tip();
+        assert_eq!(
+            refused(case.accept(&two)),
+            "changes_bare_repository",
+            "{folder:?} {other:?} {head:?} make one layout on an HFS+ volume"
+        );
+        assert_eq!(case.tip(), tip, "the branch did not move");
+    }
+}
+
 #[test]
 fn a_link_an_agent_leaves_pointing_outside_the_project_or_into_the_agents_folder_is_refused() {
     let turn = TurnEnd {

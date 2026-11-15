@@ -175,14 +175,18 @@ fn collect(
 }
 
 /// True when a listed path names a regular file in the project: a plain relative path of
-/// at most 512 bytes with no `.git` part and no control character, not itself a link, in
-/// a folder that resolves inside the project. Inputs: the canonical folder and the path.
+/// at most 512 bytes with no part a case-insensitive volume opens as `.git`
+/// ([`crate::instruction_files::names_git`]) and no control character, not itself a link,
+/// in a folder that resolves inside the project. Inputs: the canonical folder and the path.
 #[cfg(unix)]
 fn inside(root: &Path, path: &str) -> bool {
     let relative = Path::new(path);
-    let plain = relative
-        .components()
-        .all(|part| matches!(part, std::path::Component::Normal(name) if !name.eq_ignore_ascii_case(".git")));
+    let plain = relative.components().all(|part| match part {
+        std::path::Component::Normal(name) => {
+            !crate::instruction_files::names_git(&name.to_string_lossy())
+        }
+        _ => false,
+    });
     if !plain || path.len() > PATH_BYTES_MAX || path.chars().any(char::is_control) {
         return false;
     }
@@ -306,6 +310,20 @@ mod tests {
         );
         assert_eq!(list(&repo, "", 2, later()).unwrap().len(), 2);
         assert_eq!(list(&repo, "", 1, later()).unwrap().len(), 1);
+    }
+
+    /// A listed path with a part a case-insensitive HFS+ volume opens as `.git`, such as
+    /// `.g\u{200c}it` or `\u{feff}.git`, is never inside the project, as `.git` is not
+    /// (RV-DS241-148).
+    #[test]
+    fn a_path_part_hfs_opens_as_git_is_never_inside() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().canonicalize().unwrap();
+        for part in [".g\u{200c}it", "\u{feff}.git"] {
+            fs::create_dir(root.join(part)).unwrap();
+            fs::write(root.join(part).join("config"), "[core]\n").unwrap();
+            assert!(!inside(&root, &format!("{part}/config")), "{part:?}");
+        }
     }
 
     #[test]

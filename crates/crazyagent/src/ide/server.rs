@@ -1149,8 +1149,9 @@ fn confined_git(data: &Path, launch: &Launch<'_>) -> Result<OsString, EngineErro
     Ok(ceiling)
 }
 
-/// Refuses a start while the server data folder holds an entry named `.git` in any ASCII
-/// letter case at any depth, folder, file or link alike, which a server of an older profile
+/// Refuses a start while the server data folder holds an entry named `.git` in any spelling
+/// a case-insensitive volume opens as it ([`crate::instruction_files::names_git`],
+/// RV-DS241-148) at any depth, folder, file or link alike, which a server of an older profile
 /// could leave to rename into the project later (SA vid 101 residue). Links are never
 /// followed. Inputs: the folder and the most entries to read. Output: Ok, or
 /// `ide_server_data_git` for a `.git`, a folder it cannot read or more than `limit` entries.
@@ -1162,7 +1163,9 @@ fn refuse_planted_git(home: &Path, limit: usize) -> Result<(), EngineError> {
         for entry in fs::read_dir(&folder).map_err(refused)? {
             let entry = entry.map_err(refused)?;
             read += 1;
-            if read > limit || entry.file_name().eq_ignore_ascii_case(".git") {
+            if read > limit
+                || crate::instruction_files::names_git(&entry.file_name().to_string_lossy())
+            {
                 return Err(failure("ide_server_data_git"));
             }
             if entry.file_type().map_err(refused)?.is_dir() {

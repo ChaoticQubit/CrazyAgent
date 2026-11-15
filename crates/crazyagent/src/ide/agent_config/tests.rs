@@ -62,6 +62,10 @@ fn ide_config_paths_fold_case_the_way_apfs_does() {
         assert!(!same_name(&format!("a{folded}b"), "ab"));
     }
     assert!(same_name(".GITATTRIBUTE\u{17f}", ".gitattributes"));
+    assert!(same_name(".gitattribute\u{200c}s", ".gitattributes"));
+    assert!(same_name("\u{feff}.GitModules", ".gitmodules"));
+    assert!(is_ide_config(".vs\u{200c}code/tasks.json"));
+    assert!(is_ide_config("a/b.code-work\u{feff}space"));
     assert!(same_name(".GitModules", ".gitmodules"));
     assert!(!same_name(".gitmodule", ".gitmodules"));
     for plain in [

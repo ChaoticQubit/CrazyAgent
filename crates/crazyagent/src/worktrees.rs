@@ -1959,7 +1959,7 @@ fn tree_entries(
                 .any(|p| !matches!(p, Component::Normal(_)))
             || path
                 .components()
-                .any(|p| p.as_os_str().to_string_lossy().eq_ignore_ascii_case(".git"))
+                .any(|p| crate::instruction_files::names_git(&p.as_os_str().to_string_lossy()))
         {
             return Err(error("unsupported_or_unsafe_tree_entry"));
         }
@@ -2110,8 +2110,9 @@ fn copy_blobs(
 
 /// Says whether a tracked symlink resolves inside the lease wherever it is followed from:
 /// its target is relative, climbs only with leading `..` steps and no higher than the
-/// folder holding the link, then names plain components other than `.git`. Inputs: the
-/// link's path in the tree and its target bytes. Output: true when it stays inside.
+/// folder holding the link, then names plain components other than `.git` in any spelling
+/// a case-insensitive volume opens as it ([`crate::instruction_files::names_git`]). Inputs:
+/// the link's path in the tree and its target bytes. Output: true when it stays inside.
 #[cfg(unix)]
 fn link_stays_inside(link: &Path, target: &[u8]) -> bool {
     let Ok(target) = std::str::from_utf8(target) else {
@@ -2124,7 +2125,9 @@ fn link_stays_inside(link: &Path, target: &[u8]) -> bool {
         match part {
             ".." if climbing => up += 1,
             "" | "." | ".." => return false,
-            name if name.eq_ignore_ascii_case(".git") || name.contains('\0') => return false,
+            name if crate::instruction_files::names_git(name) || name.contains('\0') => {
+                return false;
+            }
             _ => climbing = false,
         }
     }
@@ -3363,6 +3366,50 @@ mod tests {
         }
     }
 
+    /// A tree path with a part a case-insensitive HFS+ volume opens as `.git`, such as
+    /// `.g\u{200c}it` or `\u{feff}.GIT`, is refused like `.git` itself, so a lease never
+    /// writes into a git folder on such a volume (RV-DS241-148).
+    #[test]
+    fn tree_listing_refuses_a_path_part_hfs_opens_as_git() {
+        for part in [".g\u{200c}it", "\u{feff}.GIT"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let repository = committed_repository(temporary.path());
+            let folder = repository.join("sub").join(part);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("config"), b"[core]\n").unwrap();
+            for args in [
+                &[
+                    "-c",
+                    "core.protectHFS=false",
+                    "-c",
+                    "core.protectNTFS=false",
+                    "add",
+                    "-A",
+                ][..],
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@invalid",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "planted",
+                ],
+            ] {
+                git(&repository, args).unwrap();
+            }
+            let later = Instant::now() + Duration::from_secs(5);
+            assert_eq!(
+                tree_entries(&repository, "HEAD", &TREE_BOUNDS, later)
+                    .unwrap_err()
+                    .0,
+                "unsupported_or_unsafe_tree_entry",
+                "{part:?}"
+            );
+        }
+    }
+
     #[test]
     fn writing_a_tree_stops_at_its_deadline() {
         let temporary = tempfile::tempdir().unwrap();
@@ -3410,6 +3457,8 @@ mod tests {
             ("none", "", false),
             ("a/git", "../.git/config", false),
             ("a/git-case", "../.GIT", false),
+            ("a/git-hfs", "../.g\u{200c}it/config", false),
+            ("a/git-bom", "../\u{feff}.GIT", false),
             ("a/nul", "x\0y", false),
         ] {
             assert_eq!(
