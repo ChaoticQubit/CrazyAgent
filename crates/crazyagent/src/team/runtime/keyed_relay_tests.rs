@@ -295,6 +295,9 @@ fn a_keyed_live_master_is_stopped_at_quit_so_nothing_dials_its_ended_relay_port(
     let running = host.alive().unwrap().contains(&pane);
     host.close(&[]).unwrap();
     assert_eq!(reached, 0, "the master dialed its ended relay's port");
-    assert!(left.is_empty(), "the keyed master is left running: {left:?}");
+    assert!(
+        left.is_empty(),
+        "the keyed master is left running: {left:?}"
+    );
     assert!(!running, "the keyed master's pane runs on");
 }
