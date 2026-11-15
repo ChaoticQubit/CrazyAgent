@@ -302,6 +302,25 @@ pub(super) fn save_job(_root: &Path, _job: &GitHubPublishJob) -> Result<(), Engi
     Err(failure("github_state_unavailable"))
 }
 
+/// Removes one project's publish job, as Discard does. Inputs: the engine root and the
+/// project folder. Output: Ok, also when no job is saved, or `github_state_unavailable`.
+#[cfg(unix)]
+pub(super) fn remove_job(root: &Path, project: &Path) -> Result<(), EngineError> {
+    let (folder, name) = job_file(root, project);
+    match std::fs::remove_file(folder.join(name)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(failure("github_state_unavailable")),
+    }
+}
+
+/// Refuses to remove a publish job where none can be saved. Takes the engine root and the
+/// project folder, both unused. Returns `github_state_unavailable`.
+#[cfg(not(unix))]
+pub(super) fn remove_job(_root: &Path, _project: &Path) -> Result<(), EngineError> {
+    Err(failure("github_state_unavailable"))
+}
+
 /// Refuses to save a repository record where no owner-only file can be made. Takes the
 /// engine root, name and record, all unused. Returns `github_state_unavailable`.
 #[cfg(not(unix))]

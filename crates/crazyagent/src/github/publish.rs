@@ -836,11 +836,13 @@ fn passed_over(error: &std::io::Error) -> bool {
     }
 }
 
-/// Adds the secret lines of the working copies of the files publish wrote, which the
-/// commit takes by name (`add -f`) whatever the history or the .gitignore says, so the
-/// scan of HEAD's tree or of the listing may never have read them. A finding already
-/// there is not added twice, and the 1000 bound holds. Inputs: the project, the written
-/// paths and the scan. Output: `()`, or `github_publish_failed`.
+/// Adds the secret lines of the working copies of the files publish wrote, for a project
+/// with owner history, whose commit takes them by name (`add -f`) whatever the .gitignore
+/// says, so the scan of HEAD's tree may never have read them. A written path that is
+/// there but not a plain file, such as a folder `add -f` would take whole, is refused. A
+/// finding already there is not added twice, and the 1000 bound holds. Inputs: the
+/// project, the written paths and the scan. Output: `()`, or `github_publish_file_invalid`,
+/// `github_publish_failed`.
 pub(super) fn written_findings(
     project: &Path,
     written: &[String],
@@ -854,7 +856,7 @@ pub(super) fn written_findings(
             Err(_) => return Err(failed()),
         };
         if !file.metadata().map_err(|_| failed())?.is_file() {
-            continue;
+            return Err(failure("github_publish_file_invalid"));
         }
         let mut head = Vec::new();
         file.take(SCAN_FILE_BYTES_MAX)
@@ -1339,8 +1341,10 @@ pub(super) fn commit(
 /// Makes the publish commit as [`commit`] does, reading at most `status_max` bytes of the
 /// status that counts what the commit leaves out. The status is read before anything is
 /// staged or committed, so a count that cannot be made leaves HEAD and the index as they
-/// were. Inputs: as [`commit`], and the cap. Output: as [`commit`], or
-/// `github_publish_too_large` past the cap.
+/// were. A written path gone from disk and not tracked is left out of the add, so a file
+/// the owner deleted since publish wrote it never stops the commit. Inputs: as
+/// [`commit`], and the cap. Output: as [`commit`], or `github_publish_too_large` past the
+/// cap.
 fn commit_within(
     git: &Path,
     home: &Path,
@@ -1373,6 +1377,21 @@ fn commit_within(
         WORK_TIME,
         status_max,
     )?;
+    let listed: Vec<&[u8]> = status
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| entry.get(3..))
+        .collect();
+    let paths: Vec<&str> = paths
+        .into_iter()
+        .filter(
+            |known| match std::fs::symlink_metadata(project.join(known)) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    listed.contains(&known.as_bytes())
+                }
+                _ => true,
+            },
+        )
+        .collect();
     let taken = |entry: &[u8]| {
         history != GitHubHistory::Owner
             || entry

@@ -59,7 +59,8 @@ impl Action {
     pub(super) fn time(&self) -> Duration {
         match self {
             Self::Clone { .. } => CLONE_TIME,
-            Self::PublishApprove { .. }
+            Self::PublishStart { .. }
+            | Self::PublishApprove { .. }
             | Self::PublishExclude { .. }
             | Self::PublishRecheck { .. }
             | Self::PublishContinue { .. } => PUBLISH_TIME,

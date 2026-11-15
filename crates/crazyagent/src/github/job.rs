@@ -80,8 +80,9 @@ pub enum GitHubPublishStep {
 }
 
 /// One project's publish as the engine records it: the plan, the lines the owner
-/// approved, the paths publish wrote, the step reached, and the code of the failure that
-/// stopped it there, if one did.
+/// approved, the paths publish wrote, the step reached, the code of the failure that
+/// stopped it there, if one did, and the `owner/name` of the repository it made, kept
+/// once made so a check and commit again never create a second one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubPublishJob {
@@ -91,6 +92,8 @@ pub struct GitHubPublishJob {
     pub written: Vec<String>,
     pub step: GitHubPublishStep,
     pub stopped: Option<String>,
+    #[serde(default)]
+    pub made: Option<String>,
 }
 
 /// Holds one project's publish for the engine, so a second run of it is refused while
@@ -148,8 +151,9 @@ impl GitHub {
     /// project's agent through `ask` for .gitignore lines from the project's names only,
     /// and records the lines the owner is shown first: the baseline, then the agent's, or
     /// the baseline alone with the code `ask` gave. Nothing is written into the project.
-    /// A job that made its repository already is gone on with Continue instead, and a
-    /// start over an earlier job keeps the paths it wrote, which the commit then takes.
+    /// A job that made its repository already is gone on with Continue or forgotten with
+    /// Discard instead, and a start over an earlier job keeps the paths it wrote, which
+    /// the commit then takes.
     /// Inputs: the project folder, the plan and `ask`, which takes the prompt and gives
     /// the reply or a code. Output: the job at its lines, or
     /// `github_repo_name_invalid`, `github_repo_description_invalid`,
@@ -166,10 +170,12 @@ impl GitHub {
         self.saved()?;
         let written = match state::load_job(&self.root, project)? {
             Some(job)
-                if matches!(
-                    job.step,
-                    GitHubPublishStep::Created { .. } | GitHubPublishStep::Pushed { .. }
-                ) =>
+                if !matches!(job.step, GitHubPublishStep::Done { .. })
+                    && (job.made.is_some()
+                        || matches!(
+                            job.step,
+                            GitHubPublishStep::Created { .. } | GitHubPublishStep::Pushed { .. }
+                        )) =>
             {
                 return Err(failure("github_publish_in_progress"));
             }
@@ -198,6 +204,7 @@ impl GitHub {
                 draft: by,
             },
             stopped: None,
+            made: None,
         };
         state::save_job(&self.root, &job)?;
         Ok(job)
@@ -317,12 +324,22 @@ impl GitHub {
         })
     }
 
-    /// Forgets a project's publish short of Done, so Start runs fresh. Input: the project
-    /// folder. Output: the name of the empty repository the job left on GitHub, if it made
-    /// one, or `github_publish_not_started`, `github_publish_step_invalid`.
+    /// Forgets a project's publish short of Done, so Start runs fresh: the way out of a
+    /// job whose repository is gone on GitHub or whose name or visibility the owner wants
+    /// changed. Nothing on GitHub or in the project is touched. Input: the project folder.
+    /// Output: the `owner/name` of the repository the job left on GitHub, if it made one,
+    /// or `github_publish_not_started`, `github_publish_step_invalid` for a job at Done.
     pub fn publish_discard(&self, project: &Path) -> Result<Option<String>, EngineError> {
-        let _ = project;
-        Err(failure("github_publish_unbuilt"))
+        let _held = publishing(&self.root, project)?;
+        let job = self.job(project)?;
+        let left = match &job.step {
+            GitHubPublishStep::Done { .. } => return Err(failure("github_publish_step_invalid")),
+            GitHubPublishStep::Created { full_name, .. }
+            | GitHubPublishStep::Pushed { full_name, .. } => Some(full_name.clone()),
+            _ => None,
+        };
+        state::remove_job(&self.root, project)?;
+        Ok(job.made.or(left))
     }
 
     /// Reads a project's publish record, which a run in progress keeps up to date step by
@@ -367,13 +384,15 @@ impl GitHub {
         self.checked(job)
     }
 
-    /// Checks what the publish would push for secrets, the files publish wrote included,
-    /// and records the job as checked, or blocked on what was found. Input: the job.
-    /// Output: `()`, or the refusal.
+    /// Checks what the publish would push for secrets, with owner history the files publish
+    /// wrote included, which its commit takes by name, and records the job as checked, or
+    /// blocked on what was found. Input: the job. Output: `()`, or the refusal.
     fn checked(&self, job: &mut GitHubPublishJob) -> Result<(), EngineError> {
         let history = self.publish_inspect(&job.project)?.history;
         let mut scan = self.publish_secrets(&job.project, history)?;
-        publish::written_findings(&job.project, &job.written, &mut scan)?;
+        if history == GitHubHistory::Owner {
+            publish::written_findings(&job.project, &job.written, &mut scan)?;
+        }
         job.step = if scan.findings.is_empty() {
             assert!(!scan.truncated);
             GitHubPublishStep::Checked
@@ -385,9 +404,12 @@ impl GitHub {
 
     /// Runs a checked job on step by step, recording each step before the next starts:
     /// the commit, "create sent" before the create request, the repository, the push and
-    /// the rules. A step that fails leaves the job at the last one finished. Inputs: the
-    /// job and the owner's home folder. Output: `()`, or the failure.
+    /// the rules. A step that fails leaves the job at the last one finished. A push refused
+    /// because HEAD moved since the commit checks the project again and commits on the new
+    /// HEAD once per call, reusing the repository made. Inputs: the job and the owner's
+    /// home folder. Output: `()`, or the failure.
     fn advance(&self, job: &mut GitHubPublishJob, owner_home: &Path) -> Result<(), EngineError> {
+        let mut rechecked = false;
         loop {
             let next = match &job.step {
                 GitHubPublishStep::Lines { .. }
@@ -401,11 +423,17 @@ impl GitHub {
                     sent_at: now()?,
                 },
                 GitHubPublishStep::Creating { committed, sent_at } => {
-                    let created = self.made(&job.plan, *sent_at)?;
+                    let (full_name, private) = match &job.made {
+                        Some(full_name) => (full_name.clone(), job.plan.private),
+                        None => {
+                            let created = self.made(&job.plan, *sent_at)?;
+                            (created.full_name, created.private)
+                        }
+                    };
                     GitHubPublishStep::Created {
                         committed: committed.clone(),
-                        full_name: created.full_name,
-                        private: created.private,
+                        full_name,
+                        private,
                     }
                 }
                 GitHubPublishStep::Created {
@@ -414,11 +442,19 @@ impl GitHub {
                     private,
                 } => {
                     let workflows = self.workflows_allowed(&job.project, committed)?;
-                    self.publish_push(&job.project, full_name, committed)?;
-                    GitHubPublishStep::Pushed {
-                        full_name: full_name.clone(),
-                        private: *private,
-                        workflows,
+                    match self.publish_push(&job.project, full_name, committed) {
+                        Err(error) if error.0 == "github_publish_head_moved" && !rechecked => {
+                            rechecked = true;
+                            GitHubPublishStep::Checked
+                        }
+                        pushed => {
+                            pushed?;
+                            GitHubPublishStep::Pushed {
+                                full_name: full_name.clone(),
+                                private: *private,
+                                workflows,
+                            }
+                        }
                     }
                 }
                 GitHubPublishStep::Pushed {
@@ -441,6 +477,14 @@ impl GitHub {
                     }
                 }
             };
+            if next == GitHubPublishStep::Checked {
+                assert!(rechecked && matches!(job.step, GitHubPublishStep::Created { .. }));
+                self.checked(job)?;
+                continue;
+            }
+            if let GitHubPublishStep::Created { full_name, .. } = &next {
+                job.made = Some(full_name.clone());
+            }
             job.step = next;
             job.stopped = None;
             state::save_job(&self.root, job)?;

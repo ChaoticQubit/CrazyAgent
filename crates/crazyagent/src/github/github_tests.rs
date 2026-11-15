@@ -2150,6 +2150,7 @@ fn publish_job_runs_from_the_ignore_lines_to_done_and_records_each_step() {
                 },
             },
             stopped: None,
+            made: None,
         }
     );
     assert!(!project.join(".git").exists());
