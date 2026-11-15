@@ -2063,8 +2063,9 @@ fn a_confined_agent_cannot_add_shadow_or_link_a_git_object_in_the_shared_store()
 /// agents share, nor of its worktree's git links, so the owner's git and every landing keep
 /// reading them (RV-DS241-185): `chmod 000`, `chflags uchg` and `chmod +a` on a fan-out
 /// folder, a loose object, the admin folder's `commondir` and `gitdir` and the worktree's
-/// `.git` all fail, and the owner's git still reads the object. What a try changed is put
-/// back before the row checks, so its folder can be removed.
+/// `.git` all fail, as does a hard link of each into the worktree, a name it could change
+/// one through (rv-sa241 NV-1), and the owner's git still reads the object. What a try
+/// changed is put back before the row checks, so its folder can be removed.
 #[test]
 fn a_confined_agent_cannot_chmod_flag_or_acl_the_shared_git_objects_or_its_git_links() {
     use std::os::macos::fs::MetadataExt;
@@ -2105,6 +2106,7 @@ fn a_confined_agent_cannot_chmod_flag_or_acl_the_shared_git_objects_or_its_git_l
     };
     let before: Vec<Option<(u32, u32)>> = targets.iter().map(state).collect();
     assert!(before.iter().all(Option::is_some));
+    let linked = one.join("linked");
     let script = targets
         .iter()
         .flat_map(|target| {
@@ -2113,6 +2115,7 @@ fn a_confined_agent_cannot_chmod_flag_or_acl_the_shared_git_objects_or_its_git_l
                 format!("/bin/chmod 000 {target}"),
                 format!("/usr/bin/chflags uchg {target}"),
                 format!("/bin/chmod +a 'everyone deny read' {target}"),
+                format!("/bin/ln {target} {}", quoted(&linked)),
             ]
         })
         .map(|step| format!("{step} 2>/dev/null && echo \"changed: {step}\"\n"))
@@ -2147,6 +2150,7 @@ fn a_confined_agent_cannot_chmod_flag_or_acl_the_shared_git_objects_or_its_git_l
     let errors = String::from_utf8_lossy(&tried.stderr).into_owned();
     assert_eq!(stdout, "tried\n", "{errors}");
     assert_eq!(after, before);
+    assert!(fs::symlink_metadata(&linked).is_err());
     let acls = String::from_utf8_lossy(&listed.stdout).into_owned();
     assert!(!acls.contains("deny"), "{acls}");
     assert_eq!(git(&["cat-file", "-p", &loose]), "loose");
