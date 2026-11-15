@@ -3631,7 +3631,9 @@ fn teammates_clone_denies(clone: &Path, lead: Option<&str>) -> String {
 /// Spells plain text as a Seatbelt regex that matches every name a case-insensitive volume
 /// finds under it: each letter in both cases with every code point that folds onto it or
 /// onto a run of two or three letters ([`spelled`]), so the rule never leans on how Seatbelt
-/// folds names itself (SA vid 202). Input: text without a quote or backslash. Output: the
+/// folds names itself (SA vid 202). A stretch with more than [`SPELLINGS_MAX`] spellings, a
+/// long run of `s` or `f` in path text, is spelled as the [`superset`], which matches more,
+/// so the result holds in a deny. Input: text without a quote or backslash. Output: the
 /// pattern text, without anchors.
 pub(crate) fn any_case(text: &str) -> String {
     spelled(&regex_escape(text), false)
@@ -3639,15 +3641,17 @@ pub(crate) fn any_case(text: &str) -> String {
 
 /// A Seatbelt regex fragment matched as [`any_case`] matches plain text, every character
 /// that is not a letter, regex syntax included, staying as written; a letter run next to a
-/// wildcard also takes a fold reaching into it ([`spelled_run`]). Input: a fragment with no
-/// bracket class or quote. Output: the pattern.
+/// wildcard also takes a fold reaching into it ([`spelled_run`]). Every stretch is listed
+/// whole, so a rule that gives access back stays exact. Input: a fragment with no bracket
+/// class or quote. Output: the pattern.
 pub(crate) fn fold_case(pattern: &str) -> String {
     assert!(!pattern.contains('[') && !pattern.contains('"'));
     spelled(pattern, true)
 }
 
-/// The most spellings one stretch of letters between two places no fold spans may list.
-const SPELLINGS_MAX: usize = 64;
+/// The most spellings one stretch of letters between two places no fold spans lists one by
+/// one; past it path text takes the [`superset`] (B5 r2).
+const SPELLINGS_MAX: usize = 8;
 
 /// Spells text run by run from [`crate::instruction_files::ASCII_FOLDS`]: each run of ASCII
 /// letters through [`spelled_run`], every other character through [`spelled_char`]. In a
@@ -3675,7 +3679,7 @@ fn spelled(text: &str, regex: bool) -> String {
         let after = regex
             && characters.get(at) == Some(&'.')
             && matches!(characters.get(at + 1), Some('*' | '+'));
-        pattern.push_str(&spelled_run(&characters[start..at], before, after));
+        pattern.push_str(&spelled_run(&characters[start..at], before, after, regex));
     }
     pattern
 }
@@ -3722,9 +3726,11 @@ fn spelled_char(character: char) -> String {
 
 /// Spells one run of ASCII letters with every fold of two or three letters inside it and,
 /// next to a wildcard, every fold reaching past its first or last letter into the wildcard.
-/// The run splits where no fold spans, each stretch listing all its spellings. Inputs: the
-/// letters and whether a wildcard comes before and after them. Output: the pattern text.
-fn spelled_run(run: &[char], before: bool, after: bool) -> String {
+/// The run splits where no fold spans, each stretch listing all its spellings, or past
+/// [`SPELLINGS_MAX`] taking the [`superset`] unless it must stay exact. Inputs: the letters,
+/// whether a wildcard comes before and after them and whether every stretch must be listed
+/// whole. Output: the pattern text.
+fn spelled_run(run: &[char], before: bool, after: bool, exact: bool) -> String {
     let lower: String = run.iter().map(char::to_ascii_lowercase).collect();
     let count = run.len();
     let mut folds: Vec<(usize, usize, char)> = Vec::new();
@@ -3765,21 +3771,66 @@ fn spelled_run(run: &[char], before: bool, after: bool) -> String {
         .collect();
     let mut pattern = String::new();
     for stretch in cuts.windows(2) {
+        let (at, to) = (stretch[0], stretch[1]);
+        let (count, fewest) = tally(&pieces, at, to);
+        assert!(count >= 1 && (1..=to - at).contains(&fewest));
+        if count > SPELLINGS_MAX {
+            assert!(!exact, "a pattern stretch lists every spelling");
+            pattern.push_str(&superset(&pieces, at, to, fewest));
+            continue;
+        }
         let mut spellings = Vec::new();
-        spell_stretch(
-            &pieces,
-            stretch[0],
-            stretch[1],
-            String::new(),
-            &mut spellings,
-        );
-        assert!(!spellings.is_empty() && spellings.len() <= SPELLINGS_MAX);
+        spell_stretch(&pieces, at, to, String::new(), &mut spellings);
+        assert_eq!(spellings.len(), count);
         if let [only] = spellings.as_slice() {
             pattern.push_str(only);
         } else {
             pattern.push_str(&format!("({})", spellings.join("|")));
         }
     }
+    pattern
+}
+
+/// Counts the spellings of the letters from `at` to `to` that the pieces give, up to one
+/// past [`SPELLINGS_MAX`], and the fewest pieces one spelling takes, place by place from the
+/// end, so no long run is listed to be counted. Inputs: the pieces as start, end and
+/// pattern, and the stretch. Output: the count and the fewest pieces.
+fn tally(pieces: &[(usize, usize, String)], at: usize, to: usize) -> (usize, usize) {
+    assert!(at < to);
+    let mut counts = vec![0; to - at + 1];
+    let mut fewest = vec![0; to - at + 1];
+    counts[to - at] = 1;
+    for place in (at..to).rev() {
+        let ends: Vec<usize> = pieces
+            .iter()
+            .filter(|(start, end, _)| *start == place && *end <= to)
+            .map(|(_, end, _)| end - at)
+            .collect();
+        assert!(!ends.is_empty());
+        counts[place - at] = ends
+            .iter()
+            .fold(0, |sum, &end| (sum + counts[end]).min(SPELLINGS_MAX + 1));
+        fewest[place - at] = 1 + ends.iter().map(|&end| fewest[end]).min().unwrap_or(0);
+    }
+    (counts[0], fewest[0])
+}
+
+/// Spells the letters from `at` to `to` as one of the stretch's pieces at each place, at
+/// least `fewest` places and at most one per letter, the extra places optional, since
+/// Seatbelt reads no `{m,n}` count (probe 2026-11-15). It matches every spelling and more,
+/// so it holds only in a deny. Inputs: the pieces, the stretch and its fewest pieces.
+/// Output: the pattern.
+fn superset(pieces: &[(usize, usize, String)], at: usize, to: usize, fewest: usize) -> String {
+    let mut alternatives: Vec<&str> = Vec::new();
+    for (start, end, piece) in pieces {
+        if at <= *start && *end <= to && !alternatives.contains(&piece.as_str()) {
+            alternatives.push(piece);
+        }
+    }
+    let place = format!("({})", alternatives.join("|"));
+    let optional = format!("{place}?");
+    let pattern = place.repeat(fewest) + &optional.repeat(to - at - fewest);
+    assert!(fewest <= to - at && pattern.len() <= (to - at) * optional.len());
     pattern
 }
 
