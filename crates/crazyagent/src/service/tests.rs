@@ -2182,7 +2182,7 @@ fn a_part_an_access_list_opens_to_others_is_changeable() {
 
 /// RV-DS241-18: a macOS `ls -lde` listing names an entry changeable by others when an
 /// allow entry gives write, append, add or delete rights, or rights over the entry's own
-/// attributes, security or owner, to anyone but this user, root, wheel or admin; deny
+/// attributes, security or owner, to anyone but this user, root, wheel, daemon or admin; deny
 /// entries and read rights never do, and a listing it cannot read fails closed.
 #[cfg(unix)]
 #[test]
@@ -2225,6 +2225,7 @@ fn an_access_listing_that_lets_others_change_an_entry_is_shared() {
         "user:me allow write,append,delete",
         "user:root allow write",
         "group:wheel allow add_file",
+        "group:daemon allow add_file",
         "group:admin allow add_file",
         "user:other allow read,list,search,readattr,readextattr,readsecurity,execute",
         "group:staff inherited deny add_file,delete_child",
