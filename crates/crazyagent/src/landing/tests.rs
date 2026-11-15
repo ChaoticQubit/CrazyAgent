@@ -15602,6 +15602,46 @@ fn the_engine_start_keeps_a_foreign_index_lock_beside_a_left_step_folder() {
     }
 }
 
+/// RV-DS241-135 r2 (rv-code4 F1): while a confined Linux step runs, the `index.lock` it took
+/// holds `crazyagent-step <pid> <start>` for this engine process. The start sweep reads that
+/// very text as the engine's: kept while this engine runs, swept once the process it names
+/// is gone.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_step_on_linux_names_its_engine_process_in_the_lock_it_takes() {
+    let case = Case::new();
+    let _master = master_agent(&case);
+    let repo = confined_agent(&case, git::Writes::WorkTree);
+    let lock = case.workspace.git_dir.join("index.lock");
+    let pid = i32::try_from(std::process::id()).unwrap();
+    let started = crate::storage::harness_groups::start_identity(pid)
+        .unwrap()
+        .unwrap();
+    let mut seen = String::new();
+    repo.swapped(|| {
+        seen = std::fs::read_to_string(&lock).unwrap();
+        Ok(git::Output {
+            code: 0,
+            stdout: Vec::new(),
+            overflow: false,
+        })
+    })
+    .unwrap();
+    assert_eq!(seen, format!("crazyagent-step {pid} {started}\n"));
+    assert!(
+        std::fs::symlink_metadata(&lock).is_err(),
+        "the step left its lock"
+    );
+    write(&lock, &seen);
+    assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 0);
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), seen);
+    let gone = seen.replacen(&format!(" {pid} "), &format!(" {} ", i32::MAX), 1);
+    assert_ne!(gone, seen);
+    write(&lock, &gone);
+    assert_eq!(crate::landing::clear_step_locks(&case.db).unwrap(), 1);
+    assert!(std::fs::symlink_metadata(&lock).is_err());
+}
+
 /// The other half of LINUX-GIT-CONFINE r1 F1: an index that already is a link, FIFO, second
 /// hard link or folder is never read or copied by a confined Linux step. The step refuses
 /// with `changes_git_failed` before git runs, at once even for a FIFO, and nothing from
