@@ -2099,6 +2099,7 @@ fn creates(server: &Server) -> Vec<Seen> {
 fn new_project(files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
     let folder = tempfile::tempdir().unwrap();
     let project = folder.path().canonicalize().unwrap();
+    std::fs::create_dir(project.join(".crazyagent")).unwrap();
     for (path, text) in files {
         let path = project.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
