@@ -3949,11 +3949,11 @@ fn register_rcli_profile(
 /// each member without a registration whose engine-generated SDK home exists, each member
 /// whose registration was made under an older binding, from custody's unchanged profile,
 /// and each member whose pinned home custody no longer loads, such as a config an undone
-/// account save put back with a new change time, which registration re-pins only when the
-/// home differs in its times alone. Inputs: the actor database, settings, custody, host
-/// and the session. Output: Ok; a member that cannot register is left for its turn check
-/// to name, except the owner's chosen member with an unchanged home, whose failure stops
-/// the preparation as before.
+/// account save put back with a new change time, on the home its slot pins, which
+/// registration re-pins only when it differs in its times alone. Inputs: the actor
+/// database, settings, custody, host and the session. Output: Ok; a member that cannot
+/// register is left for its turn check to name, except the owner's chosen member with an
+/// unchanged home, whose failure stops the preparation as before.
 fn register_generated_rcli_profile(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -3986,28 +3986,39 @@ fn register_generated_rcli_profile(
         {
             continue;
         }
-        let (stale, moved) = match registration(&tx, session_id, &profile)? {
-            None => (None, false),
+        let (stale, pinned) = match registration(&tx, session_id, &profile)? {
+            None => (None, None),
             Some(record) => match validate_registration(&tx, &session, &record) {
                 Err(failure) if failure.0 == "master_configured_receipt_stale" => {
-                    (Some(record), false)
+                    (Some(record), None)
                 }
                 Err(failure) if failure.0 == "rcli_profile_identity_changed" => {
-                    (Some(record), true)
+                    let Some(pinned) = custody.as_ref().ok().and_then(|custody| {
+                        custody
+                            .configured_rcli_home(host, &record.proof.profile_ref)
+                            .ok()
+                    }) else {
+                        continue;
+                    };
+                    (Some(record), Some(pinned))
                 }
                 Ok(()) | Err(_) => continue,
             },
         };
         let account = super::account_profile::configured_profile_ref(member)?;
-        pending.push((member.clone(), account, stale, chosen && !moved));
+        let chosen = chosen && pinned.is_none();
+        pending.push((member.clone(), account, stale, chosen, pinned));
     }
     drop(tx);
     assert!(pending.len() <= crate::config::POOL_MEMBERS_MAX);
-    for (member, account, stale, chosen) in pending {
-        let home = custody
-            .as_ref()
-            .map_err(|failure| failure.clone())?
-            .generated_configured_home(&account);
+    for (member, account, stale, chosen, pinned) in pending {
+        let home = match pinned {
+            Some(pinned) => pinned,
+            None => custody
+                .as_ref()
+                .map_err(|failure| failure.clone())?
+                .generated_configured_home(&account),
+        };
         let registered = if home.join(".backboard/config.json").is_file() {
             let registration = RcliRegistration {
                 host,

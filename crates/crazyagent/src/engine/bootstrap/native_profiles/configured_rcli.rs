@@ -586,6 +586,24 @@ impl NativeProfileCustody {
         Ok(metadata)
     }
 
+    /// The configured home a slot pins, read from its manifest under the retained root
+    /// without loading the home. Inputs: the host and the slot's profile ref. Output: the
+    /// pinned path, or the slot's read failure.
+    pub(crate) fn configured_rcli_home(
+        &self,
+        host: &HostStamp,
+        target_profile_ref: &CredentialRef,
+    ) -> Result<PathBuf, EngineError> {
+        self.verify()?;
+        let (root, _, root_identity) = self.retained_root(host).map_err(configuration_missing)?;
+        let slots = scan_slots(&root.file)?;
+        let key = digest(target_profile_ref.as_str().as_bytes());
+        let (_, _, actual) =
+            self.read_configured_slot(&root, &root_identity, &slots, &key, target_profile_ref)?;
+        self.validate_configured_home_path(&actual.configured.path)?;
+        Ok(actual.configured.path)
+    }
+
     pub(crate) fn configured_rcli_profile(
         &mut self,
         host: &HostStamp,

@@ -219,6 +219,14 @@ impl NativeProfileCustody {
         match *self {}
     }
 
+    pub(crate) fn configured_rcli_home(
+        &self,
+        _host: &HostStamp,
+        _target_profile_ref: &CredentialRef,
+    ) -> Result<PathBuf, EngineError> {
+        match *self {}
+    }
+
     pub(crate) fn configured_rcli_profile(
         &mut self,
         _host: &HostStamp,
