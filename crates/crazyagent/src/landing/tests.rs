@@ -3613,29 +3613,6 @@ fn the_onboarding_listing_keeps_out_what_the_owners_global_ignore_file_names() {
     assert_eq!(kept, Some(vec!["scratch.txt".to_owned()]));
 }
 
-/// SA vid 2: a turn end still leaves out what the owner's ignore file names now that its
-/// patterns reach the add as names: a folder the file ignores, listed once with a closing
-/// `/`, with everything below it, and files a wildcard pattern names at any depth.
-#[test]
-fn a_folder_and_files_the_owners_ignore_file_names_stay_out_of_change_sets() {
-    let case = Case::new();
-    write(&case.home.join(".config/git/ignore"), "cache/\n*.tmp\n");
-    case.edit("README", "one\ntwo\nthree\nfour\n");
-    case.edit("cache/a.txt", "cached\n");
-    case.edit("cache/deep/b.txt", "cached\n");
-    case.edit("notes.tmp", "scratch\n");
-    case.edit("docs/draft.tmp", "scratch\n");
-
-    let id = case.turn(TurnOutcome::Succeeded).unwrap();
-
-    let view = case.view(&id);
-    assert_eq!(view.files, 1);
-    assert_eq!(
-        case.owner(&["ls-tree", "-r", "--name-only", &view.head]),
-        "README\n"
-    );
-}
-
 #[test]
 fn files_the_owners_global_ignore_file_excludes_stay_out_of_change_sets() {
     let configured: [(&str, Option<&str>); 2] = [
@@ -3692,6 +3669,29 @@ fn files_the_owners_global_ignore_file_excludes_stay_out_of_change_sets() {
             "{file}"
         );
     }
+}
+
+/// SA vid 2: a turn end still leaves out what the owner's ignore file names now that its
+/// patterns reach the add as names: a folder the file ignores, listed once with a closing
+/// `/`, with everything below it, and files a wildcard pattern names at any depth.
+#[test]
+fn a_folder_and_files_the_owners_ignore_file_names_stay_out_of_change_sets() {
+    let case = Case::new();
+    write(&case.home.join(".config/git/ignore"), "cache/\n*.tmp\n");
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.edit("cache/a.txt", "cached\n");
+    case.edit("cache/deep/b.txt", "cached\n");
+    case.edit("notes.tmp", "scratch\n");
+    case.edit("docs/draft.tmp", "scratch\n");
+
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+
+    let view = case.view(&id);
+    assert_eq!(view.files, 1);
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &view.head]),
+        "README\n"
+    );
 }
 
 #[test]
