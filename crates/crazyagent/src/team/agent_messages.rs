@@ -478,6 +478,21 @@ pub(crate) fn said_before(
         .map_err(error)
 }
 
+/// Keeps an engine notice for a sub-agent unless the same notice is still kept for it, so an
+/// agent started again for each turn is told once. Takes the transaction, the project, the
+/// agent, the text and the time. Returns whether the notice was written now.
+pub(crate) fn note_once(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    agent: i64,
+    text: &str,
+    now: i64,
+) -> Result<bool, EngineError> {
+    assert!(agent > 0);
+    record(tx, project, agent, Said::Notice, text, now)?;
+    Ok(true)
+}
+
 /// Reads one page of a project sub-agent's Messages timeline as the owner gets it: `read`,
 /// fitted to one owner reply by `fit`. Takes the connection, the project, the agent, the
 /// cursor of the newest entry not wanted and the page size, none for the project's setting.
