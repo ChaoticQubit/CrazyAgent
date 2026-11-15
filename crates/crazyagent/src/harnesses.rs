@@ -868,10 +868,11 @@ pub fn run_min(id: &str) -> Option<&'static str> {
     registry::registry().get(id)?.minimum_version()
 }
 
-/// Tells whether an installed harness is older than the oldest version CrazyAgent drives, so
-/// it shows "needs X or newer" with its Update line and is not launched. Inputs: the harness
-/// and the installed version, None when unknown. Output: true only for a known version below
-/// the manifest's floor; a version that is not plain numbers is never below.
+/// Tells whether an installed harness is older than the oldest version CrazyAgent drives,
+/// the test a client's "needs X or newer" line and a launch that knows the installed
+/// version use. Inputs: the harness and the installed version, None when unknown. Output:
+/// true only for a known version below the manifest's floor; a version that is not plain
+/// numbers is never below.
 pub fn too_old(harness: &registry::Harness, installed: Option<&str>) -> bool {
     match (harness.minimum_version(), installed) {
         (Some(minimum), Some(installed)) => update::below(installed, minimum),
