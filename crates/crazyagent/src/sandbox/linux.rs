@@ -1073,17 +1073,20 @@ fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
 }
 
 /// Reads what this machine holds for an agent beyond its Landlock rules: whether the
-/// kernel scopes signals (the helper's `--scoped`) and whether the helper's plain probe
-/// passes inside bubblewrap's namespaces ([`nests`]), as a launch asks it. Input: the
-/// helper. Output: the facts, each false when its question cannot be asked.
+/// kernel scopes signals (the helper's `--scoped`) and whether a launch gives the agent a
+/// process namespace: the plain probe passes inside bubblewrap's namespaces ([`nests`]), or
+/// fails outside them, which sends every launch through bubblewrap. Input: the helper.
+/// Output: the facts, each false when its question cannot be asked.
 pub fn read_host(helper: &Path) -> super::LinuxHost {
     let usable = clean_absolute(helper) && helper.is_file();
     let scoped = usable && passes(Command::new(helper).arg(SCOPED));
+    let held = usable && passes(Command::new(helper).arg(PROBE));
     let bwrap = BWRAP_PATHS
         .iter()
         .map(Path::new)
         .find(|path| path.is_file());
-    let nested = usable && bwrap.is_some_and(|bwrap| nests(bwrap, helper, &[PROBE.into()]));
+    let apart = |bwrap: &Path| !held || nests(bwrap, helper, &[PROBE.into()]);
+    let nested = usable && bwrap.is_some_and(apart);
     super::LinuxHost { nested, scoped }
 }
 
