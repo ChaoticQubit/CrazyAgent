@@ -108,8 +108,8 @@ const NO_SUB_AGENTS = "Not available: runs only as a master";
 const SUB_AGENT_HARNESSES: readonly CoordHarness[] = ["claude-code", "codex"];
 
 /** Tells why no sub-agent runs on a harness kind: a kind the engine launches no team agent on,
- * today rcli, keeps its rows, which say so instead of a live control (DEC-141 PA-15). The
- * engine's team::launch_harness and NO_SUB_AGENTS are the source a test ties this to.
+ * today rcli, keeps its rows, which say so instead of a live control (DEC-141 PA-15). A test
+ * ties this to the agent role in each kind's harness manifest and to the engine's NO_SUB_AGENTS.
  * Input: the harness kind. Output: the reason, or undefined for a kind sub-agents run on. */
 export function subAgentsUnavailable(harness: CoordHarness): string | undefined {
   return SUB_AGENT_HARNESSES.includes(harness) ? undefined : NO_SUB_AGENTS;

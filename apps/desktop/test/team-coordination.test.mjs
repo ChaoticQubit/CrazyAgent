@@ -262,8 +262,14 @@ test("a coordination save keeps the value the TUI or another window set since, e
 
 test("a harness kind no sub-agent runs on keeps its rows, each saying why instead of a live control (PA-15, DEC-141)", () => {
   const team = readFileSync(new URL("../../../crates/crazyagent/src/team.rs", import.meta.url), "utf8");
-  const start = team.indexOf("pub fn launch_harness");
-  const runs = [...team.slice(start, team.indexOf("\n}\n", start)).matchAll(/"([a-z-]+)"/gu)].map((match) => match[1]);
+  const roles = (harness) => {
+    const manifest = readFileSync(new URL(`../../../crates/crazyagent/harness-manifests/${harness}.yaml`, import.meta.url), "utf8");
+    const listed = manifest.match(/^roles:\n((?:  - "[a-z_]+"\n)+)/mu);
+    assert.ok(listed, `${harness}: its manifest lists its roles`);
+    return [...listed[1].matchAll(/"([a-z_]+)"/gu)].map((match) => match[1]);
+  };
+  const runs = coord.COORD_HARNESSES.filter((harness) => roles(harness).includes("agent"));
+  assert.ok(runs.length > 0 && runs.length < coord.COORD_HARNESSES.length, "some kinds run team agents and some do not");
   const sentence = team.match(/pub const NO_SUB_AGENTS: &str =\s*"([^"]+)";/u);
   assert.ok(sentence, "the engine names the reason once");
   const status = { project_id: "p", coordination: { settings: coord.COORD_DEFAULTS, harnesses: [] } };
