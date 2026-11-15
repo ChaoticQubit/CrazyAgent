@@ -5,7 +5,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { LINUX_SOCKETS, SandboxSettingsView } = await import("../src/screens/settings/sandbox.tsx");
+const { LINUX_SOCKETS, LINUX_SUPERVISOR, LINUX_SUPERVISOR_DEFAULT, SandboxSettingsView, sandboxDraft } = await import("../src/screens/settings/sandbox.tsx");
 const { knownError } = await import("../src/api.ts");
 const { SETTINGS_TABS } = await import("../src/ui/router.ts");
 
@@ -17,6 +17,9 @@ const view = (settings, extra = {}) => renderToStaticMarkup(createElement(Sandbo
 const checked = (markup) => [...markup.matchAll(/<input type="radio" name="linux-sockets"[^>]*>/g)]
   .filter(([input]) => / checked=""/.test(input)).map(([input]) => input.match(/ value="([a-z_]+)"/)[1]);
 const saveDisabled = (markup) => /<button type="submit"[^>]*disabled=""/.test(markup);
+const stored = (linux_sockets, linux_supervisor) => ({ kind: "ok", value: { linux_sockets, linux_supervisor } });
+const supervised = (markup) => [...markup.matchAll(/<input type="radio" name="linux-supervisor"[^>]*>/g)]
+  .filter(([input]) => / checked=""/.test(input)).map(([input]) => input.match(/ value="([a-z_]+)"/)[1]);
 
 test("Settings, Sandbox lists every Linux sockets option with what it allows and risks", () => {
   assert.ok(SETTINGS_TABS.includes("sandbox"));
@@ -62,6 +65,54 @@ test("picking TCP ports only enables Save changes and a refused save shows why",
   const saving = view(ok("tcp_only"), { picked: "tcp_ports", saving: true });
   assert.match(saving, /<fieldset[^>]*disabled=""/);
   assert.match(saving, /Saving\.\.\./);
+});
+
+test("Settings, Sandbox lists the Linux call supervisor's On and Off with what each keeps, in the TUI's words (DEC-179 T4c)", () => {
+  const markup = view(stored("tcp_only", "on"));
+  assert.match(markup, /Linux call supervisor/);
+  assert.deepEqual(LINUX_SUPERVISOR.map((option) => option.value), ["on", "off"]);
+  assert.equal(LINUX_SUPERVISOR_DEFAULT, "on");
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/app_setup.rs", import.meta.url), "utf8");
+  for (const option of LINUX_SUPERVISOR) {
+    assert.ok(markup.includes(option.title.replaceAll("'", "&#x27;")), option.title);
+    assert.ok(markup.includes(option.detail.replaceAll("'", "&#x27;")), option.detail);
+    assert.ok(tui.includes(`"${option.title}"`), `the TUI says ${option.title}`);
+    assert.ok(tui.includes(`"${option.detail}"`), `the TUI says ${option.detail}`);
+  }
+  assert.match(LINUX_SUPERVISOR[0].detail, /makes them for them/);
+  assert.match(LINUX_SUPERVISOR[1].detail, /open to them on every host/);
+});
+
+test("each supervisor option is checked as stored, and picking the other enables Save with the sockets choice kept", () => {
+  for (const [value, other] of [["on", "off"], ["off", "on"]]) {
+    const markup = view(stored("tcp_ports", value));
+    assert.deepEqual(supervised(markup), [value]);
+    assert.deepEqual(checked(markup), ["tcp_ports"]);
+    assert.ok(saveDisabled(markup), `${value} saves nothing until changed`);
+    const picked = view(stored("tcp_ports", value), { pickedSupervisor: other });
+    assert.deepEqual(supervised(picked), [other]);
+    assert.deepEqual(checked(picked), ["tcp_ports"], "the sockets choice stays");
+    assert.ok(!saveDisabled(picked));
+  }
+});
+
+test("Save sends both Linux settings, each as picked or else as stored", () => {
+  const both = { linux_sockets: "refuse", linux_supervisor: "on" };
+  assert.deepEqual(sandboxDraft(both, null, null), both);
+  assert.deepEqual(sandboxDraft(both, null, "off"), { linux_sockets: "refuse", linux_supervisor: "off" });
+  assert.deepEqual(sandboxDraft(both, "tcp_only", null), { linux_sockets: "tcp_only", linux_supervisor: "on" });
+  assert.deepEqual(sandboxDraft(both, "tcp_ports", "off"), { linux_sockets: "tcp_ports", linux_supervisor: "off" });
+  const source = readFileSync(new URL("../src/screens/settings/sandbox.tsx", import.meta.url), "utf8");
+  assert.match(source, /saveSandboxSettings\(sandboxDraft\(settings\.value, picked, pickedSupervisor\)\)/);
+});
+
+test("the supervisor options are the engine's LinuxSupervisor names", () => {
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
+  const body = engine.match(/#\[serde\(rename_all = "snake_case"\)\]\s*pub enum LinuxSupervisor \{([^}]*)\}/);
+  assert.ok(body, "sandbox.rs declares LinuxSupervisor in snake case");
+  const names = [...body[1].matchAll(/^\s*([A-Z][A-Za-z]*),/gm)].map(([, name]) => name.toLowerCase());
+  assert.deepEqual(names, LINUX_SUPERVISOR.map((option) => option.value));
+  assert.match(engine, /pub enum LinuxSupervisor \{\s*#\[default\]\s*On,/, "On is the engine's default");
 });
 
 test("loading, not ready and a failed read each say so", () => {
