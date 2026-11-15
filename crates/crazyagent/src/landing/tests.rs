@@ -3694,6 +3694,31 @@ fn a_folder_and_files_the_owners_ignore_file_names_stay_out_of_change_sets() {
     );
 }
 
+/// SA vid 2 r1 (rv-code2 F2): what the owner's ignore file keeps out reaches the add as literal
+/// names, so a name holding a glob character, a leading `-`, a leading `:` or a `)` leaves out
+/// only itself, and a file a glob reading of `a*b` would also catch still lands.
+#[test]
+fn odd_names_the_owners_ignore_file_names_leave_out_only_themselves() {
+    let case = Case::new();
+    write(
+        &case.home.join(".config/git/ignore"),
+        "a\\*b\n-lead\n:colon\np)q\n",
+    );
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    for name in ["a*b", "-lead", ":colon", "p)q", "aXb"] {
+        case.edit(name, "agent\n");
+    }
+
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+
+    let view = case.view(&id);
+    assert_eq!(view.files, 2);
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &view.head]),
+        "README\naXb\n"
+    );
+}
+
 #[test]
 fn the_proposed_message_reuses_the_agent_commit_subjects_newest_first_and_lands() {
     let case = Case::new();
@@ -15726,6 +15751,33 @@ fn a_confined_read_tree_on_linux_leaves_an_index_the_next_move_can_put_back() {
         git_in(&case.home, &worktree, &["status", "--porcelain"]),
         ""
     );
+}
+
+/// SA vid 2 r1 (rv-sec3 F1): a confined Linux step's git takes no excludes file, so a
+/// `read-tree -u -m` counts an untracked file only the owner's ignore file names as the agent's,
+/// as it does any untracked file: where the target tracks that path the move refuses and changes
+/// nothing, the file and the index left as they were, instead of writing over the file as the
+/// step did while it read the owner's file. The refusal fails closed; macOS, whose step still
+/// reads that file, writes over it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_confined_read_tree_on_linux_keeps_an_untracked_file_only_the_owners_ignore_file_names() {
+    let case = Case::new();
+    let worktree = case.workspace.worktree.clone();
+    let index = case.workspace.git_dir.join("index");
+    let target = case.owner_commit("build.tmp", "tracked\n", "Target");
+    write(&case.home.join(".config/git/ignore"), "*.tmp\n");
+    write(&worktree.join("build.tmp"), "the agent's\n");
+    let before = std::fs::read(&index).unwrap();
+    let moved = confined_agent(&case, git::Writes::WorkTree)
+        .exec(&["read-tree", "-u", "-m", "HEAD", &target], None, &[], 4096)
+        .unwrap();
+    assert_ne!(moved.code, 0, "read-tree wrote over the untracked file");
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("build.tmp")).unwrap(),
+        "the agent's\n"
+    );
+    assert_eq!(std::fs::read(&index).unwrap(), before);
 }
 
 /// LINUX-GIT-CONFINE r1 F2 (rv-code), RV-DS241-135: an engine stopped during a confined Linux
