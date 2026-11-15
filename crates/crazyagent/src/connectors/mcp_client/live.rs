@@ -88,6 +88,8 @@ pub(super) struct Live {
     listed: bool,
     left_out: usize,
     next_id: u64,
+    #[cfg(test)]
+    vet: bool,
 }
 
 fn client() -> Value {
@@ -166,8 +168,36 @@ impl Live {
         cap: SizeCap,
         reach: ProviderReach,
     ) -> Result<Self, McpError> {
+        Self::new(root, endpoint, auth, access, cap, reach)?.begin()
+    }
+
+    /// [`Self::open`] for rows that count lookups: the address of the stand-in on this
+    /// machine is looked up and vetted before every request like a vendor's name, and
+    /// the result is still never handed to curl.
+    #[cfg(test)]
+    pub(super) fn open_vetting(
+        root: &Path,
+        endpoint: &McpEndpoint,
+        auth: &Credential,
+        access: Access,
+        cap: SizeCap,
+        reach: ProviderReach,
+    ) -> Result<Self, McpError> {
+        let mut live = Self::new(root, endpoint, auth, access, cap, reach)?;
+        live.vet = true;
+        live.begin()
+    }
+
+    fn new(
+        root: &Path,
+        endpoint: &McpEndpoint,
+        auth: &Credential,
+        access: Access,
+        cap: SizeCap,
+        reach: ProviderReach,
+    ) -> Result<Self, McpError> {
         let target = guard::target(endpoint, access)?;
-        let mut live = Self {
+        Ok(Self {
             root: root.to_path_buf(),
             target,
             auth: auth.clone(),
@@ -180,12 +210,17 @@ impl Live {
             listed: false,
             left_out: 0,
             next_id: 1,
-        };
-        live.era = live.probe()?;
-        if live.era == Era::Legacy {
-            live.hello()?;
+            #[cfg(test)]
+            vet: false,
+        })
+    }
+
+    fn begin(mut self) -> Result<Self, McpError> {
+        self.era = self.probe()?;
+        if self.era == Era::Legacy {
+            self.hello()?;
         }
-        Ok(live)
+        Ok(self)
     }
 
     pub(super) fn left_out(&self) -> usize {
@@ -193,9 +228,6 @@ impl Live {
     }
 
     fn pins(&self) -> Result<Option<String>, McpError> {
-        if self.target.loopback {
-            return Ok(None);
-        }
         let address = || refused("connector_address_refused");
         let host = self.target.url.host_str().ok_or_else(address)?;
         let port = self
@@ -203,6 +235,13 @@ impl Live {
             .url
             .port_or_known_default()
             .ok_or_else(address)?;
+        if self.target.loopback {
+            #[cfg(test)]
+            if self.vet {
+                guard::pins(host, port, &self.reach)?;
+            }
+            return Ok(None);
+        }
         guard::pins(host, port, &self.reach).map(Some)
     }
 

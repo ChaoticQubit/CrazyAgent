@@ -191,6 +191,20 @@ impl McpSession {
         live::Live::open(root, endpoint, auth, access, cap, reach).map(|live| Self { live })
     }
 
+    /// [`Self::open_with`] for rows that count lookups: the stand-in's address on this
+    /// machine is looked up and vetted before every request, and never handed to curl.
+    #[cfg(test)]
+    pub(crate) fn open_vetting(
+        root: &Path,
+        endpoint: &McpEndpoint,
+        auth: &Credential,
+        access: Access,
+        cap: SizeCap,
+        reach: ProviderReach,
+    ) -> Result<Self, McpError> {
+        live::Live::open_vetting(root, endpoint, auth, access, cap, reach).map(|live| Self { live })
+    }
+
     /// Lists the vendor's tools, every page, cleaned. Output: at most `TOOLS_MAX` tools, or
     /// `connector_tools_limit` for a longer list.
     pub fn list_tools(&mut self) -> Result<Vec<VendorTool>, McpError> {

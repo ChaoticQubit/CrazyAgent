@@ -1765,3 +1765,110 @@ fn every_mcp_client_code_has_a_plain_sentence() {
         assert!(MCP_CODES.contains(&error.code()), "{error:?}");
     }
 }
+
+#[test]
+fn curl_reaches_the_address_the_guard_pinned_and_looks_no_name_up_itself() {
+    let desk = desk();
+    let vendor = Vendor::start(|seen, _, stream| {
+        send(stream, &result(seen, json!({"resultType": "complete"})));
+    });
+    let host = format!("pinned.invalid:{}", vendor.port);
+    let url = url::Url::parse(&format!("http://{host}/mcp")).unwrap();
+    let pins = format!("{host}:127.0.0.1");
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
+    let reply = super::wire::send(
+        &desk.case.root,
+        &super::wire::Request {
+            url: &url,
+            verb: super::wire::Verb::Post(body.as_bytes()),
+            pins: Some(&pins),
+            headers: &[],
+            auth: &desk.bearer,
+            wait: Some(json!(1)),
+        },
+    )
+    .unwrap();
+    assert_eq!(reply.status, 200);
+    let seen = vendor.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].header("host"), Some(host.as_str()));
+    assert_eq!(seen[0].rpc(), "ping");
+}
+
+#[test]
+fn every_request_looks_the_vendor_up_again_and_one_that_turns_private_is_not_sent() {
+    let desk = desk();
+    let vendor = Vendor::start(|seen, _, stream| {
+        if seen.verb == "DELETE" {
+            send(stream, &empty("200 OK", &[]));
+            return;
+        }
+        let reply = legacy(seen, Some("sess-1"), "2025-06-18").unwrap_or_else(|| {
+            match (seen.rpc(), seen.body["params"].get("cursor")) {
+                ("tools/list", None) => result(
+                    seen,
+                    json!({"tools": [tool("list_issues")], "nextCursor": "p2"}),
+                ),
+                ("tools/list", Some(_)) => result(seen, json!({"tools": [tool("get_issue")]})),
+                ("tools/call", _) => result(seen, text_result("ran")),
+                other => panic!("{other:?}"),
+            }
+        });
+        send(stream, &reply);
+    });
+    let looked = Arc::new(AtomicUsize::new(0));
+    let private_from = Arc::new(AtomicUsize::new(usize::MAX));
+    let (count, turn) = (looked.clone(), private_from.clone());
+    let reach = ProviderReach::new(
+        move |name, port| {
+            assert_eq!(name, "127.0.0.1");
+            let at = count.fetch_add(1, Ordering::SeqCst) + 1;
+            let address = if at >= turn.load(Ordering::SeqCst) {
+                "10.0.0.5"
+            } else {
+                "1.1.1.1"
+            };
+            Ok(vec![SocketAddr::new(address.parse().unwrap(), port)])
+        },
+        |_| panic!("the client never dials by itself"),
+    );
+    let mut session = McpSession::open_vetting(
+        &desk.case.root,
+        &vendor.endpoint(),
+        &desk.bearer,
+        Access::Full,
+        SizeCap::Kib256,
+        reach,
+    )
+    .unwrap();
+    let lookups = || looked.load(Ordering::SeqCst);
+    assert_eq!(
+        vendor.calls(),
+        ["server/discover", "initialize", "notifications/initialized"]
+    );
+    assert_eq!(lookups(), 3);
+    let tools = session.list_tools().unwrap();
+    assert_eq!(names(&tools), ["list_issues", "get_issue"]);
+    assert_eq!(lookups(), 5);
+    assert!(session.call("list_issues", &json!({})).is_ok());
+    assert_eq!(lookups(), 6);
+    assert_eq!(vendor.seen().len(), 6);
+
+    private_from.store(7, Ordering::SeqCst);
+    assert_eq!(
+        session.call("list_issues", &json!({})),
+        Err(McpError::Refused("connector_host_private"))
+    );
+    assert_eq!(lookups(), 7);
+    assert_eq!(vendor.seen().len(), 6);
+
+    private_from.store(usize::MAX, Ordering::SeqCst);
+    assert!(session.call("get_issue", &json!({})).is_ok());
+    assert_eq!(lookups(), 8);
+    session.close();
+    assert_eq!(lookups(), 9);
+    let seen = vendor.seen();
+    assert_eq!(seen.len(), 8);
+    assert_eq!(seen[7].verb, "DELETE");
+    assert_eq!(seen[7].header("mcp-session-id"), Some("sess-1"));
+}
