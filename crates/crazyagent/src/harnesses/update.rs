@@ -817,9 +817,9 @@ fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'stati
 /// Passes a command only when the tool resolver would run its program and every copy of an
 /// interpreter the program asks `env` for by name that the command's own search folders
 /// hold, since the child's PATH looks there first and would find that copy ahead of the one
-/// the resolver vetted. Inputs: the command and the resolver's places. Output: Ok, or
-/// `TOOL_UNSAFE`.
-fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<(), &'static str> {
+/// the resolver vetted. Inputs: the command and the resolver's places. Output: the real file
+/// the resolver resolved the program to and checked, or `TOOL_UNSAFE`.
+fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<PathBuf, &'static str> {
     let resolved = crate::tools::resolve_entry(&fixed.program, places).map_err(|_| TOOL_UNSAFE)?;
     let mut at = &resolved;
     for _ in 0..=crate::tools::INTERPRETER_DEPTH_MAX {
@@ -829,7 +829,7 @@ fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<(), &'static s
             ..
         } = &at.kind
         else {
-            return Ok(());
+            return Ok(resolved.program.clone());
         };
         if *by_name {
             let name = interpreter.entry.file_name().ok_or(TOOL_UNSAFE)?;

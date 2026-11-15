@@ -349,15 +349,26 @@ fn updated(
 /// Asks a harness for its version only when the tool resolver would run it and every
 /// interpreter its first line names, with no refused copy of one in its own folder
 /// ([`super::vetted`]), so a file agents can write, or one whose program is missing, is never
-/// started for a version. Inputs: the harness executable, the home folder and the resolver's
-/// places. Output: the version, or none.
+/// started for a version. It runs the real file the resolver checked, once that file passes
+/// again by its own path, with the entry's folder kept as the search an interpreter asked for
+/// by name is found in, so no link of the entry's chain is followed after the check.
+/// Inputs: the harness executable, the home folder and the resolver's places. Output: the
+/// version, or none.
 pub(super) fn version_if_runs(
     executable: &Path,
     home: &Path,
     places: &crate::tools::Places,
 ) -> Option<String> {
-    let fixed = version_command(executable)?;
-    super::vetted(&fixed, places).ok()?;
+    let entry = version_command(executable)?;
+    let real = super::vetted(&entry, places).ok()?;
+    let fixed = Fixed {
+        program: real,
+        ..entry
+    };
+    if super::vetted(&fixed, places).ok()? != fixed.program {
+        return None;
+    }
+    assert!(fixed.program.is_absolute());
     #[cfg(test)]
     if let Some(step) = between_vetted_and_run(executable) {
         step();
