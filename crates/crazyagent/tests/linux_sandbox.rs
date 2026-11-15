@@ -154,6 +154,65 @@ fn assert_boundary(case: &Case, output: &Output) {
     );
 }
 
+/// The state field of `/proc/<pid>/stat`, or None once the process is gone. Input: the
+/// process id. Output: the state letter, `Z` for one that exited and waits to be reaped.
+fn process_state(pid: u32) -> Option<char> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(") ")?.1.chars().next()
+}
+
+/// RV-DS241-142: a helper run told to die with its parent (`--die-with <pid>`, as every engine
+/// git step is) starts its program, which the helper became, and that program is killed once
+/// its parent exits, so a git step never outlives the engine that took its lock. A parent id
+/// that is not the helper's parent is refused (exit 3) before the program starts.
+#[test]
+fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
+    let case = case();
+    let started = case.tmp.join("started");
+    let parent = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(
+            "\"$0\" --die-with $$ --read / --write \"$1\" -- \
+             /bin/sh -c 'echo $$ > \"$0\"; exec /bin/sleep 60' \"$2\" & /bin/sleep 2",
+        )
+        .arg(HELPER)
+        .arg(&case.tmp)
+        .arg(&started)
+        .stdin(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(parent.success());
+    let pid: u32 = fs::read_to_string(&started)
+        .expect("the helper started its program")
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while process_state(pid).is_some_and(|state| state != 'Z')
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        process_state(pid).is_none_or(|state| state == 'Z'),
+        "the program outlived its parent"
+    );
+
+    let refused = case.tmp.join("refused");
+    let status = Command::new(HELPER)
+        .args(["--die-with", "1", "--read", "/", "--write"])
+        .arg(&case.tmp)
+        .args(["--", "/bin/sh", "-c", "echo ran > \"$0\""])
+        .arg(&refused)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(3), "a parent id that is not the parent");
+    assert!(!refused.exists(), "nothing started for a wrong parent id");
+}
+
 #[test]
 fn landlock_holds_the_project_boundary_on_this_kernel() {
     let case = case();
