@@ -344,7 +344,7 @@ fn owner_home() -> Option<PathBuf> {
 /// Checks the folder the owner asked to onboard: an existing, canonical,
 /// real directory at least two levels below `/`, with no quote or backslash
 /// in its path, outside the engine's runtime folder, and neither the owner's
-/// home, a folder holding it, nor one inside `~/.codex` or `~/.claude`.
+/// home, a folder holding it, nor one inside a harness's own folder there.
 /// Takes the path and the engine database. Returns the folder or a code.
 fn project_folder(path: &Path, database: &Path) -> Result<PathBuf, &'static str> {
     let text = path.to_str().ok_or("onboarding_path_invalid")?;
