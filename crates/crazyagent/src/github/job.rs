@@ -1,6 +1,6 @@
 use super::{
     GitHub, GitHubCi, GitHubCommitted, GitHubCreated, GitHubHistory, GitHubNewRepo, GitHubPrepare,
-    GitHubRepoFacts, GitHubRule, GitHubRuleOutcome, GitHubSecretScan, api, publish, state,
+    GitHubRepoFacts, GitHubRule, GitHubRuleOutcome, GitHubSecretScan, api, draft, publish, state,
 };
 use crate::engine::EngineError;
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,6 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-const BASELINE: [&str; 4] = [".env*", "*.pem", "*.key", ".DS_Store"];
 const WORKFLOW: [&str; 1] = ["workflow"];
 const EXCLUDE_SPECIAL: &[u8] = b"*?[\\";
 
@@ -26,6 +25,15 @@ pub struct GitHubPublishPlan {
     pub docs: bool,
 }
 
+/// Who drafted the .gitignore lines a publish proposes: the project's agent, or nobody,
+/// so the lines are the fixed baseline, with the code that says why no agent drafted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "by", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GitHubIgnoreDraft {
+    Agent,
+    Baseline { reason: String },
+}
+
 /// Where a publish job stands: waiting for the owner to approve the .gitignore lines or
 /// to deal with a secret, or the last step it finished on the way to the rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +41,7 @@ pub struct GitHubPublishPlan {
 pub enum GitHubPublishStep {
     Lines {
         lines: Vec<String>,
+        draft: GitHubIgnoreDraft,
     },
     Blocked {
         scan: GitHubSecretScan,
@@ -138,7 +147,9 @@ impl GitHub {
         &self,
         project: &Path,
         plan: &GitHubPublishPlan,
+        draft: impl FnOnce(&str) -> Result<String, &'static str>,
     ) -> Result<GitHubPublishJob, EngineError> {
+        let _ = draft;
         api::check_new(&new_repo(plan))?;
         let _held = publishing(&self.root, project)?;
         self.saved()?;
@@ -161,7 +172,10 @@ impl GitHub {
             lines: Vec::new(),
             written,
             step: GitHubPublishStep::Lines {
-                lines: BASELINE.map(String::from).to_vec(),
+                lines: draft::merged(&[], None),
+                draft: GitHubIgnoreDraft::Baseline {
+                    reason: draft::NOT_ASKED.to_owned(),
+                },
             },
             stopped: None,
         };

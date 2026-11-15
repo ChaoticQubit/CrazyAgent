@@ -580,7 +580,13 @@ mod slow_remote {
                 .unwrap();
             assert_eq!(started.project, project);
             assert!(
-                matches!(started.step, GitHubPublishStep::Lines { .. }),
+                matches!(
+                    &started.step,
+                    GitHubPublishStep::Lines {
+                        draft: crate::github::GitHubIgnoreDraft::Baseline { reason },
+                        ..
+                    } if reason.starts_with("instructions_cleanup_")
+                ),
                 "{started:?}"
             );
             let lines = vec![".env*".to_owned()];

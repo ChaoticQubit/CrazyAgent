@@ -407,7 +407,9 @@ async fn handle(
                 owners: account.owners()?,
             },
             Action::PublishStart { project, plan } => Reply::Publish {
-                job: account.publish_start(&project_folder(&root, &project)?, &plan)?,
+                job: account.publish_start(&project_folder(&root, &project)?, &plan, |_| {
+                    Err(crate::instruction_cleanup::UNAVAILABLE)
+                })?,
             },
             Action::PublishApprove { project, lines } => Reply::Publish {
                 job: account.publish_approve(

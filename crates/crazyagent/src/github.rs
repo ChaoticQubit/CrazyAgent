@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 mod api;
 mod clone;
+mod draft;
 pub(crate) mod http;
 mod job;
 mod publish;
@@ -23,7 +24,7 @@ pub(crate) mod test_server;
 mod tests;
 
 pub use api::Endpoints;
-pub use job::{GitHubPublishJob, GitHubPublishPlan, GitHubPublishStep};
+pub use job::{GitHubIgnoreDraft, GitHubPublishJob, GitHubPublishPlan, GitHubPublishStep};
 pub use publish::{
     GitHubCommitted, GitHubHistory, GitHubLocal, GitHubPrepare, GitHubSecretFinding,
     GitHubSecretKind, GitHubSecretScan,
