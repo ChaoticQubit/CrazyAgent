@@ -8,6 +8,7 @@ pub mod leftovers;
 pub mod manifest;
 pub mod records;
 pub mod registry;
+pub mod render;
 pub mod terminal_session;
 pub mod transcript;
 pub mod update;
