@@ -1049,6 +1049,8 @@ fn a_launch_removes_shell_startup_files_and_shell_prelude_folders_from_the_agent
 /// link among them without what it names, while each
 /// harness's sign-in, transcripts, team and task state, the per-agent keychain, the
 /// launch's own files, the cargo caches linked from the owner's and the shared caches stay.
+/// `skills` stays only in a Codex home, whose launch removes and makes it again; in a Claude
+/// Code home, where Claude Code would load whatever skill an earlier run wrote, it goes.
 #[cfg(unix)]
 #[test]
 fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
@@ -1101,16 +1103,16 @@ fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
         "todos/t.json",
         "tasks/t/1.json",
         "plans/p.md",
-        "skills/s/SKILL.md",
         "config.toml",
         "Library/Keychains/login.keychain-db",
         "Library/Preferences/com.apple.security.plist",
         ".cache/uv/x",
         ".npm/_cacache/index-v5/x",
     ];
+    let skill = "skills/s/SKILL.md";
     for (name, harness) in [("claude", Harness::Claude), ("codex", Harness::Codex)] {
         let home = home(&root, name);
-        for file in planted.iter().chain(kept.iter()) {
+        for file in planted.iter().chain(kept.iter()).chain([&skill]) {
             let path = home.join(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, "planted\n").unwrap();
@@ -1146,6 +1148,11 @@ fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
             );
         }
         assert_eq!(
+            fs::symlink_metadata(home.join("skills")).is_ok(),
+            harness == Harness::Codex,
+            "{name}: only a Codex home keeps skills, which its launch then makes again"
+        );
+        assert_eq!(
             fs::read_link(home.join(".cargo/registry")).unwrap(),
             outside
         );
@@ -1154,6 +1161,34 @@ fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
             "kept outside\n"
         );
     }
+}
+
+/// A native lead's teammates' home keeps no `skills` an earlier run left: the teammates are
+/// Claude Code processes, which would load each skill found there, and the engine's own
+/// skills reach them through the plugin folder. Their transcripts stay.
+#[cfg(unix)]
+#[test]
+fn a_teammates_home_keeps_no_skills_an_earlier_run_left() {
+    let (_directory, root) = folder();
+    let mates = home(&root, "mates");
+    for file in [
+        "skills/s/SKILL.md",
+        "skills/.system/x/SKILL.md",
+        "projects/p/s.jsonl",
+    ] {
+        let path = mates.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "planted\n").unwrap();
+    }
+
+    let reset = reset_mates_home(&mates).map_err(|error| error.0);
+
+    assert_eq!(reset, Ok(()));
+    assert!(fs::symlink_metadata(mates.join("skills")).is_err());
+    assert_eq!(
+        fs::read_to_string(mates.join("projects/p/s.jsonl")).unwrap(),
+        "planted\n"
+    );
 }
 
 /// A launch never keeps a link in the place of what it keeps, nor follows one (RV-DS241-137):
