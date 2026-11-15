@@ -2,8 +2,8 @@
 use crazyagent::sandbox::linux::{BWRAP_PATHS, HelperRequest, LinuxBackend, LinuxSandbox, NEST_ARGS};
 
 use crazyagent::sandbox::{
-    InstalledSandbox, LinuxSockets, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork,
-    SandboxRemote,
+    InstalledSandbox, LinuxSockets, LinuxSupervisor, ProjectSandbox, Sandbox, SandboxError,
+    SandboxNetwork, SandboxRemote,
 };
 
 use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, Scope};
@@ -846,6 +846,7 @@ fn an_installed_sandbox_on_linux_launches_through_the_linux_boundary() {
     let installed = InstalledSandbox::install(
         policy(&case, SandboxNetwork::Open),
         &profiles.join("agent.sb"),
+        LinuxSupervisor::On,
     )
     .unwrap();
     let launcher = installed.launcher().to_path_buf();
@@ -2398,8 +2399,10 @@ fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
     let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER));
     assert_eq!(host.scoped, scoped);
     assert_eq!(host.nested, nesting_bwrap().is_some());
+    assert!(host.supervised, "the call supervisor probe row needs the same of this machine");
     let absent = crazyagent::sandbox::linux::read_host(Path::new("/nonexistent/helper"));
     assert!(!absent.scoped && !absent.nested, "{absent:?}");
+    assert!(!absent.supervised, "{absent:?}");
 }
 
 #[test]
@@ -2411,6 +2414,7 @@ fn a_host_whose_landlock_does_not_hold_reports_the_process_namespace_bubblewrap_
     let host = crazyagent::sandbox::linux::read_host(refusing);
     assert!(!host.scoped, "{host:?}");
     assert!(host.nested, "{host:?}");
+    assert!(!host.supervised, "bubblewrap alone runs no call supervisor: {host:?}");
 }
 
 /// This computer's address on its default route, which is never loopback. No input.
@@ -2840,6 +2844,29 @@ fn a_supervised_agent_signals_only_the_programs_it_started() {
     assert_eq!(outside.try_wait().unwrap(), None, "the outside process still runs");
     outside.kill().unwrap();
     outside.wait().unwrap();
+}
+
+/// The owner setting "Linux call supervisor", one row per option (DEC-179 add.2 Q1): On
+/// puts a launch under the supervisor, which keeps a new `.git` out of every folder the
+/// agent may change but its working tree's own; Off starts the agent as before, where
+/// Landlock alone cannot stop one (RV-DS241-85b).
+#[test]
+fn the_call_supervisor_setting_on_guards_a_launch_and_off_keeps_it_as_before() {
+    for (calls, made) in [(LinuxSupervisor::On, false), (LinuxSupervisor::Off, true)] {
+        let case = case();
+        let sandbox = pinned(policy(&case, SandboxNetwork::Only(Vec::new()))).supervise(calls);
+        let folder = case.project.join("worktrees").join("nested");
+        let nested = quoted(&folder);
+        let script = format!("mkdir {nested} && (mkdir {nested}/.git || true)");
+        let output = run(&sandbox, &case, &script);
+        assert!(
+            output.status.success(),
+            "{calls:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(folder.is_dir(), "{calls:?}");
+        assert_eq!(folder.join(".git").exists(), made, "{calls:?}");
+    }
 }
 
 const TRACED_SUPERVISOR: &str = "import ctypes, os

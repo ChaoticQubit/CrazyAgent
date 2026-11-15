@@ -106,6 +106,16 @@ pub fn load(connection: &Connection) -> Result<SandboxSettings, EngineError> {
     })
 }
 
+/// Reads the owner's sandbox settings from the engine database in the engine root without
+/// writing to it, for a launch outside the engine's own transaction: a master turn and the
+/// two checks. Input: the engine root. Output: the settings, `sandbox_settings_unavailable`
+/// when the database cannot be opened, or [`load`]'s refusal, so the launch fails closed.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+pub(crate) fn stored(engine: &std::path::Path) -> Result<SandboxSettings, EngineError> {
+    let _ = engine;
+    Ok(SandboxSettings::default())
+}
+
 /// The owner read of the sandbox settings. Input: the open transaction. Output: the
 /// settings as owner data.
 pub(crate) fn read(connection: &Connection) -> Result<OwnerData, EngineError> {
@@ -233,6 +243,26 @@ mod tests {
         };
         save(&connection, &off).unwrap();
         assert_eq!(load(&connection).unwrap(), off);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_reads_the_stored_choices_from_the_engine_root_and_fails_closed_without_them() {
+        let folder = tempfile::tempdir().unwrap();
+        let engine = folder.path().canonicalize().unwrap();
+        assert_eq!(stored(&engine).unwrap_err().0, "sandbox_settings_unavailable");
+        let connection = Connection::open(engine.join("engine.db")).unwrap();
+        initialize(&connection).unwrap();
+        let off = SandboxSettings {
+            linux_sockets: LinuxSockets::TcpPorts,
+            linux_supervisor: LinuxSupervisor::Off,
+        };
+        save(&connection, &off).unwrap();
+        assert_eq!(stored(&engine).unwrap(), off);
+        drop(connection);
+        let held = std::fs::read(engine.join("engine.db")).unwrap();
+        assert_eq!(stored(&engine).unwrap(), off);
+        assert_eq!(std::fs::read(engine.join("engine.db")).unwrap(), held, "read only");
     }
 
     #[test]

@@ -1,7 +1,8 @@
 #![cfg(target_os = "macos")]
 
 use crazyagent::sandbox::{
-    HIDDEN_MAX, InstalledSandbox, ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote,
+    HIDDEN_MAX, InstalledSandbox, LinuxSupervisor, ProjectSandbox, SandboxError, SandboxNetwork,
+    SandboxRemote,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -76,7 +77,8 @@ fn quoted(path: &Path) -> String {
 fn an_agent_in_an_engine_worktree_writes_there_and_in_the_project_and_nowhere_else() {
     let case = case();
     let profile = case.profiles.join("agent.sb");
-    let installed = InstalledSandbox::install(sandbox(&case), &profile).unwrap();
+    let confined = sandbox(&case);
+    let installed = InstalledSandbox::install(confined, &profile, LinuxSupervisor::On).unwrap();
     assert_eq!(installed.profile(), profile.as_path());
     assert_eq!(
         fs::read_to_string(&profile).unwrap(),
@@ -191,11 +193,12 @@ fn worktrees_are_checked_bounded_and_kept_out_of_the_profile_location() {
     assert!(widened.allow_worktree(&ninth).is_err());
 
     let inside = case.worktree.join("agent.sb");
-    assert!(InstalledSandbox::install(sandbox(&case), &inside).is_err());
+    assert!(InstalledSandbox::install(sandbox(&case), &inside, LinuxSupervisor::On).is_err());
     assert!(!inside.exists());
 
-    let installed =
-        InstalledSandbox::install(sandbox(&case), &case.profiles.join("agent.sb")).unwrap();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case);
+    let installed = InstalledSandbox::install(confined, &profile, LinuxSupervisor::On).unwrap();
     for cwd in [&case.outside, &case.tmp, &case.home] {
         let mut harness = Command::new("/bin/sh");
         harness.current_dir(cwd);
@@ -237,8 +240,8 @@ fn a_hidden_folder_in_a_root_can_be_neither_listed_read_nor_written() {
     fs::write(hidden.join("draft.json"), "{}\n").unwrap();
     fs::write(case.project.join("shown.txt"), "shown\n").unwrap();
     let profile = case.profiles.join("hidden.sb");
-    let installed =
-        InstalledSandbox::install(sandbox(&case).hide(&hidden).unwrap(), &profile).unwrap();
+    let hiding = sandbox(&case).hide(&hidden).unwrap();
+    let installed = InstalledSandbox::install(hiding, &profile, LinuxSupervisor::On).unwrap();
     let seen = shell(
         &installed,
         &case.project,

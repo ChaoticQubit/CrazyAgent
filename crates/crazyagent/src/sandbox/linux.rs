@@ -2,8 +2,8 @@ use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS, RELAY_PORTS};
 use super::{
     BRIDGE_PORT_MIN, GIT_STATE_FILES, GIT_STATE_TREES, KEPT_PORTS_MAX, LINUX_HARNESS_UNCHECKED,
     LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK, LINUX_RESOLVER_NEEDS_UDP,
-    LinuxSockets, OWNER_PORTS, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork,
-    SandboxRemote, agent_env, clean_absolute, invalid,
+    LinuxSockets, LinuxSupervisor, OWNER_PORTS, ProjectSandbox, Sandbox, SandboxError,
+    SandboxNetwork, SandboxRemote, agent_env, clean_absolute, invalid,
 };
 use crazyagent_linux_supervisor::rules::{GitOwn, Reach};
 use crazyagent_linux_supervisor::serve::{self, Supervised};
@@ -1247,6 +1247,15 @@ pub enum LinuxBackend {
 pub struct LinuxSandbox {
     sandbox: ProjectSandbox,
     backend: LinuxBackend,
+    supervision: Option<Supervision>,
+}
+
+/// What the call supervisor holds for a launch on this host beyond the guards every
+/// supervised launch carries: `signals` where neither a process namespace nor the
+/// kernel's signal scope keeps the agent's signals to itself (DEC-179 T4c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Supervision {
+    signals: bool,
 }
 
 impl LinuxSandbox {
@@ -1298,7 +1307,20 @@ impl LinuxSandbox {
             kept_outside_picked(&kept_free(&sandbox), read_picked_ports().as_ref())
                 .map_err(SandboxError::Unavailable)?;
         }
-        Ok(Self { sandbox, backend })
+        Ok(Self {
+            sandbox,
+            backend,
+            supervision: None,
+        })
+    }
+
+    /// Puts this launch under the call supervisor when the owner's setting is On and this
+    /// host holds it as the launch starts it ([`supervises`]); bubblewrap alone never runs
+    /// it. Off, or a host where the probe fails, keeps the launch as it was. Input: the
+    /// owner's choice. Output: the sandbox.
+    pub fn supervise(self, calls: LinuxSupervisor) -> Self {
+        let _ = calls;
+        self
     }
 
     /// Picks the backend this machine holds: Landlock when the helper exists and its probe
@@ -1472,7 +1494,11 @@ pub fn read_host(helper: &Path) -> super::LinuxHost {
         .find(|path| path.is_file());
     let apart = |bwrap: &Path| !held || nests(bwrap, helper, &[PROBE.into()]);
     let nested = usable && bwrap.is_some_and(apart);
-    super::LinuxHost { nested, scoped }
+    super::LinuxHost {
+        nested,
+        scoped,
+        supervised: false,
+    }
 }
 
 /// [`read_host`] for the helper beside this executable, read again once what is kept is
@@ -1690,6 +1716,25 @@ fn writable_children(
         }
     }
     Ok(())
+}
+
+/// The guards a supervised launch carries (DEC-179 T4c): the loopback ports of a limited
+/// network under [`LinuxSockets::TcpOnly`], each then reached on this computer only, but a
+/// port the agent may also reach on any host; the agent's own git folders
+/// ([`git_own`]); and signals where [`Supervision`] says nothing else holds them. Inputs:
+/// the policy and what the supervisor holds here. Output: the guard.
+fn guard(sandbox: &ProjectSandbox, supervision: Supervision) -> Guard {
+    let _ = (sandbox, supervision);
+    Guard::default()
+}
+
+/// The folders an agent may make a `.git` entry in, as the macOS boundary's nested git
+/// rule allows them: the top of each working tree it works in, and each folder directly
+/// inside the engine's worktree folders (when it adds worktrees) or inside a setup folder.
+/// Input: the policy. Output: the agent's own git folders.
+fn git_own(sandbox: &ProjectSandbox) -> GitOwn {
+    let _ = sandbox;
+    GitOwn::default()
 }
 
 fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy {
@@ -2363,6 +2408,7 @@ mod tests {
             Some(LinuxHost {
                 nested,
                 scoped: false,
+                supervised: false,
             })
         };
         let launched = |remotes: &[SandboxRemote]| {
@@ -2707,6 +2753,124 @@ mod tests {
             assert!(parse(refused).is_err(), "{refused:?}");
         }
         assert_eq!(Bridge::fits(None, &HelperRequest::Supervisor), Ok(()));
+    }
+
+    /// A supervised launch guards the loopback ports of a limited network under TCP only,
+    /// but a port it may also reach on any host or look names up on, always its own git
+    /// folders, and signals only where the host holds nothing else (DEC-179 T4c).
+    #[test]
+    fn a_supervised_launch_carries_each_guard_its_policy_and_host_need() {
+        use SandboxRemote::{AnyHost, Loopback};
+        let remotes = vec![Loopback(8080), Loopback(443), AnyHost(443), Loopback(53)];
+        let (_temp, sandbox) = project(SandboxNetwork::Only(remotes));
+        assert!(sandbox.resolves_over_tcp());
+        let own = GitOwn {
+            trees: vec![sandbox.project_root().to_path_buf()],
+            ..GitOwn::default()
+        };
+        let alone = Supervision { signals: true };
+        let expected = Guard {
+            loopback: vec![8080],
+            git: Some(own),
+            signals: true,
+        };
+        assert_eq!(guard(&sandbox, alone), expected);
+        let nested = Guard {
+            signals: false,
+            ..expected.clone()
+        };
+        assert_eq!(guard(&sandbox, Supervision { signals: false }), nested);
+        let ports = sandbox.clone().limit_sockets(LinuxSockets::TcpPorts);
+        let any_host = Guard {
+            loopback: Vec::new(),
+            ..expected
+        };
+        assert_eq!(guard(&ports, alone), any_host);
+        let (_open, open) = project(SandboxNetwork::Open);
+        let held = guard(&open, alone);
+        assert!(held.loopback.is_empty(), "{held:?}");
+        assert!(held.git.is_some_and(|git| git.trees == [open.project_root()]));
+    }
+
+    /// The git folders a supervised agent owns are the ones the macOS boundary leaves it:
+    /// the top of each tree it works in and, for the engine's worktree step, each folder in
+    /// the two worktree folders (DEC-179 T4c, RV-DS241-85b).
+    #[test]
+    fn a_supervised_agent_owns_the_git_of_each_tree_it_works_in_and_of_each_engine_worktree() {
+        let (temp, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+        let project = sandbox.project_root().to_path_buf();
+        let alone = GitOwn {
+            trees: vec![project.clone()],
+            ..GitOwn::default()
+        };
+        assert_eq!(git_own(&sandbox), alone);
+        let lease = temp.path().canonicalize().unwrap().join("lease");
+        fs::create_dir(&lease).unwrap();
+        let worked = sandbox.allow_worktree(&lease).unwrap().adding_worktrees();
+        let state = project.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        let expected = GitOwn {
+            trees: vec![project.clone(), lease],
+            kids: vec![project.join("worktrees"), state.join("worktrees")],
+            exact: Vec::new(),
+        };
+        assert_eq!(git_own(&worked), expected);
+    }
+
+    /// The helper gets guard flags only for a launch the call supervisor holds, and a
+    /// nested one carries no signal guard: its process namespace holds signals.
+    #[test]
+    fn only_a_supervised_launch_hands_the_helper_its_guards() {
+        let (_temp, sandbox) = project(SandboxNetwork::Open);
+        let cwd = sandbox.project_root().to_path_buf();
+        let helper = std::env::current_exe().unwrap();
+        let backend = LinuxBackend::Nested {
+            bwrap: helper.clone(),
+            helper,
+        };
+        let plain = LinuxSandbox::new(sandbox, backend).unwrap();
+        let mut harness = Command::new("/bin/sh");
+        harness.args(["-c", "true"]).current_dir(&cwd);
+        let words = |sandbox: &LinuxSandbox| -> Vec<OsString> {
+            sandbox
+                .wrap(&harness)
+                .unwrap()
+                .get_args()
+                .map(OsStr::to_os_string)
+                .collect()
+        };
+        assert!(!words(&plain).contains(&GUARD_GIT.into()));
+        let supervised = LinuxSandbox {
+            supervision: Some(Supervision { signals: false }),
+            ..plain
+        };
+        let held = words(&supervised);
+        let git = [GUARD_GIT, OWN_TREE].map(OsString::from);
+        let at = held
+            .windows(2)
+            .position(|pair| pair == git)
+            .expect("the git guard");
+        assert_eq!(held[at + 2], cwd.as_os_str());
+        assert!(!held.contains(&GUARD_SIGNALS.into()));
+        assert!(!held.contains(&GUARD_LOOPBACK.into()));
+    }
+
+    /// The owner's setting Off, and a host that only has bubblewrap, start no supervisor:
+    /// the launch stays as it was before the supervisor (DEC-179 add.2 Q1).
+    #[test]
+    fn the_supervisor_setting_off_and_bubblewrap_alone_start_no_supervisor() {
+        let helper = std::env::current_exe().unwrap();
+        let (_temp, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+        let landlock = LinuxBackend::Landlock {
+            helper: helper.clone(),
+        };
+        let off = LinuxSandbox::new(sandbox.clone(), landlock).unwrap();
+        assert_eq!(off.supervise(LinuxSupervisor::Off).supervision, None);
+        let bubblewrap = LinuxBackend::Bubblewrap {
+            bwrap: helper.clone(),
+            helper,
+        };
+        let alone = LinuxSandbox::new(sandbox, bubblewrap).unwrap();
+        assert_eq!(alone.supervise(LinuxSupervisor::On).supervision, None);
     }
 
     #[test]

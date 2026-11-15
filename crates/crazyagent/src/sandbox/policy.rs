@@ -1562,6 +1562,7 @@ mod tests {
             Some(LinuxHost {
                 nested,
                 scoped: false,
+                supervised: false,
             })
         };
         let port = |port| AccessGrant::Port { port };
@@ -1595,7 +1596,13 @@ mod tests {
     #[test]
     fn a_level_says_what_this_linux_cannot_hold_for_it_and_nothing_elsewhere() {
         use crate::sandbox::{LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE, LinuxHost};
-        let host = |nested, scoped| Some(LinuxHost { nested, scoped });
+        let host = |nested, scoped| {
+            Some(LinuxHost {
+                nested,
+                scoped,
+                supervised: false,
+            })
+        };
         let gaps = |access, nested, scoped| linux_gaps(access, host(nested, scoped));
         for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
             assert!(linux_gaps(access, None).is_empty(), "not Linux");

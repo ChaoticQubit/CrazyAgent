@@ -986,11 +986,13 @@ pub const LINUX_PROCESS_LIST_LINE: &str = "On this Linux, agents can see which p
 
 /// What this Linux holds for an agent beyond its Landlock file and network rules: `nested`
 /// when it starts agents in a process namespace of their own, `scoped` when the kernel
-/// keeps their signals inside their own Landlock domain (Linux 6.12 or newer).
+/// keeps their signals inside their own Landlock domain (Linux 6.12 or newer), and
+/// `supervised` when the call supervisor holds every guard here, as launches start it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinuxHost {
     pub nested: bool,
     pub scoped: bool,
+    pub supervised: bool,
 }
 
 /// What this computer holds as [`LinuxHost`] says, read through the sandbox helper beside
@@ -3508,6 +3510,7 @@ pub struct InstalledSandbox {
     sandbox: ProjectSandbox,
     profile: PathBuf,
     unconfined: bool,
+    calls: LinuxSupervisor,
     #[cfg(target_os = "linux")]
     linux: linux::LinuxSandbox,
     #[cfg(target_os = "windows")]
@@ -3519,9 +3522,15 @@ impl InstalledSandbox {
     /// Linux, picks the Landlock helper next to the engine's executable or bubblewrap; on
     /// Windows, checks the helper next to the engine's executable first, then writes its
     /// boundary profile with the engine's grants folder (see
-    /// [`windows::WindowsSandbox::install`]). Output: the sandbox bound to that profile, the
-    /// install refusal, or `Unavailable` where this system has no boundary.
-    pub fn install(sandbox: ProjectSandbox, profile: &Path) -> Result<Self, SandboxError> {
+    /// [`windows::WindowsSandbox::install`]). `calls` is the owner's "Linux call supervisor"
+    /// choice, which every launch must pass and only Linux acts on. Output: the sandbox
+    /// bound to that profile, the install refusal, or `Unavailable` where this system has no
+    /// boundary.
+    pub fn install(
+        sandbox: ProjectSandbox,
+        profile: &Path,
+        calls: LinuxSupervisor,
+    ) -> Result<Self, SandboxError> {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some()
         {
@@ -3553,6 +3562,7 @@ impl InstalledSandbox {
                 sandbox,
                 profile: profile.to_path_buf(),
                 unconfined: false,
+                calls,
                 windows,
             })
         }
@@ -3563,12 +3573,13 @@ impl InstalledSandbox {
             #[cfg(target_os = "linux")]
             let linux = {
                 let helper = std::env::current_exe()?.with_file_name(linux::HELPER_NAME);
-                linux::LinuxSandbox::detect(sandbox.clone(), &helper)?
+                linux::LinuxSandbox::detect(sandbox.clone(), &helper)?.supervise(calls)
             };
             Ok(Self {
                 sandbox,
                 profile: profile.to_path_buf(),
                 unconfined: false,
+                calls,
                 #[cfg(target_os = "linux")]
                 linux,
             })
@@ -3621,6 +3632,12 @@ impl InstalledSandbox {
     /// Windows helper reads.
     pub fn profile(&self) -> &Path {
         &self.profile
+    }
+
+    /// The owner's "Linux call supervisor" choice this boundary was installed with; only
+    /// Linux acts on it.
+    pub fn linux_supervisor(&self) -> LinuxSupervisor {
+        self.calls
     }
 
     /// Rebuilds a harness command to run inside this boundary; see [`ProjectSandbox::wrap`]
