@@ -13,6 +13,12 @@ const VERSION_MIN: (u32, u32) = (2, 40);
 const EXCLUDES_PATH_BYTES_MAX: usize = 1024;
 const CHECK_LINE_BYTES_MAX: usize = 80;
 
+/// The excludes setting a confined Linux step's git takes in place of the owner's ignore
+/// file, which that step may not read (SA vid 2): an empty file, so git applies no
+/// excludes file at all and never warns about one it cannot open.
+#[cfg(target_os = "linux")]
+const NO_EXCLUDES: &str = "core.excludesFile=/dev/null";
+
 #[cfg(test)]
 thread_local! {
     /// The owner home a landing test stands in for the process's HOME, so engine git in
@@ -481,8 +487,11 @@ impl Repo {
     /// This repository with its git calls started by the Landlock helper under
     /// [`crate::sandbox::linux::git_step_policy`], for a step on a linked agent worktree whose
     /// agent may still be changing it, as `WORK_TREE_PROFILE` holds it on macOS. The step
-    /// reads the system, the work tree, the repository's git folder, git and the owner's
-    /// ignore file. It writes only what it names and the engine's step folder in the
+    /// reads the system, the work tree, the repository's git folder and git, never the owner's
+    /// ignore file, which a link swapped in during a turn-end add would otherwise copy into
+    /// the object store (SA vid 2): its git takes no excludes file ([`NO_EXCLUDES`]), and a
+    /// turn end applies that file's patterns as names instead (`flow::add_pathspecs`). It
+    /// writes only what it names and the engine's step folder in the
     /// worktree's git folder, where it works on a copy of the index ([`Self::swapped`]), so a
     /// link swapped in during the step reaches nothing else. Input: what the step may write.
     /// Output: the repository, `changes_workspace_invalid` for one that is not a linked
@@ -520,13 +529,7 @@ impl Repo {
         if !std::fs::symlink_metadata(&step).is_ok_and(|meta| meta.is_dir()) {
             return Err(invalid());
         }
-        let mut read = vec![work.clone(), common.clone(), git.clone()];
-        read.extend(
-            self.excludes
-                .as_deref()
-                .and_then(|setting| setting.strip_prefix("core.excludesFile="))
-                .and_then(|path| std::fs::canonicalize(path).ok()),
-        );
+        let read = [work.clone(), common.clone(), git.clone()];
         let target = match writes {
             Writes::Objects => common.join("objects"),
             Writes::WorkTree => work,
@@ -538,6 +541,7 @@ impl Repo {
         assert!(confinement.len() > 4);
         Ok(Self {
             index: Some(step.join("index")),
+            excludes: Some(NO_EXCLUDES.to_owned()),
             confinement,
             ..self.clone()
         })

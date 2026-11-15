@@ -1891,6 +1891,55 @@ fn ignores_any(checkout: &Path, paths: &[&str]) -> Result<bool, EngineError> {
     }
 }
 
+/// The pathspecs a turn end's `add -A` reads from its input, each ending in a NUL: the whole
+/// tree but the teammates' folder ([`teammates_left_out`]), less each untracked path the
+/// worktree's ignore rules exclude, the owner's ignore file included, as this unconfined git
+/// lists them, an ignored folder once with a closing `/`. The confined add on Linux may not
+/// read that file, since a link swapped in during the add would copy it into the object
+/// store (SA vid 2), so it gets the file's patterns as names, which tell it nothing the
+/// agent's own listing does not. Input: the agent's repository. Output: the pathspecs,
+/// `changes_too_large` past the listing bound or `changes_git_failed`.
+fn add_pathspecs(repo: &Repo) -> Result<Vec<u8>, EngineError> {
+    let teammates = teammates_left_out();
+    let ignored = repo.exec(
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "--",
+            ":(top)",
+            &teammates,
+        ],
+        None,
+        &[],
+        LISTING_BYTES_MAX,
+    )?;
+    if ignored.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    if ignored.overflow {
+        return Err(failure("changes_too_large"));
+    }
+    let mut pathspecs = format!(":(top)\0{teammates}\0").into_bytes();
+    let mut left_out = 0;
+    for path in ignored.stdout.split(|byte| *byte == 0) {
+        if !path.is_empty() {
+            pathspecs.extend_from_slice(b":(exclude,top,literal)");
+            pathspecs.extend_from_slice(path);
+            pathspecs.push(0);
+            left_out += 1;
+        }
+    }
+    assert_eq!(
+        pathspecs.iter().filter(|byte| **byte == 0).count(),
+        left_out + 2
+    );
+    Ok(pathspecs)
+}
+
 /// Stages everything in an agent worktree and makes it a commit object above `head`
 /// without moving any ref, or nothing when the tree equals `head`'s. The whole change
 /// set from `above` must stay within the bounds, staged files included, and its own work
@@ -1909,8 +1958,16 @@ fn commit_worktree(
     message: &str,
 ) -> Result<Option<String>, EngineError> {
     check_bounds(repo, worktree, bounds)?;
-    repo.confined(Writes::Objects)?
-        .run(&["add", "-A", "--", ":(top)", &teammates_left_out()])?;
+    let pathspecs = add_pathspecs(repo)?;
+    let added = repo.confined(Writes::Objects)?.exec(
+        &["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+        Some(&pathspecs),
+        &[],
+        4096,
+    )?;
+    if added.code != 0 || added.overflow {
+        return Err(failure("changes_git_failed"));
+    }
     let tree = object_id(&repo.run(&["write-tree"])?)?;
     if tree == repo.tree_of(head)? {
         return Ok(None);
