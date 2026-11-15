@@ -2323,6 +2323,83 @@ fn publish_job_checks_a_fixed_file_again_and_goes_on() {
 }
 
 #[test]
+fn publish_job_continued_after_a_stop_before_its_commit_checks_the_project_again() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    git(&["init", "--quiet", "--initial-branch=main"], &project);
+    git(&["config", "hook.mark.event", "pre-commit"], &project);
+    git(&["config", "hook.mark.command", "/usr/bin/true"], &project);
+    account.publish_start(&project, &plan("tool")).unwrap();
+    let stopped = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert_eq!(stopped.step, GitHubPublishStep::Checked);
+    assert_eq!(stopped.stopped.as_deref(), Some("github_publish_hooks_set"));
+    git(&["config", "--remove-section", "hook.mark"], &project);
+    std::fs::write(project.join("keys.txt"), format!("token {LEAKED}\n")).unwrap();
+    let continued = account
+        .publish_continue(&project, owner_home.path())
+        .unwrap();
+    assert_eq!(
+        continued.step,
+        GitHubPublishStep::Blocked {
+            scan: GitHubSecretScan {
+                findings: vec![GitHubSecretFinding {
+                    path: "keys.txt".into(),
+                    line: 1,
+                    kind: GitHubSecretKind::Token,
+                }],
+                truncated: false,
+            },
+        }
+    );
+    assert_eq!(continued.stopped, None);
+    assert!(creates(&server).is_empty());
+    assert_eq!(account.publish_status(&project).unwrap(), Some(continued));
+}
+
+#[test]
+fn publish_job_started_again_keeps_the_paths_publish_wrote_for_its_commit() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    git(&["init", "--quiet", "--initial-branch=main"], &project);
+    git(&["add", "main.rs"], &project);
+    git(&["commit", "--quiet", "-m", "first"], &project);
+    git(&["config", "hook.mark.event", "pre-commit"], &project);
+    git(&["config", "hook.mark.command", "/usr/bin/true"], &project);
+    account.publish_start(&project, &plan("tool")).unwrap();
+    let stopped = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert_eq!(stopped.step, GitHubPublishStep::Checked);
+    assert_eq!(stopped.stopped.as_deref(), Some("github_publish_hooks_set"));
+    assert_eq!(stopped.written, [".gitignore"]);
+    git(&["config", "--remove-section", "hook.mark"], &project);
+    let restarted = account.publish_start(&project, &plan("tool")).unwrap();
+    assert_eq!(restarted.written, [".gitignore"]);
+    let done = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    let (full_name, _) = done_on(&done);
+    assert_eq!(full_name, "octo-cat/tool");
+    assert_eq!(
+        git_out(&["ls-tree", "-r", "--name-only", "HEAD"], &project),
+        ".gitignore\nmain.rs\n"
+    );
+    assert_eq!(creates(&server).len(), 1);
+}
+
+#[test]
 fn publish_job_stopped_at_create_goes_on_and_knows_the_repository_it_made() {
     let scratch = Scratch::new();
     let secret_text = token();
