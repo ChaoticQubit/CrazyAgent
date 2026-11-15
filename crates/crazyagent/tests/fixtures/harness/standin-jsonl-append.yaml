@@ -1,0 +1,30 @@
+schema: 1
+kind: harness
+id: "standin-jsonl-append"
+name: "Stand-in JSON lines record"
+binaries:
+  - "standin-jsonl-append"
+headless: "none: standin-jsonl-append runs in a terminal pane only"
+model_selection: true
+account_kinds:
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+roles:
+  - "agent"
+  - "master"
+sub_agents: "app"
+terminal:
+  argv:
+    - "--home"
+    - "{home}"
+    - "--session"
+    - "{session}"
+  resume:
+    - "--home"
+    - "{home}"
+    - "--resume"
+    - "{session}"
+  record:
+    reader: "jsonl-append"
+    path: "{home}/standin/records/{session}.jsonl"

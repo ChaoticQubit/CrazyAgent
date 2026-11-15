@@ -1,0 +1,29 @@
+schema: 1
+kind: harness
+id: "standin-jsonl-turn"
+name: "Stand-in JSON lines turn"
+binaries:
+  - "standin-jsonl-turn"
+headless: "standin-jsonl-turn: one process per turn, JSON lines out"
+model_selection: true
+account_kinds:
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+roles:
+  - "agent"
+  - "master"
+  - "research"
+sub_agents: "app"
+piped:
+  driver: "jsonl-turn"
+  argv:
+    - "--home"
+    - "{home}"
+    - "--model"
+    - "{model}"
+    - "--prompt"
+    - "{prompt}"
+  resume:
+    - "--resume"
+    - "{session}"

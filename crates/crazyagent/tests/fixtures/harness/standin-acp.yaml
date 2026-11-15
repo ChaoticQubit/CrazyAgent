@@ -1,0 +1,22 @@
+schema: 1
+kind: harness
+id: "standin-acp"
+name: "Stand-in ACP"
+binaries:
+  - "standin-acp"
+headless: "standin-acp: ACP JSON-RPC over stdio, replayed from fixtures"
+model_selection: true
+account_kinds:
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+roles:
+  - "agent"
+  - "master"
+  - "research"
+sub_agents: "app"
+piped:
+  driver: "acp"
+  argv:
+    - "--home"
+    - "{home}"

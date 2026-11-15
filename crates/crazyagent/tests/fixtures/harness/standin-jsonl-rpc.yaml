@@ -1,0 +1,24 @@
+schema: 1
+kind: harness
+id: "standin-jsonl-rpc"
+name: "Stand-in JSON lines RPC"
+binaries:
+  - "standin-jsonl-rpc"
+headless: "standin-jsonl-rpc: one long-lived process, JSON lines both ways"
+model_selection: true
+account_kinds:
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+roles:
+  - "agent"
+  - "master"
+  - "research"
+sub_agents: "app"
+piped:
+  driver: "jsonl-rpc"
+  argv:
+    - "--home"
+    - "{home}"
+    - "--model"
+    - "{model}"
