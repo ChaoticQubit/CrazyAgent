@@ -1001,14 +1001,9 @@ fn job_report(db: &Connection, folder: &std::path::Path, text: &str) -> String {
     let report = folder.join(".crazyagent").join(&stored);
     std::fs::create_dir_all(report.parent().unwrap()).unwrap();
     std::fs::write(&report, text).unwrap();
-    db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS research_jobs(id INTEGER PRIMARY KEY, project TEXT,
-           kind TEXT, status TEXT, report_path TEXT);",
-    )
-    .unwrap();
     db.execute(
-        "INSERT INTO research_jobs(project,kind,status,report_path)
-         VALUES('alpha','competitor_research','done',?1)",
+        "INSERT INTO research_jobs(project,kind,harness,tools,status,report_path,created_ms)
+         VALUES('alpha','competitor_research','codex',0,'done',?1,0)",
         [stored.as_str()],
     )
     .unwrap();
@@ -1068,10 +1063,11 @@ fn competitors_is_the_report_of_the_newest_finished_competitor_research_job() {
     link_competitor_research(&mut db, &project, folder.path(), "docs/competitors.md");
     let stored = job_report(&db, folder.path(), "Gamma leads.\n");
     db.execute_batch(
-        "INSERT INTO research_jobs(project,kind,status,report_path) VALUES
-           ('alpha','competitor_research','running',NULL),
-           ('alpha','market_research','done','context/research/market_research.md'),
-           ('beta','competitor_research','done','context/research/beta.md');",
+        "INSERT INTO research_jobs(project,kind,harness,tools,status,report_path,created_ms)
+         VALUES
+           ('alpha','competitor_research','codex',0,'running',NULL,0),
+           ('alpha','market_research','codex',0,'done','context/research/market_research.md',0),
+           ('beta','competitor_research','codex',0,'done','context/research/beta.md',0);",
     )
     .unwrap();
     assert_eq!(

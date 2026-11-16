@@ -2384,10 +2384,7 @@ fn process_import_never_labels_the_project_text() {
         assert!(done.status.success(), "{done:?}");
     }
     let project = with_project(&root, &folder);
-    let action = Action::ConfirmImport {
-        project: project.clone(),
-    };
-    run(&root, action, None).unwrap();
+    crate::instruction_files::import(&project_folder(&root, &project).unwrap()).unwrap();
     assert_eq!(
         crate::agent_home::read_project(&folder).unwrap(),
         "OWNER-TEXT-7\n\n### Imported from CLAUDE.md\n\nREPO-RULE-7\n"

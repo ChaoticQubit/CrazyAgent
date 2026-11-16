@@ -523,7 +523,10 @@ async fn a_new_project_lands_in_the_home_as_a_ready_git_repository() {
     engine.stop().await;
 }
 
-fn slow_git(root: &Path, sections: usize, broken: bool) {
+/// Plants a `.gitconfig` in the engine's git home that git refuses to start a repository
+/// with, a default branch named `bad..name`, as a git that read it would. Input: the engine
+/// root. Output: none.
+fn plant_git_config(root: &Path) {
     let projects = root.join("projects");
     let git_home = projects.join(".git-home");
     for folder in [&projects, &git_home] {
@@ -534,16 +537,11 @@ fn slow_git(root: &Path, sections: usize, broken: bool) {
         }
         fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let mut config = String::with_capacity(sections * 16);
-    for section in 0..sections {
-        config.push_str("[s");
-        config.push_str(&(section % 50).to_string());
-        config.push_str("]\n\tk = v\n");
-    }
-    if broken {
-        config.push_str("[init]\n\tdefaultBranch = bad..name\n");
-    }
-    fs::write(git_home.join(".gitconfig"), config).unwrap();
+    fs::write(
+        git_home.join(".gitconfig"),
+        "[init]\n\tdefaultBranch = bad..name\n",
+    )
+    .unwrap();
 }
 
 fn staging_left(home: &Path) -> Vec<String> {
@@ -553,8 +551,13 @@ fn staging_left(home: &Path) -> Vec<String> {
         .collect()
 }
 
+/// RV-DS241-39: New Project's git reads no global config, so a `.gitconfig` planted in the
+/// engine's git home, with a default branch git refuses, does not break it; a build that
+/// fails, here with a file where the engine's projects folder goes, leaves no folder and no
+/// setup; and two New Projects of one name at once still give one project and leave no
+/// staging folder.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_slow_new_project_still_answers_within_the_default_owner_deadline() {
+async fn a_new_project_reads_no_git_config_planted_in_the_engine_git_home() {
     let engine = Engine::with_settings("").await;
     let place = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let home = place.path().canonicalize().unwrap().join("projects");
@@ -576,41 +579,39 @@ async fn a_slow_new_project_still_answers_within_the_default_owner_deadline() {
         .await
         .unwrap();
     assert_eq!(result(response), OwnerResult::Applied);
-    let owner_deadline = Duration::from_millis(1000);
     let slow = ProjectId::new("slow").unwrap();
     let quiet = || ProjectSetup {
         research: vec![],
         ..setup()
     };
 
-    slow_git(engine.root.path(), 1_200_000, true);
-    let started = std::time::Instant::now();
+    let projects = engine.root.path().join("projects");
+    match fs::remove_dir(&projects) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => panic!("{e}"),
+    }
+    fs::write(&projects, "not a folder").unwrap();
     let response = owner
         .setup_project(slow.clone(), spec("Slow Start"), quiet(), next())
         .await
         .unwrap();
-    assert!(
-        started.elapsed() > owner_deadline,
-        "{:?}",
-        started.elapsed()
-    );
     assert_eq!(result(response), rejected("home_new_project_failed"));
     assert!(plain_problem("home_new_project_failed").is_some());
     assert_eq!(names(&home), Vec::<String>::new());
     assert!(owner.project_setup(slow.clone()).await.unwrap().is_none());
+    fs::remove_file(&projects).unwrap();
 
-    slow_git(engine.root.path(), 1_200_000, false);
-    let started = std::time::Instant::now();
+    plant_git_config(engine.root.path());
     let response = owner
         .setup_project(slow.clone(), spec("Slow Start"), quiet(), next())
         .await
         .unwrap();
-    assert!(
-        started.elapsed() > owner_deadline,
-        "{:?}",
-        started.elapsed()
+    assert_eq!(
+        result(response),
+        OwnerResult::Applied,
+        "the planted config is not read"
     );
-    assert_eq!(result(response), OwnerResult::Applied);
     let folder = home.join("slow-start");
     assert_eq!(names(&home), ["slow-start"]);
     assert_eq!(git(&folder, &["rev-list", "--count", "HEAD"]).trim(), "1");
@@ -631,7 +632,6 @@ async fn a_slow_new_project_still_answers_within_the_default_owner_deadline() {
     let stored = owner.project_setup(slow.clone()).await.unwrap().unwrap();
     assert_eq!(Path::new(&stored.folder), folder);
 
-    slow_git(engine.root.path(), 300_000, false);
     let mut other = OwnerController::attach(
         engine.root.path(),
         OwnerClientKind::Tui,
