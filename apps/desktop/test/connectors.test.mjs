@@ -511,3 +511,16 @@ test("Removing the connector whose page is open replaces that page in the histor
   const screen = source("../src/screens/settings/connectors.tsx");
   assert.match(screen, /connector === name\) navigate\(\{ name: "settings", tab: "connectors" \}, true\);/u);
 });
+
+test("A project's Connectors section has one row per name: the owner's refused file a built-in connector shadows adds no row and no not-ready name", () => {
+  for (const enabled of [true, false]) {
+    const view = { ...VIEW, connectors: [...VIEW.connectors, refusedFile("linear", TAKEN)], grants: [{ connector: "linear", enabled, who: "both" }] };
+    const { rows, others } = api.projectRows(view);
+    assert.deepEqual(rows.filter((row) => row.name === "linear").map((row) => row.title), ["Linear"], `grant ${enabled}`);
+    assert.ok(!others.includes("linear"), `grant ${enabled}: ${others.join(", ")}`);
+    const markup = render({ view: { kind: "ok", value: view } });
+    assert.equal(markup.split("id=\"pc-on-linear\"").length, 2, `grant ${enabled}: one switch for linear`);
+  }
+  const broken = { ...VIEW, connectors: [...VIEW.connectors, refusedFile("broken", PROBLEM)], grants: [{ connector: "broken", enabled: true, who: "both" }] };
+  assert.deepEqual(api.projectRows(broken).rows.filter((row) => row.name === "broken").map((row) => row.word), ["Refused"], "a refused file of its own name keeps its switch, so it can be turned off");
+});
