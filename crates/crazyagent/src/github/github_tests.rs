@@ -1672,6 +1672,7 @@ fn publish_commit_uses_the_owners_identity_else_the_github_noreply_address() {
         private: true,
         docs: false,
         approved: Vec::new(),
+        rules: GitHubRule::defaults(),
     };
     let written = account.publish_prepare(&project, &local, &choices).unwrap();
     assert_eq!(
@@ -2151,6 +2152,7 @@ fn publish_job_runs_from_the_ignore_lines_to_done_and_records_each_step() {
             },
             stopped: None,
             made: None,
+            rules: GitHubRule::defaults(),
         }
     );
     assert!(!project.join(".git").exists());
@@ -2754,6 +2756,7 @@ fn publish_job_at_pushed_is_not_discarded_while_its_rules_are_still_to_apply() {
         },
         stopped: Some("github_token_refused".into()),
         made: Some("octo-cat/tool".into()),
+        rules: GitHubRule::defaults(),
     };
     state::save_job(&engine_root, &pushed).unwrap();
     assert_eq!(
@@ -3152,4 +3155,44 @@ fn publish_job_refuses_a_bad_plan_a_wrong_step_and_a_second_run() {
             .0,
         "github_publish_step_invalid"
     );
+}
+
+#[test]
+fn a_publish_copies_the_global_rule_defaults_at_start_and_sets_that_copy() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let mut chosen = GitHubRule::defaults();
+    chosen.insert(GitHubRule::SignedCommits);
+    chosen.remove(&GitHubRule::WikiOff);
+    assert_eq!(account.set_rule_defaults(&chosen).unwrap(), chosen);
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let owner_home = tempfile::tempdir().unwrap();
+    let started = account
+        .publish_start(&project, &plan("tool"), no_draft)
+        .unwrap();
+    assert_eq!(started.rules, chosen);
+    account.set_rule_defaults(&GitHubRule::defaults()).unwrap();
+    let done = account
+        .publish_approve(&project, owner_home.path(), &baseline())
+        .unwrap();
+    assert_eq!(done.rules, chosen);
+    let (_, outcomes) = done_on(&done);
+    let on: BTreeSet<GitHubRule> = outcomes
+        .iter()
+        .filter(|outcome| outcome.on)
+        .map(|outcome| outcome.rule)
+        .collect();
+    let expected: BTreeSet<GitHubRule> = chosen
+        .iter()
+        .copied()
+        .filter(|rule| rule.on_github())
+        .collect();
+    assert_eq!(on, expected);
+    let mut older = serde_json::to_value(&done).unwrap();
+    older.as_object_mut().unwrap().remove("rules");
+    let loaded: GitHubPublishJob = serde_json::from_value(older).unwrap();
+    assert_eq!(loaded.rules, GitHubRule::defaults());
 }

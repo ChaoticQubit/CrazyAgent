@@ -100,6 +100,7 @@ impl Fixture {
                 private,
                 docs,
                 approved,
+                rules: GitHubRule::defaults(),
             },
         )
     }
@@ -1000,5 +1001,66 @@ fn a_status_publish_cannot_count_is_refused_before_anything_is_committed() {
     assert_eq!(
         owned.lines(&["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]),
         [".gitignore"]
+    );
+}
+
+#[test]
+fn the_file_rules_turned_off_leave_the_security_policy_and_dependabot_unwritten() {
+    let written = |rules: BTreeSet<GitHubRule>| {
+        let public = fixture();
+        public.write("Cargo.toml", "[package]\n");
+        let local = public.inspect().unwrap();
+        let paths = prepare(
+            Path::new(GIT),
+            public.home.path(),
+            &public.path(),
+            &local,
+            &GitHubPrepare {
+                private: false,
+                docs: false,
+                approved: Vec::new(),
+                rules,
+            },
+        )
+        .unwrap();
+        let on_disk =
+            ["SECURITY.md", ".github/dependabot.yml"].map(|path| public.path().join(path).exists());
+        (paths, on_disk)
+    };
+    let mut neither = GitHubRule::defaults();
+    neither.remove(&GitHubRule::SecurityPolicy);
+    neither.remove(&GitHubRule::DependabotVersionUpdates);
+    assert_eq!(
+        written(neither.clone()),
+        (vec![".gitignore".to_owned()], [false, false])
+    );
+    let mut updates = neither.clone();
+    updates.insert(GitHubRule::DependabotVersionUpdates);
+    assert_eq!(
+        written(updates),
+        (
+            vec![".gitignore".to_owned(), ".github/dependabot.yml".to_owned()],
+            [false, true]
+        )
+    );
+    let mut policy = neither;
+    policy.insert(GitHubRule::SecurityPolicy);
+    assert_eq!(
+        written(policy),
+        (
+            vec![".gitignore".to_owned(), "SECURITY.md".to_owned()],
+            [true, false]
+        )
+    );
+    assert_eq!(
+        written(GitHubRule::defaults()),
+        (
+            vec![
+                ".gitignore".to_owned(),
+                "SECURITY.md".to_owned(),
+                ".github/dependabot.yml".to_owned()
+            ],
+            [true, true]
+        )
     );
 }

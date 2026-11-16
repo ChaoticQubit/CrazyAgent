@@ -1,8 +1,10 @@
+use super::GitHubRule;
 use super::clone;
 use crate::engine::EngineError;
 use crate::project_setup::SECRET_PREFIXES;
 use crate::research::runner::GIT_SAFE;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
@@ -131,13 +133,15 @@ pub struct GitHubLocal {
 }
 
 /// What the owner chose for the local side of a publish: the repository's visibility,
-/// whether the docs folder goes up, and the .gitignore lines the owner approved.
+/// whether the docs folder goes up, the .gitignore lines the owner approved, and the rules
+/// on, of which the security policy and Dependabot version updates are files written here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubPrepare {
     pub private: bool,
     pub docs: bool,
     pub approved: Vec<String>,
+    pub rules: BTreeSet<GitHubRule>,
 }
 
 /// The kind of secret found on a line: a known token, a private key block, or a
@@ -606,7 +610,7 @@ pub(super) fn prepare(
     }
     let ignore = project.join(GITIGNORE);
     let existing = read_gitignore(&ignore)?;
-    let files = generated(project, choices.private)?;
+    let files = generated(project, choices)?;
     if !local.repository {
         let made = run(project_git(git, home, project)
             .env_remove("GIT_DIR")
@@ -724,15 +728,21 @@ fn replace_file(project: &Path, path: &Path, text: &str) -> Result<(), EngineErr
     Ok(())
 }
 
-/// The files publish writes into a project where none of their kind exists: the
-/// security policy on a public repository, and Dependabot version updates for each
-/// ecosystem the project's top level shows. A `.github` that is not a plain folder is
-/// refused. Inputs: the project and whether the repository is private.
+/// The files publish writes into a project where none of their kind exists, each while
+/// its rule is on: the security policy on a public repository, and Dependabot version
+/// updates for each ecosystem the project's top level shows. A `.github` that is not a
+/// plain folder is refused. Inputs: the project and the owner's choices.
 /// Output: each file's path and text, or `github_publish_file_invalid`.
-fn generated(project: &Path, private: bool) -> Result<Vec<(&'static str, String)>, EngineError> {
+fn generated(
+    project: &Path,
+    choices: &GitHubPrepare,
+) -> Result<Vec<(&'static str, String)>, EngineError> {
     let present = |path: &str| std::fs::symlink_metadata(project.join(path)).is_ok();
     let mut files: Vec<(&'static str, String)> = Vec::new();
-    if !private && !SECURITY_PATHS.iter().any(|path| present(path)) {
+    if !choices.private
+        && choices.rules.contains(&GitHubRule::SecurityPolicy)
+        && !SECURITY_PATHS.iter().any(|path| present(path))
+    {
         files.push((SECURITY_PATHS[0], SECURITY_POLICY.to_owned()));
     }
     let mut ecosystems: Vec<&str> = Vec::new();
@@ -741,7 +751,12 @@ fn generated(project: &Path, private: bool) -> Result<Vec<(&'static str, String)
             ecosystems.push(ecosystem);
         }
     }
-    if !ecosystems.is_empty() && !DEPENDABOT_PATHS.iter().any(|path| present(path)) {
+    if choices
+        .rules
+        .contains(&GitHubRule::DependabotVersionUpdates)
+        && !ecosystems.is_empty()
+        && !DEPENDABOT_PATHS.iter().any(|path| present(path))
+    {
         let mut text = String::from("version: 2\nupdates:\n");
         for ecosystem in &ecosystems {
             text.push_str(&format!(
