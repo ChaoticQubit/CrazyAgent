@@ -29,6 +29,7 @@ impl AccountSecret {
 
     fn wipe(&mut self) {
         self.0.fill(0);
+        std::hint::black_box(&self.0);
     }
 }
 
