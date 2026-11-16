@@ -143,6 +143,37 @@ fn group_listeners(group: i32) -> Vec<String> {
     addresses
 }
 
+/// IDE-PORT-TOCTOU: the engine picks the server port and drops it before the server binds
+/// it, so another local process can take it first. The open catches that before it returns:
+/// every listener on the port must be in the server's process group, so a listener of
+/// another group, or none, refuses with `ide_server_port_taken`, and one in the group passes.
+#[tokio::test]
+async fn a_listener_outside_the_servers_group_refuses_the_open() {
+    let held = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
+    let port = held.local_addr().unwrap().port();
+    let ours = rustix::process::getpgid(None).unwrap();
+    let other = Pid::from_raw(1).unwrap();
+    assert_ne!(ours, other);
+    let taken = owned_listener(port, other).await.unwrap_err();
+    assert_eq!(taken.0, "ide_server_port_taken");
+    assert!(owned_listener(port, ours).await.is_ok());
+    drop(held);
+    let gone = owned_listener(port, ours).await.unwrap_err();
+    assert_eq!(gone.0, "ide_server_port_taken");
+}
+
+/// rv-ds241 L1: a port a wildcard listener of this user holds is not free, so the open picks
+/// another server port instead of recording one the server would only bind beside it, which
+/// would refuse every later open of the project.
+#[test]
+fn a_port_a_wildcard_listener_of_this_user_holds_is_not_free() {
+    let held = crate::spawn_gate::bind_tcp_std(("0.0.0.0", 0)).unwrap();
+    let port = held.local_addr().unwrap().port();
+    assert!(!ports::free(port), "a wildcard listener holds {port}");
+    drop(held);
+    assert!(ports::free(port), "free once it is released");
+}
+
 #[tokio::test]
 async fn ide_server_listens_only_on_loopback() {
     let checkout = scratch();

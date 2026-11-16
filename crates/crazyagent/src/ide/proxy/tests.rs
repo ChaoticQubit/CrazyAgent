@@ -488,6 +488,7 @@ async fn the_proxy_serves_webview_files_without_the_token_and_nothing_else() {
             pre: pre.clone(),
             token: token.clone(),
             workspace: WORKSPACE.to_owned(),
+            served: Arc::default(),
         },
     ));
     assert_eq!(
@@ -641,4 +642,95 @@ fn the_workbench_opens_only_the_engine_workspace() {
         Some("/a b/c%d+e~f g")
     );
     assert_eq!(decoded("%2"), None);
+}
+
+/// Starts a proxy in front of `upstream` for the LEAD-1 row, with the processes the open saw
+/// listening there once ready, or none before. Inputs: the server port and those processes.
+/// Output: the proxy port.
+async fn proxy_to(upstream: u16, served: Option<Vec<i32>>) -> u16 {
+    let (listener, port) = bind(None).await.unwrap();
+    let seen = Arc::new(std::sync::OnceLock::new());
+    if let Some(pids) = served {
+        seen.set(pids).unwrap();
+    }
+    tokio::spawn(serve(
+        listener,
+        Site {
+            port,
+            upstream,
+            pre: PathBuf::from("/var/empty"),
+            token: token(),
+            workspace: WORKSPACE.to_owned(),
+            served: seen,
+        },
+    ));
+    port
+}
+
+/// Sends one authorized request for a script through a proxy and reads its whole reply.
+/// Input: the proxy port. Output: the reply.
+async fn fetched(port: u16) -> String {
+    let head = format!(
+        "GET /static/app.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {COOKIE}={}\r\n\r\n",
+        token()
+    );
+    let mut stream = crate::spawn_gate::connect_tcp(("127.0.0.1", port))
+        .await
+        .unwrap();
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut reply = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(20), stream.read_to_end(&mut reply)).await;
+    assert!(read.is_ok(), "the proxy answers");
+    String::from_utf8_lossy(&reply).into_owned()
+}
+
+/// rv-sa241 LEAD-1: the proxy sends nothing upstream before the open has seen the server
+/// ready, and each upstream connection is checked before anything is sent: a listener that is
+/// not a process the open saw listening on the server port, as one that took the port after
+/// the server exited, gets no request and no token, and the owner gets 502.
+#[tokio::test]
+async fn a_request_reaches_only_the_listeners_the_open_saw_ready() {
+    let (upstream, server_port) = bind(None).await.unwrap();
+    let before = tokio::spawn(fetched(proxy_to(server_port, None).await));
+    let reached = tokio::time::timeout(
+        Duration::from_secs(2),
+        crate::spawn_gate::accept_tcp(&upstream),
+    )
+    .await;
+    assert!(
+        reached.is_err(),
+        "no connection before the open saw it ready"
+    );
+    assert!(before.await.unwrap().starts_with("HTTP/1.1 502 "));
+
+    let taken = tokio::spawn(fetched(proxy_to(server_port, Some(vec![i32::MAX])).await));
+    let (mut squatter, _) = crate::spawn_gate::accept_tcp(&upstream).await.unwrap();
+    let mut got = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), squatter.read_to_end(&mut got)).await;
+    assert!(
+        got.is_empty(),
+        "the squatter got: {}",
+        String::from_utf8_lossy(&got)
+    );
+    drop(squatter);
+    assert!(taken.await.unwrap().starts_with("HTTP/1.1 502 "));
+
+    let ours = vec![i32::try_from(std::process::id()).unwrap()];
+    let served = tokio::spawn(fetched(proxy_to(server_port, Some(ours)).await));
+    let (mut server, _) = crate::spawn_gate::accept_tcp(&upstream).await.unwrap();
+    let mut head = Vec::new();
+    let mut chunk = [0u8; 1024];
+    while find(&head, b"\r\n\r\n").is_none() && head.len() < HEAD_BYTES_MAX {
+        let read = server.read(&mut chunk).await.unwrap();
+        assert_ne!(read, 0, "the head arrives whole");
+        head.extend_from_slice(&chunk[..read]);
+    }
+    let head = String::from_utf8_lossy(&head).into_owned();
+    assert!(head.contains(&format!("{COOKIE}={}", token())), "{head}");
+    server
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        .await
+        .unwrap();
+    drop(server);
+    assert!(served.await.unwrap().starts_with("HTTP/1.1 200 OK\r\n"));
 }
