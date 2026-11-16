@@ -1070,10 +1070,10 @@ fn save_record(root: &Path, name: &str, text: String) -> Result<(), OAuthError> 
 /// checked first, so a code from another server is never sent anywhere. The request body
 /// lives in a buffer that never grows and is zeroed. Under the renewal lock, the owner's
 /// own app must still be the one the sign-in began with, and bound to this issuer or to
-/// none; then the tokens are saved, the
-/// tokens of another issuer the connector was signed in at before are removed, the owner's
-/// own app is bound to this issuer, and the sign-in record is saved last. Inputs: engine root, the
-/// sign-in, the code, the answer's issuer and the lookup. Output: Ok once all is saved.
+/// none; then the tokens are saved, the tokens of another issuer the connector was signed
+/// in at before are removed, the owner's own app is bound to this issuer, and the sign-in
+/// record is saved last. Inputs: engine root, the sign-in, the code, the answer's issuer
+/// and the lookup. Output: Ok once all is saved.
 fn redeem(
     root: &Path,
     flow: Flow,
@@ -1093,8 +1093,8 @@ fn redeem(
     let lock = renewal_lock(root, &flow.connector);
     let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
     if flow.client.own {
-        let now = saved(root, &own_ref(&flow.connector)?)?;
-        if now.is_none_or(|id| id.expose() != flow.client.id) {
+        let saved_id = saved(root, &own_ref(&flow.connector)?)?;
+        if saved_id.is_none_or(|id| id.expose() != flow.client.id) {
             return Err(OAuthError("connector_oauth_state_unknown"));
         }
         let bound = accounts::read_bearer_in(root, PLUGIN_KEYS, &own_issuer_ref(&flow.connector)?)
