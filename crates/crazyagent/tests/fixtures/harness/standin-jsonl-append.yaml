@@ -10,6 +10,17 @@ account_kinds:
   - "api_key"
   - "open_ai_compatible_url"
   - "local"
+home:
+  env_prefixes:
+    - "STANDIN_APPEND_"
+  env:
+    STANDIN_APPEND_CONFIG: "{home}/config"
+mcp:
+  render: "json-mcp-servers"
+  path: "{home}/config/mcp.json"
+instructions:
+  render: "file"
+  path: "{home}/config/AGENTS.md"
 roles:
   - "agent"
   - "master"
@@ -41,6 +52,7 @@ rules:
       when:
         type: "started"
       emit: "turn_started"
+      text: "prompt"
     text:
       when:
         type: "text"

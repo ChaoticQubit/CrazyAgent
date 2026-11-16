@@ -4909,6 +4909,47 @@ mod tests {
         );
     }
 
+    /// DEC-180 T20 M8 (Q2): a live master on a listed harness stores the turn the owner
+    /// typed in its pane as the words its record shows, read by the manifest's
+    /// `turn_started` rule and marked as read from the record, then the reply, as a native
+    /// terminal turn is stored.
+    #[cfg(unix)]
+    #[test]
+    fn a_listed_live_master_turn_is_stored_as_the_words_its_record_shows_then_the_reply() {
+        let (folder, connection) = store_fixture();
+        let project = ProjectId::new("store-project").unwrap();
+        let (harness, session) = ("standin-jsonl-append", "s-listed");
+        let record = folder.path().join("standin-1.jsonl");
+        let lines = [
+            serde_json::json!({"type": "started", "prompt": "continue"}),
+            serde_json::json!({"type": "text", "delta": "On it"}),
+            serde_json::json!({"type": "done", "ok": true}),
+        ];
+        let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        std::fs::write(&record, text).unwrap();
+        let kept = SessionConversation {
+            agent: 1,
+            harness: harness.into(),
+            connection: "local-a".into(),
+            resume: Resume {
+                id: "standin-1".into(),
+                record,
+            },
+        };
+        keep_conversation(&connection, &project, session, &kept).unwrap();
+
+        super::mark_owner_turn(&connection, &project, session, harness).unwrap();
+        super::mark_owner_reply(&connection, &project, session, harness, "On it").unwrap();
+
+        assert_eq!(
+            shown(&connection, session),
+            [
+                "owner/live/record: continue",
+                "master/live/terminal: On it",
+            ]
+        );
+    }
+
     /// OB6-F3: a typed message the record gains only after its turn began is read when the
     /// turn ends, and a message typed while that turn ran stays for the turn it begins.
     #[cfg(unix)]
