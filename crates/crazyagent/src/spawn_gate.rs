@@ -266,8 +266,9 @@ pub fn connect_unix_std(
 /// Tries one Unix stream connect inside the gate without waiting, through the short address
 /// of a path too long for a socket address. A listener whose queue of unaccepted
 /// connections is full answers `WouldBlock` at once, where a blocking connect on Linux
-/// waits for room with no bound, the gate held. Input: the socket path. Output: the
-/// stream, blocking once connected, or the connect's error.
+/// waits for room with no bound, the gate held. The socket is close-on-exec from its
+/// creation on Linux (rv-sec3 N1) and by fcntl inside the gate everywhere. Input: the
+/// socket path. Output: the stream, blocking once connected, or the connect's error.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
 pub fn try_connect_unix_std(
@@ -277,13 +278,12 @@ pub fn try_connect_unix_std(
     use std::os::fd::AsRawFd;
     let address = crate::socket_address::address(path.as_ref())?;
     let unix = UnixAddr::new(address.as_path()).map_err(io::Error::from)?;
+    #[cfg(target_os = "linux")]
+    let flags = SockFlag::SOCK_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = SockFlag::empty();
     let stream = guarded(|| -> io::Result<std::os::unix::net::UnixStream> {
-        let fd = socket(
-            AddressFamily::Unix,
-            SockType::Stream,
-            SockFlag::empty(),
-            None,
-        )?;
+        let fd = socket(AddressFamily::Unix, SockType::Stream, flags, None)?;
         rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)?;
         let stream = std::os::unix::net::UnixStream::from(fd);
         stream.set_nonblocking(true)?;
@@ -541,6 +541,52 @@ pub(crate) fn unconnected_unix_stream() -> io::Result<std::os::unix::net::UnixSt
     })
     .map(std::os::unix::net::UnixStream::from)
     .map_err(io::Error::from)
+}
+
+/// Makes a Unix listener whose queue of unaccepted connections is full, every socket
+/// inside the gate, for checks that a connect never waits on one: the queue takes no room
+/// past the kernel's floor, and clients that never wait connect until one is turned away.
+/// Input: the socket path. Output: the listener and the queued clients, which keep the
+/// queue full while held.
+#[cfg(all(test, target_os = "linux"))]
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn full_unix_listener(
+    path: &std::path::Path,
+) -> io::Result<(std::os::fd::OwnedFd, Vec<std::os::fd::OwnedFd>)> {
+    use nix::errno::Errno;
+    use nix::sys::socket::{
+        AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, connect, listen, socket,
+    };
+    use std::os::fd::AsRawFd;
+    const QUEUED_MAX: usize = 64;
+    let address = UnixAddr::new(path)?;
+    let server = guarded(|| {
+        socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::SOCK_CLOEXEC,
+            None,
+        )
+    })?;
+    bind(server.as_raw_fd(), &address)?;
+    listen(&server, Backlog::new(0)?)?;
+    let mut queued = Vec::new();
+    while queued.len() < QUEUED_MAX {
+        let client = guarded(|| {
+            socket(
+                AddressFamily::Unix,
+                SockType::Stream,
+                SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
+                None,
+            )
+        })?;
+        match connect(client.as_raw_fd(), &address) {
+            Ok(()) => queued.push(client),
+            Err(Errno::EAGAIN) => return Ok((server, queued)),
+            Err(other) => return Err(other.into()),
+        }
+    }
+    Err(io::Error::other("the queue never filled"))
 }
 
 #[cfg(unix)]
