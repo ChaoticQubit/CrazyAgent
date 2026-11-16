@@ -1702,8 +1702,9 @@ impl Session {
 
     /// Spawns one listed master turn's harness from the command [`listed_command`] built, its
     /// ACP session opened with the given engine servers, holding the relay of a keyed account
-    /// while the session lives (DEC-180 Task 20). Inputs: the checked request, the command,
-    /// the relay, if any, and the servers. Output: a running session, or a plain refusal code.
+    /// and with it the engine's lifeline while the session lives (DEC-180 Task 20, T20 r1 F2).
+    /// Inputs: the checked request, the command, the relay, if any, and the servers. Output:
+    /// a running session, or a plain refusal code.
     pub fn start_listed(
         request: LaunchRequest,
         command: Command,
@@ -1821,6 +1822,12 @@ impl Session {
         let follower = request
             .unconfined
             .then(|| Follower::start(child.id(), Some(token)));
+        #[cfg(unix)]
+        let relayed = relay.is_some()
+            || request
+                .account
+                .key()
+                .is_some_and(|key| crate::model_gateway::relay::is_relay_token(key.reveal()));
         let mut session = Self {
             child,
             warden,
@@ -1841,11 +1848,7 @@ impl Session {
             lifeline: None,
         };
         #[cfg(unix)]
-        if request
-            .account
-            .key()
-            .is_some_and(|key| crate::model_gateway::relay::is_relay_token(key.reveal()))
-        {
+        if relayed {
             let lifeline = crate::research::runner::Lifeline::watch(session.child.id())
                 .map_err(|_| failure("launch_spawn_failed"))?;
             session.lifeline = Some(lifeline);
