@@ -388,8 +388,21 @@ pub(crate) fn holds(connection: &Connection, folder: &Path) -> rusqlite::Result<
 /// destination and replaces a row already there. Inputs: an engine connection and the
 /// folder. Output: the answer, or any SQLite failure.
 pub(crate) fn lands(connection: &Connection, folder: &Path) -> rusqlite::Result<bool> {
-    let _ = (connection, folder);
-    Ok(false)
+    if !present(connection, "projects_home_project_move")? {
+        return Ok(false);
+    }
+    let target: Option<String> = connection
+        .query_row(
+            "SELECT target FROM projects_home_project_move WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(target.is_some_and(|target| {
+        let target = Path::new(&target);
+        folder.starts_with(target)
+            || std::fs::canonicalize(folder).is_ok_and(|real| real.starts_with(target))
+    }))
 }
 
 /// Forgets a pending project move whose disk work never ran. Inputs: the transaction and
