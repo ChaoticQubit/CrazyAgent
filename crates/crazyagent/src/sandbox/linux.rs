@@ -2532,7 +2532,8 @@ mod tests {
     }
 
     fn git(folder: &Path, args: &[&str]) {
-        let status = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .arg("-C")
             .arg(folder)
             .args([
@@ -2543,9 +2544,8 @@ mod tests {
             ])
             .args(["-c", "commit.gpgsign=false"])
             .args(args)
-            .stdout(Stdio::null())
-            .status()
-            .unwrap();
+            .stdout(Stdio::null());
+        let status = crate::spawn_gate::status(&mut command).unwrap();
         assert!(status.success(), "git {args:?}");
     }
 
@@ -2673,8 +2673,9 @@ mod tests {
         };
         let mut run = many.args();
         run.extend([OsString::from("--"), OsString::from("/bin/true")]);
-        assert!(
-            HelperRequest::parse(run).is_err(),
+        assert_eq!(
+            HelperRequest::parse(run).err(),
+            Some("too many path grants".to_owned()),
             "the git tier counts toward the helper's path limit"
         );
     }
