@@ -269,9 +269,9 @@ fn read(kind: &Kind, file: File, budget: u64, bounds: &Bounds) -> Outcome {
 }
 
 /// Reads a record line by line, at most `budget` bytes in all and each line at most
-/// `line_bytes` bytes; a longer line is passed over to its end without being kept, and a
-/// blank line is passed over. Inputs: the file, the budget, the line bound and what to do
-/// with each line. Output: what the lines gave.
+/// `line_bytes` bytes; a longer line is passed over to its end, a blank line is passed over,
+/// and a last line the budget cut is not kept and marks the record clipped. Inputs: the
+/// file, the budget, the line bound and what to do with each line. Output: what it gave.
 fn lines_of(
     file: File,
     budget: u64,
@@ -291,12 +291,17 @@ fn lines_of(
             break;
         }
         taken.bytes += count as u64;
-        if line.last() != Some(&b'\n') && line.len() > line_bytes {
+        let ended = line.last() == Some(&b'\n');
+        if !ended && line.len() > line_bytes {
             match reader.skip_until(b'\n') {
                 Ok(skipped) => taken.bytes += skipped as u64,
                 Err(_) => break,
             }
             continue;
+        }
+        if !ended && taken.bytes == budget {
+            taken.clipped = true;
+            break;
         }
         let text = line.strip_suffix(b"\n").unwrap_or(&line);
         let text = text.strip_suffix(b"\r").unwrap_or(text);
@@ -308,10 +313,10 @@ fn lines_of(
     taken
 }
 
-/// Reads a record that is one JSON array, whose object entries the record rules read.
-/// Inputs: the rules, the file, its length, the bytes left for it and the bounds. Output:
-/// what it gave; skipped as too large past `DOCUMENT_BYTES_MAX` or the record bound, as
-/// unreadable, or stopped when fewer bytes are left in all.
+/// Reads a record that is one JSON array, whose object entries the record rules read once
+/// its relay tokens are redacted. Inputs: the rules, the file, its length, the bytes left for
+/// it and the bounds. Output: what it gave; skipped as too large past `DOCUMENT_BYTES_MAX` or
+/// the record bound, as unreadable, or stopped when fewer bytes are left in all.
 fn document(rules: &[Rule], file: File, length: u64, budget: u64, bounds: &Bounds) -> Outcome {
     let most = (DOCUMENT_BYTES_MAX as u64).min(bounds.record_bytes);
     if length > most {
@@ -335,8 +340,11 @@ fn document(rules: &[Rule], file: File, length: u64, budget: u64, bounds: &Bound
         bytes: read,
         ..Taken::default()
     };
-    match serde_json::from_slice::<Value>(&bytes) {
-        Ok(Value::Array(entries)) => {
+    let parsed = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&redacted(text)).ok());
+    match parsed {
+        Some(Value::Array(entries)) => {
             for entry in entries.iter().filter(|entry| entry.is_object()) {
                 let said = rules::matched(rules, entry).and_then(spoken);
                 taken.push(said, bounds.messages);
@@ -364,10 +372,17 @@ impl Taken {
 
     /// Reads one JSON line: a line that is not JSON marks the record broken; otherwise the
     /// working folder the record names is kept from its first line that has one, and the
-    /// message it gives is kept. Inputs: how the lines give messages, the line and the
-    /// bound on messages.
+    /// message it gives is kept. A line the record rules read has its relay tokens redacted
+    /// first, so their clip never cuts one. Inputs: how the lines give messages, the line
+    /// and the bound on messages.
     fn json(&mut self, said: &Said, line: &[u8], most: usize) {
-        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+        let parsed = match said {
+            Said::Ruled(_) => std::str::from_utf8(line)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&redacted(text)).ok()),
+            Said::Claude | Said::Codex => serde_json::from_slice::<Value>(line).ok(),
+        };
+        let Some(value) = parsed else {
             self.broken = true;
             return;
         };
