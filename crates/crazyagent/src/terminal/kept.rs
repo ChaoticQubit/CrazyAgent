@@ -630,8 +630,8 @@ mod tests {
         killing.join().unwrap().unwrap();
         assert!(host.alive().unwrap().is_empty());
 
-        let held = host.screens();
-        assert!(held.view(&named).is_some());
+        assert!(host.screens().view(&named).is_some());
+        let held = host.turns.take(&named);
         let spawning = {
             let (host, named) = (Arc::clone(&host), named.clone());
             let second = run("second run");
@@ -640,7 +640,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(500));
         assert!(
             host.alive().unwrap().is_empty(),
-            "a respawn starts the terminal only while it holds the kept screens"
+            "a respawn starts the terminal only once it holds the agent's turn"
         );
         drop(held);
         spawning.join().unwrap().unwrap();

@@ -271,6 +271,7 @@ fn group_alive(group: i64) -> bool {
 }
 
 #[test]
+#[ignore = "live qualification: needs a local Ollama at 127.0.0.1:11434 serving qwen2.5:7b and Codex installed"]
 fn the_master_hands_two_tasks_to_sandboxed_sub_agents_and_hears_their_results() {
     require_model();
     let runtime = runtime();

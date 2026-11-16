@@ -786,8 +786,8 @@ pub(super) fn agent(db: &Connection, record: &Record) -> Result<Agent, EngineErr
 }
 
 /// Says whether an agent worktree holds exactly a commit: nothing staged or changed in
-/// tracked files, as its confined step reads them ([`Repo::reading`]), and no untracked file
-/// outside its ignore rules. A submodule counts by the commit it records, never by its own
+/// tracked files and no untracked file outside its ignore rules, the owner's ignore file
+/// included, all as its confined reading step reads them ([`Repo::reading`]). A submodule counts by the commit it records, never by its own
 /// content, so no git runs inside it under config the engine did not write. Inputs: the
 /// worktree and the commit. Output: true when it holds nothing else.
 pub(super) fn holds_only(repo: &Repo, commit: &str) -> Result<bool, EngineError> {
@@ -821,7 +821,7 @@ pub(super) fn holds_only_except(
         .collect();
     let mut listing = vec!["ls-files", "-z", "--others", "--exclude-standard"];
     listing.extend(exclude.iter().map(String::as_str));
-    let untracked = repo.exec(&listing, None, &[], 1)?;
+    let untracked = reading.exec(&listing, None, &[], 1)?;
     if untracked.code != 0 {
         return Err(failure("changes_git_failed"));
     }

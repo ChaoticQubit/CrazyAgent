@@ -257,13 +257,16 @@ fn admit(
 /// owner's branch into its worktree and starts that work. A refused check changes
 /// nothing. Once merged, a resolve that does not start leaves the set merged and waiting
 /// for its agent rather than failing the update; asking again for a waiting set only
-/// starts the resolve. A master's resolve turn is started by the owner runtime after
+/// starts the resolve, and so does asking again for a team agent's updating set whose
+/// resolve task a stop failed, a crash cancelled or that ended ([`crate::team::resolve_pending`],
+/// LAND-UPDATING-STUCK). A master's resolve turn is started by the owner runtime after
 /// this returns. Inputs: the store and the change set. Output: true when this call
 /// merged, or the refusal.
 pub(crate) fn update(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
     let set = view(db, id)?.ok_or_else(|| refused("changes_not_found"))?;
-    let again = set.state == ChangeState::Updating && set.waiting;
+    let updating = set.state == ChangeState::Updating;
     if set.agent.kind == AgentKind::Master {
+        let again = updating && set.waiting;
         let session =
             SessionId::new(set.agent.id.clone()).map_err(|_| refused("changes_master_closed"))?;
         crate::storage::master_resolve_ready(db, &session)?.map_err(refused)?;
@@ -272,6 +275,9 @@ pub(crate) fn update(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineEr
         }
         return Ok(!again);
     }
+    let again = updating
+        && (set.waiting
+            || !crate::team::resolve_pending(db, &set_project(db, id)?, team_agent(&set)?)?);
     if again {
         hand_over(db, id, Asker::Owner)?;
         return Ok(false);

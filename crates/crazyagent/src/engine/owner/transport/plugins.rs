@@ -1608,11 +1608,15 @@ fn boundary_check(
         .map_err(|error| refused(&error))?;
     let reads = program.parent().ok_or("server_command_not_runnable")?;
     #[cfg(target_os = "linux")]
-    let calls = crate::sandbox_settings::stored(root)
-        .map_err(|error| refused(&error.0))?
-        .linux_supervisor;
+    let (calls, strict) = {
+        let settings = crate::sandbox_settings::stored(root).map_err(|error| refused(&error.0))?;
+        (settings.linux_supervisor, settings.linux_strict)
+    };
     #[cfg(not(target_os = "linux"))]
-    let calls = crate::sandbox::LinuxSupervisor::On;
+    let (calls, strict) = (
+        crate::sandbox::LinuxSupervisor::On,
+        crate::sandbox::LinuxStrict::Off,
+    );
     let profile = check_profile(&checks, id);
     let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network)
         .and_then(|sandbox| sandbox.keep_ports(kept))
@@ -1622,7 +1626,7 @@ fn boundary_check(
             Some(install) => sandbox.allow_read(install),
             None => Ok(sandbox),
         })
-        .and_then(|sandbox| InstalledSandbox::install(sandbox, &profile, calls))
+        .and_then(|sandbox| InstalledSandbox::install(sandbox, &profile, calls, strict))
         .map_err(boundary)?;
     let mut server = std::process::Command::new(program);
     server.args(args).current_dir(&folders[0]);
@@ -1631,7 +1635,7 @@ fn boundary_check(
         process.env(name, std::ffi::OsStr::from_bytes(value));
     }
     assert_eq!(process.get_program(), sandbox.launcher().as_os_str());
-    check::check_command(process, check::CHECK_TIME).map_err(String::from)
+    check::check_command(process, check::CHECK_TIME, sandbox.lineage_check()).map_err(String::from)
 }
 
 /// Refuses to check a command server where no process group can be stopped. Takes the

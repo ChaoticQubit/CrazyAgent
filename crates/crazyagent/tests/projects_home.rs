@@ -941,7 +941,7 @@ fn a_case_sensitive_copy_never_writes_through_a_link_it_made() {
         "the link's target keeps its bytes"
     );
     assert_eq!(mode(&victim), 0o600, "and its mode");
-    assert_eq!(added.unwrap_err().0, "home_copy_failed");
+    assert_eq!(added.unwrap_err().0, "home_copy_names_fold");
     assert_eq!(
         names(&case.home),
         Vec::<String>::new(),

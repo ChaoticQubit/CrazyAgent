@@ -1225,7 +1225,7 @@ async fn first_run_setup_continues_without_installing_and_home_lists_what_is_mis
     let rows = render(&mut shell, 80, 24);
     let help = crate::tui::screens::settings_accounts::tests::bar_rows(&rows).join("\n");
     assert!(help.contains("Enter Install and continue"), "{rows:#?}");
-    assert!(help.contains("c Continue without installing"), "{rows:#?}");
+    assert!(help.contains("c Skip for now"), "{rows:#?}");
 
     shell.key(Key::Char('c'));
     assert_eq!(shell.place(), Some(Place::HarnessSetup));
@@ -1578,13 +1578,12 @@ fn a_folder_that_came_with_its_own_project_instructions_says_so_in_the_desktop_w
 
 /// SA vid 7 (leader 09:27 A): a folder that arrives with its own .crazyagent/instructions.md,
 /// committed, with no git or with a git folder that cannot be read, starts onboarding with
-/// those instructions under their Imported heading and a review that says so in the desktop
-/// words, and the import Process runs later never labels the owner's text again; one whose
-/// label cannot be saved is refused, so no project holds the text unlabelled.
+/// those instructions under their Imported heading and an onboarding the engine marks as
+/// carrying them, which the review shows in the desktop words (the review row above), and
+/// the import Process runs later never labels the owner's text again; one whose label cannot
+/// be saved is refused, so no project holds the text unlabelled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_folder_that_arrives_with_project_instructions_starts_onboarding_with_them_labelled() {
-    let notice = "The folder came with its own .crazyagent/instructions.md. CrazyAgent gives it to your agents under the heading Imported from .crazyagent/instructions.md. Check it in Process before you start the team.";
-    let wrapped = crate::tui::text::wrap(notice, 76);
     let mut engine = Engine::start().await;
     let home = engine.set_home().await;
     let mut problems = Vec::new();
@@ -1674,9 +1673,17 @@ async fn a_folder_that_arrives_with_project_instructions_starts_onboarding_with_
             ));
             continue;
         }
-        let rows = render(&mut shell, 200, 40);
-        if !wrapped.iter().all(|line| shows(&rows, line)) {
-            problems.push(format!("{name}: the review shows no notice: {rows:#?}"));
+        let Some(Place::Onboarding {
+            project: Some(project),
+            ..
+        }) = shell.place()
+        else {
+            panic!("the started onboarding names its project");
+        };
+        if !engine.controller.onboarding(project).await.unwrap().carried {
+            problems.push(format!(
+                "{name}: the onboarding does not say its instructions came with the folder"
+            ));
         }
         crate::agent_home::save_project(&folder, "OWNER-EDIT\n").unwrap();
         std::fs::write(folder.join("AGENTS.md"), "NEW-RULE\n").unwrap();

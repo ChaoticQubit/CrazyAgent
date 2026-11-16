@@ -489,6 +489,7 @@ async fn the_proxy_serves_webview_files_without_the_token_and_nothing_else() {
             token: token.clone(),
             workspace: WORKSPACE.to_owned(),
             served: Arc::default(),
+            refused: Arc::default(),
         },
     ));
     assert_eq!(
@@ -644,15 +645,20 @@ fn the_workbench_opens_only_the_engine_workspace() {
     assert_eq!(decoded("%2"), None);
 }
 
-/// Starts a proxy in front of `upstream` for the LEAD-1 row, with the processes the open saw
+/// Starts a proxy in front of `upstream` for the LEAD-1 rows, with the processes the open saw
 /// listening there once ready, or none before. Inputs: the server port and those processes.
-/// Output: the proxy port.
-async fn proxy_to(upstream: u16, served: Option<Vec<i32>>) -> u16 {
+/// Output: the proxy port and the flag it sets once none of them holds the port.
+#[cfg(target_os = "macos")]
+async fn proxy_to(
+    upstream: u16,
+    served: Option<Vec<i32>>,
+) -> (u16, Arc<std::sync::atomic::AtomicBool>) {
     let (listener, port) = bind(None).await.unwrap();
     let seen = Arc::new(std::sync::OnceLock::new());
     if let Some(pids) = served {
         seen.set(pids).unwrap();
     }
+    let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
     tokio::spawn(serve(
         listener,
         Site {
@@ -662,13 +668,21 @@ async fn proxy_to(upstream: u16, served: Option<Vec<i32>>) -> u16 {
             token: token(),
             workspace: WORKSPACE.to_owned(),
             served: seen,
+            refused: Arc::clone(&refused),
         },
     ));
-    port
+    (port, refused)
+}
+
+/// Whether a proxy has set its refused flag. Input: the flag. Output: the answer.
+#[cfg(target_os = "macos")]
+fn flagged(refused: &std::sync::atomic::AtomicBool) -> bool {
+    refused.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Sends one authorized request for a script through a proxy and reads its whole reply.
 /// Input: the proxy port. Output: the reply.
+#[cfg(target_os = "macos")]
 async fn fetched(port: u16) -> String {
     let head = format!(
         "GET /static/app.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {COOKIE}={}\r\n\r\n",
@@ -684,14 +698,83 @@ async fn fetched(port: u16) -> String {
     String::from_utf8_lossy(&reply).into_owned()
 }
 
+/// Answers one request on a stand-in server with 200 once its whole head has arrived, within
+/// 20 s. Input: the stand-in's listener. Output: the head it got.
+#[cfg(target_os = "macos")]
+async fn answer_once(upstream: &TcpListener) -> String {
+    let accepted = tokio::time::timeout(
+        Duration::from_secs(20),
+        crate::spawn_gate::accept_tcp(upstream),
+    )
+    .await;
+    let (mut server, _) = accepted.expect("the proxy connects").unwrap();
+    let mut head = Vec::new();
+    let mut chunk = [0u8; 1024];
+    while find(&head, b"\r\n\r\n").is_none() && head.len() < HEAD_BYTES_MAX {
+        let read = server.read(&mut chunk).await.unwrap();
+        assert_ne!(read, 0, "the head arrives whole");
+        head.extend_from_slice(&chunk[..read]);
+    }
+    assert!(head.len() < HEAD_BYTES_MAX + chunk.len());
+    server
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&head).into_owned()
+}
+
+/// A `/bin/sleep 30` child started through the spawn gate holding one handed listening
+/// socket, so a process the open never saw ready holds it; ended when dropped, also while a
+/// failed assert unwinds, and never panics there.
+#[cfg(target_os = "macos")]
+struct Holder(std::process::Child);
+
+#[cfg(target_os = "macos")]
+impl Holder {
+    /// Hands a socket to a new child ([`crate::spawn_gate::spawn_handing`] closes this
+    /// process's copy of it). Input: the socket, or a duplicate of one this process keeps.
+    /// Output: the holder.
+    fn of(socket: std::os::fd::OwnedFd) -> Self {
+        let child = crate::spawn_gate::spawn_handing(
+            std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+            socket,
+        )
+        .unwrap();
+        let holder = Self(child);
+        assert!(holder.pid() > 1);
+        assert_ne!(holder.pid(), i32::try_from(std::process::id()).unwrap());
+        holder
+    }
+
+    /// The child's process id.
+    fn pid(&self) -> i32 {
+        i32::try_from(self.0.id()).unwrap()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Holder {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// rv-sa241 LEAD-1: the proxy sends nothing upstream before the open has seen the server
-/// ready, and each upstream connection is checked before anything is sent: a listener that is
-/// not a process the open saw listening on the server port, as one that took the port after
-/// the server exited, gets no request and no token, and the owner gets 502.
+/// ready, and each upstream connection is checked before anything is sent: once no process
+/// the open saw ready holds the server port, as after the server exited and another took it,
+/// the taker gets no request and no token, the owner gets 502, and the proxy flags the launch
+/// to be stopped (rv-sa241 LOW-1, rv-ds241 N1). Not being ready yet flags nothing.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_request_reaches_only_the_listeners_the_open_saw_ready() {
     let (upstream, server_port) = bind(None).await.unwrap();
-    let before = tokio::spawn(fetched(proxy_to(server_port, None).await));
+    let (proxy, refused) = proxy_to(server_port, None).await;
+    let before = tokio::spawn(fetched(proxy));
     let reached = tokio::time::timeout(
         Duration::from_secs(2),
         crate::spawn_gate::accept_tcp(&upstream),
@@ -702,8 +785,10 @@ async fn a_request_reaches_only_the_listeners_the_open_saw_ready() {
         "no connection before the open saw it ready"
     );
     assert!(before.await.unwrap().starts_with("HTTP/1.1 502 "));
+    assert!(!flagged(&refused), "not ready yet is no refusal");
 
-    let taken = tokio::spawn(fetched(proxy_to(server_port, Some(vec![i32::MAX])).await));
+    let (proxy, refused) = proxy_to(server_port, Some(vec![i32::MAX])).await;
+    let taken = tokio::spawn(fetched(proxy));
     let (mut squatter, _) = crate::spawn_gate::accept_tcp(&upstream).await.unwrap();
     let mut got = Vec::new();
     let _ = tokio::time::timeout(Duration::from_secs(5), squatter.read_to_end(&mut got)).await;
@@ -714,23 +799,124 @@ async fn a_request_reaches_only_the_listeners_the_open_saw_ready() {
     );
     drop(squatter);
     assert!(taken.await.unwrap().starts_with("HTTP/1.1 502 "));
+    assert!(flagged(&refused), "the launch is flagged to stop");
 
     let ours = vec![i32::try_from(std::process::id()).unwrap()];
-    let served = tokio::spawn(fetched(proxy_to(server_port, Some(ours)).await));
-    let (mut server, _) = crate::spawn_gate::accept_tcp(&upstream).await.unwrap();
-    let mut head = Vec::new();
-    let mut chunk = [0u8; 1024];
-    while find(&head, b"\r\n\r\n").is_none() && head.len() < HEAD_BYTES_MAX {
-        let read = server.read(&mut chunk).await.unwrap();
-        assert_ne!(read, 0, "the head arrives whole");
-        head.extend_from_slice(&chunk[..read]);
-    }
-    let head = String::from_utf8_lossy(&head).into_owned();
+    let (proxy, refused) = proxy_to(server_port, Some(ours)).await;
+    let served = tokio::spawn(fetched(proxy));
+    let head = answer_once(&upstream).await;
     assert!(head.contains(&format!("{COOKIE}={}", token())), "{head}");
-    server
-        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-        .await
-        .unwrap();
-    drop(server);
     assert!(served.await.unwrap().starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(!flagged(&refused));
+}
+
+/// rv-sa241 LOW-1: a wildcard listener beside the server's 127.0.0.1 port, which an
+/// open-network agent of another project may bind, gets no connection, since the specific
+/// bind wins, and fails no request even when a process the open never saw ready holds it
+/// (rv-ds241 r2 F1): the request is served and the launch is kept.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_wildcard_listener_beside_the_server_fails_no_request() {
+    use std::os::fd::AsFd;
+    let (upstream, server_port) = bind(None).await.unwrap();
+    let beside = crate::spawn_gate::bind_tcp_std(("0.0.0.0", server_port)).unwrap();
+    assert_eq!(beside.local_addr().unwrap().port(), server_port);
+    let holder = Holder::of(beside.as_fd().try_clone_to_owned().unwrap());
+    let held = crate::ide::server::listeners(server_port).unwrap();
+    assert!(
+        held.contains(&(holder.pid(), format!("*:{server_port}"))),
+        "a process the open never saw holds the wildcard: {held:?}"
+    );
+    let ours = vec![i32::try_from(std::process::id()).unwrap()];
+    let (proxy, refused) = proxy_to(server_port, Some(ours)).await;
+    let served = tokio::spawn(fetched(proxy));
+    let head = answer_once(&upstream).await;
+    assert!(
+        head.starts_with("GET /static/app.js HTTP/1.1\r\n"),
+        "{head}"
+    );
+    assert!(served.await.unwrap().starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(!flagged(&refused), "the launch is kept");
+    beside.set_nonblocking(true).unwrap();
+    assert!(
+        beside.accept().is_err(),
+        "the wildcard listener got nothing"
+    );
+}
+
+/// rv-sa241 LOW-1 (ide-port follow-up r2), rv-ds241 r2 F2: a process the open never saw
+/// ready listening on the server port at an address other than 127.0.0.1, here [::1] as an
+/// agent of another project may bind, can take no 127.0.0.1 connection. So it fails no
+/// request: the request is served and the launch is kept.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_listener_off_127_0_0_1_the_open_never_saw_fails_no_request() {
+    let (upstream, server_port) = bind(None).await.unwrap();
+    let beside = crate::spawn_gate::bind_tcp_std(("::1", server_port)).unwrap();
+    let holder = Holder::of(beside.into());
+    let held = crate::ide::server::listeners(server_port).unwrap();
+    assert!(
+        held.contains(&(holder.pid(), format!("[::1]:{server_port}"))),
+        "a process the open never saw holds [::1]: {held:?}"
+    );
+    let ours = vec![i32::try_from(std::process::id()).unwrap()];
+    let (proxy, refused) = proxy_to(server_port, Some(ours)).await;
+    let served = tokio::spawn(fetched(proxy));
+    let head = answer_once(&upstream).await;
+    assert!(
+        head.starts_with("GET /static/app.js HTTP/1.1\r\n"),
+        "{head}"
+    );
+    assert!(served.await.unwrap().starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(!flagged(&refused), "the launch is kept");
+}
+
+/// A launch can list more than one process on its port at ready. One of them ending while
+/// another still listens on 127.0.0.1 fails no request and flags nothing: a served process
+/// that is gone holds no listener, so the listing names only the live one.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_served_process_that_ended_beside_one_still_listening_fails_nothing() {
+    let (upstream, server_port) = bind(None).await.unwrap();
+    let ours = i32::try_from(std::process::id()).unwrap();
+    assert_ne!(ours, i32::MAX);
+    let (proxy, refused) = proxy_to(server_port, Some(vec![ours, i32::MAX])).await;
+    let served = tokio::spawn(fetched(proxy));
+    let head = answer_once(&upstream).await;
+    assert!(
+        head.starts_with("GET /static/app.js HTTP/1.1\r\n"),
+        "{head}"
+    );
+    assert!(served.await.unwrap().starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(!flagged(&refused), "the launch is kept");
+}
+
+/// rv-sa241 LEAD-2: a process the open did not see ready that holds the server's own
+/// listening socket, as one that inherited it after ready, can accept the owner's
+/// connection, so the proxy sends nothing, the owner gets 502, and the launch is flagged.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_process_the_open_did_not_see_holding_the_listening_socket_gets_nothing() {
+    use std::os::fd::AsFd;
+    let (upstream, server_port) = bind(None).await.unwrap();
+    let holder = Holder::of(upstream.as_fd().try_clone_to_owned().unwrap());
+    let held = crate::ide::server::listeners(server_port).unwrap();
+    let shared = held.contains(&(holder.pid(), format!("127.0.0.1:{server_port}")));
+    let ours = vec![i32::try_from(std::process::id()).unwrap()];
+    let (proxy, refused) = proxy_to(server_port, Some(ours)).await;
+    let taken = tokio::spawn(fetched(proxy));
+    let (mut reached, _) = crate::spawn_gate::accept_tcp(&upstream).await.unwrap();
+    let mut got = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), reached.read_to_end(&mut got)).await;
+    drop(reached);
+    let reply = taken.await.unwrap();
+    drop(holder);
+    assert!(shared, "the holder shares the listening socket: {held:?}");
+    assert!(
+        got.is_empty(),
+        "the shared socket got: {}",
+        String::from_utf8_lossy(&got)
+    );
+    assert!(reply.starts_with("HTTP/1.1 502 "), "{reply}");
+    assert!(flagged(&refused), "the launch is flagged to stop");
 }

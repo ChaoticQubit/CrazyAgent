@@ -75,6 +75,7 @@ fn main() {
         "desktop_team_hand_off",
         "desktop_team_rename",
         "desktop_team_wake_agent",
+        "desktop_team_restart_hidden_seers",
         "desktop_team_stop_agent",
         "desktop_team_stop_teammate",
         "desktop_coord_send",

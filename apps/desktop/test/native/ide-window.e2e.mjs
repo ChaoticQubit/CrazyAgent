@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
+import { onScreen, planEnd } from "./ide-window-kit.mjs";
 import { go, until } from "./trial-kit.mjs";
 
 const root = process.env.MS_ROOT;
@@ -25,7 +26,12 @@ const POLL_MS = 1000;
 const SHOWN_WIDTH = 1040;
 const SHOWN_HEIGHT = 720;
 const PANEL_SHIFT = "96px";
+const SHOT_MS = 5000;
+const SHOT_EVERY_MS = 200;
+const SHOT_MARGIN_MS = 200;
+const PLAN_SETTLE_S = 5;
 let generation = 0;
+let planDone = 0;
 
 /** Calls one desktop command through the app's own bridge. Inputs: the command and its
  * arguments. Output: its answer; throws with the failure the app returned. */
@@ -151,20 +157,23 @@ function ideRefusal() {
   return typeof written === "string" ? JSON.parse(written) : written;
 }
 
-/** The app's window number, found by its process. Output: the number as text; throws when
- * the window is not on screen. */
-function windowNumber() {
+/** The app's window number while the window server lists the window on screen, found by the
+ * app's process. Output: the number as text, or an empty string while the window is off that
+ * list; throws when the app has no process. */
+function listedWindow() {
   const found = spawnSync("/usr/bin/pgrep", ["-f", `^${app}`], { encoding: "utf8" }).stdout.trim().split("\n")[0];
   assert.ok(found, "the test app has a process");
   const listed = spawnSync(windowIdTool, [found], { encoding: "utf8" });
-  const number = listed.stdout.trim().split("\n")[0];
-  assert.ok(number, `the test app has a window on screen: ${listed.stderr}`);
-  return number;
+  return listed.stdout.trim().split("\n")[0];
 }
 
-/** Saves a picture of the app's window alone, with the IDE webview in it. Input: the name. */
-function shot(name) {
-  const taken = spawnSync("/usr/sbin/screencapture", ["-x", "-o", `-l${windowNumber()}`, join(evidence, `${name}.png`)], { encoding: "utf8" });
+/** Saves a picture of the app's window alone, with the IDE webview in it, once the window server
+ * lists the window on screen, waiting up to `by` for a window it dropped for a moment. Inputs:
+ * the name and that deadline in milliseconds. Output: once it is saved; throws naming how long
+ * the window was off the list. */
+async function shot(name, by = Date.now() + SHOT_MS) {
+  const number = await onScreen(listedWindow, { by, every: SHOT_EVERY_MS, label: `the ${name} picture: the app's window` });
+  const taken = spawnSync("/usr/sbin/screencapture", ["-x", "-o", `-l${number}`, join(evidence, `${name}.png`)], { encoding: "utf8" });
   assert.equal(taken.status, 0, `the ${name} picture: ${taken.stderr}`);
 }
 
@@ -177,8 +186,10 @@ function resize() {
 }
 
 /** Runs the plan in the page on its own timers, since the webdriver session cannot see the
- * main window while an IDE webview is in it. Input: the plan rows. Output: none. */
+ * main window while an IDE webview is in it, and notes when it ends, so a later row waits out
+ * a plan its failed row left running. Input: the plan rows. Output: none. */
 function startPlan(plan) {
+  planDone = Math.max(planDone, planEnd(plan, Date.now(), PLAN_SETTLE_S));
   return browser.execute((rows) => {
     const log = [];
     window.__ideWindowLog = log;
@@ -335,16 +346,24 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     mkdirSync(join(root, "projects"), { mode: 0o700 });
     const homed = await invoke("desktop_set_projects_home", { path: join(root, "projects"), generation: ++generation });
     assert.equal(homed.outcome, "applied", `the projects home is set: ${JSON.stringify(homed)}`);
-    await browser.execute(() => location.reload());
-    await until(() => browser.execute(() => document.readyState === "complete" && Boolean(window.__TAURI_INTERNALS__)), 60000, "the app window never loaded again");
-    ideDark = await browser.execute(() => {
+    await browser.execute(() => {
+      window.__ideWindowOldPage = true;
+      location.reload();
+    });
+    await until(() => browser.execute(() => window.__ideWindowOldPage !== true && document.readyState === "complete" && Boolean(window.__TAURI_INTERNALS__)), 60000, "the app window never loaded again");
+    const look = await browser.execute(() => {
       const dark = matchMedia("(prefers-color-scheme: dark)").matches;
       document.documentElement.setAttribute("data-theme", dark ? "light" : "dark");
-      return dark;
+      return { dark, painted: getComputedStyle(document.body).backgroundColor, old: window.__ideWindowOldPage === true };
     });
-    const painted = await browser.execute(() => getComputedStyle(document.body).backgroundColor);
-    const mean = painted.match(/\d+/g).slice(0, 3).reduce((sum, part) => sum + Number(part), 0) / 3;
-    assert.ok(ideDark ? mean > LIGHT_ABOVE : mean < DARK_BELOW, `the app page takes the appearance the IDE, which follows the system, does not: ${painted}`);
+    assert.equal(look.old, false, "the theme was set on the page the reload replaced");
+    ideDark = look.dark;
+    const mean = look.painted.match(/\d+/g).slice(0, 3).reduce((sum, part) => sum + Number(part), 0) / 3;
+    assert.ok(ideDark ? mean > LIGHT_ABOVE : mean < DARK_BELOW, `the app page takes the appearance the IDE, which follows the system, does not: ${look.painted}`);
+  });
+
+  beforeEach(async () => {
+    await pause(Math.max(0, planDone - Date.now()));
   });
 
   it("opens, leaves, returns, follows its panel, and goes away with its project", async () => {
@@ -374,15 +393,16 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     ]);
     const started = Date.now();
     const at = (seconds) => pause(Math.max(0, started + seconds * 1000 - Date.now()));
+    const by = (seconds) => started + seconds * 1000 - SHOT_MARGIN_MS;
     const actions = [
-      [30, () => shot("open-30s")], [60, () => shot("open-60s")], [92, () => shot("open-92s")],
-      [107, () => shot("left")], [127, () => shot("back")], [142, () => shot("moved")],
+      [30, () => shot("open-30s", by(60))], [60, () => shot("open-60s", by(92))], [92, () => shot("open-92s", by(95))],
+      [107, () => shot("left", by(110))], [127, () => shot("back", by(130))], [142, () => shot("moved", by(143))],
       [145, () => writeFileSync(join(evidence, "resize.json"), JSON.stringify(resize()))],
-      [157, () => shot("resized")], [217, () => shot("second-open")], [234, () => shot("closed")],
+      [157, () => shot("resized", by(160))], [217, () => shot("second-open", by(220))], [234, () => shot("closed")],
     ];
     for (const [seconds, action] of actions) {
       await at(seconds);
-      action();
+      await action();
     }
     let log = null;
     for (const deadline = Date.now() + BACK_MS; log === null; await pause(POLL_MS)) {
@@ -429,7 +449,7 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     await testAppInFront();
     onApp(`keystroke "${UNSAVED}"`);
     await pause(BACKUP_MS);
-    shot("unsaved-before-restart");
+    await shot("unsaved-before-restart");
     await startPlan([[LEAVE_S, "go", "#/"]]);
     const view = await invoke("desktop_project_agent_policy", { id: project });
     const access = view.access === "sandboxed" ? "own_branch" : "sandboxed";
@@ -443,7 +463,7 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     let count = editors();
     for (const deadline = Date.now() + RESTORE_MS; count !== before + 1 && Date.now() < deadline; await pause(POLL_MS)) count = editors();
     const back = count === before + 1;
-    shot("unsaved-after-restart");
+    await shot("unsaved-after-restart");
     writeFileSync(join(evidence, "unsaved-after-restart.txt"), `${back ? "returned" : "lost"} editors ${count} before ${before}\n`);
     const said = readFileSync(new URL("../../src/screens/project/access.tsx", import.meta.url), "utf8").includes("Unsaved edits are lost.");
     assert.equal(said, !back, `an unsaved edit was ${back ? "returned" : "lost"} after the restart, and the Save ${said ? "says" : "does not say"} it is lost`);
@@ -481,13 +501,13 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
 
     raise("IDE");
     await pause(POLL_MS);
-    shot("own-window");
+    await shot("own-window");
     await testAppInFront();
     onApp(`set size of (first window whose title contains "IDE") to {${SHOWN_WIDTH}, ${SHOWN_HEIGHT}}`);
     const resized = await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.view.outer[0] === SHOWN_WIDTH * scale && row.view.ide.size[0] === row.view.outer[0], "the IDE did not follow its window's new size", OWN_WINDOW_MS);
     assert.equal(resized.view.ide.at[1] + resized.view.ide.size[1], resized.view.outer[1], "after a resize it still reaches the bottom");
     assert.equal(resized.view.ide.at[1], ide.at[1], "and still sits below the title bar");
-    shot("own-window-resized");
+    await shot("own-window-resized");
     await browser.saveScreenshot(join(evidence, "tab-while-out.png"));
     assert.ok(!menuNames().includes("File"), `the IDE window's menu owns none of the editor's keys: ${menuNames()}`);
     const before = (await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.view.focused && row.look !== null, "the IDE window never had the focus", OWN_WINDOW_MS)).look.editors;

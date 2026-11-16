@@ -7,7 +7,7 @@ use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
 use crate::provider_retry::{ProviderRetry, ProviderRetryView};
 use crate::quit_settings::QuitSettings;
-use crate::sandbox_settings::SandboxSettings;
+use crate::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 
 impl OwnerController {
     /// Reads the owner's first-run profile from the engine.
@@ -38,26 +38,34 @@ impl OwnerController {
     }
 
     /// Reads the owner's sandbox settings from the engine. Input: none. Output: the
-    /// stored settings, or the defaults before the first save.
-    pub async fn sandbox_settings(&mut self) -> Result<SandboxSettings, EngineError> {
+    /// stored settings and the version a save from this read names, or the defaults at
+    /// version 0 before the first save.
+    pub async fn sandbox_settings(&mut self) -> Result<StoredSandboxSettings, EngineError> {
         match self.read(OwnerRead::SandboxSettings).await?.data {
-            OwnerData::SandboxSettings { settings } => Ok(settings),
+            OwnerData::SandboxSettings { settings, version } => {
+                Ok(StoredSandboxSettings { settings, version })
+            }
             _ => Err(EngineError("controller_read_response".into())),
         }
     }
 
     /// Saves the owner's sandbox settings as one retained owner mutation. Input: the full
-    /// settings and a nonzero client generation. Output: the engine response.
+    /// settings, the version of the read they change and a nonzero client generation.
+    /// Output: the engine response, `stale_revision` once the settings changed since.
     pub async fn set_sandbox_settings(
         &mut self,
         settings: SandboxSettings,
+        version: u64,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         if self.pending.is_some() || self.pending_account_profile.is_some() {
             return Err(EngineError("controller_pending_intent".into()));
         }
         self.read(OwnerRead::SandboxSettings).await?;
-        self.begin_mutation(OwnerMutation::SetSandboxSettings { settings }, generation)?;
+        self.begin_mutation(
+            OwnerMutation::SetSandboxSettings { settings, version },
+            generation,
+        )?;
         self.send_pending().await
     }
 

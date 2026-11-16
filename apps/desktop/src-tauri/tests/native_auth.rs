@@ -1508,3 +1508,57 @@ async fn desktop_native_auth_a_recheck_that_reads_the_end_leaves_the_open_drawer
     })
     .await;
 }
+
+/// PROTO-3-SEC F1: once a recheck kept an ended sign-in held for the drawer, a new sign-in on
+/// the same account starts: the bridge reads the engine, drops the ended one and goes on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_native_auth_a_new_sign_in_starts_after_a_recheck_kept_an_ended_one() {
+    run_case(|fixture| async move {
+        let running = sleeping_login(&fixture).await;
+        let mut bridge = fixture.bridge().await;
+        let drawer = inspect(&mut bridge, "connection-z").await;
+        let first = serde_json::to_value(
+            bridge
+                .start_native_auth(&drawer.ticket, NativeAuthMethod::ClaudeOfficial)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        login_pid(&running).await;
+        let cancelling =
+            serde_json::to_value(bridge.cancel_native_auth(&drawer.ticket).await.unwrap()).unwrap();
+        let mut phase = NativeAuthPhase::Cancelling;
+        for _ in 0..120 {
+            phase = fixture.owner_fact(&cancelling).await.fact.phase;
+            if phase == NativeAuthPhase::Cancelled {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(phase, NativeAuthPhase::Cancelled);
+        std::fs::remove_file(&running).unwrap();
+        OwnerController::attach(
+            &fixture.root.path().join("s"),
+            OwnerClientKind::Tui,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap()
+        .add_account(claude_draft("Added after the cancel"), None)
+        .await
+        .unwrap();
+        let current = inspect(&mut bridge, "connection-z").await;
+        assert_ne!(current.source_hash, drawer.source_hash);
+        let again = bridge
+            .start_native_auth(&current.ticket, NativeAuthMethod::ClaudeOfficial)
+            .await
+            .map(|view| serde_json::to_value(view).unwrap())
+            .map_err(|error| error.code);
+        let again = again.expect("a new sign-in starts after the kept ended one");
+        assert_ne!(again["operation_id"], first["operation_id"]);
+        login_pid(&running).await;
+        bridge.cancel_native_auth(&current.ticket).await.unwrap();
+        settle_open(&mut bridge, &current.ticket, "cancelled").await;
+    })
+    .await;
+}

@@ -1059,18 +1059,28 @@ fn turn_sandbox(
             .map_err(failure)?
     };
     #[cfg(target_os = "linux")]
-    let (sandbox, calls) = {
+    let (sandbox, calls, strict) = {
         let settings = stored_sandbox_settings(root)?;
         let sandbox = sandbox.limit_sockets(settings.linux_sockets);
         if let Some(code) = sandbox.linux_refusal(executable) {
             return Err(failure(code));
         }
-        (sandbox, settings.linux_supervisor)
+        (sandbox, settings.linux_supervisor, settings.linux_strict)
     };
     #[cfg(not(target_os = "linux"))]
-    let calls = crate::sandbox::LinuxSupervisor::On;
+    let (calls, strict) = (
+        crate::sandbox::LinuxSupervisor::On,
+        crate::sandbox::LinuxStrict::Off,
+    );
     let profile = runtime.path.join(MASTER_PROFILE);
-    let installed = InstalledSandbox::install(sandbox, &profile, calls).map_err(refused)?;
+    let installed =
+        InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(|error| {
+            if crate::sandbox::linux_not_full(&error) {
+                failure(crate::sandbox::LINUX_NOT_FULL)
+            } else {
+                refused(error)
+            }
+        })?;
     let installed = if policy.access == AgentAccess::Full {
         installed.unconfined()
     } else {

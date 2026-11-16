@@ -54,6 +54,7 @@ const COPY: Record<string, string> = {
   linux_limited_network_off: "The Linux limited-network sockets setting is 'Do not start limited-network agents', so this master does not start. Pick another Linux limited-network sockets option in Settings.",
   linux_resolver_needs_udp: "This harness cannot look up names over TCP, which the Linux setting 'TCP only' needs. Choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
   linux_harness_unchecked: "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
+  linux_sandbox_not_full: "This Linux cannot give this agent the full sandbox and the setting 'Refuse agents without the full Linux sandbox' is on, so it does not start. The lines under Agent access say what this Linux lacks. Turn the setting off in Settings to start agents with what this Linux holds.",
   pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
   pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
@@ -178,6 +179,7 @@ const COPY: Record<string, string> = {
   grant_socket_keys: "That socket belongs to a key or password agent (gpg-agent, 1Password, SSH or another agent), so it is never allowed.",
   grant_socket_owner: "That socket belongs to the system or another user, has a second name, or sits in a folder other users can change, so it is never allowed.",
   grant_socket_missing: "There is no socket at that path now. Start the program that makes it, then allow it again.",
+  grant_socket_refused: "That socket cannot be allowed. A socket can be allowed only when it is there now, belongs to the owner with one name, sits in a folder only the owner can change, and is no socket of CrazyAgent itself, of keys or credentials, of containers or virtual machines, or of a terminal, editor, SSH connection or key agent. Check the path and that the program making it runs, then ask again.",
   grant_port_reserved: "That port belongs to your sign-in, your local model or CrazyAgent itself (its IDE or model proxy), or controls Docker, a browser or a debugger (Node, Java, Python or Go), so it is never allowed.",
   grant_port_dynamic: "Ports from 49152 up are lent by the system to CrazyAgent's IDE and other apps for a while, so they are never allowed. Pick a fixed port below 49152.",
   agent_grants_invalid: "A project allows at most 2 sockets, 4 ports and your temp folder, each once.",
@@ -477,20 +479,33 @@ export type LinuxSockets = "tcp_only" | "refuse" | "tcp_ports";
 /** Whether the call supervisor guards agents on Linux, the engine's `LinuxSupervisor`. */
 export type LinuxSupervisor = "on" | "off";
 
+/** Whether a Linux launch without the full Linux sandbox is refused, the engine's `LinuxStrict`. */
+export type LinuxStrict = "off" | "on";
+
 /** The owner's app-wide sandbox settings, the engine's `SandboxSettings`. */
 export interface SandboxSettings {
   linux_sockets: LinuxSockets;
   linux_supervisor: LinuxSupervisor;
+  linux_strict: LinuxStrict;
 }
 
-/** Reads the owner's sandbox settings. Output: the stored settings, or the defaults before the first save. */
-export function getSandboxSettings(): Promise<Result<SandboxSettings>> {
-  return call<SandboxSettings>("desktop_sandbox_settings");
+/** The owner's sandbox settings with the version of the read that showed them, the engine's
+ * `StoredSandboxSettings`; a save names the version, 0 before the first save. */
+export interface StoredSandboxSettings {
+  settings: SandboxSettings;
+  version: number;
 }
 
-/** Saves the owner's sandbox settings. Input: the full settings. Output: ok once saved. */
-export function saveSandboxSettings(settings: SandboxSettings): Promise<Result<void>> {
-  return change("desktop_set_sandbox_settings", { settings, generation: nextGeneration() });
+/** Reads the owner's sandbox settings. Output: the stored settings and their version, or the
+ * defaults at version 0 before the first save. */
+export function getSandboxSettings(): Promise<Result<StoredSandboxSettings>> {
+  return call<StoredSandboxSettings>("desktop_sandbox_settings");
+}
+
+/** Saves the owner's sandbox settings. Inputs: the full settings and the version of the read
+ * they change. Output: ok once saved, or `stale_revision` once they changed since that read. */
+export function saveSandboxSettings(settings: SandboxSettings, version: number): Promise<Result<void>> {
+  return change("desktop_set_sandbox_settings", { settings, version, generation: nextGeneration() });
 }
 
 /** When the engine removes a finished agent's worktree on its own, the engine's `CleanupMode`. */

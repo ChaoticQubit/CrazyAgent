@@ -151,7 +151,8 @@ pub(super) fn npm_wrap(
     cwd: &Path,
 ) -> Result<Command, InstallError> {
     let _ = root;
-    let sandbox =
-        InstalledSandbox::install(sandbox, profile, LinuxSupervisor::On).map_err(refused)?;
+    let strict = crate::sandbox::LinuxStrict::Off;
+    let sandbox = InstalledSandbox::install(sandbox, profile, LinuxSupervisor::On, strict)
+        .map_err(refused)?;
     sandbox.wrap(&npm_invocation(bin, cwd)).map_err(refused)
 }

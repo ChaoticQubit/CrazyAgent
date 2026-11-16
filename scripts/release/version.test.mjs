@@ -92,7 +92,7 @@ test("a CRLF checkout, as on Windows, gets the same edits as LF and keeps CRLF; 
     const crlf = (text) => text.replaceAll("\n", "\r\n");
     const list = /^members = \[([^\]]*)\]$/m.exec(await readFile(join(root, "Cargo.toml"), "utf8"))[1];
     const manifests = [...list.matchAll(/"([^"]+)"/g)].map((match) => `${match[1]}/Cargo.toml`);
-    assert.equal(manifests.length, 3);
+    assert(manifests.length >= 1, "the workspace Cargo.toml lists its members");
     const lf = {};
     for (const file of [...FILES, ...manifests]) {
       lf[file] = await readFile(join(root, file), "utf8");

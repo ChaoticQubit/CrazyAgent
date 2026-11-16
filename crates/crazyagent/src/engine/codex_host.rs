@@ -82,7 +82,7 @@ impl CodexHost {
             &budget,
             run_time,
             Some((profile, project)),
-            sandbox.is_unconfined(),
+            sandbox.lineage_check(),
         )
         .await?;
         process.limit_input(frames.bytes());

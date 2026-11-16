@@ -266,6 +266,7 @@ fn runtime(name: &str, catalog: &str) -> PathBuf {
 
 #[cfg(target_os = "macos")]
 #[test]
+#[ignore = "live qualification: needs a local Ollama at 127.0.0.1:11434 serving qwen2.5:7b and Codex and Claude Code installed"]
 fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database() {
     require_model();
     let runtime = runtime("q", CATALOG);

@@ -745,6 +745,7 @@ fn agent_runs(agents: &Path, prefix: &str) -> usize {
 
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live qualification: needs a local Ollama at 127.0.0.1:11434 serving qwen2.5:7b and Codex and graphify installed"]
 async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
     require_model();
     let mut bench = Bench::start(|_| {}).await;

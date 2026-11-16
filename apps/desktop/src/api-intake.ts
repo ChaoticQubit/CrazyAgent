@@ -42,6 +42,8 @@ const COPY: Record<string, string> = {
   home_copy_too_large: "The folder has too many files or levels to copy. Use it where it is instead.",
   home_copy_failed: "Couldn't copy the folder. The original is untouched. Try again.",
   home_copy_unverified: "The copy didn't match the original, so the original was kept.",
+  home_copy_names_fold: "Two names in the folder differ only in case or accents, and your projects folder can't keep both. Rename one of them, then try again. The original is untouched.",
+  home_copy_entry_swapped: "Something replaced a file or folder in it while it was being copied, so the copy stopped. The original is untouched. Try again once nothing else is changing the folder.",
   home_copy_linked_checkout: "This folder is a git worktree or submodule of another repository, so a copy would still share it. Use it where it is, or copy the main repository folder.",
   home_move_failed: "Couldn't move the folder. Nothing was removed. Try again.",
   home_move_source_left: "The folder was added, but part of the original couldn't be removed. What's left there may be newer than the copy, so check it before you delete anything.",

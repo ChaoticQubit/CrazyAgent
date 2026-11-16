@@ -377,26 +377,35 @@ pub(super) struct Repo {
     /// every other repository.
     #[cfg(target_os = "linux")]
     index_steps: Vec<std::ffi::OsString>,
+    /// Whether a confined Linux step works on a copy of the worktree's own index
+    /// ([`Self::swapped`]): false for one on the engine's private index and for every
+    /// repository that is not confined.
+    #[cfg(target_os = "linux")]
+    copies: bool,
 }
 
 /// The Seatbelt profile of one engine git step on an agent's work tree (SECAUDIT
 /// unconfined-git-add-reads-through-raced-symlink, unconfined-read-tree-u): it reads only the
-/// system, its own toolchain, the work tree, the repository's git folder and the owner's
-/// ignore file, and writes only what the step names and the worktree's index, never the
-/// repository's `hooks` or `config`, whatever an agent swaps a path for during the step.
+/// system, its own toolchain, the work tree, the repository's git folder, the owner's ignore
+/// file and the index it works on with its lock, which git opens read-write, and writes only
+/// what the step names and that index, the worktree's own or the engine's private one, never
+/// the repository's `hooks` or `config`, whatever an agent swaps a path for during the step.
 /// Paths reach it as parameters, so no path text is read as profile text.
 #[cfg(target_os = "macos")]
 const WORK_TREE_PROFILE: &str = "(version 1)\n\
 (allow default)\n\
-(deny file-read-data (require-not (require-any (literal \"/\") (subpath \"/System\") (subpath \"/usr/lib\") (subpath \"/usr/share\") (subpath \"/dev\") (subpath (param \"TOOLS\")) (subpath (param \"WORK\")) (subpath (param \"COMMON\")) (literal (param \"EXCLUDES\")))))\n\
+(deny file-read-data (require-not (require-any (literal \"/\") (subpath \"/System\") (subpath \"/usr/lib\") (subpath \"/usr/share\") (subpath \"/dev\") (subpath (param \"TOOLS\")) (subpath (param \"WORK\")) (subpath (param \"COMMON\")) (literal (param \"EXCLUDES\")) (literal (param \"INDEX\")) (literal (param \"INDEX_LOCK\")))))\n\
 (deny file-write* (require-not (require-any (literal \"/dev/null\") (subpath (param \"WRITE\")) (literal (param \"INDEX\")) (literal (param \"INDEX_LOCK\")))))\n";
 
-/// What one confined git step may write besides the worktree's index: the object store,
-/// for a step that only reads the work tree, or the work tree, for one that fills it.
+/// What one confined git step may write besides the index it works on: the object store,
+/// for a step that hashes the work tree, the work tree, for one that fills it, or nothing,
+/// for one that only reads it ([`Repo::reading`]). Only a step that writes no object may read
+/// the owner's ignore file on Linux, so a link swapped in can never hash it (SA vid 2).
 #[derive(Clone, Copy)]
 pub(super) enum Writes {
     Objects,
     WorkTree,
+    Index,
 }
 
 impl Repo {
@@ -427,6 +436,8 @@ impl Repo {
             confinement: Vec::new(),
             #[cfg(target_os = "linux")]
             index_steps: Vec::new(),
+            #[cfg(target_os = "linux")]
+            copies: false,
         };
         repo.check_version()?;
         let listing = repo.capture(&crate::research::runner::FILTER_KEYS, LISTING_BYTES_MAX)?;
@@ -487,6 +498,8 @@ impl Repo {
             confinement: Vec::new(),
             #[cfg(target_os = "linux")]
             index_steps: Vec::new(),
+            #[cfg(target_os = "linux")]
+            copies: false,
         }
     }
 
@@ -506,29 +519,66 @@ impl Repo {
         self
     }
 
-    /// This repository with its git calls run under [`WORK_TREE_PROFILE`], for a step on a
-    /// linked agent worktree whose agent may still be changing it. Git reads a path with no
-    /// check it can hold, so a link swapped in during the step is stopped here. Input: what
-    /// the step may write. Output: the repository, `changes_workspace_invalid` for one that
-    /// is not a linked worktree's, or `changes_git_unsupported` where no toolchain git is
-    /// found.
-    #[cfg(target_os = "macos")]
-    pub(super) fn confined(&self, writes: Writes) -> Result<Self, EngineError> {
-        use std::ffi::OsString;
-        assert!(
-            self.index.is_none(),
-            "a confined step uses the worktree's own index"
-        );
+    /// Where a confined step runs, each canonical: the work tree, the git folder and the
+    /// repository's common git folder. The git folder is a linked worktree's, or, for a step
+    /// on the engine's private index, the owner checkout's own `.git`, which a harness clone's
+    /// check reads through. Input: the repository. Output: the three folders, or
+    /// `changes_workspace_invalid`.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn places(&self) -> Result<(PathBuf, PathBuf, PathBuf), EngineError> {
         let invalid = || failure("changes_workspace_invalid");
         let real = |path: &Path| std::fs::canonicalize(path).map_err(|_| invalid());
         let work = real(self.work_tree.as_deref().ok_or_else(invalid)?)?;
         let private = real(&self.git_dir)?;
-        let common = private
+        let linked = private
             .parent()
             .filter(|parent| parent.ends_with("worktrees"))
-            .and_then(Path::parent)
-            .ok_or_else(invalid)?
-            .to_path_buf();
+            .and_then(Path::parent);
+        let common = match (linked, &self.index) {
+            (_, Some(_)) if private.file_name() == Some(std::ffi::OsStr::new(".git")) => {
+                private.clone()
+            }
+            (Some(common), _) => common.to_path_buf(),
+            (None, _) => return Err(invalid()),
+        };
+        assert!(work.is_absolute() && common.is_absolute());
+        Ok((work, private, common))
+    }
+
+    /// The engine's private index a reading step works on and its lock, in the index's
+    /// canonical folder, which must exist. Input: the repository. Output: both paths, none
+    /// on the worktree's own index, or `changes_workspace_invalid`.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn private_places(&self) -> Result<Option<(PathBuf, PathBuf)>, EngineError> {
+        let Some(index) = &self.index else {
+            return Ok(None);
+        };
+        let invalid = || failure("changes_workspace_invalid");
+        let folder = index
+            .parent()
+            .and_then(|folder| std::fs::canonicalize(folder).ok())
+            .ok_or_else(invalid)?;
+        let name = index.file_name().ok_or_else(invalid)?;
+        let mut lock = name.to_os_string();
+        lock.push(".lock");
+        Ok(Some((folder.join(name), folder.join(lock))))
+    }
+
+    /// This repository with its git calls run under [`WORK_TREE_PROFILE`], for a step on a
+    /// linked agent worktree whose agent may still be changing it. Git reads a path with no
+    /// check it can hold, so a link swapped in during the step is stopped here. A reading step
+    /// may run on the engine's private index ([`Self::places`]), which it alone writes.
+    /// Input: what the step may write. Output: the repository, `changes_workspace_invalid` for
+    /// one that is not a linked worktree's, or `changes_git_unsupported` where no toolchain
+    /// git is found.
+    #[cfg(target_os = "macos")]
+    pub(super) fn confined(&self, writes: Writes) -> Result<Self, EngineError> {
+        use std::ffi::OsString;
+        assert!(
+            self.index.is_none() || matches!(writes, Writes::Index),
+            "only a reading step works on a private index"
+        );
+        let (work, private, common) = self.places()?;
         let unsupported = || failure("changes_git_unsupported");
         let git = std::fs::canonicalize(crate::research::runner::sandboxed_git())
             .map_err(|_| unsupported())?;
@@ -548,7 +598,11 @@ impl Repo {
         let target = match writes {
             Writes::Objects => common.join("objects"),
             Writes::WorkTree => work.clone(),
+            Writes::Index => PathBuf::from("/dev/null"),
         };
+        let (index, lock) = self
+            .private_places()?
+            .unwrap_or_else(|| (private.join("index"), private.join("index.lock")));
         let mut confinement = Vec::new();
         for (name, value) in [
             ("WORK", &work),
@@ -556,8 +610,8 @@ impl Repo {
             ("TOOLS", &tools),
             ("EXCLUDES", &excludes),
             ("WRITE", &target),
-            ("INDEX", &private.join("index")),
-            ("INDEX_LOCK", &private.join("index.lock")),
+            ("INDEX", &index),
+            ("INDEX_LOCK", &lock),
         ] {
             let mut pair = OsString::from(name);
             pair.push("=");
@@ -578,9 +632,10 @@ impl Repo {
     /// This repository with its git calls started by the Landlock helper under
     /// [`crate::sandbox::linux::git_step_policy`], for a step on a linked agent worktree whose
     /// agent may still be changing it, as `WORK_TREE_PROFILE` holds it on macOS. The step
-    /// reads the system, the work tree, the repository's git folder and git, never the owner's
-    /// ignore file, which a link swapped in during a turn-end add would otherwise copy into
-    /// the object store (SA vid 2): its git takes no excludes file ([`NO_EXCLUDES`]), and a
+    /// reads the system, the work tree, the repository's git folder and git. A step that may
+    /// write never reads the owner's ignore file, which a link swapped in during a turn-end
+    /// add would otherwise copy into the object store (SA vid 2): its git takes no excludes
+    /// file ([`NO_EXCLUDES`]), and a
     /// turn end applies that file's patterns as names instead (`flow::add_pathspecs`). So a
     /// `read-tree -u` counts an untracked file only that file names as the agent's and refuses
     /// to write over it, failing closed where macOS writes over it (rv-sec3 F1). A step that
@@ -589,6 +644,9 @@ impl Repo {
     /// step that may write the work tree writes only the work tree, and its index-only gits
     /// only that folder ([`Self::moved`]), so no git that writes a work-tree path, which a link
     /// swapped in during the step can point anywhere, can write anything else (SA vid 3 A).
+    /// A reading step writes no object, so it alone also reads the owner's ignore file and
+    /// keeps the owner's excludes, and its listing answers as the owner's git does; on the
+    /// engine's private index it writes only that index's folder and copies no index.
     /// Input: what the step may write.
     /// Output: the repository, `changes_workspace_invalid` for one that is not a linked
     /// worktree's, or `changes_git_unsupported` where git, the helper or this kernel's
@@ -597,25 +655,52 @@ impl Repo {
     pub(super) fn confined(&self, writes: Writes) -> Result<Self, EngineError> {
         use std::ffi::OsString;
         assert!(
-            self.index.is_none(),
-            "a confined step uses the worktree's own index"
+            self.index.is_none() || matches!(writes, Writes::Index),
+            "only a reading step works on a private index"
         );
         let invalid = || failure("changes_workspace_invalid");
-        let real = |path: &Path| std::fs::canonicalize(path).map_err(|_| invalid());
-        let work = real(self.work_tree.as_deref().ok_or_else(invalid)?)?;
-        let private = real(&self.git_dir)?;
-        let common = private
-            .parent()
-            .filter(|parent| parent.ends_with("worktrees"))
-            .and_then(Path::parent)
-            .ok_or_else(invalid)?
-            .to_path_buf();
+        let (work, private, common) = self.places()?;
         let unsupported = || failure("changes_git_unsupported");
         let git = std::fs::canonicalize(crate::research::runner::sandboxed_git())
             .map_err(|_| unsupported())?;
         let helper = landlock_helper()
             .filter(|helper| crate::sandbox::linux::holds_file_rules(helper))
             .ok_or_else(unsupported)?;
+        let reads_ignore = matches!(writes, Writes::Index);
+        let excludes = match &self.excludes {
+            Some(owner) if reads_ignore => owner.clone(),
+            _ => NO_EXCLUDES.to_owned(),
+        };
+        let mut read = vec![work.clone(), common.clone(), git.clone()];
+        read.extend(
+            excludes
+                .strip_prefix("core.excludesFile=")
+                .filter(|_| reads_ignore)
+                .and_then(|path| std::fs::canonicalize(path).ok()),
+        );
+        let wrapped = |read: &[PathBuf], write: &[PathBuf]| {
+            let policy = crate::sandbox::linux::git_step_policy(read, write);
+            let mut confinement = vec![helper.clone().into_os_string()];
+            confinement.extend(policy.args());
+            confinement.extend([OsString::from("--"), git.clone().into_os_string()]);
+            assert!(confinement.len() > 4);
+            confinement
+        };
+        if let Some((index, _)) = self.private_places()? {
+            let folder = index
+                .parent()
+                .expect("a private index sits in its folder")
+                .to_path_buf();
+            read.push(folder.clone());
+            return Ok(Self {
+                index: Some(index),
+                excludes: Some(excludes),
+                confinement: wrapped(&read, &[folder]),
+                index_steps: Vec::new(),
+                copies: false,
+                ..self.clone()
+            });
+        }
         let step = private.join(STEP_FOLDER);
         match std::fs::create_dir(&step) {
             Ok(()) => {}
@@ -625,24 +710,20 @@ impl Repo {
         if !std::fs::symlink_metadata(&step).is_ok_and(|meta| meta.is_dir()) {
             return Err(invalid());
         }
-        let read = [work.clone(), common.clone(), git.clone()];
-        let wrapped = |write: &[PathBuf]| {
-            let policy = crate::sandbox::linux::git_step_policy(&read, write);
-            let mut confinement = vec![helper.clone().into_os_string()];
-            confinement.extend(policy.args());
-            confinement.extend([OsString::from("--"), git.clone().into_os_string()]);
-            assert!(confinement.len() > 4);
-            confinement
-        };
         let (confinement, index_steps) = match writes {
-            Writes::Objects => (wrapped(&[common.join("objects"), step.clone()]), Vec::new()),
-            Writes::WorkTree => (wrapped(&[work]), wrapped(&[step.clone()])),
+            Writes::Objects => (
+                wrapped(&read, &[common.join("objects"), step.clone()]),
+                Vec::new(),
+            ),
+            Writes::Index => (wrapped(&read, &[step.clone()]), Vec::new()),
+            Writes::WorkTree => (wrapped(&read, &[work]), wrapped(&read, &[step.clone()])),
         };
         Ok(Self {
             index: Some(step.join("index")),
-            excludes: Some(NO_EXCLUDES.to_owned()),
+            excludes: Some(excludes),
             confinement,
             index_steps,
+            copies: true,
             ..self.clone()
         })
     }
@@ -655,16 +736,17 @@ impl Repo {
         Ok(self.clone())
     }
 
-    /// This repository for a step that only reads a linked agent worktree, confined as a step
-    /// writing the object store is ([`Self::confined`]), so a link swapped in during an index
-    /// refresh or compare leads its git nowhere the step may not read (LINUX-LANDING part 2).
-    /// One on a private index, as a harness clone's check uses, stays as it is. Output: the
-    /// repository, or the refusal [`Self::confined`] gives.
+    /// This repository for a step that only reads an agent's work tree, confined to write
+    /// nothing but its index ([`Writes::Index`]), so a link swapped in during an index refresh,
+    /// compare or untracked listing leads its git nowhere the step may not read, on the
+    /// worktree's own index or on the engine's private one, as a harness clone's and a
+    /// lockfile tool's checks use (LINUX-LANDING part 2 and rest). A repository already
+    /// confined stays as it is. Output: the repository, or the refusal [`Self::confined`] gives.
     pub(super) fn reading(&self) -> Result<Self, EngineError> {
-        if self.index.is_some() {
+        if !self.confinement.is_empty() {
             return Ok(self.clone());
         }
-        self.confined(Writes::Objects)
+        self.confined(Writes::Index)
     }
 
     fn check_version(&self) -> Result<(), EngineError> {
@@ -728,11 +810,11 @@ impl Repo {
     }
 
     /// Runs one git command within `STEP_TIME`, feeding it `input` and keeping at most
-    /// `limit` bytes of its output; a confined Linux step runs on a copy of the worktree's
-    /// index ([`Self::swapped`]), and a two-tree `read-tree -u -m` there that may write the work
-    /// tree runs split ([`Self::moved`]). Inputs: the arguments, the input, extra environment
-    /// and the bound. Output: the exit code, the output and whether it ran over; an error when
-    /// git cannot start, is stopped by a signal or runs past the time.
+    /// `limit` bytes of its output; a confined Linux step on the worktree's own index runs on
+    /// a copy of it ([`Self::swapped`]), and a two-tree `read-tree -u -m` there that may write
+    /// the work tree runs split ([`Self::moved`]). Inputs: the arguments, the input, extra
+    /// environment and the bound. Output: the exit code, the output and whether it ran over;
+    /// an error when git cannot start, is stopped by a signal or runs past the time.
     pub(super) fn exec(
         &self,
         args: &[&str],
@@ -741,7 +823,7 @@ impl Repo {
         limit: usize,
     ) -> Result<Output, EngineError> {
         #[cfg(target_os = "linux")]
-        if !self.confinement.is_empty() {
+        if self.copies {
             let fills = !self.index_steps.is_empty();
             if let ["read-tree", "-u", "-m", from, to] = *args
                 && fills

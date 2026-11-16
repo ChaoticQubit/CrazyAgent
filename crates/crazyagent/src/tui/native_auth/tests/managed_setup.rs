@@ -161,7 +161,10 @@ async fn managed_setup_local_endpoint_opens_private_profile_setup_without_a_hidd
         }
         assert!(views::body(&ui.app).contains("Local endpoint"));
         ui.key(KeyCode::Enter);
-        for value in ["Laptop model", "http://127.0.0.1:11434/v1", "qwen2.5:0.5b"] {
+        let (_refusing, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        assert!(!crate::sandbox::OWNER_PORTS.contains(&port), "{port}");
+        let url = format!("http://127.0.0.1:{port}/v1");
+        for value in ["Laptop model", url.as_str(), "qwen2.5:0.5b"] {
             for character in value.chars() {
                 ui.key(KeyCode::Char(character));
             }
@@ -171,6 +174,14 @@ async fn managed_setup_local_endpoint_opens_private_profile_setup_without_a_hidd
         let saved = saved_catalog(&case);
         assert_eq!(saved.connections.len(), 1);
         assert_eq!(saved.connections[0].harness.as_str(), "rcli");
+        assert!(
+            matches!(
+                &saved.connections[0].endpoint,
+                ModelEndpoint::Http { url: kept } if kept.contains(&format!("127.0.0.1:{port}/"))
+            ),
+            "{:?}",
+            saved.connections[0].endpoint
+        );
         let body = views::body(&ui.app);
         assert!(body.contains("Private profile setup"), "{body}");
         assert!(body.contains("qwen2.5:0.5b"), "{body}");

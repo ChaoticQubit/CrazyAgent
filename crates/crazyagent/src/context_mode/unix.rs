@@ -92,8 +92,9 @@ pub(super) fn npm_wrap(
         let settings = crate::sandbox_settings::stored(root).map_err(refused)?;
         let sandbox = sandbox.limit_sockets(settings.linux_sockets);
         let calls = settings.linux_supervisor;
-        let sandbox =
-            crate::sandbox::InstalledSandbox::install(sandbox, profile, calls).map_err(refused)?;
+        let strict = settings.linux_strict;
+        let sandbox = crate::sandbox::InstalledSandbox::install(sandbox, profile, calls, strict)
+            .map_err(refused)?;
         let mut npm = Command::new(bin.join("npm"));
         npm.current_dir(cwd);
         sandbox.wrap(&npm).map_err(refused)?

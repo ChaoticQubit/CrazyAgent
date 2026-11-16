@@ -162,6 +162,7 @@ mod tests {
             hookless: false,
             message_note: None,
             started_ms: None,
+            sees_hidden: false,
         }
     }
 
