@@ -2544,3 +2544,35 @@ fn a_project_page_offers_no_harness_file_and_a_failed_list_changes_nothing() {
         "{shown}"
     );
 }
+
+/// H-import code F2 (rv-code4 21:12): Enter on a typed path while the harness list is still
+/// on its way keeps the field open with the path, sending nothing; once the list arrives,
+/// the same Enter reads the typed file.
+#[test]
+fn a_typed_path_waits_for_the_harness_list_instead_of_vanishing() {
+    let mut shell = opened(Scope::App, "Saved rule.");
+    shell.key(Key::Ctrl('g'));
+    shell.key(Key::Ctrl('o'));
+    assert_eq!(requests(&mut shell), vec![ProcessQuery::Sources]);
+
+    typed(&mut shell, "/notes/rules.md");
+    shell.key(Key::Enter);
+
+    assert_eq!(requests(&mut shell), vec![], "nothing is sent while the list is pending");
+    let shown = screen(&mut shell);
+    assert!(shown.contains("Type the file's full path"), "the field stays open: {shown}");
+    assert!(shown.contains("/notes/rules.md"), "the typed path stays: {shown}");
+
+    shell.arrive(answered(
+        ProcessQuery::Sources,
+        Ok(ProcessReply::Sources(harness_sources())),
+    ));
+    shell.key(Key::Enter);
+
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::ReadFile {
+            path: std::path::PathBuf::from("/notes/rules.md"),
+        }]
+    );
+}
