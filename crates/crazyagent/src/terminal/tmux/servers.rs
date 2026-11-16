@@ -74,6 +74,19 @@ fn refused(socket: &Path) -> bool {
     )
 }
 
+/// How the keeper an engine holds for one of a lead's servers stands: none when none is held,
+/// true once it exited cleanly, the exit `end_keeper` reads as the server's end confirmed,
+/// and false while it runs, after any other exit, or when the keepers cannot be read. Takes
+/// the keepers of that kind of server and the lead. Returns the answer.
+fn keeper_ended(kept: &Mutex<BTreeMap<AgentId, Child>>, lead: &AgentId) -> Option<bool> {
+    let Ok(mut keepers) = kept.lock() else {
+        return Some(false);
+    };
+    keepers
+        .get_mut(lead)
+        .map(|keeper| matches!(keeper.try_wait(), Ok(Some(status)) if status.success()))
+}
+
 /// The installed Seatbelt profile of a team agent, which its own server and every engine
 /// client on it run inside. Takes the engine root and the agent. Returns the profile path,
 /// or `terminal_own_server_unavailable` when it is not this user's plain file.
@@ -372,13 +385,31 @@ impl Servers {
     }
 
     /// The lead's own server when one listens for it now, else none; a name that is not a
-    /// team agent has none. Takes the agent. Returns the server host or the failure to open
-    /// one.
+    /// team agent has none. While this engine holds the keeper it started that server under,
+    /// only that keeper's clean exit, as after its warden confirmed the server's sandbox
+    /// emptied, lets a refused socket count as none: a keeper outlives its server, and on
+    /// macOS a live server whose accept queue is full refuses a connect too. A listing that
+    /// finds a refusal unlinks the file, so a socket gone under a host this engine holds open
+    /// is no proof either: with a held keeper that still runs or exited otherwise it gives
+    /// `terminal_own_server_unavailable`, so a call on the lead fails rather than finding it
+    /// gone. With no keeper held only the socket file is read, and an agent with no host open
+    /// here takes no keeper lock. Takes the agent. Returns the server host or the failure to
+    /// open one.
     fn own(&self, agent: &AgentId) -> Result<Option<Arc<Tmux>>, HostError> {
         let Ok(socket) = harness_socket(&self.root, agent) else {
             return Ok(None);
         };
-        if !listening(&socket) {
+        let present = listening(&socket);
+        if !present
+            && self
+                .leads
+                .lock()
+                .is_ok_and(|leads| leads.contains_key(agent))
+            && keeper_ended(&self.keepers, agent) == Some(false)
+        {
+            return Err(failure(OWN_SERVER_UNAVAILABLE));
+        }
+        if !present || (keeper_ended(&self.keepers, agent) == Some(true) && refused(&socket)) {
             if let Ok(mut leads) = self.leads.lock() {
                 leads.remove(agent);
             }
@@ -510,18 +541,10 @@ impl Servers {
     /// cleanly counts: a keeper outlives its server, while on macOS a live server whose
     /// accept queue is full refuses a connect too, and a teammate can stop the server it
     /// runs under. With none held, as for a server an earlier engine started, whose keeper
-    /// still ends it at its deadline, any failed connect counts. A poisoned keepers lock
-    /// counts as a held keeper still running. Takes the lead and the socket. Returns the
-    /// answer.
+    /// still ends it at its deadline, any failed connect counts. Takes the lead and the
+    /// socket. Returns the answer.
     fn mates_gone(&self, lead: &AgentId, socket: &Path) -> bool {
-        let Ok(mut keepers) = self.mates_keepers.lock() else {
-            return false;
-        };
-        let ended_cleanly = keepers
-            .get_mut(lead)
-            .map(|keeper| matches!(keeper.try_wait(), Ok(Some(status)) if status.success()));
-        drop(keepers);
-        match ended_cleanly {
+        match keeper_ended(&self.mates_keepers, lead) {
             None => crate::spawn_gate::connect_unix_std(socket).is_err(),
             Some(true) => refused(socket),
             Some(false) => false,
