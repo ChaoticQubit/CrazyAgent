@@ -206,9 +206,15 @@ fn listed_refusal(
     access: AgentAccess,
     tools: bool,
 ) -> Option<&'static str> {
-    let _ = (manifest, access, tools);
-    None
+    if access == AgentAccess::Full {
+        return Some(LISTED_FULL_ACCESS);
+    }
+    (!tools && manifest.tools_limited.is_some()).then_some(LISTED_TOOLS_OFF)
 }
+
+/// The line a tools-on research job on a listed harness ends with in a project that turned
+/// hooks on, which a listed harness cannot run (T19b 19b-4, QUESTION-0100 Q6).
+const LISTED_HOOKS: &str = "This project turned hooks on, and this harness can't run them, so this research job can't run on it with tools on. Turn tools off for the job, or run it on Codex or Claude Code.";
 
 /// The line a read-only run on a listed harness ends with (T19b 19b-4, QUESTION-0100 Q5):
 /// project mapping, roadmap status checks and the Overview run on Codex or Claude Code only.
@@ -1141,8 +1147,13 @@ impl ResearchRunner {
         if let Some(reason) = policy.access.unavailable() {
             return Err(RunError::Invalid(reason.into()));
         }
-        if matches!(harness, ResearchHarness::Listed(_)) && policy.access == AgentAccess::Full {
-            return Err(RunError::Invalid(LISTED_FULL_ACCESS.into()));
+        if let ResearchHarness::Listed(id) = harness {
+            let listed = crate::harnesses::registry::registry()
+                .get(id)
+                .ok_or_else(|| RunError::Invalid("listed harness missing".into()))?;
+            if let Some(line) = listed_refusal(listed.manifest(), policy.access, job.tools) {
+                return Err(RunError::Invalid(line.into()));
+            }
         }
         let kept = job_kept_ports(self.settings.as_ref(), job.tools)?;
         let (network, proxy) = job_reach(&policy, job.tools, account, job.id, &kept)?;
@@ -2745,11 +2756,13 @@ fn listed_session(
     Session::start_with_context(request(&own)?, context).map_err(listed_start_failure)
 }
 
-/// The failure of a listed harness's research session that would not start: a context
-/// refusal as the context's, anything else under its code. Input: the launch refusal.
-/// Output: the runner's failure.
+/// The failure of a listed harness's research session that would not start: the plain
+/// hooks line for a project whose hooks it cannot run, a context refusal as the context's,
+/// anything else under its code. Input: the launch refusal. Output: the runner's failure.
 fn listed_start_failure(problem: LaunchError) -> RunError {
-    if problem.1.is_some() {
+    if problem.0 == "launch_listed_hooks_unsupported" {
+        RunError::Invalid(LISTED_HOOKS.into())
+    } else if problem.1.is_some() {
         RunError::Context(problem)
     } else {
         RunError::Invalid(format!("listed harness: {}", problem.0))
@@ -2955,11 +2968,19 @@ const NOT_A_REPOSITORY: &str = "The project folder is not a git repository, so a
 const HOOK_REFUSAL_START: &str = "The project's Git config sets ";
 
 /// Whether a setup refusal is one only the owner's change to the project clears, a hook
-/// its Git config names or an owner's folder that is no repository, which a later attempt
-/// meets again. Takes the refusal's line, the engine's own words with at most a hook key
-/// `listed_hook` bounded. Returns true for those two refusals only.
+/// its Git config names, an owner's folder that is no repository, or a run a listed harness
+/// can never take (T19b 19b-4), which a later attempt meets again. Takes the refusal's line,
+/// the engine's own words with at most a hook key `listed_hook` bounded. Returns true for
+/// those refusals only.
 fn owner_refusal(line: &str) -> bool {
-    line.starts_with(HOOK_REFUSAL_START) || line == NOT_A_REPOSITORY || line == LISTED_FULL_ACCESS
+    line.starts_with(HOOK_REFUSAL_START)
+        || [
+            NOT_A_REPOSITORY,
+            LISTED_FULL_ACCESS,
+            LISTED_TOOLS_OFF,
+            LISTED_HOOKS,
+        ]
+        .contains(&line)
 }
 
 /// Makes a project folder the engine created a git repository with one empty start commit,
