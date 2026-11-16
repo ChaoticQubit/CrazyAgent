@@ -193,6 +193,77 @@ fn a_tools_on_team_agent_of_a_listed_harness_is_hookless_and_refused_under_block
     assert!(hookless_saved(&fixture, with_tools));
 }
 
+/// rv-code4 T19b F2: a tools-on team agent of a listed harness runs with HOME at its private
+/// home, while its temp folder, its own `git` and its cargo home are the ones `prepare` made
+/// in the agent home its sandbox grants, so the launch never falls back to the private home
+/// for TMPDIR or points CARGO_HOME at a folder nothing prepared.
+#[test]
+fn a_tools_on_listed_team_agent_launches_with_the_agent_homes_temp_folder_and_cargo_home() {
+    struct TmpRemoved(PathBuf);
+    impl Drop for TmpRemoved {
+        fn drop(&mut self) {
+            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+        }
+    }
+    let fixture = Fixture::new(1);
+    let runtime = listed_runtime(&fixture);
+    let id = fixture.agent(AgentRole::Sub, "standin-acp", AgentStatus::Starting);
+    let own = agent_home(&fixture.base.join("team"), id);
+    let _removed = TmpRemoved(own.clone());
+
+    let prepared = runtime.prepare(
+        &fixture.setup,
+        id,
+        AgentRole::Sub,
+        "standin-acp",
+        true,
+        &keyless_endpoint(),
+        false,
+        crate::agent_git::Layout::Linked,
+        false,
+    );
+
+    assert!(prepared.is_ok(), "{:?}", prepared.as_ref().err());
+    let (_, plan, mode) = prepared.unwrap();
+    let Mode::Kept { account, context } = mode else {
+        panic!("an endpoint agent is kept between turns");
+    };
+    let request = plan.request(account, plan.access);
+    assert!(request.is_ok(), "{:?}", request.as_ref().err());
+    let request = request.unwrap();
+    let built = crate::harnesses::launch::command_with_context(&request, &context);
+    assert!(built.is_ok(), "{:?}", built.as_ref().err());
+    let (command, _installed) = built.unwrap();
+    let env = |wanted: &str| {
+        command
+            .get_envs()
+            .find(|(name, _)| *name == wanted)
+            .and_then(|(_, value)| value)
+            .map(PathBuf::from)
+    };
+    let scratch = crate::sandbox::toolchains::existing_tmp(&own);
+    assert!(scratch.is_some(), "prepare made the agent's temp folder");
+    let scratch = scratch.unwrap();
+    assert_eq!(env("HOME"), Some(own.join("standin-acp").join(ENDPOINT)));
+    assert_eq!(env("TMPDIR").as_deref(), Some(scratch.as_path()));
+    assert_eq!(
+        crate::sandbox::toolchains::private_folder_pin(&scratch),
+        plan.scratch_pin
+    );
+    assert_eq!(env("CARGO_HOME"), Some(own.join(".cargo")));
+    assert!(own.join(".cargo").is_dir());
+    let git = scratch.join("bin");
+    if git.join("git").is_file() {
+        let path = env("PATH").unwrap_or_default();
+        assert!(
+            path.as_os_str()
+                .to_string_lossy()
+                .starts_with(&format!("{}:", git.display())),
+            "{path:?}"
+        );
+    }
+}
+
 const MASTER_REPLY: &str = "MASTER-19B-HANDED page.md to a sub-agent";
 
 const SUB_REPORT: &str = "SUB-19B-REPORT page.md is written";
