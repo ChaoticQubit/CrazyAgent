@@ -603,6 +603,26 @@ pub fn revoke_writes(
     Ok(removed == 1)
 }
 
+/// Forgets a removed project's write approvals and standing allows, so a project set up
+/// again under the same id starts with neither. A call still parked on one of them ends as
+/// expired. Inputs: the transaction and the project. Output: Ok, or `connectors_unavailable`.
+pub fn forget_project(db: &Connection, project: &str) -> Result<(), EngineError> {
+    if !asked_before(db)? {
+        return Ok(());
+    }
+    db.execute(
+        "DELETE FROM connector_approvals WHERE project=?1",
+        [project],
+    )
+    .map_err(sqlite)?;
+    db.execute(
+        "DELETE FROM connector_write_allowed WHERE project=?1",
+        [project],
+    )
+    .map_err(sqlite)?;
+    Ok(())
+}
+
 /// The waiting approvals for their notices. Inputs: the database and the most to read.
 /// Output: them in id order, or none before any approval was asked.
 pub fn waiting(db: &Connection, max: usize) -> Result<Option<Vec<Waiting>>, EngineError> {
