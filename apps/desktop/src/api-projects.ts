@@ -482,10 +482,6 @@ export function loadProjectCatalog(pool: string | null, research: ResearchKind[]
   return call<ProjectCatalog>("desktop_project_catalog", { pool, research });
 }
 
-export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_setup_project", { spec, setup, generation });
-}
-
 /** Whether a New Project receipt gets one automatic reconcile, as the TUI does: the engine
  * answered OutcomeUnknown or the reply was lost, and the bridge still keeps the intent.
  * Input: the receipt from Create project. Output: true when it should reconcile once. */
@@ -820,6 +816,14 @@ export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddO
  * exact name as typed. Output: the started job, or the delete's refusal. */
 export function startDeleteJob(id: string, name: string): Promise<Result<IntakeJob>> {
   return call<IntakeJob>("desktop_delete_project_job", { id, name });
+}
+
+/** Starts the engine's job that sets up a New Project, followed on the New Project page and on
+ * Home: it builds the project's folder in the projects folder with its documents counted and
+ * records it, and leaving the page never stops it (DEC-177 add.2). Inputs: the name spec and
+ * the setup. Output: the started job, or New Project's refusal. */
+export function startSetupJob(spec: ProjectSpec, setup: ProjectSetup): Promise<Result<IntakeJob>> {
+  return call<IntakeJob>("desktop_setup_project_job", { spec, setup });
 }
 
 export const PAGES_MAX = 50;

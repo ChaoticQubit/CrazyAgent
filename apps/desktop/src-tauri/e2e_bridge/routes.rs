@@ -265,21 +265,6 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state).await?.project_catalog(pool, research).await }.await;
             routed(result)
         }
-        "desktop_setup_project" => {
-            #[derive(serde::Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct Args {
-                spec: ProjectSpec,
-                setup: ProjectSetup,
-                generation: u64,
-            }
-            let Args { spec, setup, generation } = match parse(args) {
-                Ok(args) => args,
-                Err(invalid) => return invalid,
-            };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .setup_project(spec, setup, generation) .await }.await;
-            routed(result)
-        }
         "desktop_project_setup" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -1595,6 +1580,20 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.delete_project_job(&id, name)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_setup_project_job" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                spec: ProjectSpec,
+                setup: ProjectSetup,
+            }
+            let Args { spec, setup } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.setup_project_job(spec, setup)?; call.await }.await;
             routed(result)
         }
         "desktop_remove_project" => {

@@ -1,4 +1,4 @@
-import { ADD_WARNINGS, intakeCopy, loadIntakeJob, measuredLine, moveCopy } from "../../api-intake";
+import { ADD_WARNINGS, intakeCopy, loadIntakeJob, measuredLine, moveCopy, newProjectCopy } from "../../api-intake";
 import type { Result } from "../../api";
 import { failureCopy, receiptState, type KeptFile, type StoredSetup } from "../../api-projects";
 import type {
@@ -216,19 +216,20 @@ export function icloudProgressLine(progress: IcloudProgress | null): string {
 export const INTAKE_POLL_MS = 1000;
 
 /** Whether the job is still at work: downloading, waiting for agents to stop, copying, moving
- * folders to the Trash or clearing. Input: the job, if any. Output: true while it runs. */
+ * folders to the Trash, building a New Project or clearing. Input: the job, if any. Output:
+ * true while it runs. */
 export function jobRunning(job: IntakeJob | null): boolean {
   const state = job?.state.state;
-  return state === "downloading" || state === "stopping" || state === "copying" || state === "trashing" || state === "clearing";
+  return state === "downloading" || state === "stopping" || state === "copying" || state === "trashing" || state === "building" || state === "clearing";
 }
 
-/** The name a job's row and lines show: a delete's project name whole, else the folder's own
- * name. Input: the job. Output: the name. */
+/** The name a job's row and lines show: a delete's or a New Project's project name whole, else
+ * the folder's own name. Input: the job. Output: the name. */
 export function jobName(job: IntakeJob): string {
-  return job.kind === "delete" ? job.source : folderName(job.source);
+  return job.kind === "delete" || job.kind === "setup" ? job.source : folderName(job.source);
 }
 
-const JOB_VERBS: Record<IntakeJob["kind"], string> = { add: "Adding", move_project: "Moving", delete: "Deleting" };
+const JOB_VERBS: Record<IntakeJob["kind"], string> = { add: "Adding", move_project: "Moving", delete: "Deleting", setup: "Setting up" };
 
 /** The words for a start the engine refused job_busy: names the job that runs, as the app last
  * read it, or says another job runs when that read found none running. Input: the job read.
@@ -271,13 +272,15 @@ export function intakePollMs(job: IntakeJob | null): number {
 }
 
 /** What the job does now or how it ended, with the folder's name and the counts as files land,
- * in the words of an add or of a project move. Input: the job. Output: one sentence. */
+ * in the words of an add, a project move, a delete or a New Project. Input: the job. Output:
+ * one sentence. */
 export function jobLine(job: IntakeJob): string {
   const name = jobName(job);
   const now = job.state;
   const moving = job.kind === "move_project";
   if (jobRunning(job) && job.stopping) return `Stopping ${name}...`;
   if (job.kind === "delete") return deleteLine(name, now);
+  if (job.kind === "setup") return setupLine(name, now);
   switch (now.state) {
     case "downloading": {
       const { done, total } = now.progress;
@@ -309,6 +312,8 @@ export function jobLine(job: IntakeJob): string {
     case "trashing":
     case "cut_short":
       return deleteLine(name, now);
+    case "building":
+      return setupLine(name, now);
   }
 }
 
@@ -340,13 +345,43 @@ function deleteLine(name: string, now: IntakeJob["state"]): string {
     case "downloading":
     case "copying":
     case "needs_answer":
+    case "building":
       return `Deleting ${name}...`;
   }
 }
 
-/** What Home offers for the job. Stop while it downloads, waits for agents or copies; nothing
- * while it clears or a delete moves folders to the Trash, since neither stops; Retry only when
- * the folder did not land, since a failure while clearing means it is already in the projects
+/** What a New Project does now or how it ended (DEC-177 add.2), with the project's name and
+ * how many of its documents were copied once they are counted; Done names the project's
+ * Settings, since the page's pool and agent access follow-ups run only while it stays open.
+ * Inputs: the name and the state. Output: one sentence. */
+function setupLine(name: string, now: IntakeJob["state"]): string {
+  switch (now.state) {
+    case "building": {
+      if (now.done > now.total) throw new Error(`setup copied ${now.done} is past total ${now.total}`);
+      if (now.total === 0) return `Setting up ${name}...`;
+      return `Setting up ${name}: ${now.done} of ${now.total} document${now.total === 1 ? "" : "s"} copied`;
+    }
+    case "done":
+      return `${name} is set up. Choose its pool and agent access in its Settings.`;
+    case "cancelled":
+      return `Setting up ${name} stopped. Nothing was kept.`;
+    case "failed":
+      return `${name}: ${newProjectCopy(now.code)}`;
+    case "downloading":
+    case "stopping":
+    case "copying":
+    case "clearing":
+    case "trashing":
+    case "needs_answer":
+    case "cut_short":
+      return `Setting up ${name}...`;
+  }
+}
+
+/** What Home offers for the job. Stop while it downloads, waits for agents, copies or builds a
+ * New Project, which the engine refuses once the project is being saved; nothing while it
+ * clears or a delete moves folders to the Trash, since neither stops; Retry only when the
+ * folder did not land, since a failure while clearing means it is already in the projects
  * folder, and Finish delete for a delete cut short; an answer for a soft refusal; Dismiss
  * once it ended. Input: the job. Output: the actions in button order. */
 export function jobActions(job: IntakeJob): ("stop" | "retry" | "answer" | "dismiss")[] {
@@ -355,6 +390,7 @@ export function jobActions(job: IntakeJob): ("stop" | "retry" | "answer" | "dism
     case "downloading":
     case "stopping":
     case "copying":
+    case "building":
       return job.stopping ? [] : ["stop"];
     case "clearing":
     case "trashing":
@@ -414,23 +450,53 @@ export interface RestartSteps {
 }
 
 /** Starts a job again for a retry or an answer to its soft refusal, as the same kind of job: an
- * add of its folder, or a move of its project, never an add of a project's folder. A delete is
- * never started again in one click: [`retryRoute`] opens its remove ask. Inputs: the job, the
- * overrides to start with and the two starts. Output: the start's result. */
+ * add of its folder, or a move of its project, never an add of a project's folder. A delete or
+ * a New Project is never started again in one click: [`retryRoute`] opens its remove ask or
+ * New Project. Inputs: the job, the overrides to start with and the two starts. Output: the
+ * start's result. */
 export function restartJob(job: IntakeJob, overrides: AddOverride[], steps: RestartSteps): Promise<Result<IntakeJob>> {
   if (job.kind === "delete") throw new Error(`delete job ${job.id} starts again only from the remove ask`);
+  if (job.kind === "setup") throw new Error(`New Project job ${job.id} starts again only from New Project`);
   if (job.kind === "add") return steps.add(job.source, job.mode, overrides);
   if (job.project_id === null) throw new Error(`move job ${job.id} names no project`);
   return steps.move(job.project_id, job.mode, overrides);
 }
 
-/** Where Home's Finish delete or Try again of a delete goes: the project's Remove section with
- * the remove ask open on Delete everything, where the exact name is typed again (DEC-177
- * add.1). Input: the job. Output: the route, or null for a job that is not a delete. */
+/** Where Home's Finish delete or Try again of a delete or a New Project goes: the project's
+ * Remove section with the remove ask open on Delete everything, where the exact name is typed
+ * again (DEC-177 add.1), or New Project, with the answers this window kept (add.2). Input: the
+ * job. Output: the route, or null for an add or a move. */
 export function retryRoute(job: IntakeJob): string | null {
+  if (job.kind === "setup") return "/projects/new";
   if (job.kind !== "delete") return null;
   if (job.project_id === null) throw new Error(`delete job ${job.id} names no project`);
   return `/projects/${encodeURIComponent(job.project_id)}/settings?section=remove&ask=delete`;
+}
+
+/** What the New Project page does next with the job it started, as Home's read of the
+ * engine's job shows it: still running, done with its project, ended with New Project's
+ * words, or lost when the read names another job or none. */
+export type SetupFollow = { kind: "running"; job: IntakeJob } | { kind: "done"; project: string } | { kind: "ended"; words: string } | { kind: "lost" };
+
+/** Reads the New Project job the page started from Home's read of the engine's job (DEC-177
+ * add.2 Q1 A). Inputs: the job read, if any, and the started job's id. Output: what the page
+ * does next. */
+export function setupFollow(job: IntakeJob | null, id: string): SetupFollow {
+  if (job === null || job.id !== id) return { kind: "lost" };
+  if (job.kind !== "setup") throw new Error(`job ${job.id} is a ${job.kind}, not a New Project`);
+  if (jobRunning(job)) return { kind: "running", job };
+  const now = job.state;
+  switch (now.state) {
+    case "done":
+      if (job.project_id === null) throw new Error(`New Project job ${job.id} names no project`);
+      return { kind: "done", project: job.project_id };
+    case "failed":
+      return { kind: "ended", words: newProjectCopy(now.code) };
+    case "cancelled":
+      return { kind: "ended", words: newProjectCopy("home_add_cancelled") };
+    default:
+      throw new Error(`New Project job ${job.id} cannot end ${now.state}`);
+  }
 }
 
 const ANSWER_ISSUES: Record<string, AnywayIssue> = {

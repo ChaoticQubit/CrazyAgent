@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, render } from "./bridge-routes.mjs";
-import { INTERNALS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { INTERNALS, closedPort, owner, required, serveApp, setUpProject, start as launch, stop, value } from "./e2e-harness.mjs";
 import { git } from "./trial4-projects.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -25,18 +25,15 @@ const run = { generation: 10, homes: 0 };
  * so the project is one kept outside it. Input: its name. Output: its id, its folder and the new
  * projects folder. */
 async function keptOutside(name) {
-  const receipt = await value(run.bridge, "desktop_setup_project", {
-    spec: { name, repositories: [] },
-    setup: { about: `${name} for the move dialog`, tech_stack: [], platforms: ["website"], research: [], pool: "local-pool", team: null, documents: [] },
-    generation: run.generation++,
+  const id = await setUpProject(run.bridge, { name, repositories: [] }, {
+    about: `${name} for the move dialog`, tech_stack: [], platforms: ["website"], research: [], pool: "local-pool", team: null, documents: [],
   });
-  assert.equal(receipt.outcome, "applied", `${name} is made: ${JSON.stringify(receipt)}`);
-  const folder = await projectFolder(receipt.project_id);
+  const folder = await projectFolder(id);
   const home = join(run.root, `home-${++run.homes}`);
   mkdirSync(home, { mode: 0o700 });
   assert.equal((await value(run.bridge, "desktop_set_projects_home", { path: home, generation: run.generation++ })).outcome, "applied");
   assert.ok(!folder.startsWith(`${home}/`), `${folder} is outside ${home}`);
-  return { id: receipt.project_id, folder, home };
+  return { id, folder, home };
 }
 
 /** Reads a project's folder from its saved setup. Input: the project id. Output: the folder. */

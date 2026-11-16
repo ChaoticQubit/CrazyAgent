@@ -41,12 +41,13 @@ const STAMP_SETTLE: Duration = Duration::from_secs(4);
 const DEADLINE_EVERY: u64 = 1024;
 const GITDIR_FILE_BYTES_MAX: u64 = 4096;
 
-/// What one add, project move or delete reports while it works and the stop it obeys:
-/// whether a project move or a delete still waits for its agents to stop and how many are
-/// left, the entries copied and checked so far, whether the checked copy is in place and the
-/// old folder being cleared, a delete's Trash moves once it committed to them, and a stop
-/// asked between entries, which ends the work before clearing starts. The gate makes a stop
-/// and a delete's commit exclusive: whichever comes first wins.
+/// What one add, project move, delete or New Project reports while it works and the stop it
+/// obeys: whether a project move or a delete still waits for its agents to stop and how many
+/// are left, the entries copied and checked so far, whether the checked copy is in place and
+/// the old folder being cleared, a delete's Trash moves once it committed to them, a New
+/// Project's documents copied and whether its record started, and a stop asked between
+/// entries, which ends the work before clearing starts. The gate makes a stop and a delete's
+/// or a New Project's commit exclusive: whichever comes first wins.
 #[derive(Debug, Default)]
 pub struct Tally {
     waiting: AtomicBool,
@@ -58,6 +59,9 @@ pub struct Tally {
     trashing: AtomicBool,
     trash_total: AtomicU64,
     trashed: AtomicU64,
+    documents_total: AtomicU64,
+    documents_done: AtomicU64,
+    recording: AtomicBool,
     gate: std::sync::Mutex<()>,
 }
 
@@ -126,11 +130,12 @@ impl Tally {
     }
 
     /// Asks the copy to stop at its next entry. Clearing the old folder never stops, since
-    /// the copy it follows is complete and checked, and a delete that committed to its Trash
-    /// moves refuses the stop. Output: whether the stop was taken.
+    /// the copy it follows is complete and checked, a delete that committed to its Trash
+    /// moves refuses the stop, and so does a New Project whose record started. Output:
+    /// whether the stop was taken.
     pub fn stop(&self) -> bool {
         let _gate = self.gate();
-        if self.trashing.load(Ordering::SeqCst) {
+        if self.trashing.load(Ordering::SeqCst) || self.recording.load(Ordering::SeqCst) {
             assert!(!self.stopped());
             return false;
         }
@@ -169,6 +174,53 @@ impl Tally {
         assert!(self.trashing.load(Ordering::SeqCst));
         let before = self.trashed.fetch_add(1, Ordering::SeqCst);
         assert!(before < self.trash_total.load(Ordering::SeqCst));
+    }
+
+    /// How many documents a New Project copied so far and how many it copies, (0, 0) before
+    /// it counted them. Output: (done, total).
+    pub fn building(&self) -> (u64, u64) {
+        let total = self.documents_total.load(Ordering::SeqCst);
+        let done = self.documents_done.load(Ordering::SeqCst);
+        assert!(done <= total, "copied {done} of {total} documents");
+        (done, total)
+    }
+
+    /// Counts the documents a New Project copies, before the first. Input: the count.
+    /// Output: Ok, or `home_add_cancelled` once a stop was asked.
+    pub(crate) fn documents(&self, total: u64) -> Result<(), EngineError> {
+        self.go_on()?;
+        assert_eq!(
+            self.documents_done.load(Ordering::SeqCst),
+            0,
+            "a New Project counts its documents before it copies them"
+        );
+        self.documents_total.store(total, Ordering::SeqCst);
+        assert_eq!(self.building(), (0, total));
+        Ok(())
+    }
+
+    /// Counts one document a New Project copied.
+    pub(crate) fn document_copied(&self) {
+        let total = self.documents_total.load(Ordering::SeqCst);
+        let before = self.documents_done.fetch_add(1, Ordering::SeqCst);
+        assert!(before < total, "copied past the {total} documents counted");
+    }
+
+    /// Commits a New Project to its record, once its folder is built: from here a stop is
+    /// refused, so a stop never leaves a project half recorded. A stop asked first wins and
+    /// nothing is recorded. Output: Ok, or `home_add_cancelled` when a stop came first.
+    pub(crate) fn commit_record(&self) -> Result<(), EngineError> {
+        let _gate = self.gate();
+        self.go_on()?;
+        let before = self.recording.swap(true, Ordering::SeqCst);
+        assert!(!before, "a New Project commits to its record once");
+        assert!(self.recording());
+        Ok(())
+    }
+
+    /// Whether a New Project committed to its record.
+    pub fn recording(&self) -> bool {
+        self.recording.load(Ordering::SeqCst)
     }
 
     fn gate(&self) -> std::sync::MutexGuard<'_, ()> {
