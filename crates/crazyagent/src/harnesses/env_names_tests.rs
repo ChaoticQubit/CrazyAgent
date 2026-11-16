@@ -20,6 +20,28 @@ const LISTED: &str = concat!(
     "accounts:\n  openai-chat:\n    env:\n",
 );
 
+const OWNER_TOOLCHAIN: [&str; 8] = [
+    "DEVELOPER_DIR",
+    "CC",
+    "CXX",
+    "CFLAGS",
+    "LDFLAGS",
+    "CPATH",
+    "LIBRARY_PATH",
+    "PKG_CONFIG_PATH",
+];
+
+const OWNER_TOOLCHAIN_PREFIXES: [&str; 8] = [
+    "DEVELOPER_",
+    "CC_",
+    "CXX_",
+    "CFLAGS_",
+    "LDFLAGS_",
+    "CPATH_",
+    "LIBRARY_",
+    "PKG_",
+];
+
 const COVERS: &str = "this prefix covers names CrazyAgent sets itself or that decide which code runs.";
 
 const ENGINE_FAMILY_NAMES: &[&str] = &[
@@ -427,4 +449,50 @@ fn the_macos_sdk_the_engine_pins_is_owned_at_both_sites() {
     assert_eq!(refused, Some((VALUE, format!("{place}: {sentence}"))));
     assert!(owned("sdkroot"));
     assert!(claims("SDK_"));
+}
+
+/// The owner's toolchain names (leader 01:34 residual call): the compiler, its flags, its
+/// header and library paths and the developer-tools folder. No manifest may set them, in an
+/// account entry or a home block, or claim them with a home prefix: each is refused with
+/// its own words.
+#[test]
+fn no_manifest_sets_or_claims_the_owner_s_toolchain_names() {
+    let place = "rowharness: accounts.openai-chat.env";
+    let picks = "picks the owner's compiler or build tools, so only the owner sets it.";
+    let covers = "this prefix covers names that pick the owner's compiler or build tools.";
+    for name in OWNER_TOOLCHAIN {
+        let block = format!("  env_prefixes:\n    - \"SAMPLE_\"\n  env:\n    {name}: \"x\"\n");
+
+        let account = account_refusal(&format!("      {name}: \"/opt/tools\"\n"));
+        let home = home_refusal(&block);
+
+        let to_account = format!("{place}: {name} {picks}");
+        let to_home = format!("home.env.{name}: this {picks}");
+        assert_eq!(account, Some((VALUE, to_account)), "{name}");
+        assert_eq!(home, Some((VALUE, to_home)), "{name}");
+    }
+    for prefix in OWNER_TOOLCHAIN_PREFIXES {
+        let block = format!("  env_prefixes:\n    - \"{prefix}\"\n");
+
+        let refused = home_refusal(&block);
+
+        let words = format!("home.env_prefixes.{prefix}: {covers}");
+        assert_eq!(refused, Some((VALUE, words)), "{prefix}");
+    }
+}
+
+/// The owner's toolchain names stay the owner's (leader 01:34): the engine does not own
+/// them and the launch's variable guard lets them through, so a value the owner chose for
+/// an account still reaches the agent; only a manifest is refused them.
+#[test]
+fn the_owner_s_toolchain_names_stay_open_to_the_owner() {
+    use std::ffi::OsStr;
+    for name in OWNER_TOOLCHAIN {
+        let value = OsStr::new("/opt/owner/tools");
+
+        let allowed = crate::sandbox::agent_variable_allowed(OsStr::new(name), value);
+
+        assert!(!owned(name), "{name}");
+        assert!(allowed, "{name}");
+    }
 }
