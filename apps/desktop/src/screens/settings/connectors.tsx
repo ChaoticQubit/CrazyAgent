@@ -342,11 +342,13 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
   }
 
   async function save() {
-    if (view.kind !== "ok" || (native === null && sizeCap === null)) return;
+    if (view.kind !== "ok") return;
     const read = view.value.settings;
+    const settings = settingsToSave(read, { write: null, wait: null, native, size_cap: sizeCap });
+    if (settings === null) return;
     setSaving(true);
     setProblem("");
-    const result = await saveConnectorSettings(settingsToSave(read, native ?? read.native, sizeCap ?? read.size_cap), view.value.version);
+    const result = await saveConnectorSettings(settings, view.value.version);
     setSaving(false);
     if (result.kind === "error") { setProblem(`${CONNECTORS_PAGE.notSaved} ${result.message}`); return; }
     if (result.kind === "not_ready") { setProblem(NOT_READY); return; }

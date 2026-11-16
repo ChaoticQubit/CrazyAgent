@@ -100,6 +100,22 @@ export const PROJECT_CONNECTORS = {
   notChanged: "The connector was not changed.",
 } as const;
 
+/** The connectors a project may write with without asking again, each with the title of the
+ * first listed connector of that name, else its name. Inputs: the page read and the allowed
+ * writes. Output: the rows, in the allowed writes' order. */
+export function writeRows(page: ConnectorsView, writes: AllowedWrites): { name: string; title: string }[] {
+  void page;
+  void writes;
+  return [];
+}
+
+/** The toast after a Revoke, the same in the TUI. Input: the connector's title. Output: the
+ * sentence. */
+export function writesRevoked(title: string): string {
+  void title;
+  return "";
+}
+
 /** The line naming the connectors a project cannot switch yet, the same in the TUI. Input:
  * their titles, at least one. Output: the line. */
 export function notReadyLine(titles: string[]): string {
@@ -180,6 +196,10 @@ export const CONNECTORS_PAGE = {
   removeBody: "Its manifest is deleted from your plugins folder, with its keys and its switch in every project.",
 } as const;
 
+/** The write action choices in the order both apps list them, the default first. */
+export const WRITE_CHOICES: { choice: WritePolicy; label: string }[] = [];
+/** The approval wait choices in the order both apps list them; 10 min is the default. */
+export const WAIT_CHOICES: { choice: Wait; label: string }[] = [];
 /** The harness-native choices in the order both apps list them, the default first. */
 export const NATIVE_CHOICES: { choice: NativeConnectors; label: string }[] = [{ choice: "off", label: "Off" }, { choice: "on", label: "On" }];
 /** The size cap choices in the order both apps list them; 256 KiB is the default. */
@@ -191,11 +211,18 @@ const NOT_CONNECTOR: Problem = { code: "app_plugin_not_connector", line: null, f
 /** The settings an owner has until they pick others: the engine's `ConnectorSettings::DEFAULT`. */
 export const CONNECTOR_DEFAULTS: ConnectorSettings = { write: "ask_every_time", wait: "minutes10", native: "off", size_cap: "kib256", keep_log: "days30" };
 
-/** The settings a Connectors page save sends: the ones read, with only the two this page
- * shows replaced, so the write, wait and keep settings go back as they were. Inputs: the
- * settings read and the picked values. Output: the settings to save. */
-export function settingsToSave(read: ConnectorSettings, native: NativeConnectors, sizeCap: SizeCap): ConnectorSettings {
-  return { ...read, native, size_cap: sizeCap };
+/** What the owner picked on the Connectors page for each setting it shows, or null where they
+ * picked nothing. */
+export type SettingPicks = { write: WritePolicy | null; wait: Wait | null; native: NativeConnectors | null; size_cap: SizeCap | null };
+
+/** The settings a Connectors page save sends: the ones read, with only the four this page
+ * shows replaced by their picks, so the keep setting goes back as it was. Inputs: the
+ * settings read and the picks. Output: the settings to save, or null when no pick differs
+ * from what was read. */
+export function settingsToSave(read: ConnectorSettings, picks: SettingPicks): ConnectorSettings | null {
+  void read;
+  void picks;
+  return null;
 }
 
 /** A connector's state word with its tone and the line under it, checked in a fixed order:
