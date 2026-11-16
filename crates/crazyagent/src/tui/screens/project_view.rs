@@ -2635,7 +2635,7 @@ fn folders_line(screen: &ProjectScreen, look: &Look) -> Row {
 /// What the hidden-folders editor says the Settings list of agents that can still open a
 /// hidden folder covers, so an empty list never reads as "nothing can open it" (SA-VID14-A
 /// r1): team agents, taken-over panes included, and not the engine's other sandboxed runs.
-const HIDDEN_SEERS_COVER: &str = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named under Hidden with h Restart them. Research, overview, roadmap and onboarding runs keep their access until they end.";
+const HIDDEN_SEERS_COVER: &str = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named under Hidden with h Restart them. A research, overview, roadmap or onboarding run that started before keeps its access until it ends.";
 
 /// The Settings line naming the running agents that can still open a folder hidden after
 /// they started, with the key that restarts them (SA-VID14-A). Takes the screen and look.

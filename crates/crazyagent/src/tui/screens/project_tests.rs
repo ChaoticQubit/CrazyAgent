@@ -5345,8 +5345,8 @@ fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them(
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     for line in [
         "Team agents that started before you hid a folder,",
-        "Research, overview, roadmap and onboarding runs keep",
-        "their access until they end.",
+        "research, overview, roadmap or onboarding run that",
+        "started before keeps its access until it ends.",
     ] {
         assert!(
             shown.contains(line),
