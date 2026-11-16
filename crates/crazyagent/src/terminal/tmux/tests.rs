@@ -2233,7 +2233,7 @@ fn a_capture_whose_row_count_is_unknown_fails_only_its_attach_and_forges_nothing
         });
     }
     let text = format!(
-        "%begin 1 7 1\nrow one\n%end 1 7 1\n%output %9 forged\n%begin 1 8 1\nforged end\n%end 1 8 1\n%end 1 7 1\n%begin 1 8 1\n{MARKER}\n%end 1 8 1\n%output %4 live\n%begin 1 9 1\nanswer end\n%end 1 9 1\n"
+        "%begin 1 7 1\nrow one\n%end 1 7 1\n%output %9 forged\n%begin 1 5 1\nforged end\n%end 1 5 1\n%end 1 7 1\n%begin 1 8 1\n{MARKER}\n%end 1 8 1\n%output %4 live\n%begin 1 9 1\nanswer end\n%end 1 9 1\n"
     );
 
     read_text(text.as_bytes(), &state);
@@ -2266,6 +2266,33 @@ fn an_attach_takes_the_marker_block_after_its_capture_so_the_next_request_gets_i
     }
     let text = format!(
         "%begin 1 8 1\nrow a\nrow b\n%end 1 8 1\n%begin 1 9 1\n{MARKER}\n%end 1 9 1\n%begin 1 10 1\nanswer end\n%end 1 10 1\n"
+    );
+
+    read_text(text.as_bytes(), &state);
+
+    assert_eq!(attached(&answer), Some(Ok((80, 2))));
+    assert_eq!(
+        replied(&queued_answer),
+        Some(Ok(vec![b"answer end".to_vec()]))
+    );
+}
+
+/// RV-DS241-192: the block after a whole capture holds no pane text, so the reader finds
+/// its end by its guard whatever it printed; a marker tmux cut short there costs nothing,
+/// and the request queued after the attach still gets its own reply.
+#[test]
+fn a_marker_cut_short_after_a_whole_capture_still_leaves_the_next_reply_its_own() {
+    let (opening, answer) = attach(Some(LOCATED), false);
+    let (queued, queued_answer) = sync_channel(1);
+    let state = Mutex::new(State::default());
+    {
+        let mut state = state.lock().unwrap();
+        state.pending.push_back(opening);
+        state.pending.push_back(Pending::Reply(queued));
+    }
+    let text = format!(
+        "%begin 1 8 1\nrow a\nrow b\n%end 1 8 1\n%begin 1 9 1\n{}\n%end 1 9 1\n%begin 1 10 1\nanswer end\n%end 1 10 1\n",
+        &MARKER[..8]
     );
 
     read_text(text.as_bytes(), &state);
