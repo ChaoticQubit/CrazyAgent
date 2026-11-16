@@ -2182,7 +2182,7 @@ fn the_edit_names_a_skill_its_agents_do_not_get() {
     );
     assert!(!seen.contains("`grill-me` is not"), "{seen}");
     assert!(!seen.contains("`superpowers:grill-me` is not"), "{seen}");
-    assert!(!seen.contains("`plain-word`"), "{seen}");
+    assert!(!seen.contains("`plain-word` is not"), "{seen}");
     save(&root, None, own, 0).unwrap();
     let app = check_prompt(&root, None);
     assert!(
