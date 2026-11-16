@@ -10,6 +10,7 @@ use crate::harnesses::accounts::Handover;
 use crate::harnesses::launch::{LaunchError, LaunchEvent, LaunchRequest, listed_command};
 use crate::harnesses::manifest::{DriverKind, Manifest};
 use crate::harnesses::registry::Harness;
+use crate::launch_context::EngineServer;
 use crate::model_gateway::relay::Relay;
 use crate::plugins::{LaunchServer, ServerSpec};
 use crate::usage::capture::Tokens;
@@ -82,10 +83,12 @@ pub(super) struct ListedSpec<'a> {
     pub(super) instructions: &'a str,
 }
 
-/// The command a listed master turn spawns, exactly as built, and the files written for it
-/// in the private home: the rendered MCP config and the instruction file.
+/// The command a listed master turn spawns, exactly as built, the engine servers its ACP
+/// session opens with, and the files written for it in the private home: the rendered MCP
+/// config and the instruction file.
 pub(super) struct ListedLaunch {
     pub(super) command: Command,
+    pub(super) servers: Vec<EngineServer>,
     pub(super) written: Vec<PathBuf>,
 }
 
@@ -128,7 +131,11 @@ pub(super) fn listed_launch(spec: &ListedSpec<'_>) -> Result<ListedLaunch, Engin
     let command = listed_command(request, &arguments, &environment, handed)
         .map_err(engine_error)?;
     assert!(written.iter().all(|path| path.starts_with(home)));
-    Ok(ListedLaunch { command, written })
+    Ok(ListedLaunch {
+        command,
+        servers: Vec::new(),
+        written,
+    })
 }
 
 /// One listed master turn's arguments: the manifest's `piped.argv` with `piped.tools_off`

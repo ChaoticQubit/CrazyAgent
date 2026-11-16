@@ -342,11 +342,12 @@ mod launch {
     }
 
     /// DEC-180 Task 20 M2: a keyless listed master's harness gets the account's own address
-    /// and the placeholder, no relay, its private home and the arguments its manifest
-    /// gives; a hand-over that names the engine's TLS roots ends with the engine's value.
+    /// and the placeholder, no relay, its private home, the arguments its manifest gives and
+    /// the engine's TLS roots, which no account entry can hand over any more: the env-name
+    /// rule refuses an `SSL_` name when the manifest loads.
     #[test]
     fn a_keyless_listed_master_holds_the_placeholder_and_the_engine_s_own_variables() {
-        let harness = standin_with("SSL_CERT_FILE: \"/owner/roots.pem\"");
+        let harness = standin();
         let handed = hand_over(harness, &connection(false), None);
         assert!(handed.is_ok(), "{:?}", handed.as_ref().err());
         let (handover, relay) = handed.unwrap();
@@ -369,12 +370,12 @@ mod launch {
         assert!(given.windows(2).any(|window| window == pair));
     }
 
-    /// DEC-180 Task 20 M3: with tools on, the MCP config written in the private home holds
-    /// the engine's team server alone, with the command and arguments a native master's
-    /// team server has; with tools off it holds no team server and the manifest's tools-off
-    /// switch is in the arguments.
+    /// DEC-180 Task 20 M3 (after T19b-1): with tools on, the launch hands the ACP session the
+    /// engine's team server alone, with the command and arguments a native master's team
+    /// server has, never in an argument, and the MCP config in the private home names no team
+    /// server; with tools off it hands none and the manifest's tools-off switch is an argument.
     #[test]
-    fn a_listed_master_names_the_team_server_only_with_its_tools_on() {
+    fn a_listed_master_hands_its_session_the_team_server_only_with_its_tools_on() {
         let harness = standin();
         let handed = hand_over(harness, &connection(false), None);
         assert!(handed.is_ok(), "{:?}", handed.as_ref().err());
@@ -395,21 +396,23 @@ mod launch {
         });
         assert!(launch.is_ok(), "{:?}", launch.as_ref().err());
         let launch = launch.unwrap();
+        let team = EngineServer {
+            name: crate::team::tool::SERVER_NAME.into(),
+            command: on.engine.to_str().unwrap().into(),
+            args: tools.server_args().unwrap(),
+        };
+        assert_eq!(launch.servers, [team]);
+        let given = args(&launch);
+        assert!(given.iter().all(|arg| arg != "--no-tools"));
+        assert!(given.iter().all(|arg| !arg.contains("team-mcp")));
         let config = on.request.account.home().join("config/mcp.json");
-        assert!(launch.written.contains(&config));
-        let text = std::fs::read_to_string(&config).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let servers = parsed["mcpServers"].as_object().unwrap();
-        assert_eq!(servers.len(), 1);
-        let server = &servers[crate::team::tool::SERVER_NAME];
-        assert_eq!(server["command"], on.engine.to_str().unwrap());
-        let given: Vec<String> = serde_json::from_value(server["args"].clone()).unwrap();
-        assert_eq!(given, tools.server_args().unwrap());
-        assert!(args(&launch).iter().all(|arg| arg != "--no-tools"));
+        let text = std::fs::read_to_string(&config).unwrap_or_default();
+        assert!(!text.contains(crate::team::tool::SERVER_NAME));
         let off = turn(false);
         let launch = launched(harness, &off, &handover);
         assert!(launch.is_ok(), "{:?}", launch.as_ref().err());
         let launch = launch.unwrap();
+        assert!(launch.servers.is_empty());
         assert!(args(&launch).iter().any(|arg| arg == "--no-tools"));
         let config = off.request.account.home().join("config/mcp.json");
         let text = std::fs::read_to_string(&config).unwrap_or_default();
