@@ -15,6 +15,8 @@ use std::collections::BTreeSet;
 
 pub(in crate::tui) const PUBLISH_TITLE: &str = "Publish on GitHub";
 pub(in crate::tui) const DRAFT_POLL_MS: i64 = 2000;
+pub(in crate::tui) const PUBLISH_NOT_SEEN: &str = "No publish has shown up.";
+pub(in crate::tui) const PUBLISH_AGAIN: &str = "Try Publish again.";
 pub(in crate::tui) const DRAFT_AGENT: &str =
     "The project's agent drafted these lines from file names only. Check them before you approve.";
 pub(in crate::tui) const DRAFT_STOPPED: &str =
@@ -596,6 +598,6 @@ pub(in crate::tui) fn rule_label(rule: GitHubRule) -> &'static str {
 /// gives a Start ([`crate::github::START_TIME`]) has passed since the reply came. Inputs:
 /// when the reply came and now, in epoch milliseconds. Output: the answer.
 pub(in crate::tui) fn lost_start_over(since_ms: i64, now_ms: i64) -> bool {
-    let _ = (since_ms, now_ms);
-    false
+    let wait = i64::try_from(crate::github::START_TIME.as_millis()).unwrap_or(i64::MAX);
+    now_ms.saturating_sub(since_ms) >= wait
 }

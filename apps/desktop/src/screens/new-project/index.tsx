@@ -17,7 +17,8 @@ import { NotReady } from "../project/shared";
 import { AccessLevels, accessLabel, policyOf } from "../project/access";
 import { PoolPicker } from "./pool-picker";
 import { BasicsFields, PublishFields, ResearchSwitches, RoadmapSwitch, useGitHubPublish } from "./fields";
-import { createWait, emptyPublish, publishOutcome, startPublish } from "./publish";
+import { noteLostStart } from "../project/publish-job";
+import { createWait, emptyPublish, publishOutcome, startPublish, startReplyLost } from "./publish";
 import { TeamEditor } from "./team-editor";
 import {
   STEPS, addDocuments, basicsErrors, buildRequest, defaultTeam, documentType, draftAccess, emptyDraft, levelUnavailable, poolName, preselectPool,
@@ -270,7 +271,9 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     }
     if (!mounted.current) return;
     const publishing = startPublish(id, draft.publish ?? emptyPublish(), draft.name, draft.about, github.offered);
-    const outcome = publishOutcome(publishing ? await publishing : null);
+    const started = publishing ? await publishing : null;
+    const outcome = publishOutcome(started);
+    if (startReplyLost(started)) noteLostStart(id, Date.now());
     if (outcome) message = `${message} ${outcome}`;
     void dismissIntake(job);
     kept = null;

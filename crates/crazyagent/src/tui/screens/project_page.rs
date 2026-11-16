@@ -13,7 +13,8 @@ use super::project_markdown::sanitize;
 use super::project_master::{MasterRead, master_problem, transcript_from};
 use super::project_plugins::PluginsReply;
 use super::project_publish::{
-    AskKey, AskPane, DRAFT_POLL_MS, PaneKey, PublishPane, left_line, opens, query,
+    AskKey, AskPane, DRAFT_POLL_MS, PUBLISH_AGAIN, PUBLISH_NOT_SEEN, PaneKey, PublishPane,
+    left_line, lost_start_over, opens, query,
 };
 use super::project_time::local_offset;
 use super::project_view::{asks_github, project_screen};
@@ -99,6 +100,17 @@ impl MasterSent {
 struct Waiting {
     text: String,
     opening: bool,
+}
+
+/// Whether a GitHub publish Start's reply was lost after the engine may have run it: the
+/// outcome is unknown, the reply was too large, or it was not a publish. Input: the reply.
+/// Output: the answer, false for a publish or a refusal.
+fn start_reply_lost(result: &Result<IntakeView, String>) -> bool {
+    match result {
+        Ok(IntakeView::Publish(_)) => false,
+        Ok(_) => true,
+        Err(code) => START_REPLY_LOST.contains(&code.as_str()),
+    }
 }
 
 fn rejection(event: &MasterEvent) -> Option<String> {
@@ -254,6 +266,7 @@ pub(in crate::tui) struct ProjectPage {
     publish_asked: Option<IntakeQuery>,
     publish_later: bool,
     publish_read_ms: Option<i64>,
+    publish_lost_ms: Option<i64>,
     ask_pane: Option<AskPane>,
     publish_offered: bool,
     moving: Option<RequestId>,
@@ -363,6 +376,7 @@ impl ProjectPage {
             publish_asked: None,
             publish_later: false,
             publish_read_ms: None,
+            publish_lost_ms: None,
             ask_pane: None,
             publish_offered: false,
             moving: None,
@@ -440,9 +454,19 @@ impl ProjectPage {
         super::intake::ask(ctx, prompt);
     }
 
-    /// Reads the publish again while its pane shows the draft running, at most every
-    /// `DRAFT_POLL_MS`. Takes the context. Returns nothing.
+    /// Reads the publish again, at most every `DRAFT_POLL_MS`, while its pane shows the draft
+    /// running or while a Start whose reply was lost may still land (GSB-1). That wait ends
+    /// when a publish shows, or after as long as the engine gives a Start, when it says no
+    /// publish showed and asks the question again. Takes the context. Returns nothing.
     fn poll_publish(&mut self, ctx: &mut Ctx) {
+        if self
+            .publish_lost_ms
+            .is_some_and(|since| lost_start_over(since, now_ms()))
+        {
+            self.publish_lost_ms = None;
+            ctx.say(Message::warning(PUBLISH_NOT_SEEN, PUBLISH_AGAIN));
+            self.ask_prompt(ctx);
+        }
         let drafting = self
             .publish_pane
             .as_ref()
@@ -450,7 +474,7 @@ impl ProjectPage {
         let due = self
             .publish_read_ms
             .is_none_or(|at| now_ms() - at >= DRAFT_POLL_MS);
-        if drafting && due && !self.publish_later {
+        if (drafting || self.publish_lost_ms.is_some()) && due && !self.publish_later {
             self.ask_publish(ctx);
         }
     }
@@ -479,11 +503,12 @@ impl ProjectPage {
                     .cloned()
                     .map(PublishPane::new);
                 if job.is_some() {
+                    self.publish_lost_ms = None;
                     self.screen.github_notice = false;
                     if let Some(said) = self.ask_pane.take().and_then(AskPane::into_refusal) {
                         ctx.say(said);
                     }
-                } else {
+                } else if self.publish_lost_ms.is_none() {
                     self.ask_prompt(ctx);
                 }
             }
@@ -748,7 +773,7 @@ impl ProjectPage {
             Ok(IntakeView::Publish(_)) => {
                 Message::success(&format!("{name} is ready."), PUBLISH_STARTED)
             }
-            Err(code) if !START_REPLY_LOST.contains(&code.as_str()) => {
+            Err(code) if !start_reply_lost(result) => {
                 Message::warning(PUBLISH_NOT_STARTED, &super::intake::copy(code))
             }
             _ => Message::warning(PUBLISH_MAY_HAVE_STARTED, PUBLISH_WHERE_IT_STANDS),
@@ -1416,6 +1441,9 @@ impl ProjectPage {
             match self.ask_pane.as_mut().filter(|pane| !pane.asking()) {
                 Some(form) => form.refused(said),
                 None => ctx.say(said),
+            }
+            if start_reply_lost(&event.result) {
+                self.publish_lost_ms = Some(now_ms());
             }
             if !started {
                 self.ask_publish(ctx);
@@ -2278,6 +2306,7 @@ impl Screen for ProjectPage {
                 self.job_sent = None;
                 self.publish_sent = None;
                 self.publish_asked = None;
+                self.publish_lost_ms = None;
                 self.ask_pane = None;
                 self.publish_offered = false;
                 self.sent.clear();

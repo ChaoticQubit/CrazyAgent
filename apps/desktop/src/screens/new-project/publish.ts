@@ -180,6 +180,13 @@ export function startPublish(projectId: string, publish: PublishDraft, projectNa
 export function publishOutcome(result: Result<GitHubPublishJob> | null): string {
   if (!result) return "";
   if (result.kind === "ok") return PUBLISH_STARTED;
-  if (result.kind === "error" && START_REPLY_LOST.includes(result.code)) return PUBLISH_MAY_HAVE_STARTED;
+  if (startReplyLost(result)) return PUBLISH_MAY_HAVE_STARTED;
   return `${PUBLISH_NOT_STARTED} ${result.kind === "error" ? result.message : ENGINE_STARTING}`;
+}
+
+/** Whether a publish Start's reply was lost after the engine may have run it, so the
+ * Overview reads the publish until it shows. Input: the Start's result, or null. Output:
+ * true for github_outcome_unknown or github_reply_bounds. */
+export function startReplyLost(result: Result<GitHubPublishJob> | null): boolean {
+  return result?.kind === "error" && START_REPLY_LOST.includes(result.code);
 }

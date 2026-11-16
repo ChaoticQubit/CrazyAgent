@@ -5,16 +5,17 @@ import type { GitHubPublishJob } from "../../engine-client";
 import { ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
 import { PublishFields, useGitHubPublish } from "../new-project/fields";
-import { createWait, emptyPublish, overviewWait, publishOutcome, startPublish } from "../new-project/publish";
+import { createWait, emptyPublish, overviewWait, publishOutcome, startPublish, startReplyLost } from "../new-project/publish";
 import { emptyDraft } from "../new-project/wizard";
 import type { ProjectDraft } from "../new-project/wizard";
-import { DRAFT_POLL_MS, ENGINE_STARTING, PROMPT_LINE, PROMPT_NEVER, PROMPT_NOT_NOW, PROMPT_PUBLISH, discardable, leftLine, noticeShown, publishView, readKept } from "./publish-job";
+import { DRAFT_POLL_MS, ENGINE_STARTING, PROMPT_LINE, PROMPT_NEVER, PROMPT_NOT_NOW, PROMPT_PUBLISH, PUBLISH_NOT_SEEN, discardable, forgetLostStart, leftLine, lostStartOver, lostStartSince, noticeShown, publishView, readKept } from "./publish-job";
 
 /** The New Project publish fields for a project made without them, opened by the Overview's
  * Publish: the visibility, account, repository name, description and docs switch, each name
  * and description following the project's until edited. Inputs: the project's id, name and
- * about, what to do with the Start's job and its line, and Cancel. Output: the form. */
-function PublishForm({ projectId, name, about, onStarted, onCancel }: { projectId: string; name: string; about: string; onStarted: (job: GitHubPublishJob | null, line: string) => void; onCancel: () => void }) {
+ * about, what to do with the Start's job, its line and whether its reply was lost, and
+ * Cancel. Output: the form. */
+function PublishForm({ projectId, name, about, onStarted, onCancel }: { projectId: string; name: string; about: string; onStarted: (job: GitHubPublishJob | null, line: string, lost: boolean) => void; onCancel: () => void }) {
   const github = useGitHubPublish();
   const [draft, setDraft] = useState<ProjectDraft>(() => ({ ...emptyDraft(), name, about, publish: emptyPublish() }));
   const [busy, setBusy] = useState(false);
@@ -28,7 +29,7 @@ function PublishForm({ projectId, name, about, onStarted, onCancel }: { projectI
     setBusy(true);
     const result = await started;
     setBusy(false);
-    onStarted(result.kind === "ok" ? result.value : null, publishOutcome(result));
+    onStarted(result.kind === "ok" ? result.value : null, publishOutcome(result), startReplyLost(result));
   }
 
   return <div className="pj-stack-s">
@@ -46,8 +47,10 @@ function PublishForm({ projectId, name, about, onStarted, onCancel }: { projectI
  * and Check again, a stop with Try again, the finished repository, and Discard before the
  * push. A failed read keeps the last job with the problem and Try again, and a failed answer
  * reads the job again. With no publish it asks "This project is not on GitHub. Publish it?" when the engine
- * says to, with Publish, Not now and Don't ask again. Inputs: the project's id, name and
- * about. Output: the card, or nothing. */
+ * says to, with Publish, Not now and Don't ask again. After a Start whose reply was lost,
+ * here or in Create, it reads the publish every two seconds with no question until a
+ * publish shows, or says none showed once the Start's budget passed (GSB-1). Inputs: the
+ * project's id, name and about. Output: the card, or nothing. */
 export function GitHubPublishCard({ projectId, name, about }: { projectId: string; name: string; about: string }) {
   const [read, setRead] = useState<Result<GitHubPublishJob | null> | null>(null);
   const [tick, setTick] = useState(0);
@@ -61,6 +64,7 @@ export function GitHubPublishCard({ projectId, name, about }: { projectId: strin
   const [said, setSaid] = useState("");
   const [readFailed, setReadFailed] = useState<string | null>(null);
   const [answered, setAnswered] = useState(0);
+  const [lostSince, setLostSince] = useState<number | null>(() => lostStartSince(projectId));
   const job = read?.kind === "ok" ? read.value : null;
   const view = publishView(job);
   const noJob = read?.kind === "ok" && read.value === null;
@@ -78,11 +82,28 @@ export function GitHubPublishCard({ projectId, name, about }: { projectId: strin
   }, [projectId, tick]);
 
   useEffect(() => {
-    if (!noJob) return;
+    if (!noJob || lostSince !== null) return;
     let live = true;
     void loadGitHubPublishPrompt(projectId).then((result) => { if (live) setPrompt(result); });
     return () => { live = false; };
-  }, [projectId, noJob]);
+  }, [projectId, noJob, lostSince]);
+
+  useEffect(() => {
+    if (lostSince === null) return;
+    if (view.kind !== "none") {
+      forgetLostStart(projectId);
+      setLostSince(null);
+      return;
+    }
+    if (lostStartOver(lostSince, Date.now())) {
+      forgetLostStart(projectId);
+      setLostSince(null);
+      setProblem(PUBLISH_NOT_SEEN);
+      return;
+    }
+    const timer = setTimeout(() => setTick((value) => value + 1), DRAFT_POLL_MS);
+    return () => clearTimeout(timer);
+  }, [lostSince, view.kind, answered]);
 
   useEffect(() => {
     if (view.kind !== "drafting") return;
@@ -117,10 +138,11 @@ export function GitHubPublishCard({ projectId, name, about }: { projectId: strin
     setPrompt({ kind: "ok", value: false });
   }
 
-  function started(made: GitHubPublishJob | null, line: string) {
+  function started(made: GitHubPublishJob | null, line: string, lost: boolean) {
     if (!made) {
       setProblem(line);
       setTick((value) => value + 1);
+      if (lost) setLostSince(Date.now());
       return;
     }
     setForm(false);
