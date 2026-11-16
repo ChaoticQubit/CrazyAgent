@@ -1,0 +1,12 @@
+schema: 1
+kind: connector
+name: notion
+title: Notion
+version: 1.0.0
+description: Pages and databases in Notion through Notion's hosted MCP server, signed in with your Notion account in the browser. Notion has no read-only address, so the app's own filter keeps write tools away.
+mcp:
+  url: https://mcp.notion.com/mcp
+  hosts: [mcp.notion.com]
+oauth:
+  hosts: [mcp.notion.com]
+  registration: [own, cimd, dcr]

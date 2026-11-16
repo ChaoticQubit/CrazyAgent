@@ -7,6 +7,9 @@ description: Jira and Confluence through the Atlassian Rovo MCP server. Your org
 mcp:
   url: https://mcp.atlassian.com/v2/mcp
   hosts: [mcp.atlassian.com]
+oauth:
+  hosts: [auth.atlassian.com]
+  registration: [own, cimd, dcr]
 key:
   secret: api_token
   user_secret: email
