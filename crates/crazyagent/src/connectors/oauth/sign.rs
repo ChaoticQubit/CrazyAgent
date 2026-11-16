@@ -841,7 +841,7 @@ fn grant(tokens: &Map<String, Value>, now_ms: i64) -> Result<Grant<'_>, OAuthErr
 /// Saves a grant under the connector and issuer. A grant with no refresh token removes the
 /// old one after a code, and keeps it after a renewal (RFC 6749 6). Inputs: root,
 /// connector, issuer, grant and whether it renews. Output: Ok, or the key store's refusal.
-fn keep(
+fn keep_grant(
     root: &Path,
     name: &str,
     issuer: &str,
@@ -961,7 +961,7 @@ fn redeem(
             accounts::remove_key_in(root, PLUGIN_KEYS, old.as_str()).map_err(|_| key_store())?;
         }
     }
-    keep(root, &flow.connector, &flow.issuer, &granted, false)?;
+    keep_grant(root, &flow.connector, &flow.issuer, &granted, false)?;
     if flow.client.own {
         accounts::replace_key_in(
             root,
@@ -1031,7 +1031,7 @@ fn renew(
     }
     let tokens = reply.object().ok_or_else(token_invalid)?;
     let granted = grant(&tokens, now_ms)?;
-    keep(root, name, &record.issuer, &granted, true)?;
+    keep_grant(root, name, &record.issuer, &granted, true)?;
     Ok(granted.ends_ms)
 }
 
