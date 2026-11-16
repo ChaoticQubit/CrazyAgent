@@ -28,7 +28,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 116] = [
+pub const INTAKE_CODES: [&str; 118] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
