@@ -379,21 +379,22 @@ fn choice_fits(harness: &Harness, made_with: &str, protocol: &str) -> bool {
 }
 
 /// The sentence a team start shows when no account of the project's pool can run a listed
-/// harness: it names the harness by its product name and the Add account providers whose
-/// accounts fit it, in catalog order, or says that no kind of account fits it yet.
-/// Input: the harness. Output: the plain sentence.
+/// harness: it names the harness by its product name and each kind of account that fits
+/// it once, by provider and sign-in method in catalog order, or says that no kind of
+/// account fits it yet. Input: the harness. Output: the plain sentence.
 pub fn no_account_line(harness: &Harness) -> String {
     let name = &harness.manifest().name;
-    let fitting: Vec<&'static str> = crate::accounts::catalog()
-        .iter()
-        .filter(|entry| {
-            entry.methods.iter().any(|method| {
-                crate::accounts::stored_as(entry.provider, method.method)
-                    .is_some_and(|(made_with, protocol)| choice_fits(harness, made_with, protocol))
-            })
-        })
-        .map(|entry| crate::accounts::provider_name(entry.provider))
-        .collect();
+    let mut fitting: Vec<&'static str> = Vec::new();
+    for entry in crate::accounts::catalog() {
+        for method in &entry.methods {
+            let fits = crate::accounts::stored_as(entry.provider, method.method)
+                .is_some_and(|(made_with, protocol)| choice_fits(harness, made_with, protocol));
+            let phrase = crate::accounts::account_phrase(entry.provider, method.method);
+            if fits && !fitting.contains(&phrase) {
+                fitting.push(phrase);
+            }
+        }
+    }
     match fitting.as_slice() {
         [] => format!(
             "No account in this project's pool can run {name}, and no kind of account CrazyAgent can add fits it yet"
