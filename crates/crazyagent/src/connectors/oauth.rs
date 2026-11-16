@@ -28,7 +28,7 @@ pub(crate) use sign::step_up_with;
 
 /// Every sign-in refusal code this client adds beside the connector address codes of
 /// `mcp_client::MCP_CODES`, sorted.
-pub const OAUTH_CODES: [&str; 13] = [
+pub const OAUTH_CODES: [&str; 15] = [
     "connector_oauth_client_invalid",
     "connector_oauth_code_invalid",
     "connector_oauth_issuer_mismatch",
@@ -39,7 +39,9 @@ pub const OAUTH_CODES: [&str; 13] = [
     "connector_oauth_pkce_unsupported",
     "connector_oauth_redirect_invalid",
     "connector_oauth_refused",
+    "connector_oauth_scope_undeclared",
     "connector_oauth_state_unknown",
+    "connector_oauth_step_up_limit",
     "connector_oauth_token_invalid",
     "connector_oauth_trust_changed",
 ];

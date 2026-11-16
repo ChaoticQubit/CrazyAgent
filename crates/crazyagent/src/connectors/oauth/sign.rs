@@ -42,6 +42,10 @@ const PROBE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
 const RENEW_EARLY_MS: i64 = 60_000;
 /// The longest access token lifetime taken from a server, ten years.
 const LIFETIME_MAX_S: i64 = 10 * 365 * 24 * 60 * 60;
+/// The most step-up sign-ins in a row before the engine stops asking for more scope.
+const STEP_UPS_MAX: u8 = 2;
+/// The most scopes one challenge may name.
+const SCOPES_MAX: usize = 32;
 
 fn failed() -> OAuthError {
     OAuthError("connector_call_failed")
@@ -87,6 +91,8 @@ struct Flow {
     client: Client,
     redirect: String,
     resource: String,
+    scopes: Vec<String>,
+    tries: u8,
     verifier: SecretString,
     started: Instant,
 }
@@ -103,7 +109,8 @@ struct Client {
 
 /// What a renewal needs of a connector's last sign-in, saved after its tokens in the plugin
 /// key store: the issuer, its token endpoint, the client and how it signs in, the resource
-/// the tokens are for, and when the access token ends (Unix ms; `i64::MAX` for no end).
+/// the tokens are for, the scopes it asked, how many step-ups in a row led to it, and when
+/// the access token ends (Unix ms; `i64::MAX` for no end).
 #[derive(Serialize, Deserialize)]
 struct Record {
     issuer: String,
@@ -112,6 +119,8 @@ struct Record {
     secret: Option<String>,
     post: bool,
     resource: String,
+    scopes: Vec<String>,
+    tries: u8,
     expires_ms: i64,
 }
 
@@ -658,20 +667,54 @@ pub(crate) fn begin_with(
     reach: &ProviderReach,
 ) -> Result<Pending, OAuthError> {
     let oauth = spec.oauth.as_ref().ok_or_else(not_offered)?;
+    let scopes = declared(oauth, writes)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    begin_scoped(root, name, sha256, spec, redirect, scopes, 0, cimd, reach)
+}
+
+/// The scopes a sign-in may ask for: the file's read scopes, then its write scopes while
+/// writes are allowed, each once, in the file's order.
+fn declared(oauth: &OAuthSpec, writes: bool) -> Vec<&str> {
+    let mut scopes: Vec<&str> =
+        Vec::with_capacity(oauth.scopes_read.len() + oauth.scopes_write.len());
+    let write = oauth.scopes_write.iter().filter(|_| writes);
+    for scope in oauth.scopes_read.iter().chain(write) {
+        if !scopes.contains(&scope.as_str()) {
+            scopes.push(scope);
+        }
+    }
+    scopes
+}
+
+/// Starts a sign-in for the scopes given: finds the authorization server, picks the
+/// client and keeps the flow. Inputs: root, connector, the trusted file's sha256, its
+/// declaration, the loopback address, the scopes, the step-ups in a row it is, the client
+/// document address and the lookup. Output: the address to open and its state.
+#[allow(clippy::too_many_arguments)]
+fn begin_scoped(
+    root: &Path,
+    name: &str,
+    sha256: &str,
+    spec: &ConnectorSpec,
+    redirect: &url::Url,
+    scopes: Vec<String>,
+    tries: u8,
+    cimd: Option<&url::Url>,
+    reach: &ProviderReach,
+) -> Result<Pending, OAuthError> {
+    assert!(
+        tries <= STEP_UPS_MAX,
+        "a step-up past the limit is refused before"
+    );
+    let oauth = spec.oauth.as_ref().ok_or_else(not_offered)?;
     if !loopback_redirect(redirect) {
         return Err(OAuthError("connector_oauth_redirect_invalid"));
     }
     let (resource, issuer) = protected_resource(spec, oauth, reach)?;
     let server = server(&issuer, oauth, reach)?;
     let client = client(root, name, oauth, &server, cimd, redirect, reach)?;
-    let mut scopes: Vec<&str> = oauth.scopes_read.iter().map(String::as_str).collect();
-    if writes {
-        for scope in &oauth.scopes_write {
-            if !scopes.contains(&scope.as_str()) {
-                scopes.push(scope);
-            }
-        }
-    }
     let state = random_text()?;
     let verifier = random_text()?;
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -705,6 +748,8 @@ pub(crate) fn begin_with(
         client,
         redirect: redirect.as_str().to_owned(),
         resource,
+        scopes,
+        tries,
         verifier,
         started: Instant::now(),
     });
@@ -951,6 +996,8 @@ fn redeem(
             .map(|reference| reference.as_str().to_owned()),
         post: flow.client.post,
         resource: flow.resource.clone(),
+        scopes: flow.scopes.clone(),
+        tries: flow.tries,
         expires_ms: granted.ends_ms,
     })?;
     if let Some(before) = record_of(root, &flow.connector)?
@@ -1088,8 +1135,44 @@ pub(crate) fn step_up_with(
     cimd: Option<&url::Url>,
     reach: &ProviderReach,
 ) -> Result<Pending, OAuthError> {
-    let _ = (
-        root, name, sha256, spec, challenge, redirect, writes, cimd, reach,
-    );
-    Err(not_offered())
+    let oauth = spec.oauth.as_ref().ok_or_else(not_offered)?;
+    let allowed = declared(oauth, writes);
+    let asked: Vec<&str> = challenge
+        .split(' ')
+        .filter(|scope| !scope.is_empty())
+        .collect();
+    let undeclared = OAuthError("connector_oauth_scope_undeclared");
+    if asked.is_empty()
+        || asked.len() > SCOPES_MAX
+        || !asked.iter().all(|scope| allowed.contains(scope))
+    {
+        return Err(undeclared);
+    }
+    let record = record_of(root, name)?;
+    let tries = record.as_ref().map_or(0, |record| record.tries);
+    if tries >= STEP_UPS_MAX {
+        return Err(OAuthError("connector_oauth_step_up_limit"));
+    }
+    let before: Vec<&str> = match &record {
+        Some(record) => record.scopes.iter().map(String::as_str).collect(),
+        None => allowed.clone(),
+    };
+    let mut union: Vec<String> = Vec::with_capacity(allowed.len());
+    for scope in before.iter().chain(&asked) {
+        if allowed.contains(scope) && !union.iter().any(|kept| kept == scope) {
+            union.push((*scope).to_owned());
+        }
+    }
+    assert!(!union.is_empty() && union.len() <= allowed.len());
+    begin_scoped(
+        root,
+        name,
+        sha256,
+        spec,
+        redirect,
+        union,
+        tries + 1,
+        cimd,
+        reach,
+    )
 }
