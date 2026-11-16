@@ -3071,11 +3071,12 @@ impl TeamRuntime {
     /// Ends the engine's hold on every agent as the engine stops and returns running tasks
     /// to the queue. While the owner keeps team agents running when CrazyAgent quits, the
     /// default and also when that setting cannot be read, an agent in a pane a later engine
-    /// can take over keeps running there with its turn stopped, so agent sessions outlive the
-    /// engine; with Stop every agent stops as an owner Stop would (FBTMUX-P1). A keyed agent
-    /// is never kept: its key relay ends with this engine, and a process that later took the
-    /// relay's port would get its next model request (SA vid 9). Every other agent process
-    /// group stops. Waits a bounded time for each agent thread. Returns the panes left running.
+    /// can take over keeps running there with its turn and its teammates' turns stopped
+    /// (LP-R1 F2), so agent sessions outlive the engine; with Stop every agent stops as an
+    /// owner Stop would (FBTMUX-P1). A keyed agent is never kept: its key relay ends with
+    /// this engine, and a process that later took the relay's port would get its next model
+    /// request (SA vid 9). Every other agent process group stops. Waits a bounded time for
+    /// each agent thread. Returns the panes left running.
     pub fn shutdown(&mut self) -> Result<Vec<AgentId>, EngineError> {
         let keep_panes = crate::quit_settings::load(&self.connection)
             .map_or(true, |settings| settings.keeps_team_agents());
@@ -12428,7 +12429,8 @@ fn next_lead_turn(
 /// still ran also ends the agent, so those commands stop with its process, and so does a
 /// turn the wrap flag ended, whose app may still run its own turn (F15).
 /// At the end it stops the agent, or, when the engine quits with the agent kept,
-/// stops the running turn and leaves the pane running for the next engine. A kept
+/// stops the running turn, presses Escape in its teammates' panes too (LP-R1 F2), and
+/// leaves every pane running for the next engine. A kept
 /// session's credential copy and custody use are released once its process stopped or was
 /// left. A stop its warden did not confirm keeps both for the engine's life and ends the
 /// agent with that problem; a Full access stop that left processes running keeps both
@@ -12509,6 +12511,7 @@ fn serve(
     }
     if problem.is_none() && leave.load(Ordering::SeqCst) {
         let _ = session.interrupt();
+        session.interrupt_teammates();
         session.leave();
     } else {
         return settle_end(session.stop(), held, problem, reports, by);

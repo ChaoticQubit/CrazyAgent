@@ -596,6 +596,26 @@ impl TerminalSession {
         self.type_bytes(ESCAPE)
     }
 
+    /// Presses Escape once in every other live pane of this agent's own window, the
+    /// teammates a native lead split off, as the engine quits with the agent kept, so their
+    /// running turns stop as this pane's does while every pane keeps running. A window the
+    /// host cannot list, or one no longer holding this agent's own pane, gets nothing, and a
+    /// pane that does not take the key is passed over. Takes the session. Returns nothing.
+    pub fn interrupt_teammates(&self) {
+        let Ok(panes) = self.host.panes(&self.agent) else {
+            return;
+        };
+        if !panes.iter().any(|pane| pane.pid == self.pid) {
+            return;
+        }
+        let pressed = panes
+            .iter()
+            .filter(|pane| pane.pid != self.pid && !pane.dead)
+            .filter(|pane| self.host.input_pane(&self.agent, &pane.id, ESCAPE).is_ok())
+            .count();
+        assert!(pressed < panes.len());
+    }
+
     /// Waits up to `wait` for the next event of the turn the engine started. Text, tool
     /// use and turn ends from turns the owner typed into the pane are not reported.
     /// No count of events or record bytes ends the pane (owner 11-11). Output: Some(event),
@@ -1414,6 +1434,15 @@ impl AgentSession {
         match self {
             Self::Piped(session) => session.interrupt(),
             Self::Terminal(session) => session.interrupt(),
+        }
+    }
+
+    /// Presses Escape in the teammates' panes of a pane agent, see
+    /// [`TerminalSession::interrupt_teammates`]; a headless agent on pipes has none.
+    /// Takes the session. Returns nothing.
+    pub fn interrupt_teammates(&self) {
+        if let Self::Terminal(session) = self {
+            session.interrupt_teammates();
         }
     }
 
