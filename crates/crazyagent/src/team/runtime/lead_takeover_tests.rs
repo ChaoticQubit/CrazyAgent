@@ -86,6 +86,7 @@ fn a_native_lead_taken_over_past_its_run_time_ends_at_the_deadline_before_any_ha
         record.context = Some(crate::launch_context::InstalledFiles {
             home: home.clone(),
             codex: false,
+            rendered: Vec::new(),
         });
         record.since_ms -= u64::try_from(limits.run_time.as_millis()).unwrap() + 60_000;
         assert_eq!(record.run_time_left(limits.run_time), Duration::ZERO);

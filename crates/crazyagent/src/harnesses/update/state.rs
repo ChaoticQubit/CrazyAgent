@@ -302,6 +302,7 @@ fn missing(id: &str, roots: &Roots, settings: UpdateSettings) -> HarnessVersions
         last: None,
         needs: None,
         sign_in_min: None,
+        run_min: None,
     }
 }
 
@@ -638,6 +639,7 @@ impl Updates {
             last: None,
             needs: None,
             sign_in_min: None,
+            run_min: None,
         }
     }
 
@@ -676,6 +678,7 @@ impl Updates {
         versions.running = state.running == Some(spec.id);
         versions.last = state.last.get(spec.id).cloned();
         versions.sign_in_min = harnesses::sign_in_min(spec.id).map(str::to_owned);
+        versions.run_min = harnesses::run_min(spec.id).map(str::to_owned);
         versions
     }
 
