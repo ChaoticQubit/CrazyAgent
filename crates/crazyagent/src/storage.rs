@@ -1824,9 +1824,10 @@ fn execute(
     }
 }
 
-/// Records a new project and clears any plugin rows a prior project of the same id left
-/// behind, so a reused id (re-adding a folder with the same name is the normal way to reuse
-/// one) inherits none of the old project's MCP servers, secrets, skills or switches. The
+/// Records a new project and clears any plugin and connector rows a prior project of the
+/// same id left behind, so a reused id (re-adding a folder with the same name is the normal
+/// way to reuse one, and the demo always takes the same id) inherits none of the old
+/// project's MCP servers, secrets, skills, switches, write approvals or write allows. The
 /// clear runs only once the row is confirmed new, so a rejected duplicate leaves a live
 /// project's plugins untouched. The reused id's old skill store folder is removed at once,
 /// not left for the next start's trash sweep, so the new project starts with a clean skill
@@ -1875,6 +1876,8 @@ pub(crate) fn create_project(
     crate::activity::note_created(tx, project_id, &spec.name, created_ms());
     plugins::remove_project(tx, project_id)?;
     crate::memory::forget_project(tx, project_id)?;
+    crate::connectors::grants::forget_project(tx, project_id.as_str()).map_err(error)?;
+    crate::connectors::approvals::forget_project(tx, project_id.as_str())?;
     if let Some(root) = tx.path().map(Path::new).and_then(Path::parent) {
         plugins::remove_skill_project_folder(root, project_id.as_str())?;
     }
