@@ -570,6 +570,7 @@ pub struct Keeper {
     sensing: Option<power::Sensing>,
     lid_line: bool,
     lid_ask: power::LidAsk,
+    low_power_under: Option<LowPower>,
     lid_order_sent: u32,
     lid_journal: Option<bool>,
     reading: Option<power::PowerReading>,
@@ -674,6 +675,8 @@ impl Keeper {
         self.lost = false;
         self.lid_ask.wanted = false;
         self.lid_ask.sleep_display = false;
+        self.lid_ask.low_power = false;
+        self.low_power_under = None;
     }
 
     /// Drops every hold as the engine stops (QUESTION 36d): the platform hold at once, and
@@ -682,6 +685,7 @@ impl Keeper {
     pub fn stop(&mut self) {
         self.release();
         assert!(!self.lid_ask.wanted);
+        assert!(!self.lid_ask.low_power);
         if !self.lid_line {
             return;
         }
@@ -827,14 +831,21 @@ impl Keeper {
         self.work = Some(view.work);
         self.hand_lid_order(lid_order);
         let wanted = matches!(view.state.want, Want::IdleAndLid { .. });
+        let holding = view.state.want != Want::Nothing;
+        let low_power = self.sensors().is_some_and(|sensors| {
+            low_power_wanted(&view.settings, &sensors, holding, self.low_power_under)
+        });
+        self.low_power_under = low_power.then_some(view.settings.low_power);
         self.lid_ask = power::LidAsk {
             rule_on: view.settings.lid != LidRule::Off,
             wanted,
             sleep_display: wanted && view.settings.lid_display == LidDisplay::Sleep,
-            low_power: false,
+            low_power,
         };
         assert!(self.lid_ask.rule_on || !self.lid_ask.wanted);
         assert!(self.lid_ask.wanted || !self.lid_ask.sleep_display);
+        assert!(holding || !self.lid_ask.low_power);
+        assert_eq!(self.low_power_under.is_some(), self.lid_ask.low_power);
         assert!(view.work <= work::WORK_MAX);
         Ok(Some(view))
     }

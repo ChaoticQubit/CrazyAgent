@@ -212,6 +212,7 @@ pub struct KeepAwakeSettings {
     pub heat_notice: HeatNotice,
     pub lid_display: LidDisplay,
     pub display_awake: DisplayAwake,
+    #[serde(default)]
     pub low_power: LowPower,
 }
 

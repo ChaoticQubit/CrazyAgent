@@ -276,17 +276,31 @@ pub fn lid_status(settings: &KeepAwakeSettings, sensors: &Sensors) -> LidSupport
     LidSupport::Held
 }
 
-/// Tells whether a hold asks for the platform's low power mode (QUESTION 39e). Inputs: the
-/// settings, the readings, whether a hold runs, and the option the last ask of this hold was
-/// made under, none when it did not ask. Output: whether to ask.
+/// Tells whether a hold asks for the platform's low power mode (QUESTION 39e): only while a
+/// hold runs on battery. Below 40 % needs a read charge under 40, and once asked under that
+/// option it stays asked while on battery, so a charge read at 39, then 40, does not turn it
+/// on and off. Inputs: the settings, the readings, whether a hold runs, and the option the
+/// last ask of this hold was made under, none when it did not ask. Output: whether to ask.
 pub fn low_power_wanted(
     settings: &KeepAwakeSettings,
     sensors: &Sensors,
     holding: bool,
     asked_under: Option<LowPower>,
 ) -> bool {
-    let red_stub = (settings.low_power, sensors.power, holding, asked_under);
-    red_stub.2 && false
+    assert!(sensors.battery_pct.is_none_or(|pct| pct <= 100));
+    if !holding || sensors.power != PowerSource::Battery {
+        return false;
+    }
+    let kept = asked_under == Some(settings.low_power);
+    let wanted = match settings.low_power {
+        LowPower::Off => false,
+        LowPower::OnBattery => true,
+        LowPower::BatteryBelow40 => {
+            kept || sensors.battery_pct.is_some_and(|pct| pct < LowPower::BELOW_PCT)
+        }
+    };
+    assert!(settings.low_power != LowPower::Off || !wanted);
+    wanted
 }
 
 /// Tells whether the heat notice is due: the setting is on and the heat is serious or

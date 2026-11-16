@@ -235,13 +235,15 @@ impl Sensing {
         assert!(self.pending.is_some());
     }
 
-    /// Sends a last ask and waits for its answer, at most `wait` in all, so a lid lease
-    /// is released before the engine stops. A reading under way is waited for first; the
-    /// last ask goes only when the ask sent before it wanted the lid. It does nothing
-    /// without a lid line or before any ask. Inputs: the last ask and the longest wait.
+    /// Sends a last ask and waits for its answer, at most `wait` in all, so a lid or low
+    /// power lease is released before the engine stops. A reading under way is waited for
+    /// first; the last ask goes only when the ask sent before it wanted the lid or low power.
+    /// It does nothing without a lid line or before any ask. Inputs: the last ask and the
+    /// longest wait.
     pub(super) fn finish(&mut self, last: LidAsk, wait: Duration) {
         assert!(!last.wanted);
         assert!(!last.sleep_display);
+        assert!(!last.low_power);
         assert!(!wait.is_zero());
         let Some(asked_ms) = self.asked_ms.filter(|_| self.lid && !self.stopped) else {
             return;
@@ -252,7 +254,7 @@ impl Sensing {
             return;
         }
         self.waiting = false;
-        if !self.asked_with.is_some_and(|asked| asked.wanted) {
+        if !self.asked_with.is_some_and(|asked| asked.wanted || asked.low_power) {
             return;
         }
         if self.ask.try_send((last, None, asked_ms)).is_err() {
