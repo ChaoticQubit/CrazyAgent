@@ -1,12 +1,13 @@
 /// Names a manifest may never set in `accounts.<format>.env` or `home.env`, and no
 /// `home.env_prefixes` entry may cover: the engine sets them on a launch, or they decide which
 /// shell setup runs, which code a runtime loads or which server an install trusts.
-const NAMES: [&str; 33] = [
+const NAMES: [&str; 34] = [
     "PATH",
     "HOME",
     "SHELL",
     "TMPDIR",
     "TMPPREFIX",
+    "SDKROOT",
     "USER",
     "LOGNAME",
     "TERM",
