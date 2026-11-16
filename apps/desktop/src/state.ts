@@ -43,6 +43,45 @@ export function saveQuestionsShown(choice: QuestionsShown): void {
   }
 }
 
+const LAST_PROJECT_KEY = "crazyagent.last-project";
+const PROJECT_ID_MAX = 256;
+
+/** Reads the project whose page the owner opened last, as kept in this app, so app start can
+ * load its views in the background (DEC-187). Output: the project id; null when none was
+ * kept, storage is unavailable or it holds something else. */
+export function readLastProject(): string | null {
+  try {
+    const value = window.localStorage.getItem(LAST_PROJECT_KEY);
+    return value && value.length <= PROJECT_ID_MAX ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Remembers the project whose page the owner opened. Input: the project id. Output: none. */
+export function saveLastProject(id: string): void {
+  if (!id || id.length > PROJECT_ID_MAX) return;
+  try {
+    window.localStorage.setItem(LAST_PROJECT_KEY, id);
+  } catch {
+    return;
+  }
+}
+
+/** Runs work once the window has drawn its next frame and that frame's task is over, so work
+ * started at app start never delays what the owner sees first (DEC-187). Input: the work.
+ * Output: the call that cancels it before it runs. */
+export function afterFirstPaint(run: () => void): () => void {
+  let timer = 0;
+  const frame = window.requestAnimationFrame(() => {
+    timer = window.setTimeout(run, 0);
+  });
+  return () => {
+    window.cancelAnimationFrame(frame);
+    window.clearTimeout(timer);
+  };
+}
+
 /** Reads where the owner types to every agent's terminal, as kept in this app (not in the
  * engine). The old Master input key is ignored on purpose: a live trial left Both in it.
  * Output: the choice; the default when storage is unavailable or holds something else. */

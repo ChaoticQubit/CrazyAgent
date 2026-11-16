@@ -2,14 +2,14 @@ import { Channel } from "@tauri-apps/api/core";
 import type { FitAddon } from "@xterm/addon-fit";
 import type { IDisposable, ITerminalOptions, Terminal } from "@xterm/xterm";
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type Ref } from "react";
-import { attachTerminal, detachTerminal, promptTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
+import { attachTerminal, detachTerminal, loadTeamGraph, promptTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
 import type { GraphNode, TerminalMessage } from "../../engine-client";
 import type { InputChoice } from "./terminal-io";
-import { readTerminalInput, type Loaded, type ProjectRow } from "../../state";
+import { afterFirstPaint, readLastProject, readTerminalInput, type Loaded, type ProjectRow } from "../../state";
 import { Button, Icon, NotReady, StatusBadge, isMac, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeRole, nodeRunning, nodeStatus } from "./graph";
-import { HIDDEN_FLUSH_MS, HiddenOutput, KEPT_MAX, KeptSet, keyId, type Held, type KeptKey } from "./kept-terminals";
+import { HIDDEN_FLUSH_MS, HiddenOutput, KEPT_MAX, KeptSet, keyId, readSaved, resized, shownFirst, writeSaved, type Held, type KeptKey, type SavedView } from "./kept-terminals";
 import { connectingLine, copyKey, encodeBinary, encodeTyped, endCopy, followTry, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, selectNote, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
 
 const COPIED_MS = 2000;
@@ -473,10 +473,16 @@ export class KeptView implements Held {
    * whether the app reads the mouse. Output: the same object until one of them changes. */
   readonly snapshot = (): ViewState => this.state;
 
+  /** The size in px the view's panel last had, if known. Output: the size, or null. */
+  get parked(): { width: number; height: number } | null {
+    return this.size;
+  }
+
   /** Shows the view in a panel's screen: writes the output held while hidden in one write,
    * then moves its element in. Nothing here waits or measures: no bridge call and no fit. The
    * element's size watch fits after the frame only when the screen's size differs from the
-   * parked one, and sends the new size only when the columns or rows changed. A live view
+   * parked one, and sends the new size only when the columns or rows changed. A view whose
+   * terminal ended connects again once it is in, as a panel opened anew would. A live view
    * takes the focus after the frame. Input: the screen element. Output: none. */
   show(screen: HTMLElement): void {
     assert(!this.dropped, "a view let go is never shown");
@@ -485,6 +491,7 @@ export class KeptView implements Held {
     this.host.style.width = "";
     this.host.style.height = "";
     screen.appendChild(this.host);
+    if (this.state.view.kind === "ended") this.reopen();
     window.cancelAnimationFrame(this.focusFrame);
     this.focusFrame = window.requestAnimationFrame(() => {
       if (this.shown && this.link?.live) this.terminal?.focus();
@@ -573,7 +580,10 @@ export class KeptView implements Held {
     const observer = new ResizeObserver(() => {
       const width = this.host.offsetWidth;
       const height = this.host.offsetHeight;
-      if (this.shown && width > 0 && height > 0) this.size = { width, height };
+      if (this.shown && width > 0 && height > 0 && (width !== this.size?.width || height !== this.size?.height)) {
+        this.size = { width, height };
+        if (kept.get(this.key) === this) rememberSize(this);
+      }
       this.refit();
     });
     observer.observe(this.host);
@@ -728,13 +738,30 @@ function letGo(dropped: KeptView[]): void {
  * Input: the key. Output: the view. */
 function keptView(key: KeptKey): KeptView {
   const found = kept.get(key);
-  if (found) {
-    kept.touch(key);
-    return found;
-  }
-  const view = new KeptView(key);
-  letGo(kept.add(view));
+  const view = found ?? new KeptView(key);
+  if (found) kept.touch(key);
+  else letGo(kept.add(view));
+  rememberShown(view);
   return view;
+}
+
+function savedOf(view: KeptView): SavedView | null {
+  const { project, terminal, pane } = view.key;
+  return project === null ? null : { key: { project, terminal, pane }, size: view.parked };
+}
+
+/** Remembers a view the owner shows as the most recently used, for the next app start. Input:
+ * the view. Output: none. */
+function rememberShown(view: KeptView): void {
+  const entry = savedOf(view);
+  if (entry) writeSaved(shownFirst(readSaved(), entry));
+}
+
+/** Remembers the size a remembered view's panel has now, in the same order. Input: the view.
+ * Output: none. */
+function rememberSize(view: KeptView): void {
+  const entry = savedOf(view);
+  if (entry?.size) writeSaved(resized(readSaved(), entry.key, entry.size));
 }
 
 /** Lets go of the kept terminal views whose project is no longer open: one removed or closed,
@@ -744,19 +771,59 @@ export function keepTerminalsOf(open: (project: string | null) => boolean): void
   letGo(kept.dropWhere((key) => !open(key.project)));
 }
 
+let epoch = 0;
+
+/** Loads a remembered terminal hidden, behind the views the owner opened since, when the set
+ * has room and the project's team still lists that terminal. Inputs: the entry and the
+ * session it was read in. Output: none. */
+async function preloadView(entry: SavedView, at: number): Promise<void> {
+  const graph = await loadTeamGraph(entry.key.project);
+  if (at !== epoch || graph.kind !== "ok" || !kept.roomBehind(entry.key)) return;
+  if (!graph.value.nodes.some((node) => node.terminal === entry.key.terminal && teammatePane(node) === entry.key.pane)) return;
+  kept.keepBehind(new KeptView(entry.key, entry.size));
+}
+
+/** Loads the terminals the owner used last, most recent first, hidden and unfocused; with none
+ * remembered, the master of the project whose page was opened last. Only listed projects
+ * count and nothing is started: a terminal the team does not list is skipped. Inputs: the
+ * listed projects and the session. Output: none. */
+async function preloadKept(listed: ReadonlySet<string>, at: number): Promise<void> {
+  const saved = readSaved().filter((entry) => listed.has(entry.key.project));
+  for (const entry of saved) await preloadView(entry, at);
+  const last = readLastProject();
+  if (saved.length > 0 || last === null || !listed.has(last)) return;
+  const graph = await loadTeamGraph(last);
+  const master = graph.kind === "ok" ? graph.value.nodes.find((node) => node.kind === "master") : undefined;
+  if (at === epoch && master?.terminal) await preloadView({ key: { project: last, terminal: master.terminal, pane: teammatePane(master) }, size: null }, at);
+}
+
 /** Keeps the main window's kept terminal views to open projects (DEC-187): once the project
- * list reads complete, the views of a project it no longer lists go, and when the session
- * starts again, as after an engine reconnect or a profile change, every view goes. A list
- * with more projects than it holds drops nothing. Inputs: the session's projects and whether
- * more are unlisted. Output: none. */
+ * list reads complete, the views of a project it no longer lists go and are forgotten, and
+ * when the session starts again, as after an engine reconnect or a profile change, every view
+ * goes. A list with more projects than it holds drops nothing. Once per session, after the
+ * window has drawn, the terminals used last load in the background. Inputs: the session's
+ * projects and whether more are unlisted. Output: none. */
 export function useKeptTerminalProjects(projects: Loaded<ProjectRow[]>, more: boolean): void {
+  const preloaded = useRef(false);
   useEffect(() => {
     if (projects.kind === "loading") {
+      epoch += 1;
+      preloaded.current = false;
       keepTerminalsOf(() => false);
-    } else if (projects.kind === "ok" && !more) {
-      const open = new Set(projects.value.map((project) => project.id));
-      keepTerminalsOf((project) => project !== null && open.has(project));
+      return;
     }
+    if (projects.kind !== "ok") return;
+    const listed = new Set(projects.value.map((project) => project.id));
+    if (!more) {
+      keepTerminalsOf((project) => project !== null && listed.has(project));
+      const saved = readSaved();
+      const open = saved.filter((entry) => listed.has(entry.key.project));
+      if (open.length !== saved.length) writeSaved(open);
+    }
+    if (preloaded.current) return;
+    preloaded.current = true;
+    const at = epoch;
+    afterFirstPaint(() => void preloadKept(listed, at));
   }, [projects, more]);
 }
 

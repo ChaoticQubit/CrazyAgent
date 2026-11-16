@@ -1,6 +1,9 @@
 export const KEPT_MAX = 2;
 export const HIDDEN_FLUSH_MS = 250;
 export const HIDDEN_BYTES_MAX = 1024 * 1024;
+export const KEPT_STORE_KEY = "crazyagent.kept-terminals";
+export const KEPT_TEXT_MAX = 256;
+export const KEPT_PX_MAX = 16384;
 
 function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -54,6 +57,22 @@ export class KeptSet<E extends Held> {
       const view = this.held.get(id);
       return view ? [view.key] : [];
     });
+  }
+
+  /** Whether a view for this key can be kept behind the others: the set does not keep the key
+   * and is under its cap. Input: the key. Output: the answer. */
+  roomBehind(key: KeptKey): boolean {
+    return !this.held.has(keyId(key)) && this.held.size < this.max;
+  }
+
+  /** Keeps a view loaded ahead of use as the least recently used, so it never drops a view the
+   * owner opened. Input: a view `roomBehind` allows. Output: none. */
+  keepBehind(view: E): void {
+    assert(this.roomBehind(view.key), "a view kept behind takes a free place");
+    const id = keyId(view.key);
+    this.held.set(id, view);
+    this.order.push(id);
+    this.check();
   }
 
   /** Keeps a new view as the most recently used, then drops views past the cap as `trim`
@@ -111,6 +130,91 @@ export class KeptSet<E extends Held> {
   private check(): void {
     assert(this.order.length === this.held.size, "the order names every kept view once");
     assert(this.held.size <= this.max || [...this.held.values()].every((view) => view.shown), "past the cap only shown views stay");
+  }
+}
+
+/** A terminal the owner used, as the app remembers it to load at the next start (DEC-187):
+ * its key, with a project, and the size in px its panel last had, if known. */
+export type SavedView = { key: KeptKey & { project: string }; size: { width: number; height: number } | null };
+
+function name(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= KEPT_TEXT_MAX;
+}
+
+function px(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) > 0 && (value as number) <= KEPT_PX_MAX;
+}
+
+/** Reads the remembered terminals from their stored text, most recently used first. Anything
+ * not exactly a remembered terminal is skipped, a key is kept once, and at most `KEPT_MAX`
+ * come back. Input: the stored text, or null. Output: the terminals. */
+export function savedViews(text: string | null): SavedView[] {
+  let value: unknown;
+  try {
+    value = JSON.parse(text ?? "[]");
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const saved: SavedView[] = [];
+  for (const item of value.slice(0, KEPT_MAX * 4)) {
+    if (saved.length === KEPT_MAX) break;
+    if (typeof item !== "object" || item === null) continue;
+    const { project, terminal, pane, width, height } = item as Record<string, unknown>;
+    if (!name(project) || !name(terminal) || !(pane === null || name(pane))) continue;
+    const sized = px(width) && px(height);
+    if (!sized && !(width === null && height === null)) continue;
+    const key = { project, terminal, pane };
+    const id = keyId(key);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    saved.push({ key, size: sized ? { width, height } : null });
+  }
+  assert(saved.length <= KEPT_MAX, "at most the cap is remembered");
+  return saved;
+}
+
+/** The stored text for remembered terminals. Input: at most `KEPT_MAX` terminals. Output: the
+ * text. */
+export function savedText(saved: SavedView[]): string {
+  assert(saved.length <= KEPT_MAX, "at most the cap is remembered");
+  return JSON.stringify(saved.map(({ key, size }) => ({ ...key, width: size?.width ?? null, height: size?.height ?? null })));
+}
+
+/** The remembered terminals after the owner shows one: it comes first, its older entry goes
+ * and the list keeps the cap. Inputs: the list and the shown terminal. Output: the new list. */
+export function shownFirst(saved: SavedView[], shown: SavedView): SavedView[] {
+  const id = keyId(shown.key);
+  const kept = saved.find((entry) => keyId(entry.key) === id);
+  const size = shown.size ?? kept?.size ?? null;
+  return [{ key: shown.key, size }, ...saved.filter((entry) => keyId(entry.key) !== id)].slice(0, KEPT_MAX);
+}
+
+/** The remembered terminals after a shown one's panel changed size, in the same order; a key
+ * not remembered changes nothing. Inputs: the list, the key and the size. Output: the list. */
+export function resized(saved: SavedView[], key: KeptKey, size: { width: number; height: number }): SavedView[] {
+  const id = keyId(key);
+  return saved.map((entry) => keyId(entry.key) === id ? { key: entry.key, size } : entry);
+}
+
+/** Reads the remembered terminals from this app's storage; storage that is unavailable or
+ * refuses reads as none. Output: the terminals, most recently used first. */
+export function readSaved(): SavedView[] {
+  try {
+    return savedViews(window.localStorage.getItem(KEPT_STORE_KEY));
+  } catch {
+    return [];
+  }
+}
+
+/** Stores the remembered terminals; storage that refuses keeps the old list. Input: the
+ * terminals. Output: none. */
+export function writeSaved(saved: SavedView[]): void {
+  try {
+    window.localStorage.setItem(KEPT_STORE_KEY, savedText(saved));
+  } catch {
+    return;
   }
 }
 

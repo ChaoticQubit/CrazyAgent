@@ -8,7 +8,7 @@ import teamStyles from "../../src/screens/team/team-graph.css?inline";
 import { keepTerminalsOf, TerminalPanel } from "../../src/screens/team/terminal-panel.tsx";
 
 let root = null;
-const engine = { callbacks: new Map(), channel: null, next: 0, typed: [] };
+const engine = { callbacks: new Map(), channel: null, next: 0, typed: [], attaches: 0 };
 
 /** Sends one message down the attached terminal's channel as the bridge does, in order.
  * Input: the message, a control frame or raw output bytes. */
@@ -27,11 +27,13 @@ function deliver(message) {
 export function open(role, harness) {
   root?.unmount();
   keepTerminalsOf(() => false);
-  Object.assign(engine, { callbacks: new Map(), channel: null, next: 0, typed: [] });
+  Object.assign(engine, { callbacks: new Map(), channel: null, next: 0, typed: [], attaches: 0 });
   window.__TAURI_INTERNALS__ = {
     invoke: async (command, args) => {
       if (command === "desktop_terminal_attach") {
         engine.channel = args.output.id;
+        engine.next = 0;
+        engine.attaches += 1;
         deliver({ kind: "attached", cols: 80, rows: 24 });
         return 1;
       }
@@ -55,13 +57,38 @@ export function open(role, harness) {
     document.head.append(style);
   }
   document.body.innerHTML = '<div id="root"><main class="main"><div class="pj pj-project"><div class="pj-tab-panel" id="panel"></div></div></main></div>';
-  root = createRoot(document.getElementById("panel"));
+  back(role, harness);
+}
+
+/** Takes the panel off the page as a switch to another page does; the window keeps its view.
+ * Output: none. */
+export function away() {
+  root?.unmount();
+  root = null;
+}
+
+/** Mounts the panel for the agent again over the same stand-in engine, as a switch back does.
+ * Inputs: the agent's role and its harness id. Output: the ms the mount took. */
+export function back(role, harness) {
   const master = role === "master";
   const node = {
     id: "team-1", kind: role, parent: master ? null : "m", label: master ? "Master" : "Ada", harness, status: "working", status_label: "Working",
     account: null, terminal: "team-1", agent: 1,
   };
-  flushSync(() => root.render(createElement(TerminalPanel, { node })));
+  const start = performance.now();
+  root = createRoot(document.getElementById("panel"));
+  flushSync(() => root.render(createElement(TerminalPanel, { node, projectId: "p1" })));
+  return performance.now() - start;
+}
+
+/** Ends the attached terminal as the engine does when the agent's app exits. Output: none. */
+export function close() {
+  deliver({ kind: "closed", reason: "exited" });
+}
+
+/** How many times the panel attached since the page was opened. Output: the count. */
+export function attaches() {
+  return engine.attaches;
 }
 
 /** Writes what the agent's app prints into the attached terminal, as the engine relays pane
