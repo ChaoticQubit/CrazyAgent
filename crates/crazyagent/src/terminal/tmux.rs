@@ -208,9 +208,13 @@ enum Pending {
         reply: SyncSender<Result<TerminalStream, HostError>>,
         marker: Vec<u8>,
     },
-    /// The block an answered attach's command line ends with, which prints only its marker:
-    /// the reader drops it, as it drops a cut capture, up to the marker line.
+    /// The capture and marker blocks still to come after an attach's located reply too large
+    /// to keep: the capture's pane rows cannot be counted, so the reader drops every line up
+    /// to the marker line, as it does for a cut capture.
     Marker(Vec<u8>),
+    /// The block that prints the marker of an attach already answered: it holds no pane
+    /// text, so the reader finds its end by its guard and drops it, whatever it printed.
+    Spent,
 }
 
 /// Finds the tmux program the engine uses, anew on each call, through the one tool resolver:
@@ -1688,15 +1692,16 @@ fn error_code(lines: &[Vec<u8>]) -> HostError {
 
 /// Hands one closed reply block to the request at the front of the queue. `ran` is whether
 /// the block closed with `%end`, since tmux skips the rest of a command line after an
-/// `%error`: an attach whose located reply ran keeps its place for the capture, and one whose
-/// located reply was too large to keep, or whose capture ran, leaves its marker block to be
-/// dropped. Takes the state, the answer and whether the command ran.
+/// `%error`: an attach whose located reply ran keeps its place for the capture, one whose
+/// located reply was too large to keep leaves its capture and marker to be drained, and one
+/// whose capture ran leaves its marker block to be dropped. Takes the state, the answer and
+/// whether the command ran.
 fn finish(state: &mut State, answer: Answer, ran: bool) {
     let Some(front) = state.pending.pop_front() else {
         return;
     };
     match front {
-        Pending::Startup | Pending::Marker(_) => {}
+        Pending::Startup | Pending::Marker(_) | Pending::Spent => {}
         Pending::Reply(reply) => {
             let _ = reply.send(answer);
         }
@@ -1729,13 +1734,13 @@ fn finish(state: &mut State, answer: Answer, ran: bool) {
             history,
             view,
             reply,
-            marker,
+            ..
         } => {
             let opened =
                 answer.and_then(|screen| viewer(state, agent, &lines, &screen, history, view));
             let _ = reply.send(opened);
             if ran {
-                state.pending.push_front(Pending::Marker(marker));
+                state.pending.push_front(Pending::Spent);
             }
         }
     }
@@ -1769,8 +1774,8 @@ enum Rows {
 /// control line, including the block's closing guard, so those rows are counted as data,
 /// never searched for a guard. An attach whose located reply was cut, so its rows cannot be
 /// counted, leaves the queue failing with `REPLY_CUT`, so its caller asks again, and its
-/// capture is drained; so is the marker block an answered attach left. Takes the state.
-/// Returns how to read the block.
+/// capture is drained; so are the blocks after a located reply too large to keep. Takes the
+/// state. Returns how to read the block.
 fn opening(state: &mut State) -> Rows {
     match state.pending.pop_front() {
         Some(Pending::Marker(marker)) => Rows::Drained(marker),
@@ -1805,8 +1810,8 @@ fn opening(state: &mut State) -> Rows {
     }
 }
 
-/// The lines the reader drops for one attach, from the opening guard of its cut capture or
-/// of its marker block up to the `%end` after its marker line. `opened` is the last opening
+/// The lines the reader drops for one attach, from the opening guard of a capture whose rows
+/// cannot be counted up to the `%end` after its marker line. `opened` is the last opening
 /// guard seen, which once the marker shows is the marker block's own, since tmux prints that
 /// block after every row of the capture; `found` is whether the marker showed, and `lines`
 /// counts the lines dropped, at most `DRAIN_LINES_MAX`.
