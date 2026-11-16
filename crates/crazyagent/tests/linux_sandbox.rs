@@ -2861,6 +2861,53 @@ fn a_failed_setup_never_starts_the_agent() {
     assert!(!folder.join("started").exists(), "the command ran: {said}");
 }
 
+/// Stage 1's two start bytes as a shell stands them in: bubblewrap blocks on descriptor 4
+/// and starts the helper's probe with `--route-fd 5`, a second descriptor on the same
+/// input, which holds the bytes given as a line. Positional arguments: the folder,
+/// bubblewrap, the helper and the bytes.
+const GO_STAGED: &str = "cd \"$1\" && exec \"$2\" --unshare-user --die-with-parent --dev-bind / / --block-fd 4 -- \"$3\" --route-fd 5 --probe 4<<X 5<&4 2>said
+$4
+X";
+
+#[test]
+fn a_nested_helper_starts_only_on_the_go_byte_after_bubblewraps_own() {
+    let Some(bwrap) = nesting_bwrap() else {
+        return;
+    };
+    let run = |bytes: &str| {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().canonicalize().unwrap();
+        let mut staged = crazyagent::spawn_gate::spawn(
+            Command::new("/bin/sh")
+                .args(["-c", GO_STAGED, "sh"])
+                .arg(&folder)
+                .arg(&bwrap)
+                .arg(HELPER)
+                .arg(bytes)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        let status = exit_within(&mut staged, Duration::from_secs(10));
+        if status.is_none() {
+            staged.kill().unwrap();
+            staged.wait().unwrap();
+        }
+        let said = fs::read_to_string(folder.join("said")).unwrap_or_default();
+        (status.and_then(|status| status.code()), said)
+    };
+    let (code, said) = run("12");
+    assert_eq!(code, Some(0), "the go byte after bubblewrap's: {said}");
+    for refused in ["1", ""] {
+        let (code, said) = run(refused);
+        assert_eq!(code, Some(3), "{refused:?}: {said}");
+        assert!(said.contains("the agent's network was not built"), "{said}");
+    }
+}
+
 /// The setup child runs only as its nest's child, so a caller of the helper never reaches
 /// the agent's namespaces through it (leader 23:16): without the two pipes stage 1 hands it,
 /// for a process that is not its parent's child, or under a parent that is not one of the
