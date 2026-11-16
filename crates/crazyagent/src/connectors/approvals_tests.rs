@@ -355,8 +355,8 @@ fn the_full_arguments_show_every_value_and_withhold_secret_forms() {
 
 /// DEC-168 Task 12, sec r2 F2: the full arguments leave out no character the vendor gets. A
 /// tag-block payload, a zero-width joiner, a variation selector and a carriage return each
-/// show as a `\u{XXXX}` escape, in names too, so two names stay two; line breaks and tabs
-/// stay as written, and the write is marked as holding hidden characters.
+/// show as a `\u{XXXX}` escape, in names too, and a typed backslash shows doubled, so two
+/// names stay two; line breaks and tabs stay, and the write is marked as holding them.
 #[test]
 fn the_full_arguments_show_every_hidden_character_escaped_and_mark_the_write() {
     let fields = json!({
@@ -377,6 +377,12 @@ fn the_full_arguments_show_every_hidden_character_escaped_and_mark_the_write() {
     assert!(!hidden(ordinary.as_object().unwrap()));
     let tagged = json!({"extra": [{"sign\u{e0041}": "x"}]});
     assert!(hidden(tagged.as_object().unwrap()));
+    let twins = json!({"k\\u{200D}": "seen", "k\u{200d}": "sent unseen"});
+    let text = arguments(twins.as_object().unwrap(), &[]).unwrap();
+    let shown: Value = serde_json::from_str(&text).unwrap_or_else(|_| panic!("{text:?}"));
+    assert_eq!(shown.as_object().unwrap().len(), 2, "{text}");
+    assert_eq!(shown["k\\\\u{200D}"], json!("seen"), "{text}");
+    assert_eq!(shown["k\\u{200D}"], json!("sent unseen"), "{text}");
 }
 
 /// DEC-168 Task 12, sec r1 F2: a waiting approval keeps the write's full arguments for the
