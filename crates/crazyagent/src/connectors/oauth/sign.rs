@@ -115,8 +115,8 @@ struct Client {
 /// What a renewal needs of a connector's last sign-in, saved after its tokens in the plugin
 /// key store: the issuer, its token endpoint, the client and how it signs in, the resource
 /// the tokens are for, the scopes it asked, how many step-ups in a row led to it, when the
-/// access token ends (Unix ms; `i64::MAX` for no end), the sha256 of the connector file
-/// the owner signed in under, and whether the client is the owner's own app.
+/// access token ends (Unix ms; `i64::MAX` for no end) and the sha256 of the connector file
+/// the owner signed in under.
 #[derive(Serialize, Deserialize)]
 struct Record {
     sha256: String,
@@ -125,7 +125,6 @@ struct Record {
     client: String,
     secret: Option<String>,
     post: bool,
-    own: bool,
     resource: String,
     scopes: Vec<String>,
     tries: u8,
@@ -1015,9 +1014,10 @@ pub(super) fn forget_keys(root: &Path, name: &str) -> Result<(), OAuthError> {
     Ok(())
 }
 
-/// Runs `save`, which replaces the owner's own app for a connector, under its renewal
-/// lock, after ending a sign-in made with the app saved before and dropping the sign-ins
-/// begun with it, so the issuer it was used at never gets the new app's id or secret; the
+/// Runs `save`, which saves or clears the owner's own app for a connector, under its
+/// renewal lock, after ending its sign-in and dropping the sign-ins begun for it, as the
+/// way it signs in changes: an issuer never gets a new app's id or secret with an old
+/// sign-in, and tokens of a registered client are not used once an own app is saved. The
 /// owner is asked to sign in again. Inputs: database, root, connector, its title, the
 /// clock (Unix ms) and the save. Output: the save's answer, or the key store's or
 /// database's refusal.
@@ -1031,8 +1031,8 @@ pub(super) fn own_replaced(
 ) -> Result<(), OAuthError> {
     let lock = renewal_lock(root, name);
     let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
-    flows().retain(|flow| !(flow.root == root && flow.connector == name && flow.client.own));
-    if let Some(record) = record_of(root, name)?.filter(|record| record.own) {
+    flows().retain(|flow| !(flow.root == root && flow.connector == name));
+    if let Some(record) = record_of(root, name)? {
         ended(root, name, &record.issuer)?;
         mark_sign_in(db, name, title, now_ms)?;
     }
@@ -1135,7 +1135,6 @@ fn redeem(
             .as_ref()
             .map(|reference| reference.as_str().to_owned()),
         post: flow.client.post,
-        own: flow.client.own,
         resource: flow.resource.clone(),
         scopes: flow.scopes.clone(),
         tries: flow.tries,
