@@ -25,6 +25,7 @@ const REFUSED_PAGE: &str = "Bad request.";
 const HEAD_BYTES_MAX: usize = 8 * 1024;
 const READ_WAIT: Duration = Duration::from_secs(5);
 const ACCEPT_POLL: Duration = Duration::from_millis(20);
+const STOP_POLL: Duration = Duration::from_millis(100);
 
 /// How a wait for the browser ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,7 +87,7 @@ impl Callback {
                 std::thread::sleep(ACCEPT_POLL);
                 continue;
             };
-            if let Some(waited) = answer(stream, state, deadline - now) {
+            if let Some(waited) = answer(stream, state, deadline - now, stop) {
                 return waited;
             }
             refused += 1;
@@ -99,22 +100,23 @@ impl Callback {
 }
 
 /// Reads one request and answers it: a page for the one that ends the wait, a plain 400 for
-/// any other. A connection that sends nothing closes with no answer, so a browser's spare
-/// connection never reads a refusal. Inputs: the connection, the sign-in's state and the time
-/// left. Output: how the wait ended, or none for a refused request.
-fn answer(mut stream: TcpStream, state: &str, left: Duration) -> Option<Waited> {
-    let read_wait = left.min(READ_WAIT).max(Duration::from_millis(1));
+/// any other. The connection has one budget, at most `READ_WAIT` and never past the time
+/// left, for its head and the drain after its answer. A connection that sends nothing, and
+/// one cut short by `stop`, closes with no answer, so a browser's spare connection never
+/// reads a refusal. Inputs: the connection, the sign-in's state, the time left and the stop
+/// flag. Output: how the wait ended, or none for a refused request.
+fn answer(mut stream: TcpStream, state: &str, left: Duration, stop: &AtomicBool) -> Option<Waited> {
+    let until = Instant::now() + left.min(READ_WAIT);
     let ready = stream.set_nonblocking(false).is_ok()
-        && stream.set_read_timeout(Some(read_wait)).is_ok()
-        && stream.set_write_timeout(Some(READ_WAIT)).is_ok();
+        && stream.set_write_timeout(Some(STOP_POLL)).is_ok();
     if !ready {
         return None;
     }
     let mut bytes = Vec::with_capacity(1024);
-    let read = head(&mut stream, &mut bytes);
+    let read = head(&mut stream, &mut bytes, until, stop);
     let waited = read.and_then(|head| ended(&head, state));
-    if bytes.is_empty() {
-        assert!(waited.is_none());
+    if bytes.is_empty() || (waited.is_none() && stop.load(Ordering::SeqCst)) {
+        assert!(!bytes.is_empty() || waited.is_none());
         return None;
     }
     let page = match &waited {
@@ -122,21 +124,61 @@ fn answer(mut stream: TcpStream, state: &str, left: Duration) -> Option<Waited> 
         Some(Waited::Code { .. }) => Some(DONE_PAGE),
         Some(_) => Some(FAILED_PAGE),
     };
-    reply(&mut stream, page);
+    reply(&mut stream, page, until, stop);
     waited
 }
 
-/// Reads a request head up to its blank line into `bytes`. Inputs: the connection and an
-/// empty buffer. Output: the head, or none when it passes `HEAD_BYTES_MAX`, is not UTF-8, or
-/// the connection ends or stalls.
-fn head(stream: &mut TcpStream, bytes: &mut Vec<u8>) -> Option<String> {
+/// Reads once from a connection within its budget, waiting at most `STOP_POLL` at a time so
+/// a set `stop` is seen that soon. Inputs: the connection, the buffer, the budget's end and
+/// the stop flag. Output: the bytes read, 0 at the connection's end, or none once the budget
+/// ran out, `stop` was set or the read failed.
+fn read_by(
+    stream: &mut TcpStream,
+    chunk: &mut [u8],
+    until: Instant,
+    stop: &AtomicBool,
+) -> Option<usize> {
+    loop {
+        let now = Instant::now();
+        if stop.load(Ordering::SeqCst) || now >= until {
+            return None;
+        }
+        let slice = (until - now).min(STOP_POLL).max(Duration::from_millis(1));
+        stream.set_read_timeout(Some(slice)).ok()?;
+        match stream.read(chunk) {
+            Ok(read) => return Some(read),
+            Err(error) if again(error.kind()) => continue,
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Whether a read that failed with `kind` only timed out or was interrupted, so it may be
+/// tried again within its budget.
+fn again(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+    )
+}
+
+/// Reads a request head up to its blank line into `bytes`, within the connection's budget.
+/// Inputs: the connection, an empty buffer, the budget's end and the stop flag. Output: the
+/// head, or none when it passes `HEAD_BYTES_MAX`, is not UTF-8, the connection ends, the
+/// budget runs out or `stop` is set.
+fn head(
+    stream: &mut TcpStream,
+    bytes: &mut Vec<u8>,
+    until: Instant,
+    stop: &AtomicBool,
+) -> Option<String> {
     assert!(bytes.is_empty());
     let mut chunk = [0u8; 1024];
     while !bytes.windows(4).any(|four| four == b"\r\n\r\n") {
         if bytes.len() >= HEAD_BYTES_MAX {
             return None;
         }
-        let read = stream.read(&mut chunk).ok()?;
+        let read = read_by(stream, &mut chunk, until, stop)?;
         if read == 0 {
             return None;
         }
@@ -200,9 +242,10 @@ fn same(sent: &str, state: &str) -> bool {
 }
 
 /// Answers one request with a plain page, closes its sending side and reads what is left,
-/// at most `HEAD_BYTES_MAX` bytes, so the browser reads the page before the connection goes.
-/// Inputs: the connection and the page, none for a refused request.
-fn reply(stream: &mut TcpStream, page: Option<&str>) {
+/// at most `HEAD_BYTES_MAX` bytes within the connection's budget, so the browser reads the
+/// page before the connection goes. Inputs: the connection, the page, none for a refused
+/// request, the budget's end and the stop flag.
+fn reply(stream: &mut TcpStream, page: Option<&str>, until: Instant, stop: &AtomicBool) {
     let (status, body) = match page {
         Some(page) => ("200 OK", page),
         None => ("400 Bad Request", REFUSED_PAGE),
@@ -218,9 +261,9 @@ fn reply(stream: &mut TcpStream, page: Option<&str>) {
     let mut chunk = [0u8; 1024];
     let mut left = HEAD_BYTES_MAX;
     while left > 0 {
-        match stream.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
-            Ok(read) => left = left.saturating_sub(read),
+        match read_by(stream, &mut chunk, until, stop) {
+            Some(0) | None => break,
+            Some(read) => left = left.saturating_sub(read),
         }
     }
 }
