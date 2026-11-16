@@ -804,6 +804,57 @@ fn an_adoption_replay_cut_at_the_run_time_passes_over_the_rest_and_hands_the_ses
     assert!(host.alive().unwrap().is_empty());
 }
 
+/// RV-DS241-190: a read cut short leaves unknown whether a turn is open, so a sub-agent pane
+/// that does not show the app's input prompt may still be mid-turn. It is not taken over
+/// idle with the turn running, where the next order would be typed behind it and the old
+/// turn's reply reported for the new one: it gets Escape like a pane with an open turn, its
+/// turn settles, and only then is it taken over. The stand-in records every Escape.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_cut_adoption_replay_on_a_pane_without_its_input_prompt_stops_the_turn_before_the_pane_is_adopted()
+ {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(16).unwrap();
+    let file = long_record(&fixture, 1_024);
+    let length = std::fs::metadata(&file).unwrap().len();
+    assert!(length > 4 * READ_BYTES_MAX as u64);
+    let record = fixture.spawn(&host, &agent, ESCAPE_HARNESS, &file);
+    std::thread::sleep(Duration::from_millis(500));
+    let launched = PaneRecord {
+        since_ms: record.since_ms - 60_000,
+        ..record
+    };
+    let limits = LaunchLimits {
+        run_time: Duration::from_secs(30),
+        ..LaunchLimits::default()
+    };
+    assert!(launched.run_time_left(limits.run_time).is_zero());
+
+    let mut session =
+        TerminalSession::adopt(host.clone(), agent.clone(), &launched, limits).unwrap();
+    assert_eq!(
+        lines(&file),
+        2 * 1_024 + 1,
+        "the pane whose read was cut got Escape and its turn ended before it was taken over"
+    );
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .ends_with("[Request interrupted by user]\"}]}}\n")
+    );
+    assert_eq!(
+        session.reader.unread(),
+        Some(0),
+        "the old turn's lines and its end are read before the session takes orders"
+    );
+    assert!(session.ready && !session.turn);
+    session.clear_deadline();
+    follows_a_typed_command(&mut session, &file);
+    drop(session);
+    assert!(host.alive().unwrap().is_empty());
+}
+
 /// RV-DS241-143: a live master is not bound by the launch's 24 h run time (the Master run
 /// time bounds it, F01), so a master pane that started 25 h ago, whose record takes more than
 /// three reads (all a cut adoption with an Escape could read), is still read to its record's
