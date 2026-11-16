@@ -198,3 +198,27 @@ fn the_relay_stop_test_reaches_the_renewal() {
     let _ = source.current(&|| true);
     assert!(told.load(Ordering::SeqCst));
 }
+
+/// T22: a renewal its relay stopped is no sign that the sign-in lapsed. A source may be
+/// shared by several relays of one account, so stopping one run neither stops the source
+/// nor tells the others to sign in again: the next request renews and is served.
+#[test]
+fn a_renewal_its_relay_stopped_does_not_stop_the_source() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counting = Arc::clone(&calls);
+    let renew: Renew = Box::new(move |_: Duration, halted: &dyn Fn() -> bool| {
+        counting.fetch_add(1, Ordering::SeqCst);
+        if halted() {
+            return Err(EngineError("native_profile_renewal_stopped".into()));
+        }
+        Ok(tokens("fresh", None, now() + Duration::from_secs(3600)))
+    });
+    let source = ChatGptSource::new(tokens("held", None, now() + Duration::from_secs(30)), renew);
+    assert_ne!(
+        source.current(&|| true).err().map(|problem| problem.0),
+        None
+    );
+    assert_eq!(source.failed(), None);
+    assert_eq!(handed(&source), Some(("fresh".to_owned(), None)));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
