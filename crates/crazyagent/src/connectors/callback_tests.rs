@@ -232,6 +232,18 @@ fn a_stopped_wait_ends_at_once_and_closes_the_port() {
     assert!(closed(port));
 }
 
+/// rv-ds241 23:13 nit: an answer's code is a one-time secret, so the debug text of a wait
+/// names its issuer and never its code, and a log or a failed row cannot hold it.
+#[test]
+fn the_debug_text_of_an_answer_never_holds_its_code() {
+    let iss = Some("https://auth.example".to_owned());
+    let code = "code-c0ffee-5".to_owned();
+    let shown = format!("{:?}", Waited::Code { code, iss });
+    assert!(!shown.contains("c0ffee"), "{shown}");
+    assert!(shown.contains("Code") && shown.contains("https://auth.example"), "{shown}");
+    assert_eq!(format!("{:?}", Waited::Expired), "Expired");
+}
+
 /// DEC-168 addendum 30 decision 1: the app's client metadata document names the app, the
 /// loopback callback with no port, the code and refresh grants and no client secret. It
 /// carries no client id until the build has the address it is served at, then that one.
