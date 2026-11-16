@@ -10,18 +10,19 @@ import { handOff, onEngine, startingWith } from "./codex-task-engine.mjs";
 /** The probe every sub-agent run of the stand-in Codex makes from its worktree inside the
  * owner's project folder: which project files it reads, and whether it can add to an
  * untracked top-level folder and to an untracked file at the root. It writes one line per
- * check to shared-probe.txt in its own home. */
+ * check to .cache/shared-probe.txt in its own home. */
 const PROBE = String.raw`case "$1:$(/bin/pwd -P)" in
   app-server:*) ;;
   */.crazyagent/worktrees/agent-*)
     r="$(/bin/pwd -P)/../../.."
+    /bin/mkdir -p "$CODEX_HOME/.cache"
     {
       for p in README.md program/data.csv build/out.txt notes.txt .env keys/server.pem; do
         if /bin/cat "$r/$p" >/dev/null 2>&1; then echo "read $p"; else echo "closed $p"; fi
       done
       if (printf x >> "$r/program/agent.txt") 2>/dev/null; then echo "wrote program"; else echo "kept program"; fi
       if (printf x >> "$r/notes.txt") 2>/dev/null; then echo "wrote notes.txt"; else echo "kept notes.txt"; fi
-    } > "$CODEX_HOME/shared-probe.txt"
+    } > "$CODEX_HOME/.cache/shared-probe.txt"
     ;;
 esac
 `;
@@ -74,7 +75,7 @@ function localFiles(repo) {
 function probe(runtime) {
   const agents = join(runtime, "team", "agents");
   if (!existsSync(agents)) return null;
-  const found = readdirSync(agents).map((name) => join(agents, name, "home", "shared-probe.txt")).filter((path) => existsSync(path));
+  const found = readdirSync(agents).map((name) => join(agents, name, "home", ".cache", "shared-probe.txt")).filter((path) => existsSync(path));
   assert.ok(found.length <= 1, `one sub-agent probed: ${JSON.stringify(found)}`);
   return found.length === 1 ? readFileSync(found[0], "utf8").trim().split("\n") : null;
 }

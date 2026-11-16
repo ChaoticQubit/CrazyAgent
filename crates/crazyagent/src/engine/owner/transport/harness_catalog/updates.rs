@@ -1,6 +1,6 @@
 use super::*;
 use crate::harnesses::update::{
-    self, CHECK_TIME, Roots, UNKNOWN_HARNESS, UpdateSettings, VERSION_TIME,
+    self, CHECK_TIME, Roots, UNKNOWN_HARNESS, UpdateSettings, Updates, VERSION_TIME,
 };
 
 pub(in crate::engine::owner::transport) const UPDATES_TIMEOUT: Duration =
@@ -8,6 +8,11 @@ pub(in crate::engine::owner::transport) const UPDATES_TIMEOUT: Duration =
 pub(super) const REQUEST_BYTES_MAX: usize = 2 * finding::PATH_BYTES_MAX + 256;
 const ID_BYTES_MAX: usize = 64;
 const UNAVAILABLE: &str = "harness_update_unavailable";
+const QUEUE_THREAD: &str = "harness-install-queue";
+const QUEUE_PAUSE: Duration = Duration::from_millis(500);
+const QUEUE_STOP: Duration = Duration::from_millis(1);
+const QUEUE_WAIT_MAX: Duration =
+    Duration::from_secs(update::UPDATE_TIME.as_secs() + VERSION_TIME.as_secs() + 5);
 
 const _: () = assert!(UPDATES_TIMEOUT.as_secs() > VERSION_TIME.as_secs() + CHECK_TIME.as_secs());
 const _: () = assert!(REQUEST_BYTES_MAX + 4 <= crate::protocol::FRAME_BYTES_MAX);
@@ -77,6 +82,29 @@ impl OwnerClient {
         match self.harness_exchange(action, None).await? {
             WireReply::Started => Ok(()),
             _ => Err(unknown()),
+        }
+    }
+
+    /// Starts installing a list of harnesses one after another in the background, the
+    /// onboarding picks. Input: the catalog ids, the only thing the request carries.
+    /// Output: Ok once the list is queued, or the refusal code.
+    pub async fn harness_install_many(&self, ids: &[String]) -> Result<(), EngineError> {
+        let action = Action::InstallMany { ids: ids.to_vec() };
+        match self.harness_exchange(action, None).await? {
+            WireReply::Started => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads the harnesses still waiting in the install queue, in install order.
+    /// Output: their catalog ids, or the refusal code.
+    pub async fn harness_queued(&self) -> Result<Vec<String>, EngineError> {
+        match self
+            .harness_exchange(Action::Queued, Some("harness_catalog.queued"))
+            .await?
+        {
+            WireReply::Queued { ids } => Ok(ids),
+            _ => Err(failure("harness_catalog_reply_invalid")),
         }
     }
 
@@ -251,6 +279,35 @@ async fn entry(
         .ok_or_else(|| failure(UNKNOWN_HARNESS))
 }
 
+/// The installed version of a harness as its Settings, Harnesses row reads it, for the
+/// sign-in minimum check (DEC-166): the catalog entry's version when that entry is the file
+/// the sign-in runs, else unknown. Inputs: the engine, the engine root, the catalog search,
+/// the catalog id and the real file the sign-in runs. Output: the version, or None.
+#[cfg(unix)]
+pub(crate) async fn sign_in_version(
+    engine: &Arc<Engine>,
+    root: PathBuf,
+    search: Search,
+    id: &str,
+    runs: PathBuf,
+) -> Option<String> {
+    let entry = entry(engine, search, id, false).await.ok()?;
+    let updates = engine.harness_updates.clone();
+    tokio::task::spawn_blocking(move || {
+        let listed = std::fs::canonicalize(entry.executable.as_deref()?).ok()?;
+        if listed != std::fs::canonicalize(&runs).ok()? {
+            return None;
+        }
+        let db = open(&root).ok()?;
+        updates
+            .versions(&db, &entry, &Roots::engine(&root), false)
+            .installed
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Runs one blocking piece of harness update work off the request path.
 /// Input: the work. Output: its answer, or `harness_update_unavailable` when it could not
 /// finish.
@@ -346,7 +403,7 @@ async fn answer(
         Action::Versions { id, look } => {
             let entry = entry(engine, search, &id, false).await?;
             blocking(move || {
-                let versions = updates.versions(&open(&root)?, &entry, &Roots::system(), look);
+                let versions = updates.versions(&open(&root)?, &entry, &Roots::engine(&root), look);
                 Ok(WireReply::Versions {
                     versions: Box::new(versions),
                 })
@@ -366,7 +423,7 @@ async fn answer(
                     });
                 };
                 updates
-                    .start(&open(&root)?, &entry, &Roots::system(), after)
+                    .start(&open(&root)?, &entry, &Roots::engine(&root), after)
                     .map(|()| WireReply::Started)
                     .map_err(failure)
             })
@@ -375,20 +432,130 @@ async fn answer(
         Action::Install { id } => {
             let entry = entry(engine, search.clone(), &id, true).await?;
             blocking(move || {
-                let id = entry.id.clone();
-                let after = move || {
-                    pin(&owner, &id);
-                    let entries = runtime.block_on(probe.entries(search, true)).ok()?;
-                    let found = entries.into_iter().find(|entry| entry.id == id)?;
-                    found.executable
+                let db = open(&root)?;
+                let job = Job {
+                    owner,
+                    runtime,
+                    probe,
+                    search,
+                    updates,
                 };
-                updates
-                    .install(&open(&root)?, &entry, &Roots::system(), after)
+                job.install(&db, &root, &entry)
                     .map(|()| WireReply::Started)
                     .map_err(failure)
             })
             .await
         }
+        Action::InstallMany { ids } => {
+            let engine = engine.clone();
+            let job = Job {
+                owner,
+                runtime,
+                probe,
+                search,
+                updates: updates.clone(),
+            };
+            let folder = root.clone();
+            install_many(updates, root, ids, move |id| {
+                job.install_next(&engine, &folder, id)
+            })
+            .await
+        }
+        Action::Queued => Ok(WireReply::Queued {
+            ids: engine.harness_updates.queued(),
+        }),
+    }
+}
+
+/// Queues a list of harnesses for install and starts the one drain thread that installs
+/// them through `start`, both in the same blocking work, so a request cut while the list
+/// queues still drains it and the queue never stays full with no drain (RV-DS241-74).
+/// Inputs: the update state, the engine folder, the ids and what starts one install.
+/// Output: Started, or the refusal.
+async fn install_many(
+    updates: Arc<Updates>,
+    root: PathBuf,
+    ids: Vec<String>,
+    start: impl FnMut(&'static str) -> Result<(), &'static str> + Send + 'static,
+) -> Result<WireReply, EngineError> {
+    blocking(move || {
+        updates.queue(&open(&root)?, &ids).map_err(failure)?;
+        drain_on_thread(updates, start)
+    })
+    .await
+}
+
+/// Starts the thread that drains the install queue through `start`; when no thread starts,
+/// every queued harness is refused at once so the queue never stays full. Inputs: the
+/// update state and what starts one install. Output: Started, or `START_FAILED`.
+fn drain_on_thread(
+    updates: Arc<Updates>,
+    start: impl FnMut(&'static str) -> Result<(), &'static str> + Send + 'static,
+) -> Result<WireReply, EngineError> {
+    let left = updates.clone();
+    let started = std::thread::Builder::new()
+        .name(QUEUE_THREAD.into())
+        .spawn(move || updates.drain(start, QUEUE_PAUSE, QUEUE_WAIT_MAX));
+    if started.is_err() {
+        left.drain(|_| Err(update::START_FAILED), QUEUE_STOP, QUEUE_STOP);
+        return Err(failure(update::START_FAILED));
+    }
+    Ok(WireReply::Started)
+}
+
+/// What one install job needs past the request: the owner runtime that pins the new
+/// harness, the runtime and probe that look again once it ends, the catalog search and the
+/// update state that holds the one job slot.
+struct Job {
+    owner: OwnerRuntimeHandle,
+    runtime: tokio::runtime::Handle,
+    probe: Arc<crate::harnesses::ProbeCache>,
+    search: Search,
+    updates: Arc<Updates>,
+}
+
+impl Job {
+    /// Starts the install of one catalog entry and, once it ends, pins the harness and
+    /// probes the catalog again so every later launch sees it. Inputs: the engine database,
+    /// the engine folder and the entry. Output: Ok once the install runs, or the refusal code.
+    fn install(
+        &self,
+        db: &rusqlite::Connection,
+        root: &Path,
+        entry: &HarnessEntry,
+    ) -> Result<(), &'static str> {
+        let (owner, runtime, probe, search) = (
+            self.owner.clone(),
+            self.runtime.clone(),
+            self.probe.clone(),
+            self.search.clone(),
+        );
+        let id = entry.id.clone();
+        let after = move || {
+            pin(&owner, &id);
+            let entries = runtime.block_on(probe.entries(search, true)).ok()?;
+            let found = entries.into_iter().find(|entry| entry.id == id)?;
+            found.executable
+        };
+        self.updates.install(db, entry, &Roots::engine(root), after)
+    }
+
+    /// Starts the install of the next queued harness from a fresh catalog probe, on the
+    /// queue's own thread. Inputs: the engine, the engine folder and the catalog id.
+    /// Output: Ok once the install runs, or the refusal code.
+    fn install_next(
+        &self,
+        engine: &Arc<Engine>,
+        root: &Path,
+        id: &'static str,
+    ) -> Result<(), &'static str> {
+        let entry = self
+            .runtime
+            .block_on(entry(engine, self.search.clone(), id, true))
+            .map_err(|_| UNKNOWN_HARNESS)?;
+        let db = open(root).map_err(|_| UNAVAILABLE)?;
+        assert!(entry.id == id);
+        self.install(&db, root, &entry)
     }
 }
 
@@ -406,9 +573,7 @@ fn choose(root: &Path, id: &str, path: Option<&str>) -> Result<WireReply, Engine
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let space = finding::AgentSpace::read(root, &db)?;
     let checked = finding::check(id, Path::new(text), &space, home.as_deref())?;
-    let host = crate::engine::RegisteredNativeAuthHost::capture_entry(&checked)?;
-    host.verified_path()?;
-    drop(host);
+    crate::engine::RegisteredNativeAuthHost::capture_entry(&checked)?.verified_path()?;
     finding::set_chosen(&db, id, Some(&checked))?;
     Ok(WireReply::Started)
 }
@@ -451,6 +616,46 @@ mod tests {
         .unwrap()
     }
 
+    /// RV-DS241-74: an InstallMany whose request is dropped while its list is being queued
+    /// still drains that list, so the queue never stays full with no drain thread and a
+    /// later list is not refused busy. The install it starts is refused at once, so nothing
+    /// is installed.
+    #[tokio::test]
+    async fn an_install_list_cut_while_it_queues_still_drains() {
+        let folder = tempfile::tempdir().unwrap();
+        let root = folder.path().canonicalize().unwrap();
+        let updates = Updates::new();
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = asked.clone();
+        let cut = install_many(
+            updates.clone(),
+            root.clone(),
+            vec!["codex".into()],
+            move |_| {
+                seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                Err("install_refused_in_test")
+            },
+        );
+        let _ = tokio::time::timeout(Duration::ZERO, cut).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !(asked.load(std::sync::atomic::Ordering::SeqCst) && updates.queued().is_empty())
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            "the cut list reached a drain: {:?}",
+            updates.queued()
+        );
+        assert!(updates.queued().is_empty());
+        assert!(
+            updates
+                .queue(&open(&root).unwrap(), &["codex".into()])
+                .is_ok()
+        );
+    }
+
     #[test]
     fn list_and_check_keep_their_wire_form_and_stay_on_the_inline_path() {
         assert_eq!(body(&Action::List), br#"{"harness_catalog":"list"}"#);
@@ -470,6 +675,10 @@ mod tests {
             },
             Action::Update { id: id.clone() },
             Action::Install { id },
+            Action::InstallMany {
+                ids: vec!["x".repeat(ID_BYTES_MAX); crate::harnesses::specs().len()],
+            },
+            Action::Queued,
             Action::Settings,
             Action::SetSettings {
                 mode: update::UpdateMode::CheckAndUpdate,

@@ -157,3 +157,12 @@ test("the Context tab lists the roadmap and release process beside the brief", (
   assert.match(source, /items\.filter\(\(entry\) => entry\.kind === "plan"\)/);
   assert.match(source, /researchKindOf\(chosen, researchJobs\(jobs\)\)/, "a planning document never offers Save research to memory");
 });
+
+test("a queued research or planning job shows why it waits, never a bare Queued (RV-DS241-27, DEC-141)", () => {
+  const reason = "Waiting for this account to be ready";
+  assert.equal(research.researchRow(job(1, "market_research", "queued", { error: reason }), 3_000).progress, reason);
+  const view = (jobs) => planning.planningView(planning.planningState(jobs));
+  assert.deepEqual(view([job(2, "roadmap_planning", "queued", { error: reason })]),
+    { word: "Planning", tone: "info", line: reason, action: null, report: null });
+  assert.equal(view([job(2, "roadmap_planning", "queued", { error: "  " })]).line, "Waiting to start");
+});

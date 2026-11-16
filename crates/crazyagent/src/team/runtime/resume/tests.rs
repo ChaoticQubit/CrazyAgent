@@ -393,15 +393,15 @@ mod failed {
     /// launch and every typed line, and in a fresh session hangs once in a task that started
     /// a command it never finishes, as a turn cut short does, reading single keys until
     /// Escape, which ends that turn as interrupted in its rollout, as Codex records it, and
-    /// then reads what is typed again; with a `deaf` file in its home it never answers
+    /// then reads what is typed again; with a `deaf` file in its home's `.cache` it never answers
     /// Escape, and with a `stubborn` file it ignores terminate from the next key on. Any
     /// other turn, and every turn of a resumed session, even one whose note quotes that
     /// task, ends with "Done.".
     const RESUMING_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
-/bin/mkdir -p "$d" || exit 1
-printf '%s\n' "$*" >> "$CODEX_HOME/launches"
+/bin/mkdir -p "$d" "$CODEX_HOME/.cache" || exit 1
+printf '%s\n' "$*" >> "$CODEX_HOME/.cache/launches"
 id=""
 resumed=""
 prev=""
@@ -427,7 +427,7 @@ hung=""
 said=""
 while IFS= read -r line; do
   case "$line" in *"$e[200~"*) open=1 ;; esac
-  printf '%s\n' "$line" >> "$CODEX_HOME/typed"
+  printf '%s\n' "$line" >> "$CODEX_HOME/.cache/typed"
   said="$said$(printf '%s' "$line" | /usr/bin/sed "s/$e\[20[01]~//g") "
   case "$line" in *"hang here"*) [ -z "$resumed" ] && [ -z "$hung" ] && hang=1 ;; esac
   case "$line" in
@@ -446,8 +446,8 @@ while IFS= read -r line; do
     while :; do
       c=$(/bin/dd bs=1 count=1 2>/dev/null | /usr/bin/od -An -tx1 | /usr/bin/tr -d ' \n')
       [ -n "$c" ] || exit 0
-      [ -e "$CODEX_HOME/stubborn" ] && trap '' TERM
-      [ "$c" = 1b ] && [ ! -e "$CODEX_HOME/deaf" ] && break
+      [ -e "$CODEX_HOME/.cache/stubborn" ] && trap '' TERM
+      [ "$c" = 1b ] && [ ! -e "$CODEX_HOME/.cache/deaf" ] && break
     done
     printf '{"type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}\n' >> "$f"
     /bin/stty icanon
@@ -651,7 +651,7 @@ done
                 self.base
                     .join("team/agents")
                     .join(format!("agent-{agent}"))
-                    .join("home")
+                    .join("home/.cache")
                     .join(name),
             )
             .unwrap_or_default()
@@ -682,7 +682,7 @@ done
                 self.base
                     .join("team/agents")
                     .join(format!("agent-{agent}"))
-                    .join("home")
+                    .join("home/.cache")
                     .join(marker),
                 "",
             )
@@ -833,6 +833,47 @@ done
         assert!(typed.contains("Verify before continuing."), "{typed}");
         assert_eq!(fixture.task(task), ("done".into(), Some(sub), 2));
         assert!(!recovery::retry(&fixture.base, sub).unwrap());
+        team.shutdown().unwrap();
+        host.close(&[]).unwrap();
+    }
+
+    /// RV-DS241-125 r3 (rv-sec4 r2 F2): a sub-agent cut short in a turn and stopped by the
+    /// owner before its run resumed is never started again by Recovery: the run is recorded
+    /// failed with that reason and a team note, its task stays held, and the agent stays
+    /// stopped with the owner's stop kept, so only the owner starts it (AW-1).
+    #[test]
+    fn a_run_of_an_owner_stopped_agent_is_not_restarted_by_recovery() {
+        let fixture = Team::new();
+        let host = fixture.host();
+        let mut team = fixture.runtime(&host);
+        let (task, sub) = fixture.hung(&mut team);
+        team.shutdown().unwrap();
+        drop(team);
+        host.kill(&AgentId::team(sub).unwrap()).unwrap();
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+                params![sub, PROJECT],
+            )
+            .unwrap();
+
+        let mut team = fixture.runtime(&host);
+        let reason = "it was stopped, so it waits for you to start it again";
+        fixture.until(&mut team, "the stopped agent's run is not resumed", |f| {
+            f.runs()
+                .first()
+                .is_some_and(|run| run.state == RunState::Failed)
+        });
+        assert_eq!(fixture.runs()[0].reason.as_deref(), Some(reason));
+        assert!(fixture.noted(&format!(
+            "An agent cut short when CrazyAgent stopped could not resume: {reason}. {RETRY_LATER}."
+        )));
+        fixture.idle(&mut team);
+        assert_eq!(fixture.launches(sub).len(), 1, "never started again");
+        assert_eq!(fixture.task(task), ("queued".into(), None, 1), "held");
+        assert_eq!(fixture.agent_status(sub), "stopped");
+        assert!(crate::team::owner_stopped(&fixture.connection, sub).unwrap());
         team.shutdown().unwrap();
         host.close(&[]).unwrap();
     }
@@ -1245,6 +1286,7 @@ mod live {
             hookless: plan.hookless,
             scratch_pin: plan.scratch_pin,
             proxy: plan.proxy.clone(),
+            freeze_record: plan.freeze_record.clone(),
             relay: plan.relay.clone(),
             terminal_display: plan.terminal_display,
             task_start: plan.task_start.clone(),

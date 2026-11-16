@@ -6,7 +6,11 @@ use crate::harnesses::update::{
 use crate::harnesses::{HarnessEntry, Search};
 use serde::{Deserialize, Serialize};
 
+#[cfg(all(test, unix))]
+mod tests;
 mod updates;
+#[cfg(unix)]
+pub(super) use updates::sign_in_version;
 pub(super) use updates::{UPDATES_TIMEOUT, slow};
 
 #[derive(Serialize, Deserialize)]
@@ -30,6 +34,10 @@ enum Action {
     Install {
         id: String,
     },
+    InstallMany {
+        ids: Vec<String>,
+    },
+    Queued,
     Settings,
     SetSettings {
         mode: UpdateMode,
@@ -59,6 +67,9 @@ enum WireReply {
         versions: Box<HarnessVersions>,
     },
     Started,
+    Queued {
+        ids: Vec<String>,
+    },
     Settings {
         mode: UpdateMode,
         when: CheckWhen,
@@ -189,9 +200,16 @@ pub(super) async fn serve(
         ("rcli", runtime.registered_rcli_master_executable()),
     ] {
         if let Ok(executable) = executable
-            && let Ok(path) = executable.verified_path()
+            && let Ok(pinned) = executable.verified_path()
         {
-            search = search.with_registered(id, path.to_path_buf());
+            let listed = executable
+                .entry()
+                .and_then(|entry| {
+                    crate::paths::launch_entry(entry, std::env::var_os("PATH").as_deref()).ok()
+                })
+                .filter(|used| std::fs::canonicalize(used).ok().as_deref() == Some(pinned))
+                .unwrap_or_else(|| pinned.to_path_buf());
+            search = search.with_registered(id, listed);
         }
     }
     if !matches!(action, Action::List | Action::Check) {
@@ -202,6 +220,13 @@ pub(super) async fn serve(
         .entries(search, matches!(action, Action::Check))
         .await
         .map_err(|_| failure("harness_catalog_unavailable"))?;
+    let root = super::changes::engine_root(authority)?;
+    let entries = tokio::task::spawn_blocking(move || {
+        let places = crate::tools::Places::from_environment(Some(&root));
+        crate::harnesses::with_needs(entries, &places)
+    })
+    .await
+    .map_err(|_| failure("harness_catalog_unavailable"))?;
     assert!(!entries.is_empty());
     let _barrier = engine.owner_egress.write().await;
     let reply = if &authority.authenticate(packet)? == admission {

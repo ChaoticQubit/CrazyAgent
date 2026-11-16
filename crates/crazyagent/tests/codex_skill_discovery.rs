@@ -91,11 +91,6 @@ fn skill_folder(root: &Path, name: &str) -> String {
     path.display().to_string()
 }
 
-fn closed_port() -> u16 {
-    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
-}
-
 fn send(input: &mut ChildStdin, frame: &[u8]) {
     input.write_all(frame).unwrap();
     input.flush().unwrap();
@@ -178,6 +173,7 @@ async fn a_supported_codex_discovers_every_skill_the_engine_copies_into_the_agen
     let context = launch_context::for_project(&connection, &project, Layout::Linked).unwrap();
     drop(connection);
 
+    let (_held, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
     let profile = base.join("agent.sb");
     fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
     let work = private_directory(&base.join("work"));
@@ -189,7 +185,7 @@ async fn a_supported_codex_discovers_every_skill_the_engine_copies_into_the_agen
             working_dir: work.clone(),
             account: AccountBinding::Url {
                 home: home.clone(),
-                base_url: format!("http://127.0.0.1:{}/v1", closed_port()),
+                base_url: format!("http://127.0.0.1:{port}/v1"),
                 key: None,
             },
             model: Some("qwen2.5:0.5b".into()),

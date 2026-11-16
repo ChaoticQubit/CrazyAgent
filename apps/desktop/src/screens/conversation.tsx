@@ -16,6 +16,16 @@ function escaped(value: string): string {
   return point > 0xffff ? `\\u{${point.toString(16)}}` : `\\u${point.toString(16).padStart(4, "0")}`;
 }
 
+/** Tells whether text holds a character the engine refuses as hidden (`memory::hidden_text`):
+ * a control other than a line break or tab, or a direction-changing, zero-width, tag or other
+ * invisible character, where one emoji selector or joiner inside an emoji stays allowed.
+ * Input: the text. Output: true when it holds one. */
+export function hiddenText(text: string): boolean {
+  if (!HIDDEN.test(text)) return false;
+  const chars = Array.from(text);
+  return chars.some((value, at) => HIDDEN.test(value) && !emojiPart(chars, at));
+}
+
 /** Makes untrusted text safe to show: control, direction-changing, zero-width, tag and other
  * invisible characters become visible escapes, the same set the engine refuses in memory text.
  * One emoji selector or joiner inside an emoji stays. Input: the text. Output: the shown text. */

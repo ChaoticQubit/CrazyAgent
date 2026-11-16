@@ -41,6 +41,7 @@ fn a_pack_row_decides_the_switch_over_the_plugin_store() {
         skills: vec![format!("skill-{GRAPH_ENTRY}")],
         server: None,
         enabled: false,
+        hooks: Vec::new(),
     };
     save_pack(&tx, &record).unwrap();
     assert_eq!(entry_switch(&tx, GRAPH_ENTRY).unwrap(), Some(false));

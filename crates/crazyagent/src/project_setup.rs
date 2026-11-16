@@ -1,6 +1,7 @@
 use crate::config::{EffectiveConfig, ModelAuthentication};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
+use crate::research::jobs::RUN_AGAIN;
 use crate::sandbox::policy::LevelView;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 #[cfg(unix)]
@@ -436,6 +437,15 @@ pub struct ReadPaths {
     pub version: u64,
 }
 
+/// The folders a project's agents are kept out of in saved order, with the version the
+/// owner's screen sends back when it changes them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HiddenPaths {
+    pub paths: Vec<String>,
+    pub version: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredSetup {
@@ -491,13 +501,19 @@ impl StoredSetup {
     /// The project's own folder: the recorded folder, or the folder holding
     /// it when onboarding recorded the project's `.crazyagent/` folder.
     pub fn project_folder(&self) -> PathBuf {
-        let folder = Path::new(&self.folder);
-        match folder.parent() {
-            Some(parent) if folder.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY) => {
-                parent.to_path_buf()
-            }
-            _ => folder.to_path_buf(),
+        project_folder_of(Path::new(&self.folder))
+    }
+}
+
+/// A project's own folder from the folder a setup recorded: that folder, or the folder
+/// holding it when onboarding recorded the project's `.crazyagent/` folder. Input: the
+/// recorded folder. Output: the project folder.
+pub(crate) fn project_folder_of(folder: &Path) -> PathBuf {
+    match folder.parent() {
+        Some(parent) if folder.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY) => {
+            parent.to_path_buf()
         }
+        _ => folder.to_path_buf(),
     }
 }
 
@@ -793,7 +809,7 @@ pub enum SetupView {
     Removal(Box<crate::team::cleanup::RemovalPreview>),
     Context(ProjectContext),
     ReadPaths(ReadPaths),
-    HiddenPaths(Vec<String>),
+    HiddenPaths(HiddenPaths),
     AgentPolicy(crate::sandbox::policy::PolicyView),
     Item(ContextChunk),
     Log(Vec<String>),
@@ -875,6 +891,7 @@ pub enum SetupAction {
     },
     SetHiddenPaths {
         project_id: ProjectId,
+        version: u64,
         paths: Vec<String>,
     },
     SetAgentPolicy {
@@ -1009,9 +1026,23 @@ fn now_ms() -> i64 {
 }
 
 const DEFAULT_TEAM_HARNESS: &str = "codex";
-const SIGNED_IN_TEAM_HARNESSES: [&str; 3] = ["codex", "claude", "claude-code"];
+const LEAD_HARNESSES: [&str; 3] = ["codex", "claude", "claude-code"];
 const TEAM_NEEDS_POOL: &str = "Needs a pool";
-const TEAM_NEEDS_SIGN_IN: &str = "Needs a signed-in account";
+
+/// The default team status when no account of the pool can lead the team: the account kinds
+/// both lead harnesses take, Codex and Claude Code, built from the words the team start line
+/// names them in (`team::account_providers`), so the two never drift (V241-MASTER-WORDS).
+/// Takes none. Returns the words.
+fn team_needs_account() -> &'static str {
+    static WORDS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let (codex_in, codex_key) = crate::team::account_providers("codex");
+        let (claude_in, claude_key) = crate::team::account_providers("claude-code");
+        format!(
+            "Needs a {codex_in} or {claude_in} sign-in, or an {codex_key} or {claude_key} API key"
+        )
+    });
+    WORDS.as_str()
+}
 
 const TECH_CATALOG: [(&str, &str, TechGroup); 30] = [
     ("typescript", "TypeScript", TechGroup::Language),
@@ -1159,15 +1190,15 @@ pub fn project_has_pool(config: &EffectiveConfig, project: &ProjectId) -> bool {
 
 /// Builds the smart team defaults for the New Project Team step (DEC-147.1).
 /// Takes the configuration, the chosen pool and the signed-in connections.
-/// Returns the pool's best signed-in harness, Codex before Claude Code, as master with tools
-/// on; Codex when the pool has no signed-in harness, never RCLI. No sub-agent harness is
+/// Returns the harness `lead_harness` picks as master with tools on; Codex when no account
+/// of the pool can run one, never RCLI. No sub-agent harness is
 /// named and the team maximum is `TEAM_AGENTS_MAX`, so any harness runs with no limit.
 pub fn default_team(
     config: &EffectiveConfig,
     pool: Option<&CredentialRef>,
     signed_in: &BTreeSet<CredentialRef>,
 ) -> TeamPlan {
-    let master = best_signed_in_harness(config, pool, signed_in)
+    let master = lead_harness(config, pool, signed_in)
         .unwrap_or(DEFAULT_TEAM_HARNESS)
         .to_owned();
     assert!(master != "rcli" && harness_valid(&master));
@@ -1202,7 +1233,7 @@ fn best_signed_in_harness<'a>(
                 && matches!(c.auth, ModelAuthentication::NativeManaged { .. })
         })
         .filter_map(|c| {
-            SIGNED_IN_TEAM_HARNESSES
+            LEAD_HARNESSES
                 .iter()
                 .position(|harness| *harness == c.harness.as_str())
                 .map(|rank| (rank, c.harness.as_str()))
@@ -1211,9 +1242,29 @@ fn best_signed_in_harness<'a>(
         .map(|(_, harness)| harness)
 }
 
+/// Finds the harness the default team leads with (DEC-161): the best signed-in managed
+/// harness, else the first of Codex and Claude Code a pool member can run by the one account
+/// rule, such as an Anthropic API key for Claude Code. Takes the configuration, the chosen
+/// pool and the signed-in connections. Returns the harness id, or none when none can run.
+fn lead_harness<'a>(
+    config: &'a EffectiveConfig,
+    pool: Option<&CredentialRef>,
+    signed_in: &BTreeSet<CredentialRef>,
+) -> Option<&'a str> {
+    best_signed_in_harness(config, pool, signed_in).or_else(|| {
+        let access = config.settings.model_access.as_ref()?;
+        let chosen = access.pools.iter().find(|p| Some(&p.id) == pool)?;
+        let ready =
+            |connection: &crate::config::ModelConnection| signed_in.contains(&connection.id);
+        LEAD_HARNESSES.into_iter().find(|harness| {
+            crate::research::accounts::pool_account(access, chosen, harness, &ready).is_some()
+        })
+    })
+}
+
 /// Says in plain words why the default team cannot start yet.
 /// Takes the configuration, the chosen pool and the signed-in connections.
-/// Returns "Needs a pool" without a pool that has members, "Needs a signed-in account" when no
+/// Returns "Needs a pool" without a pool that has members, the account kinds to add when no
 /// member can run the default harness, or none when the default team can start.
 pub fn default_team_status(
     config: &EffectiveConfig,
@@ -1229,11 +1280,11 @@ pub fn default_team_status(
     else {
         return Some(TEAM_NEEDS_POOL);
     };
-    let harness = best_signed_in_harness(config, pool, signed_in).unwrap_or(DEFAULT_TEAM_HARNESS);
+    let harness = lead_harness(config, pool, signed_in).unwrap_or(DEFAULT_TEAM_HARNESS);
     let ready = |connection: &crate::config::ModelConnection| signed_in.contains(&connection.id);
     match crate::research::accounts::pool_account(access, chosen, harness, &ready) {
         Some(_) => None,
-        None => Some(TEAM_NEEDS_SIGN_IN),
+        None => Some(team_needs_account()),
     }
 }
 
@@ -1464,6 +1515,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 ON research_jobs(project, status, id);",
         )
         .map_err(error)?;
+    crate::research::jobs::add_columns(connection).map_err(error)?;
     links::initialize(connection)
 }
 
@@ -1960,9 +2012,11 @@ pub(crate) fn execute(
             version,
             paths,
         } => set_read_paths(tx, project_id, *version, paths),
-        SetupAction::SetHiddenPaths { project_id, paths } => {
-            set_hidden_paths(tx, project_id, paths)
-        }
+        SetupAction::SetHiddenPaths {
+            project_id,
+            version,
+            paths,
+        } => set_hidden_paths(tx, project_id, *version, paths),
         SetupAction::SetAgentPolicy {
             project_id,
             version,
@@ -2279,7 +2333,7 @@ fn replan_jobs(
                     &format!(
                         "UPDATE research_jobs SET status=?2, harness=?3, tools=?4,
                         attempts=CASE WHEN status IN ('failed','cancelled') THEN 0 ELSE attempts END,
-                        cancel_requested=0, error=NULL, claimer=NULL, finished_ms=NULL
+                        cancel_requested=0, error=NULL, claimer=NULL, finished_ms=NULL, {RUN_AGAIN}
                         WHERE id=?1 AND status IN ({restartable})"
                     ),
                     params![job.id, waiting.stored(), harness, tools],
@@ -2377,9 +2431,11 @@ fn retry_research(
     let status = effective(ResearchStatus::Queued, project_has_pool(config, project_id));
     let changed = tx
         .execute(
-            "UPDATE research_jobs SET status=?2, attempts=0, claimer=NULL, error=NULL,
-            cancel_requested=0, output_bytes=0, started_ms=NULL, heartbeat_ms=NULL,
-            finished_ms=NULL WHERE id=?1 AND status IN ('failed','cancelled')",
+            &format!(
+                "UPDATE research_jobs SET status=?2, attempts=0, claimer=NULL, error=NULL,
+                cancel_requested=0, output_bytes=0, started_ms=NULL, heartbeat_ms=NULL,
+                finished_ms=NULL, {RUN_AGAIN} WHERE id=?1 AND status IN ('failed','cancelled')"
+            ),
             params![id, status.stored()],
         )
         .map_err(error)?;
@@ -2460,9 +2516,12 @@ fn plan_roadmap(
         Some(job) => {
             let changed = tx
                 .execute(
-                    "UPDATE research_jobs SET status=?2, attempts=0, claimer=NULL, error=NULL,
-                    cancel_requested=0, output_bytes=0, started_ms=NULL, heartbeat_ms=NULL,
-                    finished_ms=NULL WHERE id=?1 AND status IN ('done','failed','cancelled')",
+                    &format!(
+                        "UPDATE research_jobs SET status=?2, attempts=0, claimer=NULL, error=NULL,
+                        cancel_requested=0, output_bytes=0, started_ms=NULL, heartbeat_ms=NULL,
+                        finished_ms=NULL, {RUN_AGAIN}
+                        WHERE id=?1 AND status IN ('done','failed','cancelled')"
+                    ),
                     params![job.id, waiting.stored()],
                 )
                 .map_err(error)?;
@@ -2483,7 +2542,7 @@ const DELETE_NAME_BYTES_MAX: usize = 1024;
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 54] = [
+const REMOVED_WITH_PROJECT: [&str; 62] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2512,6 +2571,9 @@ const REMOVED_WITH_PROJECT: [&str; 54] = [
     "team_reask_empty",
     "team_master_idle_stop",
     "team_master_live_terminal",
+    "team_live_masters",
+    "team_done_quiet",
+    "team_notifications",
     "team_wall",
     "team_catch_up_main",
     "team_reuse_idle",
@@ -2538,6 +2600,11 @@ const REMOVED_WITH_PROJECT: [&str; 54] = [
     "project_doc_links",
     "roadmap_status",
     "roadmap_status_settings",
+    "project_overview",
+    "project_overview_tabs",
+    "team_master_retries",
+    "team_master_turns",
+    "team_master_conversations",
 ];
 
 /// Saves a project's extra read-only folders once each passes
@@ -2578,11 +2645,14 @@ fn set_read_paths(
 
 /// Saves a project's hidden folders once each passes
 /// [`crate::sandbox::hidden_paths::checked`] against the project's own folder, so agents are
-/// kept out of them. Takes the transaction, project and typed paths. Returns Applied, or a
-/// plain rejection for an unknown project or a refused path.
+/// kept out of them, and the owner's screen showed the current ones. Takes the transaction,
+/// project, the version the screen showed and the typed paths. Returns Applied, or a plain
+/// rejection for an unknown project, a refused path or `stale_revision` when the folders
+/// changed since, so a stale screen never un-hides a folder.
 fn set_hidden_paths(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
+    version: u64,
     paths: &[String],
 ) -> Result<Outcome, EngineError> {
     let Some(setup) = load_setup(tx, project_id)? else {
@@ -2595,6 +2665,10 @@ fn set_hidden_paths(
     };
     if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &checked) {
         return Ok(rejected(code));
+    }
+    let item = crate::storage::versioned::hidden_paths_item(project_id);
+    if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
+        return Ok(rejected(crate::storage::versioned::STALE_CODE));
     }
     crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
     Ok(Outcome::Applied)
@@ -2670,8 +2744,8 @@ fn set_agent_policy(
 /// Removes a project from CrazyAgent and leaves its folder on disk where it is.
 /// Takes the transaction, the project and the revision before the removal. Its open master
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
-/// tasks, settings (sub-agent nesting and the new folder limit among them), wake rules and
-/// ended agents are deleted, so a waiting step is never
+/// tasks, settings (sub-agent nesting and the new folder limit among them), live master
+/// switch, done-quiet choice, owner notifications, wake rules and ended agents are deleted, so a waiting step is never
 /// claimed and a running one stops; its read folders, agent access, agent settings and its
 /// agents' own instructions go too. Its project-scoped MCP servers, skills, secrets and
 /// per-project switches are cleared too, and so are the memories its agents saved, so a new
@@ -2712,6 +2786,7 @@ fn remove(
     crate::sandbox::grants::forget_project(tx, project_id.as_str()).map_err(error)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
+        crate::storage::versioned::hidden_paths_item(project_id),
         crate::storage::versioned::agent_policy_item(project_id),
         crate::storage::versioned::instruction_settings_item(project_id),
         crate::storage::versioned::process_text_item(Some(project_id)),
@@ -2725,6 +2800,7 @@ fn remove(
     crate::activity::forget_project(tx, project_id)?;
     crate::usage::forget_project(tx, project_id.as_str())?;
     crate::ide::bridge::run_command::forget_project(tx, project_id)?;
+    finish_removed_agent_notices(tx, project_id)?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",
@@ -2741,13 +2817,49 @@ fn remove(
         [project_id.as_str()],
     )
     .map_err(error)?;
+    crate::projects_home::delete_mark::forget(tx, project_id)?;
     let removed = tx
         .execute("DELETE FROM projects WHERE id=?1", [project_id.as_str()])
         .map_err(error)?;
     assert_eq!(removed, 1);
     crate::memory::library::forget_orphan_agent_memories(tx)?;
+    crate::memory::forget_project(tx, project_id)?;
     crate::storage::plugins::remove_project(tx, project_id)?;
     Ok(Outcome::Applied)
+}
+
+/// Finishes, as unknown, the pending start and worktree actions of the agents a removal
+/// deletes, its stopped and failed ones, so no notice is left naming an agent that is gone
+/// (RV-DS241-64). Takes the transaction and the project. Returns done, or the ledger's or
+/// the database's refusal.
+fn finish_removed_agent_notices(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+) -> Result<(), EngineError> {
+    use crate::ledger::{ActionKind, Outcome};
+    crate::ledger::initialize(tx)?;
+    for kind in [ActionKind::AgentSpawn, ActionKind::WorktreeCreate] {
+        for action in crate::ledger::pending(tx, kind)? {
+            let Some(agent) = serde_json::from_str::<serde_json::Value>(&action.payload)
+                .ok()
+                .and_then(|payload| payload.get("team_agent")?.as_i64())
+            else {
+                continue;
+            };
+            let removed: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM team_agents
+                     WHERE id=?1 AND project=?2 AND status IN ('stopped','failed'))",
+                    params![agent, project_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(error)?;
+            if removed {
+                crate::ledger::finish(tx, action.id, Outcome::Unknown)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Records a Delete everything once the owner transport finished its disk work: the

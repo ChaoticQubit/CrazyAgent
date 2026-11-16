@@ -110,6 +110,7 @@ test("a polite live line says how many questions wait and who asked the newest, 
   assert.equal(popup.dockAnnouncement([]), "");
   assert.equal(popup.dockAnnouncement([question()]), "A question waits for you. The newest is from Master.");
   assert.equal(popup.dockAnnouncement([question({ id: 30, asker: "agent:team-4" }), question({ id: 21 })]), "2 questions wait for you. The newest is from Agent team-4.");
+  assert.equal(popup.dockAnnouncement([question({ id: 31, asker: "agent:7", asker_name: "Ada (@menu-prices)" })]), "A question waits for you. The newest is from Ada (@menu-prices).", "the asker's name the engine sent (V241-QUESTION-UX P1)");
   assert.match(view(), /<p class="visually-hidden" role="status">2 questions wait for you\. The newest is from Master\.<\/p>/);
   assert.match(view({ shown: false }), /<div class="qp-dock" hidden=""><p class="visually-hidden" role="status"><\/p>/, "a tab without the pop-up keeps it mounted, hidden and silent");
   assert.equal(view({ waiting: [] }), '<div class="qp-dock"><p class="visually-hidden" role="status"></p></div>', "with none waiting only the empty live line is there");

@@ -15,10 +15,27 @@ impl Machine {
         }
     }
     fn roots(&self) -> Roots {
+        let npm = self.root.path().join("brew/bin/npm");
+        let engine = crate::setup::harness_prefix(self.root.path());
+        let home = self.root.path().join("home");
+        let places = crate::tools::Places::new(
+            vec![
+                self.root.path().join("setup/bin"),
+                self.root.path().join("brew/bin"),
+            ],
+            Some(home.clone()),
+        );
         Roots {
-            home: self.root.path().join("home"),
+            home,
             brew_prefixes: vec![self.root.path().join("brew")],
             casks: true,
+            npm: npm.exists().then(|| NpmInstall {
+                node: self.root.path().join("brew/bin/node"),
+                program: npm,
+                search: vec![self.root.path().join("brew/bin"), engine.join("bin")],
+                prefix: engine,
+            }),
+            places,
         }
     }
     fn program(&self, relative: &str, mode: u32) -> PathBuf {
@@ -1141,8 +1158,73 @@ fn npm_installs_into_the_prefix_the_harness_was_found_in_whatever_the_owners_npm
     let install = install_command("codex", &machine.roots()).unwrap();
     assert_eq!(install.program, machine.root.path().join("brew/bin/npm"));
     assert!(run(&install, &home, CHECK_TIME).unwrap().success);
-    assert!(machine.root.path().join("brew/installed").exists());
+    assert!(
+        crate::setup::harness_prefix(machine.root.path())
+            .join("installed")
+            .exists()
+    );
+    assert!(!machine.root.path().join("brew/installed").exists());
     assert!(!elsewhere.join("installed").exists());
+}
+
+#[test]
+fn an_npm_install_goes_to_the_engine_prefix_with_the_found_npm_and_never_to_a_homebrew_prefix() {
+    let machine = Machine::new();
+    machine.program("brew/bin/brew", 0o755);
+    let npm = machine.npm("brew");
+    executable(&npm, NPM_LIKE);
+    let engine = crate::setup::harness_prefix(machine.root.path());
+    let fixed = install_command("gemini-cli", &machine.roots()).unwrap();
+    assert_eq!(fixed.program, npm);
+    assert_eq!(fixed.args, ["install", "-g", "@google/gemini-cli"]);
+    assert_eq!(fixed.prefix.as_deref(), Some(engine.as_path()));
+    assert_eq!(
+        fixed.search,
+        vec![machine.root.path().join("brew/bin"), engine.join("bin")]
+    );
+    let home = machine.roots().home;
+    std::fs::create_dir_all(&home).unwrap();
+    assert!(run(&fixed, &home, CHECK_TIME).unwrap().success);
+    assert!(engine.join("installed").exists());
+    assert!(!machine.root.path().join("brew/installed").exists());
+    let no_node = Roots {
+        npm: None,
+        ..machine.roots()
+    };
+    assert_eq!(
+        install_command("gemini-cli", &no_node).unwrap_err(),
+        NEEDS_NODE
+    );
+}
+
+#[test]
+fn a_harness_npm_put_in_the_engine_prefix_updates_and_checks_with_the_found_npm() {
+    let machine = Machine::new();
+    let npm = machine.npm("brew");
+    let engine = crate::setup::harness_prefix(machine.root.path());
+    std::fs::create_dir_all(engine.join("lib/node_modules")).unwrap();
+    let relative = engine
+        .strip_prefix(machine.root.path())
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let real = machine.program(
+        &format!("{relative}/lib/node_modules/@google/gemini-cli/dist/index.js"),
+        0o755,
+    );
+    let update = update_command("gemini-cli", &real, &real, &machine.roots()).unwrap();
+    assert_eq!(update.program, npm);
+    assert_eq!(update.prefix.as_deref(), Some(engine.as_path()));
+    assert_eq!(
+        update.search,
+        vec![machine.root.path().join("brew/bin"), engine.join("bin")]
+    );
+    let check = check_command("gemini-cli", &real, &machine.roots())
+        .unwrap()
+        .unwrap();
+    assert_eq!(check.program, npm);
+    assert_eq!(check.args, ["view", "@google/gemini-cli", "version"]);
+    assert_eq!(check.prefix.as_deref(), Some(engine.as_path()));
 }
 
 /// The groups this user is in, as `/usr/bin/id -G` lists them.
@@ -1706,6 +1788,20 @@ fn an_install_runs_the_fixed_line_and_the_harness_is_found_right_after() {
 }
 
 #[test]
+fn an_npm_install_from_the_app_links_the_node_it_installs_with_into_the_engine_prefix() {
+    let machine = Machine::new();
+    executable(&machine.npm("brew"), NPM_LIKE);
+    let node = machine.program("brew/bin/node", 0o755);
+    std::fs::create_dir_all(machine.roots().home).unwrap();
+    let case = Case::new(machine, entry("gemini-cli", None), None);
+    case.install().unwrap();
+    case.finish();
+    let engine = crate::setup::harness_prefix(case.machine.root.path());
+    assert!(engine.join("installed").exists());
+    assert_eq!(std::fs::read_link(engine.join("bin/node")).unwrap(), node);
+}
+
+#[test]
 fn an_install_is_refused_when_installed_when_the_setting_is_off_and_while_another_job_runs() {
     assert_eq!(
         update_case("claude-code").install().unwrap_err(),
@@ -1773,4 +1869,977 @@ fn an_unrecognized_install_of_a_harness_crazyagent_cannot_start_is_never_run() {
     let system = update_case_at("claude-code", "usr/bin/claude");
     assert_eq!(system.versions(false).installed.as_deref(), Some("1.0.0"));
     assert!(system.machine.root.path().join("ran").exists());
+}
+
+/// The roots of a machine whose npm is the one setup's Node test finds on the resolver's
+/// folders under that machine's HOME only, so this Mac's own Node never counts.
+fn home_node_roots(machine: &Machine) -> Roots {
+    let home = machine.roots().home;
+    let folders: Vec<PathBuf> = crate::tools::Places::engine(None, None, Some(home.clone()), None)
+        .folders()
+        .iter()
+        .filter(|folder| folder.starts_with(&home))
+        .cloned()
+        .collect();
+    let places = crate::tools::Places::new(folders, Some(home));
+    Roots {
+        npm: super::state::engine_npm_at(machine.root.path(), &places),
+        ..machine.roots()
+    }
+}
+
+#[test]
+fn node_the_tool_resolver_finds_outside_homebrew_is_not_called_missing() {
+    for (bin, why) in [
+        ("home/.nvm/versions/node/v22.11.0/bin", "an nvm Node"),
+        (
+            "home/.volta/tools/image/node/22.11.0/bin",
+            "a volta Node, found through its real install, not its shim",
+        ),
+    ] {
+        let machine = Machine::new();
+        machine.program(&format!("{bin}/node"), 0o755);
+        assert_eq!(
+            install_command("codex", &home_node_roots(&machine)).unwrap_err(),
+            NEEDS_NODE,
+            "{why} without npm is not a usable Node"
+        );
+        let npm = machine.program(&format!("{bin}/npm"), 0o755);
+        let fixed = install_command("codex", &home_node_roots(&machine)).unwrap();
+        assert_eq!(fixed.program, npm, "{why}");
+        assert_eq!(
+            fixed.prefix.as_deref(),
+            Some(crate::setup::harness_prefix(machine.root.path()).as_path()),
+            "{why} installs into the engine prefix"
+        );
+    }
+    let other = Machine::new();
+    other.program("home/.nvm/versions/node/v22.11.0/bin/node", 0o777);
+    other.program("home/.nvm/versions/node/v22.11.0/bin/npm", 0o755);
+    assert_eq!(
+        install_command("codex", &home_node_roots(&other)).unwrap_err(),
+        NEEDS_NODE,
+        "a node anyone can change is not one the resolver uses"
+    );
+}
+
+#[test]
+fn an_npm_harness_on_a_mac_with_no_npm_needs_node_and_a_harness_with_no_package_has_no_installer() {
+    let machine = Machine::new();
+    for id in ["codex", "claude-code", "gemini-cli"] {
+        assert_eq!(
+            install_command(id, &machine.roots()).unwrap_err(),
+            "harness_install_needs_node",
+            "{id}"
+        );
+    }
+    for id in ["aider", "goose", "cursor-agent"] {
+        assert_eq!(
+            install_command(id, &machine.roots()).unwrap_err(),
+            NO_INSTALLER,
+            "{id}"
+        );
+    }
+    let missing = Case::new(Machine::new(), entry("codex", None), None);
+    assert_eq!(
+        missing.versions(false).refusal.as_deref(),
+        Some("harness_install_needs_node")
+    );
+}
+
+#[test]
+fn an_npm_codex_with_no_node_the_resolver_finds_reads_needs_node_until_node_is_in_setup() {
+    let machine = Machine::new();
+    let codex = machine.root.path().join("brew/bin/codex");
+    std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    std::fs::write(&codex, "#!/usr/bin/env node\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let case = Case::new(machine, entry("codex", Some(codex)), None);
+    assert_eq!(
+        case.versions(false).needs,
+        Some(HarnessNeeds {
+            program: Some("node".into()),
+            line: "codex needs node, which is missing. Install Node.js from nodejs.org, or run \
+                   brew install node in Terminal. Then try again."
+                .into(),
+        }),
+        "a found Codex that cannot run is never read as installed and ready"
+    );
+    case.machine.program("setup/bin/node", 0o755);
+    assert_eq!(
+        case.versions(false).needs,
+        None,
+        "the Node setup installs runs the same Codex"
+    );
+    let other = Machine::new();
+    let plain = other.program("brew/bin/codex", 0o755);
+    let shell = Case::new(other, entry("codex", Some(plain)), None);
+    assert_eq!(
+        shell.versions(false).needs,
+        None,
+        "a file that runs as it is"
+    );
+}
+
+/// v241 leader 20:31 fix 3: while a found harness still needs a program the resolver cannot
+/// find, a versions read never asks the harness for its version, so the Settings and first-run
+/// reads that wait on Node start nothing however often they come; the first read after the
+/// resolver finds the program asks once.
+#[test]
+fn a_harness_that_still_needs_a_program_is_never_asked_its_version_until_the_resolver_finds_it() {
+    let machine = Machine::new();
+    machine.npm("node");
+    let real = machine
+        .root
+        .path()
+        .join("node/lib/node_modules/@openai/codex/bin/codex.js");
+    executable(&real, "#!/usr/bin/env ca-version-runtime\n");
+    let codex = machine.root.path().join("node/bin/codex");
+    std::os::unix::fs::symlink(&real, &codex).unwrap();
+    let asked = machine.root.path().join("asked");
+    executable(
+        &machine.root.path().join("node/bin/ca-version-runtime"),
+        &format!(
+            "#!/bin/sh\necho asked >> {}\necho 'codex-cli 0.167.1'\n",
+            asked.display()
+        ),
+    );
+    assert!(matches!(
+        method("codex", &real, &machine.roots()),
+        Method::Npm { .. }
+    ));
+    std::fs::create_dir_all(machine.roots().home).unwrap();
+    let case = Case::new(machine, entry("codex", Some(codex)), None);
+    for _ in 0..3 {
+        let versions = case.versions(false);
+        assert_eq!(
+            versions
+                .needs
+                .as_ref()
+                .and_then(|needs| needs.program.as_deref()),
+            Some("ca-version-runtime")
+        );
+        assert_eq!(versions.installed, None);
+    }
+    assert!(
+        !asked.exists(),
+        "a harness that still needs its program is never run for its version"
+    );
+    case.machine.program("setup/bin/ca-version-runtime", 0o755);
+    let versions = case.versions(false);
+    assert_eq!(versions.needs, None);
+    assert_eq!(versions.installed.as_deref(), Some("0.167.1"));
+    assert_eq!(
+        std::fs::read_to_string(&asked).unwrap().lines().count(),
+        1,
+        "the read that finds the program asks once"
+    );
+}
+
+/// security-audit run-1 (version read): a harness file the tool resolver refuses as one
+/// agents can write, such as a codex planted in a project's `node_modules/.bin`, is never run
+/// for its version: the read starts nothing and names the resolver's refusal, as a launch
+/// refuses the file. Without the project marker the same file is read once, so the resolver
+/// decides the outcome, not a failed start.
+#[test]
+fn a_harness_the_resolver_refuses_as_agent_writable_is_never_asked_its_version() {
+    for project in [true, false] {
+        let machine = Machine::new();
+        std::fs::create_dir_all(machine.roots().home).unwrap();
+        let work = machine.root.path().join("proj");
+        if project {
+            std::fs::create_dir_all(work.join(".crazyagent")).unwrap();
+        }
+        let ran = machine.root.path().join("ran");
+        let real = work.join("node_modules/@openai/codex/bin/codex.js");
+        executable(
+            &real,
+            &format!(
+                "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+                ran.display()
+            ),
+        );
+        let link = work.join("node_modules/.bin/codex");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(matches!(
+            method("codex", &real, &machine.roots()),
+            Method::Npm { .. }
+        ));
+        let resolved = crate::tools::resolve_entry(&link, &machine.roots().places);
+        let case = Case::new(machine, entry("codex", Some(link)), None);
+        let versions = case.versions(false);
+        if project {
+            let refused = resolved.unwrap_err();
+            assert_eq!(refused.reason, crate::tools::Reason::Refused);
+            assert_eq!(
+                refused.refused.as_ref().map(|refused| refused.why.clone()),
+                Some(crate::tools::Refusal::AgentsCanWrite)
+            );
+            assert_eq!(versions.installed, None);
+            assert_eq!(
+                versions.needs.as_ref().map(|needs| needs.line.clone()),
+                Some(refused.line())
+            );
+            assert!(!ran.exists(), "a refused harness file is never run");
+            let listed = crate::harnesses::with_needs(
+                vec![entry("codex", Some(case.entry.executable.clone().unwrap()))],
+                &case.machine.roots().places,
+            );
+            assert_eq!(
+                listed[0].status,
+                crate::harnesses::HarnessStatus::CantRun {
+                    reason: refused.line()
+                }
+            );
+        } else {
+            assert!(resolved.is_ok());
+            assert_eq!(versions.needs, None);
+            assert_eq!(versions.installed.as_deref(), Some("0.167.1"));
+            assert_eq!(std::fs::read_to_string(&ran).unwrap().lines().count(), 1);
+        }
+    }
+}
+
+/// security-audit vid 1, the sign-in shape: an agent-written link in a project folder that
+/// leads to the owner's npm-built Codex, with a `node` planted beside the link, is never run
+/// for its version. The resolver refuses the link as one agents can write before it reads
+/// the first line, so neither the Codex nor the planted node starts and the row names that
+/// refusal. Without the project marker the same link only lacks a vetted node.
+#[test]
+fn an_agent_written_link_to_an_owner_harness_never_starts_a_node_planted_beside_it() {
+    let machine = Machine::new();
+    std::fs::create_dir_all(machine.roots().home).unwrap();
+    let work = machine.root.path().join("proj");
+    let marker = work.join(".crazyagent");
+    std::fs::create_dir_all(&marker).unwrap();
+    let ran = machine.root.path().join("ran");
+    let real = machine
+        .root
+        .path()
+        .join("node/lib/node_modules/@openai/codex/bin/codex.js");
+    executable(&real, "#!/usr/bin/env node\n");
+    let link = work.join("node_modules/.bin/codex");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    executable(
+        &work.join("node_modules/.bin/node"),
+        &format!(
+            "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+            ran.display()
+        ),
+    );
+    let refused = crate::tools::resolve_entry(&link, &machine.roots().places).unwrap_err();
+    assert_eq!(refused.reason, crate::tools::Reason::Refused);
+    assert_eq!(
+        refused.refused.as_ref().map(|refused| refused.why.clone()),
+        Some(crate::tools::Refusal::AgentsCanWrite)
+    );
+    std::fs::remove_dir(&marker).unwrap();
+    let bare = crate::tools::resolve_entry(&link, &machine.roots().places).unwrap_err();
+    assert_eq!(bare.reason, crate::tools::Reason::NeedsInterpreter);
+    assert_eq!(bare.needs.as_deref(), Some("node"));
+    std::fs::create_dir_all(&marker).unwrap();
+    let case = Case::new(machine, entry("codex", Some(link)), None);
+    let versions = case.versions(false);
+    assert_eq!(versions.installed, None);
+    assert_eq!(
+        versions.needs.as_ref().map(|needs| needs.line.clone()),
+        Some(refused.line())
+    );
+    assert!(
+        !ran.exists(),
+        "a node planted beside a refused link is never run"
+    );
+}
+
+/// security-audit vid 1 (NEXT-02:50 step 1): a harness file the resolver refuses as one
+/// another user can change is never run for its version, and what it needs names that
+/// refusal.
+#[test]
+fn a_harness_the_resolver_refuses_as_changeable_is_never_asked_its_version() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    std::fs::create_dir_all(&roots.home).unwrap();
+    let ran = machine.root.path().join("ran");
+    let open = machine.root.path().join("open/codex");
+    executable(
+        &open,
+        &format!(
+            "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+            ran.display()
+        ),
+    );
+    let folder = open.parent().unwrap();
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let refused = crate::tools::resolve_entry(&open, &roots.places).unwrap_err();
+    assert!(matches!(
+        refused.refused.as_ref().map(|refused| &refused.why),
+        Some(crate::tools::Refusal::OthersCanChange(_))
+    ));
+    let needs = super::state::needs(&open, &roots.places);
+    assert_eq!(needs.map(|needs| needs.line), Some(refused.line()));
+    let version = super::state::version_if_runs(&open, &roots.home, &roots.places);
+    assert_eq!(version, None);
+    assert!(!ran.exists(), "a refused harness file is never run");
+}
+
+/// A folder for a row's owner entry outside every temp folder and every folder agents can
+/// write: in `~/Library/Caches`, since this user's `getconf` cache folder lies in
+/// `/private/var/folders`, a temp folder, and the checkout and its build sit below a project
+/// folder. A HOME without `Library/Caches`, as the gate's own HOME is, gets it private, as
+/// macOS makes it for every user. A HOME inside a project, below a `.crazyagent` folder,
+/// leaves no such folder, so the rows stop here naming it rather than on a refusal they did
+/// not test. Input: the folder name's prefix. Output: the folder, removed when dropped.
+#[cfg(target_os = "macos")]
+fn outside_temp(prefix: &str) -> tempfile::TempDir {
+    use std::os::unix::fs::DirBuilderExt;
+    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
+    let caches = home.join("Library").join("Caches");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&caches)
+        .unwrap();
+    let caches = caches.canonicalize().unwrap();
+    let folder = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(caches)
+        .unwrap();
+    let place = folder.path().canonicalize().unwrap();
+    assert!(
+        !crate::tools::temp_roots()
+            .iter()
+            .any(|temp| place.starts_with(temp)),
+        "HOME lies in a temp folder: {}",
+        place.display()
+    );
+    assert!(
+        !crate::tools::Places::from_environment(None).agent_writable(&place),
+        "HOME lies where agents can write, such as below a project's .crazyagent folder: {}",
+        place.display()
+    );
+    folder
+}
+
+/// security-audit vid 1 (NEXT-02:50 step 1), on macOS: an owner entry outside every temp
+/// folder that leads to a harness file in the temp folder is refused on the engine's places
+/// as one in a temp folder, is never run for its version, and what it needs names that
+/// refusal.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_harness_entry_that_leads_into_temp_is_never_asked_its_version_on_macos() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    std::fs::create_dir_all(&roots.home).unwrap();
+    let at = machine.root.path();
+    let ran = at.join("ran");
+    let real = at.join("temp/codex");
+    executable(
+        &real,
+        &format!(
+            "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+            ran.display()
+        ),
+    );
+    let outside = outside_temp("vid1-temp-");
+    let link = outside.path().join("bin/codex");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let engine = crate::tools::Places::from_environment(Some(&at.join("engine")));
+    let refused = crate::tools::resolve_entry(&link, &engine).unwrap_err();
+    assert_eq!(
+        refused.refused.as_ref().map(|refused| refused.why.clone()),
+        Some(crate::tools::Refusal::InTemp),
+        "an owner link into the temp folder is refused on the engine's places"
+    );
+    let needs = super::state::needs(&link, &engine);
+    assert_eq!(needs.map(|needs| needs.line), Some(refused.line()));
+    let version = super::state::version_if_runs(&link, &roots.home, &engine);
+    assert_eq!(version, None);
+    assert!(!ran.exists(), "a refused harness file is never run");
+}
+
+/// security-audit vid 1, leader 03:14 (a): a version read runs the real file the resolver
+/// checked, not the entry's chain a second time. An owner entry whose chain passes through a
+/// link in a project agents can write, which the resolver does not judge, has that link moved
+/// to a planted Codex between the check and the run: the owner's file still answers, and the
+/// planted one never starts.
+#[test]
+fn a_version_read_runs_the_file_it_checked_when_a_middle_link_moves_before_the_run() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    std::fs::create_dir_all(&roots.home).unwrap();
+    let at = machine.root.path();
+    let work = at.join("proj");
+    std::fs::create_dir_all(work.join(".crazyagent")).unwrap();
+    let text = |ran: &Path, version: &str| {
+        format!(
+            "#!/bin/sh\necho ran >> {}\necho 'codex-cli {version}'\n",
+            ran.display()
+        )
+    };
+    let (owner_ran, planted_ran) = (at.join("owner-ran"), at.join("planted-ran"));
+    let owned = at.join("owner/lib/node_modules/@openai/codex/bin/codex.js");
+    let planted = work.join("tools/planted/codex");
+    let middle = work.join("tools/codex");
+    let link = at.join("bin/codex");
+    executable(&owned, &text(&owner_ran, "0.167.1"));
+    executable(&planted, &text(&planted_ran, "6.6.6"));
+    std::os::unix::fs::symlink(&owned, &middle).unwrap();
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&middle, &link).unwrap();
+    assert!(matches!(
+        method("codex", &owned, &roots),
+        Method::Npm { .. }
+    ));
+    assert!(crate::tools::resolve_entry(&link, &roots.places).is_ok());
+    let (moved, to) = (middle.clone(), planted.clone());
+    let step: super::state::Step = Box::new(move || {
+        std::fs::remove_file(&moved).unwrap();
+        std::os::unix::fs::symlink(&to, &moved).unwrap();
+    });
+    super::state::BETWEEN_VETTED_AND_RUN
+        .lock()
+        .unwrap()
+        .push((link.clone(), step));
+    let case = Case::new(machine, entry("codex", Some(link)), None);
+    let versions = case.versions(false);
+    let moved_to = std::fs::read_link(&middle).unwrap();
+    assert_eq!(moved_to, planted, "the step ran");
+    assert_eq!(versions.installed.as_deref(), Some("0.167.1"));
+    assert!(
+        !planted_ran.exists(),
+        "a link moved after the check never reaches the run"
+    );
+    assert!(owner_ran.exists(), "the file the resolver checked answers");
+}
+
+/// security-audit vid 1 r2 (rv-secreview, leader 03:29): an update command is checked when
+/// it is built and run later, so the check must bind what runs. A standalone Codex whose
+/// owner entry leads through a link in a project agents can write, which the resolver does
+/// not judge, has that link moved to a planted file after the self-update command passed its
+/// checks: the planted file never runs.
+#[test]
+fn a_self_update_never_runs_a_file_a_middle_link_moved_to_after_its_check() {
+    let machine = Machine::new();
+    let roots = machine.roots();
+    std::fs::create_dir_all(&roots.home).unwrap();
+    let at = machine.root.path();
+    let work = at.join("proj");
+    std::fs::create_dir_all(work.join(".crazyagent")).unwrap();
+    let marks = |ran: &Path| format!("#!/bin/sh\necho ran >> {}\n", ran.display());
+    let planted_ran = at.join("planted-ran");
+    let real = at.join("home/.codex/packages/standalone/0.167.1/codex");
+    let planted = work.join("tools/planted/codex");
+    let middle = work.join("tools/codex");
+    let entry = at.join("home/.local/bin/codex");
+    executable(&real, &marks(&at.join("owner-ran")));
+    executable(&planted, &marks(&planted_ran));
+    std::os::unix::fs::symlink(&real, &middle).unwrap();
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&middle, &entry).unwrap();
+    assert_eq!(method("codex", &real, &roots), Method::SelfUpdate);
+    if let Ok(fixed) = update_command("codex", &entry, &real, &roots) {
+        std::fs::remove_file(&middle).unwrap();
+        std::os::unix::fs::symlink(&planted, &middle).unwrap();
+        let _ = run(&fixed, &roots.home, CHECK_TIME);
+    }
+    assert!(
+        !planted_ran.exists(),
+        "a link moved after the check never reaches the update run"
+    );
+}
+
+/// security-audit vid 1 r2, leader 11:25 (3): a self-update runs the PATH entry, so its
+/// command is refused when a link on the entry's way to the real file sits where agents can
+/// write it or another user can change it, and no such link is left to move between the check
+/// and the run. A middle link in a folder only this user owns passes and still runs the entry.
+#[test]
+fn a_self_update_is_refused_when_a_middle_link_sits_where_agents_or_others_can_move_it() {
+    for (place, refused) in [
+        ("proj/tools", true),
+        ("open/tools", true),
+        ("owned/tools", false),
+    ] {
+        let machine = Machine::new();
+        let roots = machine.roots();
+        std::fs::create_dir_all(&roots.home).unwrap();
+        let at = machine.root.path();
+        std::fs::create_dir_all(at.join("proj/.crazyagent")).unwrap();
+        let open = at.join("open");
+        std::fs::create_dir_all(open.join("tools")).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let real = at.join("home/.codex/packages/standalone/0.167.1/codex");
+        let middle = at.join(place).join("codex");
+        let entry = at.join("home/.local/bin/codex");
+        executable(&real, "#!/bin/sh\n");
+        std::fs::create_dir_all(middle.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&real, &middle).unwrap();
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&middle, &entry).unwrap();
+        assert_eq!(method("codex", &real, &roots), Method::SelfUpdate);
+        assert!(
+            crate::tools::resolve_entry(&entry, &roots.places).is_ok(),
+            "{place}"
+        );
+        let command = update_command("codex", &entry, &real, &roots);
+        if refused {
+            assert_eq!(command.unwrap_err(), TOOL_UNSAFE, "{place}");
+        } else {
+            assert_eq!(command.unwrap().program, entry, "{place}");
+        }
+    }
+}
+
+/// security-audit vid 1 r2 (3), on macOS, with the program's own place outside every temp
+/// folder: on the engine's places a command is refused when a link on its program's way to
+/// the real file lies in the temp folder while the program's own place does not, since agents
+/// granted the owner's temp folder can move that link; the chain without it passes.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_command_whose_link_chain_passes_through_the_temp_folder_is_refused_on_macos() {
+    let machine = Machine::new();
+    let at = machine.root.path();
+    let outside = outside_temp("vid1-hop-");
+    let real = outside.path().join("real/codex");
+    executable(&real, "#!/bin/sh\n");
+    let middle = at.join("tools/codex");
+    std::fs::create_dir_all(middle.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &middle).unwrap();
+    let through = outside.path().join("bin/codex");
+    let direct = outside.path().join("direct/codex");
+    for (link, to) in [(&through, &middle), (&direct, &real)] {
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(to, link).unwrap();
+    }
+    let engine = crate::tools::Places::from_environment(Some(&at.join("engine")));
+    let command = |program: &Path| Fixed {
+        program: program.to_path_buf(),
+        args: vec!["--version"],
+        search: vec![program.parent().unwrap().to_path_buf()],
+        prefix: None,
+    };
+    assert!(crate::tools::resolve_entry(&through, &engine).is_ok());
+    assert_eq!(
+        checked(command(&through), &engine).unwrap_err(),
+        TOOL_UNSAFE
+    );
+    assert_eq!(checked(command(&direct), &engine).unwrap().program, direct);
+}
+
+fn listed(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|id| (*id).to_owned()).collect()
+}
+
+#[test]
+fn a_list_is_queued_only_when_each_id_is_a_catalog_harness_once_and_never_rcli() {
+    let updates = Updates::new();
+    let db = db();
+    for refused in [
+        listed(&[]),
+        listed(&["no-such-harness"]),
+        listed(&["rcli"]),
+        listed(&["codex", "codex"]),
+        listed(&["claude", "claude-code"]),
+        vec!["codex".to_owned(); crate::harnesses::specs().len() + 1],
+    ] {
+        assert_eq!(
+            updates.queue(&db, &refused).unwrap_err(),
+            "harness_install_list_invalid",
+            "{refused:?}"
+        );
+        assert!(updates.queued().is_empty());
+    }
+    assert_eq!(
+        updates.queue(&db, &listed(&["claude", "codex"])).unwrap(),
+        vec!["claude-code", "codex"]
+    );
+    assert_eq!(updates.queued(), listed(&["claude-code", "codex"]));
+    assert_eq!(
+        updates.queue(&db, &listed(&["aider"])).unwrap_err(),
+        "harness_update_busy"
+    );
+    let off = self::db();
+    set_settings(
+        &off,
+        UpdateSettings {
+            install: InstallFromApp::Off,
+            ..UpdateSettings::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        Updates::new().queue(&off, &listed(&["codex"])).unwrap_err(),
+        "harness_install_off"
+    );
+}
+
+#[test]
+fn a_queued_list_installs_in_order_one_at_a_time_and_a_failure_does_not_stop_the_rest() {
+    let case = slow_install_case("aider");
+    let ids = listed(&["aider", "goose", "codex"]);
+    assert_eq!(
+        case.updates.queue(&case.db, &ids).unwrap(),
+        vec!["aider", "goose", "codex"]
+    );
+    let seen: Arc<Mutex<Vec<(&'static str, bool)>>> = Arc::default();
+    let drain = {
+        let (updates, seen) = (case.updates.clone(), seen.clone());
+        let (roots, bin) = (case.machine.roots(), case.bin());
+        std::thread::spawn(move || {
+            let db = db();
+            let worker = updates.clone();
+            updates.drain(
+                move |id| {
+                    seen.lock().unwrap().push((id, worker.idle()));
+                    assert_eq!(worker.queued().first().map(String::as_str), Some(id));
+                    match id {
+                        "aider" => {
+                            let bin = bin.clone();
+                            worker.install(&db, &entry(id, None), &roots, move || {
+                                found_in(&bin, "aider")
+                            })
+                        }
+                        "goose" => Err(NO_INSTALLER),
+                        _ => Ok(()),
+                    }
+                },
+                WAIT_STEP,
+                WAIT_STEP * u32::try_from(WAIT_STEPS).unwrap(),
+            );
+        })
+    };
+    let running = (0..WAIT_STEPS).any(|_| {
+        std::thread::sleep(WAIT_STEP);
+        !case.updates.idle()
+    });
+    assert!(running);
+    let rest = listed(&["goose", "codex"]);
+    let waiting = (0..WAIT_STEPS).any(|_| {
+        let now = case.updates.queued();
+        assert!(now.ends_with(&rest), "{now:?}");
+        now == rest || {
+            std::thread::sleep(WAIT_STEP);
+            false
+        }
+    });
+    assert!(waiting, "aider leaves the queue once its install started");
+    case.finish();
+    drain.join().unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![("aider", true), ("goose", true), ("codex", true)]
+    );
+    assert!(case.updates.queued().is_empty());
+    assert!(case.versions(false).last.unwrap().ok);
+    let goose = case.updates.versions(
+        &case.db,
+        &entry("goose", None),
+        &case.machine.roots(),
+        false,
+    );
+    assert_eq!(goose.last.unwrap().code.as_deref(), Some(NO_INSTALLER));
+}
+
+#[test]
+fn a_second_npm_install_keeps_the_prefix_node_on_the_real_node_when_the_resolver_finds_the_link_first()
+ {
+    let machine = Machine::new();
+    let root = machine.root.path();
+    let prefix = crate::setup::harness_prefix(root);
+    let node = machine.program("home/.nvm/versions/node/v22.11.0/bin/node", 0o755);
+    machine.program("home/.nvm/versions/node/v22.11.0/bin/npm", 0o755);
+    let places = crate::tools::Places::new(
+        vec![prefix.join("bin"), node.parent().unwrap().to_path_buf()],
+        None,
+    );
+    for round in ["first install", "second install"] {
+        let npm = super::state::engine_npm_at(root, &places).unwrap();
+        crate::setup::node::make_prefix(&npm.prefix, &npm.node).unwrap();
+        assert_eq!(
+            std::fs::read_link(prefix.join("bin/node")).unwrap(),
+            node,
+            "{round} links the real node"
+        );
+    }
+    let relative = prefix.strip_prefix(root).unwrap().to_str().unwrap();
+    let script = machine.program(
+        &format!("{relative}/lib/node_modules/@openai/codex/bin/codex.js"),
+        0o755,
+    );
+    assert_eq!(crate::harnesses::node_prefix(&script), Some(prefix));
+}
+
+#[test]
+fn the_prefix_node_follows_a_homebrew_upgrade_that_removes_the_old_keg() {
+    let machine = Machine::new();
+    let root = machine.root.path();
+    let prefix = crate::setup::harness_prefix(root);
+    let brew_bin = root.join("brew/bin");
+    let old = machine.program("brew/Cellar/node/26.0.0/bin/node", 0o755);
+    machine.program("brew/bin/npm", 0o755);
+    std::os::unix::fs::symlink(&old, brew_bin.join("node")).unwrap();
+    let places = crate::tools::Places::new(vec![brew_bin.clone()], None);
+    let npm = super::state::engine_npm_at(root, &places).unwrap();
+    crate::setup::node::make_prefix(&npm.prefix, &npm.node).unwrap();
+    let relative = prefix.strip_prefix(root).unwrap().to_str().unwrap();
+    let script = machine.program(
+        &format!("{relative}/lib/node_modules/@openai/codex/bin/codex.js"),
+        0o755,
+    );
+    let new = machine.program("brew/Cellar/node/26.1.0/bin/node", 0o755);
+    std::fs::remove_file(brew_bin.join("node")).unwrap();
+    std::os::unix::fs::symlink(&new, brew_bin.join("node")).unwrap();
+    std::fs::remove_dir_all(root.join("brew/Cellar/node/26.0.0")).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(prefix.join("bin/node")).ok(),
+        new.canonicalize().ok(),
+        "the prefix node follows brew's own link to the new keg"
+    );
+    assert_eq!(crate::harnesses::node_prefix(&script), Some(prefix.clone()));
+    let [project, home, tmp] = ["project", "agent-home", "agent-tmp"].map(|name| {
+        let folder = root.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    });
+    let sandbox = crate::sandbox::ProjectSandbox::new(
+        &project,
+        &home,
+        &tmp,
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_node_for(&script)
+    .unwrap();
+    let package = prefix.join("lib/node_modules/@openai/codex");
+    assert!(
+        sandbox
+            .tool_roots()
+            .iter()
+            .chain(sandbox.read_roots())
+            .any(|granted| *granted == package),
+        "a sandboxed agent can still read the harness package"
+    );
+}
+
+/// DEC-166: an installed version is below a sign-in minimum only when it reads lower number
+/// by number, a missing number counting as zero; a version that is not plain is unknown and
+/// never below.
+#[test]
+fn an_installed_version_is_below_a_sign_in_minimum_only_when_it_reads_lower() {
+    assert!(below("2.1.267", "2.1.268"));
+    assert!(below("2.1.41", "2.1.268"));
+    assert!(below("2.1", "2.1.268"));
+    assert!(below("0.55.9", "0.56.0"));
+    assert!(!below("2.1.268", "2.1.268"));
+    assert!(!below("2.1.325", "2.1.268"));
+    assert!(!below("2.10.0", "2.9.9"));
+    assert!(!below("0.56", "0.56.0"));
+    for unknown in ["", "garbage", "2.1.x", "v2.1.0", "2"] {
+        assert!(!below(unknown, "2.1.268"), "{unknown:?}");
+    }
+}
+
+/// DEC-166: a sign-in is refused as too old only for a harness that has a minimum and a
+/// known installed version below it; an unknown version runs as before.
+#[test]
+fn a_sign_in_is_too_old_only_below_the_harness_minimum_with_a_known_version() {
+    assert!(crate::harnesses::sign_in_too_old("claude", Some("2.1.200")));
+    assert!(crate::harnesses::sign_in_too_old(
+        "claude-code",
+        Some("2.1.40")
+    ));
+    assert!(!crate::harnesses::sign_in_too_old(
+        "claude",
+        Some("2.1.268")
+    ));
+    assert!(!crate::harnesses::sign_in_too_old(
+        "claude-code",
+        Some("2.1.325")
+    ));
+    assert!(!crate::harnesses::sign_in_too_old("claude", None));
+    assert!(crate::harnesses::sign_in_too_old("codex", Some("0.55.0")));
+    assert!(!crate::harnesses::sign_in_too_old(
+        "codex",
+        Some(crate::adapters::codex::SIGN_IN_MIN)
+    ));
+    assert!(!crate::harnesses::sign_in_too_old("codex", None));
+    assert!(!crate::harnesses::sign_in_too_old(
+        "gemini-cli",
+        Some("0.0.1")
+    ));
+    assert!(!crate::harnesses::sign_in_too_old(
+        "not-a-harness",
+        Some("0.0.1")
+    ));
+}
+
+/// DEC-166: the versions row of a harness that signs in names its sign-in minimum, installed
+/// or not, and the row of a harness with no sign-in names none.
+#[test]
+fn a_versions_row_names_the_sign_in_minimum_of_a_harness_that_signs_in() {
+    let row = |id: &str| Case::new(Machine::new(), entry(id, None), None).versions(false);
+    assert_eq!(row("claude-code").sign_in_min.as_deref(), Some("2.1.268"));
+    assert_eq!(
+        row("codex").sign_in_min.as_deref(),
+        Some(crate::adapters::codex::SIGN_IN_MIN)
+    );
+    assert_eq!(row("gemini-cli").sign_in_min, None);
+    let machine = Machine::new();
+    let claude = machine.program("brew/bin/claude", 0o755);
+    let installed = Case::new(machine, entry("claude-code", Some(claude)), None).versions(false);
+    assert_eq!(installed.sign_in_min.as_deref(), Some("2.1.268"));
+}
+
+/// RV-DS241-59: a check or update program is trusted only as the tool resolver trusts one:
+/// npm from a prefix inside a project, which agents write, or from a prefix under a folder
+/// every user can write, two levels up from npm, is refused before anything runs.
+#[test]
+fn a_check_program_agents_or_other_users_can_change_up_its_path_is_refused() {
+    for prefix in ["proj/node", "open/shared/node"] {
+        let machine = Machine::new();
+        std::fs::create_dir_all(machine.root.path().join("proj/.crazyagent")).unwrap();
+        machine.npm(prefix);
+        let open = machine.root.path().join("open");
+        std::fs::create_dir_all(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let real = machine.program(
+            &format!("{prefix}/lib/node_modules/@openai/codex/bin/codex.js"),
+            0o755,
+        );
+        assert_eq!(
+            check_command("codex", &real, &machine.roots()).map(|fixed| fixed.map(|_| ())),
+            Err(TOOL_UNSAFE),
+            "{prefix}"
+        );
+    }
+}
+
+/// security-audit run-1 (npm prefix, test A): a Check of an npm harness outside the engine's
+/// own prefix never starts a `node` the resolver would not run: npm's `env node` first line
+/// finds the prefix's node first on the child's PATH, and that node leads into a folder every
+/// user can write, so the check is refused, even with a good node elsewhere in the places the
+/// resolver vets npm with, and the prefix's node never runs.
+#[test]
+fn a_check_never_runs_an_npm_prefix_node_others_can_change() {
+    let machine = Machine::new();
+    let home = machine.roots().home;
+    std::fs::create_dir_all(&home).unwrap();
+    let vetted = machine.program("brew/bin/node", 0o755);
+    let real = machine.program("node/lib/node_modules/@openai/codex/bin/codex.js", 0o755);
+    let cli = machine
+        .root
+        .path()
+        .join("node/lib/node_modules/npm/bin/npm-cli.js");
+    executable(&cli, "#!/usr/bin/env node\n");
+    let bin = machine.root.path().join("node/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(&cli, bin.join("npm")).unwrap();
+    let open = machine.root.path().join("open");
+    std::fs::create_dir_all(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    executable(&open.join("node"), "#!/bin/sh\n: > \"$HOME/marker\"\n");
+    std::os::unix::fs::symlink(open.join("node"), bin.join("node")).unwrap();
+    let resolved = crate::tools::resolve_entry(&bin.join("npm"), &machine.roots().places);
+    match resolved.unwrap().kind {
+        crate::tools::Kind::Script { interpreter, .. } => assert_eq!(interpreter.entry, vetted),
+        crate::tools::Kind::Native => panic!("npm is a script"),
+    }
+    match check_command("codex", &real, &machine.roots()) {
+        Ok(Some(fixed)) => {
+            let _ = run(&fixed, &home, CHECK_TIME);
+        }
+        Ok(None) => {}
+        Err(code) => assert_eq!(code, TOOL_UNSAFE),
+    }
+    assert!(
+        !home.join("marker").exists(),
+        "a node others can change never runs"
+    );
+}
+
+/// RV-DS241-62: the Homebrew prefixes the engine trusts for install, check and update are
+/// this platform's own, as the tool resolver's are: Linuxbrew's prefix only on Linux, so a
+/// Mac never stats or runs a brew from the home automount.
+#[test]
+fn the_engine_trusts_only_this_platforms_homebrew_prefixes() {
+    let machine = Machine::new();
+    let roots = Roots::engine(machine.root.path());
+    let linuxbrew = PathBuf::from("/home/linuxbrew/.linuxbrew");
+    assert_eq!(
+        roots.brew_prefixes.contains(&linuxbrew),
+        cfg!(target_os = "linux")
+    );
+    if cfg!(target_os = "macos") {
+        for prefix in ["/opt/homebrew", "/usr/local"] {
+            assert!(
+                roots.brew_prefixes.contains(&PathBuf::from(prefix)),
+                "{prefix}"
+            );
+        }
+    }
+}
+
+/// RV-DS241-59 (Update): an Update of a harness the tool resolver refuses, an npm Codex in a
+/// prefix inside a project, which agents write, never runs that file for its version before
+/// or after the update, nor the prefix's npm.
+#[test]
+fn an_update_of_a_resolver_refused_harness_never_runs_it() {
+    let machine = Machine::new();
+    std::fs::create_dir_all(machine.roots().home).unwrap();
+    std::fs::create_dir_all(machine.root.path().join("proj/.crazyagent")).unwrap();
+    let ran = machine.root.path().join("ran");
+    machine.npm("proj/node");
+    let real = machine
+        .root
+        .path()
+        .join("proj/node/lib/node_modules/@openai/codex/bin/codex.js");
+    executable(
+        &real,
+        &format!(
+            "#!/bin/sh\necho ran >> {}\necho 'codex-cli 0.167.1'\n",
+            ran.display()
+        ),
+    );
+    let case = Case::new(machine, entry("codex", Some(real)), None);
+    let (ended, told) = std::sync::mpsc::channel();
+    let started = case
+        .updates
+        .start(&case.db, &case.entry, &case.machine.roots(), move |ok| {
+            let _ = ended.send(ok);
+        });
+    match started {
+        Ok(()) => {
+            let _ = told.recv_timeout(Duration::from_secs(30));
+        }
+        Err(code) => assert_eq!(code, TOOL_UNSAFE),
+    }
+    assert!(!ran.exists(), "a refused harness file is never run");
+}
+
+/// rv-sec4 r1 addendum F2 (RV-DS241-59 sibling): the usage User-Agent's version read runs a
+/// Claude entry's `--version` only where the tool resolver would run it. An npm entry whose
+/// `env node` first line finds, in the entry's own folder, a node that leads into a folder
+/// every user can write is never asked its version, and that node never runs.
+#[test]
+fn the_user_agent_version_read_never_runs_a_node_others_can_change() {
+    let machine = Machine::new();
+    let entry = machine.root.path().join("claude/bin/claude");
+    executable(&entry, "#!/usr/bin/env node\n");
+    let open = machine.root.path().join("open");
+    std::fs::create_dir_all(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let marker = machine.root.path().join("marker");
+    executable(
+        &open.join("node"),
+        &format!(
+            "#!/bin/sh\n: > '{}'\necho 2.1.300\n",
+            marker.to_str().unwrap()
+        ),
+    );
+    std::os::unix::fs::symlink(open.join("node"), entry.with_file_name("node")).unwrap();
+    assert_eq!(version_under_home(&entry), None);
+    assert!(!marker.exists(), "a node others can change never runs");
 }

@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 pub const OUTPUT_BYTES_MAX: usize = 64 * 1024;
 const POLL: Duration = Duration::from_millis(50);
+const PAUSE_MIN: Duration = Duration::from_millis(1);
 
 /// Runs one program with only the given environment, no input and a time bound, then
 /// stops its whole process group. Inputs: the absolute program, its arguments, the
@@ -32,8 +33,9 @@ pub fn run(
 }
 
 /// Runs one prepared command, such as a sandboxed one, with no input and a time bound, then
-/// stops its whole process group. Inputs: the command and the bound. Output: whether it
-/// exited with success and at most `OUTPUT_BYTES_MAX` bytes of its standard output, or
+/// stops its whole process group. It wakes when the output closes, so a quick program is
+/// not held for a whole poll. Inputs: the command and the bound. Output: whether it exited
+/// with success and at most `OUTPUT_BYTES_MAX` bytes of its standard output, or
 /// `setup_timeout`.
 pub fn run_command(mut command: Command, limit: Duration) -> Result<(bool, Vec<u8>), InstallError> {
     command
@@ -45,6 +47,7 @@ pub fn run_command(mut command: Command, limit: Duration) -> Result<(bool, Vec<u
         crate::spawn_gate::spawn(&mut command).map_err(|_| InstallError("setup_install_failed"))?;
     let pid = child.id();
     let stdout = child.stdout.take();
+    let (finished, read_to_end) = std::sync::mpsc::channel::<()>();
     let reader = std::thread::Builder::new()
         .name("crazyagent-setup-output".into())
         .spawn(move || {
@@ -54,14 +57,30 @@ pub fn run_command(mut command: Command, limit: Duration) -> Result<(bool, Vec<u
                 let _ = limited.read_to_end(&mut kept);
                 let _ = std::io::copy(&mut limited.into_inner(), &mut std::io::sink());
             }
+            let _ = finished.send(());
             kept
         });
     let deadline = Instant::now() + limit;
+    let mut reading = reader.is_ok();
+    let mut pause = PAUSE_MIN;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
-            Ok(None) if Instant::now() >= deadline => break Err(InstallError("setup_timeout")),
-            Ok(None) => std::thread::sleep(POLL),
+            Ok(None) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break Err(InstallError("setup_timeout"));
+                }
+                if reading {
+                    reading = matches!(
+                        read_to_end.recv_timeout(POLL.min(left)),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    );
+                } else {
+                    std::thread::sleep(pause.min(left));
+                    pause = (pause * 2).min(POLL);
+                }
+            }
             Err(_) => break Err(InstallError("setup_install_failed")),
         }
     };

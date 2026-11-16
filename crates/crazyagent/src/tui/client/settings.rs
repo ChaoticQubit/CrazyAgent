@@ -19,9 +19,9 @@ use crate::memory::library::{
 use crate::memory::{KnowledgeStatus, ReviewDecision};
 use crate::plugins::{HookView, Scope, ServerSpec, ServerView, SkillView, ToolView};
 use crate::protocol::CredentialRef;
-use crate::usage::money::MoneySettings;
+use crate::usage::money::MoneyChoice;
 use crate::usage::report::UsageReport;
-use crate::usage::spend::SpendSettings;
+use crate::usage::spend::SpendChoice;
 
 const POOL_JOINS_MAX: usize = 64;
 const SUGGESTION_PROJECTS_MAX: usize = 50;
@@ -40,6 +40,7 @@ pub(in crate::tui) enum SettingsJob {
     Accounts(AccountsRequest),
     AllAccounts,
     Harnesses,
+    HarnessList,
     HarnessVersions {
         id: String,
         look: bool,
@@ -50,6 +51,10 @@ pub(in crate::tui) enum SettingsJob {
     HarnessInstall {
         id: String,
     },
+    HarnessInstallMany {
+        ids: Vec<String>,
+    },
+    HarnessQueued,
     HarnessFind {
         id: String,
     },
@@ -66,8 +71,8 @@ pub(in crate::tui) enum SettingsJob {
     Extras {
         detail: bool,
     },
-    SetMoney(MoneySettings),
-    SetSpend(SpendSettings),
+    SetMoneyOne(MoneyChoice),
+    SetSpendOne(SpendChoice),
     Spend {
         account: CredentialRef,
         confirmed: bool,
@@ -159,8 +164,10 @@ pub(in crate::tui) enum SettingsJob {
 }
 
 /// One change to skills and MCP servers, from Settings or from a project's
-/// settings. Switch turns an every-project item on or off for one project.
-/// Input: built by the plugins pages. Output: one plugins call on the engine.
+/// settings. Switch turns an every-project item on or off for one project;
+/// Switches does that for each of a plugin's hooks in turn, stopping at the
+/// first refusal. Input: built by the plugins pages. Output: one plugins call on
+/// the engine per item.
 pub(in crate::tui) enum PluginChange {
     AddSkill {
         scope: Scope,
@@ -172,6 +179,10 @@ pub(in crate::tui) enum PluginChange {
     },
     SetHook {
         id: String,
+        enabled: bool,
+    },
+    SetHooks {
+        ids: Vec<String>,
         enabled: bool,
     },
     SetSkill {
@@ -225,6 +236,11 @@ pub(in crate::tui) enum PluginChange {
         on: bool,
         version: u64,
     },
+    Switches {
+        project: ProjectId,
+        items: Vec<(String, u64)>,
+        on: bool,
+    },
 }
 
 impl std::fmt::Debug for SettingsJob {
@@ -233,17 +249,20 @@ impl std::fmt::Debug for SettingsJob {
             Self::Accounts(_) => "Accounts",
             Self::AllAccounts => "AllAccounts",
             Self::Harnesses => "Harnesses",
+            Self::HarnessList => "HarnessList",
             Self::HarnessVersions { .. } => "HarnessVersions",
             Self::HarnessUpdate { .. } => "HarnessUpdate",
             Self::HarnessInstall { .. } => "HarnessInstall",
+            Self::HarnessInstallMany { .. } => "HarnessInstallMany",
+            Self::HarnessQueued => "HarnessQueued",
             Self::HarnessFind { .. } => "HarnessFind",
             Self::HarnessChoosePath { .. } => "HarnessChoosePath",
             Self::HarnessUpdateSettings => "HarnessUpdateSettings",
             Self::Usage { .. } => "Usage",
             Self::RefreshUsage => "RefreshUsage",
             Self::Extras { .. } => "Extras",
-            Self::SetMoney(_) => "SetMoney",
-            Self::SetSpend(_) => "SetSpend",
+            Self::SetMoneyOne(_) => "SetMoneyOne",
+            Self::SetSpendOne(_) => "SetSpendOne",
             Self::Spend { .. } => "Spend",
             Self::DecideRecount(_) => "DecideRecount",
             Self::SignIn(_) => "SignIn",
@@ -365,6 +384,8 @@ pub(in crate::tui) enum SettingsEvent {
     HarnessVersions(String, Result<HarnessVersions, String>),
     HarnessUpdated(String, Result<(), String>),
     HarnessInstalled(String, Result<(), String>),
+    HarnessesQueued(Vec<String>, Result<(), String>),
+    HarnessQueue(Result<Vec<String>, String>),
     HarnessFound(String, Result<Found, String>),
     HarnessChosen(String, Option<String>, Result<Found, String>),
     HarnessUpdateSettings(Result<UpdateSettings, String>),
@@ -423,12 +444,16 @@ impl SettingsEvent {
         match job {
             SettingsJob::Accounts(_) => Self::Accounts(Err(problem)),
             SettingsJob::AllAccounts => Self::AllAccounts(Err(problem)),
-            SettingsJob::Harnesses => Self::Harnesses(Err(problem)),
+            SettingsJob::Harnesses | SettingsJob::HarnessList => Self::Harnesses(Err(problem)),
             SettingsJob::HarnessVersions { id, .. } => {
                 Self::HarnessVersions(id.clone(), Err(problem))
             }
             SettingsJob::HarnessUpdate { id } => Self::HarnessUpdated(id.clone(), Err(problem)),
             SettingsJob::HarnessInstall { id } => Self::HarnessInstalled(id.clone(), Err(problem)),
+            SettingsJob::HarnessInstallMany { ids } => {
+                Self::HarnessesQueued(ids.clone(), Err(problem))
+            }
+            SettingsJob::HarnessQueued => Self::HarnessQueue(Err(problem)),
             SettingsJob::HarnessFind { id } => Self::HarnessFound(id.clone(), Err(problem)),
             SettingsJob::HarnessChoosePath { id, path } => {
                 Self::HarnessChosen(id.clone(), path.clone(), Err(problem))
@@ -437,8 +462,8 @@ impl SettingsEvent {
             SettingsJob::Usage { .. } => Self::Usage(Err(problem)),
             SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
             SettingsJob::Extras { .. } => Self::Extras(Err(problem)),
-            SettingsJob::SetMoney(_) => Self::MoneySet(Err(problem)),
-            SettingsJob::SetSpend(_) => Self::SpendSet(Err(problem)),
+            SettingsJob::SetMoneyOne(_) => Self::MoneySet(Err(problem)),
+            SettingsJob::SetSpendOne(_) => Self::SpendSet(Err(problem)),
             SettingsJob::Spend { .. } => Self::Spent(Err(problem)),
             SettingsJob::DecideRecount(_) => Self::RecountDecided(Err(problem)),
             SettingsJob::SignIn(_) => Self::SignIn(Err(problem)),
@@ -595,6 +620,15 @@ impl NativeOwner {
                     .map_err(|error| problem(&error, lost)),
                 Err(error) => Err(error),
             }),
+            SettingsJob::HarnessList => {
+                SettingsEvent::Harnesses(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .harness_catalog(false)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
             SettingsJob::HarnessVersions { id, look } => {
                 let result = match self.settings_controller() {
                     Ok(controller) => controller
@@ -624,6 +658,25 @@ impl NativeOwner {
                     Err(error) => Err(error),
                 };
                 SettingsEvent::HarnessInstalled(id, result)
+            }
+            SettingsJob::HarnessInstallMany { ids } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .harness_install_many(&ids)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::HarnessesQueued(ids, result)
+            }
+            SettingsJob::HarnessQueued => {
+                SettingsEvent::HarnessQueue(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .harness_queued()
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
             }
             SettingsJob::HarnessFind { id } => {
                 let result = match self.settings_controller() {
@@ -683,19 +736,19 @@ impl NativeOwner {
                     Err(error) => Err(error),
                 })
             }
-            SettingsJob::SetMoney(settings) => {
+            SettingsJob::SetMoneyOne(choice) => {
                 SettingsEvent::MoneySet(match self.settings_controller() {
                     Ok(controller) => controller
-                        .usage_set_money(settings)
+                        .usage_set_money_one(choice)
                         .await
                         .map_err(|error| problem(&error, lost)),
                     Err(error) => Err(error),
                 })
             }
-            SettingsJob::SetSpend(settings) => {
+            SettingsJob::SetSpendOne(choice) => {
                 SettingsEvent::SpendSet(match self.settings_controller() {
                     Ok(controller) => controller
-                        .usage_set_spend(settings)
+                        .usage_set_spend_one(choice)
                         .await
                         .map_err(|error| problem(&error, lost)),
                     Err(error) => Err(error),
@@ -986,6 +1039,17 @@ impl NativeOwner {
             PluginChange::SetHook { id, enabled } => {
                 controller.set_hook_enabled(id, enabled).await.map(|_| None)
             }
+            PluginChange::SetHooks { ids, enabled } => {
+                assert!(!ids.is_empty());
+                let mut done = Ok(None);
+                for id in ids {
+                    done = controller.set_hook_enabled(id, enabled).await.map(|_| None);
+                    if done.is_err() {
+                        break;
+                    }
+                }
+                done
+            }
             PluginChange::SetSkill {
                 id,
                 enabled,
@@ -1041,6 +1105,20 @@ impl NativeOwner {
                 .switch_plugin(project, id, on, version)
                 .await
                 .map(|()| None),
+            PluginChange::Switches { project, items, on } => {
+                assert!(!items.is_empty());
+                let mut done = Ok(None);
+                for (id, version) in items {
+                    done = controller
+                        .switch_plugin(project.clone(), id, on, version)
+                        .await
+                        .map(|()| None);
+                    if done.is_err() {
+                        break;
+                    }
+                }
+                done
+            }
         };
         done.map_err(|error| problem(&error, lost))
     }

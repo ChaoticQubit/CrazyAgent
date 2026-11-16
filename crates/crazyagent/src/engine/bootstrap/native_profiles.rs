@@ -26,7 +26,7 @@ pub(crate) use configured_rcli::ConfiguredRcliProfileMetadata;
 use configured_rcli::lock;
 use staging::{ROOT_STAGING, STAGING, Staging, step};
 
-const ROOT: &str = "native-profiles";
+const ROOT: &str = super::NATIVE_PROFILES_FOLDER;
 pub(crate) use retire::{generated_home_needs_key, remove_generated_home, remove_sign_in};
 
 const MANIFEST: &str = "identity.json";

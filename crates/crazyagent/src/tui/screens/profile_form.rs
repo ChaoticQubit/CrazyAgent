@@ -1,6 +1,6 @@
 use crate::owner_profile::{
     AnswerDetail, BIO_BYTES_MAX, Initiative, NAME_BYTES_MAX, OwnerProfile, ROLE_BYTES_MAX,
-    WorkingStyle, plain_problem,
+    WorkingStyle, plain_problem, stack_item_problem,
 };
 use crate::tui::ctx::Ctx;
 use crate::tui::keys::{Key, ShiftArrows, ShiftEnter};
@@ -260,6 +260,15 @@ impl ProfileForm {
         self.check(Slot::Name);
         if self.name.error.is_some() {
             return Err(Slot::Name);
+        }
+        if let Some(sentence) = self
+            .stack_items()
+            .iter()
+            .find_map(|item| stack_item_problem(item))
+        {
+            self.stack.error = Some(sentence);
+            self.focus = Some(Slot::Stack);
+            return Err(Slot::Stack);
         }
         let profile = OwnerProfile {
             name: self.name.value().trim().to_owned(),
@@ -675,7 +684,9 @@ mod tests {
         assert_eq!(form.profile(), Err(Slot::Stack));
         assert_eq!(
             form.stack.error.as_deref(),
-            Some("List up to 12 different technologies, each up to 40 characters.")
+            Some(
+                "List up to 12 different technologies, each on one line, up to 40 bytes, with no hidden characters."
+            )
         );
         assert_eq!(form.focus(), Some(Slot::Stack));
     }
@@ -695,5 +706,91 @@ mod tests {
         let mut form = ProfileForm::new(Some(&saved), Some(Colors::Light));
         assert_eq!(form.profile().unwrap(), saved);
         assert_eq!(form.colors(), Some(Colors::Light));
+    }
+
+    #[test]
+    fn a_hidden_character_is_refused_under_its_field_in_the_engine_words() {
+        let hidden = OwnerProfile {
+            name: "Ada\u{200b}".into(),
+            role: String::new(),
+            bio: String::new(),
+            preferred_stack: Vec::new(),
+            working_style: WorkingStyle::default(),
+        };
+        let mut form = ProfileForm::new(Some(&hidden), None);
+        assert_eq!(form.profile(), Err(Slot::Name));
+        assert_eq!(
+            form.name.error.as_deref(),
+            Some(
+                "Enter your name on one line, up to 100 bytes (about 100 English letters or 33 Chinese, Hindi or Thai ones), with no hidden characters."
+            )
+        );
+        let tagged = OwnerProfile {
+            name: "Ada".into(),
+            bio: "Builds tools.\u{e0041}".into(),
+            ..hidden
+        };
+        let mut form = ProfileForm::new(Some(&tagged), None);
+        assert_eq!(form.profile(), Err(Slot::Bio));
+        assert_eq!(
+            form.bio.error.as_deref(),
+            Some(
+                "Keep your bio to 1000 bytes (about 1000 English letters or 333 Chinese, Hindi or Thai ones), with no tabs, special or hidden characters."
+            )
+        );
+    }
+
+    /// RV-DS241-134 r2: a form opened on a stored profile whose name the read left blank
+    /// shows its role, bio and stack, asks for a name, and saves them once one is typed.
+    #[test]
+    fn a_blank_named_stored_profile_prefills_the_form_and_saves_its_fields() {
+        let kept = OwnerProfile {
+            name: String::new(),
+            role: "Founder".into(),
+            bio: "Builds tools.".into(),
+            preferred_stack: vec!["Rust".into(), "Go".into()],
+            working_style: WorkingStyle {
+                detail: AnswerDetail::Detailed,
+                initiative: Initiative::ActFirst,
+            },
+        };
+        let mut form = ProfileForm::new(Some(&kept), None);
+        assert_eq!(form.profile(), Err(Slot::Name));
+        typed(&mut form, "Ada");
+        assert_eq!(
+            form.profile(),
+            Ok(OwnerProfile {
+                name: "Ada".into(),
+                ..kept
+            })
+        );
+    }
+
+    /// RV-DS241-136 r2 (DEC-141): a stack entry the save would refuse is named under the
+    /// field in the desktop chip input's words, its hidden character shown as an escape,
+    /// instead of the general stack sentence; plain entries beside it are kept.
+    #[test]
+    fn a_refused_stack_entry_is_named_under_the_field_in_the_desktop_words() {
+        for (stack, sentence) in [
+            (
+                "Go, Ru\u{200b}st",
+                "Ru\\u200bst has a hidden or special character. Type it again without it.",
+            ),
+            (
+                "Go, 数据库管理系统数据库管理系统",
+                "数据库管理系统数据库管理系统 is over 40 bytes (about 40 English letters or 13 Chinese, Hindi or Thai ones). Shorten it.",
+            ),
+        ] {
+            let mut form = ProfileForm::new(None, None);
+            typed(&mut form, "Mira");
+            form.stack.set(stack);
+            assert_eq!(form.profile(), Err(Slot::Stack), "{stack}");
+            assert_eq!(form.stack.error.as_deref(), Some(sentence));
+            assert_eq!(form.focus(), Some(Slot::Stack));
+        }
+        let mut form = ProfileForm::new(None, None);
+        typed(&mut form, "Mira");
+        form.stack.set("Go, 数据库");
+        assert_eq!(form.profile().unwrap().preferred_stack, ["Go", "数据库"]);
     }
 }

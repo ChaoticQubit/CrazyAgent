@@ -7,7 +7,7 @@ use serde::Serialize;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -70,6 +70,11 @@ const CONFIG_BYTES_MAX: usize = 512 * 1024;
 const CHECK_TIME: Duration = Duration::from_secs(20);
 const DRAIN_TIME: Duration = Duration::from_secs(2);
 const REMOTES_MAX: usize = 64;
+const HOOKS_MAX: usize = 64;
+/// The key prefix git lists an `includeIf "onbranch:..."` entry under, its section in lower
+/// case as git prints it: the file it includes follows HEAD, which the IDE can write between
+/// the check and the run, so git could read a file the check never saw (RV-DS241-144).
+const BRANCH_INCLUDE: &str = "includeif.onbranch:";
 const DEPTH_DIGITS_MAX: usize = 9;
 const POLL: Duration = Duration::from_millis(20);
 /// The most `ide.git` calls one owner server runs at once, across its projects, and for
@@ -443,16 +448,21 @@ pub(super) fn owner_path(value: &OsStr, denied: &[&Path]) -> OsString {
 }
 
 /// Runs one checked IDE git command in the project folder outside the IDE sandbox, after
-/// three checks against the configuration git will use: every file it reads lies outside
-/// the project folder or is the folder's own `.git/config` or `.git/config.worktree`, which
-/// the IDE sandbox cannot write; every remote reached is configured there with a URL; and
-/// every URL it fetches from or pushes to, `insteadOf` applied, uses https, http, ssh or
-/// git. git runs the [`engine_args`], so a pull only fetches, with [`HARDENING`] (no hooks,
-/// fsmonitor, pager, askpass, submodules, replace objects or automatic maintenance), the
-/// [`owner_env`] environment and its own process group, which is killed at `limit`.
-/// Inputs: the canonical project folder, the environment, the plan, git's arguments and
-/// the time limit. Output: the outcome, or
-/// `ide_git_config_refused`, `ide_git_remote_unknown`, `ide_git_transport_refused`,
+/// four checks against the configuration git will use: every file it reads and every file
+/// an include names is placed outside the project folder, links followed, or is the
+/// folder's own `.git/config` or `.git/config.worktree`, which the IDE sandbox cannot write
+/// ([`placed_allowed`]); no entry includes a file by branch ([`BRANCH_INCLUDE`]); every
+/// remote reached is configured there with a URL; and every URL it fetches from or pushes
+/// to, `insteadOf` applied, uses https, http, ssh or git. git runs the [`engine_args`], so a
+/// pull only fetches, with [`HARDENING`] (no hooks, fsmonitor, pager, askpass, submodules,
+/// replace objects or automatic maintenance), every config hook of the owner's own config
+/// switched off ([`hooks_off`]), the [`owner_env`] environment and its own process group,
+/// which is killed at `limit`. A config entry refused by the first two checks, or a config
+/// hook git cannot be kept from running, ends the command before git runs, with git's usual
+/// failure code and a line naming the key and its file. Inputs: the canonical project
+/// folder, the environment, the plan, git's arguments and the time limit. Output: the
+/// outcome, or `ide_git_config_refused` for a configuration git cannot list or with too
+/// many remotes, `ide_git_remote_unknown`, `ide_git_transport_refused`,
 /// `ide_git_unavailable` or `ide_git_outcome_unknown`.
 pub(super) fn run(
     folder: &Path,
@@ -466,12 +476,24 @@ pub(super) fn run(
             .is_some_and(|first| first == verb_word(plan.verb))
     );
     let entries = config(folder, env)?;
-    if !entries
+    let home = env
         .iter()
-        .all(|entry| origin_allowed(&entry.origin, folder))
+        .find(|(name, _)| name.as_os_str() == OsStr::new("HOME"))
+        .map(|(_, value)| Path::new(value));
+    if let Some(line) = entries
+        .iter()
+        .find_map(|entry| config_refusal(entry, folder, home))
     {
-        return Err(failure("ide_git_config_refused"));
+        eprintln!("ide_git_config_refused");
+        return Ok(refused_outcome(&line));
     }
+    let hooks = match hooks_off(&entries, folder) {
+        Ok(hooks) => hooks,
+        Err(line) => {
+            eprintln!("ide_git_hook_refused");
+            return Ok(refused_outcome(&line));
+        }
+    };
     let known = remotes(&entries);
     if known.len() > REMOTES_MAX {
         return Err(failure("ide_git_config_refused"));
@@ -498,7 +520,8 @@ pub(super) fn run(
             return Err(failure("ide_git_transport_refused"));
         }
     }
-    let argv = engine_args(plan, args, default.as_deref());
+    let mut argv = hooks;
+    argv.extend(engine_args(plan, args, default.as_deref()));
     let ran = ran(git(folder, env, &argv), OUTPUT_BYTES_MAX, limit)?;
     let code = ran
         .status
@@ -624,23 +647,256 @@ fn entries(bytes: &[u8]) -> Option<Vec<Entry>> {
     )
 }
 
+/// The line [`run`] answers instead of running git when one config entry is refused: its
+/// file is not placed outside the project folder, it includes a file by branch, or it
+/// includes a file that is not, or cannot be, placed outside the folder (RV-DS241-144 and
+/// 144b). Inputs: the entry, the canonical project folder and the owner's HOME. Output:
+/// the line naming the key and its file, or None when the entry is allowed.
+fn config_refusal(entry: &Entry, folder: &Path, home: Option<&Path>) -> Option<String> {
+    let line = |why: &str, fix: &str| Some(entry_line(entry, why, fix));
+    if !origin_allowed(&entry.origin, folder) {
+        return line(
+            "from a file in the project folder or reached through it, which the IDE can write",
+            "move that setting to .git/config or to a file outside the project folder",
+        );
+    }
+    if entry.key.starts_with(BRANCH_INCLUDE) {
+        return line(
+            "an include that follows the branch, which the IDE can switch",
+            "use includeIf \"gitdir:...\" instead",
+        );
+    }
+    let include = entry.key == "include.path"
+        || entry
+            .key
+            .strip_prefix("includeif.")
+            .is_some_and(|rest| rest.ends_with(".path"));
+    if !include {
+        return None;
+    }
+    match include_target(entry, folder, home) {
+        None => line(
+            "an include whose file CrazyAgent cannot place",
+            "write that path in full, starting with / or ~/",
+        ),
+        Some(target) if !placed_allowed(&target, folder) => line(
+            "an include of a file in the project folder or reached through it, which the IDE can write",
+            "move that file outside the project folder and include it by its full path",
+        ),
+        Some(_) => None,
+    }
+}
+
 /// Whether one entry's origin is safe for git running outside the IDE sandbox: the command
-/// line, or a file that is outside the project folder or is its `.git/config` or
-/// `.git/config.worktree`, which the IDE sandbox denies writing. An include planted in the
-/// project folder, an origin that is not a file and a file that cannot be resolved are
-/// refused. Inputs: the origin and the canonical project folder. Output: the answer.
+/// line, or a file [`placed_allowed`] allows. An origin that is not a file is refused.
+/// Inputs: the origin and the canonical project folder. Output: the answer.
 fn origin_allowed(origin: &str, folder: &Path) -> bool {
-    if origin == "command line:" {
+    origin == "command line:"
+        || origin
+            .strip_prefix("file:")
+            .is_some_and(|file| placed_allowed(&folder.join(file), folder))
+}
+
+/// The file an include entry names, placed as git places it: `~/` against the owner's
+/// absolute HOME, an absolute path as written, a relative one beside the including file as
+/// git opened it. None for `~user/`, a bare `~`, `%(prefix)/` and a relative path from
+/// anything but a file, which are not placed here. Inputs: the entry, the canonical project
+/// folder and the owner's HOME. Output: the absolute path, or None.
+fn include_target(entry: &Entry, folder: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let value = entry.value.as_str();
+    if let Some(rest) = value.strip_prefix('~') {
+        let home = home.filter(|path| path.is_absolute() && rest.starts_with('/'))?;
+        let mut joined = home.as_os_str().to_owned();
+        joined.push(rest);
+        return Some(PathBuf::from(joined));
+    }
+    if value.starts_with("%(prefix)/") {
+        return None;
+    }
+    if Path::new(value).is_absolute() {
+        return Some(PathBuf::from(value));
+    }
+    let file = entry.origin.strip_prefix("file:")?;
+    Some(folder.join(file).parent()?.join(value))
+}
+
+/// Whether git may read a file at `path`, the path as git opens it, from outside the IDE
+/// sandbox: the folder's own `.git/config` or `.git/config.worktree`, written with no `..`
+/// and reached through no link, which the IDE sandbox denies writing, or a path
+/// [`placed_inside`] keeps out of the project folder whatever the file holds now
+/// (RV-DS241-144b). Inputs: the absolute path and the canonical project folder. Output:
+/// the answer.
+fn placed_allowed(path: &Path, folder: &Path) -> bool {
+    let git = folder.join(".git");
+    let placed = lexical(path);
+    let own = [git.join("config"), git.join("config.worktree")].contains(&placed)
+        && !path.components().any(|part| part == Component::ParentDir)
+        && crate::sandbox::canonical(path).is_ok_and(|real| real == placed);
+    own || !placed_inside(path, folder)
+}
+
+/// The most links [`placed_inside`] follows for one path, the limit macOS itself sets.
+const LINK_HOPS_MAX: usize = 32;
+
+/// Whether a path git may open is placed in the project folder: the path as written, `.`
+/// and `..` taken by name, lies in it, or, walking the path as the system does, a part that
+/// exists resolves into it, a link's target lies in it, a part cannot be read, or more than
+/// [`LINK_HOPS_MAX`] links are met. The walk stops at the first missing part, which only a
+/// writer of the folder holding it could make. Inputs: the absolute path and the canonical
+/// project folder. Output: the answer.
+fn placed_inside(path: &Path, folder: &Path) -> bool {
+    assert!(path.is_absolute() && folder.is_absolute());
+    if lexical(path).starts_with(folder) {
         return true;
     }
-    let Some(file) = origin.strip_prefix("file:") else {
-        return false;
-    };
-    let Ok(real) = crate::sandbox::canonical(&folder.join(file)) else {
-        return false;
-    };
-    let git = folder.join(".git");
-    !real.starts_with(folder) || real == git.join("config") || real == git.join("config.worktree")
+    let mut current = PathBuf::from("/");
+    let mut rest = names(path);
+    let mut hops = 0;
+    while let Some(name) = rest.pop() {
+        if name == ".." {
+            current.pop();
+            continue;
+        }
+        let next = current.join(&name);
+        match std::fs::symlink_metadata(&next) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let Ok(target) = std::fs::read_link(&next) else {
+                    return true;
+                };
+                hops += 1;
+                if hops > LINK_HOPS_MAX || lexical(&current.join(&target)).starts_with(folder) {
+                    return true;
+                }
+                if target.is_absolute() {
+                    current = PathBuf::from("/");
+                }
+                rest.extend(names(&target));
+            }
+            Ok(_) => match crate::sandbox::canonical(&next) {
+                Ok(real) if !real.starts_with(folder) => current = real,
+                _ => return true,
+            },
+            Err(error) => return error.kind() != std::io::ErrorKind::NotFound,
+        }
+    }
+    assert!(!current.starts_with(folder));
+    false
+}
+
+/// A path with each `.` dropped and each `..` taking off the part before it, by name only,
+/// as the path is written. Input: the path. Output: the written place.
+fn lexical(path: &Path) -> PathBuf {
+    let mut placed = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::ParentDir => {
+                placed.pop();
+            }
+            Component::CurDir => {}
+            other => placed.push(other),
+        }
+    }
+    placed
+}
+
+/// The parts of a path after its root, `.` dropped and `..` kept, last part first, so a
+/// walk pops them in order. Input: the path. Output: the parts.
+fn names(path: &Path) -> Vec<OsString> {
+    path.components()
+        .rev()
+        .filter_map(|part| match part {
+            Component::Normal(name) => Some(name.to_owned()),
+            Component::ParentDir => Some(OsString::from("..")),
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
+        })
+        .collect()
+}
+
+/// The exit code of an IDE git command refused for its configuration before git ran, a
+/// config hook among them, the one git itself ends a failed command with.
+const REFUSED_CODE: i32 = 128;
+
+/// The answer to an IDE git command refused before git ran: git's usual failure code,
+/// nothing on standard output and the line on standard error. Input: the line. Output:
+/// the outcome.
+fn refused_outcome(line: &str) -> GitOutcome {
+    GitOutcome {
+        code: REFUSED_CODE,
+        stdout: String::new(),
+        stderr: text(line.as_bytes(), OUTPUT_BYTES_MAX),
+    }
+}
+
+/// The line an IDE git command refused for one config entry shows as git's output: the
+/// file, the key, why, the code `ide_git_config_refused` and what to do (RV-DS241-144 r1
+/// F1). Inputs: the entry, why and what to do. Output: the line.
+fn entry_line(entry: &Entry, why: &str, fix: &str) -> String {
+    let file = entry.origin.strip_prefix("file:").unwrap_or(&entry.origin);
+    format!(
+        "crazyagent: {} sets {}, {why}. CrazyAgent did not run this git command (ide_git_config_refused), so {fix}, then try again.\n",
+        printable(file),
+        printable(&entry.key)
+    )
+}
+
+/// Text from git's configuration as one line of output shows it: each control character
+/// as `?`. Input: the text. Output: the shown text.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
+/// The `-c` arguments that switch off, for one engine git run, every config hook
+/// `hook.<name>.command` the owner's own config names, which git 2.54 runs whatever
+/// `core.hooksPath` says (RV-DS241-39 r2 F1). A hook key read from a file inside the project
+/// folder, its `.git/config` or `.git/config.worktree`, refuses the run instead, as does a
+/// name no `-c` can carry (empty, holding `=` or a control character) and more than
+/// [`HOOKS_MAX`] names. Inputs: the entries [`config`] read and the canonical project
+/// folder. Output: the arguments, or the line naming the key and its file.
+fn hooks_off(entries: &[Entry], folder: &Path) -> Result<Vec<String>, String> {
+    let mut names: Vec<&str> = Vec::new();
+    for entry in entries {
+        let Some((name, _)) = entry
+            .key
+            .strip_prefix("hook.")
+            .and_then(|rest| rest.rsplit_once('.'))
+        else {
+            continue;
+        };
+        let inside = entry.origin.strip_prefix("file:").is_some_and(|file| {
+            crate::sandbox::canonical(&folder.join(file))
+                .ok()
+                .is_none_or(|real| real.starts_with(folder))
+        });
+        let carried =
+            !name.is_empty() && !name.contains('=') && !name.chars().any(char::is_control);
+        let new = !names.contains(&name);
+        if inside || !carried || (new && names.len() == HOOKS_MAX) {
+            return Err(hook_line(entry));
+        }
+        if new {
+            names.push(name);
+        }
+    }
+    let arguments: Vec<String> = names
+        .iter()
+        .flat_map(|name| ["-c".to_owned(), format!("hook.{name}.enabled=false")])
+        .collect();
+    assert_eq!(arguments.len(), names.len() * 2);
+    assert!(names.len() <= HOOKS_MAX);
+    Ok(arguments)
+}
+
+/// The line an IDE git command refused for a config hook shows as git's output: the file
+/// and the key, each control character shown as `?`. Input: the entry. Output: the line.
+fn hook_line(entry: &Entry) -> String {
+    let file = entry.origin.strip_prefix("file:").unwrap_or(&entry.origin);
+    format!(
+        "crazyagent: {} sets {}, a Git hook that runs whatever core.hooksPath says. CrazyAgent runs no hook here, so remove it from that file, then try again.\n",
+        printable(file),
+        printable(&entry.key)
+    )
 }
 
 /// The configured remotes: every name with a `remote.<name>.url` entry, sorted, each once.

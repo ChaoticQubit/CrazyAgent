@@ -686,7 +686,7 @@ async function main() {
       try {
         const home = (text) => text.includes("New project") && text.includes(name);
         for (let turn = 0; ; turn += 1) {
-          const screen = await tuiUntil("showed_home", (text) => home(text) || text.includes("Welcome to CrazyAgent") || text.includes("c Continue without"));
+          const screen = await tuiUntil("showed_home", (text) => home(text) || text.includes("Welcome to CrazyAgent") || text.includes("c Skip for now"));
           if (home(screen)) break;
           if (turn >= SCREEN_STEPS) throw new Refused("tui_never_reached_home", words(screen).slice(-300));
           tuiKey("c");

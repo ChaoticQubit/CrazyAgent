@@ -1,9 +1,27 @@
 use crate::engine::owner::AccountExtras;
-use crate::usage::extras::{LimitExtras, ResetKind, Resets, Spend};
+use crate::usage::extras::{LimitExtras, ResetKind, Resets, Spend, UnreadClass};
 use std::collections::HashMap;
 
 /// The separator between the parts of an account's limits line, the same as the desktop's.
 pub const PART_GAP: &str = " \u{b7} ";
+
+/// The words for free resets the last read found no count of, the same as the desktop's.
+pub const UNREAD: &str = "Free resets: couldn't read";
+
+/// The words for a free resets count the engine could not read, by why, the same as the
+/// desktop's: the plain words with a short reason, or off when the owner turned the read
+/// off. Input: the class. Output: the words.
+pub fn unread_text(class: UnreadClass) -> &'static str {
+    match class {
+        UnreadClass::Unspecified => UNREAD,
+        UnreadClass::Asker => "Free resets: couldn't read (Anthropic answers only Claude Code)",
+        UnreadClass::Withheld => "Free resets: couldn't read (Anthropic withheld them)",
+        UnreadClass::NoReason => "Free resets: couldn't read (Anthropic gave no reason)",
+        UnreadClass::NoAnswer => "Free resets: couldn't read (no answer)",
+        UnreadClass::NotUnderstood => "Free resets: couldn't read (answer not understood)",
+        UnreadClass::Off => "Free resets: off in Settings",
+    }
+}
 
 /// The count an account holds now: its stored count, or none when not reported or when the
 /// next expiry has passed, which the engine also reads as not reported until read again.
@@ -35,11 +53,14 @@ fn counted(count: u32) -> String {
 }
 
 /// An account's free resets in words, the same as the desktop's: "No free resets", "2 free
-/// resets (5-hour, weekly), next expires Nov 20", with "(may break)" for a private read, or
-/// "Free resets: not reported by <harness>". Inputs: the contract, now and the local offset in
-/// seconds. Output: the words, never a bare 0.
+/// resets (5-hour, weekly), next expires Nov 20", with "(may break)" for a private read, "Free
+/// resets: couldn't read" or "Free resets: not reported by <harness>". Inputs: the contract,
+/// now and the local offset in seconds. Output: the words, never a bare 0.
 pub fn resets_text(extras: &LimitExtras, now_ms: i64, offset: i64) -> String {
     let Some(resets) = live(extras, now_ms) else {
+        if let Some(class) = extras.resets_unread {
+            return unread_text(class).to_owned();
+        }
         return format!("Free resets: {}", extras.not_reported);
     };
     let label = if extras.may_break { " (may break)" } else { "" };
@@ -74,7 +95,10 @@ pub fn credits_text(extras: &LimitExtras) -> String {
 /// resets, credits and where to spend, with two not reported fields said once. Inputs: the
 /// contract, now and the local offset in seconds. Output: the line.
 pub fn extras_line(extras: &LimitExtras, now_ms: i64, offset: i64) -> String {
-    let mut parts = if live(extras, now_ms).is_none() && extras.credits.is_none() {
+    let mut parts = if live(extras, now_ms).is_none()
+        && extras.resets_unread.is_none()
+        && extras.credits.is_none()
+    {
         vec![format!("Free resets and credits: {}", extras.not_reported)]
     } else {
         vec![resets_text(extras, now_ms, offset), credits_text(extras)]
@@ -197,6 +221,7 @@ mod tests {
             resets_checked_ms: None,
             credits_checked_ms: None,
             resets_gained_ms: None,
+            resets_unread: None,
         }
     }
 
@@ -208,6 +233,78 @@ mod tests {
                 next_expiry_ms,
             }),
             ..extras()
+        }
+    }
+
+    #[test]
+    fn a_resets_read_that_found_no_count_reads_couldnt_read_never_none_or_not_reported() {
+        let claude = LimitExtras {
+            harness: "Claude Code".into(),
+            adapter: Adapter::Claude,
+            may_break: true,
+            not_reported: "not reported by Claude Code".into(),
+            resets_checked_ms: Some(NOW),
+            resets_unread: Some(UnreadClass::Unspecified),
+            ..extras()
+        };
+        assert_eq!(resets_text(&claude, NOW, 0), "Free resets: couldn't read");
+        assert_eq!(
+            extras_line(&claude, NOW, 0),
+            "Free resets: couldn't read \u{b7} Credits: not reported by Claude Code"
+        );
+        let never = LimitExtras {
+            resets_checked_ms: None,
+            resets_unread: None,
+            ..claude
+        };
+        assert_eq!(
+            extras_line(&never, NOW, 0),
+            "Free resets and credits: not reported by Claude Code"
+        );
+    }
+
+    /// Each reason a count could not be read has its own short words, and "Don't read" says
+    /// off in Settings; none of them reads as none or as not reported.
+    #[test]
+    fn each_unread_class_reads_couldnt_read_with_its_reason_and_off_reads_off_in_settings() {
+        for (class, words) in [
+            (UnreadClass::Unspecified, "Free resets: couldn't read"),
+            (
+                UnreadClass::Asker,
+                "Free resets: couldn't read (Anthropic answers only Claude Code)",
+            ),
+            (
+                UnreadClass::Withheld,
+                "Free resets: couldn't read (Anthropic withheld them)",
+            ),
+            (
+                UnreadClass::NoReason,
+                "Free resets: couldn't read (Anthropic gave no reason)",
+            ),
+            (
+                UnreadClass::NoAnswer,
+                "Free resets: couldn't read (no answer)",
+            ),
+            (
+                UnreadClass::NotUnderstood,
+                "Free resets: couldn't read (answer not understood)",
+            ),
+            (UnreadClass::Off, "Free resets: off in Settings"),
+        ] {
+            let claude = LimitExtras {
+                harness: "Claude Code".into(),
+                adapter: Adapter::Claude,
+                may_break: true,
+                not_reported: "not reported by Claude Code".into(),
+                resets_unread: Some(class),
+                ..extras()
+            };
+            assert_eq!(unread_text(class), words);
+            assert_eq!(resets_text(&claude, NOW, 0), words, "{class:?}");
+            assert_eq!(
+                extras_line(&claude, NOW, 0),
+                format!("{words} \u{b7} Credits: not reported by Claude Code")
+            );
         }
     }
 
@@ -374,6 +471,7 @@ mod tests {
                     next_expiry_ms: None,
                 }),
                 resets_gained_ms: gained,
+                resets_unread: None,
                 ..extras()
             },
         }

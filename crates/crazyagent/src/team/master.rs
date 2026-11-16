@@ -30,6 +30,9 @@ const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const LEAD_MODE_REFUSED: &str = "Not started: only the master picks a lead's mode; your sub-agents run in yours. Call spawn again without mode (spawn_mode_master_only).";
 const DISCARD_LEAD_REFUSED: &str = "Not discarded: only the master discards a change set. Tell your lead or the master why the work should not land.";
 const NATIVE_LEAD_REFUSED: &str = "Not started: you were started to run your sub-agents natively. Start them with your own harness instead: an agent team in Claude Code, sub-agents in Codex.";
+/// The refusal a stopping, held or stopped agent reads for a call that starts or changes
+/// work (RV-DS241-122).
+pub(super) const STOPPED_CALLS_REFUSED: &str = "Not done: you were stopped, so you cannot start a worker, merge or change work now. End your turn here.";
 const MASTER_LABEL: &str = "Master";
 const RECALL_LEFT_OUT: &str =
     "More memories matched and were left out. Search for something narrower.\n";
@@ -1630,6 +1633,9 @@ fn lead_delegate(
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(state)?;
+    if super::stopped(&tx, lead)? {
+        return Ok((STOPPED_CALLS_REFUSED.to_owned(), true));
+    }
     let limit = super::nesting(&tx, project)?.depth;
     let depth = super::agent_depth(&tx, lead)?;
     if depth >= limit {

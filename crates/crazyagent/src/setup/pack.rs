@@ -1,6 +1,7 @@
 use crate::engine::EngineError;
 use crate::plugins::validate_server_name;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 pub const VERSION: u32 = 1;
@@ -70,7 +71,8 @@ pub enum PackSource {
 /// One pinned entry of the default pack as shipped in `pack.toml`: a stable id, its
 /// kind and group, the pinned source, the SPDX license, whether it starts on, a short
 /// install hint for setup and, for an npm package the engine installs itself, the
-/// package tarball's `sha512-` integrity that npm must record before the engine uses it.
+/// package tarball's `sha512-` integrity that npm must record before the engine uses it and
+/// the `sha512-` hash of the program file the engine runs from that install.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackManifestEntry {
@@ -83,6 +85,8 @@ pub struct PackManifestEntry {
     pub install: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integrity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_integrity: Option<String>,
 }
 
 /// The whole default-pack manifest: its format version and every entry in setup order.
@@ -105,6 +109,20 @@ fn sha512_integrity(text: &str) -> bool {
 
 fn error(code: &str) -> EngineError {
     EngineError(code.into())
+}
+
+/// Names the key a pinned git source's checkout folder starts with, `<repo key>` in
+/// `<setup>/pack/<repo key>-<commit>`, on every platform. Input: the repository URL.
+/// Output: the first 8 bytes of the SHA-256 of the URL as 16 lowercase hex characters.
+pub fn repo_key(repo: &str) -> String {
+    let key: String = Sha256::digest(repo.as_bytes())
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(key.len(), 16);
+    assert!(key.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    key
 }
 
 /// Loads the default pack compiled into the engine from `pack.toml`, with no file or
@@ -150,9 +168,9 @@ impl PackManifest {
 
 impl PackManifestEntry {
     /// Checks one entry: an id usable as an MCP server key, a present SPDX-style
-    /// license, a printable install hint, the default that matches its group, and a
-    /// GitHub repo pinned to a full lowercase commit or a relative bundled path.
-    /// Input: a parsed entry. Output: Ok, or the first problem's code.
+    /// license, a printable install hint, the default that matches its group, tarball and
+    /// program hashes in `sha512-` form, and a GitHub repo pinned to a full lowercase commit
+    /// or a relative bundled path. Input: a parsed entry. Output: Ok, or the first problem's code.
     pub fn validate(&self) -> Result<(), EngineError> {
         validate_server_name(&self.id).map_err(|_| error("pack_entry_id_invalid"))?;
         if self.license.is_empty() {
@@ -170,10 +188,11 @@ impl PackManifestEntry {
         if self.on_by_default == (self.group == PackGroup::Optional) {
             return Err(error("pack_entry_default_invalid"));
         }
-        if self
-            .integrity
-            .as_deref()
-            .is_some_and(|text| !sha512_integrity(text))
+        let hashes = [self.integrity.as_deref(), self.program_integrity.as_deref()];
+        if hashes
+            .into_iter()
+            .flatten()
+            .any(|text| !sha512_integrity(text))
         {
             return Err(error("pack_entry_integrity_invalid"));
         }

@@ -13,6 +13,7 @@ use crate::sandbox::shared_folders::{
     CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope, UNREACHABLE_SECRETS_LINE,
 };
 use crate::sandbox::toolchains::Toolchain;
+use crate::sandbox::{LINUX_NESTED_GIT_LINE, LINUX_PORTS_ANY_HOST_LINE};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -609,4 +610,22 @@ fn the_access_box_keeps_shared_back_secrets_and_says_what_stays_closed() {
         &["program"],
     ));
     assert!(!shown_words(&all).contains(UNREACHABLE_SECRETS_LINE));
+}
+
+#[test]
+fn only_on_linux_does_the_box_say_ports_hold_no_host_and_nested_git_is_not_blocked() {
+    let mut edit = AccessEdit::of(&view());
+    assert_eq!(edit.linux, cfg!(target_os = "linux"));
+    edit.linux = false;
+    let words = shown_words(&edit);
+    assert!(!words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
+    assert!(!words.contains(LINUX_NESTED_GIT_LINE), "{words}");
+    edit.linux = true;
+    let words = shown_words(&edit);
+    assert!(words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
+    assert!(words.contains(LINUX_NESTED_GIT_LINE), "{words}");
+    edit.access = AgentAccess::Full;
+    let words = shown_words(&edit);
+    assert!(!words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
+    assert!(!words.contains(LINUX_NESTED_GIT_LINE), "{words}");
 }

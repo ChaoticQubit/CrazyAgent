@@ -47,7 +47,7 @@ impl Choice {
     }
 }
 
-/// The first-run Accounts step after Setup, in the desktop words: Add account (Home under
+/// The first-run Accounts step after Harnesses, in the desktop words: Add account (Home under
 /// Add account) or Skip for now (Home), and the Learn CrazyAgent offer with its ticked box.
 /// Unticked, either button first writes the skipped mark and leaves on the engine's answer,
 /// saying the guide stays on Home when it refused. Esc does nothing here.

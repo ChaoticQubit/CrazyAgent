@@ -2,7 +2,7 @@
 
 use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
 use crazyagent::harnesses::terminal_session::end_left_pane;
-use crazyagent::terminal::buffer::skipped_marker;
+use crazyagent::terminal::buffer::Chunk;
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
 use crazyagent::terminal::{
     AgentId, FOLDER, Host, INPUT_BYTES_MAX, SCROLLBACK_LINES, TerminalStream,
@@ -87,11 +87,31 @@ fn read_until(stream: &mut TerminalStream, seen: &mut Vec<u8>, wanted: &[u8]) ->
         tokio::time::timeout(Duration::from_secs(10), async {
             while !contains(seen, wanted) {
                 match stream.next().await {
-                    Some(chunk) => seen.extend_from_slice(&chunk),
-                    None => return false,
+                    Some(Chunk::Output(chunk)) => seen.extend_from_slice(&chunk),
+                    Some(Chunk::Behind) | None => return false,
                 }
             }
             true
+        })
+        .await
+        .unwrap_or(false)
+    })
+}
+
+fn read_behind(stream: &mut TerminalStream, seen: &mut Vec<u8>) -> bool {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match stream.next().await {
+                    Some(Chunk::Output(chunk)) => seen.extend_from_slice(&chunk),
+                    Some(Chunk::Behind) => return true,
+                    None => return false,
+                }
+            }
         })
         .await
         .unwrap_or(false)
@@ -395,7 +415,7 @@ fn panes_have_a_scrollback_cap_and_close_when_their_process_ends() {
 }
 
 #[test]
-fn a_viewer_that_falls_behind_is_told_how_much_output_it_missed() {
+fn a_viewer_that_falls_behind_reads_behind_and_a_fresh_view_draws_the_screen_now() {
     let root = root();
     let tmux = tmux(root.path());
     let folder = root.path().join(FOLDER);
@@ -411,18 +431,33 @@ fn a_viewer_that_falls_behind_is_told_how_much_output_it_missed() {
     let flood = VIEWER_BUFFER_BYTES_MAX * 3;
     host.input(
         &agent,
-        format!("head -c {flood} /dev/zero | tr '\\0' a; echo; echo flood-done\r").as_bytes(),
+        format!("head -c {flood} /dev/zero | tr '\\0' a; echo; echo flood-$((6*7))-done\r")
+            .as_bytes(),
     )
     .unwrap();
     std::thread::sleep(Duration::from_secs(5));
     let mut seen = Vec::new();
-    assert!(read_until(&mut stream, &mut seen, b"\r\nflood-done\r\n"));
     assert!(
-        contains(&seen, b" bytes of output skipped]"),
-        "the viewer reads a skipped marker instead of being dropped"
+        read_behind(&mut stream, &mut seen),
+        "a viewer more than its buffer behind reads Behind instead of being dropped"
     );
-    assert!(seen.len() < flood, "the oldest output was dropped");
-    assert!(skipped_marker(1).starts_with(b"\r\n"));
+    assert!(
+        !contains(&seen, b"bytes of output skipped"),
+        "no viewer ever reads a skipped-output line"
+    );
+    assert!(
+        seen.len() < flood,
+        "the output the viewer could not keep was not read"
+    );
+    assert!(
+        ended(&mut stream),
+        "a viewer that read Behind reads its end next"
+    );
+    let fresh = host.attach(&agent).unwrap();
+    assert!(
+        contains(&fresh.redraw(), b"flood-42-done"),
+        "a fresh view draws the screen as it is now"
+    );
     host.kill(&agent).unwrap();
 }
 
@@ -1054,8 +1089,8 @@ fn quiet(stream: &mut TerminalStream, unwanted: &[u8], wait: Duration) -> Vec<u8
         let _ = tokio::time::timeout(wait, async {
             while !contains(&seen, unwanted) {
                 match stream.next().await {
-                    Some(chunk) => seen.extend_from_slice(&chunk),
-                    None => return,
+                    Some(Chunk::Output(chunk)) => seen.extend_from_slice(&chunk),
+                    Some(Chunk::Behind) | None => return,
                 }
             }
         })
@@ -2188,10 +2223,13 @@ fn stand_in(tmux: &Path, socket: &Path, lead: &AgentId) {
 }
 
 /// PLC (c): the engine pins a native lead's teammates' server to the pid it first answered
-/// with. Once that server and the lead's own ended, stand-in servers another process started
-/// at both sockets are refused for the lead's team panes: by the same host, though it dropped
-/// its teammates' client while nothing listened there, and by a host opened again on the
-/// same engine root, as after an engine restart, since the pin is kept on disk (PC-L1).
+/// with. Once that server and the lead's own ended and both their keepers confirmed it, the
+/// host reads the lead as gone, as for any ended lead (gb67): its panes are
+/// `terminal_agent_unknown`, and a kill finds no server and drops its teammates' client.
+/// Stand-in servers another process then started at both sockets are refused for the lead's
+/// team panes: by the same host, though it dropped that client while nothing listened there,
+/// and by a host opened again on the same engine root, as after an engine restart, since the
+/// pin is kept on disk (PC-L1).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_server_started_at_a_native_lead_s_teammates_socket_after_its_own_ended_is_refused() {
@@ -2217,10 +2255,23 @@ fn a_server_started_at_a_native_lead_s_teammates_socket_after_its_own_ended_is_r
         assert!(killed.success());
         until_refused(socket);
     }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !host.server_keepers(&leader).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the keepers of the lead's ended servers still run"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert_eq!(
         host.panes(&leader).unwrap_err().0,
-        "terminal_teammates_server_ended",
-        "no server lists the lead's panes while none runs, and the host drops its teammates' client"
+        "terminal_agent_unknown",
+        "a server listed the panes of a lead whose servers ended and whose keepers confirmed it"
+    );
+    assert_eq!(
+        host.kill(&leader).unwrap_err().0,
+        "terminal_agent_unknown",
+        "the host found a server for a lead whose servers ended"
     );
     for socket in [&lead.socket, &lead.mates] {
         stand_in(&lead.tmux, socket, &leader);

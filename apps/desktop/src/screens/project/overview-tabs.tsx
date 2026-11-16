@@ -103,6 +103,11 @@ const DIFF_CHANGED = "This tab changed since this diff was made. The diff now sh
 const FIRST: StripId = "quick_info";
 const LOADING = "Loading the Overview tabs...";
 const READ_ONLY = "This is the project's own file. Edit it in the project.";
+/** What a tab whose file came with the project's files says above its text, the TUI's words
+ * (RV-DS241-2, DEC-141): CrazyAgent didn't write it and the owner didn't save it here. */
+export const FOREIGN_TAB = "This tab's file came with the project's files: CrazyAgent didn't write it and you didn't save it. Check it before you use its commands.";
+/** What the review of a proposal for such a tab says in place of the owner's-edit line. */
+const FOREIGN_REVIEW = "This tab's file came with the project's files. Accept replaces it with the proposal; Reject keeps it.";
 const CUT = "Showing the first part of a long file.";
 const NO_README = "This project has no README file.";
 const WRITING = "Writing now";
@@ -198,6 +203,14 @@ export function pollEvery(overview: ProjectOverview | null): number | null {
   return overview.running || due ? OVERVIEW_POLL_MS : null;
 }
 
+/** The read the tabs show after a new one: a failed read keeps the last good one, as the TUI
+ * does, so a re-read on a tab pick never blanks tabs already shown; with no good read yet the
+ * failure shows. Inputs: the last read of the same project, if any, and the new read.
+ * Output: the read to show. */
+export function keptRead(last: Result<ProjectOverview> | undefined, next: Result<ProjectOverview>): Result<ProjectOverview> {
+  return next.kind !== "ok" && last?.kind === "ok" ? last : next;
+}
+
 /** Where "Move into CrazyAgent folder" lives: the Remove section of Project settings.
  * Input: the project. Output: the route. */
 export function moveRoute(projectId: string): string {
@@ -259,12 +272,13 @@ function queued(overview: ProjectOverview): boolean {
   return overview.stale && !overview.running && overview.refresh !== "off" && !overview.needs_home;
 }
 
-/** The stored failure line: an alert only for a run that ended. While a run is queued or
- * writing, as one waiting for an account is, the same reason shows under a status, since
- * that refresh has not failed. Input: the overview. Output: the line, or null with none. */
+/** The stored failure line: an alert, also while a new run is queued or writing, except the
+ * engine's wait for an account, whose reason shows under a status while its run is queued or
+ * writing, since that refresh has not failed (IW-L1). Input: the overview. Output: the line,
+ * or null with none. */
 function failureLine(overview: ProjectOverview): ReactNode {
   if (!overview.failure) return null;
-  if (overview.running || queued(overview)) return <p className="pj-muted" role="status">{displayText(overview.failure)}</p>;
+  if (overview.waiting_for_account && (overview.running || queued(overview))) return <p className="pj-muted" role="status">{displayText(overview.failure)}</p>;
   return <p className="pj-error" role="alert">Couldn't refresh the tabs. {displayText(overview.failure)}</p>;
 }
 
@@ -458,6 +472,7 @@ export function ProposalReview({ label, state, busy, note, onAccept, onReject, o
   const added = rows?.filter((row) => row.kind === "added").length ?? 0;
   return <section className="pj-stack-s ov-review" id={REVIEW_PANEL} tabIndex={-1} aria-label={`Proposed changes to ${label}`}>
     {state.edited && <p className="pj-note warn">You edited this tab. Accept replaces your text with the proposal; Reject keeps yours.</p>}
+    {state.foreign && <p className="pj-note warn">{FOREIGN_REVIEW}</p>}
     {rows !== null ? <>
       <p className="pj-secondary">{`${removed} ${removed === 1 ? "line" : "lines"} removed, ${added} added. Nothing changes until you accept.`}</p>
       <div className="process-text pr-diff" role="group" aria-label="Proposed changes">
@@ -588,7 +603,8 @@ function CompetitorsPanel({ data, overview, state, onSelect }: { data: ProjectDa
 
 /** The body of one generated tab that can be shown: Competitors with its source, Quick info
  * through the project's own description, else its Markdown or what will write it; Install &
- * use gets Copy and Run on its command lines.
+ * use gets Copy and Run on its command lines. A tab whose file came with the project's files
+ * says so first, and its commands get Copy only (RV-DS241-2).
  * Inputs: the project data, the overview, the tab's state, the Run mode, the tab pick handler
  * and how Quick info renders a text. Output: the body. */
 function TabBody({ data, overview, state, runMode, onSelect, quickInfo }: {
@@ -600,10 +616,12 @@ function TabBody({ data, overview, state, runMode, onSelect, quickInfo }: {
   quickInfo: (text: string | null) => ReactNode;
 }) {
   const facts = state.tab === "quick_info";
-  if (state.tab === "competitors") return <CompetitorsPanel data={data} overview={overview} state={state} onSelect={onSelect} />;
+  const from = state.foreign && state.text !== null && <p className="pj-note warn">{FOREIGN_TAB}</p>;
+  if (state.tab === "competitors") return <>{from}<CompetitorsPanel data={data} overview={overview} state={state} onSelect={onSelect} /></>;
   if (state.text === null) return <><p className="pj-muted">{unwritten(overview)}</p>{facts && quickInfo(null)}</>;
-  if (facts) return <>{quickInfo(state.text)}</>;
-  return <MarkdownView source={state.text} onOpenLink={(href) => void openLink(href)} codeAction={state.tab === "install_and_use" ? commandAction(data.id, runMode) : undefined} />;
+  if (facts) return <>{from}{quickInfo(state.text)}</>;
+  const mode = state.foreign ? "off" : runMode;
+  return <>{from}<MarkdownView source={state.text} onOpenLink={(href) => void openLink(href)} codeAction={state.tab === "install_and_use" ? commandAction(data.id, mode) : undefined} /></>;
 }
 
 /** The banner of a tab whose refresh proposal waits, or the open review of it. Accept sends
@@ -779,9 +797,9 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
   </section>;
 }
 
-/** The Overview tabs of one project, read from the engine: reads once per visit and after
- * each action, and again every `OVERVIEW_POLL_MS` only while a run is writing or a landed
- * change set waits for one; keeps the picked tab for the session.
+/** The Overview tabs of one project, read from the engine once per visit, on each tab pick (a
+ * tab file can change outside CrazyAgent), after each action, and every `OVERVIEW_POLL_MS` only
+ * while a run writes or a landed change set waits for one; keeps the picked tab for the session.
  * Inputs: the project data, how Quick info renders a text, the Activity panel and the read.
  * Output: the strip and its panel. */
 export function ProjectOverviewTabs({ data, quickInfo, activity, load = loadOverview }: {
@@ -791,12 +809,14 @@ export function ProjectOverviewTabs({ data, quickInfo, activity, load = loadOver
   load?: typeof loadOverview;
 }) {
   const [selected, setSelected] = useState<StripId>(() => storedTab(data.id));
-  const [read, setRead] = useState<Result<ProjectOverview> | undefined>(undefined);
+  const [read, setRead] = useState<{ project: string; result: Result<ProjectOverview> } | undefined>(undefined);
   const [round, setRound] = useState(0);
   const [runMode, setRunMode] = useState<RunMode>("off");
   useEffect(() => {
     let live = true;
-    void load(data.id).then((result) => { if (live) setRead(result); });
+    void load(data.id).then((result) => {
+      if (live) setRead((last) => ({ project: data.id, result: keptRead(last?.project === data.id ? last.result : undefined, result) }));
+    });
     return () => { live = false; };
   }, [data.id, round, load]);
   useEffect(() => {
@@ -804,17 +824,18 @@ export function ProjectOverviewTabs({ data, quickInfo, activity, load = loadOver
     void loadRunMode(data.id).then((result) => { if (live) setRunMode(result.kind === "ok" ? result.value : "off"); });
     return () => { live = false; };
   }, [data.id]);
-  const overview = read?.kind === "ok" ? read.value : null;
+  const shown = read?.project === data.id ? read.result : undefined;
+  const overview = shown?.kind === "ok" ? shown.value : null;
   const every = pollEvery(overview);
   useEffect(() => {
     if (every === null) return;
     const timer = window.setInterval(() => setRound((count) => count + 1), every);
     return () => window.clearInterval(timer);
   }, [every]);
-  const problem = read?.kind === "not_ready" ? "Not ready yet: the Overview tabs aren't in this build."
-    : read?.kind === "error" ? `Couldn't load the Overview tabs. ${overviewCopy(read)}` : undefined;
+  const problem = shown?.kind === "not_ready" ? "Not ready yet: the Overview tabs aren't in this build."
+    : shown?.kind === "error" ? `Couldn't load the Overview tabs. ${overviewCopy(shown)}` : undefined;
   return <OverviewTabs key={data.id} data={data} overview={overview} problem={problem} now={data.now} selected={selected}
-    onSelect={(tab) => { storeTab(data.id, tab); setSelected(tab); }}
+    onSelect={(tab) => { storeTab(data.id, tab); setSelected(tab); setRound((count) => count + 1); }}
     actions={{ refresh: () => refreshOverview(data.id), save: saveOverviewTab, accept: acceptOverviewTab, reject: rejectOverviewTab, reload: () => setRound((count) => count + 1) }}
     runMode={runMode} quickInfo={quickInfo} activity={activity} />;
 }

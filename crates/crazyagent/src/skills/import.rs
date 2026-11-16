@@ -20,6 +20,9 @@ pub enum ImportFrom {
 }
 
 impl ImportFrom {
+    /// Every folder imports read from, in the order the scan lists them.
+    pub const ALL: [Self; 2] = [Self::Claude, Self::Codex];
+
     /// The skills folder under the owner's home. Output: `.claude/skills` or `.codex/skills`.
     pub fn folder(self) -> &'static str {
         match self {
@@ -225,6 +228,14 @@ fn candidate(
     })
 }
 
+/// The owner's home that imports read from: `HOME` when it is an absolute path. Input: none.
+/// Output: the folder, or none when `HOME` is unset or relative.
+pub fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+}
+
 /// Finds the skills in the owner's `~/.claude/skills` and `~/.codex/skills` folders: each
 /// folder holding SKILL.md, skipping dot folders. Each one is checked in place under the
 /// import rules, so the state says exactly what an import would do; nothing is written and
@@ -236,7 +247,7 @@ pub fn scan(home: &Path, added: &[SkillInfo]) -> Result<ImportList, EngineError>
     }
     let mut all = Vec::new();
     let mut unlisted = 0usize;
-    for from in [ImportFrom::Claude, ImportFrom::Codex] {
+    for from in ImportFrom::ALL {
         let root = home.join(from.folder());
         let (names, more) = folder_names(&root);
         unlisted += more;
@@ -296,6 +307,7 @@ mod tests {
             enabled: true,
             on_here: None,
             source: source.display().to_string(),
+            origin: "Imported from Claude Code".into(),
             folder: folder.display().to_string(),
             version: 0,
             refused: None,

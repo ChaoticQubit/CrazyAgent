@@ -64,9 +64,9 @@ use crazyagent::team::cleanup::FinishedAgent;
 use crazyagent::team::{TeamGraph, TeamStatus, TerminalsPerWindow};
 use crazyagent::terminal::TerminalRequest;
 use crazyagent::usage::metrics::Metrics;
-use crazyagent::usage::money::MoneySettings;
+use crazyagent::usage::money::MoneyChoice;
 use crazyagent::usage::report::UsageReport;
-use crazyagent::usage::spend::SpendSettings;
+use crazyagent::usage::spend::SpendChoice;
 use std::sync::Arc;
 use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
@@ -163,13 +163,16 @@ fn default_engine() -> Result<(crazyagent::paths::Layout, crazyagent::service::S
     Ok((layout, service))
 }
 
-/// Installs the service when it is missing, when `reinstall` asks or when it is
-/// [`crazyagent::service::Service::stale`], else starts it as it is, then waits for the
-/// engine while the service still runs it ([`crazyagent::service::wait_started`]). The
-/// service runs the sidecar, or its private copy when the sidecar sits in the AppImage
-/// mount folder; a sidecar other users can change is refused. Inputs: the layout, the
-/// service and whether to replace the definition with this app's sidecar. Output: Ok once
-/// it answers.
+/// Installs the service or starts it as it is, as [`crazyagent::service::Service::repair`]
+/// says: a definition naming a gone, /Volumes or translocated program is never started as
+/// it is (RV-DS241-118), and a sidecar on a disk image or in a temporary folder is never
+/// installed (`engine_app_not_installed`); a refusal removes a definition naming a broken
+/// program first. Restart engine never replaces another program this engine may not
+/// (`engine_newer_than_app`, RV-DS241-129). Then it waits for the engine while the service
+/// still runs it ([`crazyagent::service::wait_started`]). The service runs the sidecar, or its
+/// private copy when the sidecar sits in the AppImage mount folder; a sidecar other users can
+/// change is refused. Inputs: the layout, the service and whether to replace the definition
+/// with this app's sidecar. Output: Ok once it answers.
 async fn start_engine(
     layout: &crazyagent::paths::Layout,
     service: &crazyagent::service::Service,
@@ -187,22 +190,30 @@ async fn start_engine(
             .map_err(|_| engine_failure("engine_service_failed"))?,
         ..service.clone()
     };
-    if reinstall || !installed || service.stale(bundled) {
-        if !service.executable.is_file() {
-            return Err(engine_failure("engine_sidecar_missing"));
+    match service.repair(bundled, installed, reinstall) {
+        crazyagent::service::Repair::Refuse => {
+            service.refuse();
+            return Err(engine_failure("engine_app_not_installed"));
         }
-        if installed {
+        crazyagent::service::Repair::Keep => {
+            return Err(engine_failure("engine_newer_than_app"));
+        }
+        crazyagent::service::Repair::Install => {
+            if !service.executable.is_file() {
+                return Err(engine_failure("engine_sidecar_missing"));
+            }
+            if installed {
+                service
+                    .stop()
+                    .map_err(|_| engine_failure("engine_service_failed"))?;
+            }
             service
-                .stop()
+                .install()
                 .map_err(|_| engine_failure("engine_service_failed"))?;
         }
-        service
-            .install()
-            .map_err(|_| engine_failure("engine_service_failed"))?;
-    } else {
-        service
+        crazyagent::service::Repair::Start => service
             .start()
-            .map_err(|_| engine_failure("engine_service_failed"))?;
+            .map_err(|_| engine_failure("engine_service_failed"))?,
     }
     crazyagent::service::wait_started(layout, &service, crazyagent::service::READY_TIMEOUT, since)
         .await
@@ -362,6 +373,25 @@ async fn desktop_harness_install(
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     read(&state).await?.harness_install(&id).await
+}
+
+#[tauri::command]
+async fn desktop_harness_install_many(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    ids: Vec<String>,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.harness_install_many(&ids).await
+}
+
+#[tauri::command]
+async fn desktop_harness_queued(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.harness_queued().await
 }
 
 #[tauri::command]
@@ -879,7 +909,7 @@ async fn desktop_project_hidden_paths(
     webview: Webview,
     state: State<'_, NativeState>,
     id: String,
-) -> Result<Vec<String>, BridgeError> {
+) -> Result<crazyagent::project_setup::HiddenPaths, BridgeError> {
     main_window(&webview)?;
     read(&state).await?.project_hidden_paths(&id).await
 }
@@ -942,13 +972,14 @@ async fn desktop_set_project_hidden_paths(
     webview: Webview,
     state: State<'_, NativeState>,
     id: String,
+    version: u64,
     paths: Vec<String>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
     lock(&state)
         .await?
-        .set_project_hidden_paths(&id, paths, generation)
+        .set_project_hidden_paths(&id, version, paths, generation)
         .await
 }
 
@@ -1807,15 +1838,27 @@ async fn desktop_terminal_attach(
     terminal_window(&webview)?;
     let agent = bridge::terminal::agent(&agent)?;
     let pane = pane.as_deref().map(bridge::terminal::pane).transpose()?;
-    if webview.label() != "main" {
-        let id = id.ok_or_else(|| engine_failure("window_denied"))?;
-        terminal_window_for(&webview, &id)?;
-        let graph = read(&state).await?.team_graph(&id).await?;
-        if !bridge::terminal::graph_shows(&graph, &agent) {
-            return Err(engine_failure("window_denied"));
+    let id = match webview.label() {
+        "main" => None,
+        _ => {
+            let id = id.ok_or_else(|| engine_failure("window_denied"))?;
+            terminal_window_for(&webview, &id)?;
+            Some(id)
         }
-    }
-    let room = terminals.0.room(webview.label(), &agent)?;
+    };
+    let shows = async {
+        if let Some(id) = id {
+            let graph = read(&state).await?.team_graph(&id).await?;
+            if !bridge::terminal::graph_shows(&graph, &agent) {
+                return Err(engine_failure("window_denied"));
+            }
+        }
+        Ok::<(), BridgeError>(())
+    };
+    let room = terminals
+        .0
+        .checked_room(webview.label(), &agent, shows)
+        .await?;
     let session = lock(&state).await?.open_terminal(agent, pane).await?;
     room.attach(session, output)
 }
@@ -2521,6 +2564,51 @@ async fn desktop_icloud_cancel(
 }
 
 #[tauri::command]
+async fn desktop_intake_start(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    path: String,
+    mode: AddMode,
+    overrides: Vec<AddOverride>,
+) -> Result<crazyagent::projects_home::job::JobView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.intake_start(path, mode, overrides)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_intake_status(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<Option<crazyagent::projects_home::job::JobView>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.intake_status()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_intake_stop(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.intake_stop(id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_intake_dismiss(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.intake_dismiss(id)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_setup_status(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -2538,6 +2626,50 @@ async fn desktop_run_setup(
 ) -> Result<SetupStatus, BridgeError> {
     main_window(&webview)?;
     lock(&state).await?.run_setup(pack, generation).await
+}
+
+#[tauri::command]
+async fn desktop_install_dependency(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: crazyagent::setup::Dependency,
+    generation: u64,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .install_dependency(name, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_fix_tool_permissions(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: crazyagent::setup::Dependency,
+    tree: String,
+    recursive: bool,
+    generation: u64,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .fix_tool_permissions(name, tree, recursive, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_set_refused_tool(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    choice: crazyagent::setup::RefusedTool,
+    generation: u64,
+) -> Result<SetupStatus, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_refused_tool(choice, generation)
+        .await
 }
 
 #[tauri::command]
@@ -3014,6 +3146,29 @@ async fn desktop_set_quit_settings(
     lock(&state)
         .await?
         .set_quit_settings(settings, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_provider_retry(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::provider_retry::ProviderRetryView, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.provider_retry().await
+}
+
+#[tauri::command]
+async fn desktop_set_provider_retry(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    choice: crazyagent::provider_retry::ProviderRetry,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_provider_retry(choice, generation)
         .await
 }
 
@@ -3646,10 +3801,10 @@ fn desktop_usage_notices(webview: Webview) -> Result<&'static str, BridgeError> 
 async fn desktop_usage_set_money(
     webview: Webview,
     state: State<'_, NativeState>,
-    settings: MoneySettings,
+    choice: MoneyChoice,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.usage_set_money(settings)?;
+    let call = lock(&state).await?.usage_set_money_one(choice)?;
     call.await
 }
 
@@ -3669,10 +3824,10 @@ async fn desktop_usage_spend(
 async fn desktop_usage_set_spend(
     webview: Webview,
     state: State<'_, NativeState>,
-    settings: SpendSettings,
+    choice: SpendChoice,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.usage_set_spend(settings)?;
+    let call = lock(&state).await?.usage_set_spend_one(choice)?;
     call.await
 }
 
@@ -4074,6 +4229,35 @@ async fn desktop_notify_question(
     };
     bridge::notify::show(tauri::Manager::app_handle(&webview), id, &notice)
         .inspect_err(|_| notices.release(question.id, id))
+}
+
+#[tauri::command]
+async fn desktop_notify_intake(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    notices: State<'_, Notices>,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    bridge::notify::available()?;
+    if webview.window().is_focused().unwrap_or(false) {
+        return Ok(());
+    }
+    let call = lock(&state).await?.intake_status()?;
+    let Some(job) = call.await? else {
+        return Ok(());
+    };
+    if job.id.as_str() != id {
+        return Ok(());
+    }
+    let Some(notice) = bridge::notify::intake_notice(&job) else {
+        return Ok(());
+    };
+    let Some(number) = notices.claim_job(&id)? else {
+        return Ok(());
+    };
+    bridge::notify::show(tauri::Manager::app_handle(&webview), number, &notice)
+        .inspect_err(|_| notices.release_job(&id, number))
 }
 
 #[tauri::command]
@@ -4814,6 +4998,8 @@ native_commands! {
     desktop_harness_versions,
     desktop_harness_update,
     desktop_harness_install,
+    desktop_harness_install_many,
+    desktop_harness_queued,
     desktop_harness_find,
     desktop_harness_choose_path,
     desktop_pick_harness_file,
@@ -4939,8 +5125,15 @@ native_commands! {
     desktop_icloud_download,
     desktop_icloud_progress,
     desktop_icloud_cancel,
+    desktop_intake_start,
+    desktop_intake_status,
+    desktop_intake_stop,
+    desktop_intake_dismiss,
     desktop_setup_status,
     desktop_run_setup,
+    desktop_install_dependency,
+    desktop_fix_tool_permissions,
+    desktop_set_refused_tool,
     desktop_set_pack_entry,
     desktop_remove_pack_entry,
     desktop_project_memories,
@@ -5003,6 +5196,8 @@ native_commands! {
     desktop_set_cleanup_settings,
     desktop_quit_settings,
     desktop_set_quit_settings,
+    desktop_provider_retry,
+    desktop_set_provider_retry,
     desktop_learning_progress,
     desktop_set_learning_mark,
     desktop_master_step_settings,
@@ -5068,6 +5263,7 @@ native_commands! {
     desktop_dismiss_questions,
     desktop_question_counts,
     desktop_notify_question,
+    desktop_notify_intake,
     desktop_notification_target,
     desktop_system_notifications,
     desktop_process_text,

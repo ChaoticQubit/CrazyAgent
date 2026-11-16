@@ -121,17 +121,19 @@ impl OwnerController {
 
     /// Reads the folders the owner keeps this project's agents out of (DEC-111 Q7).
     /// Takes the project id.
-    /// Returns the folders in saved order, none when nothing was saved.
+    /// Returns the folders in saved order, none when nothing was saved, and their version.
     pub async fn project_hidden_paths(
         &mut self,
         project_id: ProjectId,
-    ) -> Result<Vec<String>, EngineError> {
+    ) -> Result<crate::project_setup::HiddenPaths, EngineError> {
         match self
             .read(OwnerRead::ProjectHiddenPaths { project_id })
             .await?
             .data
         {
-            OwnerData::ProjectHiddenPaths { paths, .. } => Ok(paths),
+            OwnerData::ProjectHiddenPaths { paths, version, .. } => {
+                Ok(crate::project_setup::HiddenPaths { paths, version })
+            }
             _ => Err(EngineError("controller_read_response".into())),
         }
     }
@@ -435,17 +437,23 @@ impl OwnerController {
     }
 
     /// Replaces the folders this project's agents are kept out of (DEC-111 Q7). Takes the
-    /// project id, the typed folders and the client generation. Returns the actual owner
-    /// response; a folder outside the project is a plain rejection.
+    /// project id, the version the screen showed, the typed folders and the client
+    /// generation. Returns the actual owner response; a folder outside the project is a plain
+    /// rejection, and folders changed since the screen read them are `stale_revision`.
     pub async fn set_project_hidden_paths(
         &mut self,
         project_id: ProjectId,
+        version: u64,
         paths: Vec<String>,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         self.project_hidden_paths(project_id.clone()).await?;
         self.begin_mutation(
-            OwnerMutation::SetProjectHiddenPaths { project_id, paths },
+            OwnerMutation::SetProjectHiddenPaths {
+                project_id,
+                version,
+                paths,
+            },
             generation,
         )?;
         self.send_pending().await

@@ -21,10 +21,17 @@ pub const PATH_UNREADABLE: &str = "harness_path_unreadable";
 pub const LOOKED_MAX: usize = 48;
 pub const LOOKED_BYTES_MAX: usize = 256;
 const SHIM_SKIPPED: &str = " (shim, skipped)";
+/// The mark on a folder the engine's search passed over for a temp folder, in the words the
+/// tool resolver uses for the same refusal.
+pub const TEMP_SKIPPED: &str =
+    " (skipped: in a temp folder or links to one, which agents or other users can change)";
 #[cfg(target_os = "macos")]
 const AGENT_TMP: &str = "/private/tmp/ca-";
 #[cfg(not(target_os = "macos"))]
 const AGENT_TMP: &str = "/tmp/ca-";
+/// The most links one chain may pass through, the bound Linux puts on one lookup.
+#[cfg(unix)]
+const LINK_HOPS_MAX: usize = 40;
 /// The most rows read from one table that names folders agents can write, and the most
 /// repositories one project may declare; more is refused as unreadable, so no folder is
 /// ever left out of an [`AgentSpace`].
@@ -56,6 +63,16 @@ const AGENT_TABLES: [(&str, Names, &str); 4] = [
     ),
 ];
 
+/// The engine's own temp folder as given and real when it is the owner's private one, which
+/// the agents' temp grant gives them; none where agents get no such grant. Output: the
+/// absolute folders, at most two.
+fn owner_temp() -> Vec<PathBuf> {
+    match crate::sandbox::grants::owner_temp_folder() {
+        Ok(real) => vec![std::env::temp_dir(), real],
+        Err(_) => Vec::new(),
+    }
+}
+
 /// How one engine table names a folder agents can write: a setup body with the project
 /// folder, a project body with the repositories it declares, or a stored path. An agent
 /// worktree inside its repository or a `.crazyagent` folder is covered already and not read,
@@ -68,12 +85,16 @@ enum Names {
 }
 
 /// The folders agents can write, where no harness file may come from: the engine folder
-/// with every agent home, the agents' temp folders, any `.crazyagent` folder with its agent
-/// worktrees, and each project folder, declared repository and agent worktree the engine
-/// database names, each kept as stored and as its real path. A folder holding the owner's
-/// home is left out, as no project may be one.
+/// outside its `setup` folder ([`crate::tools::in_engine_data`]) with every agent home, the
+/// agents' temp folders, the engine's own temp folder, which the agents' temp grant gives
+/// them ([`crate::sandbox::grants::owner_temp_folder`]), any `.crazyagent` folder with its
+/// agent worktrees, and each project folder, declared repository and agent worktree the
+/// engine database names, each kept as stored and as its real path. A folder holding the
+/// owner's home is left out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSpace {
+    engine: Vec<PathBuf>,
+    temp: Vec<PathBuf>,
     folders: Vec<PathBuf>,
 }
 
@@ -84,7 +105,7 @@ impl AgentSpace {
     pub fn open(root: &Path) -> Result<Self, EngineError> {
         match std::fs::symlink_metadata(root.join("engine.db")) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::of(root, Vec::new()));
+                return Ok(Self::of(root, Vec::new(), &owner_temp()));
             }
             Err(_) => return Err(failure(PATH_UNREADABLE)),
             Ok(_) => {}
@@ -124,34 +145,46 @@ impl AgentSpace {
                 named.extend(folders_in(names, &text)?);
             }
         }
-        Ok(Self::of(root, named))
+        Ok(Self::of(root, named, &owner_temp()))
     }
 
-    /// Builds the space from the engine folder and the folders the database names.
-    /// Inputs: the engine folder and the named folders. Output: the space, each absolute
-    /// folder kept as named and as its real path, none that holds the owner's home.
-    fn of(root: &Path, named: Vec<PathBuf>) -> Self {
+    /// Builds the space from the engine folder, the folders the database names and the
+    /// engine's own temp folder. Inputs: the engine folder, the named folders and the temp
+    /// folder as given and real. Output: the space, each absolute folder kept as named and as
+    /// its real path, none that holds the owner's home.
+    fn of(root: &Path, named: Vec<PathBuf>, temp: &[PathBuf]) -> Self {
         let owner = crate::projects_home::owner_home().ok();
-        let mut folders = Vec::new();
-        for folder in std::iter::once(root.to_path_buf()).chain(named) {
-            if !folder.is_absolute() || folder.parent().is_none() {
-                continue;
-            }
-            let real = std::fs::canonicalize(&folder).ok();
-            for kept in std::iter::once(folder).chain(real) {
-                if owner
+        let usable = |folder: &PathBuf| {
+            folder.is_absolute()
+                && folder.parent().is_some()
+                && !owner
                     .as_deref()
-                    .is_some_and(|owner| owner.starts_with(&kept))
-                {
-                    continue;
-                }
-                folders.push(kept);
-            }
+                    .is_some_and(|owner| owner.starts_with(folder))
+        };
+        let engine: Vec<PathBuf> = crate::tools::engine_roots(Some(root))
+            .into_iter()
+            .filter(usable)
+            .collect();
+        let mut folders = Vec::new();
+        for folder in named {
+            let real = std::fs::canonicalize(&folder).ok();
+            folders.extend(std::iter::once(folder).chain(real).filter(usable));
         }
         folders.sort();
         folders.dedup();
+        let temp: Vec<PathBuf> = temp
+            .iter()
+            .filter(|folder| usable(folder))
+            .cloned()
+            .collect();
+        assert!(engine.len() <= 2);
+        assert!(temp.len() <= 2);
         assert!(folders.len() <= AGENT_FOLDERS_MAX);
-        Self { folders }
+        Self {
+            engine,
+            temp,
+            folders,
+        }
     }
 
     /// Whether agents could write a harness file or the link to it: the path as given, the
@@ -170,6 +203,8 @@ impl AgentSpace {
             .any(|at| {
                 in_crazyagent_folder(&at)
                     || at.to_str().is_some_and(|text| text.starts_with(AGENT_TMP))
+                    || crate::tools::in_engine_data(&self.engine, &at)
+                    || self.temp.iter().any(|folder| at.starts_with(folder))
                     || self.folders.iter().any(|folder| at.starts_with(folder))
             })
     }
@@ -340,7 +375,8 @@ pub fn at_start(root: &Path, home: Option<&Path>) -> crate::paths::Harnesses {
 /// Checks a harness file, chosen or found, before it is pinned or stored: an absolute path
 /// of at most [`PATH_BYTES_MAX`] bytes with no control characters, to a runnable regular
 /// file, no version-manager shim, outside every folder agents can write ([`AgentSpace`]),
-/// in folders no other user can change, whose real file passes the pin's own file rule.
+/// in folders no other user can change, each link of its chain and each folder a `..` in
+/// it leaves too, whose real file passes the pin's own file rule.
 /// Inputs: the id, the path, the agent space and HOME. Output: the path, links kept.
 pub fn check(
     id: &str,
@@ -351,6 +387,17 @@ pub fn check(
     if !CHOOSABLE.contains(&id) {
         return Err(failure(UNKNOWN_HARNESS));
     }
+    check_file(path, space, home)
+}
+
+/// Checks a harness file by the rules of [`check`] whatever its id, so a pinned rcli or a
+/// harness a PATH entry leads to again later passes the same rules as at engine start.
+/// Inputs: the path, the agent space and HOME. Output: the path, links kept, or the refusal.
+pub fn check_file(
+    path: &Path,
+    space: &AgentSpace,
+    home: Option<&Path>,
+) -> Result<PathBuf, EngineError> {
     let text = path.to_str().ok_or_else(|| failure(PATH_INVALID))?;
     if !path.is_absolute()
         || text.len() > PATH_BYTES_MAX
@@ -367,15 +414,80 @@ pub fn check(
     if is_shim(home, path) {
         return Err(failure(PATH_SHIM));
     }
-    if space.holds(path) {
+    let hops = link_hops(path).ok_or_else(|| failure(PATH_NOT_FOUND))?;
+    if space.holds(path) || hops.iter().any(|hop| space.holds(hop)) {
         return Err(failure(PATH_AGENT_SPACE));
     }
-    if crate::service::changeable_by_others(path).is_some() {
+    if std::iter::once(path)
+        .chain(hops.iter().map(PathBuf::as_path))
+        .any(|part| crate::service::changeable_by_others(part).is_some())
+    {
         return Err(failure(PATH_CHANGEABLE));
     }
     crate::engine::pinnable(&metadata)?;
     assert!(path.is_absolute());
     Ok(path.to_path_buf())
+}
+
+/// Every link a path's resolution passes through, file and folder links alike, and every
+/// real folder a `..` in it leaves, each named where it really sits, in the order the
+/// resolution meets them, so a chain is judged by every place an agent could move it from,
+/// not only by its two ends (RV-DS241-140). Reads at most [`LINK_HOPS_MAX`] links. Input:
+/// an absolute path. Output: those places, or none when the path does not resolve within
+/// that bound.
+#[cfg(unix)]
+pub(crate) fn link_hops(path: &Path) -> Option<Vec<PathBuf>> {
+    use std::path::Component;
+    assert!(path.is_absolute());
+    let queue = |pending: &mut Vec<PathBuf>, from: &Path| {
+        for part in from.components().rev() {
+            match part {
+                Component::Normal(name) => pending.push(PathBuf::from(name)),
+                Component::ParentDir => pending.push(PathBuf::from("..")),
+                Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+            }
+        }
+    };
+    let mut pending = Vec::new();
+    queue(&mut pending, path);
+    let mut at = PathBuf::from("/");
+    let mut hops = Vec::new();
+    let mut links = 0;
+    while let Some(part) = pending.pop() {
+        if part.as_os_str() == ".." {
+            if at.parent().is_some() {
+                hops.push(at.clone());
+            }
+            at.pop();
+            continue;
+        }
+        let next = at.join(&part);
+        let kind = std::fs::symlink_metadata(&next).ok()?.file_type();
+        if !kind.is_symlink() {
+            at = next;
+            continue;
+        }
+        if links == LINK_HOPS_MAX {
+            return None;
+        }
+        links += 1;
+        let target = std::fs::read_link(&next).ok()?;
+        hops.push(next);
+        if target.is_absolute() {
+            at = PathBuf::from("/");
+        }
+        queue(&mut pending, &target);
+    }
+    assert!(links <= LINK_HOPS_MAX);
+    assert!(hops.len() >= links);
+    Some(hops)
+}
+
+/// Reads no links off Unix, where the checks rest on the two ends of a chain as before.
+/// Input: the path, unused. Output: no links.
+#[cfg(not(unix))]
+pub(crate) fn link_hops(_path: &Path) -> Option<Vec<PathBuf>> {
+    Some(Vec::new())
 }
 
 /// Picks the file a pin may use from what a search finds: the first candidate, in search
@@ -427,11 +539,13 @@ fn owner_runnable(_metadata: &std::fs::Metadata) -> bool {
 }
 
 /// The folders a search looked in for one harness as the owner reads them: HOME shown as
-/// `~`, a shim folder marked "(shim, skipped)", at most [`LOOKED_MAX`] folders, each at most
+/// `~`, a shim folder marked "(shim, skipped)", a folder passed over for a temp folder marked
+/// with that reason ([`TEMP_SKIPPED`]), at most [`LOOKED_MAX`] folders, each at most
 /// [`LOOKED_BYTES_MAX`] bytes, so the answer always fits one reply frame. Inputs: the search
 /// and the id. Output: the lines.
 pub fn looked(search: &Search, id: &str) -> Vec<String> {
     let home = search.home();
+    let skipped = search.temp_skipped(id);
     let lines: Vec<String> = search
         .looked(id)
         .into_iter()
@@ -442,6 +556,8 @@ pub fn looked(search: &Search, id: &str) -> Vec<String> {
             };
             if is_shim_folder(home, &folder) {
                 shown.push_str(SHIM_SKIPPED);
+            } else if skipped.contains(&folder) {
+                shown.push_str(TEMP_SKIPPED);
             }
             (shown.len() <= LOOKED_BYTES_MAX).then_some(shown)
         })
@@ -449,4 +565,30 @@ pub fn looked(search: &Search, id: &str) -> Vec<String> {
         .collect();
     assert!(lines.len() <= LOOKED_MAX);
     lines
+}
+
+/// A folder for a row's harness files where an owner's install would be: outside every
+/// folder the agent space holds, the engine's own temp folder among them, and outside the
+/// shared temp folders other users can change; this user's cache folder on macOS, the temp
+/// folder elsewhere. Input: the folder name's prefix. Output: the folder, removed when dropped.
+#[cfg(all(test, unix))]
+pub(crate) fn owner_folder(prefix: &str) -> tempfile::TempDir {
+    if !cfg!(target_os = "macos") {
+        return tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+    }
+    let cache = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/getconf")
+            .arg("DARWIN_USER_CACHE_DIR")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let cache = std::fs::canonicalize(String::from_utf8(cache.stdout).unwrap().trim()).unwrap();
+    let folder = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(cache)
+        .unwrap();
+    assert!(folder.path().is_absolute());
+    folder
 }

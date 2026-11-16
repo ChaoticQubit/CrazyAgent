@@ -16,7 +16,7 @@ function session(patch = {}) {
   const forbidden = () => { throw new Error("static rendering must not call the engine"); };
   return {
     engine: "running", unconfirmed: false, profile: { kind: "ok", value: profile }, projects: { kind: "ok", value: [] },
-    toast: "", revision: 1, retry: forbidden, checkUnconfirmed: forbidden, refreshProfile: forbidden, refreshProjects: forbidden,
+    toast: "", revision: 1, intake: null, found: { kind: "loading" }, retry: forbidden, checkUnconfirmed: forbidden, refreshProfile: forbidden, refreshProjects: forbidden,
     showToast: forbidden, noteResult: (result) => result, ...patch,
   };
 }
@@ -48,6 +48,25 @@ test("an unreachable engine shows one full-window state with Try again and no sh
   assert.match(markup, /Start it, then try again\./);
   assert.match(markup, /class="btn primary"[^>]*>[\s\S]*Try again<\/button>/);
   assert.doesNotMatch(markup, /class="sidebar"/);
+});
+
+test("the engine-down state offers Restart engine, which repairs the login service, and names why the engine didn't start (RV-DS241-118)", async () => {
+  const moved = "Move CrazyAgent to your Applications folder, then open it again. Its engine can't run at login from a disk image, another disk or a temporary folder.";
+  const { plainError } = await import("../src/api.ts");
+  assert.equal(plainError("engine_app_not_installed"), moved);
+  const markup = render({ engine: "down", engineProblem: moved });
+  assert.match(markup, /<h1>CrazyAgent&#x27;s engine isn&#x27;t running<\/h1>/);
+  assert.match(markup, /role="alert"[^>]*>Move CrazyAgent to your Applications folder, then open it again\./);
+  assert.match(markup, /class="btn primary"[^>]*>[\s\S]*Try again<\/button>/);
+  assert.match(markup, /class="btn"[^>]*>(?:(?!<\/button>).)*Restart engine<\/button>/);
+  const plain = render({ engine: "down", engineProblem: null });
+  assert.match(plain, /Restart engine<\/button>/);
+  assert.doesNotMatch(plain, /role="alert"/);
+});
+
+test("Restart engine never replaces a newer engine, or one a test build may not, and says why (RV-DS241-129)", async () => {
+  const { plainError } = await import("../src/api.ts");
+  assert.equal(plainError("engine_newer_than_app"), "Your login service runs a newer CrazyAgent engine than this app, or this app is a test build, so Restart engine keeps that engine. Open the newer CrazyAgent or update this one, then restart the engine.");
 });
 
 test("an engine of another version asks for a restart with both versions, not the engine-down state", () => {
@@ -87,6 +106,14 @@ test("an empty engine profile opens Welcome; a saved profile opens Home in the s
   assert.match(home, /<h1>Projects<\/h1>/);
   assert.match(home, /Skip to content/);
   assert.doesNotMatch(home, /Tell CrazyAgent about you/);
+});
+
+test("a stored profile the engine read back with a blank name opens Welcome prefilled with its role, bio and stack (RV-DS241-134 r2)", () => {
+  const kept = { name: "", role: "Founder", bio: "Builds tools.", preferred_stack: ["Rust"], working_style: { detail: "detailed", initiative: "act_first" } };
+  const markup = render({ profile: { kind: "ok", value: kept } });
+  assert.match(markup, /<h1>Tell CrazyAgent about you<\/h1>/);
+  assert.doesNotMatch(markup, /class="sidebar"/);
+  for (const shown of ['value="Founder"', ">Builds tools.</textarea>", ">Rust<"]) assert.ok(markup.includes(shown), `${shown} is not prefilled: ${markup}`);
 });
 
 test("a profile read that is not in this build yet skips Welcome instead of blocking the app", () => {
@@ -279,6 +306,24 @@ test("Get set up keeps Install tools until tmux, uv and graphify are found; the 
   const failedRead = item({ kind: "error", code: "setup_owner_unavailable", message: "CrazyAgent's engine isn't running." });
   assert.equal(failedRead.done, false);
   assert.equal(failedRead.body, "Couldn't check tmux, uv and graphify. Open setup to try again.");
+});
+
+test("Install tools counts a tmux bundled with CrazyAgent as installed, so a 2.4.1 Mac never asks to install tmux (DEC-157)", () => {
+  const pool = { id: "pool-1", name: "Main", summary: "1 ChatGPT", members: [], project_count: 0 };
+  const item = (tools) => setupSteps(ok([account({})]), ok([pool]), ok([]), tools).items.find((entry) => entry.id === "tools");
+  const bundled = { state: "bundled", version: "3.8" };
+  assert.equal(item(toolsRead(bundled, found, found)).done, true);
+  assert.equal(item(toolsRead(bundled, found, found)).body, "tmux, uv and graphify are installed.");
+  assert.equal(item(toolsRead(bundled, found, { state: "missing" })).body,
+    "graphify isn't installed. Live terminals and the team graph need tmux; setting up a project needs graphify.");
+});
+
+test("Install tools counts a system tmux used in place of the bundled one as installed (leader 20:08)", () => {
+  const pool = { id: "pool-1", name: "Main", summary: "1 ChatGPT", members: [], project_count: 0 };
+  const item = (tools) => setupSteps(ok([account({})]), ok([pool]), ok([]), tools).items.find((entry) => entry.id === "tools");
+  const system = { state: "system", version: "3.5a", note: "Using the system tmux, the bundled one is missing; reinstall CrazyAgent." };
+  assert.equal(item(toolsRead(system, found, found)).done, true);
+  assert.equal(item(toolsRead(system, found, found)).body, "tmux, uv and graphify are installed.");
 });
 
 test("Home keeps the Get set up panel with Set up tools after a skipped tools step", () => {

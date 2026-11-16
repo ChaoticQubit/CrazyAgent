@@ -758,12 +758,15 @@ export function replyingTurn(turns: MasterTurn[]): MasterTurn | null {
   return turns.filter((turn) => !turnSettled(turn)).reduce<MasterTurn | null>((last, turn) => last === null || turn.ordinal > last.ordinal ? turn : last, null);
 }
 
-/** The Conversation line when the master's harness is not installed on this Mac.
+/** The Conversation line when the master's harness is not installed on this Mac, or is found
+ * but the engine lists it as Can't run, in the words New Project and the team pickers use.
  * Inputs: the harness catalog, or null while it is not ready, and the master's harness id.
- * Output: the line, or null when the harness is installed or unknown. */
+ * Output: the line, or null when the harness can run or is unknown. */
 export function masterMissingLine(harnesses: HarnessEntry[] | null, master: string): string | null {
   const entry = harnesses?.find((harness) => harness.id === master);
-  return entry?.status.kind === "not_installed" ? `${entry.name} isn't installed on this Mac.` : null;
+  if (entry?.status.kind === "not_installed") return `${entry.name} isn't installed on this Mac.`;
+  if (entry?.status.kind === "cant_run") return `${entry.name} can't run on this Mac. Pick another harness.`;
+  return null;
 }
 
 /** The Needs you line when accounts in the project's pool need to sign in again.

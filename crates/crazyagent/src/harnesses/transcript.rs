@@ -10,6 +10,8 @@ pub const READ_BYTES_MAX: usize = 1024 * 1024;
 pub const LINE_BYTES_MAX: usize = 16 * 1024 * 1024;
 pub const EVENTS_PER_READ_MAX: usize = 4096;
 const ROLLOUTS_SCANNED_MAX: usize = 512;
+/// How deep a Codex rollout lies below the agent home: `sessions/<year>/<month>/<day>/<file>`.
+const ROLLOUT_DEPTH: usize = 5;
 const ROLLOUT_HEAD_BYTES_MAX: usize = 256 * 1024;
 const ROLLOUT_CLOCK_SLACK: Duration = Duration::from_secs(5);
 const CLAUDE_INTERRUPTED: &str = "[Request interrupted by user";
@@ -199,7 +201,7 @@ impl TranscriptReader {
         let mut reader = Self::with_earlier(source, cwd, SystemTime::now(), Vec::new());
         let (mut file, id) = match &reader.source {
             Transcript::CodexRollouts { sessions } if plain_below(sessions, record) => {
-                let file = open_plain(record).ok_or_else(unavailable)?;
+                let file = open_rollout(record).ok_or_else(unavailable)?;
                 let id = rollout_id(&file, &reader.cwd).ok_or_else(unavailable)?;
                 (file, id)
             }
@@ -281,6 +283,42 @@ impl TranscriptReader {
         assert!(self.in_turn);
         self.in_turn = false;
         self.dropped = true;
+    }
+
+    /// Passes over all the open record holds now, unread, as an adoption whose read was cut
+    /// short needs, so no earlier line is reported later as new (RV-DS241-143). Reading goes
+    /// on at the record's current end, past the rest of a line still being written there.
+    /// Whether a turn is open is unknown, so it is forgotten as a dropped one (see
+    /// `drop_turn`). Takes the reader. Returns nothing, or a plain code when the record
+    /// cannot be read.
+    pub fn skip_to_end(&mut self) -> Result<(), LaunchError> {
+        let unavailable = |_: std::io::Error| failure("launch_transcript_unavailable");
+        let Some(file) = self.file.as_mut() else {
+            return Ok(());
+        };
+        let at = self.start + self.consumed;
+        let end = file.seek(SeekFrom::End(0)).map_err(unavailable)?;
+        let inside_line = if end > at {
+            let mut last = [0u8; 1];
+            file.seek(SeekFrom::Start(end - 1)).map_err(unavailable)?;
+            file.read_exact(&mut last).map_err(unavailable)?;
+            last[0] != b'\n'
+        } else {
+            file.seek(SeekFrom::Start(at)).map_err(unavailable)?;
+            self.skipping || self.pending.last().is_some_and(|byte| *byte != b'\n')
+        };
+        let end = end.max(at);
+        assert_eq!(file.stream_position().ok(), Some(end));
+        self.consumed = end - self.start;
+        self.pending.clear();
+        self.scanned = 0;
+        self.skipping = inside_line;
+        self.in_turn = false;
+        self.aside = false;
+        self.dropped = true;
+        self.codex_calls = CodexExecCalls::default();
+        assert_eq!(self.start + self.consumed, end);
+        Ok(())
     }
 
     /// Reads what the harness appended since the last read, at most `READ_BYTES_MAX` bytes,
@@ -459,7 +497,39 @@ fn file_key(_metadata: &std::fs::Metadata, path: &Path) -> FileKey {
     path.to_path_buf()
 }
 
+/// Opens a Codex rollout record with no link followed from the agent home down: the record
+/// is `<home>/sessions/<year>/<month>/<day>/<file>`, as [`rollouts`] lists it, and each part
+/// below the home opens as itself ([`crate::platform::open_plain_beneath`]). Takes the
+/// record. Returns the file, none for a record elsewhere, a link on the way or anything but
+/// a plain file.
+pub(crate) fn open_rollout(record: &Path) -> Option<File> {
+    let home = record.ancestors().nth(ROLLOUT_DEPTH)?;
+    let below = record.strip_prefix(home).ok()?;
+    if below.components().next() != Some(Component::Normal(std::ffi::OsStr::new("sessions"))) {
+        return None;
+    }
+    let file = crate::platform::open_plain_beneath(home, below).ok()?;
+    file.metadata().ok()?.is_file().then_some(file)
+}
+
+/// Opens a harness conversation record to read: a Codex rollout through [`open_rollout`],
+/// any other record as [`open_plain`] does. Takes the harness and the record. Returns the
+/// file, none when it cannot be opened that way.
+pub(crate) fn open_record(harness: &str, record: &Path) -> Option<File> {
+    match harness {
+        "codex" => open_rollout(record),
+        _ => open_plain(record),
+    }
+}
+
+/// Lists the Codex rollouts of the newest two days of the newest two months and years below
+/// `sessions`, nothing when `sessions` is a link or no folder, so a sessions folder swapped
+/// for a link lists nothing; each one found is opened later through [`open_rollout`]. Takes
+/// the sessions folder. Returns each rollout's time, path and identity.
 fn rollouts(sessions: &Path) -> Vec<(SystemTime, PathBuf, FileKey)> {
+    if !std::fs::symlink_metadata(sessions).is_ok_and(|metadata| metadata.is_dir()) {
+        return Vec::new();
+    }
     let mut found = Vec::new();
     let mut scanned = 0;
     for year in newest(sessions, 2) {
@@ -508,7 +578,7 @@ fn find_rollout(
         .collect();
     candidates.sort_by_key(|a| std::cmp::Reverse(a.0));
     candidates.into_iter().find_map(|(_, path)| {
-        let file = open_plain(&path).filter(|file| {
+        let file = open_rollout(&path).filter(|file| {
             file.metadata()
                 .is_ok_and(|metadata| earlier.binary_search(&file_key(&metadata, &path)).is_err())
         })?;
@@ -856,6 +926,10 @@ fn claude_aside(value: &Value) -> bool {
     !texts.is_empty() && !interrupt && !claude_prompt(value, &texts)
 }
 
+/// The facts of one Claude Code session line. A reply cut at the output cap does not end
+/// the turn, since Claude Code asks the model to go on and ends a turn it gives up with its
+/// own error line, and its text gains no line break, so the parts join as one answer.
+/// Takes the line. Returns the facts.
 fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
     let message = &value["message"];
     match value["type"].as_str() {
@@ -913,6 +987,7 @@ fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
             ]
         }
         Some("assistant") => {
+            let cut = message["stop_reason"] == "max_tokens";
             let mut facts = Vec::new();
             let mut said = false;
             for item in message["content"].as_array().into_iter().flatten() {
@@ -920,7 +995,13 @@ fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
                     Some("text") => {
                         if let Some(text) = item["text"].as_str().filter(|text| !text.is_empty()) {
                             said = true;
-                            facts.push(line_text(text));
+                            facts.push(if cut {
+                                TranscriptEvent::Text {
+                                    text: text.to_owned(),
+                                }
+                            } else {
+                                line_text(text)
+                            });
                         }
                     }
                     Some("tool_use") => facts.push(TranscriptEvent::ToolUse {
@@ -929,12 +1010,13 @@ fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
                     _ => {}
                 }
             }
-            match message["stop_reason"].as_str() {
-                Some("end_turn" | "stop_sequence") if said => {
-                    facts.push(TranscriptEvent::TurnFinished { success: true });
-                }
-                Some("max_tokens") => facts.push(TranscriptEvent::TurnFinished { success: false }),
-                _ => {}
+            if said
+                && matches!(
+                    message["stop_reason"].as_str(),
+                    Some("end_turn" | "stop_sequence")
+                )
+            {
+                facts.push(TranscriptEvent::TurnFinished { success: true });
             }
             facts
         }
@@ -960,7 +1042,7 @@ pub enum Speaker {
 /// never follows a link. Takes the harness and the record. Returns the messages oldest
 /// first, at most `EXCERPT_MESSAGES_MAX`, none when the record cannot be read.
 pub fn conversation_messages(harness: &str, record: &Path) -> Vec<(Speaker, String)> {
-    let Some(mut file) = open_plain(record) else {
+    let Some(mut file) = open_record(harness, record) else {
         return Vec::new();
     };
     let Ok(length) = file.metadata().map(|metadata| metadata.len()) else {
@@ -1289,7 +1371,7 @@ pub mod pending;
 /// offset. Returns the typed texts oldest first, or none when the record cannot be read or
 /// is now shorter than the offset.
 pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<String>> {
-    let mut file = open_plain(record)?;
+    let mut file = open_record(harness, record)?;
     let length = file.metadata().ok()?.len();
     if length < offset {
         return None;
@@ -1331,7 +1413,7 @@ pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<Stri
 /// when no typed text was found; none when the record cannot be read or is now shorter
 /// than the offset.
 pub fn typed_past(harness: &str, record: &Path, offset: u64) -> Option<(Vec<(u64, String)>, u64)> {
-    let mut file = open_plain(record)?;
+    let mut file = open_record(harness, record)?;
     let length = file.metadata().ok()?.len();
     if length < offset {
         return None;

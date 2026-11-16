@@ -124,7 +124,7 @@ fn the_attach_screen_puts_a_full_screen_app_back_on_its_alternate_screen_with_it
 
 #[test]
 fn an_attach_reads_the_pane_its_window_cursor_and_size() {
-    let found = located(&[b"%2 @2 8 0 80 24 1 0 312 0 0 0 0 0 0 end".to_vec()]).unwrap();
+    let found = located(&[b"24 312 %2 @2 8 0 80 1 0 0 0 0 0 0 0 end".to_vec()]).unwrap();
     assert_eq!(
         (
             found.pane,
@@ -144,7 +144,7 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
     );
     assert_eq!(found.history, 312);
     assert_eq!(
-        located(&[b"%2 @2 8 0 80 24 0 1 0 1 0 1 0 1 0 end".to_vec()])
+        located(&[b"24 0 %2 @2 8 0 80 0 1 1 0 1 0 1 0 end".to_vec()])
             .unwrap()
             .modes,
         Modes {
@@ -156,7 +156,7 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
         }
     );
     assert_eq!(
-        located(&[b"%2 @2 8 0 80 24 0 0 0 1 1   1  end".to_vec()])
+        located(&[b"24 0 %2 @2 8 0 80 0 0 1 1   1  end".to_vec()])
             .unwrap()
             .modes,
         Modes {
@@ -168,7 +168,7 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
         "a mode flag an older tmux leaves empty reads as off"
     );
     let full = format!(
-        "%2 @2 8 0 80 24 1 0 {} 0 0 0 0 0 0{FORMAT_END}",
+        "24 {} %2 @2 8 0 80 1 0 0 0 0 0 0 0{FORMAT_END}",
         u64::from(SCROLLBACK_LINES) * 3
     );
     assert_eq!(
@@ -176,20 +176,20 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
         HISTORY_ROWS_MAX,
         "history past what the capture asks for is clamped to it"
     );
-    assert!(located(&[b"%2 @2 8 0 80 24 end".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0 end".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 x 0 end".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0 -4 end".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0 312 end".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0 312 2 0 0 0 0 0 end".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0 312 0 0 0 0 0 0 0 end".to_vec()]).is_none());
-    assert!(located(&[b"  0 0 80 24 0 0 0 end".to_vec()]).is_none());
+    assert!(located(&[b"24 312 %2 @2 8 0 80 end".to_vec()]).is_none());
+    assert!(located(&[b"24 312 %2 @2 8 0 80 1 0 end".to_vec()]).is_none());
+    assert!(located(&[b"24 312 %2 @2 8 0 80 1 x 0 0 0 0 0 0 end".to_vec()]).is_none());
+    assert!(located(&[b"24 -4 %2 @2 8 0 80 1 0 0 0 0 0 0 0 end".to_vec()]).is_none());
+    assert!(located(&[b"24 312 %2 @2 8 0 80 1 0 0 end".to_vec()]).is_none());
+    assert!(located(&[b"24 312 %2 @2 8 0 80 1 0 2 0 0 0 0 0 end".to_vec()]).is_none());
+    assert!(located(&[b"24 312 %2 @2 8 0 80 1 0 0 0 0 0 0 0 0 end".to_vec()]).is_none());
+    assert!(located(&[b"24 0   0 0 80 0 0 0 0 0 0 0 0 end".to_vec()]).is_none());
     assert!(located(&[]).is_none());
     assert!(
-        located(&[b"%2 @2 8 0 80 24 1 0 312 0 0 0 0 0 0".to_vec()]).is_none(),
+        located(&[b"24 312 %2 @2 8 0 80 1 0 0 0 0 0 0 0".to_vec()]).is_none(),
         "a line without the end mark is one tmux cut short"
     );
-    assert!(located(&[b"%1 @1 0 ".to_vec()]).is_none());
+    assert!(located(&[b"24 312 %1 @1 0 ".to_vec()]).is_none());
 }
 
 #[test]
@@ -261,7 +261,7 @@ fn a_confined_lead_line_takes_only_the_engines_own_keeper_back_out() {
     };
     let line = |argv: Vec<String>| confined_line(&agent, &command(argv), profile, &[]);
     let lead = plain("/private/tmp/lead.sb");
-    let kept = kept_pane(lead.clone()).unwrap();
+    let kept = kept_pane(lead.clone(), None).unwrap();
     assert_eq!(
         line(kept.clone()).map_err(|error| error.0),
         Ok(line(lead.clone()).unwrap()),
@@ -285,7 +285,8 @@ fn a_confined_lead_line_takes_only_the_engines_own_keeper_back_out() {
     ];
     wrapped.extend(lead.clone());
     let refused = [
-        kept_pane(plain("/private/tmp/other.sb")).unwrap(),
+        kept_pane(plain("/private/tmp/other.sb"), None).unwrap(),
+        kept_pane(lead.clone(), Some(Path::new("/private/tmp/state"))).unwrap(),
         keeper_text,
         shim_text,
         no_shim,
@@ -325,6 +326,74 @@ fn a_pane_command_with_a_perl_load_variable_is_refused() {
             "{name}"
         );
     }
+}
+
+/// DEC-158: a kept pane's keeper takes the engine's freeze record as the word before its
+/// `sandbox-exec`, so a kept freezable pane passes the pane gate with no variable of the
+/// engine's own; a record that is not one absolute line of at most 1001 bytes is refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_kept_pane_hands_its_keeper_the_freeze_record_as_an_argument() {
+    use crate::sandbox::{KEEPER, PANE_SHIM, SANDBOX_EXEC, kept_pane};
+    let agent = AgentId::team(4).unwrap();
+    let plain: Vec<String> = [
+        SANDBOX_EXEC,
+        "-f",
+        "/private/tmp/agent.sb",
+        "/usr/local/bin/claude",
+    ]
+    .map(String::from)
+    .to_vec();
+    let state = Path::new("/private/tmp/team/state");
+    let kept = kept_pane(plain.clone(), Some(state)).unwrap();
+    assert_eq!(kept.len(), KEEPER.len() + 1 + PANE_SHIM.len() + plain.len());
+    assert_eq!(kept[KEEPER.len()], "/private/tmp/team/state");
+    assert_eq!(kept[KEEPER.len() + 1..KEEPER.len() + 4], plain[..3]);
+    assert_eq!(kept.last(), plain.last());
+    let command = InteractiveCommand {
+        argv: kept,
+        cwd: PathBuf::from("/private/tmp/project"),
+        env: vec![],
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    assert!(spawn_line(&agent, &command).is_ok());
+    let longest = format!("/{}", "a".repeat(1000));
+    assert!(kept_pane(plain.clone(), Some(Path::new(&longest))).is_some());
+    let longer = format!("/{}", "a".repeat(1001));
+    for refused in [
+        "private/tmp/state",
+        "/private/tmp/a\nb",
+        "/",
+        longer.as_str(),
+    ] {
+        assert_eq!(
+            kept_pane(plain.clone(), Some(Path::new(refused))),
+            None,
+            "{refused:?}"
+        );
+    }
+}
+
+/// DEC-158: a kept pane's keeper takes the engine's freeze record as an argument, so the
+/// pane variable gate stays as it was and still refuses a pane command that carries the
+/// keeper's own state variable.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pane_command_with_the_keeper_state_variable_is_still_refused() {
+    let agent = AgentId::team(4).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/usr/local/bin/claude".into()],
+        cwd: PathBuf::from("/private/tmp/project"),
+        env: vec![(
+            crate::sandbox::KEEPER_STATE.into(),
+            "/private/tmp/state".into(),
+        )],
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    assert_eq!(
+        spawn_line(&agent, &command).map_err(|error| error.0),
+        Err("terminal_command_invalid".to_owned())
+    );
 }
 
 #[test]
@@ -1926,4 +1995,349 @@ fn the_server_pid_comes_only_from_a_listener_bound_at_the_socket_itself() {
         None,
         "a link at the socket path redirected the probe to another listener"
     );
+}
+
+/// Writes an `sh` stand-in for tmux that adds a line to `ran` each time it starts, then does
+/// `rest`. Takes the folder, the counting file and the rest of the script. Returns the tmux
+/// as the resolver gives it.
+fn counted_tmux(
+    folder: &std::path::Path,
+    ran: &std::path::Path,
+    rest: &str,
+) -> crate::tools::Resolved {
+    use std::os::unix::fs::PermissionsExt;
+    let program = folder.join(crate::tools::BUNDLED_TMUX);
+    let script = format!("#!/bin/sh\necho ran >> '{}'\n{rest}\n", ran.display());
+    std::fs::write(&program, script).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::tools::Resolved {
+        entry: program.clone(),
+        program,
+        kind: crate::tools::Kind::Native,
+    }
+}
+
+/// How many times a [`counted_tmux`] started. Takes its counting file. Returns the count.
+fn started(ran: &std::path::Path) -> usize {
+    std::fs::read_to_string(ran).map_or(0, |text| text.lines().count())
+}
+
+#[test]
+fn a_tmux_whose_version_read_runs_out_of_time_is_not_read_again_while_the_file_is_unchanged() {
+    let folder = tempfile::tempdir().unwrap();
+    let ran = folder.path().join("ran.txt");
+    let tmux = counted_tmux(folder.path(), &ran, "exec /bin/sleep 30");
+    let bound = std::time::Duration::from_secs(1);
+    assert!(
+        runs_within(&tmux, bound),
+        "a read that runs out of time counts as running"
+    );
+    let first = started(&ran);
+    assert!(first <= 1);
+    let again = std::time::Instant::now();
+    assert!(runs_within(&tmux, bound));
+    assert_eq!(
+        started(&ran),
+        first,
+        "every terminal start waited the whole bound again for the same file"
+    );
+    assert!(again.elapsed() < bound);
+}
+
+#[test]
+fn a_tmux_whose_version_read_fails_is_asked_again_so_a_fix_outside_the_file_counts() {
+    let folder = tempfile::tempdir().unwrap();
+    let ran = folder.path().join("ran.txt");
+    let tmux = counted_tmux(folder.path(), &ran, "exit 1");
+    assert!(!runs(&tmux));
+    assert_eq!(started(&ran), 1);
+    assert!(!runs(&tmux));
+    assert_eq!(started(&ran), 2, "a failed read is not kept");
+}
+
+/// Starts a test's own tmux host in a private folder with one sleeping agent per id.
+/// Takes the home folder and the agent ids. Returns the host and its server, which ends
+/// the server when dropped.
+#[cfg(target_os = "macos")]
+fn host_with_agents(home: &Path, ids: &[i64]) -> (Tmux, Server) {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = home.join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    for id in ids {
+        let command = InteractiveCommand {
+            argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/sleep 60".into()],
+            cwd: home.to_path_buf(),
+            env: Vec::new(),
+            transcript: crate::harnesses::interactive::Transcript::Unavailable,
+        };
+        host.spawn(&AgentId::team(*id).unwrap(), &command).unwrap();
+    }
+    (host, server)
+}
+
+/// Live views count per pane, not per tmux server: eight views of one agent leave room for
+/// a view of another agent on the engine's same server, as a nine-tile wall needs, while a
+/// ninth view of that same pane is still refused (RV-DS241-96).
+#[cfg(target_os = "macos")]
+#[test]
+fn views_count_per_pane_so_eight_of_one_agent_leave_room_for_another() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, _server) = host_with_agents(home.path(), &[1, 2]);
+    let (one, two) = (AgentId::team(1).unwrap(), AgentId::team(2).unwrap());
+    let views: Vec<TerminalStream> = (0..VIEWERS_MAX)
+        .map(|_| host.attach(&one).unwrap())
+        .collect();
+    assert_eq!(
+        host.attach(&one).err().map(|problem| problem.0),
+        Some("terminal_viewers_full".to_owned())
+    );
+    let other = host.attach(&two);
+    assert!(other.is_ok(), "{:?}", other.err());
+    drop(views);
+}
+
+/// A view of a teammate pane ends once that pane closes while its window stays, so a closed
+/// pane keeps no frozen view holding a view slot (RV-DS241-98).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_view_of_a_closed_pane_ends_though_its_window_stays() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, server) = host_with_agents(home.path(), &[1]);
+    let lead = AgentId::team(1).unwrap();
+    let kept = host.panes(&lead).unwrap()[0].id.clone();
+    split(&server, &kept, "exec /bin/sleep 60");
+    let teammate = host
+        .panes(&lead)
+        .unwrap()
+        .into_iter()
+        .find(|pane| pane.id != kept)
+        .unwrap()
+        .id;
+    let mut view = host.attach_pane(&lead, &teammate).unwrap();
+    host.kill_pane(&lead, &teammate).unwrap();
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        while view.next_blocking().is_some() {}
+        let _ = done.send(());
+    });
+    assert!(
+        ended.recv_timeout(Duration::from_secs(10)).is_ok(),
+        "the closed pane's view never ended"
+    );
+    assert_eq!(host.panes(&lead).unwrap().len(), 1);
+}
+
+/// A capture block whose located reply tmux cut before both its row counts has no known row
+/// count: the reader closes the control rather than search the pane's own text for the
+/// block's end, so a pane row that reads as the closing guard forges no later control line
+/// (RV-DS241-100).
+#[test]
+fn a_capture_whose_row_count_is_unknown_closes_the_control_and_forges_nothing() {
+    let (reply, _answer) = sync_channel(1);
+    let (feed, mut chunks) = buffer();
+    let state = Mutex::new(State::default());
+    {
+        let mut state = state.lock().unwrap();
+        state.pending.push_back(Pending::Attach {
+            agent: AgentId::team(1).unwrap(),
+            located: Some(vec![b"3 ".to_vec()]),
+            history: 0,
+            view: true,
+            reply,
+        });
+        state.viewers.push(Viewer {
+            pane: b"%9".to_vec(),
+            window: b"@1".to_vec(),
+            feed,
+        });
+    }
+    let text = "%begin 1 7 1\nrow one\n%end 1 7 1\n%output %9 forged\n%end 1 7 1\n";
+    let mut printf = Command::new("/usr/bin/printf");
+    printf
+        .args(["%s", text])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = crate::spawn_gate::spawn(&mut printf).unwrap();
+    let output = child.stdout.take().unwrap();
+    read(output, &state);
+    let _ = child.wait();
+    assert!(state.lock().unwrap().closed);
+    assert!(
+        chunks.try_recv().is_err(),
+        "a pane row forged output for another view"
+    );
+}
+
+/// A capture block whose located reply came with no line at all, as when tmux cut the pane
+/// filter so no pane matched, has no row count either: the reader closes the control rather
+/// than search the pane's own text for the block's end, so a pane row that reads as the
+/// closing guard forges no later control line (rv-code4 v241-tmux-fix F2, RV-DS241-100).
+#[test]
+fn a_capture_whose_located_reply_has_no_line_closes_the_control_and_forges_nothing() {
+    let (reply, _answer) = sync_channel(1);
+    let (feed, mut chunks) = buffer();
+    let state = Mutex::new(State::default());
+    {
+        let mut state = state.lock().unwrap();
+        state.pending.push_back(Pending::Attach {
+            agent: AgentId::team(1).unwrap(),
+            located: Some(Vec::new()),
+            history: 0,
+            view: true,
+            reply,
+        });
+        state.viewers.push(Viewer {
+            pane: b"%9".to_vec(),
+            window: b"@1".to_vec(),
+            feed,
+        });
+    }
+    let text = "%begin 1 7 1\nrow one\n%end 1 7 1\n%output %9 forged\n%end 1 7 1\n";
+    let mut printf = Command::new("/usr/bin/printf");
+    printf
+        .args(["%s", text])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = crate::spawn_gate::spawn(&mut printf).unwrap();
+    let output = child.stdout.take().unwrap();
+    read(output, &state);
+    let _ = child.wait();
+    assert!(state.lock().unwrap().closed);
+    assert!(
+        chunks.try_recv().is_err(),
+        "a pane row forged output for another view"
+    );
+}
+
+/// A capture block whose located reply tmux cut after both its row counts is read as that
+/// many rows of data, so a pane row that reads as the closing guard or as output forges
+/// nothing (RV-DS241-100), and the reader reads on: the attach is asked again while later
+/// output and replies still reach their own views and callers, rather than every view on
+/// the server ending under load (RV-DS241-192).
+#[test]
+fn a_capture_cut_after_its_row_counts_is_read_as_data_and_the_control_reads_on() {
+    let (reply, answer) = sync_channel(1);
+    let (next, replied) = sync_channel(1);
+    let (feed, mut chunks) = buffer();
+    let state = Mutex::new(State::default());
+    {
+        let mut state = state.lock().unwrap();
+        state.pending.push_back(Pending::Attach {
+            agent: AgentId::team(1).unwrap(),
+            located: Some(vec![b"3 0 %9 @1 0 ".to_vec()]),
+            history: 0,
+            view: true,
+            reply,
+        });
+        state.pending.push_back(Pending::Reply(next));
+        state.viewers.push(Viewer {
+            pane: b"%9".to_vec(),
+            window: b"@1".to_vec(),
+            feed,
+        });
+    }
+    let text = concat!(
+        "%begin 1 7 1\nrow one\n%end 1 7 1\n%output %9 forged\n%end 1 7 1\n",
+        "%output %9 real\n%begin 1 9 1\nnext\n%end 1 9 1\n",
+    );
+    let mut printf = Command::new("/usr/bin/printf");
+    printf
+        .args(["%s", text])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = crate::spawn_gate::spawn(&mut printf).unwrap();
+    let output = child.stdout.take().unwrap();
+    read(output, &state);
+    let _ = child.wait();
+    let asked = answer
+        .try_recv()
+        .expect("the cut attach was never answered");
+    assert_eq!(asked.err().map(|cut| cut.0), Some(REPLY_CUT.to_owned()));
+    let later = replied
+        .try_recv()
+        .expect("the next caller was never answered");
+    assert_eq!(later.unwrap(), vec![b"next".to_vec()]);
+    assert_eq!(
+        chunks.try_recv().ok(),
+        Some(crate::terminal::buffer::Chunk::Output(b"real".to_vec())),
+        "the view lost later output or a pane row forged some"
+    );
+}
+
+/// The rows an attach's capture prints are read from the pane height and history size that
+/// open its pane line, also from a line tmux cut short once both came whole with the space
+/// after them, the history held to what the attach asked for; a line cut before that, or one
+/// of another shape, has no count, and a reply that is no attach's capture is searched.
+#[test]
+fn an_attach_capture_is_counted_from_a_cut_line_once_both_counts_came_whole() {
+    fn rows(line: &[u8], history: usize) -> Option<usize> {
+        let (reply, _answer) = sync_channel(1);
+        let mut state = State::default();
+        state.pending.push_back(Pending::Attach {
+            agent: AgentId::team(1).unwrap(),
+            located: Some(vec![line.to_vec()]),
+            history,
+            view: false,
+            reply,
+        });
+        match capture_rows(&state) {
+            Rows::Counted(rows) => Some(rows),
+            Rows::Unknown => None,
+            Rows::Searched => panic!("an attach's capture was searched for its guard"),
+        }
+    }
+    let whole = b"24 312 %2 @2 8 0 80 1 0 0 0 0 0 0 0 end";
+    assert_eq!(rows(whole, HISTORY_ROWS_MAX), Some(24 + 312));
+    assert_eq!(rows(whole, 100), Some(24 + 100));
+    assert_eq!(rows(b"24 312 %2 @2 8 ", 0), Some(24));
+    assert_eq!(rows(b"24 312 ", HISTORY_ROWS_MAX), Some(24 + 312));
+    assert_eq!(rows(b"24 312", HISTORY_ROWS_MAX), None);
+    assert_eq!(rows(b"24 ", HISTORY_ROWS_MAX), None);
+    assert_eq!(rows(b"", HISTORY_ROWS_MAX), None);
+    assert_eq!(rows(b"%2 @2 8 0 80 24 1 0 312 ", HISTORY_ROWS_MAX), None);
+    let deep = format!("24 {} %2 ", u64::from(SCROLLBACK_LINES) * 3);
+    assert_eq!(
+        rows(deep.as_bytes(), HISTORY_ROWS_MAX),
+        Some(24 + HISTORY_ROWS_MAX)
+    );
+    let (reply, _answer) = sync_channel(1);
+    let mut state = State::default();
+    state.pending.push_back(Pending::Reply(reply));
+    assert!(matches!(capture_rows(&state), Rows::Searched));
+}
+
+/// A window layout names every pane it holds, in leaf cells at any depth of splits, and a
+/// layout that is not read names none, so it ends no view.
+#[test]
+fn a_layout_names_the_panes_of_every_leaf_cell() {
+    let ids = |layout: &str| {
+        layout_panes(layout.as_bytes())
+            .into_iter()
+            .map(|pane| String::from_utf8(pane).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids("c0de,80x24,0,0,7"), ["%7"]);
+    assert_eq!(
+        ids("b25f,80x24,0,0{40x24,0,0,1,39x24,41,0,2}"),
+        ["%1", "%2"]
+    );
+    assert_eq!(
+        ids("a1b2,80x24,0,0[80x12,0,0,3,80x11,0,13{40x11,0,13,4,39x11,41,13,5}]"),
+        ["%3", "%4", "%5"]
+    );
+    assert!(ids("").is_empty());
+    assert!(ids("not a layout").is_empty());
 }

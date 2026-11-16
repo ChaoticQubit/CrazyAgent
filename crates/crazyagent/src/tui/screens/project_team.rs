@@ -4016,13 +4016,15 @@ impl TeamView {
     }
 }
 
-/// What V says for a master with no live terminal, whose conversation already is the console.
-const NO_LIVE_TERMINAL: &str = "This master has no live terminal: its conversation is the console.";
+/// What V says for a master with no live terminal, whose conversation already is the console,
+/// and what the master view says when such a master takes it back to the console.
+pub(in crate::tui) const NO_LIVE_TERMINAL: &str =
+    "This master has no live terminal: its conversation is the console.";
 
 /// Says whether "Live terminal" governs the project's master (OWNER-Q4-2-L3). Input: the team
 /// status. Output: true for a master harness the engine reads as a terminal app, and with no
 /// master yet, whose choice is stored for the master that comes.
-fn master_runs_live(status: &TeamStatus) -> bool {
+pub(in crate::tui) fn master_runs_live(status: &TeamStatus) -> bool {
     status
         .harnesses
         .iter()

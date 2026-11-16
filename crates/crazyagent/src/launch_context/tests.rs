@@ -212,6 +212,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -241,6 +242,82 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
     );
 }
 
+/// On macOS a launch never locks a home whose lock file has a second link, which may be the
+/// owner's file an agent linked in (RV-DS241-137 r3, code r2 F2): the reset that follows
+/// removes a kept file with a second link, so the lock this launch held would go and let a
+/// second launch into the home. The launch is refused and the owner's file stays as it was.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_launch_never_locks_a_lock_file_with_a_second_link() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("claude");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let owner = root.join("owner.txt");
+    fs::write(&owner, "the owner's\n").unwrap();
+    fs::hard_link(&owner, home.join(LOCK)).unwrap();
+
+    let locked = lock_only(&home, "claude-code").err().map(|error| error.0);
+
+    assert_eq!(locked.as_deref(), Some("launch_context_unsafe"));
+    assert_eq!(fs::read_to_string(&owner).unwrap(), "the owner's\n");
+}
+
+/// On Linux a launch locks a home whose lock an agent gave a second name inside its own
+/// write roots (RV-DS241-137 r3 code F2): Landlock and bubblewrap keep it from linking a file
+/// from outside them, and the reset keeps the lock whatever its links, so one `ln` of the
+/// lock never refuses every later launch of the home.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_launch_locks_a_home_whose_lock_has_a_second_name_in_the_home() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("claude");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let first = lock_only(&home, "claude-code")
+        .map(|_| ())
+        .map_err(|error| error.0);
+    assert_eq!(first, Ok(()));
+    fs::create_dir(home.join(".cache")).unwrap();
+    fs::hard_link(home.join(LOCK), home.join(".cache").join("x")).unwrap();
+
+    let locked = lock_only(&home, "claude-code")
+        .map(|_| ())
+        .map_err(|error| error.0);
+
+    assert_eq!(locked, Ok(()));
+}
+
+/// A launch locks a home an earlier run left with an ACL that denies listing and searching
+/// it (RV-DS241-137 code r2 F3): the retry clears the home's ACL by its path, which needs
+/// neither, where clearing it on the folder itself opens it and fails.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_launch_locks_a_home_whose_acl_denies_listing_and_searching_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("claude");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let added = crate::spawn_gate::collected(
+        std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone deny list,search"])
+            .arg(&home),
+    )
+    .unwrap();
+    assert!(added.status.success(), "{added:?}");
+
+    let locked = lock_only(&home, "claude-code")
+        .map(|_| ())
+        .map_err(|error| error.0);
+
+    let _ = crate::spawn_gate::collected(
+        std::process::Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(&home),
+    );
+    assert_eq!(locked, Ok(()));
+}
+
 /// A context-less launch's hold takes the same home lock as an install and leaves the home's
 /// files as they were (aabe420f): an install or a second hold on the held home is refused, the
 /// home keeps its own file and gains only the lock file, and the home is free once the hold
@@ -262,6 +339,7 @@ fn lock_only_holds_the_home_and_leaves_no_files() {
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -324,6 +402,7 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -379,6 +458,7 @@ fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -427,6 +507,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -554,6 +635,7 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     }
@@ -595,6 +677,7 @@ fn a_planted_codex_system_skill_does_not_survive_a_relaunch() {
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -669,6 +752,7 @@ fn an_immutable_planted_codex_system_skill_does_not_survive_a_relaunch() {
             native_threads: None,
             relay: None,
             model_proxy: None,
+            freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
         };
@@ -730,6 +814,7 @@ fn a_parked_name_is_left_alone_and_a_home_denying_removals_still_loses_planted_s
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -892,6 +977,7 @@ fn pinned_codex_system_skills_never_refuse_the_next_launches() {
             native_threads: None,
             relay: None,
             model_proxy: None,
+            freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
         };
@@ -990,6 +1076,7 @@ fn a_planted_skills_link_is_moved_away_and_what_it_names_is_left_as_it_was() {
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -1063,6 +1150,7 @@ fn an_owner_file_linked_into_codex_skills_keeps_its_immutable_flag() {
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -1116,6 +1204,7 @@ fn a_codex_install_moves_earlier_skills_out_of_a_home_that_denies_removals() {
             native_threads: None,
             relay: None,
             model_proxy: None,
+            freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
         };
@@ -1481,6 +1570,7 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -1645,6 +1735,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -1840,6 +1931,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -1937,6 +2029,7 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
             native_threads: None,
             relay: None,
             model_proxy: None,
+            freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
         };
@@ -2012,6 +2105,8 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
                     ),
                 }],
             }],
+            context_mode_off: None,
+            left_out: Vec::new(),
         },
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
@@ -2021,6 +2116,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -2136,6 +2232,8 @@ impl LeftPane {
                         value: crate::plugins::SecretValue::new(secret.as_bytes().to_vec()),
                     }],
                 }],
+                context_mode_off: None,
+                left_out: Vec::new(),
             },
             instructions: "# Project context from CrazyAgent\n".into(),
             process: None,
@@ -2145,6 +2243,7 @@ impl LeftPane {
             native_threads: None,
             relay: None,
             model_proxy: None,
+            freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
         };
@@ -2340,6 +2439,7 @@ fn the_restart_sentence_reaches_only_a_sub_agent_in_its_own_clone() {
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -2389,6 +2489,7 @@ fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -2481,6 +2582,7 @@ fn context_with(
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     }
@@ -2523,6 +2625,8 @@ fn the_context_mode_server_is_declared_under_its_plugin_name_for_claude_and_code
     let plugins = || LaunchPlugins {
         skills: Vec::new(),
         servers: vec![command_server("context-mode"), command_server("graph")],
+        context_mode_off: None,
+        left_out: Vec::new(),
     };
 
     let claude = private_home(&root, "claude");
@@ -2556,6 +2660,8 @@ fn switched_off_tools_reach_claude_as_denied_names_and_codex_as_disabled_tools()
     let plugins = || LaunchPlugins {
         skills: Vec::new(),
         servers: vec![command_server("context-mode"), command_server("graph")],
+        context_mode_off: None,
+        left_out: Vec::new(),
     };
     let off = || {
         vec![
@@ -2912,6 +3018,8 @@ fn every_tools_on_launch_delivers_the_tool_rules_as_firm_rules() {
                     folder: folder.clone(),
                 }],
                 servers: vec![command_server("context-mode")],
+                context_mode_off: None,
+                left_out: Vec::new(),
             },
             Vec::new(),
         )
@@ -2990,6 +3098,8 @@ fn the_task_start_reminder_names_the_select_string_and_skills_per_harness_and_no
             true => vec![command_server("context-mode"), command_server("graph")],
             false => vec![command_server("graph")],
         },
+        context_mode_off: None,
+        left_out: Vec::new(),
     };
     let off = |tools: &[&str]| {
         vec![(
@@ -3113,6 +3223,8 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
             false => Vec::new(),
         },
         servers: vec![command_server("context-mode"), command_server("graph")],
+        context_mode_off: None,
+        left_out: Vec::new(),
     };
     let off = || {
         vec![(
@@ -3230,6 +3342,8 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
         LaunchPlugins {
             skills: Vec::new(),
             servers: vec![command_server("graph")],
+            context_mode_off: None,
+            left_out: Vec::new(),
         },
         Vec::new(),
     )
@@ -3367,6 +3481,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -3586,6 +3701,7 @@ fn context_mode_context(plugins: LaunchPlugins) -> AgentContext {
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     }
@@ -3615,18 +3731,21 @@ fn a_fresh_agent_home_starts_context_mode_from_the_engine_install_not_npx() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let root = private_folder(&base.join("engine"));
-    let bin = private_folder(&base.join("bin"));
+    let bin = private_folder(&root.join("setup").join("bin"));
     for program in ["npx", "node"] {
         fs::write(bin.join(program), "").unwrap();
         fs::set_permissions(bin.join(program), fs::Permissions::from_mode(0o755)).unwrap();
     }
     let mut connection = store_context_mode(&root, &bin);
-    let waiting = context_mode_context(launch_app(&mut connection, &root));
-    let (command, _) = claude_context_mode(&waiting, &private_folder(&base.join("first")));
+    let waiting = launch_app(&mut connection, &root);
+    assert!(
+        waiting.servers.is_empty(),
+        "until the engine install is complete an agent gets no context-mode, never npx"
+    );
     assert_eq!(
-        command,
-        bin.join("npx").to_str().unwrap(),
-        "until the engine install is complete an agent keeps the approved npx launch"
+        waiting.context_mode_off,
+        Some(crate::plugins::ContextModeOff::Failed),
+        "no npm beside npx, so no shared install can run"
     );
 
     let install = root
@@ -3793,6 +3912,84 @@ fn on_path(name: &str) -> Option<PathBuf> {
             .map(|folder| folder.join(name))
             .find(|candidate| candidate.is_file())
     })
+}
+
+/// RV-DS241-156: a launch that leaves the context-mode server out, here with no npm beside
+/// npx so no shared install can run, leaves out the hooks that follow that server, from the
+/// same decision, so no agent gets context-mode's hooks without its server; a hook that
+/// follows no item still launches.
+#[test]
+fn a_launch_that_left_context_mode_out_leaves_out_the_hooks_that_follow_it() {
+    use crate::storage::plugins::{Command, execute};
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let root = private_folder(&base.join("engine"));
+    let bin = private_folder(&root.join("setup").join("bin"));
+    for program in ["npx", "node"] {
+        fs::write(bin.join(program), "").unwrap();
+        fs::set_permissions(bin.join(program), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut connection = store_context_mode(&root, &bin);
+    let server: String = connection
+        .query_row(
+            "SELECT id FROM plugin_items WHERE kind='server'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    for (name, follows) in [("context-mode", Some(server)), ("standalone", None)] {
+        let plugin = base.join(name);
+        fs::create_dir_all(plugin.join("hooks")).unwrap();
+        fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
+        fs::write(
+            plugin.join(".claude-plugin/plugin.json"),
+            format!(r#"{{"name":"{name}"}}"#),
+        )
+        .unwrap();
+        fs::write(
+            plugin.join("hooks/hooks.json"),
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/start.sh\""}]}]}}"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("hooks/start.sh"), "exit 0\n").unwrap();
+        execute(
+            &mut connection,
+            &root,
+            Command::AddHooks {
+                scope: crate::plugins::Scope::Global,
+                source: plugin.to_str().unwrap().to_owned(),
+                follows,
+            },
+        )
+        .unwrap();
+    }
+    let context = crate::launch_context::for_project(
+        &connection,
+        &ProjectId::new("app").unwrap(),
+        crate::agent_git::Layout::Linked,
+    )
+    .unwrap();
+    assert!(
+        context.plugins.servers.is_empty(),
+        "the server was left out"
+    );
+    assert_eq!(
+        context.plugins.context_mode_off,
+        Some(crate::plugins::ContextModeOff::Failed)
+    );
+    let launched: Vec<&str> = context
+        .process
+        .as_ref()
+        .unwrap()
+        .hooks
+        .iter()
+        .map(|hook| hook.plugin.as_str())
+        .collect();
+    assert_eq!(
+        launched,
+        ["standalone"],
+        "a hook that follows the left-out server never launches"
+    );
 }
 
 /// The engine's shared context-mode install under a test folder: an engine root whose
@@ -4444,6 +4641,7 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
         native_threads: None,
         relay: None,
         model_proxy: None,
+        freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
     };
@@ -4515,4 +4713,98 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
         ),
         "the resumed turn is not told the new text replaces the old"
     );
+}
+
+#[test]
+fn a_launch_whose_context_mode_was_dropped_on_an_old_node_says_why_in_its_tools_section() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let line = "- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n";
+    let plugins = |dropped: bool| LaunchPlugins {
+        skills: Vec::new(),
+        servers: vec![command_server("graph")],
+        context_mode_off: dropped.then_some(crate::plugins::ContextModeOff::NodeTooOld),
+        left_out: Vec::new(),
+    };
+    let claude = private_home(&root, "claude");
+    let installed = context_with(&root, plugins(true), Vec::new())
+        .install("claude-code", &claude, true)
+        .unwrap();
+    let prompt = fs::read_to_string(claude.join(STATE).join("instructions.md")).unwrap();
+    drop(installed);
+    let section = tools_section(&prompt);
+    assert!(section.contains(line), "{section}");
+    assert!(!section.contains("ctx_execute"), "{section}");
+
+    let codex = private_home(&root, "codex");
+    let installed = context_with(&root, plugins(true), Vec::new())
+        .install("codex", &codex, true)
+        .unwrap();
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let developer = config["developer_instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    drop(installed);
+    assert!(tools_section(&developer).contains(line), "{developer}");
+
+    let kept = private_home(&root, "kept");
+    let installed = context_with(&root, plugins(false), Vec::new())
+        .install("claude-code", &kept, true)
+        .unwrap();
+    let prompt = fs::read_to_string(kept.join(STATE).join("instructions.md")).unwrap();
+    drop(installed);
+    assert!(!prompt.contains("context-mode is off"), "{prompt}");
+}
+
+#[test]
+fn a_launch_that_left_context_mode_out_says_why_in_its_tools_section() {
+    use crate::plugins::ContextModeOff;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    for (off, line) in [
+        (
+            ContextModeOff::SettingUp,
+            "- context-mode is off for this launch: CrazyAgent is still setting it up on this computer. Use the shell instead; agents started once it is set up get it.\n",
+        ),
+        (
+            ContextModeOff::Failed,
+            "- context-mode is off for this launch: setting it up failed on this computer. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n",
+        ),
+        (
+            ContextModeOff::Mismatch,
+            "- context-mode is off for this launch: its installed files did not match the copy the default pack pins, so CrazyAgent did not run them. Use the shell instead, and tell the owner in your report.\n",
+        ),
+        (
+            ContextModeOff::NodeTooOld,
+            "- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n",
+        ),
+        (
+            ContextModeOff::Unsupported,
+            "- context-mode is off for this launch: CrazyAgent cannot run it on this platform yet. Use the shell instead.\n",
+        ),
+        (
+            ContextModeOff::NpxNotFound,
+            "- context-mode is off for this launch: CrazyAgent did not find the npx it runs on this computer, so it did not start it. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n",
+        ),
+    ] {
+        let plugins = LaunchPlugins {
+            skills: Vec::new(),
+            servers: vec![command_server("graph")],
+            context_mode_off: Some(off),
+            left_out: Vec::new(),
+        };
+        let home = private_home(&root, &format!("{off:?}").to_lowercase());
+        let installed = context_with(&root, plugins, Vec::new())
+            .install("claude-code", &home, true)
+            .unwrap();
+        let prompt = fs::read_to_string(home.join(STATE).join("instructions.md")).unwrap();
+        drop(installed);
+        let section = tools_section(&prompt);
+        assert!(section.contains(line), "{off:?}: {section}");
+        assert!(!section.contains("ctx_execute"), "{off:?}: {section}");
+    }
 }

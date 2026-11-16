@@ -36,6 +36,13 @@ pub const TIMED_OUT: &str = "instructions_cleanup_timed_out";
 pub const OFF: &str = "instructions_cleanup_off";
 /// This engine cannot run a cleanup: no harness, no settings files or no confined runs.
 pub const UNAVAILABLE: &str = "instructions_cleanup_unavailable";
+/// The pool's loopback model provider refused every connect, so nothing was sent.
+pub const PROVIDER_UNREACHABLE: &str = "instructions_cleanup_provider_unreachable";
+/// The pool's remote model provider has no address or refused on every address, so
+/// nothing was sent.
+pub const REMOTE_PROVIDER_UNREACHABLE: &str = "instructions_cleanup_remote_provider_unreachable";
+/// This machine finds none of the pool's managed sign-in hosts, so nothing was sent.
+pub const NO_NETWORK: &str = "instructions_cleanup_no_network";
 
 /// The longest one cleanup may take, every try included.
 pub const WALL_TIME: Duration = Duration::from_secs(5 * 60);
@@ -104,7 +111,8 @@ fn fenced(fence: &str, text: &str) -> String {
 /// Writes the prompt of one cleanup. Inputs: which file is rewritten, the app text and the
 /// project text; for the app file the project text is empty, and a blank app text leaves the
 /// app file out of a project prompt. Output: the prompt, with both texts fenced as data by a
-/// tilde fence longer than any tilde run in them.
+/// tilde fence longer than any tilde run in them; the fence shows four times, six with the
+/// app text compared, so a long tilde run grows the prompt past twice the text cap.
 pub fn prompt(scope: Scope, app: &str, project: &str) -> String {
     assert!(app.len() <= TEXT_BYTES_MAX && project.len() <= TEXT_BYTES_MAX);
     assert!(scope == Scope::Project || project.is_empty());
@@ -137,7 +145,9 @@ pub fn prompt(scope: Scope, app: &str, project: &str) -> String {
     }
     prompt.push_str(&format!("The {name} instructions file to rewrite:\n"));
     prompt.push_str(&fenced(&fence, text));
-    assert!(prompt.len() <= 2 * TEXT_BYTES_MAX + 4096);
+    let fences = if compared { 6 } else { 4 };
+    assert!(fence.len() <= TEXT_BYTES_MAX + 1);
+    assert!(prompt.len() <= app.len() + project.len() + fences * fence.len() + 4096);
     prompt
 }
 
@@ -200,13 +210,27 @@ pub struct Request<'a> {
     pub prompt: &'a str,
 }
 
+/// The code an Edit with AI run ends with when its pool's model provider can't be reached,
+/// one per reason, so each client says what to do (DEC-163 addendum 8). Input: why.
+/// Output: the code.
+#[cfg(any(unix, test))]
+fn unreached_code(unreached: &crate::research::runner::Unreached) -> &'static str {
+    use crate::research::runner::Unreached;
+    match unreached {
+        Unreached::Loopback(_) => PROVIDER_UNREACHABLE,
+        Unreached::Remote(_) => REMOTE_PROVIDER_UNREACHABLE,
+        Unreached::Offline(_) => NO_NETWORK,
+    }
+}
+
 #[cfg(unix)]
 mod run {
     use super::{
         BUSY, CleanupPool, FAILED, NO_ACCOUNT, OUTPUT_TOKENS_MAX, PAUSED, POOL_UNKNOWN,
-        PROJECT_POOL_MISSING, Request, TIMED_OUT, TRIES_MAX, UNAVAILABLE, WALL_TIME,
+        PROJECT_POOL_MISSING, PROVIDER_UNREACHABLE, Request, TIMED_OUT, TRIES_MAX, UNAVAILABLE,
+        WALL_TIME,
     };
-    use crate::research::accounts::{AccountPick, SettingsResolver};
+    use crate::research::accounts::{AccountPick, Reach, SettingsResolver};
     use crate::research::runner::{
         ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchHarness, ResearchLimits,
         ResearchRunner,
@@ -292,31 +316,35 @@ mod run {
         format!("{NAME_PREFIX}{started_ms:013}-t{number}")
     }
 
-    /// Picks the account of one try. Inputs: the resolver, the pool rule's answer and the
-    /// installed harnesses, Codex first. Output: the account, or the plain code.
-    fn account(
+    /// Picks the account of one try, passing over a member whose loopback provider refuses
+    /// connects. Inputs: the resolver, the pool rule's answer, the installed harnesses, Codex
+    /// first, and the try, which the down provider's log line names. Output: the account, or
+    /// the plain code.
+    pub(super) fn account(
         resolver: &SettingsResolver,
         pool: CleanupPool<'_>,
         harnesses: &[ResearchHarness],
+        number: u32,
     ) -> Result<ResearchAccount, &'static str> {
         assert!(!harnesses.is_empty() && harnesses.len() <= HARNESSES.len());
         let picked = match pool {
-            CleanupPool::Chosen(pool) => match resolver.pool_pick("", pool, harnesses) {
-                AccountPick::NeedsPool => return Err(POOL_UNKNOWN),
-                pick => pick,
-            },
+            CleanupPool::Chosen(pool) => {
+                match resolver.pool_pick_with("", pool, harnesses, Reach::Reachable) {
+                    AccountPick::NeedsPool => return Err(POOL_UNKNOWN),
+                    pick => pick,
+                }
+            }
             CleanupPool::Project(project) => {
                 let mut waiting = AccountPick::NoUsableAccount;
                 for harness in harnesses {
-                    match resolver.resolve(project.as_str(), harness.id()) {
+                    match resolver.resolve_with(project.as_str(), harness.id(), Reach::Reachable) {
                         None => return Err(UNAVAILABLE),
                         Some((_, AccountPick::NeedsPool)) => return Err(PROJECT_POOL_MISSING),
                         Some((_, pick @ AccountPick::Account { .. })) => {
                             waiting = pick;
                             break;
                         }
-                        Some((_, pick @ AccountPick::Paused { .. })) => waiting = pick,
-                        Some((_, AccountPick::NoUsableAccount)) => {}
+                        Some((_, pick)) => waiting = waiting.or_wait(pick),
                     }
                 }
                 waiting
@@ -325,6 +353,10 @@ mod run {
         match picked {
             AccountPick::Account { account, .. } if harnesses.contains(&account.harness()) => {
                 Ok(*account)
+            }
+            AccountPick::Unreached { line } => {
+                eprintln!("{PROVIDER_UNREACHABLE} try={number} {line}");
+                Err(PROVIDER_UNREACHABLE)
             }
             AccountPick::Paused { .. } => Err(PAUSED),
             _ => Err(NO_ACCOUNT),
@@ -381,11 +413,16 @@ mod run {
             if left.is_zero() {
                 return Err(TIMED_OUT);
             }
-            let account = match account(&resolver, pool, &harnesses) {
+            let account = match account(&resolver, pool, &harnesses, number) {
                 Ok(account) => account,
-                Err(code) if number == 1 => return Err(code),
+                Err(code) if number == 1 || code == PROVIDER_UNREACHABLE => return Err(code),
                 Err(_) => return Err(cause),
             };
+            if let Some(unreached) = runner.unreached(&account) {
+                let code = super::unreached_code(&unreached);
+                eprintln!("{code} try={number} {}", unreached.line());
+                return Err(code);
+            }
             let name = run_name(started_ms, number);
             let run = ReadOnlyRun {
                 name: &name,

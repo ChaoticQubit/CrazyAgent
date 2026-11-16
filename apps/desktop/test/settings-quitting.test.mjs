@@ -122,3 +122,10 @@ test("the choices and the hours bounds are the engine's", () => {
   assert.match(engine, new RegExp(`pub const HOURS_MAX: u16 = ${settings.QUIT_HOURS_MAX};`));
   assert.match(engine, new RegExp(`pub const HOURS_DEFAULT: u16 = ${settings.QUIT_DEFAULT.hours};`));
 });
+
+test("Keeping team agents says an agent under network None is frozen until CrazyAgent opens again, the same words as the TUI (DEC-158)", () => {
+  const shown = text(view(ok("keep_running")));
+  assert.match(shown, /Keep team agents running They go on with their work, and CrazyAgent takes them over when it opens again\. An agent under network None is frozen instead, until CrazyAgent opens again\./);
+  const keep = settings.ON_QUIT_CHOICES.find((option) => option.choice === "keep_running");
+  assert.equal(keep.help, "They go on with their work, and CrazyAgent takes them over when it opens again. An agent under network None is frozen instead, until CrazyAgent opens again.");
+});

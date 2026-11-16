@@ -274,6 +274,10 @@ impl Host for FirstLookFails {
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
         self.real.alive()
     }
+
+    fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
+        self.real.pane_pid(agent)
+    }
 }
 
 /// A failed look at an adopted pane's screen reads as not on the folder screen, the way

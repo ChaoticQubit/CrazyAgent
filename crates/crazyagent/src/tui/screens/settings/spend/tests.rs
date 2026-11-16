@@ -14,6 +14,7 @@ fn settings(confirm: SpendConfirm, all_limited: AllLimited) -> SpendSettings {
     SpendSettings {
         confirm,
         all_limited,
+        ..SpendSettings::default()
     }
 }
 
@@ -175,7 +176,77 @@ fn c_steps_spend_confirmation_and_stores_it() {
         let (mut spend, mut ctx) = ready(view(settings(from, AllLimited::NoHint), Vec::new()));
         spend.key(&Key::Char('c'), &mut ctx);
         assert!(
-            matches!(job(&mut ctx), Some(SettingsJob::SetSpend(sent)) if sent == settings(to, AllLimited::NoHint))
+            matches!(job(&mut ctx), Some(SettingsJob::SetSpendOne(sent)) if sent == SpendChoice::Confirm(to))
+        );
+    }
+}
+
+fn with_source(source: ResetsSource) -> SpendSettings {
+    SpendSettings {
+        resets_source: source,
+        ..settings(SpendConfirm::ConfirmEach, AllLimited::NoHint)
+    }
+}
+
+/// A spend view read from a fresh install says Don't read, the default, in the same words
+/// as the option (owner answer 2026-11-14).
+#[test]
+fn the_default_claude_free_resets_source_is_dont_read_and_says_so() {
+    let (spend, ctx) = ready(view(SpendSettings::default(), Vec::new()));
+    let text = shown(&spend, &ctx);
+    assert!(text.contains(
+        "Claude free resets (f): Don't read. CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings. Don't read is the default."
+    ), "{text}");
+    assert!(keys(&spend, &ctx).contains(&"f".to_owned()));
+}
+
+#[test]
+fn option_claude_free_resets_through_claude_code_says_it_asks_as_claude_code_at_the_accounts_risk()
+{
+    let (spend, ctx) = ready(view(
+        with_source(ResetsSource::ThroughClaudeCode),
+        Vec::new(),
+    ));
+    let text = shown(&spend, &ctx);
+    assert!(text.contains(
+        "Claude free resets (f): Through Claude Code. Until Claude Code can report free resets itself, CrazyAgent asks Anthropic as Claude Code, the same as As Claude Code. Anthropic may treat this as against its terms, and the risk falls on your Claude accounts."
+    ), "{text}");
+    assert!(keys(&spend, &ctx).contains(&"f".to_owned()));
+}
+
+#[test]
+fn option_claude_free_resets_as_claude_code_says_it_asks_the_way_claude_code_does_at_the_accounts_risk()
+ {
+    let (spend, ctx) = ready(view(with_source(ResetsSource::AsClaudeCode), Vec::new()));
+    let text = shown(&spend, &ctx);
+    assert!(text.contains(
+        "Claude free resets (f): As Claude Code. CrazyAgent asks Anthropic for free resets as Claude Code, the way Claude Code itself asks. Anthropic may treat this as against its terms, and the risk falls on your Claude accounts."
+    ), "{text}");
+}
+
+#[test]
+fn option_claude_free_resets_dont_read_says_claude_accounts_say_off() {
+    let (spend, ctx) = ready(view(with_source(ResetsSource::Off), Vec::new()));
+    let text = shown(&spend, &ctx);
+    assert!(text.contains(
+        "Claude free resets (f): Don't read. CrazyAgent never asks for Claude free resets, and Claude accounts say off in Settings. Don't read is the default."
+    ), "{text}");
+}
+
+/// f steps from the default, Don't read, through the two Claude Code options and back, the
+/// desktop's order.
+#[test]
+fn f_steps_the_claude_free_resets_source_and_keeps_the_spend_settings() {
+    for (from, to) in [
+        (ResetsSource::Off, ResetsSource::ThroughClaudeCode),
+        (ResetsSource::ThroughClaudeCode, ResetsSource::AsClaudeCode),
+        (ResetsSource::AsClaudeCode, ResetsSource::Off),
+    ] {
+        let (mut spend, mut ctx) = ready(view(with_source(from), Vec::new()));
+        spend.key(&Key::Char('f'), &mut ctx);
+        assert!(
+            matches!(job(&mut ctx), Some(SettingsJob::SetSpendOne(sent)) if sent == SpendChoice::ResetsSource(to)),
+            "{from:?}"
         );
     }
 }
@@ -236,7 +307,7 @@ fn l_steps_the_all_limited_setting_and_stores_it() {
         let (mut spend, mut ctx) = ready(view(settings(SpendConfirm::OneClick, from), Vec::new()));
         spend.key(&Key::Char('l'), &mut ctx);
         assert!(
-            matches!(job(&mut ctx), Some(SettingsJob::SetSpend(sent)) if sent == settings(SpendConfirm::OneClick, to))
+            matches!(job(&mut ctx), Some(SettingsJob::SetSpendOne(sent)) if sent == SpendChoice::AllLimited(to))
         );
     }
 }
@@ -349,6 +420,15 @@ fn the_terminal_says_every_spend_outcome_and_help_line_in_the_desktop_words() {
             "{code}"
         );
     }
+    let sources = desktop_table(
+        "screens/settings/spend-settings.tsx",
+        "const RESETS_SOURCE_HELP",
+    );
+    assert_eq!(sources.len(), 3, "{sources:?}");
+    for (code, words) in sources {
+        let value: ResetsSource = serde_json::from_value(serde_json::json!(code)).unwrap();
+        assert_eq!(resets_source_help(value), words, "{code}");
+    }
 }
 
 #[test]
@@ -395,4 +475,19 @@ fn the_spend_view_is_read_once_a_minute_or_every_5_s_while_a_spend_is_out() {
         1,
         "a clock that went back reads again"
     );
+}
+
+/// c, l and f each send only the setting they step, so a change made meanwhile in another
+/// window to the other two is never written back over.
+#[test]
+fn spend_one_each_key_sends_only_its_own_setting() {
+    for key in ['c', 'l', 'f'] {
+        let (mut spend, mut ctx) = ready(view(
+            settings(SpendConfirm::OneClick, AllLimited::NoHint),
+            Vec::new(),
+        ));
+        spend.key(&Key::Char(key), &mut ctx);
+        let sent = job(&mut ctx).expect("the key asks the engine");
+        assert_eq!(format!("{sent:?}"), "SetSpendOne", "{key}");
+    }
 }

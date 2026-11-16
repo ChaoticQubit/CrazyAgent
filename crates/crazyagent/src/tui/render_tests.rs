@@ -335,6 +335,22 @@ fn startup_frames_match_the_design() {
     check("too-small", &render(&mut shell, 50, 12), &[]);
 }
 
+/// RV-DS241-118: the engine-down screen names the command that starts the engine, which also
+/// repairs a login service left naming a gone or temporary app path, as the desktop's
+/// Restart engine does.
+#[test]
+fn the_engine_down_screen_names_the_command_that_starts_and_repairs_the_engine() {
+    for (width, height) in [(120, 36), (80, 24)] {
+        let mut shell = Shell::new(ctx(width, height));
+        shell.ctx.link = Link::Down("engine_unavailable".into());
+        let text = render(&mut shell, width, height).join("\n");
+        assert!(
+            text.contains("Start it with crazyagent service start, then press r to try again."),
+            "{text}"
+        );
+    }
+}
+
 #[test]
 fn welcome_frames_match_the_design() {
     for (width, height) in [(120, 36), (80, 24)] {
@@ -377,6 +393,37 @@ fn welcome_frames_match_the_design() {
     shell.key(Key::Enter);
     assert!(shell.busy());
     check("welcome-saving-80", &render(&mut shell, 80, 24), &BIO_80);
+}
+
+/// DEC-159 S7: with a folder being added, Home lists the job first and picked, Enter stops
+/// it, and the header shows its brief beside the running agents; every frame without a job
+/// stays as it was.
+#[test]
+fn home_frame_with_an_intake_job_matches_the_design() {
+    use crate::projects_home::icloud::Progress;
+    use crate::projects_home::job::{JobState, JobView};
+    let old = old_date();
+    let swaps = project_swaps(&old);
+    let mut ctx = ready(80, 24);
+    ctx.store.projects = Load::Ready(projects());
+    ctx.store.pools = Load::Ready(pools());
+    ctx.store.accounts = Load::Ready(accounts());
+    ctx.store.intake = Some(JobView {
+        id: crate::protocol::RequestId::new("add-1").unwrap(),
+        source: "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop".into(),
+        mode: crate::projects_home::AddMode::Move,
+        overrides: Vec::new(),
+        stopping: false,
+        state: JobState::Downloading {
+            progress: Progress {
+                total: 3000,
+                done: 12,
+            },
+        },
+    });
+    let mut shell = shell_at(ctx, Place::Home);
+    shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
+    check("home-job-80", &render(&mut shell, 80, 24), &swapped(&swaps));
 }
 
 #[test]

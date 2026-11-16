@@ -23,6 +23,8 @@ const SHIFT_RIGHT: [&str; 6] = ["1b", "5b", "31", "3b", "32", "43"];
 const SHIFT_LEFT: [&str; 6] = ["1b", "5b", "31", "3b", "32", "44"];
 const SETTLE_TIME: Duration = Duration::from_secs(180);
 const TURN_TIME: Duration = Duration::from_secs(60);
+const NODE_TIME: Duration = Duration::from_secs(600);
+const SYSTEM_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const REPO: &str = "plant-shop";
 const ABOUT: &str = "A small shop that sells house plants online.";
 const STACK: &str = "TypeScript";
@@ -268,7 +270,7 @@ fn reach_home(pty: &Pty, home: impl Fn(&str) -> bool) {
         let screen = pty.until("the TUI shows Home or a first-run step", |screen| {
             home(screen)
                 || screen.contains("Welcome to CrazyAgent")
-                || screen.contains("c Continue without")
+                || screen.contains("c Skip for now")
         });
         if home(&screen) {
             return;
@@ -591,15 +593,17 @@ fn to_tab(pty: &Pty, project: &str, tab: &str, keys: &[&str]) {
     }
 }
 
-fn unreachable_provider(engine: &Engine) {
-    let closed = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let port = closed.local_addr().unwrap().port();
-    drop(closed);
+/// Points the engine's model access at a loopback provider that refuses every connect.
+/// Input: the engine. Output: the held port's two ends, which the row keeps until it ends so
+/// no other listener takes the port meanwhile.
+fn unreachable_provider(engine: &Engine) -> [std::net::TcpStream; 2] {
+    let (held, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
     std::fs::write(
         engine.path().join("global.toml"),
         MODEL_ACCESS.replace("PORT", &port.to_string()),
     )
     .unwrap();
+    held
 }
 
 async fn setup_status(engine: &Engine) -> SetupStatus {
@@ -657,7 +661,7 @@ fn settled(turn: &MasterTurnView) -> bool {
 #[test]
 fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui() {
     let mut engine = Engine::new("ca-e2e-flow-");
-    unreachable_provider(&engine);
+    let _provider = unreachable_provider(&engine);
     engine.launch();
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-disk-");
@@ -1070,13 +1074,17 @@ impl ScriptPty {
     }
 
     fn until(&self, what: &str, check: impl Fn(&str) -> bool) {
+        self.until_within(what, SCREEN_TIME, check);
+    }
+
+    fn until_within(&self, what: &str, limit: Duration, check: impl Fn(&str) -> bool) {
         let start = Instant::now();
         loop {
             let screen = self.screen();
             if check(&screen) {
                 return;
             }
-            assert!(start.elapsed() < SCREEN_TIME, "{what}:\n{screen}");
+            assert!(start.elapsed() < limit, "{what}:\n{screen}");
             std::thread::sleep(POLL_TIME);
         }
     }
@@ -1255,7 +1263,7 @@ fn script_home(pty: &mut ScriptPty) {
             pty.screen()
         );
         pty.until("the TUI shows Home or a first-run step", |screen| {
-            at_home(screen, PROJECT) || screen.contains("c Continue without")
+            at_home(screen, PROJECT) || screen.contains("c Skip for now")
         });
         let screen = pty.screen();
         if at_home(&screen, PROJECT) {
@@ -1604,9 +1612,10 @@ fn reach_accounts_step(engine: &Engine, home: &Path) -> ScriptPty {
     });
     pty.type_bytes(b"\r");
     pty.until("Setup offers to continue without installing", |screen| {
-        screen.contains("c Continue without")
+        screen.contains("c Skip for now")
     });
     pty.type_bytes(b"c");
+    pass_harness_step(&mut pty);
     pty.until("the Accounts step opens with the ticked guide", |screen| {
         screen.contains("Add an account")
             && screen.contains("[> Add account ]   [ Skip for now ]")
@@ -1614,6 +1623,143 @@ fn reach_accounts_step(engine: &Engine, home: &Path) -> ScriptPty {
             && screen.contains("[x] Show the guide on Home")
     });
     pty
+}
+
+/// Waits for first run's Harnesses step with only RCLI picked and Continue focused, then
+/// continues without installing anything. Input: the TUI after Setup. Output: none; the TUI
+/// is on its way to the Accounts step.
+fn pass_harness_step(pty: &mut ScriptPty) {
+    pty.until("the Harnesses step opens with only RCLI picked", |screen| {
+        screen.contains("Choose your harnesses")
+            && screen.contains("[x] RCLI")
+            && screen.contains("[> Continue ]")
+    });
+    pty.type_bytes(b"\r");
+}
+
+/// DEC-157: after Setup, first run asks for harnesses with only RCLI picked and locked,
+/// Codex and Claude Code unpicked, and Continue with no picks goes on to Accounts without
+/// starting an install.
+#[test]
+fn first_run_shows_the_harness_step_with_only_rcli_picked() {
+    let mut engine = Engine::start("ca-e2e-harness-step-");
+    let home = scratch("ca-e2e-harness-step-home-");
+    std::fs::create_dir(home.path().join("Projects")).unwrap();
+    let prefs = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/CrazyAgent")
+    } else {
+        home.path().join(".config/crazyagent")
+    };
+    std::fs::create_dir_all(&prefs).unwrap();
+    std::fs::write(prefs.join("tui-shift-enter"), "off").unwrap();
+    let mut pty = ScriptPty::launch(&engine.socket(), home.path());
+    welcome_bio(&pty);
+    pty.type_bytes(b"Mira Okafor\t\t\t\t\t\t\r");
+    pty.until("the projects folder step opens", |screen| {
+        screen.contains("Your projects folder")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Setup offers to continue without installing", |screen| {
+        screen.contains("c Skip for now")
+    });
+    pty.type_bytes(b"c");
+    pty.until(
+        "the Harnesses step lists RCLI picked and the others unpicked",
+        |screen| {
+            screen.contains("Choose your harnesses")
+                && screen.contains("[x] RCLI")
+                && screen.contains("Comes with CrazyAgent.")
+                && screen.contains("[ ] Codex")
+                && screen.contains("[ ] Claude Code")
+                && screen.contains("Enter Continue")
+                && !screen.contains("Install picked harnesses")
+        },
+    );
+    pty.type_bytes(b"\r");
+    pty.until("Continue goes on to the Accounts step", |screen| {
+        screen.contains("Add an account") && !screen.contains("Choose your harnesses")
+    });
+    drop(pty);
+    engine.stop();
+}
+
+/// DEC-157: on a clean Mac whose Codex was built by npm and that has no Node, the Harnesses
+/// step says Codex can't run with the resolver's line and offers Node.js; n installs the
+/// pinned Node into the engine root, the step shows it installing, and the Codex row then
+/// leaves Can't run. Needs the clean-Mac gate build and the network to nodejs.org.
+#[test]
+#[cfg_attr(
+    not(feature = "clean-mac-gate"),
+    ignore = "needs cargo test --features clean-mac-gate and the network: Node.js downloads from nodejs.org"
+)]
+fn first_run_installs_node_for_a_codex_that_cannot_run_and_its_row_leaves_cant_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = scratch("ca-e2e-node-home-");
+    std::fs::create_dir(home.path().join("Projects")).unwrap();
+    let prefs = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/CrazyAgent")
+    } else {
+        home.path().join(".config/crazyagent")
+    };
+    std::fs::create_dir_all(&prefs).unwrap();
+    std::fs::write(prefs.join("tui-shift-enter"), "off").unwrap();
+    let codex = home.path().join(".local/bin/codex");
+    std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    std::fs::write(&codex, "#!/usr/bin/env node\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let gate = scratch("ca-e2e-node-gate-");
+    let mut engine = Engine::new("ca-e2e-node-");
+    engine.home = Some(home.path().to_path_buf());
+    engine.env.push(("PATH", SYSTEM_PATH.into()));
+    engine
+        .env
+        .push(("CRAZYAGENT_GATE_SYSTEM_ROOT", gate.path().into()));
+    engine.launch();
+    let mut pty = ScriptPty::launch(&engine.socket(), home.path());
+    welcome_bio(&pty);
+    pty.type_bytes(b"Mira Okafor\t\t\t\t\t\t\r");
+    pty.until("the projects folder step opens", |screen| {
+        screen.contains("Your projects folder")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Setup offers to continue without installing", |screen| {
+        screen.contains("c Skip for now")
+    });
+    pty.type_bytes(b"c");
+    pty.until_within(
+        "the Harnesses step says Codex can't run without Node and offers Node.js once setup's check ends",
+        SETTLE_TIME,
+        |screen| {
+            screen.contains("Choose your harnesses")
+                && screen.contains("Can't run")
+                && screen.contains("codex needs node, which is missing.")
+                && screen.contains("n Install Node.js")
+                && !screen.contains("Already on this Mac.")
+        },
+    );
+    pty.type_bytes(b"n");
+    pty.until("the step shows Node.js installing", |screen| {
+        screen.contains("Installing Node.js.") && !screen.contains("n Install Node.js")
+    });
+    pty.until_within(
+        "the Codex row leaves Can't run once the engine's Node is in",
+        NODE_TIME,
+        |screen| {
+            screen.contains("Already on this Mac.")
+                && !screen.contains("Can't run")
+                && !screen.contains("Installing Node.js.")
+        },
+    );
+    assert!(
+        engine.path().join("setup/bin/node").exists(),
+        "Node went into the engine root, not the computer"
+    );
+    pty.type_bytes(b"\r");
+    pty.until("Continue goes on to the Accounts step", |screen| {
+        screen.contains("Add an account") && !screen.contains("Choose your harnesses")
+    });
+    drop(pty);
+    engine.stop();
 }
 
 /// DEC-153: keeping the Learn CrazyAgent guide ticked and picking Skip for now ends first run
@@ -1747,9 +1893,10 @@ fn run_first_run_setup_again_on_profile_clears_the_skip_and_ends_on_home_with_th
     });
     pty.type_bytes(b"\r");
     pty.until("Setup offers to continue without installing", |screen| {
-        screen.contains("c Continue without")
+        screen.contains("c Skip for now")
     });
     pty.type_bytes(b"c");
+    pass_harness_step(&mut pty);
     pty.until("the Accounts step opens with the ticked guide", |screen| {
         screen.contains("[x] Show the guide on Home")
     });
@@ -1811,6 +1958,817 @@ fn first_run_with_the_guide_unticked_adds_an_account_and_skips_the_guide() {
         );
         std::thread::sleep(POLL_TIME);
     }
+    drop(pty);
+    engine.stop();
+}
+
+const RESETS_ID: &str = "e2e-free-resets";
+const RESETS_PROJECT: &str = "Free resets e2e";
+
+/// The screen's words joined by single spaces, so a sentence the TUI wrapped still reads
+/// whole. Input: the screen. Output: the words.
+fn flat(screen: &str) -> String {
+    screen.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Opens Settings, Pools in the TUI on a fresh engine with a saved profile, home and one
+/// project, once the Pools spend part shows its Claude free resets line.
+/// Input: the scratch prefix. Output: the engine, the TUI and the scratch home.
+fn pools_settings(prefix: &str) -> (Engine, Pty, tempfile::TempDir) {
+    let engine = Engine::start(prefix);
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+            assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+            assert_eq!(
+                owner.create_project(RESETS_ID, RESETS_PROJECT).await,
+                OwnerResult::Applied
+            );
+            owner.controller.detach();
+        });
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, RESETS_PROJECT));
+    setup_checked(&pty);
+    pty.keys(&["s"]);
+    pty.until("s on Home opens Settings", |screen| {
+        screen.contains("Settings") && !at_home(screen, RESETS_PROJECT)
+    });
+    pty.keys(&["]"]);
+    pty.until(
+        "] steps to Pools with its Claude free resets line",
+        |screen| flat(screen).contains("Claude free resets (f):"),
+    );
+    (engine, pty, disk)
+}
+
+/// Reads where the engine keeps reading Claude free resets from, as any client reads it.
+/// Input: the engine. Output: the source.
+fn kept_source(engine: &Engine) -> crazyagent::usage::spend::ResetsSource {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(engine).await;
+            let report = owner
+                .controller
+                .owner_client()
+                .unwrap()
+                .usage_report(None, None, 0)
+                .await
+                .unwrap();
+            owner.controller.detach();
+            report.spend.settings.resets_source
+        })
+}
+
+/// A fresh install (owner answer 2026-11-14): Pools says Don't read is the default, and the
+/// engine reads Claude free resets as Don't read with nothing stored.
+#[test]
+fn the_tui_reads_claude_free_resets_dont_read_by_default() {
+    let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-default-");
+    pty.until("the default names itself and what it does", |screen| {
+        flat(screen).contains("Claude free resets (f): Don't read.")
+            && flat(screen).contains("Claude accounts say off in Settings.")
+            && flat(screen).contains("Don't read is the default.")
+    });
+    assert_eq!(
+        kept_source(&engine),
+        crazyagent::usage::spend::ResetsSource::Off
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// Through Claude Code (DEC-154 addendum): f saves it in the engine, and Pools says
+/// CrazyAgent asks Anthropic as Claude Code, which Anthropic may treat as against its terms.
+#[test]
+fn the_tui_saves_claude_free_resets_through_claude_code() {
+    let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-through-");
+    pty.keys(&["f"]);
+    pty.until(
+        "f saves Through Claude Code and says how it asks and the risk",
+        |screen| {
+            flat(screen).contains("Claude free resets (f): Through Claude Code.")
+                && flat(screen).contains("asks Anthropic as Claude Code")
+                && flat(screen).contains("Anthropic may treat this as against its terms")
+        },
+    );
+    assert_eq!(
+        kept_source(&engine),
+        crazyagent::usage::spend::ResetsSource::ThroughClaudeCode
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// As Claude Code (DEC-154 addendum): f twice saves it in the engine, and Pools says
+/// CrazyAgent asks the way Claude Code itself asks, which Anthropic may treat as against its
+/// terms.
+#[test]
+fn the_tui_saves_claude_free_resets_as_claude_code() {
+    let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-as-");
+    pty.keys(&["f"]);
+    pty.until("the first f saves Through Claude Code", |screen| {
+        flat(screen).contains("Claude free resets (f): Through Claude Code.")
+    });
+    pty.keys(&["f"]);
+    pty.until(
+        "the second f saves As Claude Code and says how it asks and the risk",
+        |screen| {
+            flat(screen).contains("Claude free resets (f): As Claude Code.")
+                && flat(screen).contains("the way Claude Code itself asks.")
+                && flat(screen).contains("Anthropic may treat this as against its terms")
+        },
+    );
+    assert_eq!(
+        kept_source(&engine),
+        crazyagent::usage::spend::ResetsSource::AsClaudeCode
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// Don't read (DEC-154 addendum): from As Claude Code, f saves it in the engine again, and
+/// Pools says Claude accounts say off in Settings. The row leaves Don't read and comes back,
+/// so the engine's Off is a stored choice, not the empty store's default.
+#[test]
+fn the_tui_saves_claude_free_resets_dont_read() {
+    let (mut engine, pty, _disk) = pools_settings("ca-e2e-resets-off-");
+    pty.keys(&["f"]);
+    pty.until("the first f saves Through Claude Code", |screen| {
+        flat(screen).contains("Claude free resets (f): Through Claude Code.")
+    });
+    pty.keys(&["f"]);
+    pty.until("the second f saves As Claude Code", |screen| {
+        flat(screen).contains("Claude free resets (f): As Claude Code.")
+    });
+    assert_eq!(
+        kept_source(&engine),
+        crazyagent::usage::spend::ResetsSource::AsClaudeCode
+    );
+    pty.keys(&["f"]);
+    pty.until(
+        "the third f saves Don't read and says what it does",
+        |screen| {
+            flat(screen).contains("Claude free resets (f): Don't read.")
+                && flat(screen).contains("Claude accounts say off in Settings.")
+        },
+    );
+    assert_eq!(
+        kept_source(&engine),
+        crazyagent::usage::spend::ResetsSource::Off
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// Reads the option the engine keeps for When a model provider can't be reached.
+/// Input: the engine. Output: the stored option.
+async fn stored_retry(engine: &Engine) -> crazyagent::provider_retry::ProviderRetry {
+    let mut owner = Owner::attach(engine).await;
+    let read = owner
+        .controller
+        .read(OwnerRead::ProviderRetry)
+        .await
+        .unwrap();
+    owner.controller.detach();
+    let OwnerData::ProviderRetry { settings } = read.data else {
+        panic!("the engine answers with the provider retry setting")
+    };
+    settings.choice
+}
+
+/// Opens Settings, Setup through Go to, presses e and saves the option `keys` move to,
+/// waiting until the page names it, and returns what the engine then keeps. Inputs: the
+/// TUI, the runtime, the engine, the arrow keys and the option's title. Output: the
+/// stored option.
+fn save_retry(
+    pty: &Pty,
+    runtime: &tokio::runtime::Runtime,
+    engine: &Engine,
+    keys: &[&str],
+    title: &str,
+) -> crazyagent::provider_retry::ProviderRetry {
+    pty.keys(&["e"]);
+    pty.until(
+        "e asks what harnesses do, with each harness line",
+        |screen| {
+            screen.contains("When a model provider can't be reached: what harnesses do.")
+                && screen.contains("Harness default")
+                && screen.contains("RCLI: one try. The engine never repeats an RCLI request.")
+                && screen.contains("Claude Code: no retries.")
+        },
+    );
+    pty.keys(keys);
+    let picked = format!("> {title}");
+    pty.until("the arrows pick the option", |screen| {
+        screen.contains(&picked)
+    });
+    pty.keys(&["Enter"]);
+    let said = format!("Provider retry: {title}.");
+    pty.until(
+        "the save names the option and the page shows it",
+        |screen| {
+            screen.contains(&said)
+                && screen
+                    .lines()
+                    .any(|line| line.contains("Provider retry  ") && line.contains(title))
+        },
+    );
+    runtime.block_on(stored_retry(engine))
+}
+
+/// One row per option of When a model provider can't be reached (DEC-163): the TUI opens
+/// Settings, Setup, shows Retry briefly on a fresh engine and each harness line in its ask,
+/// saves the option and the engine keeps it. Inputs: the scratch prefix, the arrow keys, the
+/// option's title and the option. Output: none; panics when a step fails.
+fn provider_retry_row(
+    prefix: &str,
+    keys: &[&str],
+    title: &str,
+    wanted: crazyagent::provider_retry::ProviderRetry,
+) {
+    use crazyagent::provider_retry::ProviderRetry;
+    let (mut engine, pty, _project, _disk) = switch_settings(prefix);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    assert_eq!(
+        runtime.block_on(stored_retry(&engine)),
+        ProviderRetry::RetryBriefly
+    );
+    pty.keys(&["C-k"]);
+    pty.until("Ctrl-K opens Go to", |screen| {
+        screen.contains("Projects, tabs, settings, actions. Enter goes there.")
+    });
+    pty.text("Settings / Setup");
+    pty.keys(&["Enter"]);
+    pty.until(
+        "Settings, Setup shows Provider retry at Retry briefly",
+        |screen| {
+            screen
+                .lines()
+                .any(|line| line.contains("Provider retry  ") && line.contains("Retry briefly"))
+        },
+    );
+    if title == "Retry briefly" {
+        let stored = save_retry(&pty, &runtime, &engine, &["Up"], "Stop at once");
+        assert_eq!(stored, ProviderRetry::StopAtOnce);
+    }
+    let stored = save_retry(&pty, &runtime, &engine, keys, title);
+    assert_eq!(stored, wanted, "the engine keeps {title}");
+    drop(pty);
+    engine.stop();
+}
+
+#[test]
+fn the_tui_saves_stop_at_once_for_a_model_provider_that_cant_be_reached() {
+    provider_retry_row(
+        "ca-e2e-retry-stop-",
+        &["Up"],
+        "Stop at once",
+        crazyagent::provider_retry::ProviderRetry::StopAtOnce,
+    );
+}
+
+#[test]
+fn the_tui_saves_retry_briefly_for_a_model_provider_that_cant_be_reached() {
+    provider_retry_row(
+        "ca-e2e-retry-brief-",
+        &["Down"],
+        "Retry briefly",
+        crazyagent::provider_retry::ProviderRetry::RetryBriefly,
+    );
+}
+
+#[test]
+fn the_tui_saves_harness_default_for_a_model_provider_that_cant_be_reached() {
+    provider_retry_row(
+        "ca-e2e-retry-default-",
+        &["Down"],
+        "Harness default",
+        crazyagent::provider_retry::ProviderRetry::HarnessDefault,
+    );
+}
+
+/// Makes a graphify in `home` that the resolver finds and passes over (DEC-162), laid out as
+/// uv lays out a tool: `.local/bin/graphify` links to the tool's script, whose Python links
+/// to a real `python3.9` (a copy of `/bin/bash`) in an installation whose folders the group
+/// can change (0775); a link in the installation points out to a 0777 file elsewhere in
+/// the home. Input: the home. Output: the installation folder and the file outside it.
+fn refused_graphify(home: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let mode = std::fs::Permissions::from_mode;
+    let prefix = home.join(".local/share/uv/python/cpython-9.9.9-dummy");
+    let real = prefix.join("bin");
+    let tool = home.join(".local/share/uv/tools/graphifyy/bin");
+    let bin = home.join(".local/bin");
+    for folder in [&real, &tool, &bin] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    std::fs::copy("/bin/bash", real.join("python3.9")).unwrap();
+    std::fs::set_permissions(real.join("python3.9"), mode(0o755)).unwrap();
+    symlink(real.join("python3.9"), tool.join("python")).unwrap();
+    let script = tool.join("graphify");
+    let text = format!(
+        "#!{}\necho 'graphify 0.9.9'\n",
+        tool.join("python").display()
+    );
+    std::fs::write(&script, text).unwrap();
+    std::fs::set_permissions(&script, mode(0o755)).unwrap();
+    symlink(&script, bin.join("graphify")).unwrap();
+    let elsewhere = home.join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let outside = elsewhere.join("kept");
+    std::fs::write(&outside, "kept").unwrap();
+    std::fs::set_permissions(&outside, mode(0o777)).unwrap();
+    symlink(&outside, prefix.join("outside")).unwrap();
+    for folder in [&real, &prefix] {
+        std::fs::set_permissions(folder, mode(0o775)).unwrap();
+    }
+    (prefix, outside)
+}
+
+/// A first-run home for the refused-tool rows: a Projects folder and the Shift-Enter
+/// preference saved, as the Node row makes it. Input: a scratch prefix. Output: the home.
+fn first_run_home(prefix: &str) -> tempfile::TempDir {
+    let home = scratch(prefix);
+    std::fs::create_dir(home.path().join("Projects")).unwrap();
+    let prefs = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/CrazyAgent")
+    } else {
+        home.path().join(".config/crazyagent")
+    };
+    std::fs::create_dir_all(&prefs).unwrap();
+    std::fs::write(prefs.join("tui-shift-enter"), "off").unwrap();
+    home
+}
+
+/// Starts a clean-Mac engine on `home`: the system PATH and an empty gate root, so the only
+/// graphify it can find is the one in the home. Inputs: a scratch prefix, the home and the
+/// gate root. Output: the running engine.
+fn clean_engine(prefix: &str, home: &Path, gate: &Path) -> Engine {
+    let mut engine = Engine::new(prefix);
+    engine.home = Some(home.to_path_buf());
+    engine.env.push(("PATH", SYSTEM_PATH.into()));
+    engine
+        .env
+        .push(("CRAZYAGENT_GATE_SYSTEM_ROOT", gate.into()));
+    engine.launch();
+    engine
+}
+
+/// Goes through first run to the Setup page, where the tools check shows. Inputs: the
+/// engine and the home. Output: the TUI on the Setup page.
+fn first_run_setup_page(engine: &Engine, home: &Path) -> ScriptPty {
+    let mut pty = ScriptPty::launch(&engine.socket(), home);
+    welcome_bio(&pty);
+    pty.type_bytes(b"Mira Okafor\t\t\t\t\t\t\r");
+    pty.until("the projects folder step opens", |screen| {
+        screen.contains("Your projects folder")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("the Setup page opens", |screen| {
+        screen.contains("c Skip for now")
+    });
+    pty
+}
+
+fn folder_mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// DEC-162, Unused tools on Fix button (the default): first run's Setup page reads the
+/// graphify the resolver passed over as Found, not used with its line; p names the tree and
+/// the command, nothing changes before y, y removes group and other write from that tree
+/// alone, a link out of the tree leaves its file as it was, the row then reads Found and the
+/// engine logs the tree and counts. Needs the clean-Mac gate build.
+#[test]
+#[cfg_attr(
+    not(feature = "clean-mac-gate"),
+    ignore = "needs cargo test --features clean-mac-gate: the gate root hides this machine's own graphify"
+)]
+fn first_run_fixes_a_refused_graphify_only_after_the_confirm_names_its_tree() {
+    let home = first_run_home("ca-e2e-fix-home-");
+    let (prefix, outside) = refused_graphify(home.path());
+    let gate = scratch("ca-e2e-fix-gate-");
+    let mut engine = clean_engine("ca-e2e-fix-", home.path(), gate.path());
+    let mut pty = first_run_setup_page(&engine, home.path());
+    pty.until_within(
+        "the Graphify command row reads Found, not used with its line and the Setup page offers p",
+        SETTLE_TIME,
+        |screen| {
+            screen.contains("Found, not used")
+                && screen.contains("graphify can't start")
+                && screen.contains("p Fix")
+        },
+    );
+    pty.type_bytes(b"p");
+    pty.until(
+        "the confirm names the tool, the tree and the command",
+        |screen| {
+            screen.contains("Fix permissions for Graphify command?")
+                && screen.contains("cpython-9.9.9-dummy")
+                && screen.contains("chmod -R go-w")
+                && screen.contains("y Fix")
+        },
+    );
+    assert_eq!(folder_mode(&prefix), 0o775, "nothing changes before y");
+    pty.type_bytes(b"y");
+    pty.until_within(
+        "the fix ends and the Graphify command row reads Found",
+        SETTLE_TIME,
+        |screen| {
+            screen.contains("Found 0.9.9")
+                && !screen.contains("Found, not used")
+                && !screen.contains("p Fix")
+        },
+    );
+    for folder in [&prefix, &prefix.join("bin")] {
+        assert_eq!(folder_mode(folder), 0o755, "{}", folder.display());
+    }
+    assert_eq!(
+        folder_mode(&outside),
+        0o777,
+        "a link out of the tree leaves its file as it was"
+    );
+    drop(pty);
+    let log = engine.stop();
+    assert!(
+        log.contains("tool_fix_done tool=graphify") && log.contains("changed="),
+        "the engine logs the fix with its tree and counts:\n{log}"
+    );
+}
+
+/// DEC-162, Unused tools on Show the command only: first run's Setup page shows the command
+/// for the graphify the resolver passed over and no fix key, p says fixing is turned off,
+/// and the engine itself refuses a fix request with `tool_fix_off`, changing nothing. Needs
+/// the clean-Mac gate build.
+#[test]
+#[cfg_attr(
+    not(feature = "clean-mac-gate"),
+    ignore = "needs cargo test --features clean-mac-gate: the gate root hides this machine's own graphify"
+)]
+fn first_run_shows_only_the_command_for_a_refused_graphify_when_unused_tools_is_command_only() {
+    let home = first_run_home("ca-e2e-fixoff-home-");
+    let (prefix, _) = refused_graphify(home.path());
+    let gate = scratch("ca-e2e-fixoff-gate-");
+    let mut engine = clean_engine("ca-e2e-fixoff-", home.path(), gate.path());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let saved = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let generation = owner.next();
+        let reply = owner
+            .controller
+            .set_refused_tool(crazyagent::setup::RefusedTool::CommandOnly, generation)
+            .await
+            .unwrap();
+        owner.controller.detach();
+        e2e_support::result(reply)
+    });
+    assert_eq!(saved, OwnerResult::Applied);
+    let mut pty = first_run_setup_page(&engine, home.path());
+    pty.until_within(
+        "the Graphify command row shows the command and the page offers no fix key",
+        SETTLE_TIME,
+        |screen| {
+            screen.contains("Found, not used")
+                && screen.contains("To fix it, run in Terminal: chmod -R go-w")
+                && !screen.contains("p Fix")
+        },
+    );
+    pty.type_bytes(b"p");
+    pty.until("p says fixing permissions is turned off", |screen| {
+        screen.contains("Fixing permissions from CrazyAgent is turned off in Settings.")
+    });
+    let answer = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let generation = owner.next();
+        let tree = prefix.canonicalize().unwrap().display().to_string();
+        let reply = owner
+            .controller
+            .fix_tool_permissions(Dependency::Graphify, tree, true, generation)
+            .await
+            .unwrap();
+        owner.controller.detach();
+        e2e_support::result(reply)
+    });
+    assert_eq!(answer, e2e_support::rejected("tool_fix_off"));
+    assert_eq!(folder_mode(&prefix), 0o775, "a refused fix changes nothing");
+    drop(pty);
+    engine.stop();
+}
+
+const DOWN_KEY: &[u8] = b"\x1b[B";
+const UP_KEY: &[u8] = b"\x1b[A";
+const KEY_TIME: Duration = Duration::from_millis(300);
+const UPDATE_TIME: Duration = Duration::from_secs(120);
+const SIGN_IN_TIME: Duration = Duration::from_secs(90);
+const TOO_OLD_WORDS: &str = "is too old to sign in";
+
+/// DEC-166: writes one stand-in harness script only its owner can change. Inputs: the path
+/// and the script. Output: none.
+fn stand_in(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// DEC-166: the `--version` arm of a stand-in: the version line, or nothing for a harness
+/// whose version CrazyAgent can't read. Input: the line. Output: the shell arm.
+fn version_arm(line: Option<String>) -> String {
+    line.map_or_else(
+        || "--version) exit 0 ;;".to_owned(),
+        |line| format!("--version) echo \"{line}\" ;;"),
+    )
+}
+
+/// DEC-166: a private test HOME for harness stand-ins where the engine takes a harness: on
+/// macOS this user's cache folder, never the shared temp folder, whose `ca-` folders are the
+/// agents' own and which every user can write, nor the engine's own temp folder, which agents
+/// with the owner's temp folder grant write; elsewhere the temp folder. Input: a name prefix.
+/// Output: the folder, removed when dropped.
+fn harness_home(prefix: &str) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let base = if cfg!(target_os = "macos") {
+        let cache = crazyagent::spawn_gate::output(
+            Command::new("/usr/bin/getconf")
+                .arg("DARWIN_USER_CACHE_DIR")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        PathBuf::from(String::from_utf8(cache.stdout).unwrap().trim())
+    } else {
+        std::env::temp_dir()
+    };
+    let home = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(std::fs::canonicalize(base).unwrap())
+        .unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    home
+}
+
+/// DEC-166: puts a self-updating Claude Code stand-in and an npm Codex stand-in under a test
+/// HOME. Each prints its old version (or none), updates to its new one with its own updater
+/// (`claude update`, `npm install`), and fails every other call, a sign-in included. Inputs:
+/// the HOME and each harness's old and new version. Output: the PATH the engine runs with.
+fn old_harnesses(home: &Path, claude: (Option<&str>, &str), codex: (Option<&str>, &str)) -> String {
+    let text = home.to_str().unwrap();
+    assert!(!text.contains('\'') && !text.contains('"'));
+    let versions = home.join(".local/share/claude/versions");
+    let bin = home.join(".local/bin");
+    let first = versions.join(claude.0.unwrap_or("0.0.0"));
+    let next = versions.join(claude.1);
+    let (to, next_text, link) = (claude.1, next.display(), bin.join("claude"));
+    stand_in(
+        &first,
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  {}\n  update) printf '#!/bin/sh\\ncase \"$1\" in --version) echo \"{to} (Claude Code)\" ;; *) exit 1 ;; esac\\n' > '{next_text}' && /bin/chmod 755 '{next_text}' && /bin/ln -sfn '{next_text}' '{link}.next' && /bin/mv -f '{link}.next' '{link}' && echo \"Updated to {to}\" ;;\n  *) exit 1 ;;\nesac\n",
+            version_arm(claude.0.map(|from| format!("{from} (Claude Code)"))),
+            link = link.display(),
+        ),
+    );
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&first, &link).unwrap();
+    assert!(first.starts_with(home) && next.starts_with(home));
+    let prefix = home.join(".npm-global");
+    let harness = prefix.join("lib/node_modules/@openai/codex/bin/codex");
+    stand_in(
+        &harness,
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  {}\n  *) exit 1 ;;\nesac\n",
+            version_arm(codex.0.map(|from| format!("codex-cli {from}")))
+        ),
+    );
+    std::fs::create_dir_all(prefix.join("bin")).unwrap();
+    std::os::unix::fs::symlink(
+        "../lib/node_modules/@openai/codex/bin/codex",
+        prefix.join("bin/codex"),
+    )
+    .unwrap();
+    let (to, harness) = (codex.1, harness.display());
+    stand_in(
+        &prefix.join("bin/npm"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  view) echo {to} ;;\n  install) printf '#!/bin/sh\\ncase \"$1\" in --version) echo \"codex-cli {to}\" ;; *) exit 1 ;; esac\\n' > '{harness}.new' && /bin/chmod 755 '{harness}.new' && /bin/mv -f '{harness}.new' '{harness}' ;;\n  *) exit 2 ;;\nesac\n"
+        ),
+    );
+    format!(
+        "{}:{}:/usr/bin:/bin",
+        prefix.join("bin").display(),
+        bin.display()
+    )
+}
+
+/// DEC-166: starts the real engine with the stand-ins' HOME and a PATH that holds only them
+/// and the system folders, so no harness installed on this Mac is ever found or run. Inputs:
+/// the prefix, the HOME and the PATH. Output: the running engine.
+fn stand_in_engine(prefix: &str, home: &Path, path: String) -> Engine {
+    let mut engine = Engine::new(prefix);
+    engine.home = Some(home.to_path_buf());
+    engine.env.push(("PATH", path.into()));
+    engine.launch();
+    engine
+}
+
+/// DEC-166: whether a row of the screen is the picked one of a list or menu and names the
+/// label as a whole: the list's `> ` marker or a menu item's focus bar, at most a provider
+/// mark, then the label, ended by a space or the line's end, so `OpenAI` never matches
+/// `OpenAI-compatible URL`. Inputs: the screen and the label. Output: the answer.
+fn picked_row(screen: &str, label: &str) -> bool {
+    screen.lines().any(|line| {
+        line.find(label).is_some_and(|at| {
+            let before = &line[..at];
+            let whole = line[at + label.len()..]
+                .chars()
+                .next()
+                .is_none_or(char::is_whitespace);
+            whole
+                && ["> ", "\u{258c} ", "| "].iter().any(|marker| {
+                    before.contains(marker)
+                        && before
+                            .rsplit(marker)
+                            .next()
+                            .is_some_and(|between| between.trim().chars().count() <= 2)
+                })
+        })
+    })
+}
+
+/// DEC-166: moves down a list, then up it, until the label is the picked row, then chooses
+/// it, so a list whose cursor opens below the label still reaches it. Inputs: the TUI and the
+/// label. Output: none.
+fn choose_row(pty: &mut ScriptPty, label: &str) {
+    pty.until(&format!("{label} is listed"), |screen| {
+        screen.contains(label)
+    });
+    for key in [DOWN_KEY, UP_KEY] {
+        for _ in 0..STEPS_MAX {
+            if picked_row(&pty.screen(), label) {
+                pty.type_bytes(b"\r");
+                return;
+            }
+            pty.type_bytes(key);
+            std::thread::sleep(KEY_TIME);
+        }
+    }
+    panic!("{label} never became the picked row:\n{}", pty.screen());
+}
+
+/// DEC-166: takes a fresh engine through first run to Add account, then picks the provider
+/// tile and its sign-in method, which starts the sign-in. Inputs: the engine, the TUI's HOME,
+/// the tile and the method. Output: the TUI on the sign-in step.
+fn start_sign_in(engine: &Engine, home: &Path, tile: &str, method: &str) -> ScriptPty {
+    let mut pty = reach_accounts_step(engine, home);
+    pty.type_bytes(b" ");
+    pty.until("Space unticks the guide", |screen| {
+        screen.contains("[ ] Show the guide on Home")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Add account opens on its providers", |screen| {
+        screen.contains("Where does the model come from?")
+    });
+    choose_row(&mut pty, tile);
+    choose_row(&mut pty, method);
+    pty
+}
+
+/// DEC-166: whether the screen shows a sign-in that ran the harness: its failure line with
+/// the key to try again and no too-old line. Input: the screen. Output: the answer.
+fn ran_the_harness(screen: &str) -> bool {
+    !screen.contains(TOO_OLD_WORDS)
+        && (screen.contains("Press n to try again.") || screen.contains("Press n for a new code."))
+}
+
+/// DEC-166: one harness below its sign-in minimum in the TUI: the sign-in stops with the
+/// app's words, u opens the Update confirm, Enter runs the harness's own update, and n then
+/// starts a sign-in that runs the harness at its minimum. Inputs: the prefix, the tile, the
+/// method, the harness name, its old version and its minimum, with the other harness current.
+fn too_old_then_updated_in_the_tui(
+    prefix: &str,
+    pick: (&str, &str),
+    name: &str,
+    old: &str,
+    minimum: &str,
+    claude: (Option<&str>, &str),
+    codex: (Option<&str>, &str),
+) {
+    let home = harness_home(&format!("{prefix}home-"));
+    let path = old_harnesses(home.path(), claude, codex);
+    let mut engine = stand_in_engine(prefix, home.path(), path);
+    let mut pty = start_sign_in(&engine, home.path(), pick.0, pick.1);
+    let line =
+        format!("{name} {old} is too old to sign in from CrazyAgent; it needs {minimum} or newer.");
+    pty.until_within(
+        "the too-old line with Update and Check again",
+        SIGN_IN_TIME,
+        |screen| {
+            line.split("; ").all(|part| screen.contains(part))
+                && screen.contains(&format!("Update {name}"))
+                && screen.contains("Check again")
+                && !screen.contains("Press n to try again.")
+        },
+    );
+    pty.type_bytes(b"u");
+    pty.until("the Update confirm", |screen| {
+        screen.contains(&format!(
+            "Update {name}? CrazyAgent runs exactly this line:"
+        ))
+    });
+    pty.type_bytes(b"\r");
+    pty.until_within("the finished update", UPDATE_TIME, |screen| {
+        screen.contains(&format!("Updated from {old} to {minimum}."))
+    });
+    pty.type_bytes(b"n");
+    pty.until_within(
+        "a sign-in that runs the harness at its minimum",
+        SIGN_IN_TIME,
+        ran_the_harness,
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// DEC-166: Claude Code 2.1.200 is refused as too old in the TUI with its version and 2.1.268,
+/// its own update runs after the confirm, and Check again then signs in with it.
+#[test]
+fn a_claude_code_below_its_sign_in_minimum_updates_from_the_tui_then_signs_in() {
+    too_old_then_updated_in_the_tui(
+        "ca-e2e-min-claude-",
+        ("Anthropic", "Sign in with your Claude subscription"),
+        "Claude Code",
+        "2.1.200",
+        "2.1.268",
+        (Some("2.1.200"), "2.1.268"),
+        (Some("0.169.0"), "0.169.0"),
+    );
+}
+
+/// DEC-166: Codex 0.50.0 is refused as too old in the TUI with its version and 0.56.0, npm
+/// updates it after the confirm, and Check again then signs in with it.
+#[test]
+fn a_codex_below_its_sign_in_minimum_updates_from_the_tui_then_signs_in() {
+    too_old_then_updated_in_the_tui(
+        "ca-e2e-min-codex-",
+        ("OpenAI", "Sign in with ChatGPT"),
+        "Codex",
+        "0.50.0",
+        "0.56.0",
+        (Some("2.1.325"), "2.1.325"),
+        (Some("0.50.0"), "0.56.0"),
+    );
+}
+
+/// DEC-166: a Claude Code and a Codex whose version CrazyAgent can't read sign in from the TUI
+/// as before, with no too-old line.
+#[test]
+fn harnesses_with_an_unknown_version_sign_in_from_the_tui_as_before() {
+    let home = harness_home("ca-e2e-min-unknown-home-");
+    let path = old_harnesses(home.path(), (None, "2.1.268"), (None, "0.56.0"));
+    let mut engine = stand_in_engine("ca-e2e-min-unknown-", home.path(), path);
+    let mut pty = start_sign_in(
+        &engine,
+        home.path(),
+        "Anthropic",
+        "Sign in with your Claude subscription",
+    );
+    pty.until_within(
+        "a Claude sign-in that runs Claude Code",
+        SIGN_IN_TIME,
+        ran_the_harness,
+    );
+    for _ in 0..STEPS_MAX {
+        if pty.screen().contains("Where does the model come from?") {
+            break;
+        }
+        pty.type_bytes(ESC_KEY);
+        std::thread::sleep(KEY_TIME);
+    }
+    choose_row(&mut pty, "OpenAI");
+    choose_row(&mut pty, "Sign in with ChatGPT");
+    pty.until_within(
+        "a ChatGPT sign-in that runs Codex",
+        SIGN_IN_TIME,
+        ran_the_harness,
+    );
     drop(pty);
     engine.stop();
 }

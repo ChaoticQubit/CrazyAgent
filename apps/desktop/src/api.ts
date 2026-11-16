@@ -36,6 +36,8 @@ const COPY: Record<string, string> = {
   owner_read_failed: "Couldn't read this from the engine. Try again.",
   engine_sidecar_missing: "This app is missing its built-in engine. Reinstall CrazyAgent.",
   engine_service_failed: "CrazyAgent couldn't set up its background engine. Try again.",
+  engine_newer_than_app: "Your login service runs a newer CrazyAgent engine than this app, or this app is a test build, so Restart engine keeps that engine. Open the newer CrazyAgent or update this one, then restart the engine.",
+  engine_app_not_installed: "Move CrazyAgent to your Applications folder, then open it again. Its engine can't run at login from a disk image, another disk or a temporary folder.",
   engine_restart_unavailable: "This window uses an engine you started yourself. Restart that engine, then try again.",
   uncertain: "We couldn't confirm your last change. Check it and save again.",
   pending_intent: "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.",
@@ -68,10 +70,10 @@ const COPY: Record<string, string> = {
   model_access_duplicate: "This already exists.",
   model_access_missing: "This no longer exists.",
   invalid_model_access: "The engine didn't accept this pool. Check its accounts and save again.",
-  owner_profile_name: "Enter your name, up to 80 characters.",
-  owner_profile_role: "Keep your role on one line, up to 80 characters.",
-  owner_profile_bio: "Keep your bio under 500 characters.",
-  owner_profile_stack: "List up to 12 different technologies, each up to 40 characters.",
+  owner_profile_name: "Enter your name on one line, up to 100 bytes (about 100 English letters or 33 Chinese, Hindi or Thai ones), with no hidden characters.",
+  owner_profile_role: "Keep your role on one line, up to 100 bytes (about 100 English letters or 33 Chinese, Hindi or Thai ones), with no hidden characters.",
+  owner_profile_bio: "Keep your bio to 1000 bytes (about 1000 English letters or 333 Chinese, Hindi or Thai ones), with no tabs, special or hidden characters.",
+  owner_profile_stack: "List up to 12 different technologies, each on one line, up to 40 bytes, with no hidden characters.",
   owner_profile_bounds: "Your profile is too long. Shorten it and save again.",
   owner_profile_invalid: "Your profile has a value the engine can't save. Check it and save again.",
   account_name_invalid: "Use an account name of up to 60 characters on one line.",
@@ -176,6 +178,7 @@ const COPY: Record<string, string> = {
   grant_socket_keys: "That socket belongs to a key or password agent (gpg-agent, 1Password, SSH or another agent), so it is never allowed.",
   grant_socket_owner: "That socket belongs to the system or another user, has a second name, or sits in a folder other users can change, so it is never allowed.",
   grant_socket_missing: "There is no socket at that path now. Start the program that makes it, then allow it again.",
+  grant_socket_refused: "That socket cannot be allowed. A socket can be allowed only when it is there now, belongs to the owner with one name, sits in a folder only the owner can change, and is no socket of CrazyAgent itself, of keys or credentials, of containers or virtual machines, or of a terminal, editor, SSH connection or key agent. Check the path and that the program making it runs, then ask again.",
   grant_port_reserved: "That port belongs to your sign-in, your local model or CrazyAgent itself (its IDE or model proxy), or controls Docker, a browser or a debugger (Node, Java, Python or Go), so it is never allowed.",
   grant_port_dynamic: "Ports from 49152 up are lent by the system to CrazyAgent's IDE and other apps for a while, so they are never allowed. Pick a fixed port below 49152.",
   agent_grants_invalid: "A project allows at most 2 sockets, 4 ports and your temp folder, each once.",
@@ -330,9 +333,15 @@ export async function checkUnconfirmed(): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_reconcile_intent");
 }
 
-/** Sends the exact kept change again; the engine applies it once even if the first send
- * landed. Output: the receipt, or why it couldn't run. */
-export function retryUnconfirmed(): Promise<Result<IntentReceipt>> {
+/** Sends the exact kept change again, reconnecting first when a lost reply let go of the
+ * engine; the engine applies it once even if the first send landed, and answers that it is
+ * still running while the first send runs. Output: the receipt, or why it couldn't run. */
+export async function retryUnconfirmed(): Promise<Result<IntentReceipt>> {
+  const current = await status();
+  if (current.kind === "ok" && !current.value.connected) {
+    const connected = await connect();
+    if (connected.kind !== "ok") return connected;
+  }
   return call<IntentReceipt>("desktop_retry_intent");
 }
 
@@ -388,6 +397,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   sandbox_settings: "changing the sandbox setting",
   cleanup_settings: "changing when finished agents' worktrees go",
   quit_settings: "changing what quitting does to team agents",
+  provider_retry: "changing what harnesses do when a model provider can't be reached",
   master_step_settings: "changing the master step limit",
   master_time_settings: "changing the master time limit",
   master_frame_settings: "changing the master frame size limit",
@@ -398,6 +408,9 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   project_move_home: "moving the project into your projects folder",
   start_onboarding: "starting project setup",
   run_setup: "running project setup",
+  install_dependency: "installing a tool",
+  fix_tool_permissions: "fixing a tool's permissions",
+  refused_tool: "saving what setup offers for unused tools",
   pack_set: "changing the default pack",
   pack_remove: "removing a pack",
   team: "changing the team",
@@ -427,6 +440,7 @@ function capital(text: string): string {
 export function unconfirmedLine(intent: PendingIntent, outcome: ActionReceipt["outcome"] | null): string {
   const label = changeLabel(intent);
   if (outcome === "not_recorded_at_barrier") return `${capital(label)} never reached the engine. Retry sends it again, or Dismiss drops it.`;
+  if (outcome === "in_progress") return `${capital(label)} is still running in the engine. It finishes on its own; we keep checking.`;
   return `We couldn't confirm ${label}. Other changes wait until it's checked.`;
 }
 
@@ -519,6 +533,38 @@ export function getQuitSettings(): Promise<Result<QuitSettings>> {
 /** Saves what quitting does to team agents. Input: the full setting. Output: ok once saved. */
 export function saveQuitSettings(settings: QuitSettings): Promise<Result<void>> {
   return change("desktop_set_quit_settings", { settings, generation: nextGeneration() });
+}
+
+/** What harnesses do when a model provider fails, the engine's `ProviderRetry` (DEC-163). */
+export type ProviderRetry = "stop_at_once" | "retry_briefly" | "harness_default";
+
+/** One harness kind as the engine's settings name it, the engine's `HarnessKind`. */
+export type RetryHarness = "claude-code" | "codex" | "rcli";
+
+/** The engine's line for one option and one harness, saying what the option does to it. */
+export interface RetryNote {
+  option: ProviderRetry;
+  harness: RetryHarness;
+  line: string;
+}
+
+/** The owner's read of the setting, the engine's `ProviderRetryView`: the chosen option and
+ * the engine's line for every option and harness. */
+export interface ProviderRetryView {
+  choice: ProviderRetry;
+  notes: RetryNote[];
+}
+
+/** Reads what harnesses do when a model provider can't be reached. Output: the view, with
+ * Retry briefly chosen before the first save. */
+export function getProviderRetry(): Promise<Result<ProviderRetryView>> {
+  return call<ProviderRetryView>("desktop_provider_retry");
+}
+
+/** Saves what harnesses do when a model provider can't be reached. Input: the option.
+ * Output: ok once saved. */
+export function saveProviderRetry(choice: ProviderRetry): Promise<Result<void>> {
+  return change("desktop_set_provider_retry", { choice, generation: nextGeneration() });
 }
 
 /** The most steps a master takes in one turn, the engine's `StepLimit`. */
@@ -947,7 +993,7 @@ export type HarnessAccountKind = "subscription" | "api_key" | "open_ai_compatibl
 export interface HarnessEntry {
   id: string;
   name: string;
-  status: { kind: "ready" } | { kind: "not_installed" } | { kind: "limited"; reason: string };
+  status: { kind: "ready" } | { kind: "not_installed" } | { kind: "limited"; reason: string } | { kind: "cant_run"; reason: string };
   status_label: string;
   executable: string | null;
   headless: string;

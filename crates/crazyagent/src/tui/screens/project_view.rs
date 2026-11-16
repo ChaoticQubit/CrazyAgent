@@ -759,7 +759,15 @@ pub(in crate::tui) fn job_status(job: &ResearchJob, now_ms: i64, offset: i64, lo
                 look.muted,
             )
         }
-        ResearchStatus::Queued => Row::of(format!("{} Queued", look.glyph("\u{25cc}")), look.muted),
+        ResearchStatus::Queued => {
+            let queued = Row::of(format!("{} Queued", look.glyph("\u{25cc}")), look.muted);
+            match job.error.as_deref().map(str::trim) {
+                Some(reason) if !reason.is_empty() => {
+                    queued.push(format!("  {reason}"), look.muted)
+                }
+                _ => queued,
+            }
+        }
         ResearchStatus::NeedsPool => match job.rate_limited() {
             Some((until, _)) => Row::of(
                 format!("! Rate limited until {}", clock(until, offset)),
@@ -865,10 +873,14 @@ fn overview_blocked(tab: OverviewTab, code: &str) -> String {
     )
 }
 
+/// What a tab whose file came with the project's files says above its text, the desktop's
+/// words (RV-DS241-2, DEC-141): CrazyAgent didn't write it and the owner didn't save it here.
+const FOREIGN_TAB: &str = "This tab's file came with the project's files: CrazyAgent didn't write it and you didn't save it. Check it before you use its commands.";
+
 /// The lines above the picked Overview tab's text and the text itself, as Markdown.
 /// A project outside the CrazyAgent folder and a blocked tab get their one line and no text;
-/// the README is shown either way.
-/// Takes the overview and the picked tab's index in `OVERVIEW_TAB_LABELS`.
+/// the README is shown either way, and a tab whose file came with the project's files says
+/// so first. Takes the overview and the picked tab's index in `OVERVIEW_TAB_LABELS`.
 /// Returns the plain notes to show first and the Markdown, None when there is none.
 fn overview_picked(overview: &Overview, picked: usize) -> (Vec<String>, Option<&str>) {
     assert!(picked < OVERVIEW_TAB_LABELS.len());
@@ -892,6 +904,9 @@ fn overview_picked(overview: &Overview, picked: usize) -> (Vec<String>, Option<&
         return (vec![overview_blocked(*tab, code)], None);
     }
     let mut notes = Vec::new();
+    if state.foreign && state.text.is_some() {
+        notes.push(FOREIGN_TAB.to_owned());
+    }
     if state.proposal.is_some() {
         notes.push("A refresh proposes changes. Review them in the desktop app.".to_owned());
     }
@@ -928,7 +943,7 @@ fn overview_tab_rows(
     }
     let mut rows = vec![Row::default(), strip];
     if let Some(failure) = &overview.failure {
-        let (line, style) = if overview_pending(overview) {
+        let (line, style) = if overview.waiting_for_account && overview_pending(overview) {
             (sanitize(failure), look.muted)
         } else {
             (
@@ -1022,9 +1037,16 @@ fn work_rows(screen: &ProjectScreen, look: &Look, paths: bool, width: usize) -> 
                     Row::of(format!("{} Queued", look.glyph("\u{25cc}")), look.muted)
                 }
             };
+            let waits = screen.job_for(&path).is_some_and(|job| {
+                job.status == ResearchStatus::Queued
+                    && job
+                        .error
+                        .as_deref()
+                        .is_some_and(|reason| !reason.trim().is_empty())
+            });
             let mut row = Row::of(research_label(*kind, look), look.fg)
                 .pad(24)
-                .cat(status.pad(28));
+                .cat(if waits { status } else { status.pad(28) });
             if paths
                 && screen
                     .job_for(&path)
@@ -2480,7 +2502,11 @@ fn folders_line(screen: &ProjectScreen, look: &Look) -> Row {
 /// The Settings line for a project's hidden folders: how many, or loading.
 /// Takes the screen and look. Returns the row with its edit key.
 fn hidden_line(screen: &ProjectScreen, look: &Look) -> Row {
-    let text = match screen.hidden_paths.as_deref() {
+    let text = match screen
+        .hidden_paths
+        .as_ref()
+        .map(|saved| saved.paths.as_slice())
+    {
         None => "Loading...".to_owned(),
         Some([]) => "None hidden".to_owned(),
         Some([one]) => one.clone(),

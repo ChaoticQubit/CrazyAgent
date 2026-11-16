@@ -1,7 +1,10 @@
-use super::new_project_input::char_cells;
+use super::new_project_input::cells;
 use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project_team::{Help, Notice, TABS, window};
-use super::settings_plugins::{hook_runs, plugin_plain, short_runs};
+use super::settings_plugins::{
+    HookGroup, HookGroupState, change_plain, hook_event_runs, hook_group_line, hook_groups,
+    hook_runs, plugin_plain, short_runs,
+};
 use crate::plugins::{HookView, Scope, ServerStatus, ServerView, SkillView};
 use crate::protocol::ProjectId;
 use crate::tui::client::settings::{PluginChange, SettingsEvent, SettingsJob};
@@ -43,11 +46,13 @@ pub(in crate::tui) enum PluginsReply {
 enum Item {
     Skill(usize),
     Server(usize),
+    HookPlugin(usize),
     Hook(usize),
 }
 
 /// The skills, MCP servers and hooks one project's agents get: every-project
-/// items with whether they are on here, and this project's own items.
+/// items with whether they are on here, and this project's own items. Hooks show
+/// one row per plugin; Enter opens that plugin's events under it.
 /// Takes engine reads through `apply` and keys through `key`; never invents data.
 /// Drawing the approval question keeps its first command line in range and
 /// notes the server whose command showed through its last line; `y` approves
@@ -66,8 +71,10 @@ pub(in crate::tui) struct ProjectPlugins {
     stale: bool,
     hooks_stale: bool,
     changing: Option<String>,
+    expanded: Option<(String, Scope)>,
     command_top: Cell<usize>,
     read_through: RefCell<Option<(String, String)>>,
+    painting: Cell<bool>,
 }
 
 impl ProjectPlugins {
@@ -89,9 +96,20 @@ impl ProjectPlugins {
             stale: true,
             hooks_stale: false,
             changing: None,
+            expanded: None,
             command_top: Cell::new(0),
             read_through: RefCell::new(None),
+            painting: Cell::new(false),
         }
+    }
+
+    /// Says whether the next drawings of this section are painted on screen. Only a painted
+    /// drawing records that an approval's command showed to its end and keeps its scroll, so
+    /// a taller layout that never reaches the screen can neither unlock y nor hold the scroll
+    /// back (RV-DS241-104). Input: true around the drawing that reaches the screen, false
+    /// after it. Output: none.
+    pub(in crate::tui) fn painting(&self, painted: bool) {
+        self.painting.set(painted);
     }
 
     /// Gives the next read: skills and servers at the start and after every
@@ -196,7 +214,7 @@ impl ProjectPlugins {
                         server.problem.as_deref().unwrap_or_default()
                     )),
                     Ok(_) => Notice::plain(done),
-                    Err(code) => Notice::problem(plugin_plain(code)),
+                    Err(code) => Notice::problem(change_plain(&done, code)),
                 });
             }
             _ => {}
@@ -212,7 +230,24 @@ impl ProjectPlugins {
     }
 
     fn count(&self) -> usize {
-        self.skills.len() + self.servers.len() + self.hooks.len()
+        self.skills.len() + self.servers.len() + self.hook_rows().len()
+    }
+
+    fn opened(&self, group: &HookGroup) -> bool {
+        self.expanded
+            .as_ref()
+            .is_some_and(|(plugin, scope)| *plugin == group.plugin && *scope == group.scope)
+    }
+
+    fn hook_rows(&self) -> Vec<Item> {
+        let mut rows = Vec::new();
+        for (at, group) in hook_groups(&self.hooks).iter().enumerate() {
+            rows.push(Item::HookPlugin(at));
+            if self.opened(group) {
+                rows.extend(group.hooks.iter().map(|&index| Item::Hook(index)));
+            }
+        }
+        rows
     }
 
     fn item(&self) -> Option<Item> {
@@ -221,10 +256,8 @@ impl ProjectPlugins {
             Some(Item::Skill(self.cursor))
         } else if self.cursor < listed {
             Some(Item::Server(self.cursor - self.skills.len()))
-        } else if self.cursor < self.count() {
-            Some(Item::Hook(self.cursor - listed))
         } else {
-            None
+            self.hook_rows().get(self.cursor - listed).copied()
         }
     }
 
@@ -244,6 +277,15 @@ impl ProjectPlugins {
             Item::Server(index) => {
                 let server = &self.servers[index];
                 (&server.id, &server.name, &server.scope)
+            }
+            Item::HookPlugin(at) => {
+                let group = &hook_groups(&self.hooks)[at];
+                let hook = &self.hooks[group.hooks[0]];
+                return Some((
+                    hook.id.clone(),
+                    group.plugin.clone(),
+                    group.scope == Scope::Global,
+                ));
             }
             Item::Hook(index) => {
                 let hook = &self.hooks[index];
@@ -285,8 +327,9 @@ impl ProjectPlugins {
     /// Handles one key: move, switch the chosen item on or off for this project,
     /// approve a server after showing exactly what it runs, or edit or remove
     /// one of this project's own items.
-    /// Takes the key event. Returns what the host should do next; Enter on an
-    /// item that needs no approval is left to the host.
+    /// Takes the key event. Returns what the host should do next; Enter on a
+    /// plugin's hooks row opens or folds its events, and Enter on any other item
+    /// that needs no approval is left to the host.
     pub fn key(&mut self, key: KeyEvent) -> PluginsReply {
         if key
             .modifiers
@@ -369,12 +412,35 @@ impl ProjectPlugins {
                     *self.read_through.borrow_mut() = None;
                     PluginsReply::Handled
                 }
+                Some(Item::HookPlugin(at)) => {
+                    self.open_hooks(at);
+                    PluginsReply::Handled
+                }
                 _ => PluginsReply::Ignored,
             },
             _ => PluginsReply::Ignored,
         };
         self.clamp();
         reply
+    }
+
+    fn open_hooks(&mut self, at: usize) {
+        let group = hook_groups(&self.hooks).swap_remove(at);
+        self.expanded = if self.opened(&group) {
+            None
+        } else {
+            Some((group.plugin, group.scope))
+        };
+        let listed = self.skills.len() + self.servers.len();
+        let row = self
+            .hook_rows()
+            .iter()
+            .position(|item| *item == Item::HookPlugin(at));
+        assert!(
+            row.is_some(),
+            "a plugin row stays listed when its events open"
+        );
+        self.cursor = listed + row.unwrap_or_default();
     }
 
     fn still_saving(&mut self) -> bool {
@@ -414,6 +480,7 @@ impl ProjectPlugins {
                     server.version,
                 )
             }
+            Item::HookPlugin(at) => return self.toggle_hook_plugin(at),
             Item::Hook(index) => {
                 let hook = &self.hooks[index];
                 (
@@ -461,7 +528,7 @@ impl ProjectPlugins {
                 },
                 format!("{name} is {}.", if enabled { "off" } else { "on" }),
             ),
-            (None, Item::Hook(_)) => (
+            (None, Item::Hook(_) | Item::HookPlugin(_)) => (
                 PluginChange::SetHook {
                     id,
                     enabled: !enabled,
@@ -473,11 +540,57 @@ impl ProjectPlugins {
         PluginsReply::Send(SettingsJob::Plugin(change))
     }
 
+    fn toggle_hook_plugin(&mut self, at: usize) -> PluginsReply {
+        let group = hook_groups(&self.hooks).swap_remove(at);
+        let switchable = hooks_switchable(&self.hooks, &group);
+        let plugin = group.plugin;
+        if switchable.is_empty() {
+            self.notice = Some(Notice::plain(format!(
+                "{plugin} is off in Settings for every project. Turn it on there first."
+            )));
+            return PluginsReply::Handled;
+        }
+        let on = switchable.iter().any(|hook| !on_here(hook));
+        let changing: Vec<&HookView> = switchable
+            .into_iter()
+            .filter(|hook| on_here(hook) != on)
+            .collect();
+        assert!(!changing.is_empty());
+        let word = if on { "on" } else { "off" };
+        let (change, done) = if group.scope == Scope::Global {
+            (
+                PluginChange::Switches {
+                    project: self.project.clone(),
+                    items: changing
+                        .iter()
+                        .map(|hook| (hook.id.clone(), hook.version))
+                        .collect(),
+                    on,
+                },
+                format!("{plugin} hooks are {word} for this project."),
+            )
+        } else {
+            (
+                PluginChange::SetHooks {
+                    ids: changing.iter().map(|hook| hook.id.clone()).collect(),
+                    enabled: on,
+                },
+                format!("{plugin} hooks are {word}."),
+            )
+        };
+        self.changing = Some(done);
+        PluginsReply::Send(SettingsJob::Plugin(change))
+    }
+
     fn ask_remove(&mut self) -> PluginsReply {
         let Some((id, name, global)) = self.chosen() else {
             return PluginsReply::Ignored;
         };
-        if matches!(self.item(), Some(Item::Hook(_))) {
+        if matches!(self.item(), Some(Item::HookPlugin(_))) {
+            self.notice = Some(Notice::plain(format!(
+                "{name} is a plugin's hooks. Press Space to turn them off."
+            )));
+        } else if matches!(self.item(), Some(Item::Hook(_))) {
             self.notice = Some(Notice::plain(format!(
                 "{name} is a hook. Press Space to turn it off."
             )));
@@ -580,8 +693,10 @@ impl ProjectPlugins {
         panel.truncate(room.saturating_sub(reserve + footer.len()));
         let fixed = reserve + panel.len() + footer.len();
         let free = room.saturating_sub(fixed).max(3);
-        let hook_rows = self.hooks.len().max(1).min((free / 3).max(1));
-        let free = free.saturating_sub(hook_rows).max(2);
+        let listed_hooks = self.hook_rows();
+        let hooks_wanted = listed_hooks.len().max(1);
+        let first_hook_rows = hooks_wanted.min((free / 3).max(1));
+        let free = free.saturating_sub(first_hook_rows).max(2);
         let wanted_servers = self.servers.len().max(1).min(free / 2);
         let skill_rows = self
             .skills
@@ -589,7 +704,16 @@ impl ProjectPlugins {
             .max(1)
             .min(free.saturating_sub(wanted_servers))
             .max(1);
-        let server_rows = free.saturating_sub(skill_rows).max(1);
+        let server_rows = self
+            .servers
+            .len()
+            .max(1)
+            .min(free.saturating_sub(skill_rows))
+            .max(1);
+        let unused = free.saturating_sub(skill_rows + server_rows);
+        let hook_rows = hooks_wanted.min(first_hook_rows + unused);
+        assert!(hook_rows >= first_hook_rows);
+        assert!(hook_rows + skill_rows + server_rows <= first_hook_rows + free.max(skill_rows + 1));
         let widths = if wide {
             vec![
                 NAME_WIDTH,
@@ -624,7 +748,10 @@ impl ProjectPlugins {
                 Row::of(place(&skill.scope), look.fg),
             ];
             if wide {
-                cells.push(Row::of(skill.description.clone(), look.muted));
+                cells.push(Row::of(
+                    format!("{}  {}", skill.origin, skill.description),
+                    look.muted,
+                ));
             }
             lines.push(list_row(
                 columns(&widths, cells),
@@ -677,31 +804,53 @@ impl ProjectPlugins {
             lines.push(Row::default());
         }
 
-        lines.push(self.heading("Hooks", self.hooks.len(), content, look));
+        let groups = hook_groups(&self.hooks);
+        lines.push(self.heading("Hooks", groups.len(), content, look));
         if self.hooks.is_empty() {
             lines.push(Row::of(
                 "  No hooks yet. Press h to add a plugin folder's hooks for this project.",
                 look.muted,
             ));
         }
-        let picked = match selected {
-            Some(Item::Hook(index)) => index,
-            _ => 0,
-        };
-        let first = window(picked, self.hooks.len(), hook_rows);
-        for (index, hook) in self.hooks.iter().enumerate().skip(first).take(hook_rows) {
-            let mut cells = vec![
-                Row::of(hook.plugin.clone(), look.fg),
-                state(hook.enabled, hook.on_here, None, look),
-                Row::of(place(&hook.scope), look.fg),
-            ];
+        let picked = selected
+            .and_then(|item| listed_hooks.iter().position(|row| *row == item))
+            .unwrap_or_default();
+        let first = window(picked, listed_hooks.len(), hook_rows);
+        for &item in listed_hooks.iter().skip(first).take(hook_rows) {
+            let mut cells = match item {
+                Item::HookPlugin(at) => vec![
+                    Row::of(groups[at].plugin.clone(), look.fg),
+                    group_state(&self.hooks, &groups[at], look),
+                    Row::of(place(&groups[at].scope), look.fg),
+                ],
+                Item::Hook(index) => vec![
+                    Row::of(format!("  {}", self.hooks[index].event), look.fg),
+                    state(
+                        self.hooks[index].enabled,
+                        self.hooks[index].on_here,
+                        None,
+                        look,
+                    ),
+                    Row::default(),
+                ],
+                Item::Skill(_) | Item::Server(_) => Vec::new(),
+            };
+            assert_eq!(
+                cells.len(),
+                3,
+                "the hooks list holds only plugin and event rows"
+            );
             if wide {
-                cells.push(Row::of(hook_runs(hook), look.muted));
+                cells.push(match item {
+                    Item::HookPlugin(at) => Row::of(hook_group_line(&groups[at]), look.muted),
+                    Item::Hook(index) => Row::of(hook_event_runs(&self.hooks[index]), look.muted),
+                    Item::Skill(_) | Item::Server(_) => Row::default(),
+                });
             }
             lines.push(list_row(
                 columns(&widths, cells),
                 content,
-                selected == Some(Item::Hook(index)),
+                selected == Some(item),
                 true,
                 look,
             ));
@@ -779,6 +928,19 @@ impl ProjectPlugins {
                     None => {}
                 }
             }
+            Some(Item::HookPlugin(at)) => {
+                let group = &hook_groups(&self.hooks)[at];
+                rows.push(spread(
+                    content,
+                    Row::of(group.plugin.clone(), look.heading),
+                    Row::of(group.scope.label(), look.muted),
+                ));
+                rows.push(entry("Runs", hook_group_line(group), look.fg));
+                rows.push(Row::of(
+                    "Enter shows or hides its events, each with its own switch.",
+                    look.muted,
+                ));
+            }
             Some(Item::Hook(index)) => {
                 let hook = &self.hooks[index];
                 rows.push(spread(
@@ -836,10 +998,10 @@ impl ProjectPlugins {
         self.notice.iter().map(|notice| notice.row(look)).collect()
     }
 
-    /// Draws the approval question: the server, the question and as many lines
-    /// of exactly what it runs as fit from the first line Up and Down chose, with
-    /// a line marker when some do not fit. Records the server and command once
-    /// its last line has shown, which `y` needs before it approves.
+    /// Draws the approval question: the server, the question and as many lines of exactly
+    /// what it runs, each hidden character as its escape, as fit from the first line Up and
+    /// Down chose, with a line marker when some do not fit. A painted drawing records the
+    /// server and command once its last line has shown, which `y` needs before it approves.
     /// Takes the server asked about, the content width, the rows and the look.
     /// Returns at most `room` rows.
     fn approval(&self, server: &ServerView, content: usize, room: usize, look: &Look) -> Vec<Row> {
@@ -859,7 +1021,10 @@ impl ProjectPlugins {
                 look.muted,
             ),
         ];
-        let command = exact_lines(&server.runs, content.saturating_sub(2));
+        let command = exact_lines(
+            &crate::memory::visible_text(&server.runs),
+            content.saturating_sub(2),
+        );
         let fits = rows.len() + command.len() <= room;
         let shown = if fits {
             command.len()
@@ -868,14 +1033,17 @@ impl ProjectPlugins {
         };
         assert!(shown <= command.len());
         let top = self.command_top.get().min(command.len() - shown);
-        self.command_top.set(top);
+        let painted = self.painting.get();
+        if painted {
+            self.command_top.set(top);
+        }
         let end = top + shown;
         rows.extend(
             command[top..end]
                 .iter()
                 .map(|line| Row::of("  ", Style::new()).push(line.clone(), look.fg)),
         );
-        if shown > 0 && end == command.len() {
+        if painted && shown > 0 && end == command.len() {
             *self.read_through.borrow_mut() = Some((server.id.clone(), server.runs.clone()));
         }
         if !fits {
@@ -913,13 +1081,16 @@ impl ProjectPlugins {
         if let Some(Item::Skill(_)) = self.item() {
             help.push(("Enter", "Details"));
         }
+        if let Some(Item::HookPlugin(_)) = self.item() {
+            help.push(("Enter", "Events"));
+        }
         if let Some(Item::Server(index)) = self.item()
             && self.servers[index].status == ServerStatus::WaitingForApproval
         {
             help.push(("Enter", "Approve"));
         }
         if let Some((_, _, false)) = self.chosen()
-            && !matches!(self.item(), Some(Item::Hook(_)))
+            && !matches!(self.item(), Some(Item::Hook(_) | Item::HookPlugin(_)))
         {
             if matches!(self.item(), Some(Item::Server(_))) {
                 help.push(("e", "Edit"));
@@ -942,6 +1113,43 @@ fn visible(scope: &Scope, project: &ProjectId) -> bool {
     match scope {
         Scope::Global => true,
         Scope::Project { project_id } => project_id == project,
+    }
+}
+
+fn on_here(hook: &HookView) -> bool {
+    hook.enabled && hook.on_here != Some(false)
+}
+
+/// The hooks of one plugin this project can switch: every hook of a project's own
+/// plugin, and every-project hooks not turned off in Settings.
+/// Takes the hooks and the group. Returns those hooks in the engine's order.
+fn hooks_switchable<'a>(hooks: &'a [HookView], group: &HookGroup) -> Vec<&'a HookView> {
+    group
+        .hooks
+        .iter()
+        .map(|&index| &hooks[index])
+        .filter(|hook| hook.on_here.is_none() || hook.enabled)
+        .collect()
+}
+
+/// What a plugin's hooks row says here: On when every hook the project can switch is on,
+/// Partly on when only some are, otherwise off here, off, or off in Settings.
+/// Takes the hooks, the group and the look. Returns the state cell.
+fn group_state(hooks: &[HookView], group: &HookGroup, look: &Look) -> Row {
+    let switchable = hooks_switchable(hooks, group);
+    let global = group.scope == Scope::Global;
+    if switchable.is_empty() {
+        return state(false, Some(true), None, look);
+    }
+    let on = switchable.iter().filter(|hook| on_here(hook)).count();
+    if on == switchable.len() {
+        state(true, None, None, look)
+    } else if on == 0 && global {
+        state(true, Some(false), None, look)
+    } else if on == 0 {
+        state(false, None, None, look)
+    } else {
+        Row::of(HookGroupState::Partly.word(), look.warning)
     }
 }
 
@@ -973,22 +1181,30 @@ fn state(enabled: bool, on_here: Option<bool>, status: Option<ServerStatus>, loo
     }
 }
 
-/// Splits text into lines of at most a width without dropping or merging any
-/// character, so a command shown for approval reads exactly as it will run.
-/// Takes the text and the width in cells. Returns at least one line.
+/// Splits text into lines of at most a width without dropping or merging any character, so
+/// a command shown for approval reads exactly as it will run. Lines are cut between the
+/// graphemes ratatui draws, each measured as ratatui measures it, so an emoji pair or a
+/// joined sequence never pushes a line's tail past the edge (RV-DS241-113 r1 F1). Takes
+/// the text and the width in cells. Returns at least one line.
 pub(in crate::tui) fn exact_lines(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut lines = vec![String::new()];
     let mut used = 0;
-    for character in text.chars() {
-        let size = char_cells(character);
-        if used + size > width && used > 0 {
-            lines.push(String::new());
-            used = 0;
+    for (at, piece) in text.split('\n').enumerate() {
+        let span = ratatui::text::Span::raw(piece);
+        let graphemes = span
+            .styled_graphemes(Style::default())
+            .map(|grapheme| grapheme.symbol);
+        for grapheme in (at > 0).then_some("\n").into_iter().chain(graphemes) {
+            let size = cells(grapheme);
+            if used + size > width && used > 0 {
+                lines.push(String::new());
+                used = 0;
+            }
+            let last = lines.len() - 1;
+            lines[last].push_str(grapheme);
+            used += size;
         }
-        let last = lines.len() - 1;
-        lines[last].push(character);
-        used += size;
     }
     assert_eq!(lines.concat(), text);
     lines

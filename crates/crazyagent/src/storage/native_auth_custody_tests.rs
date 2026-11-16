@@ -812,6 +812,31 @@ fn native_auth_custody_that_ended_while_an_agent_uses_the_account_is_settled_at_
     drop(agent);
 }
 
+/// DEC-166: a sign-in the engine refused before any custodian ran, because the harness is
+/// older than its sign-in minimum, settles Failed with `native_auth_harness_too_old` once its
+/// dispatch is released, and leaves no fence.
+#[test]
+fn a_dispatch_refused_as_too_old_settles_failed_with_that_code() {
+    assert!(native_auth::CUSTODIAN_CODES.contains(&"native_auth_harness_too_old"));
+    let mut case = CustodyCase::new();
+    let (_fact, work) = case.work("too-old-harness");
+    let dispatch = case.dispatch(work).unwrap();
+    let settled = native_auth::recover_native_auth(
+        &mut case.db,
+        &mut case.custody,
+        &case.started.host,
+        Some(dispatch.fact()),
+        Some("native_auth_harness_too_old"),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        (settled.phase, settled.code.as_deref()),
+        (NativeAuthPhase::Failed, Some("native_auth_harness_too_old"))
+    );
+    assert!(case.snapshot().fences.is_empty());
+}
+
 async fn ask<T>(storage: &Storage, job: impl FnOnce(oneshot::Sender<T>) -> Job) -> T {
     let (send, receive) = oneshot::channel();
     storage

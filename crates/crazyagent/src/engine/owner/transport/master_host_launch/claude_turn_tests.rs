@@ -20,6 +20,16 @@ fn configured(command: &Command, config: &str, extra: &[&str]) -> Command {
     })
 }
 
+/// The values a command sets for Claude Code's retry variable. Input: the command. Output:
+/// each value it sets, in order; empty when it sets none.
+fn stop_at_once_retries(command: &Command) -> Vec<Option<String>> {
+    command
+        .get_envs()
+        .filter(|(name, _)| *name == crate::provider_retry::CLAUDE_MAX_RETRIES)
+        .map(|(_, value)| value.map(|value| value.to_str().unwrap().to_owned()))
+        .collect()
+}
+
 fn rewritten(command: &Command, change: impl Fn(&mut Vec<String>)) -> Command {
     let mut args: Vec<String> = command
         .get_args()
@@ -196,8 +206,14 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         None,
         &[],
         StepLimit::Steps50,
+        crate::provider_retry::ProviderRetry::StopAtOnce,
     )
     .unwrap();
+    assert_eq!(
+        stop_at_once_retries(&off_command),
+        [Some("0".to_owned())],
+        "a tools-off Claude master under Stop at once gets the agents' retry variable (DEC-163 Q7)"
+    );
     let single: Vec<&str> = off_command
         .get_args()
         .map(|arg| arg.to_str().unwrap())
@@ -270,6 +286,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         None,
         &[],
         StepLimit::NoLimit,
+        crate::provider_retry::ProviderRetry::HarnessDefault,
     );
     assert_eq!(
         refused.err().map(|error| error.0),
@@ -311,8 +328,14 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         Some(&engine),
         &[crate::team::tool::RECALL_TOOL.to_owned()],
         StepLimit::Steps100,
+        crate::provider_retry::ProviderRetry::StopAtOnce,
     )
     .unwrap();
+    assert_eq!(
+        stop_at_once_retries(&command),
+        [Some("0".to_owned())],
+        "a tools-on Claude master under Stop at once gets the agents' retry variable (DEC-163 Q7)"
+    );
     let turn = runtime.join(format!("master-runtime-{}", tools_ref.as_str()));
     let record = turn.join("tmp").join(crate::team::tool::DROP_FILE);
     assert_eq!(tool_record.as_deref(), Some(record.as_path()));

@@ -969,7 +969,8 @@ impl Agents {
         #[cfg(not(unix))]
         let created = std::fs::DirBuilder::new().create(&folder);
         created.map_err(|_| failure("agent_state_unavailable"))?;
-        let request = spec.request(key)?;
+        let mut request = spec.request(key)?;
+        request.limits.provider_retry = crate::provider_retry::for_launch(&*self.db()?);
         let context = if spec.context {
             Some(crate::launch_context::for_project(
                 &*self.db()?,

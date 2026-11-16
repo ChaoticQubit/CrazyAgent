@@ -1223,3 +1223,96 @@ fn an_unread_durable_output_log_past_its_bound_is_emptied_only_when_it_is_the_pr
     assert!(super::trim_unread_output(&path, &probe));
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
 }
+
+/// A launch request for the retry rows: no file is read, so the paths need not exist.
+/// Inputs: the harness, the account and the owner's retry option. Output: the request.
+fn retry_request(
+    harness: &str,
+    account: AccountBinding,
+    retry: crate::provider_retry::ProviderRetry,
+) -> LaunchRequest {
+    LaunchRequest {
+        harness: harness.into(),
+        executable: PathBuf::from("/usr/bin/true"),
+        working_dir: PathBuf::from("/tmp"),
+        account,
+        model: None,
+        tools: false,
+        sandbox_profile: None,
+        unconfined: false,
+        git_identity: None,
+        limits: LaunchLimits {
+            provider_retry: retry,
+            ..LaunchLimits::default()
+        },
+    }
+}
+
+/// DEC-163: a team agent or master launch takes the owner's retry option. Codex on a
+/// ChatGPT sign-in gets the built-in provider's settings, Codex on an address account the
+/// `crazyagent` provider's, and Claude Code its retry cap as a variable. A launch whose
+/// limits were never given the owner's option sets nothing.
+#[test]
+fn a_harness_launch_takes_the_owner_retry_option_for_its_provider() {
+    use crate::provider_retry::{CLAUDE_MAX_RETRIES, CodexProvider, ProviderRetry};
+    assert_eq!(
+        LaunchLimits::default().provider_retry,
+        ProviderRetry::HarnessDefault
+    );
+    let home = PathBuf::from("/tmp/ca-retry-home");
+    let retries = |settings: Vec<String>| -> Vec<String> {
+        settings
+            .into_iter()
+            .filter(|setting| {
+                setting.contains("unbounded_connection_retries")
+                    || setting.contains("_max_retries=")
+            })
+            .collect()
+    };
+    for retry in ProviderRetry::ALL {
+        let signed_in = retry_request(
+            "codex",
+            AccountBinding::Subscription { home: home.clone() },
+            retry,
+        );
+        assert_eq!(
+            retries(super::codex_configuration(&signed_in, false, None)),
+            retry.codex_settings(CodexProvider::BuiltIn),
+            "{retry:?}"
+        );
+        let address = retry_request(
+            "codex",
+            AccountBinding::Url {
+                home: home.clone(),
+                base_url: "http://127.0.0.1:11434/v1".into(),
+                key: None,
+            },
+            retry,
+        );
+        assert_eq!(
+            retries(super::codex_configuration(&address, false, None)),
+            retry.codex_settings(CodexProvider::Custom("crazyagent")),
+            "{retry:?}"
+        );
+        let claude = retry_request(
+            "claude-code",
+            AccountBinding::Subscription { home: home.clone() },
+            retry,
+        );
+        let (_, environment) = super::claude_invocation(&claude, None, None);
+        let cap: Vec<&std::ffi::OsStr> = environment
+            .iter()
+            .filter(|(name, _)| *name == CLAUDE_MAX_RETRIES)
+            .map(|(_, value)| value.as_os_str())
+            .collect();
+        assert_eq!(
+            cap,
+            retry
+                .claude_env()
+                .map(|(_, value)| std::ffi::OsStr::new(value))
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "{retry:?}"
+        );
+    }
+}

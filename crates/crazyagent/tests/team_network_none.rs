@@ -22,8 +22,8 @@ const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []
 
 /// The harness stand-in: inside the agent's sandbox it fetches a page through the proxy
 /// its variables name and again with every proxy skipped, writes both curl verdicts into
-/// its home and exits, so no model is asked anything.
-const STAND_IN: &str = "#!/bin/sh\nthrough=$(/usr/bin/curl -sS -o /dev/null --max-time 10 https://example.com 2>&1); through_exit=$?\ndirect=$(/usr/bin/curl -sS -o /dev/null --max-time 10 --noproxy '*' https://example.com 2>&1); direct_exit=$?\nprintf 'proxy=%s\\nthrough=%s\\nthrough_exit=%s\\ndirect=%s\\ndirect_exit=%s\\n' \"$HTTPS_PROXY\" \"$through\" \"$through_exit\" \"$direct\" \"$direct_exit\" > \"$HOME/network.part\"\nmv \"$HOME/network.part\" \"$HOME/network.txt\"\nexit 1\n";
+/// `.cache` in its home and exits, so no model is asked anything.
+const STAND_IN: &str = "#!/bin/sh\n/bin/mkdir -p \"$HOME/.cache\" || exit 1\nthrough=$(/usr/bin/curl -sS -o /dev/null --max-time 10 https://example.com 2>&1); through_exit=$?\ndirect=$(/usr/bin/curl -sS -o /dev/null --max-time 10 --noproxy '*' https://example.com 2>&1); direct_exit=$?\nprintf 'proxy=%s\\nthrough=%s\\nthrough_exit=%s\\ndirect=%s\\ndirect_exit=%s\\n' \"$HTTPS_PROXY\" \"$through\" \"$through_exit\" \"$direct\" \"$direct_exit\" > \"$HOME/.cache/network.part\"\nmv \"$HOME/.cache/network.part\" \"$HOME/.cache/network.txt\"\nexit 1\n";
 
 /// Runs git in `repo` with no global or system configuration.
 /// Takes the folder and the arguments. A failure fails the test.
@@ -182,7 +182,7 @@ async fn under_no_network_an_agent_reaches_no_other_host_through_or_around_its_m
             let file = root
                 .join("team/agents")
                 .join(format!("agent-{id}"))
-                .join("home/network.txt");
+                .join("home/.cache/network.txt");
             if let Ok(text) = fs::read_to_string(&file) {
                 break text;
             }

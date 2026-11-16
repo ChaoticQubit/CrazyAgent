@@ -6,6 +6,7 @@ use crate::sandbox::policy::{
 use crate::sandbox::shared_folders::{
     CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope, UNREACHABLE_SECRETS_LINE,
 };
+use crate::sandbox::{LINUX_NESTED_GIT_LINE, LINUX_PORTS_ANY_HOST_LINE};
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// The plain warning the owner confirms before giving a project's agents Full access.
@@ -66,7 +67,8 @@ const SECRETS_SHOWN_BYTES_MAX: usize = 256;
 /// choice and the shared project folders. Row 0 is the level, each next row one toolchain,
 /// then the network, hooks, agent folders and shared folders rows, one row per top-level
 /// folder while Chosen folders is picked, and last the Read-only or Read-write row. Busy
-/// while the engine saves; a refusal keeps the choices with the reason.
+/// while the engine saves; a refusal keeps the choices with the reason. `linux` is whether
+/// the box shows what the Linux sandbox cannot hold.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct AccessEdit {
     pub view: PolicyView,
@@ -81,6 +83,7 @@ pub(in crate::tui) struct AccessEdit {
     pub confirm_full: bool,
     pub busy: bool,
     pub error: Option<String>,
+    pub linux: bool,
 }
 
 /// What one key in the Agent access box asks the screen to do.
@@ -108,6 +111,7 @@ impl AccessEdit {
             confirm_full: false,
             busy: false,
             error: None,
+            linux: cfg!(target_os = "linux"),
         }
     }
 
@@ -274,6 +278,13 @@ impl AccessEdit {
                     .map(|line| Row::of(line, look.warning)),
             );
         }
+        if self.linux && self.access != AgentAccess::Full {
+            body.extend(
+                wrap_words(LINUX_NESTED_GIT_LINE, TEXT_WIDTH)
+                    .into_iter()
+                    .map(|line| Row::of(line, look.warning)),
+            );
+        }
         body.extend(
             wrap_words(LOWERING_STOPS_AGENTS, TEXT_WIDTH)
                 .into_iter()
@@ -349,6 +360,12 @@ impl AccessEdit {
         if self.access == AgentAccess::Full {
             body.extend(
                 wrap_words(NETWORK_IGNORED_UNDER_FULL, TEXT_WIDTH)
+                    .into_iter()
+                    .map(|line| Row::of(line, look.warning)),
+            );
+        } else if self.linux {
+            body.extend(
+                wrap_words(LINUX_PORTS_ANY_HOST_LINE, TEXT_WIDTH)
                     .into_iter()
                     .map(|line| Row::of(line, look.warning)),
             );

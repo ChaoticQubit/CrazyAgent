@@ -416,8 +416,21 @@ async fn ide_terminal_tasks_run_the_owner_shell_inside_the_ide_sandbox_with_no_n
         .collect();
     assert_eq!(arguments, ["-l"]);
 
-    let tmp = crazyagent::sandbox::toolchains::existing_tmp(&started.server_data)
-        .expect("the IDE start made the server's short temp folder");
+    let text = fs::read_to_string(&started.profile).unwrap();
+    let bind = "(local unix-socket (subpath \"";
+    let at = text
+        .find(bind)
+        .expect("the profile binds sockets in the server's own temp folder")
+        + bind.len();
+    let tmp = PathBuf::from(&text[at..at + text[at..].find('"').unwrap()]);
+    assert!(
+        !tmp.exists(),
+        "the IDE stop removed the server's short temp folder"
+    );
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(&tmp).unwrap();
+    }
     let mut command = ide::sandbox::command(&started.profile, Path::new(&shell));
     command
         .args(&arguments)
@@ -436,4 +449,5 @@ async fn ide_terminal_tasks_run_the_owner_shell_inside_the_ide_sandbox_with_no_n
         seen.contains("NET-CLOSED\n") && seen.contains("not permitted"),
         "tasks run inside the IDE server's own sandbox, which has no network: {seen}"
     );
+    fs::remove_dir_all(&tmp).unwrap();
 }

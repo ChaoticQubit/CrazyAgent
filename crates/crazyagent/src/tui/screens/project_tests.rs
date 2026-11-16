@@ -1543,6 +1543,69 @@ fn the_agents_tab_shows_only_the_newest_output_lines_that_fit() {
     );
 }
 
+/// RV-DS241-27 r2 (leader 11:00, DEC-141): a research job sent back to wait shows why on its
+/// status, the line the desktop research row shows, on the Overview's work list as on the
+/// Agents tab, never a bare Queued.
+#[test]
+fn a_queued_research_job_shows_why_it_waits_on_its_status() {
+    const REASON: &str = "Waiting for this account to be ready";
+    let project = ProjectId::new("tidepool").unwrap();
+    let kind = ResearchKind::TechStackResearch;
+    let queued = ResearchJob {
+        id: 9,
+        project_id: project.clone(),
+        kind,
+        kind_label: kind.label().into(),
+        status: ResearchStatus::Queued,
+        status_label: "Queued".into(),
+        report_path: kind.report_path(),
+        harness: "codex".into(),
+        tools: true,
+        attempts: 0,
+        claimer: None,
+        error: Some(REASON.into()),
+        cancel_requested: false,
+        output_bytes: 0,
+        created_ms: 1_000,
+        started_ms: None,
+        heartbeat_ms: None,
+        finished_ms: None,
+    };
+    let look = Look::plain();
+    let status = text(&[job_status(&queued, 0, 3_600, &look)]);
+    assert!(
+        status.contains("Queued") && status.contains(REASON),
+        "{status}"
+    );
+    let mut bare = queued.clone();
+    bare.error = Some("  ".into());
+    assert!(
+        !text(&[job_status(&bare, 0, 3_600, &look)]).contains("  Waiting"),
+        "a blank line adds nothing"
+    );
+
+    let mut screen = ProjectScreen::new(project.clone(), "Tidepool".into(), None);
+    screen.setup = Some(stored(&project));
+    screen.pool = Some(PoolInfo {
+        id: CredentialRef::new("pool-main").unwrap(),
+        name: "Main".into(),
+        accounts: 1,
+        assigned: true,
+    });
+    screen.now_ms = 600_000;
+    screen.jobs = Some(vec![queued]);
+    screen.open(Tab::Overview);
+    for (width, height) in [(80u16, 24u16), (120, 36)] {
+        let shown = text(&project_screen(&mut screen, width, height, &look).rows);
+        assert!(
+            shown
+                .lines()
+                .any(|line| line.contains("Queued") && line.contains(REASON)),
+            "{width}x{height}: {shown}"
+        );
+    }
+}
+
 #[test]
 fn a_research_job_queued_again_shows_why_and_is_not_drawn_as_running() {
     const REASON: &str = "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it";
@@ -2861,6 +2924,119 @@ fn a_stale_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_read() {
     );
 }
 
+fn next_hidden_read(screen: &mut ProjectScreen, from: i64) -> SetupQuery {
+    for now in from..from + 6 {
+        let query = screen.next_query(now).expect("a read is due");
+        if matches!(query, SetupQuery::HiddenPaths { .. }) {
+            return query;
+        }
+        screen.apply(&query, Err("trusted_connection_unavailable".into()));
+    }
+    panic!("the Settings tab reads the hidden folders");
+}
+
+#[test]
+fn a_stale_hidden_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_read() {
+    let project = ProjectId::new("hidden-stale").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    let read = next_hidden_read(&mut screen, 20);
+    screen.apply(
+        &read,
+        Ok(SetupView::HiddenPaths(crate::project_setup::HiddenPaths {
+            paths: vec!["/Users/owner/project/secret".into()],
+            version: 3,
+        })),
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
+    screen.hidden.as_mut().unwrap().input.set("");
+    let save_at = |version: u64| SetupAction::SetHiddenPaths {
+        project_id: project.clone(),
+        version,
+        paths: vec![],
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(3))),
+        "the save sends the version the box opened at"
+    );
+    let change = SetupQuery::Change {
+        action: save_at(3),
+        generation: 2,
+    };
+    screen.apply(
+        &change,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "stale_revision".into(),
+        })),
+    );
+    let hidden = screen.hidden.as_ref().unwrap();
+    assert!(!hidden.busy);
+    assert_eq!(hidden.input.value(), "");
+    assert_eq!(
+        hidden.error.as_deref(),
+        Some(
+            "This project changed since you opened the form. Your edit is kept while the saved one is read."
+        )
+    );
+    assert_eq!(screen.hidden_paths, None);
+
+    let read = next_hidden_read(&mut screen, 40);
+    screen.apply(
+        &read,
+        Ok(SetupView::HiddenPaths(crate::project_setup::HiddenPaths {
+            paths: vec![
+                "/Users/owner/project/secret".into(),
+                "/Users/owner/project/keys".into(),
+            ],
+            version: 4,
+        })),
+    );
+    let hidden = screen.hidden.as_ref().unwrap();
+    assert_eq!(hidden.input.value(), "", "the typed list is kept");
+    assert_eq!(
+        hidden.error.as_deref(),
+        Some(
+            "Saved now: /Users/owner/project/secret:/Users/owner/project/keys. Enter saves your edit over it; Esc keeps the saved one."
+        )
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(4))),
+        "Enter keeps the owner's list over the saved one it was shown"
+    );
+
+    screen.apply(
+        &SetupQuery::Change {
+            action: save_at(4),
+            generation: 3,
+        },
+        Err("stale_revision".into()),
+    );
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    let read = next_hidden_read(&mut screen, 60);
+    screen.apply(
+        &read,
+        Ok(SetupView::HiddenPaths(crate::project_setup::HiddenPaths {
+            paths: vec!["/Users/owner/project/secret".into()],
+            version: 5,
+        })),
+    );
+    assert!(screen.hidden.is_none(), "Esc keeps the saved one");
+    screen.key(key(KeyCode::Char('k')));
+    let hidden = screen.hidden.as_ref().unwrap();
+    assert_eq!(hidden.input.value(), "/Users/owner/project/secret");
+    assert_eq!(
+        hidden.error, None,
+        "a box opened afresh carries no stale note"
+    );
+    screen.hidden.as_mut().unwrap().input.set("");
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(5)))
+    );
+}
+
 /// Once the research jobs and a context with no roadmap document are read, `p` on the
 /// Settings tab plans a roadmap at once and `k` opens the hidden folders box, so neither
 /// action takes the other's key.
@@ -2871,7 +3047,10 @@ fn settings_plans_a_roadmap_with_p_and_edits_hidden_folders_with_k() {
     let mut screen = loaded(&project);
     screen.open(Tab::Settings);
     screen.jobs = Some(Vec::new());
-    screen.hidden_paths = Some(vec!["/Users/owner/secret".into()]);
+    screen.hidden_paths = Some(crate::project_setup::HiddenPaths {
+        paths: vec!["/Users/owner/secret".into()],
+        version: 0,
+    });
     screen.context = Some(crate::project_setup::ProjectContext {
         project_id: project.clone(),
         folder: "/Users/owner/hidden".into(),
@@ -2949,7 +3128,10 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     );
     screen.apply(
         &read,
-        Ok(SetupView::HiddenPaths(vec!["/Users/owner/secret".into()])),
+        Ok(SetupView::HiddenPaths(crate::project_setup::HiddenPaths {
+            paths: vec!["/Users/owner/secret".into()],
+            version: 1,
+        })),
     );
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(
@@ -2975,6 +3157,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     );
     let save = SetupAction::SetHiddenPaths {
         project_id: project.clone(),
+        version: 1,
         paths: vec![
             "/Users/owner/secret".into(),
             "/Users/owner/project/vendor".into(),
@@ -3009,6 +3192,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     screen.hidden.as_mut().unwrap().input.set("");
     let clear = SetupAction::SetHiddenPaths {
         project_id: project.clone(),
+        version: 1,
         paths: vec![],
     };
     assert_eq!(
@@ -3025,7 +3209,10 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     assert!(screen.hidden.is_none());
     assert_eq!(screen.hidden_paths, None);
 
-    screen.hidden_paths = Some(vec![]);
+    screen.hidden_paths = Some(crate::project_setup::HiddenPaths {
+        paths: vec![],
+        version: 2,
+    });
     screen.key(key(KeyCode::Char('k')));
     screen.paste(&format!("/{}", "d".repeat(1100)));
     assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
@@ -4519,6 +4706,7 @@ mod overview_read {
                     text: None,
                     version: String::new(),
                     edited: false,
+                    foreign: false,
                     proposal: None,
                     proposal_version: String::new(),
                     blocked: None,
@@ -4529,6 +4717,7 @@ mod overview_read {
             stale: false,
             checked_ms: None,
             failure: None,
+            waiting_for_account: false,
             refresh: Refresh::AfterLanding,
             apply: Apply::AlwaysAsk,
             needs_home: false,
@@ -4621,6 +4810,33 @@ mod overview_read {
                 "no run can start"
             );
         }
+    }
+
+    /// A tab file can change outside CrazyAgent, so the tabs are read again each time the
+    /// owner picks one of them or opens the Overview again, even with nothing pending; time
+    /// alone still reads nothing.
+    #[test]
+    fn picking_an_overview_tab_or_opening_the_overview_reads_the_tabs_again() {
+        let project = ProjectId::new("notes-cli").unwrap();
+        let mut screen = loaded(&project);
+        read(&mut screen, 100, overview());
+        let mut now = 100 + 10 * STEP;
+        assert_eq!(overview_asked(&mut screen, now), None, "nothing is pending");
+        for code in [KeyCode::Right, KeyCode::Left] {
+            assert_eq!(screen.key(key(code)), ProjectReply::Handled);
+            now += 1;
+            let asked = overview_asked(&mut screen, now)
+                .unwrap_or_else(|| panic!("picking a tab with {code:?} reads the tabs again"));
+            screen.apply(&asked, Ok(SetupView::Overview(Box::new(overview()))));
+            assert_eq!(overview_asked(&mut screen, now + 1), None, "{code:?}");
+        }
+        screen.open(Tab::Context);
+        screen.open(Tab::Overview);
+        now += 10 * STEP;
+        assert!(
+            overview_asked(&mut screen, now).is_some(),
+            "opening the Overview again reads the tabs again"
+        );
     }
 
     #[test]
@@ -4753,4 +4969,62 @@ fn p_on_the_context_tab_opens_project_memory_and_both_layouts_say_so() {
         );
     }
     assert_eq!(screen.key(key(KeyCode::Char('p'))), ProjectReply::Memory);
+}
+
+/// Every Delete everything refusal reads as its own sentence in the TUI, as on the desktop
+/// (DEC-141): another delete still running, a mark that could not be recorded, and the older
+/// refusals the project page showed as a code.
+#[test]
+fn every_delete_refusal_reads_its_own_sentence() {
+    for code in [
+        "delete_in_progress",
+        "delete_not_recorded",
+        "delete_name_mismatch",
+        "delete_agents_running",
+        "delete_trash_partial",
+        "delete_shared_folder",
+    ] {
+        let sentence = plain_problem(code);
+        assert!(
+            !sentence.contains("(code: "),
+            "{code} reads as a sentence: {sentence}",
+        );
+    }
+    let unrecorded = plain_problem("delete_not_recorded");
+    assert!(
+        unrecorded.contains("Nothing was deleted") && unrecorded.contains("restart CrazyAgent"),
+        "{unrecorded}"
+    );
+}
+
+/// Delete again from the banner never opens the remove ask over another open box, whose keys
+/// it would take; with no box open it opens the ask.
+#[test]
+fn delete_again_never_opens_the_remove_ask_over_another_box() {
+    let project = ProjectId::new("gone").unwrap();
+    let mut screen = ProjectScreen::new(project, "Gone app".into(), None);
+    screen.hidden = Some(super::project::AddFile {
+        input: super::new_project_input::TextInput::single(64),
+        busy: false,
+        error: None,
+    });
+    screen.ask_delete_again();
+    assert!(!screen.confirm_remove, "the open box keeps the keys");
+    screen.hidden = None;
+    screen.ask_delete_again();
+    assert!(screen.confirm_remove);
+}
+
+/// Delete again from the banner on any tab moves to Settings, where the remove ask lives,
+/// before it opens the ask, as the desktop's Delete again opens Settings (DEC-141).
+#[test]
+fn delete_again_from_another_tab_opens_the_remove_ask_on_settings() {
+    for tab in [Tab::Overview, Tab::Agents, Tab::Context, Tab::Settings] {
+        let project = ProjectId::new("gone").unwrap();
+        let mut screen = ProjectScreen::new(project, "Gone app".into(), None);
+        screen.open(tab);
+        screen.ask_delete_again();
+        assert!(screen.confirm_remove, "{tab:?}");
+        assert_eq!(screen.tab, Tab::Settings, "from {tab:?}");
+    }
 }

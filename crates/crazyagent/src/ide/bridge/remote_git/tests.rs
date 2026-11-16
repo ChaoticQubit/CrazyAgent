@@ -241,6 +241,19 @@ fn landed(result: Result<GitOutcome, EngineError>) -> GitOutcome {
     outcome
 }
 
+/// Checks the answer to an IDE git command refused for one config entry before git ran:
+/// git's failure code, nothing on standard output and a line naming the key, the file git
+/// shows for it and `ide_git_config_refused` (RV-DS241-144 r1 F1). Inputs: the result, the
+/// key and the file.
+fn config_refused(result: Result<GitOutcome, EngineError>, key: &str, file: &str) {
+    let outcome = result.unwrap();
+    assert_eq!(outcome.code, 128, "{outcome:?}");
+    assert!(outcome.stdout.is_empty(), "{outcome:?}");
+    for part in [key, file, "ide_git_config_refused"] {
+        assert!(outcome.stderr.contains(part), "{part}: {outcome:?}");
+    }
+}
+
 #[test]
 fn every_network_command_vs_code_sends_is_planned_and_nothing_else() {
     let named = |verb, name: &str| Plan {
@@ -922,9 +935,10 @@ fn git_config_planted_inside_the_project_folder_is_refused() {
         &project.folder,
         &["config", "include.path", "../shared.gitconfig"],
     );
-    assert_eq!(
-        refused(project.git(&["push", "origin", "main:main"])),
-        "ide_git_config_refused"
+    config_refused(
+        project.git(&["push", "origin", "main:main"]),
+        "include.path",
+        ".git/config",
     );
     ok(&project.folder, &["config", "--unset", "include.path"]);
 
@@ -939,6 +953,152 @@ fn git_config_planted_inside_the_project_folder_is_refused() {
     landed(project.git(&["push", "origin", "main:main"]));
     assert_eq!(project.served("main").as_deref(), Some(head.as_str()));
     assert!(!marker.exists());
+}
+
+/// An include whose file is placed in the project folder, where the IDE can write it after
+/// the check, is refused while that file is missing or empty and git lists none of its
+/// entries, and once the IDE has written `core.gitProxy` into it, which never runs: a
+/// relative include of `.git/config`, a global include by absolute path, by `~/` and, on a
+/// volume that folds case, by another spelling of the folder, and a global include of a
+/// dangling link into the folder. A global include of a missing `~/.gitconfig.local` and of
+/// an existing file outside the folder still lands (RV-DS241-144b).
+#[test]
+fn an_include_of_a_file_placed_in_the_project_is_refused_while_it_is_missing_or_empty() {
+    let project = Project::new();
+    let commit = project.commit("a.txt", "a\n");
+    let global = project.home.join(".gitconfig");
+    let repo = project.folder.join(".git").join("config");
+    let shared = project.folder.join("shared.gitconfig");
+    let planted = project.folder.join("planted.gitconfig");
+    let link = project.root.join("outside.inc");
+    std::os::unix::fs::symlink(&planted, &link).unwrap();
+    let set = |file: &Path, args: &[&str]| {
+        let mut argv = vec!["config", "--file", file.to_str().unwrap()];
+        argv.extend_from_slice(args);
+        ok(&project.home, &argv);
+    };
+    let mut cases = vec![
+        (repo.clone(), "../shared.gitconfig".to_owned()),
+        (global.clone(), shared.to_str().unwrap().to_owned()),
+        (global.clone(), "~/../project/shared.gitconfig".to_owned()),
+        (global.clone(), link.to_str().unwrap().to_owned()),
+    ];
+    let folded = project.root.join("PROJECT");
+    if folded.exists() {
+        let spelled = folded.join("shared.gitconfig");
+        cases.push((global.clone(), spelled.to_str().unwrap().to_owned()));
+    }
+    let marker = project.root.join("proxy-ran");
+    let proxy = format!("[core]\n\tgitProxy = touch {}\n", marker.display());
+    for content in [None, Some(String::new()), Some(proxy)] {
+        if let Some(content) = &content {
+            for file in [&shared, &planted] {
+                std::fs::write(file, content).unwrap();
+            }
+        }
+        for (file, value) in &cases {
+            set(file.as_path(), &["include.path", value.as_str()]);
+            config_refused(
+                project.git(&["push", "origin", "main"]),
+                "include.path",
+                file.to_str().unwrap(),
+            );
+            set(file.as_path(), &["--unset-all", "include.path"]);
+        }
+    }
+    assert!(!marker.exists());
+    assert_ne!(project.served("main"), Some(commit.clone()));
+
+    let extra = project.root.join("extra.gitconfig");
+    std::fs::write(&extra, "[push]\n\tdefault = simple\n").unwrap();
+    set(
+        global.as_path(),
+        &["--add", "include.path", "~/.gitconfig.local"],
+    );
+    set(
+        global.as_path(),
+        &["--add", "include.path", extra.to_str().unwrap()],
+    );
+    landed(project.git(&["push", "origin", "main"]));
+    assert_eq!(project.served("main"), Some(commit));
+}
+
+/// An include whose file is a link placed in the project folder is refused while the link
+/// leads outside the folder, as it does at the check, and after the IDE points it at a file
+/// of its own holding `core.gitProxy`, as it could before the run: from a relative include
+/// of `.git/config` and from a global include by absolute path. The proxy never runs and
+/// nothing is pushed (RV-DS241-144 r1 sec F1).
+#[test]
+fn an_include_of_a_link_placed_in_the_project_is_refused_wherever_it_leads() {
+    let project = Project::new();
+    let commit = project.commit("a.txt", "a\n");
+    let global = project.home.join(".gitconfig");
+    let repo = project.folder.join(".git").join("config");
+    let link = project.folder.join("shared.gitconfig");
+    let benign = project.root.join("benign.gitconfig");
+    let planted = project.folder.join("planted.gitconfig");
+    let marker = project.root.join("proxy-ran");
+    std::fs::write(&benign, "[push]\n\tdefault = simple\n").unwrap();
+    std::fs::write(
+        &planted,
+        format!("[core]\n\tgitProxy = touch {}\n", marker.display()),
+    )
+    .unwrap();
+    let cases = [
+        (&repo, "../shared.gitconfig"),
+        (&global, link.to_str().unwrap()),
+    ];
+    for (file, value) in cases {
+        let file = file.to_str().unwrap();
+        ok(
+            &project.home,
+            &["config", "--file", file, "include.path", value],
+        );
+        for target in [&benign, &planted] {
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(target, &link).unwrap();
+            for args in [&["push", "origin", "main"][..], &["fetch", "origin"]] {
+                config_refused(project.git(args), "include.path", file);
+            }
+        }
+        ok(
+            &project.home,
+            &["config", "--file", file, "--unset-all", "include.path"],
+        );
+    }
+    assert!(!marker.exists());
+    assert_ne!(project.served("main"), Some(commit));
+}
+
+/// A global config reached through two links outside the project folder, the first with
+/// an absolute target and the second with a relative one, and its relative include, which
+/// git finds beside the first link, are all placed outside the folder, so the push lands
+/// (RV-DS241-144b).
+#[test]
+fn a_global_config_reached_through_links_outside_the_project_still_lands() {
+    let project = Project::new();
+    let commit = project.commit("a.txt", "a\n");
+    let global = project.home.join(".gitconfig");
+    let dots = project.root.join("dots").join("sub");
+    std::fs::create_dir_all(&dots).unwrap();
+    let real = dots.join("gitconfig");
+    std::fs::rename(&global, &real).unwrap();
+    let hop = project.home.join("hop");
+    std::os::unix::fs::symlink("../dots/sub/gitconfig", &hop).unwrap();
+    std::os::unix::fs::symlink(&hop, &global).unwrap();
+    std::fs::write(project.home.join("rel.inc"), "[push]\n\tdefault = simple\n").unwrap();
+    ok(
+        &project.home,
+        &[
+            "config",
+            "--file",
+            real.to_str().unwrap(),
+            "include.path",
+            "rel.inc",
+        ],
+    );
+    landed(project.git(&["push", "origin", "main"]));
+    assert_eq!(project.served("main"), Some(commit));
 }
 
 #[test]
@@ -1038,4 +1198,198 @@ fn a_planted_commondir_runs_no_command_from_another_folder_s_config() {
         assert!(!marker.exists(), "{name}");
         std::fs::remove_file(&planted).unwrap();
     }
+}
+
+/// Writes one config hook into `file` that touches `marker` when git fires `event`, as git
+/// 2.54 reads `hook.<name>.command` and `hook.<name>.event`. Inputs: the config file, the
+/// hook name, the event and the marker.
+fn config_hook(file: &Path, name: &str, event: &str, marker: &Path) {
+    for (key, value) in [
+        ("command", format!("touch '{}'", marker.display())),
+        ("event", event.to_owned()),
+    ] {
+        ok(
+            file.parent().unwrap(),
+            &[
+                "config",
+                "--file",
+                file.to_str().unwrap(),
+                &format!("hook.{name}.{key}"),
+                &value,
+            ],
+        );
+    }
+}
+
+/// A hook key in the project's own `.git/config`, which git 2.54 runs whatever
+/// `core.hooksPath` says, refuses the push before git runs, with a line naming the key and
+/// the file; nothing is pushed and no hook runs (RV-DS241-39 r2 F1, QUESTION-09:50 A).
+#[test]
+fn a_hook_in_the_project_config_refuses_the_push_naming_the_key_and_the_file() {
+    let project = Project::new();
+    let commit = project.commit("a.txt", "a\n");
+    let marker = project.root.join("ran-x");
+    config_hook(
+        &project.folder.join(".git").join("config"),
+        "x",
+        "pre-push",
+        &marker,
+    );
+    let outcome = project.git(&["push", "origin", "main"]).unwrap();
+    assert_ne!(outcome.code, 0, "{outcome:?}");
+    assert!(
+        outcome.stderr.contains("hook.x.command") && outcome.stderr.contains(".git/config"),
+        "{outcome:?}"
+    );
+    assert!(!marker.exists());
+    assert_ne!(project.served("main"), Some(commit));
+}
+
+/// A hook key in the owner's own global config is switched off for the run with
+/// `hook.<name>.enabled=false`, so the owner's push lands and the hook never runs
+/// (RV-DS241-39 r2 F1, QUESTION-09:50 A).
+#[test]
+fn a_hook_in_the_owner_global_config_never_runs_and_the_push_lands() {
+    let project = Project::new();
+    let commit = project.commit("a.txt", "a\n");
+    let global = project.home.join(".gitconfig");
+    let markers = [
+        project.root.join("ran-pre-push"),
+        project.root.join("ran-reference"),
+    ];
+    config_hook(&global, "owner-push", "pre-push", &markers[0]);
+    config_hook(&global, "owner-ref", "reference-transaction", &markers[1]);
+    landed(project.git(&["push", "origin", "main"]));
+    assert_eq!(project.served("main"), Some(commit));
+    for marker in &markers {
+        assert!(!marker.exists(), "{}", marker.display());
+    }
+}
+
+/// A hook name no `-c` can carry, here one holding `=`, refuses the run even from the
+/// owner's global config, since no switch can turn that hook off (RV-DS241-39 r2 F1,
+/// QUESTION-09:50 A).
+#[test]
+fn a_hook_name_no_switch_can_carry_refuses_the_push() {
+    let project = Project::new();
+    let commit = project.commit("a.txt", "a\n");
+    let marker = project.root.join("ran-odd");
+    config_hook(&project.home.join(".gitconfig"), "a=b", "pre-push", &marker);
+    let outcome = project.git(&["push", "origin", "main"]).unwrap();
+    assert_ne!(outcome.code, 0, "{outcome:?}");
+    assert!(!marker.exists());
+    assert_ne!(project.served("main"), Some(commit));
+}
+
+/// A hook key the project's `.git/config` reaches through `include.path` from a file
+/// outside the project never runs, refused or switched off, whatever origin git shows for
+/// it (RV-DS241-39 r2 F1, QUESTION-09:50 A).
+#[test]
+fn a_hook_reached_through_an_include_of_the_project_config_never_runs() {
+    let project = Project::new();
+    project.commit("a.txt", "a\n");
+    let included = project.root.join("outside.inc");
+    let marker = project.root.join("ran-included");
+    config_hook(&included, "inc", "pre-push", &marker);
+    ok(
+        &project.folder,
+        &["config", "include.path", included.to_str().unwrap()],
+    );
+    let _ = project.git(&["push", "origin", "main"]);
+    assert!(!marker.exists());
+}
+
+/// An `includeIf "onbranch:"` entry in the owner's global config makes what git reads follow
+/// HEAD, which the IDE can write between the check and the run, so every IDE git command
+/// refuses with `ide_git_config_refused` whatever branch HEAD names at the check: the hook in
+/// the branch-only file never runs and nothing is pushed. The same config without that entry
+/// lands (RV-DS241-144).
+#[test]
+fn an_onbranch_include_in_the_owner_config_refuses_every_ide_git_command() {
+    let project = Project::new();
+    let commit = project.commit("a.txt", "a\n");
+    let global = project.home.join(".gitconfig");
+    let included = project.root.join("branch.inc");
+    let marker = project.root.join("ran-onbranch");
+    config_hook(&included, "onbranch", "pre-push", &marker);
+    ok(
+        &project.home,
+        &[
+            "config",
+            "--file",
+            global.to_str().unwrap(),
+            "includeIf.onbranch:feat/*.path",
+            included.to_str().unwrap(),
+        ],
+    );
+    for branch in ["main", "feat/x"] {
+        ok(&project.folder, &["checkout", "-q", "-B", branch]);
+        for args in [
+            &["fetch", "origin"][..],
+            &["push", "origin", "main"],
+            &["ls-remote", "origin"],
+            &["pull"],
+        ] {
+            config_refused(
+                project.git(args),
+                "includeif.onbranch:feat/*.path",
+                global.to_str().unwrap(),
+            );
+        }
+    }
+    assert!(!marker.exists());
+    assert_ne!(project.served("main"), Some(commit.clone()));
+
+    ok(
+        &project.home,
+        &[
+            "config",
+            "--file",
+            global.to_str().unwrap(),
+            "--unset",
+            "includeIf.onbranch:feat/*.path",
+        ],
+    );
+    landed(project.git(&["push", "origin", "main"]));
+    assert_eq!(project.served("main"), Some(commit));
+    assert!(!marker.exists());
+}
+
+/// An `includeIf "onbranch:"` entry in the project's own `.git/config` naming a file inside
+/// the project folder is refused even while HEAD names no matching branch, when git lists
+/// none of that file's entries, so the `core.gitProxy` it holds never runs (RV-DS241-144).
+#[test]
+fn an_onbranch_include_of_a_project_file_is_refused_whatever_head_names() {
+    let project = Project::new();
+    let commit = project.commit("a.txt", "a\n");
+    let marker = project.root.join("proxy-ran");
+    std::fs::write(
+        project.folder.join("branch.gitconfig"),
+        format!("[core]\n\tgitProxy = touch {}\n", marker.display()),
+    )
+    .unwrap();
+    ok(
+        &project.folder,
+        &[
+            "config",
+            "includeIf.onbranch:feat/*.path",
+            "../branch.gitconfig",
+        ],
+    );
+    for branch in ["main", "feat/x"] {
+        ok(&project.folder, &["checkout", "-q", "-B", branch]);
+        for args in [
+            &["fetch", "origin"][..],
+            &["push", "origin", "main"],
+            &["ls-remote", "origin"],
+        ] {
+            config_refused(
+                project.git(args),
+                "includeif.onbranch:feat/*.path",
+                ".git/config",
+            );
+        }
+    }
+    assert!(!marker.exists());
+    assert_ne!(project.served("main"), Some(commit));
 }

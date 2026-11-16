@@ -116,6 +116,73 @@ fn keys_and_sizes_without_an_attached_session_are_dropped() {
 }
 
 #[test]
+fn a_long_paste_is_split_into_host_inputs_without_cutting_its_end_marker() {
+    for over in 0..=PASTE_CLOSE.len() {
+        let body = INPUT_BYTES_MAX + over - PASTE_OPEN.len() - PASTE_CLOSE.len();
+        let bytes = [PASTE_OPEN, &vec![b'x'; body][..], PASTE_CLOSE].concat();
+        let parts = inputs(&bytes);
+        assert!(parts.iter().all(|part| part.len() <= INPUT_BYTES_MAX));
+        assert!(
+            parts.last().is_some_and(|part| part.ends_with(PASTE_CLOSE)),
+            "{over}: {:?}",
+            parts.last()
+        );
+        assert_eq!(parts.concat(), bytes);
+    }
+    let typed = vec![b'x'; 3 * INPUT_BYTES_MAX + 1];
+    assert_eq!(inputs(&typed).len(), 4, "plain bytes are cut at the limit");
+}
+
+#[test]
+fn a_paste_the_stream_cannot_take_whole_is_not_sent_in_part() {
+    let root = private_root();
+    let mut terminals = Terminals::new(root.path().join("e.sock"), Duration::from_secs(2));
+    let (commands, mut sent) = mpsc::channel(2);
+    let (_frames, frames) = mpsc::channel(1);
+    terminals.session = Some(Session {
+        agent: agent(1),
+        pane: None,
+        commands,
+        frames,
+    });
+    terminals.handle(Request::TerminalInput {
+        agent: agent(1),
+        bytes: vec![b'x'; 3 * INPUT_BYTES_MAX],
+    });
+    assert!(
+        matches!(sent.try_recv(), Err(TryRecvError::Disconnected)),
+        "no part of the paste went out, and the backlogged session is closed"
+    );
+    match terminals.poll() {
+        Some((closed, TerminalFrame::Closed { reason })) => {
+            assert_eq!(closed, agent(1));
+            assert_eq!(reason, "terminal_input_backlog");
+        }
+        other => panic!("expected the backlog close, got {other:?}"),
+    }
+
+    let (commands, mut sent) = mpsc::channel(4);
+    let (_frames, frames) = mpsc::channel(1);
+    terminals.session = Some(Session {
+        agent: agent(1),
+        pane: None,
+        commands,
+        frames,
+    });
+    let paste = vec![b'y'; 3 * INPUT_BYTES_MAX];
+    terminals.handle(Request::TerminalInput {
+        agent: agent(1),
+        bytes: paste.clone(),
+    });
+    let mut got = Vec::new();
+    while let Ok(part) = sent.try_recv() {
+        assert!(part.len() <= INPUT_BYTES_MAX);
+        got.extend_from_slice(&part);
+    }
+    assert_eq!(got, paste, "a paste that fits goes out whole, in order");
+}
+
+#[test]
 #[should_panic(expected = "not a terminal request")]
 fn a_request_for_the_engine_connection_is_not_a_terminal_request() {
     let root = private_root();

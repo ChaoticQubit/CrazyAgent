@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 import { cliArchiveName, collectDesktop, packageCli, sidecars, signFile, stageSidecars, verifySignature } from "./assets.mjs";
 
@@ -11,9 +12,21 @@ const REPO = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const TAURI = join(REPO, "apps/desktop/node_modules/@tauri-apps/cli/tauri.js");
 const VERSION = "0.2.0-dev.202610251607";
 
+const SCRATCH = new Set();
+
+/**
+ * Makes a scratch folder under the temp folder and removes it after the last test, so no run
+ * leaves one behind, throwaway signing keys included. Input: the name prefix. Output: the path.
+ */
 async function scratch(prefix) {
-  return mkdtemp(join(tmpdir(), prefix));
+  const folder = await mkdtemp(join(tmpdir(), prefix));
+  SCRATCH.add(folder);
+  return folder;
 }
+
+after(async () => {
+  for (const folder of SCRATCH) await rm(folder, { recursive: true, force: true });
+});
 
 async function keyPair(root) {
   const path = join(root, "updater.key");
@@ -24,15 +37,34 @@ async function keyPair(root) {
   return { env, publicKey: (await readFile(`${path}.pub`, "utf8")).trim() };
 }
 
+/**
+ * Signs `data` the way minisign does, with a fresh Ed25519 key and the given trusted comment.
+ * Inputs: the bytes, the trusted comment and the algorithm, "ED" (prehashed, as Tauri signs) or
+ * the legacy unhashed "Ed". Output: the base64 Tauri public key and signature.
+ */
+function minisigned(data, trusted, algorithm = "ED") {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const id = Buffer.from("0123456789abcdef", "hex");
+  const raw = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url");
+  const message = algorithm === "ED" ? createHash("blake2b512").update(data).digest() : data;
+  const signed = sign(null, message, privateKey);
+  const global = sign(null, Buffer.concat([signed, Buffer.from(trusted, "utf8")]), privateKey);
+  const boxed = (lines) => Buffer.from(`${lines.join("\n")}\n`, "utf8").toString("base64");
+  return {
+    publicKey: boxed(["untrusted comment: minisign public key", Buffer.concat([Buffer.from("Ed", "latin1"), id, raw]).toString("base64")]),
+    signature: boxed(["untrusted comment: signature from minisign secret key", Buffer.concat([Buffer.from(algorithm, "latin1"), id, signed]).toString("base64"), `trusted comment: ${trusted}`, global.toString("base64")]),
+  };
+}
+
 async function executable(path, text) {
   await writeFile(path, `#!/bin/sh\necho ${text}\n`);
   await chmod(path, 0o755);
 }
 
-test("each target ships the engine, the rcli host and its own helpers", () => {
-  assert.deepEqual(sidecars("aarch64-apple-darwin"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner"]);
-  assert.deepEqual(sidecars("x86_64-apple-darwin"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner"]);
-  assert.deepEqual(sidecars("x86_64-unknown-linux-gnu"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-landlock"]);
+test("each target ships the engine, the rcli host and its own helpers, and macOS and Linux their own tmux (DEC-157)", () => {
+  assert.deepEqual(sidecars("aarch64-apple-darwin"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-tmux"]);
+  assert.deepEqual(sidecars("x86_64-apple-darwin"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-tmux"]);
+  assert.deepEqual(sidecars("x86_64-unknown-linux-gnu"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-tmux", "crazyagent-landlock"]);
   assert.deepEqual(sidecars("x86_64-pc-windows-msvc"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-win-boundary"]);
   assert.throws(() => sidecars("aarch64-unknown-linux-gnu"), /release_target_rejected/);
   assert.equal(cliArchiveName(VERSION, "x86_64-unknown-linux-gnu"), `crazyagent-${VERSION}-x86_64-unknown-linux-gnu.tar.gz`);
@@ -57,6 +89,29 @@ test("staging names sidecars with the target triple and writes the release confi
     assert.deepEqual(JSON.parse(await readFile(config, "utf8")), { bundle: { externalBin: sidecars(target).map((name) => `binaries/${name}`) } });
     await rm(join(cargo, "crazyagent-win-boundary.exe"));
     await assert.rejects(stageSidecars({ target, cargoDir: cargo, rcli: join(root, "crazyagent-rcli.exe"), tauriDir: tauri }), /release_sidecar_missing:crazyagent-win-boundary/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("staging takes the bundled tmux from its own build, never from Cargo, and refuses a macOS or Linux stage without it", async () => {
+  const root = await scratch("release-stage-tmux-");
+  try {
+    const cargo = join(root, "cargo");
+    const tauri = join(root, "src-tauri");
+    await mkdir(cargo);
+    await mkdir(tauri);
+    for (const name of ["crazyagent", "crazyagent-runner", "crazyagent-tmux"]) await executable(join(cargo, name), `cargo-${name}`);
+    await executable(join(root, "crazyagent-rcli"), "rcli");
+    await executable(join(root, "built-tmux"), "tmux");
+    const target = "aarch64-apple-darwin";
+    const given = { target, cargoDir: cargo, rcli: join(root, "crazyagent-rcli"), tmux: join(root, "built-tmux"), tauriDir: tauri };
+    const { staged, config } = await stageSidecars(given);
+    assert.deepEqual(staged.map((path) => path.slice(tauri.length + 1)), sidecars(target).map((name) => `binaries/${name}-${target}`));
+    assert.equal(await readFile(join(tauri, `binaries/crazyagent-tmux-${target}`), "utf8"), "#!/bin/sh\necho tmux\n");
+    assert.deepEqual(JSON.parse(await readFile(config, "utf8")).bundle.externalBin.filter((name) => name.includes("tmux")), ["binaries/crazyagent-tmux"]);
+    await assert.rejects(stageSidecars({ ...given, tmux: undefined }), /release_sidecar_missing:crazyagent-tmux/);
+    await assert.rejects(stageSidecars({ ...given, tmux: join(root, "absent") }), /release_sidecar_missing:crazyagent-tmux/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -153,6 +208,23 @@ test("desktop bundles are collected under release names with a signature for eve
     await mkdir(join(unsigned, "nsis"), { recursive: true });
     await writeFile(join(unsigned, `nsis/CrazyAgent_${VERSION}_x64-setup.exe`), "unsigned\n");
     await assert.rejects(collectDesktop({ target: "x86_64-pc-windows-msvc", version: VERSION, bundleDir: unsigned, out: await scratch("release-unsigned-"), env }), /release_updater_signature_missing/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a trusted comment that names a field twice is refused, and so is the legacy unhashed Ed signature (RV-DS241-35)", async () => {
+  const root = await scratch("release-sig-fields-");
+  try {
+    const file = join(root, "asset.bin");
+    await writeFile(file, "release asset bytes\n");
+    const data = await readFile(file);
+    const once = `timestamp:1761400000\tfile:asset.bin\tversion:${VERSION}`;
+    assert.equal((await verifySignature({ file, ...minisigned(data, once), version: VERSION })).version, VERSION);
+    for (const trusted of [`${once}\tversion:9.9.9`, `timestamp:1761400000\tfile:asset.bin\tversion:9.9.9\tversion:${VERSION}`, `${once}\tfile:other.bin`]) {
+      await assert.rejects(verifySignature({ file, ...minisigned(data, trusted), version: VERSION }), /release_signature_ambiguous/, trusted);
+    }
+    await assert.rejects(verifySignature({ file, ...minisigned(data, once, "Ed"), version: VERSION }), /release_signature_rejected/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

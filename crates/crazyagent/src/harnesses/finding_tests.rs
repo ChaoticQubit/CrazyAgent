@@ -1,7 +1,7 @@
 use super::Search;
 use super::finding::{
     self, PATH_AGENT_SPACE, PATH_INVALID, PATH_NOT_EXECUTABLE, PATH_NOT_FOUND, PATH_SHIM,
-    UNKNOWN_HARNESS,
+    TEMP_SKIPPED, UNKNOWN_HARNESS,
 };
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ struct Case {
 
 impl Case {
     fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = finding::owner_folder("finding-");
         let root = std::fs::canonicalize(temp.path()).unwrap();
         let home = root.join("home");
         let engine = root.join("engine");
@@ -490,4 +490,333 @@ fn a_pipe_at_the_nvm_default_alias_never_holds_up_the_search() {
         .recv_timeout(std::time::Duration::from_secs(10))
         .expect("the search waited on the pipe");
     assert!(looked.contains(&version), "{looked:?}");
+}
+
+#[test]
+fn the_engine_search_finds_a_harness_in_the_engine_npm_prefix_after_the_owners_folders() {
+    let case = Case::new();
+    let bin = crate::setup::harness_prefix(&case.engine).join("bin");
+    let bare = Search::engine(None, &[], None);
+    let engine = bare.clone().with_engine(&case.engine);
+    assert_eq!(
+        engine.clone().with_engine(&case.engine),
+        engine,
+        "the folder is added once"
+    );
+    let relative = bin.strip_prefix(&case.root).unwrap().to_str().unwrap();
+    let installed = case.file(&format!("{relative}/codex"), 0o755);
+    assert_eq!(bare.find("codex"), None);
+    assert_eq!(
+        engine.find("codex"),
+        Some(installed.clone()),
+        "a prefix made after engine start is still looked in"
+    );
+    let owned = case.file("tools/codex", 0o755);
+    let path = std::env::join_paths([owned.parent().unwrap()]).unwrap();
+    let both = Search::engine_in(Some(&path), &[], None, &[]).with_engine(&case.engine);
+    assert_eq!(both.find("codex"), Some(owned));
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(
+        Search::engine(None, &[], None)
+            .with_engine(&case.engine)
+            .find("codex"),
+        None,
+        "a prefix others can change is left out"
+    );
+}
+
+#[test]
+fn an_owner_harness_in_a_home_folder_wins_over_the_one_the_engine_installed() {
+    let case = Case::new();
+    let bin = crate::setup::harness_prefix(&case.engine).join("bin");
+    let relative = bin.strip_prefix(&case.root).unwrap().to_str().unwrap();
+    let installed = case.file(&format!("{relative}/codex"), 0o755);
+    let search = Search::engine(None, &[], Some(case.home.clone())).with_engine(&case.engine);
+    assert_eq!(
+        search.find("codex"),
+        Some(installed.clone()),
+        "the engine copy is the fallback"
+    );
+    let owned = case.file("home/.local/bin/codex", 0o755);
+    assert_eq!(search.find("codex"), Some(owned.clone()));
+    assert_eq!(search.candidates("codex"), [owned, installed]);
+    let looked = search.looked("codex");
+    let at = |folder: &Path| looked.iter().position(|seen| seen == folder).unwrap();
+    assert!(at(&bin) > at(&case.home.join(".local/bin")));
+}
+
+#[test]
+fn an_npm_harness_the_engine_installed_in_its_setup_folder_passes_and_other_engine_data_stays_refused()
+ {
+    let case = Case::new();
+    let prefix = crate::setup::harness_prefix(&case.engine);
+    let relative = prefix.strip_prefix(&case.root).unwrap().to_str().unwrap();
+    let real = case.file(
+        &format!("{relative}/lib/node_modules/@openai/codex/bin/codex.js"),
+        0o755,
+    );
+    let entry = prefix.join("bin/codex");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &entry).unwrap();
+    assert_eq!(case.check("codex", &entry), Ok(entry.clone()));
+    assert_eq!(case.check("codex", &real), Ok(real));
+    let agent = case.file("engine/team/agents/agent-7/home/codex", 0o755);
+    assert_eq!(case.check("codex", &agent), Err(PATH_AGENT_SPACE.into()));
+    let into = prefix.join("bin/claude");
+    std::os::unix::fs::symlink(&agent, &into).unwrap();
+    assert_eq!(
+        case.check("claude-code", &into),
+        Err(PATH_AGENT_SPACE.into())
+    );
+    let beside = case.file("engine/setup-other/codex", 0o755);
+    assert_eq!(case.check("codex", &beside), Err(PATH_AGENT_SPACE.into()));
+}
+
+/// Writes a runnable file, its folders made first. Input: the file. Output: the file.
+fn runnable(file: &Path) -> PathBuf {
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    file.to_path_buf()
+}
+
+/// V241-HARNESS-TEMP door 1 (DEC-157): the engine's search sets aside a PATH folder in a temp
+/// folder and passes over a file in a kept folder whose real file lies in one, and where we
+/// looked names each folder with the temp folder reason; an explicit search is unchanged.
+#[test]
+fn the_engine_search_sets_aside_temp_path_folders_and_names_them_where_it_looked() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let temps = vec![root.join("tmp")];
+    let set_aside = root.join("tmp/bin");
+    let kept = root.join("kept/bin");
+    let codex = runnable(&set_aside.join("codex"));
+    let real = runnable(&root.join("tmp/real/claude"));
+    std::fs::create_dir_all(&kept).unwrap();
+    std::os::unix::fs::symlink(&real, kept.join("claude")).unwrap();
+    let path = std::env::join_paths([set_aside.clone(), kept.clone()]).unwrap();
+    let search = Search::engine_in(Some(&path), &[], None, &temps);
+    assert_eq!(search.find("codex"), None);
+    assert!(search.candidates("codex").is_empty());
+    assert_eq!(search.find("claude-code"), None);
+    assert!(search.candidates("claude-code").is_empty());
+    let codex_looked = finding::looked(&search, "codex");
+    assert!(
+        codex_looked.contains(&format!("{}{TEMP_SKIPPED}", set_aside.display())),
+        "{codex_looked:?}"
+    );
+    let claude_looked = finding::looked(&search, "claude-code");
+    assert!(
+        claude_looked.contains(&format!("{}{TEMP_SKIPPED}", kept.display())),
+        "{claude_looked:?}"
+    );
+    assert!(
+        claude_looked
+            .iter()
+            .all(|line| !line.starts_with(set_aside.to_str().unwrap())),
+        "a set-aside folder without the harness is not named: {claude_looked:?}"
+    );
+    let explicit = Search::new(vec![set_aside, kept.clone()], None, Vec::new());
+    assert_eq!(explicit.find("codex"), Some(codex));
+    assert_eq!(explicit.find("claude-code"), Some(kept.join("claude")));
+}
+
+/// V241-HARNESS-TEMP guard (DEC-157): a HOME place inside a temp folder, as a test HOME is,
+/// is still looked in and gives its harness, also when the same folder is on PATH, and it is
+/// never marked as skipped.
+#[test]
+fn a_home_place_inside_a_temp_folder_is_kept_and_not_marked_even_on_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let home = root.join("home");
+    let codex = runnable(&home.join(".local/bin/codex"));
+    let path = std::env::join_paths([home.join(".local/bin")]).unwrap();
+    let search = Search::engine_in(Some(&path), &[], Some(home), &[root]);
+    assert_eq!(search.find("codex"), Some(codex.clone()));
+    assert_eq!(search.candidates("codex"), vec![codex]);
+    let looked = finding::looked(&search, "codex");
+    assert!(looked.contains(&"~/.local/bin".to_owned()), "{looked:?}");
+    assert!(
+        looked.iter().all(|line| !line.contains(TEMP_SKIPPED)),
+        "{looked:?}"
+    );
+}
+
+/// V241-HARNESS-TEMP r1 F1: a PATH folder in a temp folder that is also a HOME place keeps its
+/// PATH position, so a test HOME's stand-in on PATH is found before the same harness in a later
+/// PATH folder or a system folder such as Homebrew's, at the search and at the pin's entry.
+#[test]
+fn a_home_place_on_path_inside_a_temp_folder_keeps_its_path_position() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let home = root.join("home");
+    let stand_in = runnable(&home.join(".local/bin/codex"));
+    let later = runnable(&root.join("later/bin/codex"));
+    let system = root.join("opt/homebrew/bin");
+    runnable(&system.join("codex"));
+    let path = std::env::join_paths([home.join(".local/bin"), root.join("later/bin")]).unwrap();
+    let search = Search::engine_in(
+        Some(&path),
+        std::slice::from_ref(&system),
+        Some(home.clone()),
+        std::slice::from_ref(&home),
+    );
+    assert_eq!(search.find("codex"), Some(stand_in.clone()));
+    let candidates = search.candidates("codex");
+    assert_eq!(candidates.first(), Some(&stand_in), "{candidates:?}");
+    assert!(candidates.contains(&later), "{candidates:?}");
+    assert_eq!(
+        crate::paths::harness_entry("codex", &search, Some(&path)),
+        Some(stand_in)
+    );
+    let looked = finding::looked(&search, "codex");
+    assert_eq!(
+        looked.first().map(String::as_str),
+        Some("~/.local/bin"),
+        "{looked:?}"
+    );
+}
+
+/// RV-DS241-61: a chosen harness file in the engine's own temp folder, which agents with the
+/// owner's temp folder grant can write, is refused as a file agents can write, by its path as
+/// given and through a link from an owner folder into it; the shared temp folders are already
+/// refused as folders other users can change.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_chosen_file_in_the_engines_own_temp_folder_is_refused_as_agent_space() {
+    let case = Case::new();
+    let planted = tempfile::tempdir().unwrap();
+    let owner_temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let real = std::fs::canonicalize(planted.path())
+        .unwrap()
+        .join("Applications/Codex/codex");
+    assert!(real.starts_with(&owner_temp), "{real:?}");
+    std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+    std::fs::write(&real, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let link = case.root.join("bin/codex");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert_eq!(case.check("codex", &real), Err(PATH_AGENT_SPACE.to_owned()));
+    assert_eq!(case.check("codex", &link), Err(PATH_AGENT_SPACE.to_owned()));
+}
+
+/// RV-DS241-61 premise: a chosen harness file under the shared temp folder, outside the
+/// agents' own `ca-` folders, is refused as one in a folder other users can change, so the
+/// engine's own temp folder is the one temp folder the check has to add.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_chosen_file_in_the_shared_temp_folder_is_refused_as_changeable() {
+    let case = Case::new();
+    let shared = tempfile::Builder::new()
+        .prefix("harness-shared-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let file = std::fs::canonicalize(shared.path()).unwrap().join("codex");
+    std::fs::write(&file, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let space = finding::AgentSpace::open(&case.engine).unwrap();
+    assert_eq!(
+        finding::check("codex", &file, &space, Some(&case.home)).map_err(|error| error.0),
+        Err(finding::PATH_CHANGEABLE.to_owned())
+    );
+}
+
+/// RV-DS241-140 r2: a chain is judged by every link in it, each where it sits, so a link an
+/// agent can move, a folder link placed where agents write, a link whose `..` leaves a folder
+/// agents write, or a link in a folder other users can change refuses the entry while both
+/// ends of the chain pass. A chain of links the owner alone can move passes, relative links
+/// and an nvm-style `current` folder link included.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_chosen_or_found_codex_whose_chain_has_a_link_others_can_move_is_refused() {
+    let case = Case::new();
+    let real = case.file("tools/codex-0.167.1", 0o755);
+    let agent = case
+        .root
+        .join("projects/harbor/.crazyagent/worktrees/agent-3/bin");
+    let owned = case.root.join("tools/links");
+    let shared = case.root.join("shared");
+    for folder in [&agent, &owned, &shared] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let chain = |entry: &str, middle: &Path, target: &Path| {
+        std::os::unix::fs::symlink(target, middle).unwrap();
+        let entry = case.root.join(entry);
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(middle, &entry).unwrap();
+        entry
+    };
+    let kept = chain("kept/codex", &owned.join("codex"), &real);
+    assert_eq!(case.check("codex", &kept), Ok(kept.clone()));
+    let relative = case.root.join("relative/codex");
+    std::fs::create_dir_all(relative.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("../tools/codex-0.167.1", &relative).unwrap();
+    assert_eq!(case.check("codex", &relative), Ok(relative.clone()));
+    case.file("nvm/versions/v22/lib/codex.js", 0o755);
+    std::os::unix::fs::symlink("versions/v22", case.root.join("nvm/current")).unwrap();
+    std::fs::create_dir_all(case.root.join("nvm/versions/v22/bin")).unwrap();
+    std::os::unix::fs::symlink(
+        "../lib/codex.js",
+        case.root.join("nvm/versions/v22/bin/codex"),
+    )
+    .unwrap();
+    let current = case.root.join("nvm/current/bin/codex");
+    assert_eq!(case.check("codex", &current), Ok(current.clone()));
+    let dotted = case.root.join("dotted/.crazyagent/step");
+    std::fs::create_dir_all(&dotted).unwrap();
+    let stepped = case.root.join("stepped/codex");
+    std::fs::create_dir_all(stepped.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(dotted.join("../../../tools/codex-0.167.1"), &stepped).unwrap();
+    assert_eq!(case.check("codex", &stepped), Err(PATH_AGENT_SPACE.into()));
+    let moved = chain("moved/codex", &agent.join("codex"), &real);
+    assert_eq!(case.check("codex", &moved), Err(PATH_AGENT_SPACE.into()));
+    let folder = agent.join("tools");
+    std::os::unix::fs::symlink(case.root.join("tools"), &folder).unwrap();
+    let through = case.root.join("through/codex");
+    std::fs::create_dir_all(through.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(folder.join("codex-0.167.1"), &through).unwrap();
+    assert_eq!(case.check("codex", &through), Err(PATH_AGENT_SPACE.into()));
+    let open = chain("open/codex", &shared.join("codex"), &real);
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(
+        case.check("codex", &open),
+        Err(finding::PATH_CHANGEABLE.into())
+    );
+    let space = finding::AgentSpace::open(&case.engine).unwrap();
+    let found = Search::new(
+        vec![moved.parent().unwrap().to_path_buf()],
+        Some(case.home.clone()),
+        Vec::new(),
+    );
+    assert_eq!(
+        finding::pick("codex", &found, None, &space)
+            .map(|picked| picked.map_err(|(path, error)| (path, error.0))),
+        Some(Err((moved, PATH_AGENT_SPACE.into())))
+    );
+}
+
+/// RV-DS241-140 r4: a chain whose link target passes through /private/var/run, the
+/// root:daemon 775 folder nix-darwin's /run link leads to, and leaves it by `..` passes, so
+/// a harness in /run/current-system/sw/bin is kept as before the hop walk.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_chain_through_the_system_run_folder_passes_as_a_nix_darwin_profile_does() {
+    use std::os::unix::fs::MetadataExt;
+    let run = Path::new("/private/var/run");
+    let premise = std::fs::metadata(run).unwrap();
+    assert_eq!(
+        (premise.uid(), premise.gid(), premise.mode() & 0o7777),
+        (0, 1, 0o775),
+        "/private/var/run is root:daemon 775"
+    );
+    let case = Case::new();
+    let real = case.file("tools/codex-0.167.1", 0o755);
+    let up = "../".repeat(run.components().count() - 1);
+    let target = run.join(up).join(real.strip_prefix("/").unwrap());
+    let entry = case.root.join("system/codex");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&target, &entry).unwrap();
+    assert_eq!(std::fs::canonicalize(&entry).unwrap(), real);
+    assert_eq!(case.check("codex", &entry), Ok(entry.clone()));
 }

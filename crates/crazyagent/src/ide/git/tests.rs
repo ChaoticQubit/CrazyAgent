@@ -991,3 +991,131 @@ fn the_shim_keeps_the_secret_from_git_and_reports_both_failures() {
         assert!(std::fs::read_dir(&private).unwrap().next().is_none());
     }
 }
+
+/// RV-DS241-147: the shim's private copy of the index keeps the index's modified time, so
+/// git's racy-entry check still reads a file rewritten at the same size in the index's own
+/// second, and an IDE Stage of that edit is never seen as nothing to stage.
+#[test]
+fn the_shim_copies_the_index_with_its_modified_time() {
+    let scratch = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(scratch.path()).unwrap();
+    let (project, private) = (base.join("project"), base.join("private"));
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    std::fs::create_dir(&private).unwrap();
+    let index = project.join(".git").join("index");
+    std::fs::write(&index, "real").unwrap();
+    let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&index)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(then))
+        .unwrap();
+    let seen = base.join("seen");
+    let script = |name: &str, body: String| {
+        let path = base.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    let fake = script(
+        "fake-git",
+        format!("/bin/ln \"$GIT_INDEX_FILE\" '{}'\n", seen.display()),
+    );
+    let forwarder = script("forward.sh", "exit 0\n".to_owned());
+    let shim = script(
+        "shim",
+        shim_text(None, &fake, Some((&project, &private)))
+            .unwrap()
+            .strip_prefix("#!/bin/sh\n")
+            .unwrap()
+            .to_owned(),
+    );
+    let output = crate::spawn_gate::output(
+        Command::new(&shim)
+            .arg("add")
+            .current_dir(&project)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("CRAZYAGENT_IDE_GIT_NODE", "/bin/sh")
+            .env("CRAZYAGENT_IDE_GIT_FORWARD", &forwarder)
+            .env("CRAZYAGENT_IDE_GIT_SECRET", "row-secret")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "real");
+    assert_eq!(
+        std::fs::metadata(&seen).unwrap().modified().unwrap(),
+        then,
+        "git ran on a copy with a fresh modified time"
+    );
+    assert!(std::fs::read_dir(&private).unwrap().next().is_none());
+}
+
+/// RV-DS241-147 r2 (rv-secreview note): the shim's copy of the index takes only the index's
+/// times, never its file flags, so an index the owner made immutable leaves no copy behind
+/// in the private folder that a later launch could not empty.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_shim_leaves_no_copy_of_an_immutable_index_behind() {
+    let scratch = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(scratch.path()).unwrap();
+    let (project, private) = (base.join("project"), base.join("private"));
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    std::fs::create_dir(&private).unwrap();
+    let index = project.join(".git").join("index");
+    std::fs::write(&index, "real").unwrap();
+    let flags = |flag: &str, path: &Path| {
+        crate::spawn_gate::output(
+            Command::new("/usr/bin/chflags")
+                .args(["-R", flag])
+                .arg(path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap()
+        .status
+        .success()
+    };
+    assert!(flags("uchg", &index));
+    let script = |name: &str, body: &str| {
+        let path = base.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    let fake = script("fake-git", "exit 0\n");
+    let forwarder = script("forward.sh", "exit 0\n");
+    let shim = script(
+        "shim",
+        shim_text(None, &fake, Some((&project, &private)))
+            .unwrap()
+            .strip_prefix("#!/bin/sh\n")
+            .unwrap(),
+    );
+    let output = crate::spawn_gate::output(
+        Command::new(&shim)
+            .arg("add")
+            .current_dir(&project)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("CRAZYAGENT_IDE_GIT_NODE", "/bin/sh")
+            .env("CRAZYAGENT_IDE_GIT_FORWARD", &forwarder)
+            .env("CRAZYAGENT_IDE_GIT_SECRET", "row-secret")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let left = std::fs::read_dir(&private).unwrap().count();
+    assert!(flags("nouchg", &base), "the row clears its flags");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        left, 0,
+        "a copy holding the index's flags stayed in the private folder"
+    );
+}

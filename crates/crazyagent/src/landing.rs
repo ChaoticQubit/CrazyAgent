@@ -17,6 +17,9 @@ mod flow;
 #[cfg(unix)]
 mod git;
 #[cfg(unix)]
+pub(crate) use git::owner_excludes_setting;
+mod hold;
+#[cfg(unix)]
 pub(crate) mod ide;
 #[cfg(unix)]
 mod lockfiles;
@@ -27,6 +30,8 @@ mod owner;
 pub mod owner_edit;
 #[cfg(unix)]
 mod retire;
+#[cfg(all(test, unix))]
+pub(crate) mod signature_tests;
 #[cfg(unix)]
 mod store;
 #[cfg(unix)]
@@ -62,6 +67,16 @@ const LOCAL_ROOTS: [&str; 10] = [
     "/mnt/",
     "/opt/",
 ];
+
+/// Where the owner's git stands when it resolves a repository's ignore file
+/// (RV-DS241-145): a folder it finds the repository from, as the owner's git run there
+/// does, or a git folder named outright, so no `.git` file in a work tree is followed.
+#[derive(Clone, Copy, Debug)]
+#[cfg(unix)]
+pub(crate) enum Within<'a> {
+    Folder(&'a Path),
+    GitDir(&'a Path),
+}
 
 /// Replaces every control character but newline and tab, and every bidirectional
 /// override or isolate, with U+FFFD, then shows every other character a reviewer cannot
@@ -432,7 +447,7 @@ pub(crate) const BUSY_WAIT: Duration = Duration::from_secs(5);
 /// the folder while it moves. Dropping it lets landing work start again.
 #[derive(Debug)]
 pub(crate) struct RepositoryHolds {
-    _held: Vec<flow::Held>,
+    _held: Vec<hold::Held>,
 }
 
 /// Takes the landing hold on each repository, in path order, waiting no longer than
@@ -447,7 +462,7 @@ pub(crate) fn hold_repositories(
     let mut held = Vec::with_capacity(repositories.len());
     for repository in repositories {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
-        held.push(flow::hold_within(repository, left)?);
+        held.push(hold::hold_within(repository, left)?);
     }
     assert_eq!(held.len(), repositories.len());
     Some(RepositoryHolds { _held: held })
@@ -1839,6 +1854,24 @@ pub fn sweep_regenerations(db: &Connection) -> Result<usize, EngineError> {
     #[cfg(unix)]
     return lockfiles::sweep(db);
     #[cfg(not(unix))]
+    {
+        let _ = db;
+        Ok(0)
+    }
+}
+
+/// Removes the index locks confined Linux steps of a stopped engine left in agent worktrees,
+/// with the step folders their git can have left (`git::clear_step_locks`), so those agents
+/// land again. The engine runs it once at start, before any landing step; elsewhere no step
+/// takes such a lock. Input: the store. Output: how many locks it removed.
+pub fn clear_step_locks(db: &Connection) -> Result<usize, EngineError> {
+    #[cfg(target_os = "linux")]
+    return Ok(crate::worktrees::known_repositories(db)?
+        .iter()
+        .filter_map(|repository| repository.canonicalize().ok())
+        .map(|root| git::clear_step_locks(&root))
+        .sum());
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = db;
         Ok(0)

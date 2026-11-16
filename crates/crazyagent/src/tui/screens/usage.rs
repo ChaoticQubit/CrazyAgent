@@ -12,7 +12,7 @@ use crate::usage::RecountStatus;
 use crate::usage::extras::LimitExtras;
 use crate::usage::health::{StepHealth, UsageStep};
 use crate::usage::metrics::{ActivityRow, ModelRow};
-use crate::usage::money::{MainNumber, MoneyView, PriceSource};
+use crate::usage::money::{MainNumber, MoneyChoice, MoneyView, PriceSource};
 use crate::usage::report::{UsageReport, UsageRow};
 use crate::usage::{AccountLimits, LimitSource, LimitWindow};
 use ratatui::Frame;
@@ -925,22 +925,23 @@ impl Screen for UsagePage {
             Key::Char('c') => send(ctx, SettingsJob::RefreshUsage),
             Key::Char('m') if self.offers_main_number() => {
                 if let Some((_, report)) = &self.report {
-                    let mut settings = report.money.settings;
-                    settings.main_number = match settings.main_number {
+                    let main_number = match report.money.settings.main_number {
                         MainNumber::Dollars => MainNumber::Tokens,
                         MainNumber::Tokens => MainNumber::Dollars,
                     };
-                    send(ctx, SettingsJob::SetMoney(settings));
+                    send(
+                        ctx,
+                        SettingsJob::SetMoneyOne(MoneyChoice::MainNumber(main_number)),
+                    );
                 }
             }
             Key::Char('p') => {
                 if let Some((_, report)) = &self.report {
-                    let mut settings = report.money.settings;
-                    settings.prices = match settings.prices {
+                    let prices = match report.money.settings.prices {
                         PriceSource::Bundled => PriceSource::Off,
                         PriceSource::Off => PriceSource::Bundled,
                     };
-                    send(ctx, SettingsJob::SetMoney(settings));
+                    send(ctx, SettingsJob::SetMoneyOne(MoneyChoice::Prices(prices)));
                 }
             }
             Key::Char('n') if self.offers_recount() => send(ctx, SettingsJob::DecideRecount(true)),

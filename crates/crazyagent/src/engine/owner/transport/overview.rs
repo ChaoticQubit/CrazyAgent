@@ -354,6 +354,7 @@ fn state_reply(mut overview: Overview) -> Reply {
         if tab.text.take().is_some_and(|text| !fits(&text)) {
             tab.version = String::new();
             tab.edited = false;
+            tab.foreign = false;
             tab.blocked = Some(project_overview::BLOCKED_TOO_LARGE.to_owned());
         }
         if tab.proposal.take().is_some_and(|text| fits(&text)) {
@@ -565,6 +566,7 @@ mod tests {
                 text: text.map(str::to_owned),
                 version: text.map(|_| "v1".to_owned()).unwrap_or_default(),
                 edited: false,
+                foreign: false,
                 proposal: proposal.map(str::to_owned),
                 proposal_version: proposal.map(|_| "p1".to_owned()).unwrap_or_default(),
                 blocked: None,
@@ -582,6 +584,7 @@ mod tests {
             stale: false,
             checked_ms: None,
             failure: None,
+            waiting_for_account: false,
             refresh: Refresh::AfterLanding,
             apply: Apply::AlwaysAsk,
             needs_home: false,
@@ -688,6 +691,7 @@ mod tests {
         assert!(fits(&text));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_overview_is_read_and_changed_over_the_owner_socket_one_text_a_frame() {
         use super::super::usage_tests::Usage;

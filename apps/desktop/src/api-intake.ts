@@ -3,12 +3,13 @@ import { formatBytes } from "./screens/new-project/wizard";
 import { failureCopy } from "./api-projects";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
-  githubUseCli, icloudCancel, icloudDownload, icloudProgress, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, setPackEntry as switchEntry,
+  githubUseCli, icloudCancel, icloudDownload, icloudProgress, intakeDismiss, intakeStart, intakeStatus, intakeStop, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, installDependency as startInstall, setPackEntry as switchEntry,
+  fixToolPermissions as startFix, setRefusedTool as saveRefusedTool,
   setProjectsHome as saveHome, setupStatus, startOnboarding as startMapping,
 } from "./engine-client";
 import type {
-  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IcloudProgress, IntentReceipt, OnboardingView,
-  ProjectsHome, SetupStatus,
+  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IcloudProgress, IntakeJob, IntentReceipt, OnboardingView,
+  DependencyName, ProjectsHome, RefusedTool, SetupStatus,
 } from "./engine-client";
 
 export const FOUND_PROJECTS_MAX = 500;
@@ -38,7 +39,7 @@ const COPY: Record<string, string> = {
   home_copy_unverified: "The copy didn't match the original, so the original was kept.",
   home_copy_linked_checkout: "This folder is a git worktree or submodule of another repository, so a copy would still share it. Use it where it is, or copy the main repository folder.",
   home_move_failed: "Couldn't move the folder. Nothing was removed. Try again.",
-  home_move_source_left: "The folder was added, but part of the original couldn't be removed. Check its old place.",
+  home_move_source_left: "The folder was added, but part of the original couldn't be removed. What's left there may be newer than the copy, so check it before you delete anything.",
   home_move_same: "This is already your projects folder.",
   home_move_nested: "Choose a projects folder that isn't inside the current one.",
   home_move_partial: "Some projects were moved and couldn't be moved back. Check both folders.",
@@ -55,6 +56,10 @@ const COPY: Record<string, string> = {
   home_new_project_failed: "The project folder couldn't be created. Nothing was kept.",
   home_add_unverified: "The folder didn't arrive in your projects folder. Check it and try again.",
   home_add_interrupted: "Adding the folder stopped part way. Check your projects folder before trying again.",
+  home_add_cancelled: "Adding the folder stopped. Nothing was moved or copied.",
+  home_add_in_progress: "A folder is being added to your projects folder. Try again when it finishes.",
+  intake_busy: "Another folder is being added. Wait for it to finish on Home.",
+  intake_failed: "Adding the folder failed. Check your projects folder before trying again.",
   home_override_invalid: "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again.",
   home_record_invalid: "CrazyAgent's record of your projects folder can't be read.",
   home_icloud_not_downloaded: "Some files are still only in iCloud, so the folder wasn't added. Nothing was removed. Download them and try again.",
@@ -78,6 +83,7 @@ const COPY: Record<string, string> = {
   owner_home_unknown: "Your home folder couldn't be found.",
   onboarding_folder_missing: "This folder isn't there anymore. Choose it again.",
   onboarding_folder_unsafe: "This folder can't be set up. Choose a project's own folder, not your home folder or the app's data.",
+  onboarding_instructions_unwritable: "This folder came with a .crazyagent/instructions.md that CrazyAgent can't label as Imported. Make that file and its .crazyagent folder writable, then start again.",
   onboarding_layout_incomplete: "Setup didn't finish preparing this project. Try again.",
   onboarding_path_invalid: "This folder can't be set up. Choose it again with Choose folder.",
   onboarding_path_not_canonical: "This folder can't be set up from this path. Choose it again with Choose folder.",
@@ -120,6 +126,13 @@ const COPY: Record<string, string> = {
   github_token_frame_mismatch: "The token couldn't be sent to the engine safely. Paste it again.",
   github_failed: "Something went wrong talking to GitHub. Try again.",
   setup_busy: "Setup is already running. Wait for it to finish.",
+  tool_fix_off: "Fixing permissions from CrazyAgent is turned off in Settings. Run the command shown instead.",
+  tool_fix_not_needed: "This tool can run now, so nothing needed fixing.",
+  tool_fix_unavailable: "Changing permissions can't fix why this tool is not used. Follow the line shown.",
+  tool_fix_changed: "What blocks this tool changed since you looked, so nothing was changed. Check the row again.",
+  tool_fix_refused: "CrazyAgent only fixes folders you own inside your home folder, never system, Homebrew, project or app data folders. Run the command yourself if you are sure.",
+  tool_fix_too_large: "That folder is too large to fix from CrazyAgent. Run the command shown instead.",
+  tool_fix_failed: "The permissions could not be changed. Run the command shown instead.",
   setup_failed: "Something went wrong during setup.",
   setup_outcome_unknown: "We couldn't confirm what setup did. Check the list again.",
   setup_owner_unavailable: "CrazyAgent's engine isn't running.",
@@ -141,11 +154,13 @@ const COPY: Record<string, string> = {
   setup_checksum_mismatch: "The download didn't match its checksum, so it wasn't installed.",
   setup_download_failed: "The download failed. Check your connection and try again.",
   setup_homebrew_missing: "Homebrew isn't installed. Install tmux yourself, then run setup again.",
+  setup_homebrew_unsafe: "Another account can change Homebrew's files, so setup didn't run it. Install tmux yourself, then run setup again.",
   setup_install_failed: "The installer didn't finish. Try again.",
   setup_timeout: "The install took too long and was stopped. Try again.",
   setup_version_mismatch: "A different version from the pinned one is installed.",
   setup_version_unreadable: "The installed program didn't report its version.",
   setup_uv_missing: "uv is needed to install graphify and isn't installed.",
+  setup_winget_missing: "winget is needed to install uv and isn't installed. Install App Installer from the Microsoft Store, then run setup again.",
   setup_pin_invalid: "The pinned source isn't valid, so nothing was installed.",
   setup_tool_unsupported: "This tool can't be installed on this computer yet.",
   setup_request_bounds: "Setup couldn't take this request. Pick fewer entries and try again.",
@@ -258,6 +273,32 @@ export function cancelIcloudDownload(): Promise<Result<boolean>> {
   return wrap(icloudCancel);
 }
 
+/** Starts the engine's intake job, which downloads what is only in iCloud and then moves or
+ * copies the folder into the projects folder apart from the window, or attaches to the job
+ * adding that folder already. The native bridge checks the path by the host's own rule, so a
+ * Windows drive or network share folder goes through (RV-DS241-1). Inputs: the absolute folder,
+ * move or copy and the overrides. Output: the job, home_source_invalid for a path that is not
+ * absolute there, or intake_busy while another folder is being added. */
+export function startIntake(path: string, mode: AddFolderMode, overrides: AddOverride[]): Promise<Result<IntakeJob>> {
+  return wrap(() => intakeStart(path, mode, overrides));
+}
+
+/** Reads the engine's intake job, running or last ended. Output: the job, or null. */
+export function loadIntakeJob(): Promise<Result<IntakeJob | null>> {
+  return wrap(intakeStatus);
+}
+
+/** Asks the running intake job to stop between files. Input: its id. Output: whether it ran. */
+export function stopIntake(id: string): Promise<Result<boolean>> {
+  return wrap(() => intakeStop(id));
+}
+
+/** Forgets an ended intake job so Home no longer shows it. Input: its id. Output: whether it
+ * was forgotten. */
+export function dismissIntake(id: string): Promise<Result<boolean>> {
+  return wrap(() => intakeDismiss(id));
+}
+
 /** Moves or copies a folder into the projects folder, where it then shows as found.
  * Inputs: the absolute source folder, move or copy, the soft refusals the owner chose to go past
  * and a generation. Output: the receipt. */
@@ -335,6 +376,25 @@ export function loadSetupStatus(): Promise<Result<SetupStatus>> {
 export function runSetup(pack: string[]): Promise<Result<SetupStatus>> {
   if (pack.length > SETUP_PACK_MAX) throw new Error(`setup pack holds at most ${SETUP_PACK_MAX} entries`);
   return wrap(() => startSetup(pack, nextGeneration()));
+}
+
+/** Installs one missing tool alone, such as Node for the harnesses npm installs.
+ * Input: its name. Output: the status as the install starts. */
+export function installDependency(name: DependencyName): Promise<Result<SetupStatus>> {
+  return wrap(() => startInstall(name, nextGeneration()));
+}
+
+/** Fixes the permissions of the tree the owner confirmed for one refused tool (DEC-162).
+ * Inputs: its name, the tree the confirm named and whether it named all of it. Output: the
+ * status as the fix starts. */
+export function fixToolPermissions(name: DependencyName, tree: string, recursive: boolean): Promise<Result<SetupStatus>> {
+  return wrap(() => startFix(name, tree, recursive, nextGeneration()));
+}
+
+/** Saves what setup offers for a tool found and passed over. Input: the choice. Output: the
+ * new setup status. */
+export function setRefusedTool(choice: RefusedTool): Promise<Result<SetupStatus>> {
+  return wrap(() => saveRefusedTool(choice, nextGeneration()));
 }
 
 /** Switches one installed pack entry on or off for every project.

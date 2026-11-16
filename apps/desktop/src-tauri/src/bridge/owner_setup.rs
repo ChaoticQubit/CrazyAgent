@@ -7,6 +7,7 @@ use crazyagent::master_step_limit::MasterStepSettings;
 use crazyagent::master_time_limit::MasterTimeSettings;
 use crazyagent::owner_profile::OwnerProfile;
 use crazyagent::pools::PoolSummary;
+use crazyagent::provider_retry::{ProviderRetry, ProviderRetryView};
 use crazyagent::quit_settings::QuitSettings;
 use crazyagent::sandbox_settings::SandboxSettings;
 
@@ -174,6 +175,43 @@ impl NativeBridge {
             .map_err(|error| caused("owner_read_failed", &error.0))?;
         self.controller()?
             .begin_mutation(OwnerMutation::SetQuitSettings { settings }, generation)
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
+        assert!(self.status().pending);
+        self.deliver_intent(false).await
+    }
+
+    /// Reads what harnesses do when a model provider can't be reached: the chosen option and
+    /// the engine's line for every option and harness. Input: none. Output: the view.
+    pub async fn provider_retry(&mut self) -> Result<ProviderRetryView, BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        self.controller()?
+            .provider_retry()
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))
+    }
+
+    /// Saves what harnesses do when a model provider can't be reached, as one retained owner
+    /// intent. Inputs: the option and a fresh draft generation. Output: the intent receipt.
+    pub async fn set_provider_retry(
+        &mut self,
+        choice: ProviderRetry,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.allow_new_auth().await?;
+        if self.blocked() {
+            return Err(failure("pending_intent"));
+        }
+        if generation == 0 || generation > 9_007_199_254_740_991 {
+            return Err(failure("draft_generation_limit"));
+        }
+        self.controller()?
+            .read(OwnerRead::ProviderRetry)
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
+        self.controller()?
+            .begin_mutation(OwnerMutation::SetProviderRetry { choice }, generation)
             .map_err(|error| caused("owner_not_ready", &error.0))?;
         assert!(self.status().pending);
         self.deliver_intent(false).await

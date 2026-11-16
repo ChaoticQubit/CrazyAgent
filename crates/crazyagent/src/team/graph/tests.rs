@@ -15,7 +15,9 @@ fn agent(id: i64, role: AgentRole, harness: &str, status: AgentStatus) -> TeamAg
         task: None,
         turns: 1,
         problem: None,
-        process_group: None,
+        process_group: (role != AgentRole::Teammate
+            && matches!(status, AgentStatus::Idle | AgentStatus::Working))
+        .then_some(4000 + id),
         created_ms: 1,
         heartbeat_ms: 1,
         stopped_ms: None,
@@ -317,6 +319,76 @@ fn the_team_graph_is_a_tree_of_who_leads_whom() {
             (16, "team-7", "team-8", EdgeState::Sent, None),
         ],
         "each task runs from the node leading its agent, and one no agent took waits on the master"
+    );
+}
+
+/// An agent that is starting has no pane yet, so the graph names no terminal for it until
+/// its pane runs and the engine records its process group; a teammate row, which never gets
+/// a group of its own, keeps its terminal while it is live (DEC-161 3b).
+#[test]
+fn an_agent_names_its_terminal_only_once_its_pane_runs() {
+    let mut status = tree();
+    let terminal = |graph: &TeamGraph, id: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .and_then(|node| node.terminal.clone())
+    };
+    for agent in status
+        .agents
+        .iter_mut()
+        .filter(|agent| [2, 3].contains(&agent.id))
+    {
+        agent.status = AgentStatus::Starting;
+        agent.process_group = None;
+    }
+    let starting = graph(&status, &none());
+    assert_eq!(
+        terminal(&starting, MASTER_NODE),
+        None,
+        "a master still starting has no terminal to open"
+    );
+    assert_eq!(
+        terminal(&starting, "team-3"),
+        None,
+        "nor a lead still starting"
+    );
+    assert_eq!(
+        terminal(&starting, "teammate-3-12"),
+        None,
+        "nor the open teammate pane of a lead still starting"
+    );
+    for agent in status
+        .agents
+        .iter_mut()
+        .filter(|agent| [2, 3].contains(&agent.id))
+    {
+        agent.status = AgentStatus::Idle;
+        agent.process_group = Some(4000 + agent.id);
+    }
+    status.agents.push(TeamAgent {
+        parent: Some(3),
+        pane: Some("%14".into()),
+        ..agent(9, AgentRole::Teammate, "claude-code", AgentStatus::Working)
+    });
+    let running = graph(&status, &none());
+    assert_eq!(
+        terminal(&running, MASTER_NODE),
+        Some(AgentId::team(2).unwrap())
+    );
+    assert_eq!(
+        terminal(&running, "team-3"),
+        Some(AgentId::team(3).unwrap())
+    );
+    assert_eq!(
+        terminal(&running, "teammate-3-12"),
+        Some(AgentId::team(3).unwrap())
+    );
+    assert_eq!(
+        terminal(&running, "team-9"),
+        Some(AgentId::team(9).unwrap()),
+        "a teammate row with no process group of its own keeps its terminal"
     );
 }
 

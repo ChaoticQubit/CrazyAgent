@@ -338,6 +338,19 @@ fn a_refused_create_gives_no_pool_and_says_why_in_the_demo_s_words() {
     }
 }
 
+/// V241-MASTER-WORDS item 2: a Create the demo refused as not ready names the account kinds
+/// to add, as the default team status names them, never a sign-in alone, since an OpenAI or
+/// Anthropic API key makes the pool ready too; the desktop says the same words.
+#[test]
+fn a_create_refused_as_not_ready_names_the_account_kinds_to_add() {
+    let words = refusal("demo_pool_not_ready");
+    assert!(
+        words.contains("Add a ChatGPT or Claude sign-in, or an OpenAI or Anthropic API key"),
+        "{words}"
+    );
+    assert!(!words.contains("Sign one in"), "{words}");
+}
+
 #[test]
 fn an_unknown_create_outcome_reads_the_demo_again_and_goes_on_only_when_it_exists() {
     let mut shell = one_ready_pool();

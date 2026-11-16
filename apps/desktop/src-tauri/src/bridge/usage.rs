@@ -4,9 +4,9 @@ use crazyagent::engine::owner::{AccountExtras, OwnerClient, USAGE_CODES};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::usage::WindowKind;
 use crazyagent::usage::metrics::Metrics;
-use crazyagent::usage::money::MoneySettings;
+use crazyagent::usage::money::MoneyChoice;
 use crazyagent::usage::report::UsageReport;
-use crazyagent::usage::spend::SpendSettings;
+use crazyagent::usage::spend::SpendChoice;
 use std::sync::Arc;
 
 pub(super) fn usage_error(error: EngineError) -> BridgeError {
@@ -99,12 +99,15 @@ impl NativeBridge {
         }))
     }
 
-    /// Stores the owner's main number and price source, run without the bridge lock. Input:
-    /// the settings. Output: done once they are stored.
-    pub fn usage_set_money(&self, settings: MoneySettings) -> Result<Unlocked<()>, BridgeError> {
+    /// Stores one of the owner's dollars and Metrics page choices and keeps the other two, run
+    /// without the bridge lock. Input: the choice and its value. Output: done once it is stored.
+    pub fn usage_set_money_one(&self, choice: MoneyChoice) -> Result<Unlocked<()>, BridgeError> {
         let client = self.usage_client()?;
         Ok(Box::pin(async move {
-            client.usage_set_money(settings).await.map_err(usage_error)
+            client
+                .usage_set_money_one(choice)
+                .await
+                .map_err(usage_error)
         }))
     }
 
@@ -138,12 +141,15 @@ impl NativeBridge {
         }))
     }
 
-    /// Stores the owner's spend settings, run without the bridge lock. Input: the settings.
-    /// Output: done once they are stored.
-    pub fn usage_set_spend(&self, settings: SpendSettings) -> Result<Unlocked<()>, BridgeError> {
+    /// Stores one of the owner's free resets settings and keeps the other two, run without
+    /// the bridge lock. Input: the setting and its value. Output: done once it is stored.
+    pub fn usage_set_spend_one(&self, choice: SpendChoice) -> Result<Unlocked<()>, BridgeError> {
         let client = self.usage_client()?;
         Ok(Box::pin(async move {
-            client.usage_set_spend(settings).await.map_err(usage_error)
+            client
+                .usage_set_spend_one(choice)
+                .await
+                .map_err(usage_error)
         }))
     }
 

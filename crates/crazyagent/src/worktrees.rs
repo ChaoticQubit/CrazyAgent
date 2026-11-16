@@ -287,36 +287,24 @@ fn git_until(
 }
 
 /// Builds the engine's Git process: the host Git with a cleared environment, no system
-/// or global config, hooks, fsmonitor, replace objects, grafts, commit-graph files,
-/// protocols or automatic maintenance. Inputs: the repository and the arguments. Output:
-/// the unspawned process.
+/// or global config, the engine's safe settings (no hooks, fsmonitor, pager, protocols or
+/// signature programs), no replace objects, grafts, commit-graph files or automatic
+/// maintenance. Inputs: the repository and the arguments. Output: the unspawned process.
 fn git_command(repository: &Path, args: &[&str]) -> Process {
     let mut command = Process::new("/usr/bin/git");
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .env("GIT_ATTR_NOSYSTEM", "1")
+        .envs(crate::research::runner::GIT_SAFE_ENV)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_GRAFT_FILE", "/dev/null")
         .arg("--no-replace-objects")
         .arg("--no-optional-locks")
+        .args(crate::research::runner::GIT_SAFE)
         .args([
             "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.pager=cat",
-            "-c",
             "core.attributesFile=/dev/null",
-            "-c",
-            "submodule.recurse=false",
-            "-c",
-            "protocol.allow=never",
             "-c",
             "gc.auto=0",
             "-c",
@@ -500,10 +488,10 @@ thread_local! {
 
 /// The step a walk on this thread runs before each read of a listed .git entry, set for
 /// one test and cleared when dropped.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) struct BeforeRead;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl BeforeRead {
     /// Sets the step. Input: what to do with the entry and whether the coming read lists
     /// it as a folder. Output: the guard that clears it.
@@ -513,7 +501,7 @@ impl BeforeRead {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Drop for BeforeRead {
     fn drop(&mut self) {
         BEFORE_READ.with(|slot| *slot.borrow_mut() = None);
@@ -1971,7 +1959,7 @@ fn tree_entries(
                 .any(|p| !matches!(p, Component::Normal(_)))
             || path
                 .components()
-                .any(|p| p.as_os_str().to_string_lossy().eq_ignore_ascii_case(".git"))
+                .any(|p| crate::instruction_files::names_git(&p.as_os_str().to_string_lossy()))
         {
             return Err(error("unsupported_or_unsafe_tree_entry"));
         }
@@ -2122,8 +2110,9 @@ fn copy_blobs(
 
 /// Says whether a tracked symlink resolves inside the lease wherever it is followed from:
 /// its target is relative, climbs only with leading `..` steps and no higher than the
-/// folder holding the link, then names plain components other than `.git`. Inputs: the
-/// link's path in the tree and its target bytes. Output: true when it stays inside.
+/// folder holding the link, then names plain components other than `.git` in any spelling
+/// a case-insensitive volume opens as it ([`crate::instruction_files::names_git`]). Inputs:
+/// the link's path in the tree and its target bytes. Output: true when it stays inside.
 #[cfg(unix)]
 fn link_stays_inside(link: &Path, target: &[u8]) -> bool {
     let Ok(target) = std::str::from_utf8(target) else {
@@ -2136,7 +2125,9 @@ fn link_stays_inside(link: &Path, target: &[u8]) -> bool {
         match part {
             ".." if climbing => up += 1,
             "" | "." | ".." => return false,
-            name if name.eq_ignore_ascii_case(".git") || name.contains('\0') => return false,
+            name if crate::instruction_files::names_git(name) || name.contains('\0') => {
+                return false;
+            }
             _ => climbing = false,
         }
     }
@@ -3375,6 +3366,50 @@ mod tests {
         }
     }
 
+    /// A tree path with a part a case-insensitive HFS+ volume opens as `.git`, such as
+    /// `.g\u{200c}it` or `\u{feff}.GIT`, is refused like `.git` itself, so a lease never
+    /// writes into a git folder on such a volume (RV-DS241-148).
+    #[test]
+    fn tree_listing_refuses_a_path_part_hfs_opens_as_git() {
+        for part in [".g\u{200c}it", "\u{feff}.GIT"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let repository = committed_repository(temporary.path());
+            let folder = repository.join("sub").join(part);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("config"), b"[core]\n").unwrap();
+            for args in [
+                &[
+                    "-c",
+                    "core.protectHFS=false",
+                    "-c",
+                    "core.protectNTFS=false",
+                    "add",
+                    "-A",
+                ][..],
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@invalid",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "planted",
+                ],
+            ] {
+                git(&repository, args).unwrap();
+            }
+            let later = Instant::now() + Duration::from_secs(5);
+            assert_eq!(
+                tree_entries(&repository, "HEAD", &TREE_BOUNDS, later)
+                    .unwrap_err()
+                    .0,
+                "unsupported_or_unsafe_tree_entry",
+                "{part:?}"
+            );
+        }
+    }
+
     #[test]
     fn writing_a_tree_stops_at_its_deadline() {
         let temporary = tempfile::tempdir().unwrap();
@@ -3422,6 +3457,8 @@ mod tests {
             ("none", "", false),
             ("a/git", "../.git/config", false),
             ("a/git-case", "../.GIT", false),
+            ("a/git-hfs", "../.g\u{200c}it/config", false),
+            ("a/git-bom", "../\u{feff}.GIT", false),
             ("a/nul", "x\0y", false),
         ] {
             assert_eq!(
@@ -3702,5 +3739,21 @@ mod tests {
             inspect(repository.to_str().unwrap()).unwrap_err().0,
             "git_metadata_capacity"
         );
+    }
+
+    /// The engine's worktree git, asked outright for the signature of an owner commit in any
+    /// armor, runs none of the repository's signature programs (RV-DS241-39).
+    #[test]
+    fn engine_worktree_git_runs_no_repository_signature_program_in_any_armor() {
+        use crate::landing::signature_tests::{Armor, signed};
+        for armor in Armor::ALL {
+            let signed = signed(armor);
+            git(
+                &signed.root,
+                &["log", "--show-signature", "-1", "--format=%s"],
+            )
+            .unwrap();
+            assert_eq!(signed.ran(), Vec::<String>::new(), "{armor:?}");
+        }
     }
 }

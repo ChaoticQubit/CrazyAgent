@@ -76,7 +76,7 @@ const REFUSALS: [(&str, &str); 8] = [
     ("demo_pool_missing", "That pool is gone. Pick another pool."),
     (
         "demo_pool_not_ready",
-        "No account in that pool is ready for agents. Sign one in, or pick another pool.",
+        "No account in that pool is ready for agents. Add a ChatGPT or Claude sign-in, or an OpenAI or Anthropic API key, or pick another pool.",
     ),
     (
         "demo_harness_unavailable",

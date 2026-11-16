@@ -42,3 +42,20 @@ test("a save refused because the folders changed reads them again instead of res
   const reread = source.slice(source.indexOf("  async function reread()"), source.indexOf("  async function save() {\n    if (saved === null)"));
   assert.match(reread, /setSaved\(fresh\.value\);\n    setPaths\(fresh\.value\.paths\);/);
 });
+
+test("a hidden folders save sends the version it read, and a stale one reads the folders again instead of un-hiding one", () => {
+  assert.match(settings.HIDDEN_PATHS_STALE, /changed since you opened them\. The list now shows the saved folders/);
+  const source = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  const start = source.indexOf("function HiddenSection(");
+  const hidden = source.slice(start, source.indexOf("\n}\n", start));
+  assert.match(hidden, /useState<HiddenPaths \| null>\(null\)/);
+  assert.match(hidden, /saveHiddenPaths\(data\.id, paths, saved\.version, nextGeneration\(\)\)/, "the save sends the version the screen read");
+  assert.match(hidden, /if \(savedStale\(result\)\) \{\n      const shown = await reread\(\);/, "a stale save reads the folders and their version again");
+  const save = hidden.slice(hidden.indexOf("  async function save() {"));
+  assert.ok(save.indexOf("savedStale(result)") < save.indexOf("failureCopy(result)"), "before the plain refusal copy");
+  assert.match(hidden, /setSaved\(fresh\.value\);\n    setPaths\(fresh\.value\.paths\);/);
+  assert.ok(!hidden.includes("setSaved(paths)"), "an applied save reads the folders and their new version again");
+  const api = readFileSync(new URL("../src/api-projects.ts", import.meta.url), "utf8");
+  assert.match(api, /export function saveHiddenPaths\(id: string, paths: string\[\], version: number, generation: number\)/);
+  assert.match(api, /call<IntentReceipt>\("desktop_set_project_hidden_paths", \{ id, version, paths, generation \}\)/);
+});

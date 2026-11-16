@@ -64,6 +64,43 @@ fn both_texts_are_saved_and_read_back_and_a_missing_file_is_empty() {
     );
 }
 
+/// SA vid 11 r2 (rv-sec3 F1): a project instructions save writes its temporary file in the
+/// state folder's `context/`, made when missing, and leaves only that folder, empty, and the
+/// instructions file in the state folder; a `context` that is a link is refused with
+/// nothing written through it and the saved text kept.
+#[cfg(unix)]
+#[test]
+fn a_project_save_stages_in_the_context_folder_and_refuses_a_linked_one() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let folder = project.folder.clone().unwrap();
+    let state = folder.join(".crazyagent");
+    save_project(&folder, "Owner rule.\n").unwrap();
+    let mut left: Vec<_> = fs::read_dir(&state)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["context", "instructions.md"]);
+    assert_eq!(
+        fs::read_dir(state.join("context")).unwrap().count(),
+        0,
+        "no temporary file is left behind"
+    );
+    assert_eq!(read_project(&folder).unwrap(), "Owner rule.\n");
+
+    fs::remove_dir(state.join("context")).unwrap();
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, state.join("context")).unwrap();
+    assert_eq!(
+        save_project(&folder, "Planted.\n").unwrap_err().0,
+        "process_text_unwritable"
+    );
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    assert_eq!(read_project(&folder).unwrap(), "Owner rule.\n");
+}
+
 #[test]
 fn a_project_without_its_state_folder_is_refused_and_reads_empty() {
     let (_directory, root) = folder();
@@ -881,7 +918,7 @@ fn owner_text_up_to_the_cap_is_given_inline_and_more_is_refused_by_its_larger_pa
     assert!(given.text.len() <= GIVEN_BYTES_MAX);
 
     let claude = home(&root, "claude");
-    let stale = claude.join(STALE_CONTEXT_FOLDER);
+    let stale = claude.join("crazyagent-context");
     fs::create_dir(&stale).unwrap();
     fs::write(stale.join("app-instructions.md"), &app).unwrap();
     prepare(&claude, Harness::Claude, &project, &given).unwrap();
@@ -905,4 +942,1152 @@ fn owner_text_up_to_the_cap_is_given_inline_and_more_is_refused_by_its_larger_pa
         text(&project).unwrap_err().0,
         "agent_instructions_too_large_project"
     );
+}
+
+/// A launch leaves no code an agent planted in its own home for the shell its harness
+/// starts next (SA vid 12): the zsh, bash and sh startup files, the compiled zsh forms and
+/// the folders whose scripts Claude Code and Codex source ahead of each shell command are
+/// removed, a link among them without what it points to, while its harness state stays.
+#[cfg(unix)]
+#[test]
+fn a_launch_removes_shell_startup_files_and_shell_prelude_folders_from_the_agent_home() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let outside = root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("kept.sh"), "echo kept\n").unwrap();
+    let startup = [
+        ".zshenv",
+        ".zprofile",
+        ".zshrc",
+        ".zlogin",
+        ".zlogout",
+        ".zshenv.zwc",
+        ".zprofile.zwc",
+        ".zshrc.zwc",
+        ".zlogin.zwc",
+        ".zlogout.zwc",
+        ".bashrc",
+        ".bash_profile",
+        ".bash_login",
+        ".bash_logout",
+        ".profile",
+    ];
+    let kept = [".claude.json", "projects/p/s.jsonl"];
+    for (name, harness) in [("claude", Harness::Claude), ("codex", Harness::Codex)] {
+        let home = home(&root, name);
+        for file in startup.iter().chain(kept.iter()) {
+            let path = home.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "echo planted\n").unwrap();
+        }
+        let session = home.join("session-env").join("0b6f1c2e-5d4a");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(session.join("sessionstart-hook-0.sh"), "echo planted\n").unwrap();
+        fs::create_dir(home.join("shell-snapshots")).unwrap();
+        fs::write(
+            home.join("shell-snapshots").join("snapshot-zsh-1.sh"),
+            "echo planted\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, home.join("shell_snapshots")).unwrap();
+
+        prepare(&home, harness, &project, &given).unwrap();
+
+        let left: Vec<&str> = startup
+            .iter()
+            .copied()
+            .chain(["session-env", "shell-snapshots", "shell_snapshots"])
+            .filter(|entry| fs::symlink_metadata(home.join(entry)).is_ok())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "a {name} launch kept planted shell code in the agent home: {left:?}"
+        );
+        for file in kept {
+            assert_eq!(
+                fs::read_to_string(home.join(file)).unwrap(),
+                "echo planted\n",
+                "{file}"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(outside.join("kept.sh")).unwrap(),
+            "echo kept\n"
+        );
+    }
+}
+
+/// A launch keeps in an agent home only what the engine and its harness use across runs,
+/// and nothing a tool reads as config that runs code (RV-DS241-137): git's, cargo's,
+/// npm's, yarn's, ssh's and Python's config and user sites, Node's home module folder,
+/// cargo's own subcommands and a cargo cache the agent made itself (DEC-173), the packages
+/// npx installed, the harness's plugins, rules and memories and every other entry go, a
+/// link among them without what it names, while each
+/// harness's sign-in, transcripts, team and task state, the per-agent keychain, the
+/// launch's own files, the cargo caches linked from the owner's and the shared caches stay.
+#[cfg(unix)]
+#[test]
+fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let outside = root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("config.toml"), "kept outside\n").unwrap();
+    let planted = [
+        ".gitconfig",
+        ".config/git/config",
+        ".cargo/config",
+        ".cargo/config.toml",
+        ".cargo/bin/cargo-clippy",
+        ".cargo/env",
+        ".cargo/git/db/x",
+        ".npmrc",
+        ".yarnrc",
+        ".yarnrc.yml",
+        ".ssh/config",
+        ".node_modules/left-pad/index.js",
+        ".local/lib/python3.12/site-packages/run.pth",
+        "Library/Python/3.9/lib/python/site-packages/run.pth",
+        "Library/Application Support/pip/pip.conf",
+        "Library/Preferences/com.example.plist",
+        ".npm/_npx/0b6f/node_modules/run/index.js",
+        "AGENTS.override.md",
+        "settings.json",
+        "rules/default.rules",
+        "plugins/installed_plugins.json",
+        ".claude/settings.json",
+        "memories/note.md",
+        ".zsh_history",
+        "note",
+    ];
+    let kept = [
+        ".claude.json",
+        ".credentials.json",
+        "auth.json",
+        ".crazyagent-key",
+        "crazyagent.lock",
+        "crazyagent/bin/getconf",
+        "crazyagent-relay/plugin.json",
+        "projects/p/s.jsonl",
+        "sessions/2026/11/15/rollout.jsonl",
+        "teams/t/config.json",
+        ".claude/teams/t/config.json",
+        ".claude/tasks/t/1.json",
+        "todos/t.json",
+        "tasks/t/1.json",
+        "plans/p.md",
+        "skills/s/SKILL.md",
+        "config.toml",
+        "Library/Keychains/login.keychain-db",
+        "Library/Preferences/com.apple.security.plist",
+        ".cache/uv/x",
+        ".npm/_cacache/index-v5/x",
+    ];
+    for (name, harness) in [("claude", Harness::Claude), ("codex", Harness::Codex)] {
+        let home = home(&root, name);
+        for file in planted.iter().chain(kept.iter()) {
+            let path = home.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "planted\n").unwrap();
+        }
+        std::os::unix::fs::symlink(&outside, home.join(".cargo/registry")).unwrap();
+        std::os::unix::fs::symlink(&outside, home.join(".config/cargo")).unwrap();
+        std::os::unix::fs::symlink(outside.join("config.toml"), home.join("history.jsonl"))
+            .unwrap();
+
+        prepare(&home, harness, &project, &given).unwrap();
+
+        let left: Vec<&str> = planted
+            .iter()
+            .copied()
+            .chain([
+                ".config",
+                ".ssh",
+                ".local",
+                "history.jsonl",
+                "Library/Python",
+            ])
+            .filter(|entry| fs::symlink_metadata(home.join(entry)).is_ok())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "a {name} launch kept code-running config in the agent home: {left:?}"
+        );
+        for file in kept {
+            assert_eq!(
+                fs::read_to_string(home.join(file)).unwrap(),
+                "planted\n",
+                "{name}: {file}"
+            );
+        }
+        assert_eq!(
+            fs::read_link(home.join(".cargo/registry")).unwrap(),
+            outside
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("config.toml")).unwrap(),
+            "kept outside\n"
+        );
+    }
+}
+
+/// A launch never keeps a link in the place of what it keeps, nor follows one (RV-DS241-137):
+/// a `projects` folder, a `.claude.json` file and a `Library` folder that are links go
+/// without what they name, so the next run neither reads its transcripts nor finds its
+/// keychain through a place it chose, while cargo's `registry`, which the engine links to
+/// the owner's read-only crates, stays a link.
+#[cfg(unix)]
+#[test]
+fn a_launch_removes_a_link_in_the_place_of_a_kept_entry_without_what_it_names() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let outside = root.join("outside");
+    fs::create_dir_all(outside.join("Keychains")).unwrap();
+    fs::write(outside.join("Keychains/login.keychain-db"), "outside\n").unwrap();
+    fs::write(outside.join("claude.json"), "{}\n").unwrap();
+    let home = home(&root, "claude");
+    std::os::unix::fs::symlink(&outside, home.join("projects")).unwrap();
+    std::os::unix::fs::symlink(&outside, home.join("Library")).unwrap();
+    std::os::unix::fs::symlink(outside.join("claude.json"), home.join(".claude.json")).unwrap();
+    fs::create_dir(home.join(".cargo")).unwrap();
+    std::os::unix::fs::symlink(&outside, home.join(".cargo/registry")).unwrap();
+
+    prepare(&home, Harness::Claude, &project, &given).unwrap();
+
+    for entry in ["projects", "Library", ".claude.json"] {
+        assert!(
+            fs::symlink_metadata(home.join(entry)).is_err(),
+            "{entry} kept as a link"
+        );
+    }
+    assert_eq!(
+        fs::read_link(home.join(".cargo/registry")).unwrap(),
+        outside
+    );
+    assert_eq!(
+        fs::read_to_string(outside.join("Keychains/login.keychain-db")).unwrap(),
+        "outside\n"
+    );
+    assert_eq!(
+        fs::read_to_string(outside.join("claude.json")).unwrap(),
+        "{}\n"
+    );
+}
+
+/// A folder a launch keeps only part of, which a process an agent left swaps for a link to
+/// a folder outside the home while the reset walks it, never leads the reset outside
+/// (RV-DS241-137, sec F1 ds137-lock-linux): `.npm` swapped after the reset found it and
+/// before it lists it, `Library` swapped while the reset is in it and about to walk
+/// `Library/Preferences`, and `.npm` swapped while the reset is about to remove `.npm/_npx`.
+/// Every file in the folder the link names stays and the link goes as a link. It runs on
+/// plain folders, without the macOS profile's pin, so it holds where nothing pins them.
+#[cfg(unix)]
+#[test]
+fn a_kept_folder_swapped_for_a_link_mid_reset_never_leads_the_reset_outside() {
+    let legs = [
+        (".npm", ".npm", ".npm/junk"),
+        ("Library/Preferences", "Library", "Library/Preferences/junk"),
+        (".npm/_npx", ".npm", ".npm/_npx/0"),
+    ];
+    let owned = [
+        "owner.txt",
+        "junk/owner.txt",
+        "Preferences/owner.plist",
+        "_npx/owner.js",
+    ];
+    for (step, swapped, planted) in legs {
+        let (_directory, root) = folder();
+        let project = project(&root);
+        let given = text(&project).unwrap();
+        let home = home(&root, "claude");
+        fs::create_dir_all(home.join(planted)).unwrap();
+        let outside = root.join("outside");
+        for file in owned {
+            let path = outside.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "the owner's\n").unwrap();
+        }
+        let (link, moved, named) = (home.join(swapped), root.join("moved"), outside.clone());
+        let swap: Box<dyn FnOnce()> = Box::new(move || {
+            fs::rename(&link, &moved).unwrap();
+            std::os::unix::fs::symlink(&named, &link).unwrap();
+        });
+        BEFORE_HOME_STEP.with(|hook| *hook.borrow_mut() = Some((home.join(step), swap)));
+
+        let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+        let waiting = BEFORE_HOME_STEP.with(|hook| hook.borrow_mut().take());
+        assert!(waiting.is_none(), "{step}: the swap never ran");
+        let lost: Vec<&str> = owned
+            .into_iter()
+            .filter(|file| {
+                fs::read_to_string(outside.join(file)).ok().as_deref() != Some("the owner's\n")
+            })
+            .collect();
+        assert!(
+            lost.is_empty(),
+            "{step}: the reset removed {lost:?} outside the home"
+        );
+        assert_eq!(prepared, Ok(()), "{step}");
+        assert!(
+            fs::symlink_metadata(home.join(swapped)).is_err(),
+            "{step}: {swapped} kept as a link"
+        );
+    }
+}
+
+/// A link an agent left in the place of a folder a launch keeps only part of goes as a
+/// link, at the home and one folder below it, and the reset never walks through it, so
+/// every file in the folder outside the home it names stays (RV-DS241-137, sec F1
+/// ds137-lock-linux). Passes at the base too; it guards the handle walk.
+#[cfg(unix)]
+#[test]
+fn a_link_in_the_place_of_a_kept_folder_goes_at_any_depth_without_what_it_names() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let outside = root.join("outside");
+    fs::create_dir_all(outside.join("sub")).unwrap();
+    fs::write(outside.join("owner.plist"), "the owner's\n").unwrap();
+    fs::write(outside.join("sub/owner.txt"), "the owner's\n").unwrap();
+    let home = home(&root, "claude");
+    fs::create_dir(home.join("Library")).unwrap();
+    let links = [".npm", "Library/Preferences"];
+    for link in links {
+        std::os::unix::fs::symlink(&outside, home.join(link)).unwrap();
+    }
+
+    prepare(&home, Harness::Claude, &project, &given).unwrap();
+
+    for link in links {
+        assert!(
+            fs::symlink_metadata(home.join(link)).is_err(),
+            "{link} kept as a link"
+        );
+    }
+    for file in ["owner.plist", "sub/owner.txt"] {
+        assert_eq!(
+            fs::read_to_string(outside.join(file)).ok().as_deref(),
+            Some("the owner's\n"),
+            "{file}"
+        );
+    }
+}
+
+/// Cargo's `registry` and `git` caches stay in an agent home only as the links the engine
+/// makes to the owner's read-only crates (DEC-173): a cache folder an agent made itself,
+/// which a later run's cargo would build from without checking it again, goes at each
+/// launch with all it holds, also when no link takes its place, while a link stays a link
+/// and what it names stays as it was.
+#[cfg(unix)]
+#[test]
+fn a_cargo_cache_an_agent_made_goes_at_each_launch_and_only_a_link_stays() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let crates = root.join("owner-crates");
+    fs::create_dir_all(crates.join("src")).unwrap();
+    fs::write(crates.join("src/build.rs"), "fn main() {}\n").unwrap();
+    for (name, linked) in [("made", false), ("linked", true)] {
+        let home = home(&root, name);
+        let cargo = home.join(".cargo");
+        for cache in ["registry", "git"] {
+            if linked && cache == "registry" {
+                fs::create_dir_all(&cargo).unwrap();
+                std::os::unix::fs::symlink(&crates, cargo.join(cache)).unwrap();
+                continue;
+            }
+            let planted = cargo.join(cache).join("src/build.rs");
+            fs::create_dir_all(planted.parent().unwrap()).unwrap();
+            fs::write(&planted, "fn main() { planted() }\n").unwrap();
+        }
+
+        prepare(&home, Harness::Codex, &project, &given).unwrap();
+
+        let left: Vec<&str> = ["registry", "git"]
+            .into_iter()
+            .filter(|cache| !(linked && *cache == "registry"))
+            .filter(|cache| fs::symlink_metadata(cargo.join(cache)).is_ok())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "{name}: cargo caches the agent made stayed: {left:?}"
+        );
+        if linked {
+            assert_eq!(fs::read_link(cargo.join("registry")).unwrap(), crates);
+        }
+    }
+    assert_eq!(
+        fs::read_to_string(crates.join("src/build.rs")).unwrap(),
+        "fn main() {}\n"
+    );
+}
+
+/// A flag an agent set in its own home never keeps its next launch from starting
+/// (RV-DS241-138): an immutable hook file in an immutable Claude Code session folder, an
+/// append-only startup file, an immutable cargo config in an immutable `.cargo` and an
+/// immutable home itself all give way, so the launch removes what it removes and writes
+/// what it writes, while the harness state it keeps stays.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_flag_an_agent_set_in_its_home_never_blocks_its_next_launch() {
+    use nix::sys::stat::FileFlag;
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let session = home.join("session-env").join("0b6f1c2e-5d4a");
+    let hook = session.join("sessionstart-hook-0.sh");
+    fs::create_dir_all(&session).unwrap();
+    fs::write(&hook, "echo planted\n").unwrap();
+    let startup = home.join(".zshrc");
+    fs::write(&startup, "echo planted\n").unwrap();
+    let cargo = home.join(".cargo");
+    fs::create_dir(&cargo).unwrap();
+    let config = cargo.join("config.toml");
+    fs::write(&config, "[build]\nrustc-wrapper = \"/private/tmp/run\"\n").unwrap();
+    let claude = home.join(".claude.json");
+    fs::write(&claude, "{}\n").unwrap();
+    let pinned = [
+        (claude.as_path(), FileFlag::UF_IMMUTABLE),
+        (hook.as_path(), FileFlag::UF_IMMUTABLE),
+        (session.as_path(), FileFlag::UF_IMMUTABLE),
+        (startup.as_path(), FileFlag::UF_APPEND),
+        (config.as_path(), FileFlag::UF_IMMUTABLE),
+        (cargo.as_path(), FileFlag::UF_IMMUTABLE),
+        (home.as_path(), FileFlag::UF_IMMUTABLE),
+    ];
+    for (path, flag) in pinned {
+        nix::unistd::chflags(path, flag).unwrap();
+    }
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    let kept_flags = fs::symlink_metadata(&claude).map(|metadata| {
+        FileFlag::from_bits_retain(std::os::macos::fs::MetadataExt::st_flags(&metadata))
+    });
+    let left: Vec<&Path> = [
+        hook.as_path(),
+        session.as_path(),
+        startup.as_path(),
+        config.as_path(),
+    ]
+    .into_iter()
+    .filter(|path| fs::symlink_metadata(path).is_ok())
+    .collect();
+    for (path, _) in pinned {
+        let _ = nix::unistd::chflags(path, FileFlag::empty());
+    }
+    assert_eq!(prepared, Ok(()));
+    assert!(left.is_empty(), "a flag kept {left:?} from the launch");
+    assert_eq!(fs::read_to_string(&claude).unwrap(), "{}\n");
+    assert!(
+        kept_flags
+            .as_ref()
+            .is_ok_and(|flags| !flags.intersects(FileFlag::UF_IMMUTABLE)),
+        "a kept file stayed pinned: {kept_flags:?}"
+    );
+}
+
+/// A flag on an entry its owner cannot open never keeps the next launch from starting
+/// (RV-DS241-137 code r1 F2): an immutable file at mode 000, and an immutable folder at mode
+/// 000 holding one too, both go, though neither opens for reading.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_flag_on_an_entry_at_mode_000_never_blocks_the_next_launch() {
+    use nix::sys::stat::FileFlag;
+    use std::os::unix::fs::PermissionsExt;
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let locked = home.join("locked");
+    fs::write(&locked, "planted\n").unwrap();
+    let vault = home.join("vault");
+    fs::create_dir(&vault).unwrap();
+    let inner = vault.join("inner");
+    fs::write(&inner, "planted\n").unwrap();
+    let pinned = [locked.as_path(), inner.as_path(), vault.as_path()];
+    for path in pinned {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+        nix::unistd::chflags(path, FileFlag::UF_IMMUTABLE).unwrap();
+    }
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    let left: Vec<&Path> = [locked.as_path(), vault.as_path()]
+        .into_iter()
+        .filter(|path| fs::symlink_metadata(path).is_ok())
+        .collect();
+    for path in pinned.into_iter().rev() {
+        let _ = nix::unistd::chflags(path, FileFlag::empty());
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    }
+    assert_eq!(prepared, Ok(()));
+    assert!(
+        left.is_empty(),
+        "a flag at mode 000 kept {left:?} from the launch"
+    );
+}
+
+/// An ACL entry an agent set in its own home never keeps its next launch from starting
+/// (RV-DS241-137 sec r1 F2): a deny entry binds the owner too, yet a file whose ACL denies
+/// its removal, a folder whose ACL denies removing it and what it holds, and a kept
+/// `.claude.json` whose ACL denies writing it all give way, so the launch removes what it
+/// removes and the kept file holds no ACL entry after it.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_acl_an_agent_set_in_its_home_never_blocks_its_next_launch() {
+    use std::process::Command;
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let note = home.join("note");
+    fs::write(&note, "planted\n").unwrap();
+    let stuck = home.join("stuck");
+    fs::create_dir(&stuck).unwrap();
+    let inner = stuck.join("inner");
+    fs::write(&inner, "planted\n").unwrap();
+    let claude = home.join(".claude.json");
+    fs::write(&claude, "{}\n").unwrap();
+    let chmod = |arguments: &[&str]| {
+        let done =
+            crate::spawn_gate::collected(Command::new("/bin/chmod").args(arguments)).unwrap();
+        assert!(done.status.success(), "{arguments:?}: {done:?}");
+    };
+    let path = |path: &Path| path.to_str().unwrap().to_owned();
+    chmod(&["+a", "everyone deny delete", &path(&note)]);
+    chmod(&["+a", "everyone deny delete", &path(&inner)]);
+    chmod(&["+a", "everyone deny delete,delete_child", &path(&stuck)]);
+    chmod(&["+a", "everyone deny write,delete", &path(&claude)]);
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    let listed =
+        crate::spawn_gate::collected(Command::new("/bin/ls").arg("-led").arg(&claude)).unwrap();
+    let kept_acl = String::from_utf8_lossy(&listed.stdout).into_owned();
+    let left: Vec<&Path> = [note.as_path(), stuck.as_path()]
+        .into_iter()
+        .filter(|path| fs::symlink_metadata(path).is_ok())
+        .collect();
+    let _ = crate::spawn_gate::collected(Command::new("/bin/chmod").args(["-R", "-N"]).arg(&home));
+    assert_eq!(prepared, Ok(()));
+    assert!(left.is_empty(), "an ACL kept {left:?} from the launch");
+    assert_eq!(fs::read_to_string(&claude).unwrap(), "{}\n");
+    assert!(
+        listed.status.success() && !kept_acl.contains("deny"),
+        "a kept file kept its ACL: {kept_acl}"
+    );
+}
+
+/// Adds one ACL entry to a test path with `/bin/chmod +a` and requires it to hold. Inputs:
+/// the entry and the path.
+#[cfg(target_os = "macos")]
+fn acl(entry: &str, path: &Path) {
+    let done = crate::spawn_gate::collected(
+        std::process::Command::new("/bin/chmod")
+            .args(["+a", entry])
+            .arg(path),
+    )
+    .unwrap();
+    assert!(done.status.success(), "{entry} {path:?}: {done:?}");
+}
+
+/// Whether a test path's ACL holds a deny entry, as `/bin/ls -led` lists it. Input: the
+/// path. Output: the answer.
+#[cfg(target_os = "macos")]
+fn denies(path: &Path) -> bool {
+    let listed =
+        crate::spawn_gate::collected(std::process::Command::new("/bin/ls").arg("-led").arg(path))
+            .unwrap();
+    listed.status.success() && String::from_utf8_lossy(&listed.stdout).contains("deny")
+}
+
+/// Clears a test path's ACL and user flags when dropped, so its temporary folder can be
+/// deleted whatever the test asserted. Holds the path.
+#[cfg(target_os = "macos")]
+struct Released(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for Released {
+    fn drop(&mut self) {
+        let _ = nix::unistd::chflags(self.0.as_path(), nix::sys::stat::FileFlag::empty());
+        let _ = crate::spawn_gate::collected(
+            std::process::Command::new("/bin/chmod")
+                .arg("-N")
+                .arg(&self.0),
+        );
+    }
+}
+
+/// A launch that clears a home folder an agent left without write never changes the ACL of
+/// a file a link in that folder names (RV-DS241-137 sec r2 F1): the folder and the link go,
+/// and the file outside the home keeps its entry, since a tree's ACLs go only on its
+/// one-link entries that are not links and on links themselves, as a launch context's
+/// release clears them.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_link_in_a_home_folder_the_launch_opens_up_never_carries_an_acl_clear_outside() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let outside = root.join("outside.txt");
+    fs::write(&outside, "the owner's\n").unwrap();
+    let _outside = Released(outside.clone());
+    acl("everyone deny write", &outside);
+    let shut = home.join("d");
+    fs::create_dir(&shut).unwrap();
+    std::os::unix::fs::symlink(&outside, shut.join("x")).unwrap();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o500)).unwrap();
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    let _ = fs::set_permissions(&shut, fs::Permissions::from_mode(0o700));
+    assert_eq!(prepared, Ok(()));
+    assert!(
+        fs::symlink_metadata(&shut).is_err(),
+        "the shut folder stayed"
+    );
+    assert!(denies(&outside), "a file outside the home lost its ACL");
+}
+
+/// A kept name an agent made a second link to a file outside its home never changes that
+/// file at the next launch (RV-DS241-137 sec r2 F1, code r2 F2, V231-ACL): `.claude.json`
+/// linked to a file whose ACL denies writing goes as a plain unlink and the file keeps its
+/// entry, and `.credentials.json` linked to a file pinned immutable, which no unlink takes,
+/// refuses the launch while the file keeps its flag.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_kept_name_linked_to_a_file_outside_the_home_never_changes_that_file() {
+    use nix::sys::stat::FileFlag;
+    use std::os::macos::fs::MetadataExt as _;
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let denied = root.join("denied.json");
+    fs::write(&denied, "{}\n").unwrap();
+    let _denied = Released(denied.clone());
+    acl("everyone deny write", &denied);
+    let claude = home(&root, "claude");
+    fs::hard_link(&denied, claude.join(".claude.json")).unwrap();
+    let pinned = root.join("pinned.json");
+    fs::write(&pinned, "{}\n").unwrap();
+    let _pinned = Released(pinned.clone());
+    let codex = home(&root, "codex");
+    fs::hard_link(&pinned, codex.join(".credentials.json")).unwrap();
+    nix::unistd::chflags(pinned.as_path(), FileFlag::UF_IMMUTABLE).unwrap();
+
+    let linked_acl = prepare(&claude, Harness::Claude, &project, &given);
+    let linked_flag = prepare(&codex, Harness::Codex, &project, &given);
+
+    assert_eq!(linked_acl, Ok(()));
+    assert!(denies(&denied), "a file outside the home lost its ACL");
+    assert_eq!(
+        fs::metadata(&denied).unwrap().nlink(),
+        1,
+        "the second link stayed"
+    );
+    assert_eq!(
+        linked_flag,
+        Err(AgentHomeError("agent_home_unwritable".into()))
+    );
+    let flags = fs::symlink_metadata(&pinned).unwrap().st_flags();
+    assert_ne!(
+        flags & FileFlag::UF_IMMUTABLE.bits(),
+        0,
+        "a file outside the home lost its flag"
+    );
+}
+/// On Linux the reset keeps a home's launch lock that an agent gave a second name in a kept
+/// folder, the same file the launch holds (RV-DS241-137 r3 code F2): Landlock and bubblewrap
+/// keep a confined agent from linking a file from outside its write roots, so only macOS,
+/// whose profile pins the lock, refuses a second link; removing the lock here would let a
+/// second launch into the home.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_reset_keeps_the_held_lock_whatever_its_links() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let claude = home(&root, "claude");
+    let lock = claude.join(crate::launch_context::LOCK);
+    fs::write(&lock, "").unwrap();
+    fs::create_dir(claude.join(".cache")).unwrap();
+    fs::hard_link(&lock, claude.join(".cache").join("x")).unwrap();
+    let inode = fs::symlink_metadata(&lock).unwrap().ino();
+
+    let reset = prepare(&claude, Harness::Claude, &project, &given);
+
+    assert_eq!(reset, Ok(()));
+    assert_eq!(
+        fs::symlink_metadata(&lock).map(|found| found.ino()).ok(),
+        Some(inode),
+        "the held lock stays"
+    );
+}
+
+/// A home folder whose ACLs deny listing two folders deep still goes at the next launch
+/// (RV-DS241-137 code r2 F3): each folder's ACL is cleared by its path before the walk reads
+/// it, so a tree a Full run or an earlier version's run left that way never refuses every
+/// later launch. Passes at the base too (scratch probe, DONE r3); it guards the new tree clear.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_folder_whose_acls_deny_listing_two_deep_still_goes() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let outer = home.join("outer");
+    let inner = outer.join("inner");
+    let file = inner.join("file");
+    fs::create_dir_all(&inner).unwrap();
+    fs::write(&file, "planted\n").unwrap();
+    let _file = Released(file.clone());
+    let _inner = Released(inner.clone());
+    let _outer = Released(outer.clone());
+    acl("everyone deny delete", &file);
+    acl("everyone deny list,search", &inner);
+    acl("everyone deny list,search", &outer);
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    assert_eq!(prepared, Ok(()));
+    assert!(
+        fs::symlink_metadata(&outer).is_err(),
+        "a tree whose ACLs deny listing stayed"
+    );
+}
+
+/// A home folder an agent left readable but not searchable still goes at the next launch
+/// (RV-DS241-137 code r1 F2 ds137-reset-walk addendum): one whose ACL denies searching it,
+/// and an immutable one at mode 0600, each holding a file. The reset opens such a folder,
+/// finds it will not list and clears its flags, mode and ACL through its parent by name
+/// before it lists it, as a base reset by path removed both.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_folder_that_reads_but_will_not_search_still_goes() {
+    use nix::sys::stat::FileFlag;
+    use std::os::unix::fs::PermissionsExt;
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let (denied, pinned) = (home.join("denied"), home.join("pinned"));
+    for at in [&denied, &pinned] {
+        fs::create_dir(at).unwrap();
+        fs::write(at.join("file"), "planted\n").unwrap();
+    }
+    let _denied = Released(denied.clone());
+    acl("everyone deny search", &denied);
+    fs::set_permissions(&pinned, fs::Permissions::from_mode(0o600)).unwrap();
+    nix::unistd::chflags(pinned.as_path(), FileFlag::UF_IMMUTABLE).unwrap();
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    let left: Vec<&Path> = [denied.as_path(), pinned.as_path()]
+        .into_iter()
+        .filter(|path| fs::symlink_metadata(path).is_ok())
+        .collect();
+    let _ = nix::unistd::chflags(pinned.as_path(), FileFlag::empty());
+    let _ = fs::set_permissions(&pinned, fs::Permissions::from_mode(0o700));
+    assert_eq!(prepared, Ok(()));
+    assert!(
+        left.is_empty(),
+        "a folder that reads but will not search kept {left:?} from the launch"
+    );
+}
+
+/// A home an earlier run left with an ACL that denies listing it, or listing a folder the
+/// launch keeps only part of, still gets its reset (RV-DS241-137 code r2 F3): a listing that
+/// stops clears that folder's ACL by its path and lists it once more, so a Full run or an
+/// earlier version's run never refuses every later launch.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_or_kept_folder_whose_acl_denies_listing_never_refuses_the_launch() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let npm = home.join(".npm");
+    fs::create_dir_all(npm.join("_npx/0")).unwrap();
+    fs::write(home.join("note"), "planted\n").unwrap();
+    let _npm = Released(npm.clone());
+    let _home = Released(home.clone());
+    acl("everyone deny list", &npm);
+    acl("everyone deny list", &home);
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    assert_eq!(prepared, Ok(()));
+    assert!(
+        fs::symlink_metadata(home.join("note")).is_err(),
+        "a planted file stayed"
+    );
+    assert!(
+        fs::symlink_metadata(npm.join("_npx")).is_err(),
+        "npx's packages stayed"
+    );
+}
+
+/// A file a launch removes whose ACL denies reading and deleting it still goes
+/// (RV-DS241-137 code r2 F3): once the plain unlink stops, its ACL is cleared by its path,
+/// which needs no read, where clearing it on the entry itself opens it and fails.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_file_whose_acl_denies_reading_and_deleting_it_still_goes() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let planted = home.join("note");
+    fs::write(&planted, "planted\n").unwrap();
+    let _planted = Released(planted.clone());
+    acl("everyone deny read,delete", &planted);
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    assert_eq!(prepared, Ok(()));
+    assert!(
+        fs::symlink_metadata(&planted).is_err(),
+        "the denied file stayed"
+    );
+}
+
+/// A home an agent filled with more entries than one listing of it takes still launches,
+/// and every entry it planted goes while what the harness keeps stays (RV-DS241-137), so a
+/// run that makes a hundred thousand files in its home never refuses every later launch.
+#[cfg(unix)]
+#[test]
+fn a_launch_clears_a_home_an_agent_filled_with_entries() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    fs::write(home.join(".claude.json"), "{}\n").unwrap();
+    let planted = 100_001;
+    for index in 0..planted {
+        File::create(home.join(format!("n-{index}"))).unwrap();
+    }
+
+    prepare(&home, Harness::Claude, &project, &given).unwrap();
+
+    let left: Vec<String> = fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, [".claude.json"]);
+}
+
+/// A run that leaves more than 200,000 files in one folder of its home never refuses the
+/// next launch (RV-DS241-137 code r1 F1 ds137-reset-walk): the reset lists that folder a
+/// chunk at a time and removes each chunk through its handle until the folder lists empty,
+/// so no folder's size stops it and only the kept names stay.
+#[cfg(unix)]
+#[test]
+fn a_launch_clears_a_home_folder_holding_more_than_two_hundred_thousand_files() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    fs::write(home.join(".claude.json"), "{}\n").unwrap();
+    let junk = home.join("junk");
+    fs::create_dir(&junk).unwrap();
+    for index in 0..200_001 {
+        File::create(junk.join(format!("n-{index}"))).unwrap();
+    }
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    assert_eq!(prepared, Ok(()));
+    let left: Vec<String> = fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, [".claude.json"]);
+}
+
+/// A run that leaves a tree of more than 200,000 entries below one folder of its home, as a
+/// Go module or build cache, Gradle, Maven or Bun can, never refuses the next launch
+/// (RV-DS241-137 code r1 F1 ds137-reset-walk): no count of what one removal reaches stops
+/// it, so the launch after it starts and only the kept names stay.
+#[cfg(unix)]
+#[test]
+fn a_launch_clears_a_tree_of_more_than_two_hundred_thousand_entries_below_one_home_folder() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    fs::write(home.join(".claude.json"), "{}\n").unwrap();
+    for part in ["a", "b"] {
+        let at = home.join("cache").join(part);
+        fs::create_dir_all(&at).unwrap();
+        for index in 0..100_001 {
+            File::create(at.join(format!("n-{index}"))).unwrap();
+        }
+    }
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    assert_eq!(prepared, Ok(()));
+    let left: Vec<String> = fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, [".claude.json"]);
+}
+
+/// A kept folder an agent left empty at mode 0400, which reads but will not search, keeps
+/// its place and never refuses the next launch (RV-DS241-137 code r1 note 2): the reset
+/// opens it, finds it will not list and gives this user rwx on it through its parent by
+/// name before it lists it.
+#[cfg(unix)]
+#[test]
+fn a_kept_folder_left_readable_but_not_searchable_keeps_its_place() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "claude");
+    let npm = home.join(".npm");
+    fs::create_dir(&npm).unwrap();
+    fs::set_permissions(&npm, fs::Permissions::from_mode(0o400)).unwrap();
+
+    let prepared = prepare(&home, Harness::Claude, &project, &given);
+
+    let _ = fs::set_permissions(&npm, fs::Permissions::from_mode(0o700));
+    assert_eq!(prepared, Ok(()));
+    assert!(fs::symlink_metadata(&npm).is_ok_and(|found| found.is_dir()));
+}
+
+/// What an agent's own run leaves in its home runs nothing in a git, Python, cargo or npm
+/// it starts later, sandboxed or at Full access, which share one environment (RV-DS241-137,
+/// sec r1 F1): git reads no `.gitconfig`, so its `core.fsmonitor` program never runs, Python
+/// reads no user site, so a `.pth` file there runs nothing, npm reads no `.npmrc`, so its
+/// `node-options` never reach a script, and a cargo config naming a `rustc-wrapper` an
+/// earlier run left goes at the next launch. Without each pin the same plant runs, so each
+/// leg proves its pin. Needs `/usr/bin/git` and `/usr/bin/python3` from the Command Line
+/// Tools, npm and node on `PATH`, and the cargo and rustc the tests use.
+#[cfg(target_os = "macos")]
+#[test]
+fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let home = home(&root, "agent");
+    let marker = root.join("ran.txt");
+    let fsmonitor = root.join("fsmonitor.sh");
+    let wrapper = root.join("wrapper.sh");
+    for (script, then) in [(&fsmonitor, "exit 1"), (&wrapper, "exec \"$@\"")] {
+        fs::write(
+            script,
+            format!(
+                "#!/bin/sh\necho '{}' >> '{}'\n{then}\n",
+                script.display(),
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let probe = root.join("probe");
+    fs::create_dir_all(probe.join("src")).unwrap();
+    fs::write(
+        probe.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    fs::write(probe.join("src/lib.rs"), "").unwrap();
+    fs::create_dir(home.join(".cargo")).unwrap();
+    fs::write(
+        home.join(".cargo/config.toml"),
+        format!("[build]\nrustc-wrapper = \"{}\"\n", wrapper.display()),
+    )
+    .unwrap();
+
+    prepare(&home, Harness::Claude, &project, &given).unwrap();
+
+    fs::write(
+        home.join(".gitconfig"),
+        format!("[core]\n\tfsmonitor = {}\n", fsmonitor.display()),
+    )
+    .unwrap();
+    let site = crate::spawn_gate::collected(
+        Command::new("/usr/bin/python3")
+            .args(["-c", "import site; print(site.getusersitepackages())"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin"),
+    )
+    .unwrap();
+    assert!(site.status.success(), "{site:?}");
+    let site = PathBuf::from(String::from_utf8(site.stdout).unwrap().trim());
+    assert!(site.starts_with(&home), "{}", site.display());
+    fs::create_dir_all(&site).unwrap();
+    fs::write(
+        site.join("run.pth"),
+        format!(
+            "import os; open('{}', 'a').write('pth\\n')\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let repo = root.join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::write(repo.join("a.txt"), "a\n").unwrap();
+    for arguments in [&["init", "-q"][..], &["add", "a.txt"][..]] {
+        let setup = crate::spawn_gate::collected(
+            Command::new("/usr/bin/git")
+                .args(arguments)
+                .current_dir(&repo)
+                .env_clear()
+                .env("HOME", &root)
+                .env("PATH", "/usr/bin:/bin")
+                .env("GIT_CONFIG_NOSYSTEM", "1"),
+        )
+        .unwrap();
+        assert!(setup.status.success(), "{setup:?}");
+    }
+    let path = std::env::var_os("PATH").unwrap_or_else(|| OsString::from("/usr/bin:/bin"));
+    let owner = std::env::var_os("HOME").map(PathBuf::from);
+    let rustup = std::env::var_os("RUSTUP_HOME")
+        .or_else(|| owner.map(|owner| owner.join(".rustup").into_os_string()))
+        .unwrap();
+    let toolchain = std::env::var_os("RUSTUP_TOOLCHAIN");
+    let npm = std::env::split_paths(&path)
+        .map(|folder| folder.join("npm"))
+        .find(|candidate| candidate.is_file())
+        .expect("the row needs npm on PATH")
+        .into_os_string();
+    let package = root.join("package");
+    fs::create_dir(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        "{\"name\":\"p\",\"version\":\"0.0.0\",\"scripts\":{\"x\":\"node -e 0\"}}\n",
+    )
+    .unwrap();
+    let required = root.join("npmrc.js");
+    fs::write(
+        &required,
+        format!(
+            "require('fs').appendFileSync('{}', 'npmrc\\n');\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        home.join(".npmrc"),
+        format!("node-options=--require={}\n", required.display()),
+    )
+    .unwrap();
+    let cargo_home = home.join(".cargo");
+    let target = root.join("target");
+    let mut base: Vec<(&str, &OsStr)> = vec![
+        ("HOME", home.as_os_str()),
+        ("PATH", path.as_os_str()),
+        ("RUSTUP_HOME", rustup.as_os_str()),
+        ("CARGO_HOME", cargo_home.as_os_str()),
+        ("CARGO_TARGET_DIR", target.as_os_str()),
+    ];
+    if let Some(toolchain) = &toolchain {
+        base.push(("RUSTUP_TOOLCHAIN", toolchain.as_os_str()));
+    }
+    let env =
+        crate::sandbox::agent_env(&base, std::iter::empty::<(&OsStr, Option<&OsStr>)>()).unwrap();
+    let mut ran = Vec::new();
+    for (program, arguments, folder) in [
+        (
+            OsString::from("/usr/bin/git"),
+            &["status", "--porcelain"][..],
+            &repo,
+        ),
+        (
+            OsString::from("/usr/bin/python3"),
+            &["-c", "pass"][..],
+            &repo,
+        ),
+        (
+            OsString::from(env!("CARGO")),
+            &[
+                "check",
+                "--offline",
+                "--quiet",
+                "--manifest-path",
+                "Cargo.toml",
+            ][..],
+            &probe,
+        ),
+        (
+            npm.clone(),
+            &["--no-update-notifier", "run", "x"][..],
+            &package,
+        ),
+    ] {
+        let output = crate::spawn_gate::collected(
+            Command::new(&program)
+                .args(arguments)
+                .current_dir(folder)
+                .env_clear()
+                .envs(env.iter().map(|(name, value)| (name, value))),
+        )
+        .unwrap();
+        ran.push(format!("{program:?}: {output:?}"));
+        assert!(output.status.success(), "{ran:?}");
+    }
+    assert!(
+        !marker.exists(),
+        "an agent tool ran what its home config named: {:?}\n{ran:?}",
+        fs::read_to_string(&marker).unwrap_or_default()
+    );
+    for (pin, program, arguments, folder, expected) in [
+        (
+            "GIT_CONFIG_GLOBAL",
+            OsString::from("/usr/bin/git"),
+            &["status", "--porcelain"][..],
+            &repo,
+            fsmonitor.display().to_string(),
+        ),
+        (
+            "PYTHONNOUSERSITE",
+            OsString::from("/usr/bin/python3"),
+            &["-c", "pass"][..],
+            &repo,
+            "pth".to_owned(),
+        ),
+        (
+            "NPM_CONFIG_USERCONFIG",
+            npm.clone(),
+            &["--no-update-notifier", "run", "x"][..],
+            &package,
+            "npmrc".to_owned(),
+        ),
+    ] {
+        let output = crate::spawn_gate::collected(
+            Command::new(&program)
+                .args(arguments)
+                .current_dir(folder)
+                .env_clear()
+                .envs(
+                    env.iter()
+                        .filter(|(name, _)| name.as_os_str() != OsStr::new(pin))
+                        .map(|(name, value)| (name, value)),
+                ),
+        )
+        .unwrap();
+        let heard = fs::read_to_string(&marker).unwrap_or_default();
+        assert!(
+            heard.contains(&expected),
+            "without {pin} the planted config ran nothing, so the row proves nothing: \
+             {heard:?}\n{output:?}"
+        );
+    }
 }

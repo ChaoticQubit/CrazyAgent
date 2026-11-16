@@ -1,4 +1,7 @@
-use super::platform::{Stamp, copy_link, permission_bits, private_folder, stamp, writable_folder};
+use super::platform::{
+    SourceFolder, Stamp, copy_link, open_seen, permission_bits, private_folder, set_mode, stamp,
+    writable_folder,
+};
 use super::{AddMode, holds_owner_home, owner_home, path_text, real_folder, refused};
 use crate::engine::EngineError;
 use std::collections::HashMap;
@@ -6,6 +9,7 @@ use std::fs;
 use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 /// How many entries and folder levels a copy, its check or a size read goes through
@@ -36,6 +40,60 @@ const CHUNK_BYTES: usize = 64 * 1024;
 const STAMP_SETTLE: Duration = Duration::from_secs(4);
 const DEADLINE_EVERY: u64 = 1024;
 const GITDIR_FILE_BYTES_MAX: u64 = 4096;
+
+/// What one add reports while it copies and the stop it obeys: the entries copied and
+/// checked so far, whether the checked copy is in place and the old folder being cleared,
+/// and a stop asked between entries, which ends the copy before clearing starts.
+#[derive(Debug, Default)]
+pub struct Tally {
+    copied: AtomicU64,
+    checked: AtomicU64,
+    clearing: AtomicBool,
+    stop: AtomicBool,
+}
+
+impl Tally {
+    /// Entries copied so far.
+    pub fn copied(&self) -> u64 {
+        self.copied.load(Ordering::SeqCst)
+    }
+
+    /// Entries checked against the source so far.
+    pub fn checked(&self) -> u64 {
+        self.checked.load(Ordering::SeqCst)
+    }
+
+    /// Whether the copy is in place and checked and the old folder is being cleared.
+    pub fn clearing(&self) -> bool {
+        self.clearing.load(Ordering::SeqCst)
+    }
+
+    /// Whether a stop was asked.
+    pub fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
+    /// Marks the checked copy in place and the old folder being cleared.
+    pub(super) fn mark_clearing(&self) {
+        let before = self.clearing.swap(true, Ordering::SeqCst);
+        assert!(!before, "clearing starts once");
+    }
+
+    /// Asks the copy to stop at its next entry. Clearing the old folder never stops, since
+    /// the copy it follows is complete and checked.
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Ok while no stop was asked, else `home_add_cancelled`, logged without a path.
+    fn go_on(&self) -> Result<(), EngineError> {
+        if !self.stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        eprintln!("home_add_cancelled");
+        Err(refused("home_add_cancelled"))
+    }
+}
 
 /// A checked plan to bring one folder into the projects home.
 /// Built only by `plan_add`, which refuses unsafe sources and taken names.
@@ -85,9 +143,19 @@ impl AddPlan {
     /// no partial folder shows; `home_move_source_left` means the folder landed but
     /// part of the source could not be deleted.
     pub fn run(self) -> Result<(), EngineError> {
-        match self.place()? {
+        self.run_tallied(&Tally::default())
+    }
+
+    /// `run` that reports into a tally and stops when it asks, before clearing.
+    /// Input: the tally. Output: as `run`, or `home_add_cancelled` after a stop, with the
+    /// source as it was and no partial folder showing.
+    pub fn run_tallied(self, tally: &Tally) -> Result<(), EngineError> {
+        match self.place(tally)? {
             Placed::Whole => Ok(()),
-            Placed::Copied(old) => old.clear(),
+            Placed::Copied(old) => {
+                tally.mark_clearing();
+                old.clear()
+            }
         }
     }
 
@@ -95,17 +163,20 @@ impl AddPlan {
     /// one disk, else a checked copy that leaves the whole source in place for the
     /// caller to clear. Output: whether a source is left to clear, or the refusal code
     /// with the source as it was and no partial folder showing.
-    pub(super) fn place(self) -> Result<Placed, EngineError> {
+    pub(super) fn place(self, tally: &Tally) -> Result<Placed, EngineError> {
+        tally.go_on()?;
         if fs::symlink_metadata(&self.destination).is_ok() {
             return Err(refused("home_destination_exists"));
         }
         match self.mode {
             AddMode::Move => match fs::rename(&self.source, &self.destination) {
                 Ok(()) => Ok(Placed::Whole),
-                Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => self.place_by_copy(),
+                Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+                    self.place_by_copy(tally)
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::Deadlock => {
                     eprintln!("home_move_by_copy cause=edeadlk");
-                    self.place_by_copy()
+                    self.place_by_copy(tally)
                 }
                 Err(e) => Err(failed_step("rename", &e, "home_move_failed")),
             },
@@ -114,6 +185,7 @@ impl AddPlan {
                 &self.destination,
                 Copying::Standalone,
                 self.bounds,
+                tally,
             )
             .map(|_| Placed::Whole),
         }
@@ -122,12 +194,18 @@ impl AddPlan {
     /// The copy a move falls back to across disks and out of iCloud Drive: copies every
     /// entry and checks the copy against the source, which stays whole. Output: the
     /// source to clear, with what the check matched, or the refusal code.
-    pub(super) fn place_by_copy(self) -> Result<Placed, EngineError> {
+    pub(super) fn place_by_copy(self, tally: &Tally) -> Result<Placed, EngineError> {
         assert_eq!(self.mode, AddMode::Move);
         if fs::symlink_metadata(&self.destination).is_ok() {
             return Err(refused("home_destination_exists"));
         }
-        let verified = copy_into(&self.source, &self.destination, Copying::Exact, self.bounds)?;
+        let verified = copy_into(
+            &self.source,
+            &self.destination,
+            Copying::Exact,
+            self.bounds,
+            tally,
+        )?;
         Ok(Placed::Copied(OldSource {
             source: self.source,
             landed: self.destination,
@@ -254,7 +332,13 @@ pub fn move_by_copy(source: &Path, destination: &Path) -> Result<(), EngineError
 /// matched, and still as it saw them, are removed. Inputs: the source, the destination and
 /// the bounds. Output: as `move_by_copy`.
 fn move_within(source: &Path, destination: &Path, bounds: CopyBounds) -> Result<(), EngineError> {
-    let verified = copy_into(source, destination, Copying::Exact, bounds)?;
+    let verified = copy_into(
+        source,
+        destination,
+        Copying::Exact,
+        bounds,
+        &Tally::default(),
+    )?;
     make_writable(source).map_err(|_| source_left(1))?;
     remove_verified(source, destination, &verified, bounds)
 }
@@ -312,8 +396,9 @@ impl Verified {
             return fs::read_link(path)
                 .is_ok_and(|target| fs::read_link(&copy).is_ok_and(|kept| kept == target));
         }
-        fs::symlink_metadata(&copy).is_ok_and(|kept| kept.is_file())
-            && same_bytes(path, &copy).unwrap_or(false)
+        fs::symlink_metadata(&copy).is_ok_and(|kept| {
+            kept.is_file() && same_bytes((path, metadata), (copy.as_path(), &kept)).unwrap_or(false)
+        })
     }
 }
 
@@ -397,7 +482,9 @@ fn restore(copy: &Path, source: &Path) -> Result<(), EngineError> {
 }
 
 /// Copies back every entry of `copy` missing from `target` without following
-/// links, then gives each folder of `target` its counterpart's permissions.
+/// links, each read through the folder of `copy` it was listed in and written only where
+/// nothing holds its path, then gives each folder of `target` its counterpart's
+/// permissions, never through a link put at its path (RV-DS241-40, RV-DS241-41).
 /// Input: a complete copy and a partly deleted folder it was copied from.
 /// Output: Ok, or the refusal codes of `copy_tree`; entries still in `target`
 /// are kept for `verify_tree` to compare.
@@ -407,38 +494,39 @@ fn fill_tree(copy: &Path, target: &Path) -> Result<(), EngineError> {
         return copy_tree(copy, target);
     }
     let root = fs::symlink_metadata(copy).map_err(failed)?;
-    let mut folders = vec![(target.to_path_buf(), root)];
-    let mut stack = vec![(copy.to_path_buf(), target.to_path_buf(), 0usize)];
+    let mut folders = vec![(target.to_path_buf(), root.clone())];
+    let mut stack = vec![(copy.to_path_buf(), target.to_path_buf(), 0usize, root)];
     let mut entries = 0u64;
-    while let Some((from, to, depth)) = stack.pop() {
-        for entry in fs::read_dir(&from).map_err(failed)? {
+    while let Some((from, to, depth, seen)) = stack.pop() {
+        let below = from
+            .strip_prefix(copy)
+            .map_err(|_| refused("home_copy_failed"))?;
+        let folder = SourceFolder::open(copy, below, &seen).map_err(failed)?;
+        for name in folder.names().map_err(failed)? {
             entries += 1;
             if entries > ENTRIES_MAX {
                 return Err(refused("home_copy_too_large"));
             }
-            let entry = entry.map_err(failed)?;
-            let path = entry.path();
-            let kept = to.join(entry.file_name());
+            let name = name.map_err(failed)?;
+            let path = from.join(&name);
+            let kept = to.join(&name);
             let metadata = fs::symlink_metadata(&path).map_err(failed)?;
             let kind = metadata.file_type();
             match fs::symlink_metadata(&kept) {
                 Err(_) if kind.is_symlink() => {
-                    let link = fs::read_link(&path).map_err(failed)?;
+                    let link = folder.read_link(&name).map_err(failed)?;
                     copy_link(&path, link, &kept).map_err(failed)?;
                 }
                 Err(_) if kind.is_dir() => copy_tree(&path, &kept)?,
-                Err(_) => {
-                    fs::copy(&path, &kept).map_err(failed)?;
-                    fs::set_permissions(&kept, metadata.permissions()).map_err(failed)?;
-                }
+                Err(_) => folder.copy_file(&name, &metadata, &kept).map_err(failed)?,
                 Ok(existing)
                     if kind.is_dir() && existing.is_dir() && !existing.file_type().is_symlink() =>
                 {
                     if depth + 1 > DEPTH_MAX {
                         return Err(refused("home_copy_too_large"));
                     }
-                    folders.push((kept.clone(), metadata));
-                    stack.push((path, kept, depth + 1));
+                    folders.push((kept.clone(), metadata.clone()));
+                    stack.push((path, kept, depth + 1, metadata));
                 }
                 Ok(_) => {}
             }
@@ -447,7 +535,7 @@ fn fill_tree(copy: &Path, target: &Path) -> Result<(), EngineError> {
     for (folder, wanted) in folders.into_iter().rev() {
         let now = fs::symlink_metadata(&folder).map_err(failed)?;
         if permission_bits(&now) != permission_bits(&wanted) {
-            fs::set_permissions(&folder, wanted.permissions()).map_err(failed)?;
+            set_mode(&folder, wanted.permissions()).map_err(failed)?;
         }
     }
     assert!(entries <= ENTRIES_MAX);
@@ -468,6 +556,7 @@ fn copy_into(
     destination: &Path,
     how: Copying,
     bounds: CopyBounds,
+    tally: &Tally,
 ) -> Result<Verified, EngineError> {
     let parent = destination
         .parent()
@@ -479,13 +568,14 @@ fn copy_into(
         token.iter().map(|b| format!("{b:02x}")).collect::<String>()
     ));
     let result = match how {
-        Copying::Exact => copy_entries(source, &staging, &|_, _| false, bounds)
-            .and_then(|()| verify_within(source, &staging, bounds)),
+        Copying::Exact => copy_entries(source, &staging, &|_, _| false, bounds, tally)
+            .and_then(|()| verify_within(source, &staging, bounds, tally)),
         Copying::Standalone => copy_entries(
             source,
             &staging,
             &|path, kind| left_out(source, path, kind),
             bounds,
+            tally,
         )
         .map(|()| Verified::default()),
     }
@@ -530,6 +620,69 @@ fn still_in_icloud(step: &str) -> EngineError {
     refused("home_icloud_not_downloaded")
 }
 
+/// The most entries of one folder the staging sweep reads.
+const STAGING_SCAN_MAX: usize = 65_536;
+
+/// Removes the staging folders that adds and New Projects cut short by an engine stop left
+/// directly in a folder, links never followed. Run at engine start, before any add or New
+/// Project plans, so none is live. Input: the folder, the projects home. Output: how many
+/// were removed.
+pub fn sweep_staging(folder: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(folder) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.take(STAGING_SCAN_MAX).flatten() {
+        if !staging_name(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        let path = entry.path();
+        let real = fs::symlink_metadata(&path)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+        if !real {
+            continue;
+        }
+        let _ = make_writable(&path);
+        match fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => eprintln!(
+                "home_staging_not_removed errno={}",
+                e.raw_os_error().unwrap_or(0)
+            ),
+        }
+    }
+    assert!(removed <= STAGING_SCAN_MAX);
+    removed
+}
+
+/// True for a name only the engine gives a staging folder: an add's `.crazyagent-adding-`
+/// name, or a New Project's `.crazyagent-new-` followed by the engine's 64-hex id. Input:
+/// the entry's name. Output: the answer.
+fn staging_name(name: &str) -> bool {
+    assert!(!name.is_empty());
+    let id = name.strip_prefix(".crazyagent-new-");
+    let new = id.is_some_and(crate::engine::owner::is_hex_id);
+    assert!(!new || name.len() == ".crazyagent-new-".len() + 64);
+    new || name.starts_with(".crazyagent-adding-")
+}
+
+/// Where an add an engine stop cut short stands on disk, read without changing anything:
+/// `done` once the folder is a real folder at its destination (and, for a move, gone from
+/// its old place), `home_move_source_left` for a move that landed while part of the old
+/// folder is still there, else `home_add_interrupted`, nothing moved. Inputs: the source,
+/// the destination and whether it was a move. Output: the code.
+pub fn add_left(source: &Path, destination: &Path, moving: bool) -> &'static str {
+    assert!(source.is_absolute() && destination.is_absolute());
+    let landed = fs::symlink_metadata(destination)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    let left = fs::symlink_metadata(source).is_ok();
+    match (landed, moving && left) {
+        (false, _) => "home_add_interrupted",
+        (true, true) => "home_move_source_left",
+        (true, false) => "done",
+    }
+}
+
 fn make_writable(root: &Path) -> std::io::Result<()> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(folder) = stack.pop() {
@@ -551,7 +704,13 @@ fn make_writable(root: &Path) -> std::io::Result<()> {
 /// `home_copy_special_file` for devices, pipes or sockets, and
 /// `home_copy_too_large` past the entry or depth bound.
 pub fn copy_tree(source: &Path, target: &Path) -> Result<(), EngineError> {
-    copy_entries(source, target, &|_, _| false, COPY_BOUNDS)
+    copy_entries(
+        source,
+        target,
+        &|_, _| false,
+        COPY_BOUNDS,
+        &Tally::default(),
+    )
 }
 
 /// The skip rule of a standalone copy, asked for each entry below the source root.
@@ -630,6 +789,10 @@ fn gitdir_inside(root: &Path, folder: &Path, file: &Path) -> bool {
 }
 
 /// Copies a folder tree without following links, leaving out each entry `skip` names.
+/// Each source folder is opened from the root with no link followed and each entry is read
+/// through it, so an entry swapped for a link meanwhile is refused, never read through
+/// (RV-DS241-41), and each file is written only where nothing holds its path, so a link
+/// copied under a name that differs only in case is never written through (RV-DS241-40).
 /// Inputs: a real source folder, a target path that does not exist yet, the skip rule
 /// and the bounds. Output: as `copy_tree`.
 fn copy_entries(
@@ -637,6 +800,7 @@ fn copy_entries(
     target: &Path,
     skip: &dyn Fn(&Path, fs::FileType) -> bool,
     bounds: CopyBounds,
+    tally: &Tally,
 ) -> Result<(), EngineError> {
     let failed = |e: std::io::Error| failed_step("copy", &e, "home_copy_failed");
     let root = fs::symlink_metadata(source).map_err(failed)?;
@@ -646,20 +810,27 @@ fn copy_entries(
     if super::icloud::dataless(&root) {
         return Err(still_in_icloud("copy"));
     }
+    tally.go_on()?;
+    let mut copied = 0u64;
     fs::create_dir(target).map_err(failed)?;
     private_folder(target).map_err(failed)?;
     let mut folders = vec![(target.to_path_buf(), root.permissions())];
-    let mut stack = vec![(source.to_path_buf(), target.to_path_buf(), 0usize)];
+    let mut stack = vec![(source.to_path_buf(), target.to_path_buf(), 0usize, root)];
     let mut entries = 0u64;
-    while let Some((from, to, depth)) = stack.pop() {
-        for entry in fs::read_dir(&from).map_err(failed)? {
+    while let Some((from, to, depth, seen)) = stack.pop() {
+        let below = from
+            .strip_prefix(source)
+            .map_err(|_| refused("home_copy_failed"))?;
+        let folder = SourceFolder::open(source, below, &seen).map_err(failed)?;
+        for name in folder.names().map_err(failed)? {
             entries += 1;
             if entries > bounds.entries {
                 return Err(refused("home_copy_too_large"));
             }
-            let entry = entry.map_err(failed)?;
-            let path = entry.path();
-            let copy = to.join(entry.file_name());
+            tally.go_on()?;
+            let name = name.map_err(failed)?;
+            let path = from.join(&name);
+            let copy = to.join(&name);
             let metadata = fs::symlink_metadata(&path).map_err(failed)?;
             let kind = metadata.file_type();
             if skip(&path, kind) {
@@ -669,7 +840,7 @@ fn copy_entries(
                 return Err(still_in_icloud("copy"));
             }
             if kind.is_symlink() {
-                let link = fs::read_link(&path).map_err(failed)?;
+                let link = folder.read_link(&name).map_err(failed)?;
                 copy_link(&path, link, &copy).map_err(failed)?;
             } else if kind.is_dir() {
                 if depth + 1 > bounds.depth {
@@ -678,19 +849,21 @@ fn copy_entries(
                 fs::create_dir(&copy).map_err(failed)?;
                 private_folder(&copy).map_err(failed)?;
                 folders.push((copy.clone(), metadata.permissions()));
-                stack.push((path, copy, depth + 1));
+                stack.push((path, copy, depth + 1, metadata));
             } else if kind.is_file() {
-                fs::copy(&path, &copy).map_err(failed)?;
-                fs::set_permissions(&copy, metadata.permissions()).map_err(failed)?;
+                folder.copy_file(&name, &metadata, &copy).map_err(failed)?;
             } else {
                 return Err(refused("home_copy_special_file"));
             }
+            copied += 1;
+            tally.copied.fetch_add(1, Ordering::SeqCst);
         }
     }
     for (folder, permissions) in folders.into_iter().rev() {
         fs::set_permissions(&folder, permissions).map_err(failed)?;
     }
     assert!(entries <= bounds.entries);
+    assert!(copied <= entries);
     Ok(())
 }
 
@@ -699,18 +872,27 @@ fn copy_entries(
 /// kinds, permission bits, symlink targets and file bytes; otherwise
 /// `home_copy_unverified`.
 pub fn verify_tree(source: &Path, copy: &Path) -> Result<(), EngineError> {
-    verify_within(source, copy, COPY_BOUNDS).map(drop)
+    verify_within(source, copy, COPY_BOUNDS, &Tally::default()).map(drop)
 }
 
 /// `verify_tree` within the given bounds. Inputs: the source, the copy and the bounds.
 /// Output: the source files and links found equal, or the code of `verify_tree`, or
 /// `home_icloud_not_downloaded` for a source entry whose data lives only in iCloud.
-fn verify_within(source: &Path, copy: &Path, bounds: CopyBounds) -> Result<Verified, EngineError> {
+fn verify_within(
+    source: &Path,
+    copy: &Path,
+    bounds: CopyBounds,
+    tally: &Tally,
+) -> Result<Verified, EngineError> {
     let differs = || refused("home_copy_unverified");
     let mut verified = Verified::default();
     let mut stack = vec![(source.to_path_buf(), copy.to_path_buf(), 0usize)];
     let mut entries = 0u64;
+    let mut checked = 0u64;
     while let Some((left, right, depth)) = stack.pop() {
+        tally.go_on()?;
+        checked += 1;
+        tally.checked.fetch_add(1, Ordering::SeqCst);
         let a = fs::symlink_metadata(&left).map_err(|_| differs())?;
         let b = fs::symlink_metadata(&right).map_err(|_| differs())?;
         if super::icloud::dataless(&a) {
@@ -733,7 +915,7 @@ fn verify_within(source: &Path, copy: &Path, bounds: CopyBounds) -> Result<Verif
             return Err(differs());
         }
         if a.is_file() {
-            if a.len() != b.len() || !same_bytes(&left, &right)? {
+            if a.len() != b.len() || !same_bytes((left.as_path(), &a), (right.as_path(), &b))? {
                 return Err(differs());
             }
             verified.record(&left, &a);
@@ -763,11 +945,20 @@ fn verify_within(source: &Path, copy: &Path, bounds: CopyBounds) -> Result<Verif
         }
     }
     assert!(verified.0.len() as u64 <= entries + 1);
+    assert_eq!(checked, entries + 1);
     Ok(verified)
 }
 
-fn same_bytes(left: &Path, right: &Path) -> Result<bool, EngineError> {
-    let open = |path: &Path| fs::File::open(path).map_err(|_| refused("home_copy_unverified"));
+/// Compares the bytes of a source file and its copy, each opened only as the file its
+/// listing showed and never through a link at its path (RV-DS241-41). Inputs: each path
+/// with its listed metadata. Output: whether the bytes match, or `home_copy_unverified`.
+fn same_bytes(
+    left: (&Path, &fs::Metadata),
+    right: (&Path, &fs::Metadata),
+) -> Result<bool, EngineError> {
+    let open = |(path, seen): (&Path, &fs::Metadata)| {
+        open_seen(path, seen).map_err(|_| refused("home_copy_unverified"))
+    };
     let (mut a, mut b) = (open(left)?, open(right)?);
     let mut first = vec![0u8; CHUNK_BYTES];
     let mut second = vec![0u8; CHUNK_BYTES];

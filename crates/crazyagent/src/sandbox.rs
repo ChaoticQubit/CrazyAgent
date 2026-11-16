@@ -15,6 +15,8 @@ use std::process::Command;
 
 pub mod elf;
 pub mod extra_paths;
+#[cfg(all(test, target_os = "macos"))]
+mod git_deny_tests;
 pub mod grants;
 pub mod hidden_paths;
 pub mod ide_shell;
@@ -157,10 +159,6 @@ const FIXED_WRITES: &str =
 /// home for its own skills, while no folder built elsewhere replaces the one holding the
 /// engine's copies and no flag keeps the engine from removing what is in it (CTX-M1 r1).
 const PINNED_WRITES: &str = "file-write-unlink file-write-mode file-write-acl file-write-flags";
-/// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
-/// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
-#[cfg(unix)]
-const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
 /// The folders of a Claude Code config home that its agent team shares, the members'
 /// mailboxes and task lists. Claude Code 2.1.309 keeps them under each member's config home,
 /// with no variable of their own, so a native lead's teammates write the lead's (TPH-2).
@@ -171,7 +169,7 @@ const LOCK_FOLDER: &str = r#"\.lock$"#;
 /// The longest Unix socket path macOS binds, `sun_path` less its closing NUL.
 const SOCKET_PATH_BYTES_MAX: usize = 103;
 const TOOL_ROOTS_MAX: usize = 24;
-const TOOL_FILES_MAX: usize = 4;
+const TOOL_FILES_MAX: usize = 5;
 const EXECS_MAX: usize = 4;
 const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
 const REMOTES_MAX: usize = 8;
@@ -311,8 +309,13 @@ const ENGINE_SECRET_FILES: &[&str] = &[
     "github.toml",
 ];
 
-const ENGINE_SECRET_FOLDERS: &[&str] =
-    &["account-keys", crate::terminal::FOLDER, crate::ide::FOLDER];
+const ENGINE_SECRET_FOLDERS: &[&str] = &[
+    "account-keys",
+    crate::terminal::FOLDER,
+    crate::ide::FOLDER,
+    crate::engine::bootstrap::NATIVE_PROFILES_FOLDER,
+    crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER,
+];
 
 const RUNTIME_ENTRIES_MAX: usize = 1024;
 
@@ -376,6 +379,21 @@ pub const AGENT_GIT_ENV: [(&str, &str); 7] = [
     ("GIT_CONFIG_VALUE_1", "explicit"),
 ];
 
+/// The settings every agent process gets, sandboxed or at Full access, that keep its tools
+/// from reading config an earlier run left in its home, which a launch resets
+/// (RV-DS241-137, sec r1 F1): no global git config, as the engine's own git runs, so a
+/// `.gitconfig` or `.config/git/config` there never runs its hooks or programs, no Python
+/// user site, so a `.pth` file or `usercustomize` module there never runs as Python starts,
+/// and no npm user config, so an `.npmrc` there never hands its `node-options` or
+/// `script-shell` to a script. They are set after the harness's own variables, so a harness
+/// cannot replace them, and never in the owner's IDE terminal, whose home is the owner's own
+/// and no launch resets ([`owner_terminal_env`], code r1 F3).
+pub const AGENT_HOME_ENV: [(&str, &str); 3] = [
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("PYTHONNOUSERSITE", "1"),
+    ("NPM_CONFIG_USERCONFIG", "/dev/null"),
+];
+
 /// The root certificates every sandboxed agent process trusts for TLS on macOS: the system
 /// bundle, named in `SSL_CERT_FILE`. A harness that reads its roots from the keychain, as
 /// Codex does through rustls-native-certs, finds none there because every agent sandbox
@@ -430,6 +448,7 @@ pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
     }
     if AGENT_GIT_ENV
         .iter()
+        .chain(AGENT_HOME_ENV.iter())
         .any(|(git, fixed)| name == *git && value == *fixed)
     {
         return true;
@@ -454,12 +473,36 @@ pub fn shell_tmp_prefix(tmp: &Path) -> PathBuf {
 /// harness's variables (a later value replaces an earlier one and None removes it, but
 /// `HOME`, `TMPDIR` and `TMPPREFIX`, and the tool cache's [`TOOL_CACHE_ENV`] when `base`
 /// sets them, always stay as `base` set them), then `TMPPREFIX` from
-/// [`shell_tmp_prefix`] when `TMPDIR` is set, then [`AGENT_GIT_ENV`] and [`AGENT_TLS_ENV`].
+/// [`shell_tmp_prefix`] when `TMPDIR` is set, then [`AGENT_GIT_ENV`], [`AGENT_TLS_ENV`] and
+/// [`AGENT_HOME_ENV`].
 /// Inputs: the base and harness variables. Output: the variables, or `Invalid` when any
 /// one fails [`agent_variable_allowed`].
 pub fn agent_env<'a>(
     base: &[(&str, &OsStr)],
     harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Vec<(OsString, OsString)>, SandboxError> {
+    built_env(base, harness, &AGENT_HOME_ENV)
+}
+
+/// Builds the environment of the owner's confined IDE terminal as [`agent_env`] does for an
+/// agent, but without [`AGENT_HOME_ENV`]: its home is the owner's own, kept across
+/// terminals, so the global git config, Python user site and npm config the owner sets up
+/// there stay in use (RV-DS241-137 code r1 F3). Inputs: the base and terminal variables.
+/// Output: the variables, or `Invalid` when any one fails [`agent_variable_allowed`].
+pub fn owner_terminal_env<'a>(
+    base: &[(&str, &OsStr)],
+    terminal: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Vec<(OsString, OsString)>, SandboxError> {
+    built_env(base, terminal, &[])
+}
+
+/// Builds the environment [`agent_env`] describes, setting `home` after the fixed git and
+/// TLS settings. Inputs: the base and harness variables and the home settings. Output: the
+/// variables, or `Invalid` when any one fails [`agent_variable_allowed`].
+fn built_env<'a>(
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+    home: &[(&'static str, &'static str)],
 ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
     let refused = || invalid("agent environment holds an owner secret");
     let mut env: Vec<(OsString, OsString)> = Vec::new();
@@ -498,7 +541,11 @@ pub fn agent_env<'a>(
     if let Some(prefix) = prefix {
         set(&mut env, OsStr::new("TMPPREFIX"), Some(prefix.as_os_str()));
     }
-    for (name, value) in AGENT_GIT_ENV.into_iter().chain(AGENT_TLS_ENV) {
+    let fixed = AGENT_GIT_ENV
+        .into_iter()
+        .chain(AGENT_TLS_ENV)
+        .chain(home.iter().copied());
+    for (name, value) in fixed {
         set(&mut env, OsStr::new(name), Some(OsStr::new(value)));
     }
     if env.len() > AGENT_ENV_MAX {
@@ -513,11 +560,14 @@ pub fn agent_env<'a>(
 
 /// The end of the agent shims: forks the run's warden when handed a [`warden::WARDEN_FD`],
 /// keeping that descriptor and variable from the harness, then replaces the shim with the
-/// harness program and its arguments.
+/// harness program and its arguments. Asked `S` on its line, the warden stops every other
+/// process in the sandbox three times over, through the kill call that spares its sender,
+/// and answers `s` only when every pass took; asked `C`, it continues them and answers `c`
+/// (DEC-158). At the line's end it kills them all, as before.
 #[cfg(unix)]
 macro_rules! warden_then_harness {
     () => {
-        r#"if (defined(my $fd = delete $ENV{CRAZYAGENT_WARDEN_FD})) { my $engine = getppid(); $fd =~ /\A[0-9]{1,6}\z/ && $engine > 1 or die "crazyagent: no warden\n"; defined(my $warden = fork()) or die "crazyagent: no warden: $!\n"; if (!$warden) { POSIX::setsid(); POSIX::close($_) for 0, 1, 2; $SIG{PIPE} = "IGNORE"; open(my $line, "+<&=", $fd) or POSIX::_exit(1); my $armed = !kill(0, $engine) && $!{EPERM}; syswrite($line, $armed ? "A" : "U"); $armed or POSIX::_exit(0); my $byte; 1 while sysread($line, $byte, 1); syswrite($line, "F"); kill(9, -1); POSIX::_exit(1) } POSIX::close($fd) } exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n""#
+        r#"if (defined(my $fd = delete $ENV{CRAZYAGENT_WARDEN_FD})) { my $engine = getppid(); $fd =~ /\A[0-9]{1,6}\z/ && $engine > 1 or die "crazyagent: no warden\n"; defined(my $warden = fork()) or die "crazyagent: no warden: $!\n"; if (!$warden) { POSIX::setsid(); POSIX::close($_) for 0, 1, 2; $SIG{PIPE} = "IGNORE"; open(my $line, "+<&=", $fd) or POSIX::_exit(1); my $armed = !kill(0, $engine) && $!{EPERM}; syswrite($line, $armed ? "A" : "U"); $armed or POSIX::_exit(0); my $byte; while (sysread($line, $byte, 1)) { if ($byte eq "S") { my $stopped = 1; for (1 .. 3) { $stopped &&= syscall(37, -1, POSIX::SIGSTOP(), 0) == 0; select(undef, undef, undef, 0.05) } syswrite($line, "s") if $stopped } elsif ($byte eq "C") { kill("CONT", -1); syswrite($line, "c") } } syswrite($line, "F"); kill(9, -1); POSIX::_exit(1) } POSIX::close($fd) } exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n""#
     };
 }
 
@@ -560,40 +610,90 @@ pub const PANE_SHIM: [&str; 5] = [
 /// of their own included, and it exits only once the warden confirmed that or found
 /// signals not confined; otherwise it keeps the pane open, ignoring terminate, until a
 /// hangup. A confining profile keeps every agent signal from it, and the terminal keys
-/// that signal the pane's group do not end it.
+/// that signal the pane's group do not end it. Given [`KEEPER_DEADLINE`], as a native lead's
+/// server keeper is, it also reads the engine's deadline record and, once one read found the
+/// deadline ahead, stops after that many reads in a row found it passed or unreadable
+/// (FBTMUX-P1-R1-L1): it kills its command, the server, itself from outside the sandbox, so
+/// a killed warden cannot keep the server, then has the warden end the rest, and exits
+/// with status 3 when the warden does not confirm. Given the engine's freeze record, as the
+/// word before a kept pane's `sandbox-exec` (see [`kept_pane`]) or in [`KEEPER_STATE`] for a
+/// native lead's server keeper, never both, user signal 1 asks the warden to stop every
+/// process in the sandbox and user signal 2 to continue them, and each answer is written to
+/// that record as `S` or `C` (DEC-158); without it both signals are ignored. Its deadline reads count wall time, so answers do not hasten
+/// them.
 #[cfg(target_os = "macos")]
 pub const KEEPER: [&str; 6] = [
     "/usr/bin/perl",
     "-mPOSIX",
     "-MSocket",
     "-e",
-    r#"$^F = 1023; my $why = ""; $SIG{$_} = "IGNORE" for qw(INT QUIT TSTP TTIN TTOU PIPE); $SIG{HUP} = sub { $why ||= "HUP" }; $SIG{TERM} = sub { $why ||= "TERM" }; $SIG{CHLD} = sub { 1 }; socketpair(my $keep, my $line, AF_UNIX, SOCK_STREAM, PF_UNSPEC) or die "crazyagent: no warden: $!\n"; defined(my $harness = fork()) or die "crazyagent: no warden: $!\n"; if (!$harness) { $SIG{$_} = "DEFAULT" for qw(INT QUIT TSTP TTIN TTOU PIPE HUP TERM CHLD); close($keep); $ENV{CRAZYAGENT_WARDEN_FD} = fileno($line); exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n" } close($line); until ($why || waitpid($harness, POSIX::WNOHANG()) > 0) { select(undef, undef, undef, 1) } shutdown($keep, 1); my ($report, $wanted) = ("", ""); vec($wanted, fileno($keep), 1) = 1; my $until = time + 4; while (time < $until && length($report) < 8) { select(my $ready = $wanted, undef, undef, 0.25) > 0 or next; sysread($keep, my $more, 8) or last; $report .= $more } POSIX::_exit(0) if $report eq "AF" || $report eq "U" || $why eq "HUP"; $SIG{TERM} = "IGNORE"; $SIG{HUP} = "DEFAULT"; sleep(3600) while 1"#,
+    r#"$^F = 1023; my $why = ""; my ($every, $late, $record) = split(/ /, delete($ENV{CRAZYAGENT_KEEPER_DEADLINE}) // "", 3); !defined($record) || ($every =~ /\A[1-9][0-9]{0,3}\z/ && $late =~ /\A[1-9][0-9]{0,2}\z/ && $record =~ m{\A/}) or die "crazyagent: no deadline\n"; my $state = delete($ENV{CRAZYAGENT_KEEPER_STATE}); if (@ARGV > 2 && $ARGV[1] eq "/usr/bin/sandbox-exec") { !defined($state) or die "crazyagent: two state records\n"; $state = shift(@ARGV) } !defined($state) || $state =~ m{\A/[^\n\0]{1,1000}\z} or die "crazyagent: no state record\n"; my ($next, $armed, $missed, $want) = (time + ($every // 0), 0, 0, ""); $SIG{$_} = "IGNORE" for qw(INT QUIT TSTP TTIN TTOU PIPE USR1 USR2); if (defined($state)) { $SIG{USR1} = sub { $want = "S" }; $SIG{USR2} = sub { $want = "C" } } $SIG{HUP} = sub { $why ||= "HUP" }; $SIG{TERM} = sub { $why ||= "TERM" }; $SIG{CHLD} = sub { 1 }; socketpair(my $keep, my $line, AF_UNIX, SOCK_STREAM, PF_UNSPEC) or die "crazyagent: no warden: $!\n"; defined(my $harness = fork()) or die "crazyagent: no warden: $!\n"; if (!$harness) { $SIG{$_} = "DEFAULT" for qw(INT QUIT TSTP TTIN TTOU PIPE HUP TERM CHLD USR1 USR2); close($keep); $ENV{CRAZYAGENT_WARDEN_FD} = fileno($line); exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n" } close($line); my ($seen, $open, $wanted) = ("", 1, ""); vec($wanted, fileno($keep), 1) = 1; until ($why || waitpid($harness, POSIX::WNOHANG()) > 0) { if (length($want)) { syswrite($keep, $want) if $open; $want = "" } my $ready = $open ? $wanted : ""; if (select($ready, undef, undef, 1) > 0 && defined(my $got = sysread($keep, my $more, 8))) { $open = 0 if !$got; $seen .= $more // ""; if ($seen =~ s/([sc]+)\z// && defined($state)) { my $now = uc(substr($1, -1)); unlink("$state.new"); if (sysopen(my $out, "$state.new", POSIX::O_WRONLY() | POSIX::O_CREAT() | POSIX::O_EXCL(), 0600)) { syswrite($out, $now); close($out); rename("$state.new", $state) or unlink("$state.new") } } } next unless defined($record) && time >= $next; $next = time + $every; my $ahead = 0; if (my @at = lstat($record)) { if (-f _ && $at[4] == $< && $at[7] <= 19 && open(my $in, "<", $record)) { $ahead = (<$in> // "") =~ /\A([0-9]{1,19})\z/ && time < $1 } } if ($ahead) { ($armed, $missed) = (1, 0) } elsif ($armed && ++$missed >= $late) { $why = "LATE" } } kill("KILL", $harness) if $why eq "LATE"; shutdown($keep, 1); my $report = ""; my $until = time + 4; while ($open && time < $until && length($report) < 8) { select(my $ready = $wanted, undef, undef, 0.25) > 0 or next; sysread($keep, my $more, 8) or last; $report .= $more } my $said = $seen . $report; POSIX::_exit(0) if $said =~ /\AA[sc]*F\z/ || $said eq "U" || $why eq "HUP"; POSIX::_exit(3) if $why eq "LATE"; $SIG{TERM} = "IGNORE"; $SIG{HUP} = "DEFAULT"; sleep(3600) while 1"#,
     "--",
 ];
 
-/// Puts a pane's sandboxed command under the [`KEEPER`] and the [`PANE_SHIM`], so stopping
-/// the pane ends every process its agent started. Input: the argv `sandbox-exec -f
-/// <profile> <program> <arguments>`. Output: the kept argv, or none for any other argv.
+/// The variable a native lead's server keeper takes its deadline reads from
+/// (FBTMUX-P1-R1-L1): the seconds between two reads, how many reads in a row past the
+/// deadline end the server, and the engine's absolute deadline record, separated by single
+/// spaces. The [`KEEPER`] removes it before the command starts; a kept pane has none.
 #[cfg(target_os = "macos")]
-pub fn kept_pane(argv: Vec<String>) -> Option<Vec<String>> {
+pub const KEEPER_DEADLINE: &str = "CRAZYAGENT_KEEPER_DEADLINE";
+
+/// The variable that names the engine's absolute freeze record to a native lead's server
+/// [`KEEPER`], whose warden then stops and continues the sandbox on the engine's signals
+/// (DEC-158). The keeper removes it before the command starts. A pane's variables never
+/// carry it, since the pane variable gate refuses the engine's own; a kept pane takes the
+/// record as an argument instead (see [`kept_pane`]).
+#[cfg(target_os = "macos")]
+pub const KEEPER_STATE: &str = "CRAZYAGENT_KEEPER_STATE";
+
+/// The longest freeze record a [`KEEPER`] takes, in bytes: its leading slash and at most
+/// 1000 more, as the keeper's own check reads it.
+#[cfg(target_os = "macos")]
+const KEEPER_STATE_BYTES_MAX: usize = 1001;
+
+/// Puts a pane's sandboxed command under the [`KEEPER`] and the [`PANE_SHIM`], so stopping
+/// the pane ends every process its agent started. Inputs: the argv `sandbox-exec -f
+/// <profile> <program> <arguments>` and the engine's freeze record, which goes to the keeper
+/// as the word before `sandbox-exec` and never reaches the command (DEC-158). Output: the
+/// kept argv, or none for any other argv or a record that is not an absolute path of at
+/// most [`KEEPER_STATE_BYTES_MAX`] bytes on one line.
+#[cfg(target_os = "macos")]
+pub fn kept_pane(argv: Vec<String>, state: Option<&Path>) -> Option<Vec<String>> {
     if argv.len() < 4 || argv[0] != SANDBOX_EXEC || argv[1] != "-f" {
         return None;
     }
+    let state = match state {
+        None => None,
+        Some(record) => {
+            let word = record.to_str()?;
+            if !word.starts_with('/')
+                || !(2..=KEEPER_STATE_BYTES_MAX).contains(&word.len())
+                || word.contains(['\n', '\0'])
+            {
+                return None;
+            }
+            Some(word.to_owned())
+        }
+    };
+    let stated = usize::from(state.is_some());
     let length = argv.len();
     let mut kept: Vec<String> = KEEPER.iter().map(|part| (*part).to_owned()).collect();
+    kept.extend(state);
     let mut rest = argv.into_iter();
     kept.extend(rest.by_ref().take(3));
     kept.extend(PANE_SHIM.iter().map(|part| (*part).to_owned()));
     kept.extend(rest);
-    assert_eq!(kept.len(), KEEPER.len() + PANE_SHIM.len() + length);
-    assert_eq!(kept[KEEPER.len()], SANDBOX_EXEC);
+    assert_eq!(kept.len(), KEEPER.len() + stated + PANE_SHIM.len() + length);
+    assert_eq!(kept[KEEPER.len() + stated], SANDBOX_EXEC);
+    assert!(stated == 0 || kept[KEEPER.len()].starts_with('/'));
     Some(kept)
 }
 
 /// Takes a pane command back out of the [`KEEPER`] and the [`PANE_SHIM`], for a pane that
 /// starts in a server already running inside its sandbox, where neither can run. Input: an
 /// argv. Output: the `sandbox-exec -f <profile> <program> <arguments>` that [`kept_pane`]
-/// kept when keeping it again rebuilds exactly this argv, or none for any other argv.
+/// kept without a freeze record when keeping it again rebuilds exactly this argv, or none
+/// for any other argv, one kept with a freeze record included.
 #[cfg(target_os = "macos")]
 pub fn unkept_pane(argv: &[String]) -> Option<Vec<String>> {
     let shim = KEEPER.len() + 3;
@@ -604,7 +704,7 @@ pub fn unkept_pane(argv: &[String]) -> Option<Vec<String>> {
     }
     let mut plain = argv[KEEPER.len()..shim].to_vec();
     plain.extend_from_slice(&argv[program..]);
-    (kept_pane(plain.clone()).as_deref() == Some(argv)).then_some(plain)
+    (kept_pane(plain.clone(), None).as_deref() == Some(argv)).then_some(plain)
 }
 
 /// Builds the one command every sandboxed headless agent process starts from: `-f
@@ -701,8 +801,8 @@ pub fn agent_command<'a>(
 
 /// Network reach of a sandboxed agent: open when the agent's tools are on, except that
 /// it never binds or listens on an [`OWNER_PORTS`] port, one [`ProjectSandbox::keep_ports`]
-/// keeps or one of [`model_proxy::PROXY_PORTS`], otherwise only the listed remotes, each one
-/// port on loopback or on any host.
+/// keeps or one of [`model_proxy::PROXY_PORTS`] or [`model_proxy::RELAY_PORTS`], otherwise
+/// only the listed remotes, each one port on loopback or on any host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxNetwork {
     Open,
@@ -778,6 +878,41 @@ pub const LINUX_RESOLVER_NEEDS_UDP: &str = "linux_resolver_needs_udp";
 /// runs another script: the check follows a `#!` line one level only and never guesses.
 pub const LINUX_HARNESS_UNCHECKED: &str = "linux_harness_unchecked";
 
+/// The `.git` folders whose contents the owner's git reads and runs: hook scripts, rebase
+/// and sequencer plans, and remote and branch definitions. No macOS or Linux agent writes
+/// in them: Seatbelt denies each with everything below it, and Linux never grants one
+/// (RV-DS241-85).
+pub const GIT_STATE_TREES: [&str; 6] = [
+    "hooks",
+    "rebase-merge",
+    "rebase-apply",
+    "remotes",
+    "branches",
+    "sequencer",
+];
+
+/// The single `.git` files no macOS or Linux agent writes: the config, the index, their
+/// locks, and the links git follows to a common dir or a worktree config. Seatbelt denies
+/// each by name and Linux never grants one (RV-DS241-85).
+pub const GIT_STATE_FILES: [&str; 6] = [
+    "config",
+    "config.lock",
+    "index",
+    "index.lock",
+    "commondir",
+    "config.worktree",
+];
+
+/// What a limited network cannot hold on Linux, shown there only, under the network choice
+/// in the desktop and the TUI (RV-DS241-83): Landlock limits outbound TCP by port, not by
+/// host, so a port an agent may reach on this computer is open to it on every host.
+pub const LINUX_PORTS_ANY_HOST_LINE: &str = "On Linux, network limits hold ports, not hosts: a port agents may reach on this computer, such as the model's proxy port or a port you allow, is open to them on every host.";
+
+/// What a writable project folder cannot hold on Linux, shown there only, under the access
+/// level in the desktop and the TUI (RV-DS241-85): no Landlock rule stops an agent from
+/// making a git repository inside a folder it may change.
+pub const LINUX_NESTED_GIT_LINE: &str = "On Linux, agents can make a git repository inside any project folder they may change, and your own git or IDE runs its settings when you open that folder. Check agent-made folders for a .git before you open them.";
+
 /// Refusal to build or install a project sandbox, with a plain reason.
 #[derive(Debug)]
 pub enum SandboxError {
@@ -829,6 +964,7 @@ pub struct ProjectSandbox {
     kept_ports: Vec<u16>,
     owner_home: PathBuf,
     engine_secrets: Vec<PathBuf>,
+    carved_home: Option<PathBuf>,
     checkout: Option<Checkout>,
     clone: Option<PathBuf>,
     sockets: Vec<PathBuf>,
@@ -915,6 +1051,7 @@ impl ProjectSandbox {
             kept_ports: Vec::new(),
             owner_home: owner,
             engine_secrets: Vec::new(),
+            carved_home: None,
             checkout: None,
             clone: None,
             sockets: Vec::new(),
@@ -1145,9 +1282,10 @@ impl ProjectSandbox {
 
     /// Names the engine runtime folder whose secrets this agent must never read or write:
     /// the engine database, the owner socket, the GitHub sign-in and settings files, the
-    /// saved account keys, the terminal server folder and every engine socket and socket
-    /// folder found in it now. The agent's own home and temp dirs may sit inside it, but no
-    /// root granted so far may hold or sit inside one of those secrets.
+    /// saved account keys, the native sign-in profiles, the configured SDK homes with their
+    /// keys, the terminal and IDE server folders and every engine socket and socket folder
+    /// found in it now. The agent's own home and
+    /// temp dirs may sit inside it, but no granted root may hold or sit inside a secret.
     /// Input: the existing runtime folder. Output: the guarded sandbox, or a refusal.
     pub fn guard_engine(mut self, runtime: &Path) -> Result<Self, SandboxError> {
         let runtime = canonical(runtime)?;
@@ -1169,9 +1307,12 @@ impl ProjectSandbox {
 
     /// Adds the engine root's secrets for an agent whose runtime folder is one folder in it,
     /// as an owner generation is for a master: every entry guard_engine would name for the
-    /// engine root except that folder itself, where the agent's home lives. Call it after
-    /// guard_engine on the runtime folder, whose secrets stay. Inputs: the engine root and
-    /// the runtime folder. Output: the guarded sandbox, or a refusal.
+    /// engine root except that folder itself, where the agent's home lives. An rcli master's
+    /// home may instead be one configured SDK home directly in the engine root's folder of
+    /// them: that folder stays a secret and only this home is carved back out of it, so every
+    /// other home, even one made later, stays denied. Call it after guard_engine on the
+    /// runtime folder, whose secrets stay. Inputs: the engine root and the runtime folder.
+    /// Output: the guarded sandbox, or a refusal.
     pub fn guard_engine_around(
         mut self,
         engine: &Path,
@@ -1187,9 +1328,17 @@ impl ProjectSandbox {
                 "engine root must be the existing folder around the runtime",
             ));
         }
+        let homes = engine.join(crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER);
+        let carved =
+            (self.agent_home.parent() == Some(homes.as_path())).then(|| self.agent_home.clone());
         let secrets: Vec<PathBuf> = engine_secrets_in(&engine)?
             .into_iter()
             .filter(|secret| *secret != runtime)
+            .collect();
+        let around_home: Vec<PathBuf> = secrets
+            .iter()
+            .filter(|secret| **secret != homes)
+            .cloned()
             .collect();
         for root in self
             .writable_roots()
@@ -1197,7 +1346,11 @@ impl ProjectSandbox {
             .chain(self.tool_roots.iter())
             .chain(self.tool_files.iter())
         {
-            clear_of_secrets(root, &secrets)?;
+            if carved.as_ref() == Some(root) {
+                clear_of_secrets(root, &around_home)?;
+            } else {
+                clear_of_secrets(root, &secrets)?;
+            }
         }
         for secret in secrets {
             if !self.engine_secrets.contains(&secret) {
@@ -1205,6 +1358,16 @@ impl ProjectSandbox {
             }
         }
         assert!(!self.engine_secrets.contains(&runtime));
+        if let Some(home) = carved {
+            assert!(self.engine_secrets.contains(&homes));
+            assert!(
+                self.secret_paths()
+                    .iter()
+                    .filter(|secret| **secret != homes)
+                    .all(|secret| !home.starts_with(secret) && !secret.starts_with(&home))
+            );
+            self.carved_home = Some(home);
+        }
         Ok(self)
     }
 
@@ -1430,10 +1593,10 @@ impl ProjectSandbox {
     }
 
     /// Lets a Node script harness find the `node` beside it, as its sign-in does: under an npm
-    /// prefix ([`crate::harnesses::node_prefix`]) only `bin` and the harness's package folder
-    /// become readable, Seatbelt denying credential names such as `etc/npmrc` below each, and
-    /// `bin` goes first on PATH; a prefix in the project or agent-writable is skipped. Input:
-    /// the canonical program. Output: the sandbox, or a refusal of either folder.
+    /// prefix ([`crate::harnesses::node_prefix`]) only `bin`, the harness's package folder and
+    /// the real file `bin/node` links to become readable, Seatbelt denying credential names
+    /// below each folder, and `bin` goes first on PATH; a prefix or node in the project or
+    /// agent-writable is skipped. Input: the canonical program. Output: the sandbox, or a refusal.
     pub fn allow_node_for(mut self, program: &Path) -> Result<Self, SandboxError> {
         let Some(prefix) = crate::harnesses::node_prefix(program) else {
             return Ok(self);
@@ -1442,26 +1605,24 @@ impl ProjectSandbox {
             return Ok(self);
         };
         let folders = [canonical(&prefix.join("bin"))?, canonical(&package)?];
-        let agents = folders.iter().any(|folder| {
-            crate::harnesses::in_crazyagent_folder(folder)
-                || folder.starts_with(&self.project_root)
+        let node = canonical(&prefix.join("bin").join("node"))?;
+        let agents = folders.iter().chain([&node]).any(|path| {
+            crate::harnesses::in_crazyagent_folder(path)
+                || path.starts_with(&self.project_root)
                 || self
                     .writable_roots()
-                    .any(|root| folder.starts_with(root) || root.starts_with(folder))
+                    .any(|root| path.starts_with(root) || root.starts_with(path))
         });
         if agents {
             return Ok(self);
         }
         for folder in folders {
-            let covered = SYSTEM_READ_ROOTS
-                .iter()
-                .map(Path::new)
-                .chain(self.read_roots.iter().map(PathBuf::as_path))
-                .chain(self.tool_roots.iter().map(PathBuf::as_path))
-                .any(|root| folder.starts_with(root));
-            if !covered {
+            if !self.reads(&folder) {
                 self = self.allow_node_folder(&folder)?;
             }
+        }
+        if !self.reads(&node) {
+            self = self.allow_node_file(&node)?;
         }
         self.node_bin = Some(prefix.join("bin"));
         assert!(self.node_bin.as_deref().is_some_and(Path::is_absolute));
@@ -1501,6 +1662,43 @@ impl ProjectSandbox {
                 self = self.allow_node_folder(&folder)?;
             }
         }
+        Ok(self)
+    }
+
+    /// Whether a system, granted or toolchain folder already makes a path readable. Input: an
+    /// absolute path. Output: the answer.
+    fn reads(&self, path: &Path) -> bool {
+        SYSTEM_READ_ROOTS
+            .iter()
+            .map(Path::new)
+            .chain(self.read_roots.iter().map(PathBuf::as_path))
+            .chain(self.tool_roots.iter().map(PathBuf::as_path))
+            .any(|root| path.starts_with(root))
+    }
+
+    /// Grants the real `node` an npm prefix links to, such as the engine's own Node in its
+    /// setup folder, read-only and runnable: under Seatbelt as one toolchain file, elsewhere
+    /// its folder as a read root. Input: the canonical existing file. Output: the widened
+    /// sandbox, or a refusal when it fails the toolchain file or read root checks.
+    fn allow_node_file(mut self, node: &Path) -> Result<Self, SandboxError> {
+        if !cfg!(target_os = "macos") {
+            let folder = node
+                .parent()
+                .ok_or_else(|| invalid("node must sit in a folder"))?;
+            return self.allow_read(folder);
+        }
+        if self.tool_files.iter().any(|file| file == node) {
+            return Ok(self);
+        }
+        if self.tool_files.len() >= TOOL_FILES_MAX {
+            return Err(invalid("too many toolchain files"));
+        }
+        clear_of_secrets(node, &self.secret_paths())?;
+        if !clean_absolute(node) || !node.is_file() || canonical(node)? != *node {
+            return Err(invalid("toolchain files must be existing canonical files"));
+        }
+        self.tool_files.push(node.to_path_buf());
+        assert!(self.tool_files.len() <= TOOL_FILES_MAX);
         Ok(self)
     }
 
@@ -1871,8 +2069,10 @@ impl ProjectSandbox {
         let pattern = seatbelt_pattern(root);
         let mut text = format!("{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"^{pattern}/\")");
         let names: Vec<String> = open.iter().map(|name| regex_escape(name)).collect();
-        for body in regex_bodies(&format!("^{pattern}/"), &names, "(/.*)?$") {
-            text.push_str(&format!("\n    (require-not (regex #\"{body}\"))"));
+        for suffix in ["$", "/"] {
+            for body in regex_bodies(&format!("^{pattern}/"), &names, suffix) {
+                text.push_str(&format!("\n    (require-not (regex #\"{body}\"))"));
+            }
         }
         for own in self.writable_roots().filter(|own| {
             own.starts_with(root) && own.as_path() != root.as_path() && clean_absolute(own)
@@ -2005,8 +2205,9 @@ impl ProjectSandbox {
     }
 
     /// Lets a native-mode lead run its own tmux server (DEC-104): an exact socket grant, as
-    /// `allow_unix_socket` gives, for its own socket in its short temp folder, and read
-    /// access to the tmux program's folder when no system root covers it. No other Unix
+    /// `allow_unix_socket` gives, for its own socket in its short temp folder, and the tmux
+    /// program itself, readable and startable as one file, never its folder: the bundled one
+    /// sits in the app's `Contents/MacOS` beside the engine (DEC-157). No other Unix
     /// socket becomes reachable, the engine's own tmux server included, and the server and
     /// every engine client on it stay inside this profile; its teammates run in a server of
     /// their own (see [`Self::serve_tmux_server`]). Only Seatbelt holds it. Input: the socket
@@ -2095,9 +2296,11 @@ impl ProjectSandbox {
             home.join(crate::launch_context::STATE),
             home.join(crate::coord::relay::PLUGIN_FOLDER),
         ];
-        teammates
-            .read_only
-            .extend(CLAUDE_BASH_PRELUDES.iter().map(|folder| home.join(folder)));
+        teammates.read_only.extend(
+            crate::agent_home::CLAUDE_BASH_PRELUDES
+                .iter()
+                .map(|folder| home.join(folder)),
+        );
         teammates.read_only.extend(
             self.scratch
                 .iter()
@@ -2204,16 +2407,14 @@ impl ProjectSandbox {
         if !clean_absolute(tmux) || !tmux.is_file() || canonical(tmux)? != tmux {
             return Err(invalid("the tmux program must be a canonical file"));
         }
-        let folder = tmux
-            .parent()
-            .ok_or_else(|| invalid("the tmux program must sit in a folder"))?;
-        let covered = SYSTEM_READ_ROOTS
-            .iter()
-            .any(|root| folder.starts_with(root))
-            || self.read_roots.iter().any(|root| folder.starts_with(root));
-        if !covered {
-            self = self.allow_read(folder)?;
+        if !self.tool_files.iter().any(|file| file == tmux) {
+            if self.tool_files.len() >= TOOL_FILES_MAX {
+                return Err(invalid("too many toolchain files"));
+            }
+            self.tool_files.push(tmux.to_path_buf());
         }
+        self = self.allow_exec(tmux)?;
+        assert!(self.tool_files.iter().any(|file| file == tmux));
         self = if served_only {
             self.serve_unix_socket(socket)?
         } else {
@@ -2290,8 +2491,10 @@ impl ProjectSandbox {
     }
 
     /// Paths no agent may write although they sit in a writable root: both `context/`
-    /// folders, the git hooks, config and its lock, `.git/modules` and, for an agent confined
-    /// to a worktree, its admin folder's `modules`, where git keeps submodule repositories.
+    /// folders, the project instructions file every later agent and the master get as the
+    /// owner's text (SA vid 11), the git hooks, config and its lock, `.git/modules` and, for
+    /// an agent confined to a worktree, its admin folder's `modules`, where git keeps
+    /// submodule repositories.
     /// Every platform boundary keeps these read-only, except that Windows guards the config
     /// but not its lock (`windows::GIT_CONFIG_LOCK`).
     pub fn protected_paths(&self) -> Vec<PathBuf> {
@@ -2299,6 +2502,9 @@ impl ProjectSandbox {
         let mut paths = vec![
             self.project_root.join("context"),
             self.project_root.join(".crazyagent").join("context"),
+            self.project_root
+                .join(".crazyagent")
+                .join(crate::agent_home::PROJECT_FILE),
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),
@@ -2322,7 +2528,8 @@ impl ProjectSandbox {
     /// confined agent its worktree, that worktree's git admin folder and the git object
     /// store, or for a clone-confined agent its clone alone, then its own home and temp
     /// dirs, its short temp folder, then its extra worktrees, then for a native lead's
-    /// teammates the team folders they share in the lead's home.
+    /// teammates the team folders they share in the lead's home, then its tool cache, the
+    /// owner's temp folder when granted and each shared writable folder.
     pub fn writable_roots(&self) -> impl Iterator<Item = &PathBuf> {
         assert!(self.confinements() <= 1);
         let project: Vec<&PathBuf> = match (&self.checkout, &self.clone, &self.setup) {
@@ -2457,6 +2664,19 @@ impl ProjectSandbox {
             text.push_str(&format!("\n  (global-name \"{service}\")"));
         }
         text.push_str(")\n");
+        if let Some((home, homes)) = self
+            .carved_home
+            .as_ref()
+            .and_then(|home| Some((home, home.parent()?)))
+            .filter(|(home, _)| clean_absolute(home))
+        {
+            assert!(self.engine_secrets.iter().any(|secret| secret == homes));
+            text.push_str(&format!(
+                "(allow file-read* file-write*\n  (subpath \"{}\"))\n(allow file-read-metadata\n  (literal \"{}\"))\n",
+                home.display(),
+                homes.display()
+            ));
+        }
         if !self.hidden.is_empty() {
             text.push_str("(deny file-read* file-write* process-exec file-link file-clone");
             for folder in self.hidden.iter().filter(|folder| clean_absolute(folder)) {
@@ -2478,10 +2698,7 @@ impl ProjectSandbox {
                 file.display()
             ));
         }
-        let project = self.project_root.display();
-        text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git/index.lock\")\n  (subpath \"{project}/.git/rebase-merge\")\n  (subpath \"{project}/.git/rebase-apply\")\n  (subpath \"{project}/.git/remotes\")\n  (subpath \"{project}/.git/branches\")\n  (subpath \"{project}/.git/sequencer\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
-        ));
+        text.push_str(&self.project_denies());
         if let Some(scratch) = &self.scratch {
             text.push_str(&format!(
                 "(deny {FIXED_WRITES}\n  (literal \"{}\"))\n",
@@ -2501,8 +2718,9 @@ impl ProjectSandbox {
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
             text.push_str(&format!(
-                "(deny file-write*\n  (literal \"{}/HEAD\"))\n",
-                checkout.admin.display()
+                "(deny file-write*\n  (regex #\"^{}/{}$\"))\n",
+                seatbelt_pattern(&checkout.admin),
+                any_case("HEAD")
             ));
         }
         if let Some(clone) = &self.clone {
@@ -2625,6 +2843,7 @@ impl ProjectSandbox {
                     .chain(&self.kept_ports)
                     .copied()
                     .chain(model_proxy::PROXY_PORTS)
+                    .chain(model_proxy::RELAY_PORTS)
                     .map(|port| format!(" (local ip \"*:{port}\")"))
                     .collect::<String>();
                 text.push_str(&format!(
@@ -2669,6 +2888,47 @@ impl ProjectSandbox {
         text
     }
 
+    /// The Seatbelt rule that keeps the files the engine and the owner's git read in the
+    /// project folder out of agent hands: both `context/` folders, the git hooks and the
+    /// rebase, sequencer, remotes and branches state, each with everything below it, and the
+    /// entries `.git`, `.crazyagent`, the project instructions file `.crazyagent/instructions.md`
+    /// (SA vid 11), the git config and its lock, the index and its lock, `commondir`,
+    /// `config.worktree`, `objects` and `objects/info`, none of which an agent may write or
+    /// hard link under another name it could write through (SA vid 11 r2). Each name below the
+    /// project folder matches in any letter case, so the rule does not depend on how Seatbelt
+    /// folds case on the case-insensitive volume, where git finds a name however it is typed
+    /// (RV-DS241-15). `.git/info`, `.git/shallow`, the alternates files and `.git/modules`
+    /// are kept the same way by [`Self::ancestry_denies`] and [`Self::submodule_denies`].
+    /// Input: the policy. Output: the rule text.
+    fn project_denies(&self) -> String {
+        let project = seatbelt_pattern(&self.project_root);
+        let git = any_case(".git");
+        let state = any_case(crate::projects_home::CRAZYAGENT_DIRECTORY);
+        let context = any_case("context");
+        let objects = format!("{git}/{}", any_case("objects"));
+        let mut below = vec![context.clone(), format!("{state}/{context}")];
+        below.extend(GIT_STATE_TREES.map(|name| format!("{git}/{}", any_case(name))));
+        let mut entries = vec![
+            git.clone(),
+            format!("{state}/{}", any_case(crate::agent_home::PROJECT_FILE)),
+            state,
+            format!("{objects}/{}", any_case("info")),
+            objects,
+        ];
+        entries.extend(GIT_STATE_FILES.map(|name| format!("{git}/{}", any_case(name))));
+        let mut text = String::from("(deny file-write* file-link");
+        for path in &below {
+            text.push_str(&format!("\n  (regex #\"^{project}/{path}(/.*)?$\")"));
+        }
+        for path in &entries {
+            text.push_str(&format!("\n  (regex #\"^{project}/{path}$\")"));
+        }
+        text.push_str(")\n");
+        assert_eq!(below.len() + entries.len(), 19);
+        assert_eq!(text.matches("(regex #\"^/").count(), 19);
+        text
+    }
+
     /// The Seatbelt rules that keep the owner's git reading the metadata the engine made.
     /// No agent may move the project folder, the git worktrees folders or a worktree, which
     /// would carry protected files out of their denied paths and back. A worktree's `.git`
@@ -2680,8 +2940,9 @@ impl ProjectSandbox {
     /// may be made anywhere in the git folder, in any letter case: git's `worktree prune`,
     /// which the owner's next commit runs as maintenance, empties whatever folder a link at
     /// `.git/worktrees` or `.git/worktrees/<name>` names (SECAUDIT-WORKTREE-ADMIN-PLANT). Each
-    /// name below the project root matches in any letter case, as in `clone_store_denies`,
-    /// since the case-insensitive disk finds it however it is typed (DEC-123 rv-secreview L2).
+    /// name below the project root, and each extra worktree's `.git` link, matches in any
+    /// letter case, as in `clone_store_denies`, since the case-insensitive disk finds it
+    /// however it is typed (DEC-123 rv-secreview L2, RV-DS241-15).
     /// Input: the policy. Output: the rule text.
     fn git_link_denies(&self) -> String {
         let project = self.project_root.display();
@@ -2707,15 +2968,18 @@ impl ProjectSandbox {
         for worktree in &self.worktrees {
             moves.push_str(&format!("\n  (literal \"{}\")", worktree.display()));
             links.push_str(&format!(
-                "\n  (literal \"{}\")",
-                worktree.join(".git").display()
+                "\n  (regex #\"^{}/{git}$\")",
+                seatbelt_pattern(worktree)
             ));
         }
         let text = format!(
             "{moves})\n{links})\n(deny file-write*\n  (regex #\"^{admin}/{}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{pattern}/{git}/\") (vnode-type SYMLINK)))\n",
             any_case("config.worktree")
         );
-        assert_eq!(text.matches("(regex #\"^/").count(), 8);
+        assert_eq!(
+            text.matches("(regex #\"^/").count(),
+            8 + self.worktrees.len()
+        );
         assert!(text.contains("(vnode-type SYMLINK)"));
         assert!(!text.contains("/.crazyagent/worktrees\""));
         text
@@ -2727,14 +2991,15 @@ impl ProjectSandbox {
     /// admin folder, so none can plant a submodule whose metadata the engine or the owner
     /// then enters. The `.gitmodules` file and gitlinks stay writable tracked content: the
     /// engine's own git ignores them with `--ignore-submodules` and never recurses. The
-    /// name matches in any letter case, since the project disk may be case insensitive.
-    /// Input: the policy. Output: the rule text.
+    /// name matches in any letter case ([`any_case`], the long s included), since the
+    /// project disk may be case insensitive. Input: the policy. Output: the rule text.
     fn submodule_denies(&self) -> String {
         let pattern = seatbelt_pattern(&self.project_root);
-        let dot_git = "\\.[gG][iI][tT]";
-        let modules = "[mM][oO][dD][uU][lL][eE][sS]";
+        let dot_git = any_case(".git");
+        let worktrees = any_case("worktrees");
+        let modules = any_case("modules");
         let text = format!(
-            "(deny file-write*\n  (regex #\"^{pattern}/{dot_git}(/worktrees/[^/]+)?/{modules}(/.*)?$\"))\n"
+            "(deny file-write*\n  (regex #\"^{pattern}/{dot_git}(/{worktrees}/[^/]+)?/{modules}(/.*)?$\"))\n"
         );
         assert_eq!(text.matches("(regex #\"^/").count(), 1);
         text
@@ -2751,9 +3016,9 @@ impl ProjectSandbox {
     /// at a tree's root, not below it, so the `.+/` guard never matches them. A whole folder
     /// already holding a `.git` could once be renamed in as a path-blind move Seatbelt
     /// cannot inspect; that source is removed by also denying `.git` at any depth, top level
-    /// included, in every non-working-tree writable root (the admin folder, object store,
-    /// home, temp and scratch), so no agent can create a repository anywhere to rename from
-    /// (SM1-R). The only `.git` entries in agent roots are engine-made links to exactly
+    /// included, in every writable root that is not a working tree ([`Self::git_deny_roots`],
+    /// the owner's temp folder and shared writable folders included), so no agent can create
+    /// a repository anywhere to rename from (SM1-R, RV-DS241-16). The only `.git` entries in agent roots are engine-made links to exactly
     /// `/dev/null`: the uv markers in a tool cache's buckets (T8 C1), which an agent cannot
     /// make, remove or point elsewhere, and which, moved with their bucket into a tree, git
     /// never enters or stages. Input: the policy. Output: the rule text.
@@ -2768,10 +3033,7 @@ impl ProjectSandbox {
             ));
         }
         for root in &other {
-            nested.push_str(&format!(
-                "\n      (regex #\"^{}/(.+/)?{dot_git}(/.*)?$\")",
-                seatbelt_pattern(root)
-            ));
+            nested.push_str(&format!("\n      {}", any_depth_git(root)));
         }
         let pattern = seatbelt_pattern(&self.project_root);
         let checkouts = format!("{pattern}(/\\.crazyagent)?/worktrees/[^/]+");
@@ -2820,11 +3082,11 @@ impl ProjectSandbox {
     /// `alternates` or `http-alternates` file in the project's object store or the one its
     /// checkout shares (land-19 r1 M1, r2 L1), and the project's `.git/info` (which holds
     /// `grafts`) and `.git/shallow` (land-19 r2 M1). A forged graph or graft could claim an
-    /// agent commit is on the landing tip. The case-exact denies on `.git/info`,
-    /// `.git/shallow` and the alternates files miss a case variant made where the name does
-    /// not exist yet, as after a clone or `init --template=`, which git then reads through
-    /// the case-insensitive volume. Engine git reads no graph or graft; this also keeps the
-    /// owner's own git from being handed one. Input: the policy. Output: the rule text.
+    /// agent commit is on the landing tip. This is the only rule on those names, and it holds
+    /// a case variant made where the name does not exist yet, as after a clone or
+    /// `init --template=`, which git then reads through the case-insensitive volume. Engine
+    /// git reads no graph or graft; this also keeps the owner's own git from being handed one.
+    /// Input: the policy. Output: the rule text.
     fn ancestry_denies(&self) -> String {
         let git = format!(
             "{}/{}",
@@ -2860,41 +3122,36 @@ impl ProjectSandbox {
 
     /// Splits the agent's writable roots into the working-tree roots, where the root's own
     /// top-level `.git` is a legitimate repository link the engine adds, and every other
-    /// writable root, where no `.git` may ever appear. A `.git` anywhere below a working
-    /// tree, and a `.git` at any depth (top level included) in an admin folder, object
-    /// store, home, temp or scratch root, or a team folder a native lead shares with its
-    /// teammates, is denied so no agent can create a repository to rename whole into a
-    /// worktree (OP-9 r2). The tool cache is such a root (T8): its only `.git` entries are the
-    /// engine's `/dev/null` links.
+    /// writable root, where no `.git` may ever appear. The working trees are the project
+    /// folder, worktree, clone or setup folder the agent works in and its extra worktrees;
+    /// every other root comes from [`Self::writable_roots`] itself, so a root granted there
+    /// is under the rule at once: an admin folder, object store or setup records, home, temp
+    /// or scratch, a team folder a native lead shares with its teammates, the tool cache (T8,
+    /// whose only `.git` entries are the engine's `/dev/null` links), the owner's temp folder
+    /// and every shared writable folder (RV-DS241-16). A `.git` anywhere below a working
+    /// tree, and a `.git` at any depth (top level included) in every other root, is denied so
+    /// no agent can create a repository the owner's git enters there or rename one whole
+    /// into a worktree (OP-9 r2, SM1-R). Output: the working roots and the other roots.
     fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
-        let mut working: Vec<&Path> = Vec::new();
-        let mut other: Vec<&Path> = Vec::new();
         assert!(self.confinements() <= 1);
-        match (&self.checkout, &self.clone, &self.setup) {
-            (Some(checkout), _, _) => {
-                working.push(checkout.worktree.as_path());
-                other.push(checkout.admin.as_path());
-                other.push(checkout.objects.as_path());
-            }
-            (None, Some(clone), _) => working.push(clone.as_path()),
-            (None, None, Some(setup)) => {
-                working.push(setup.folder.as_path());
-                other.push(setup.records.as_path());
-            }
-            (None, None, None) => working.push(self.project_root.as_path()),
-        }
-        other.push(self.agent_home.as_path());
-        other.push(self.agent_tmp.as_path());
-        if let Some(scratch) = &self.scratch {
-            other.push(scratch.as_path());
-        }
-        other.extend(self.shared.iter().map(PathBuf::as_path));
-        if let Some((cache, _)) = &self.tool_cache {
-            other.push(cache.as_path());
-        }
-        for worktree in &self.worktrees {
-            working.push(worktree.as_path());
-        }
+        let mut working: Vec<&Path> = vec![match (&self.checkout, &self.clone, &self.setup) {
+            (Some(checkout), _, _) => checkout.worktree.as_path(),
+            (None, Some(clone), _) => clone.as_path(),
+            (None, None, Some(setup)) => setup.folder.as_path(),
+            (None, None, None) => self.project_root.as_path(),
+        }];
+        working.extend(self.worktrees.iter().map(PathBuf::as_path));
+        let other: Vec<&Path> = self
+            .writable_roots()
+            .map(PathBuf::as_path)
+            .filter(|root| !working.contains(root))
+            .collect();
+        assert!(
+            working
+                .iter()
+                .all(|root| self.writable_roots().any(|writable| writable == root))
+        );
+        assert!(other.len() >= 2);
         (working, other)
     }
 
@@ -3240,21 +3497,23 @@ impl Sandbox for InstalledSandbox {
 
 impl Checkout {
     /// The Seatbelt rules that keep a confined agent from adding to or changing the git
-    /// objects the owner and the other agents share: no write in `info/` or `pack/`, no
-    /// new, moved or removed fan-out folder, no new object file by any route (create,
-    /// rename or link) and no rewrite, removal or replacement of one, and no symlink
-    /// anywhere in the store. Git reads a loose object before a packed one without checking
-    /// its bytes, so any object an agent could add would stand in for the owner's own;
-    /// object writes are the engine's, at turn end. Seatbelt regexes take no `{n}` counts,
-    /// so the hex digits repeat. Input: the checkout. Output: the rule text.
+    /// objects the owner and the other agents share: no write in `info/` or `pack/`, nor of
+    /// either folder entry, in any letter case, no new, moved or removed fan-out folder, no
+    /// new object file by any route (create, rename or link) and no rewrite, removal or
+    /// replacement of one, and no symlink anywhere in the store. Git reads a loose object
+    /// before a packed one without checking its bytes, so any object an agent could add
+    /// would stand in for the owner's own; object writes are the engine's, at turn end.
+    /// Seatbelt regexes take no `{n}` counts, so the hex digits repeat. Input: the checkout.
+    /// Output: the rule text.
     fn object_denies(&self) -> String {
         const HEX: &str = "[0-9a-fA-F]";
         let objects = self.objects.display();
         let pattern = seatbelt_pattern(&self.objects);
+        let held = format!("({}|{})", any_case("info"), any_case("pack"));
         let text = format!(
-            "(deny file-write*\n  (subpath \"{objects}/info\")\n  (subpath \"{objects}/pack\"))\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (regex #\"^{pattern}/{HEX}{HEX}$\")\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (require-all (subpath \"{objects}\") (vnode-type SYMLINK)))\n"
+            "(deny file-write*\n  (regex #\"^{pattern}/{held}(/.*)?$\"))\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (regex #\"^{pattern}/{HEX}{HEX}$\")\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (require-all (subpath \"{objects}\") (vnode-type SYMLINK)))\n"
         );
-        assert!(text.matches("(regex #\"^/").count() == 4);
+        assert!(text.matches("(regex #\"^/").count() == 5);
         assert!(text.contains("(vnode-type SYMLINK)"));
         text
     }
@@ -3740,21 +3999,33 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
 /// output styles and rules folders Claude Code reads or the `.agents` folder whose skills
 /// Codex reads from its home, none to the global instruction files of Claude Code and Codex,
 /// the Codex override that would replace them, the Codex `config.toml` holding its developer
-/// instructions or Claude Code's `settings.json`, none under `skills` but Codex's own
-/// `.system` skills, which Codex installs at its start and the engine removes before each
-/// Codex launch, and no move or removal of the `skills` folder, so no folder built elsewhere
+/// instructions or Claude Code's `settings.json`, nor to a zsh, bash or sh startup file,
+/// which every shell its harness starts there runs first (SA vid 12), none under `skills`
+/// but Codex's own `.system` skills, which Codex installs at its start and the engine
+/// removes before each Codex launch, and no move or removal of the `skills` folder, so no
+/// folder built elsewhere
 /// is moved in, nor a flag on `skills` or anywhere in `.system` that would keep the engine
 /// from removing it (CTX-M1 r1), each name in any letter case. Its own run cannot change the
 /// text it runs with until the next launch rewrites it. They also keep the agent's own
 /// keychain and keychain settings, which the engine sets up with `security` calls before a
 /// launch, out of its reach (DEC-146): no write under `Library/Keychains` nor to
 /// `Library/Preferences/com.apple.security.plist`, and no move, removal, mode change or link
-/// in place of `Library` or `Library/Preferences`, so no link an agent plants leads one of
-/// those calls to another keychain or settings file. They must follow every write allow.
-/// Input: the home. Output: the rule text.
+/// in place of `Library`, `Library/Preferences` or any other folder a launch keeps only part
+/// of, nor of the cargo cache links the launch keeps, nor a link it makes at their names
+/// ([`crate::agent_home::pinned_entries`], DEC-173), as [`root_pin`] keeps the home itself,
+/// so no link an agent plants leads one of those calls, a launch's removal of what it does
+/// not keep or a later cargo outside the home. They deny writes to cargo's, git's, npm's
+/// and yarn's own config and cargo's subcommands in the home (`.cargo/config`,
+/// `.cargo/config.toml`, `.config/git`, `.npmrc`, `.yarnrc`, `.yarnrc.yml`, `.cargo/bin`)
+/// and any file flag or ACL in it, so a run, or a process of it still alive after the next
+/// launch's reset, neither plants config or programs its own tools run nor pins what the
+/// next launch removes or writes (RV-DS241-137, -138, sec r1 F1, F2). They deny writes to
+/// the launch lock too, so no run links, removes or replaces it, since a launch refuses a
+/// lock with a second link (r3). They must follow every write allow. Input: the home.
+/// Output: the rule text.
 fn launch_denies(home: &Path) -> String {
     use crate::agent_home::Harness;
-    use crate::launch_context::STATE;
+    use crate::launch_context::{LOCK, STATE};
     let home = seatbelt_pattern(home);
     let skills = format!("{home}/{}", any_case("skills"));
     let folders = [
@@ -3766,6 +4037,13 @@ fn launch_denies(home: &Path) -> String {
         "rules",
         ".agents",
         "Library/Keychains",
+        ".cargo/config",
+        ".cargo/config.toml",
+        ".cargo/bin",
+        ".config/git",
+        ".npmrc",
+        ".yarnrc",
+        ".yarnrc.yml",
     ];
     let files = [
         Harness::Claude.instruction_file(),
@@ -3774,6 +4052,7 @@ fn launch_denies(home: &Path) -> String {
         "config.toml",
         "settings.json",
         "Library/Preferences/com.apple.security.plist",
+        LOCK,
     ];
     let mut text = String::from("(deny file-write*\n");
     for folder in folders {
@@ -3785,18 +4064,53 @@ fn launch_denies(home: &Path) -> String {
     for file in files {
         text.push_str(&format!("  (regex #\"^{home}/{}$\")\n", any_case(file)));
     }
+    text.push_str(&format!("  (regex #\"^{home}/{}$\")\n", shell_startup()));
+    let system = any_case(crate::launch_context::CODEX_SYSTEM_SKILLS);
     text.push_str(&format!(
-        "  (regex #\"^{skills}/{}\"))\n(deny {PINNED_WRITES} (regex #\"^{skills}$\"))\n(deny file-write-flags (regex #\"^{skills}/{}(/.*)?$\"))\n",
-        other_than(crate::launch_context::CODEX_SYSTEM_SKILLS),
-        any_case(crate::launch_context::CODEX_SYSTEM_SKILLS)
+        "  (regex #\"^{skills}/{}\"))\n(deny {PINNED_WRITES} (regex #\"^{skills}$\"))\n(deny file-write-flags\n  (regex #\"^{skills}/{system}$\")\n  (regex #\"^{skills}/{system}/\"))\n",
+        other_than(crate::launch_context::CODEX_SYSTEM_SKILLS)
     ));
     let library = format!("{home}/{}", any_case("Library"));
-    let preferences = format!("{library}/{}", any_case("Preferences"));
+    let walked: Vec<String> = crate::agent_home::pinned_entries()
+        .iter()
+        .map(|entry| format!("{home}/{}", any_case(entry)))
+        .collect();
+    assert!(walked.contains(&library));
+    assert!(walked.contains(&format!("{home}/{}", any_case(".cargo/registry"))));
+    let spelled = |indent: &str| {
+        walked
+            .iter()
+            .map(|folder| format!("\n{indent}(regex #\"^{folder}$\")"))
+            .collect::<String>()
+    };
     text.push_str(&format!(
-        "(deny {PINNED_WRITES}\n  (regex #\"^{library}$\")\n  (regex #\"^{preferences}$\"))\n(deny file-write-create\n  (require-all\n    (require-any\n      (regex #\"^{library}$\")\n      (regex #\"^{preferences}$\"))\n    (vnode-type SYMLINK)))\n"
+        "(deny {PINNED_WRITES}{})\n(deny file-write-create\n  (require-all\n    (require-any{})\n    (vnode-type SYMLINK)))\n(deny file-write-flags file-write-acl (regex #\"^{home}(/.*)?$\"))\n",
+        spelled("  "),
+        spelled("      "),
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 21);
+    assert_eq!(text.matches("(regex #\"^/").count(), 42);
     text
+}
+
+/// Spells the Seatbelt pattern of the shell startup files directly in a home, each in any
+/// letter case: zsh's, alone or in the compiled form zsh runs in its place, and bash's and
+/// sh's (SA vid 12). Output: the pattern, a group without anchors.
+fn shell_startup() -> String {
+    let spelled = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| any_case(name))
+            .collect::<Vec<_>>()
+            .join("|")
+    };
+    let pattern = format!(
+        "(({})({})?|{})",
+        spelled(&crate::agent_home::ZSH_STARTUP[..]),
+        any_case(crate::agent_home::ZSH_COMPILED),
+        spelled(&crate::agent_home::SH_STARTUP[..]),
+    );
+    assert!(pattern.len() <= SBPL_STRING_MAX / 2);
+    pattern
 }
 
 /// Spells a Seatbelt regex for one path component other than `name` in any letter case,
@@ -3839,11 +4153,38 @@ fn root_pin(root: &Path) -> String {
     format!("(deny {FIXED_WRITES} (literal \"{}\"))\n", root.display())
 }
 
+/// The Seatbelt filter for a `.git` at any depth below `root`, top level included, in any
+/// letter case: the part of [`ProjectSandbox::nested_git_denies`] for a root that is not a
+/// working tree (SM1-R). Input: the root. Output: the regex filter.
+fn any_depth_git(root: &Path) -> String {
+    format!(
+        "(regex #\"^{}/(.+/)?\\.[gG][iI][tT](/.*)?$\")",
+        seatbelt_pattern(root)
+    )
+}
+
+/// The base write denies a profile gives again after it grants writes once more to the agent
+/// home and other folders, as the IDE profile does for its server's data folders: each one
+/// pinned ([`root_pin`]), no `.git` at any depth in any of them ([`any_depth_git`]), and the
+/// home's launch files ([`launch_denies`]). They must follow that grant, since the last
+/// match wins. Inputs: the home and the other folders. Output: the rule text.
+#[cfg(unix)]
+pub(crate) fn regranted_denies(home: &Path, folders: &[&Path]) -> String {
+    let mut text = launch_denies(home);
+    let mut nested = String::new();
+    for root in std::iter::once(home).chain(folders.iter().copied()) {
+        text.push_str(&root_pin(root));
+        nested.push_str(&format!("\n  {}", any_depth_git(root)));
+    }
+    text.push_str(&format!("(deny file-write*{nested})\n"));
+    text
+}
+
 /// Whether every deny rule comes after the profile's last write allow, since Seatbelt applies
 /// the last matching rule and a deny a later allow overrides no longer holds (CTX-M1 F1).
 /// Inputs: the profile text and the deny rules as written in it. Output: false when any
 /// deny is missing or comes before a write allow.
-fn denies_follow_write_allows(text: &str, denies: &[String]) -> bool {
+pub(crate) fn denies_follow_write_allows(text: &str, denies: &[String]) -> bool {
     let last_write_allow = text
         .rfind("(allow file-write*")
         .max(text.rfind("(allow file-read* file-write*"));

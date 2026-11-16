@@ -1656,6 +1656,9 @@ impl Screen for ProjectPage {
         }
         self.screen.width = ctx.width;
         if self.recovery_has_keys() && self.screen.recovery.key(key) {
+            if self.screen.recovery.take_delete_again() {
+                self.screen.ask_delete_again();
+            }
             self.pump(ctx);
             self.redraw(ctx);
             return Flow::Handled;
@@ -1872,12 +1875,14 @@ impl Screen for ProjectPage {
         self.screen.width = area.width;
         self.screen.now_ms = now_ms();
         self.screen.changes.painting(true);
+        self.screen.plugins.painting(true);
         self.view = project_screen(
             &mut self.screen,
             area.width,
             area.height.saturating_add(4),
             &look(ctx),
         );
+        self.screen.plugins.painting(false);
         self.screen.changes.painting(false);
         paint(frame, area, &self.view)
     }

@@ -14,6 +14,27 @@ const REPORT_PATH_BYTES_MAX: usize = 512;
 const RUNNING_MAX: u32 = 64;
 const ATTEMPTS_MAX: u32 = 10;
 const STALE_ERROR: &str = "Agent stopped responding";
+/// How many rate-limited ends in a row a job takes before it ends failed, since its agent
+/// can write the limit its harness reports (DEC-170 addendum 6, RV-DS241-26).
+const RATE_LIMITED_ENDS_MAX: i64 = 3;
+const RATE_LIMITED_LINE: &str =
+    "The account kept hitting its rate limit; run this research again later";
+/// The wait before a job handed back unlaunched is claimed again: the first, doubled for
+/// each refusal in a row, up to the longest (DEC-170 addendum 6, RV-DS241-27).
+const REFUSED_WAIT_FIRST_MS: i64 = 30_000;
+const REFUSED_WAIT_MAX_MS: i64 = 600_000;
+const REFUSED_DOUBLINGS_MAX: i64 = 5;
+/// The columns DEC-170 addendum 6 added to the queue: rate-limited ends in a row, refused
+/// launches in a row and the time before which a refused job is not claimed.
+const ADDED_COLUMNS: [(&str, &str); 3] = [
+    ("limited", "INTEGER NOT NULL DEFAULT 0"),
+    ("refused", "INTEGER NOT NULL DEFAULT 0"),
+    ("not_before_ms", "INTEGER"),
+];
+/// The assignments that start a job over: no rate-limited ends in a row, no refused launches
+/// in a row and no wait left by a refusal. Every statement that queues a stopped or finished
+/// job again for the owner sets them, so the job runs as a new one does (RV-DS241-159).
+pub(crate) const RUN_AGAIN: &str = "limited = 0, refused = 0, not_before_ms = NULL";
 
 const COLUMNS: &str = "id, project, kind, harness, tools, status, attempts, claimer, report_path, error, cancel_requested, output_bytes, created_ms, started_ms, heartbeat_ms, finished_ms";
 
@@ -165,6 +186,7 @@ impl ResearchJobs {
              CREATE INDEX IF NOT EXISTS research_jobs_project_status
                  ON research_jobs(project, status, id);",
         )?;
+        add_columns(&connection)?;
         Ok(Self { connection })
     }
 
@@ -239,6 +261,7 @@ impl ResearchJobs {
                      WHERE id = (SELECT id FROM research_jobs
                                  WHERE project = ?1 AND status = 'queued'
                                    AND (?5 IS NULL OR harness = ?5)
+                                   AND (not_before_ms IS NULL OR not_before_ms <= ?3)
                                    AND {AFTER_RESEARCH}
                                  ORDER BY id LIMIT 1)
                        AND (SELECT count(*) FROM research_jobs
@@ -254,10 +277,66 @@ impl ResearchJobs {
             assert_eq!(job.claimer.as_deref(), Some(claimer));
             assert!(harness.is_none_or(|harness| job.harness == harness));
             assert!(job.attempts >= 1);
-            let started = ActivityKind::ResearchStarted;
-            crate::activity::note_research(&self.connection, job.id, started, now);
         }
         Ok(job)
+    }
+
+    /// Records that the harness of the claim `held` really started: the project's activity
+    /// shows the run started, and the job's refusals in a row are forgotten (DEC-170
+    /// addendum 6). Takes the claim. Returns Ok, or `NotHeld` once the claim was lost.
+    pub fn launched(&self, held: &ResearchJob) -> Result<(), JobError> {
+        self.transition(held, "refused = 0, not_before_ms = NULL", &[])?;
+        let started = ActivityKind::ResearchStarted;
+        crate::activity::note_research(&self.connection, held.id, started, now_ms());
+        Ok(())
+    }
+
+    /// Hands back the claim `held` without launching its harness, for a refusal that may
+    /// pass on its own (a projects home move, a sign-in another run holds, an account not
+    /// ready): no attempt is spent, `line` is what the queued job shows in the desktop and
+    /// terminal apps alike (DEC-141), and it is not claimed again for a wait that doubles with
+    /// each refusal in a row (DEC-170 addendum 6, RV-DS241-27). A job whose cancel was
+    /// requested ends cancelled. Takes the claim and the plain line. Returns the new status.
+    pub fn refused(&self, held: &ResearchJob, line: &str) -> Result<ResearchStatus, JobError> {
+        bounded(line, ERROR_BYTES_MAX)?;
+        let claimer = held.claimer.as_deref().ok_or(JobError::NotHeld)?;
+        let now = now_ms();
+        let status = self
+            .connection
+            .query_row(
+                "UPDATE research_jobs
+                 SET status = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE 'queued' END,
+                     finished_ms = CASE WHEN cancel_requested = 1 THEN ?5 ELSE finished_ms END,
+                     error = CASE WHEN cancel_requested = 1 THEN error ELSE ?4 END,
+                     attempts = attempts - 1, claimer = NULL, started_ms = NULL, heartbeat_ms = NULL,
+                     not_before_ms = ?5 + min(?6 << min(refused, ?8), ?7),
+                     refused = refused + 1
+                 WHERE id = ?1 AND claimer = ?2 AND attempts = ?3 AND status = 'running'
+                 RETURNING status",
+                params![
+                    held.id,
+                    claimer,
+                    held.attempts,
+                    line,
+                    now,
+                    REFUSED_WAIT_FIRST_MS,
+                    REFUSED_WAIT_MAX_MS,
+                    REFUSED_DOUBLINGS_MAX
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(JobError::NotHeld)?;
+        let status = ResearchStatus::parse(&status).ok_or(JobError::Invalid("status"))?;
+        assert!(matches!(
+            status,
+            ResearchStatus::Queued | ResearchStatus::Cancelled
+        ));
+        if status == ResearchStatus::Cancelled {
+            let stopped = ActivityKind::ResearchStopped;
+            crate::activity::note_research(&self.connection, held.id, stopped, now);
+        }
+        Ok(status)
     }
 
     /// Records liveness and output size for the claim `held`, the job a claim
@@ -292,12 +371,49 @@ impl ResearchJobs {
         let now = now_ms();
         self.transition(
             held,
-            "status = 'done', report_path = ?4, finished_ms = ?5, claimer = NULL",
+            "status = 'done', report_path = ?4, finished_ms = ?5, claimer = NULL, limited = 0",
             &[&report_path, &now],
         )?;
         let saved = ActivityKind::ResearchSaved;
         crate::activity::note_research(&self.connection, held.id, saved, now);
         Ok(())
+    }
+
+    /// Ends the job of the claim `held` failed with `error` and gives back the attempt its
+    /// claim counted, for a run stopped before its harness started, such as one whose model
+    /// provider refuses every connect; a job whose cancel was requested ends cancelled. The
+    /// project's activity records the run as stopped. Returns the new status.
+    pub fn fail_unspent(
+        &self,
+        held: &ResearchJob,
+        error: &str,
+    ) -> Result<ResearchStatus, JobError> {
+        assert!(held.attempts >= 1, "a held job's claim counted an attempt");
+        let error = kept_error(error);
+        let claimer = held.claimer.as_deref().ok_or(JobError::NotHeld)?;
+        let now = now_ms();
+        let status = self
+            .connection
+            .query_row(
+                "UPDATE research_jobs
+                 SET status = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE 'failed' END,
+                     error = ?4, finished_ms = ?5, claimer = NULL, attempts = attempts - 1,
+                     limited = 0
+                 WHERE id = ?1 AND claimer = ?2 AND attempts = ?3 AND status = 'running'
+                 RETURNING status",
+                params![held.id, claimer, held.attempts, error, now],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(JobError::NotHeld)?;
+        let status = ResearchStatus::parse(&status).ok_or(JobError::Invalid("status"))?;
+        assert!(matches!(
+            status,
+            ResearchStatus::Failed | ResearchStatus::Cancelled
+        ));
+        let stopped = ActivityKind::ResearchStopped;
+        crate::activity::note_research(&self.connection, held.id, stopped, now);
+        Ok(status)
     }
 
     /// Records a failed attempt of the claim `held`: a job whose cancel was
@@ -314,7 +430,7 @@ impl ResearchJobs {
         if !(1..=ATTEMPTS_MAX).contains(&attempts_max) {
             return Err(JobError::Invalid("attempt limit must be 1..10"));
         }
-        let error: String = error.chars().take(ERROR_BYTES_MAX / 4).collect();
+        let error = kept_error(error);
         let claimer = held.claimer.as_deref().ok_or(JobError::NotHeld)?;
         let now = now_ms();
         let status = self
@@ -323,7 +439,7 @@ impl ResearchJobs {
                 "UPDATE research_jobs
                  SET status = CASE WHEN cancel_requested = 1 THEN 'cancelled'
                                    WHEN attempts < ?5 THEN 'queued' ELSE 'failed' END,
-                     error = ?4, finished_ms = ?6, claimer = NULL
+                     error = ?4, finished_ms = ?6, claimer = NULL, limited = 0
                  WHERE id = ?1 AND claimer = ?2 AND attempts = ?3 AND status = 'running'
                  RETURNING status",
                 params![held.id, claimer, held.attempts, error, attempts_max, now],
@@ -418,7 +534,7 @@ impl ResearchJobs {
         self.transition(
             held,
             "status = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE 'queued' END, attempts = attempts - 1, claimer = NULL,
-             error = CASE WHEN cancel_requested = 1 THEN error ELSE ?4 END",
+             error = CASE WHEN cancel_requested = 1 THEN error ELSE ?4 END, limited = 0",
             &[&reason],
         )
     }
@@ -435,8 +551,10 @@ impl ResearchJobs {
     /// project before the job is free, so the project's next pick fails over to another
     /// account; a claim lost meanwhile keeps the hold. The limit is read from what the run's
     /// harness wrote, which its agent can write too in a terminal run, so the hold reaches no
-    /// other project (SECAUDIT-RATELIMIT-FORGE). Takes the claim and the account's
-    /// connection. Returns the new status and when the hold ends, in ms since the epoch.
+    /// other project (SECAUDIT-RATELIMIT-FORGE), and the third such end in a row ends the job
+    /// failed with a plain line (DEC-170 addendum 6, RV-DS241-26). Takes the claim and the
+    /// account's connection. Returns the new status and when the hold ends, in ms since the
+    /// epoch.
     pub fn rate_limited(
         &self,
         held: &ResearchJob,
@@ -448,10 +566,42 @@ impl ResearchJobs {
             account,
             crate::team::runtime::TeamLimits::default().rate_limit_pause,
         )?;
-        self.release(held, None)?;
+        let claimer = held.claimer.as_deref().ok_or(JobError::NotHeld)?;
+        let now = now_ms();
         let status = self
-            .get(held.id)?
-            .map_or(ResearchStatus::Queued, |job| job.status);
+            .connection
+            .query_row(
+                "UPDATE research_jobs
+                 SET status = CASE WHEN cancel_requested = 1 THEN 'cancelled'
+                                   WHEN limited + 1 >= ?4 THEN 'failed' ELSE 'queued' END,
+                     error = CASE WHEN cancel_requested = 1 THEN error
+                                  WHEN limited + 1 >= ?4 THEN ?5 ELSE NULL END,
+                     finished_ms = CASE WHEN cancel_requested = 1 OR limited + 1 >= ?4 THEN ?6
+                                        ELSE finished_ms END,
+                     attempts = attempts - 1, claimer = NULL, limited = limited + 1
+                 WHERE id = ?1 AND claimer = ?2 AND attempts = ?3 AND status = 'running'
+                 RETURNING status",
+                params![
+                    held.id,
+                    claimer,
+                    held.attempts,
+                    RATE_LIMITED_ENDS_MAX,
+                    RATE_LIMITED_LINE,
+                    now
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(JobError::NotHeld)?;
+        let status = ResearchStatus::parse(&status).ok_or(JobError::Invalid("status"))?;
+        assert!(matches!(
+            status,
+            ResearchStatus::Queued | ResearchStatus::Failed | ResearchStatus::Cancelled
+        ));
+        if status != ResearchStatus::Queued {
+            let stopped = ActivityKind::ResearchStopped;
+            crate::activity::note_research(&self.connection, held.id, stopped, now);
+        }
         Ok((status, until))
     }
 
@@ -494,7 +644,7 @@ impl ResearchJobs {
         let now = now_ms();
         self.transition(
             held,
-            "status = 'cancelled', finished_ms = ?4, claimer = NULL",
+            "status = 'cancelled', finished_ms = ?4, claimer = NULL, limited = 0",
             &[&now],
         )?;
         let stopped = ActivityKind::ResearchStopped;
@@ -520,7 +670,7 @@ impl ResearchJobs {
                               ELSE error END,
                  finished_ms = CASE WHEN cancel_requested = 1 OR attempts >= ?2 THEN ?4
                                     ELSE finished_ms END,
-                 claimer = NULL
+                 claimer = NULL, limited = 0
              WHERE status = 'running' AND heartbeat_ms <= ?1",
             params![cutoff, attempts_max, STALE_ERROR, now],
         )?)
@@ -561,8 +711,8 @@ impl ResearchJobs {
     }
 
     /// Reads the terminal display the owner chose for a project's terminals
-    /// (N-D9), Classic when none is saved. Takes the project. Returns the display, or
-    /// `coord_settings_invalid` for a stored row this build cannot read.
+    /// (N-D9), the default Fullscreen when none is saved. Takes the project. Returns the
+    /// display, or `coord_settings_invalid` for a stored row this build cannot read.
     pub fn terminal_display(
         &self,
         project: &crate::protocol::ProjectId,
@@ -652,6 +802,34 @@ impl ResearchJobs {
     }
 }
 
+/// Adds the columns DEC-170 addendum 6 gave the queue to a table made without them, each
+/// once, also when another opener adds it at the same time. The queue and the engine's
+/// project setup both call it, so the owner's statements can name the columns before any
+/// runner opened the queue (RV-DS241-159). Takes the connection. Returns any SQLite failure.
+pub(crate) fn add_columns(connection: &Connection) -> rusqlite::Result<()> {
+    let present = |name: &str| {
+        connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('research_jobs') WHERE name=?1)",
+            [name],
+            |row| row.get::<_, bool>(0),
+        )
+    };
+    for (name, kind) in ADDED_COLUMNS {
+        if present(name)? {
+            continue;
+        }
+        let added = connection.execute_batch(&format!(
+            "ALTER TABLE research_jobs ADD COLUMN {name} {kind}"
+        ));
+        if let Err(error) = added
+            && !present(name)?
+        {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 /// Whether `kind` is safe as a report file stem: 1..64 of `a-z`, `0-9`, `_`, `-`.
 pub fn valid_kind(kind: &str) -> bool {
     !kind.is_empty()
@@ -668,6 +846,16 @@ fn bounded(value: &str, max: usize) -> Result<(), JobError> {
         ));
     }
     Ok(())
+}
+
+/// Cuts a failure line to the stored bound on a character boundary, so a plain line keeps
+/// every byte up to `ERROR_BYTES_MAX`. Input: the line. Output: its longest prefix within
+/// the bound that ends on a character.
+fn kept_error(error: &str) -> &str {
+    let kept = &error[..error.floor_char_boundary(ERROR_BYTES_MAX)];
+    assert!(kept.len() <= ERROR_BYTES_MAX && error.starts_with(kept));
+    assert!(kept.len() == error.len() || error.len() > ERROR_BYTES_MAX);
+    kept
 }
 
 fn now_ms() -> i64 {

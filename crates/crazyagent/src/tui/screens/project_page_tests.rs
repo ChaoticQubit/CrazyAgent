@@ -2243,6 +2243,76 @@ async fn a_creation_run_in_the_background_finishes_after_its_page_is_gone() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_draft_refused_while_another_wizard_is_open_is_kept_ahead_of_that_wizards_draft() {
+    let engine = Engine::start().await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    pump(&mut shell, &mut connection).await;
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Tidepool is ready.")
+    );
+
+    go_to(&mut shell, "new project");
+    pump(&mut shell, &mut connection).await;
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1);
+    go_to(&mut shell, "new project");
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    for character in "Harbor".chars() {
+        shell.key(Key::Char(character));
+    }
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"create"), "{sent:?}");
+    let refused = shell.ctx.message().expect("the refusal is shown");
+    assert!(
+        refused.lead.starts_with("Could not create"),
+        "{}",
+        refused.lead
+    );
+    assert!(
+        refused.rest.contains("Tidepool is kept as a draft"),
+        "{}",
+        refused.rest
+    );
+    assert_eq!(shell.place(), Some(Place::NewProject));
+
+    go_to(&mut shell, "home");
+    assert_eq!(
+        kept_draft().as_deref(),
+        Some("Tidepool"),
+        "leaving the open wizard keeps its draft behind the refused one, not over it"
+    );
+    go_to(&mut shell, "new project");
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Tidepool"), "{shown}");
+    assert_eq!(kept_draft().as_deref(), Some("Harbor"));
+    go_to(&mut shell, "home");
+    assert_eq!(kept_draft().as_deref(), Some("Harbor"));
+    go_to(&mut shell, "new project");
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Harbor"), "{shown}");
+    assert_eq!(kept_draft().as_deref(), Some("Tidepool"));
+}
+
 #[test]
 fn leaving_the_wizard_keeps_the_draft_for_next_time() {
     let mut ctx = ctx(80, 24);
@@ -4999,6 +5069,57 @@ async fn a_second_lost_reply_on_a_recovering_creation_says_the_project_is_unconf
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_creation_the_engine_still_runs_is_checked_again_on_each_tick_until_it_answers() {
+    use crate::tui::client::MutationDelivery;
+    let engine = Engine::start().await;
+    let (mut shell, _connection, submission) = submitted_creation(&engine).await;
+    let late = || Err("owner_outcome_unknown_reconcile_same_identity".to_owned());
+    let running = || {
+        Ok(Box::new(OwnerResponse::InProgress {
+            operation_id: crate::protocol::RequestId::new("late-creation").unwrap(),
+        }))
+    };
+
+    let sent = creation_reply(&mut shell, &submission, late(), true);
+    assert_eq!(sent.len(), 1, "a late answer is reconciled once");
+    assert!(matches!(sent[0].delivery, MutationDelivery::Reconcile));
+
+    for _ in 0..2 {
+        let sent = creation_reply(&mut shell, &submission, running(), true);
+        assert!(
+            sent.is_empty(),
+            "a running creation waits for the next tick"
+        );
+        let shown = render(&mut shell, 160, 24);
+        assert!(
+            !shown.contains("could not confirm"),
+            "the engine still runs the creation, so it is not unconfirmed: {shown}"
+        );
+        assert_eq!(
+            shell.ctx.message().map(|message| message.lead.clone()),
+            Some("Still creating the project.".to_owned())
+        );
+        shell.tick();
+        let checks = std::iter::from_fn(|| shell.ctx.next_request())
+            .filter_map(|request| match request {
+                Request::Creation(job) => Some(*job),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            checks.len(),
+            1,
+            "each tick checks the running creation once"
+        );
+        assert!(matches!(checks[0].delivery, MutationDelivery::Reconcile));
+        assert_eq!(
+            checks[0].submission, submission,
+            "the same submission and project id, never a second one"
+        );
+    }
+}
+
 /// While the uncommitted-move banner takes rows above the tabs, the Changes tab offers
 /// Accept on a moved diff only once its last line was painted in the frame the owner
 /// sees, never from the taller view drawn after each key (RVA-1 r1 F2).
@@ -5186,6 +5307,7 @@ mod overview_tabs {
                     text: None,
                     version: String::new(),
                     edited: false,
+                    foreign: false,
                     proposal: None,
                     proposal_version: String::new(),
                     blocked: None,
@@ -5196,6 +5318,7 @@ mod overview_tabs {
             stale: false,
             checked_ms: None,
             failure: None,
+            waiting_for_account: false,
             refresh: Refresh::AfterLanding,
             apply: Apply::AlwaysAsk,
             needs_home: false,
@@ -5305,6 +5428,38 @@ mod overview_tabs {
         assert!(!shown.contains("Share lists"));
     }
 
+    /// RV-DS241-2: a tab whose file came with the project's files, not written by the engine
+    /// nor saved by the owner, says so above its text in the desktop's words (DEC-141), and
+    /// only on that tab; a tab the owner edited does not.
+    #[test]
+    fn a_foreign_tab_file_says_it_came_with_the_projects_files() {
+        let line = concat!(
+            "This tab's file came with the project's files: CrazyAgent didn't write it and ",
+            "you didn't save it. Check it before you use its commands."
+        );
+        let mut overview = overview_with(Tab::InstallAndUse, "Run setup.sh first.\n");
+        overview.tabs[3].foreign = true;
+        let mut page = page_with_overview(overview.clone());
+        assert!(!flat(&mut page).contains(line), "only on its own tab");
+        for _ in 0..3 {
+            press(&mut page, KeyCode::Right);
+        }
+        assert!(frame(&mut page).contains(&marked("Install & use")));
+        let shown = flat(&mut page);
+        assert!(shown.contains(line), "{shown}");
+        assert!(shown.contains("Run setup.sh first."));
+        overview.tabs[3].foreign = false;
+        overview.tabs[3].edited = true;
+        let mut mine = page_with_overview(overview);
+        for _ in 0..3 {
+            press(&mut mine, KeyCode::Right);
+        }
+        assert!(
+            !flat(&mut mine).contains(line),
+            "the owner's edit is not foreign"
+        );
+    }
+
     #[test]
     fn a_tab_not_written_yet_says_what_will_write_it() {
         let shown = |change: fn(&mut Overview)| {
@@ -5347,6 +5502,7 @@ mod overview_tabs {
         for (stale, running) in [(true, false), (false, true)] {
             let mut overview = empty();
             overview.failure = Some(reason.into());
+            overview.waiting_for_account = true;
             overview.stale = stale;
             overview.running = running;
             let shown = flat(&mut page_with_overview(overview));
@@ -5355,11 +5511,31 @@ mod overview_tabs {
         }
         let mut ended = empty();
         ended.failure = Some(reason.into());
+        ended.waiting_for_account = true;
         let shown = flat(&mut page_with_overview(ended));
         assert!(
             shown.contains(&format!("Couldn't refresh the tabs. {reason}")),
             "{shown}"
         );
+    }
+
+    /// An ended real failure stays a failed refresh while the next run waits to start and
+    /// while it writes (IW-L1, DEC-147 addendum): only the engine's wait for an account is
+    /// shown as a wait, in the same words as the desktop app.
+    #[test]
+    fn an_ended_failure_stays_a_failed_refresh_while_a_new_run_waits_or_writes() {
+        let reason = crate::project_overview::UNFINISHED;
+        for (stale, running) in [(true, false), (false, true), (true, true)] {
+            let mut overview = empty();
+            overview.failure = Some(reason.into());
+            overview.stale = stale;
+            overview.running = running;
+            let shown = flat(&mut page_with_overview(overview));
+            assert!(
+                shown.contains(&format!("Couldn't refresh the tabs. {reason}")),
+                "stale {stale} running {running}: {shown}"
+            );
+        }
     }
 
     #[test]
@@ -5621,4 +5797,133 @@ async fn a_requested_memory_is_approved_from_the_project_context_tab_on_a_real_e
             tab: ProjectTab::Context,
         })
     );
+}
+
+/// A delete an engine stop cut short shows on the project's banner in plain words, with Ctrl-D
+/// Keep the project, which clears the mark, and Ctrl-X Delete again, which opens the remove ask
+/// with Delete everything picked once the engine's preview offers it (DEC-141, DEC-118).
+#[test]
+fn a_delete_cut_short_offers_keep_the_project_and_delete_again_on_the_banner() {
+    use crate::engine::owner::{BannerNotice, RecoveryBanner};
+    use crate::tui::client::SetupEvent;
+    use crate::tui::client::recovery::{RecoveryEvent, RecoveryQuery, RecoveryReply};
+    let notes = ProjectId::new("notes-cli").unwrap();
+    let mut ctx = ctx(110, 40);
+    ctx.link = crate::tui::ctx::Link::Ready;
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Overview,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let asked = |shell: &mut Shell| {
+        let mut recovery = Vec::new();
+        let mut setup = Vec::new();
+        while let Some(request) = shell.ctx.next_request() {
+            match request {
+                Request::Recovery(query) => recovery.push(*query),
+                Request::Setup(query) => setup.push(query),
+                _ => {}
+            }
+        }
+        (recovery, setup)
+    };
+    let (read, first) = asked(&mut shell);
+    assert_eq!(
+        read,
+        [RecoveryQuery::Read {
+            project: notes.clone()
+        }]
+    );
+    for query in first {
+        shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+            SetupEvent {
+                query,
+                result: Err("project_setup_missing".into()),
+            },
+        )))));
+    }
+    let notice: BannerNotice = serde_json::from_value(serde_json::json!({
+        "action_kind": "project_delete",
+        "id": 9,
+        "agent": null,
+        "label": null,
+        "change_set": null,
+        "shown": "unknown",
+        "started_ms": 1_800_000_000_000_i64,
+    }))
+    .expect("the engine names a delete cut short");
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Recovery(Box::new(
+        RecoveryEvent {
+            query: read[0].clone(),
+            result: Ok(RecoveryReply::Banner(RecoveryBanner {
+                runs: Vec::new(),
+                notices: vec![notice.clone()],
+                more: 0,
+            })),
+        },
+    )))));
+    let out = render(&mut shell, 110, 40);
+    for words in [
+        "A delete was cut short. Some folders may already be in the Trash.",
+        "Ctrl-D Keep the project",
+        "Ctrl-X Delete again",
+    ] {
+        assert!(out.contains(words), "{words:?} is drawn:\n{out}");
+    }
+
+    shell.key(Key::Ctrl('x'));
+    let (recovery, setup) = asked(&mut shell);
+    assert!(recovery.is_empty(), "Delete again clears nothing by itself");
+    let removal: Vec<SetupQuery> = setup
+        .into_iter()
+        .filter(|query| matches!(query, SetupQuery::Removal { .. }))
+        .collect();
+    assert_eq!(
+        removal,
+        [SetupQuery::Removal {
+            project: notes.clone()
+        }],
+        "Delete again reads what removing would do, as x does"
+    );
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        SetupEvent {
+            query: removal[0].clone(),
+            result: Ok(SetupView::Removal(Box::new(
+                crate::team::cleanup::RemovalPreview {
+                    name: "Notes CLI".into(),
+                    folders: vec!["/Users/owner/CrazyAgent/notes-cli".into()],
+                    can_delete: true,
+                    blocked: None,
+                    running: Vec::new(),
+                    open_change_sets: 0,
+                    losses: Vec::new(),
+                },
+            ))),
+        },
+    )))));
+    let ask = render(&mut shell, 110, 40);
+    assert!(
+        ask.contains("[ Delete everything ]") && ask.contains("Type the project name:"),
+        "the remove ask opens on Delete everything:\n{ask}"
+    );
+    shell.key(Key::Esc);
+    let kept = render(&mut shell, 110, 40);
+    assert!(
+        !kept.contains("[ Delete everything ]"),
+        "Esc keeps the project:\n{kept}"
+    );
+
+    shell.key(Key::Ctrl('d'));
+    let (recovery, _) = asked(&mut shell);
+    assert_eq!(recovery.len(), 1, "Keep the project sends one dismiss");
+    let RecoveryQuery::Dismiss { project, kind, id } = &recovery[0] else {
+        panic!("Keep the project dismisses the notice: {recovery:?}");
+    };
+    assert_eq!(project, &notes);
+    assert_eq!(serde_json::to_value(kind).unwrap(), "project_delete");
+    assert_eq!(*id, 9);
 }

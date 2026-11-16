@@ -84,6 +84,12 @@ pub fn read_paths_item(project: &ProjectId) -> Item {
     named(format!("read-paths:{}", project.as_str()))
 }
 
+/// Names the versioned item of the folders one project's agents are kept out of. Input: the
+/// project. Output: the item.
+pub fn hidden_paths_item(project: &ProjectId) -> Item {
+    named(format!("hidden-paths:{}", project.as_str()))
+}
+
 /// Names the versioned item of one project's agent instruction settings: which instruction
 /// files its agents get and whether headless Claude runs keep their transcript. Input: the
 /// project. Output: the item.

@@ -216,6 +216,10 @@ pub enum Command {
         settings: crate::quit_settings::QuitSettings,
     },
     #[serde(skip_deserializing)]
+    OwnerProviderRetry {
+        choice: crate::provider_retry::ProviderRetry,
+    },
+    #[serde(skip_deserializing)]
     OwnerMasterSteps {
         settings: crate::master_step_limit::MasterStepSettings,
     },

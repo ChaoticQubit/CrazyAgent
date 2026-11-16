@@ -71,9 +71,9 @@ export function RoadmapStatusView({ status, now, busy, problem = "", onRefresh }
 }) {
   const off = status.refresh === "off";
   const checked = status.checked_ms === null ? "Not checked yet" : `Checked ${ago(status.checked_ms, now).toLowerCase()}`;
-  const pending = status.running || (status.stale && !off);
+  const waiting = status.waiting_for_account && (status.running || (status.stale && !off));
   const reason = status.problem ? `${status.problem.replace(/\.$/, "")}.` : "";
-  const failed = reason && !pending ? `The last check failed: ${reason}` : "";
+  const failed = reason && !waiting ? `The last check failed: ${reason}` : "";
   return <section className="pj-stack-s" aria-labelledby="pj-roadmap-status"><h3 id="pj-roadmap-status">Roadmap status</h3>
     <div className="pj-row between">
       <strong>{statusCounts(status.items)}</strong>
@@ -85,7 +85,7 @@ export function RoadmapStatusView({ status, now, busy, problem = "", onRefresh }
     {off && <p className="pj-small pj-secondary">{OFF_LINE}</p>}
     {status.stale && !status.running && !off
       && <p className="pj-small pj-secondary">{DUE_LINE}{status.refresh === "after_landing" ? ` ${LANDING_WAIT_LINE}` : ""}</p>}
-    {reason && pending && <p className="pj-small pj-secondary" role="status">{displayText(reason)}</p>}
+    {reason && waiting && <p className="pj-small pj-secondary" role="status">{displayText(reason)}</p>}
     {(problem || failed) && <p className="pj-error" role="alert">{displayText(problem || failed)}</p>}
     {sections(status.items).map((group, at) => <div className="pj-stack-s" key={`${at}:${group.section}`}>
       {group.section && <h4>{displayText(group.section)}</h4>}

@@ -1517,7 +1517,7 @@ impl App {
                             self.conversation_pending.as_mut().unwrap().retry_allowed = true;
                             self.notice("Original owner operation not recorded at actual barrier; Ctrl-R explicitly retries that exact request");
                         }
-                        OwnerResponse::OutcomeUnknown { .. } => {
+                        OwnerResponse::OutcomeUnknown { .. } | OwnerResponse::InProgress { .. } => {
                             assert!(retained);
                             self.notice("Owner outcome unknown; original identity and drafts retained; Ctrl-R reconnects and reconciles");
                         }
@@ -1968,7 +1968,8 @@ impl App {
                 self.declaration_pending.as_mut().unwrap().retry_allowed = true;
                 self.notice("Creation not recorded at actual barrier; Ctrl-R explicitly retries exact intent");
             }
-            OwnerResponse::OutcomeUnknown { operation_id } => {
+            OwnerResponse::OutcomeUnknown { operation_id }
+            | OwnerResponse::InProgress { operation_id } => {
                 let pending = self.declaration_pending.as_ref().unwrap();
                 if !retained
                     || !pending

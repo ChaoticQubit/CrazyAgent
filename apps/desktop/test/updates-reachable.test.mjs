@@ -14,7 +14,7 @@ function session(patch = {}) {
   const forbidden = () => { throw new Error("static rendering must not call the engine"); };
   return {
     engine: "running", unconfirmed: false, profile: { kind: "ok", value: profile }, projects: { kind: "ok", value: [] },
-    toast: "", revision: 1, retry: forbidden, checkUnconfirmed: forbidden, refreshProfile: forbidden, refreshProjects: forbidden,
+    toast: "", revision: 1, intake: null, found: { kind: "loading" }, retry: forbidden, checkUnconfirmed: forbidden, refreshProfile: forbidden, refreshProjects: forbidden,
     showToast: forbidden, noteResult: (result) => result, ...patch,
   };
 }

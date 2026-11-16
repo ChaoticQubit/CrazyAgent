@@ -2,8 +2,9 @@ use super::*;
 #[cfg(unix)]
 use crate::plugins::{Scope, ServerSpec};
 use crate::setup::pack::{GRAPH_ENTRY, PackKind, PackManifest, PackManifestEntry};
-use crate::setup::{SetupAction, SetupStatus, progress};
+use crate::setup::{RefusedTool, SetupAction, SetupStatus, progress};
 use crate::storage::versioned;
+use crate::tools::permission_fix;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -14,6 +15,10 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS setup_pack (
 );
 CREATE TABLE IF NOT EXISTS setup_trash (
     reference TEXT PRIMARY KEY CHECK(length(reference) BETWEEN 1 AND 128)
+);
+CREATE TABLE IF NOT EXISTS setup_refused_tool (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    choice TEXT NOT NULL CHECK(choice IN ('fix_button', 'command_only'))
 );";
 const REMOVED: &str = ".removed-";
 const PRESENT: &str = "present";
@@ -43,6 +48,19 @@ struct PackRecord {
     skills: Vec<String>,
     server: Option<String>,
     enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    hooks: Vec<KeptHook>,
+}
+
+/// A hook the owner switched off, everywhere or in some projects, that went with a pin a
+/// new one replaced or with the item it followed, kept by name until setup adds the entry's
+/// hooks again ([`keep_hooks`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeptHook {
+    name: String,
+    enabled: bool,
+    projects: Vec<String>,
 }
 
 /// Creates the installed default-pack tables when the engine database opens.
@@ -101,6 +119,7 @@ fn present(
         skills,
         server,
         enabled,
+        hooks: Vec::new(),
     }))
 }
 
@@ -155,14 +174,38 @@ fn taken(problem: EngineError) -> EngineError {
     }
 }
 
+/// The hooks following one skill or MCP server that the owner switched off, everywhere or
+/// in some projects, read before the item and its hooks are removed ([`KeptHook`]). Inputs:
+/// the transaction and the item id. Output: those hooks; one left on everywhere is not kept.
+fn hooks_off(tx: &Transaction<'_>, item: &str) -> Result<Vec<KeptHook>, EngineError> {
+    let hooks: Vec<KeptHook> = plugins::following_hooks(tx, item)?
+        .into_iter()
+        .filter(|(_, enabled, projects)| !enabled || !projects.is_empty())
+        .map(|(name, enabled, projects)| KeptHook {
+            name,
+            enabled,
+            projects,
+        })
+        .collect();
+    assert!(hooks.len() <= crate::plugins::HOOKS_PER_SCOPE_MAX);
+    Ok(hooks)
+}
+
 /// Writes the next default-pack version when an installed entry holds this plugin, so a
-/// change made on the plugin screen refuses a pack screen opened before it. Inputs: the
-/// transaction and the plugin id. Output: Ok, or a store failure.
-pub(super) fn plugin_changed(tx: &Transaction<'_>, id: &str) -> Result<(), EngineError> {
+/// change made on the plugin screen refuses a pack screen opened before it. A removal takes
+/// the item out of the entry's row: an emptied row is deleted, so setup installs the entry
+/// again, and a row that stays keeps the removed item's switched-off hooks ([`KeptHook`]).
+/// Inputs: the transaction, the plugin id and whether it is removed. Output: any store failure.
+pub(super) fn plugin_changed(
+    tx: &Transaction<'_>,
+    id: &str,
+    removed: bool,
+) -> Result<(), EngineError> {
     let manifest = manifest()?;
     for entry in &manifest.entries {
-        let record = match load_pack(tx, &entry.id)? {
-            Some(record) => Some(record),
+        let stored = load_pack(tx, &entry.id)?;
+        let record = match &stored {
+            Some(record) => Some(record.clone()),
             None => present(tx, entry)?,
         };
         let held = record.is_some_and(|record| {
@@ -173,6 +216,22 @@ pub(super) fn plugin_changed(tx: &Transaction<'_>, id: &str) -> Result<(), Engin
             let current = versioned::current(tx, &item)?.version;
             let written = versioned::owner_write(tx, &item, current)?;
             assert_eq!(written.ok(), Some(current + 1));
+            if removed && let Some(mut record) = stored {
+                record.skills.retain(|skill| skill != id);
+                if record.server.as_deref() == Some(id) {
+                    record.server = None;
+                }
+                if record.skills.is_empty() && record.server.is_none() {
+                    tx.execute("DELETE FROM setup_pack WHERE id=?1", [&record.id])
+                        .map_err(error)?;
+                } else {
+                    let hooks = hooks_off(tx, id)?;
+                    if !hooks.is_empty() {
+                        record.hooks = hooks;
+                    }
+                    save_pack(tx, &record)?;
+                }
+            }
             return Ok(());
         }
     }
@@ -247,19 +306,22 @@ fn restore(moved: &[(PathBuf, PathBuf)]) {
 }
 
 /// What a new pin keeps from the pin it replaces: whether the entry is on, each skill's
-/// on/off state and per-project switches by skill name, and the server when the new pin
-/// names the same one.
+/// on/off state and per-project switches by skill name, the hooks the owner switched off
+/// ([`KeptHook`]), and the server when the new pin names the same one.
 #[cfg(unix)]
 struct Kept {
     enabled: bool,
     server: Option<String>,
     skills: Vec<(String, bool, Vec<String>)>,
+    hooks: Vec<KeptHook>,
 }
 
 /// Reads what the owner set on an older pin, then removes its skills, and its server
 /// unless the new pin names the same server, which is then reused so its secrets,
-/// switches and on/off state stay. Inputs: the transaction, engine root, old row, new
-/// server and the moved-aside folders. Output: what the new pin keeps.
+/// switches and on/off state stay. Hooks the owner switched off are read from the live
+/// hooks, or kept from the old row when none is live: the entry was off, or the item they
+/// followed was removed. Inputs: the transaction, engine root, old row, new server and the
+/// moved-aside folders. Output: what the new pin keeps.
 #[cfg(unix)]
 fn carry(
     tx: &Transaction<'_>,
@@ -312,11 +374,19 @@ fn carry(
     if reused.is_some() {
         dropped.server = None;
     }
+    let mut hooks = Vec::new();
+    for item in dropped.skills.iter().chain(dropped.server.iter()) {
+        hooks.extend(hooks_off(tx, item)?);
+    }
+    if hooks.is_empty() {
+        hooks = std::mem::take(&mut dropped.hooks);
+    }
     remove_items(tx, root, &dropped, moved)?;
     Ok(Kept {
         enabled: dropped.enabled,
         server: reused,
         skills,
+        hooks,
     })
 }
 
@@ -355,6 +425,10 @@ fn install(
         return save_pack(tx, &owned);
     }
     let mut record = record;
+    record.hooks = kept
+        .as_ref()
+        .map(|kept| kept.hooks.clone())
+        .unwrap_or_default();
     for folder in folders {
         let source = folder
             .to_str()
@@ -587,6 +661,28 @@ pub(crate) fn apply_owner(
             set(tx, root, &mut record, *on)?;
             Ok(Outcome::Applied)
         }
+        SetupAction::Install { .. } => {
+            if progress::snapshot(root).running {
+                return Ok(rejected("setup_busy"));
+            }
+            Ok(Outcome::Applied)
+        }
+        SetupAction::FixPermissions { tree, .. } => {
+            if !fix_tree_shape(tree) {
+                return Ok(rejected(permission_fix::TOOL_FIX_CHANGED));
+            }
+            if refused_tool(tx)? == RefusedTool::CommandOnly {
+                return Ok(rejected(permission_fix::TOOL_FIX_OFF));
+            }
+            if progress::snapshot(root).running {
+                return Ok(rejected("setup_busy"));
+            }
+            Ok(Outcome::Applied)
+        }
+        SetupAction::SetRefusedTool { choice } => {
+            save_refused_tool(tx, *choice)?;
+            Ok(Outcome::Applied)
+        }
         SetupAction::Remove { id, version } => {
             let Some(known) = entry(id.as_str()) else {
                 return Ok(rejected("pack_unknown"));
@@ -619,7 +715,54 @@ pub(crate) fn status(tx: &Transaction<'_>, path: &Path) -> Result<SetupStatus, E
         running: progress.running,
         notes: Vec::new(),
         version: versioned::current(tx, &versioned::default_pack_item())?.version,
+        refused_tool: refused_tool(tx)?,
     })
+}
+
+/// The longest fix target a request may name, as the resolver bounds a path.
+const FIX_TREE_BYTES_MAX: usize = 4096;
+
+/// Whether a permission fix request names its target as a row can show it: an absolute
+/// path within [`FIX_TREE_BYTES_MAX`] with no NUL. The engine only compares it with the
+/// target it resolves itself (DEC-162 Q5). Input: the target. Output: the answer.
+fn fix_tree_shape(tree: &str) -> bool {
+    tree.starts_with('/') && tree.len() <= FIX_TREE_BYTES_MAX && !tree.contains('\0')
+}
+
+/// The owner's choice for a tool found but not used (DEC-162 Q1): Fix button before any
+/// save, and Show command only for a stored value this engine does not know, the choice
+/// that changes nothing. Input: the open transaction. Output: the choice, or the database
+/// error.
+fn refused_tool(tx: &Transaction<'_>) -> Result<RefusedTool, EngineError> {
+    let stored: Option<String> = tx
+        .query_row(
+            "SELECT choice FROM setup_refused_tool WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(match stored.as_deref() {
+        None | Some("fix_button") => RefusedTool::FixButton,
+        Some(_) => RefusedTool::CommandOnly,
+    })
+}
+
+/// Saves the owner's choice for a tool found but not used over the stored one. Inputs: the
+/// open transaction and the choice. Output: Ok, or the database error.
+fn save_refused_tool(tx: &Transaction<'_>, choice: RefusedTool) -> Result<(), EngineError> {
+    let text = match choice {
+        RefusedTool::FixButton => "fix_button",
+        RefusedTool::CommandOnly => "command_only",
+    };
+    let stored = tx
+        .execute(
+            "INSERT INTO setup_refused_tool(singleton,choice) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET choice=excluded.choice",
+            [text],
+        )
+        .map_err(error)?;
+    assert_eq!(stored, 1);
+    Ok(())
 }
 
 fn sweep(connection: &mut Connection, root: &Path) -> Result<(), EngineError> {
@@ -718,10 +861,11 @@ fn seed_hooks(
         follows: Some(follows),
     };
     match plugins::run(&tx, root, command) {
-        Ok(plugins::ResultValue::HooksAdded(_, copy)) => tx.commit().map_err(|problem| {
-            let _ = std::fs::remove_dir_all(&copy);
-            error(problem)
-        }),
+        Ok(plugins::ResultValue::HooksAdded(views, copy)) => keep_hooks(&tx, root, &record, &views)
+            .and_then(|()| tx.commit().map_err(error))
+            .inspect_err(|_| {
+                let _ = std::fs::remove_dir_all(&copy);
+            }),
         Ok(_) => Err(error("setup_record_invalid")),
         Err(problem)
             if matches!(
@@ -733,6 +877,47 @@ fn seed_hooks(
         }
         Err(problem) => Err(problem),
     }
+}
+
+/// Switches the hooks setup just added off as the owner had them before they went with a
+/// replaced pin or a removed item ([`KeptHook`]), matched by name, everywhere or in the same
+/// projects, then forgets what was kept. Inputs: the transaction, engine root, the entry's
+/// row and the added hooks. Output: any failure.
+#[cfg(unix)]
+fn keep_hooks(
+    tx: &Transaction<'_>,
+    root: &Path,
+    record: &PackRecord,
+    added: &[crate::plugins::HookView],
+) -> Result<(), EngineError> {
+    if record.hooks.is_empty() {
+        return Ok(());
+    }
+    for hook in added {
+        let Some(kept) = record.hooks.iter().find(|kept| kept.name == hook.name) else {
+            continue;
+        };
+        if !kept.enabled {
+            plugins::run(
+                tx,
+                root,
+                plugins::Command::SetHook {
+                    id: hook.id.clone(),
+                    enabled: false,
+                },
+            )?;
+        }
+        for project in &kept.projects {
+            tx.execute(
+                "INSERT OR IGNORE INTO plugin_switches(project,item) VALUES(?1,?2)",
+                [project, &hook.id],
+            )
+            .map_err(error)?;
+        }
+    }
+    let mut record = record.clone();
+    record.hooks.clear();
+    save_pack(tx, &record)
 }
 
 /// Runs one default-pack job for the engine: install an entry's skills and its approved
@@ -776,6 +961,7 @@ pub(crate) fn execute(
         skills: Vec::new(),
         server: None,
         enabled: true,
+        hooks: Vec::new(),
     };
     let mut added = Vec::new();
     let mut moved = Vec::new();

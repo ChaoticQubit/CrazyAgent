@@ -7,7 +7,7 @@
     "shortDescription": "Run and watch a team of coding agents on your own projects.",
     "linux": {
       "deb": {
-        "depends": ["tmux", "xdg-utils"],
+        "depends": ["xdg-utils"],
         "section": "devel"
       },
       "appimage": {

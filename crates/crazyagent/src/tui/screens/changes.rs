@@ -1550,6 +1550,9 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         "changes_branch_not_above_base" => {
             "The agent's branch no longer holds the commit these changes start from. Ask the agent to update, or discard."
         }
+        "changes_git_hooks" => {
+            "Your project's Git config sets a hook command, which CrazyAgent never runs. Remove the hook settings from your project's Git config, then try again."
+        }
         "changes_git_unsupported" => {
             "The Git on this computer can't land changes. Update Git, then try again."
         }
