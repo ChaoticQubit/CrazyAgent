@@ -89,7 +89,7 @@ const STATES = [
 ];
 
 test("the window names every engine option and default of Keep awake as the engine does", () => {
-  const enums = { mode: "Mode", grace: "Grace", cap: "Cap", lid: "LidRule", battery_floor: "BatteryFloor", heat_end: "HeatEnd", heat_notice: "HeatNotice", lid_display: "LidDisplay", display_awake: "DisplayAwake" };
+  const enums = { mode: "Mode", grace: "Grace", cap: "Cap", lid: "LidRule", battery_floor: "BatteryFloor", heat_end: "HeatEnd", heat_notice: "HeatNotice", lid_display: "LidDisplay", display_awake: "DisplayAwake", low_power: "LowPower" };
   const fields = [...ENGINE_SETTINGS.slice(ENGINE_SETTINGS.indexOf("pub struct KeepAwakeSettings {")).split("\n}")[0].matchAll(/pub (\w+): (\w+),/g)].map(([, field, type]) => [field, type]);
   assert.deepEqual(fields, Object.entries(enums), "the settings fields in engine order");
   assert.deepEqual(api.KEEP_AWAKE_SETTINGS.map((setting) => setting.id), Object.keys(enums), "one line per engine setting, in engine order");
@@ -120,8 +120,10 @@ test("the settings matrix words are the plan's, with the default of each", () =>
     "Heat notice": ["At serious heat", "Off"],
     "Display with the lid closed (macOS)": ["Sleep the display", "Leave on"],
     "Display awake with the lid open": ["Off", "While holding"],
+    "Low Power Mode": ["On battery below 40 %", "Whenever on battery", "Off"],
   });
-  assert.equal(api.KEEP_AWAKE_SETTINGS.reduce((count, setting) => count + setting.options.length, 0), 27);
+  assert.equal(api.KEEP_AWAKE_SETTINGS.reduce((count, setting) => count + setting.options.length, 0), 30);
+  assert.match(ENGINE_SETTINGS, /pub const BELOW_PCT: u8 = 40;/, "the 40 % is the engine's");
   const display = api.KEEP_AWAKE_SETTINGS.find((setting) => setting.id === "display_awake");
   assert.equal(display.help, DISPLAY_HELP, "the help says plainly that the screen stays unlocked");
   assert.ok(TUI_SETTINGS.includes(JSON.stringify(DISPLAY_HELP)), "the TUI says the same words");
@@ -514,6 +516,23 @@ test("a save sends every setting with the picks applied, and refuses a name the 
   assert.deepEqual(Object.keys(settings.savedKeepAwake(stored, { cap: "h4" })), Object.keys(api.KEEP_AWAKE_DEFAULTS));
   assert.throws(() => settings.savedKeepAwake(stored, { cap: "h12" }), /cap cannot be h12/);
   assert.throws(() => settings.savedKeepAwake(stored, { volume: "loud" }), /no setting volume/);
+});
+
+test("a save keeps the stored Low Power Mode when the page picked none", () => {
+  const stored = { ...api.KEEP_AWAKE_DEFAULTS, low_power: "on_battery" };
+  assert.equal(settings.savedKeepAwake(stored, {}).low_power, "on_battery", "no pick sends what is stored");
+  assert.equal(settings.savedKeepAwake(stored, { grace: "min30" }).low_power, "on_battery", "another pick leaves it");
+  assert.equal(settings.savedKeepAwake(stored, { low_power: "off" }).low_power, "off", "its own pick lands");
+  assert.equal(api.KEEP_AWAKE_DEFAULTS.low_power, "battery_below40", "the engine's default and wire name");
+});
+
+test("Settings shows Low Power Mode in its own Power section after Display", () => {
+  const markup = settingsView(ok(view({}, { lid_support: { kind: "held" } })));
+  const display = markup.search(/<h3[^>]*>Display<\/h3>/);
+  const power = markup.search(/<h3[^>]*>Power<\/h3>/);
+  assert.ok(display > 0 && power > display, "Power comes after Display");
+  assert.ok(markup.indexOf('data-setting="low_power"') > power, "the row sits in Power");
+  assert.ok(text(markup).includes("What a hold does to save the battery."));
 });
 
 test("a Settings save keeps what changed elsewhere while the page was open", () => {
