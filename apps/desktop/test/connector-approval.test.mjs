@@ -181,3 +181,25 @@ test("An approval read shows every agent- and manifest-supplied string with its 
     for (const hidden of ["‮", "​"]) assert.ok(!markup.includes(hidden), JSON.stringify(hidden));
   });
 });
+
+test("An approval shows a typed backslash in its title, tool, agent and preview doubled, so a typed escape never looks like the hidden character it names", async () => {
+  const typed = "Bo\\u202eard";
+  const doubled = "Bo\\\\u202eard";
+  assert.equal(api.approvalText(typed), doubled);
+  assert.equal(api.approvalText("Bo‮ard"), typed, "a hidden character is shown as its escape");
+  assert.notEqual(api.approvalText(typed), api.approvalText("Bo‮ard"), "a typed escape and the hidden character never show alike");
+  await bridged({ ...WAITING, title: typed, tool: typed, agent: typed, preview: typed, project_name: "Al\\pha", arguments: "{\"t\": \"a\\\\b\"}" }, async () => {
+    const result = await api.loadApproval(7);
+    assert.equal(result.kind, "ok");
+    for (const field of ["title", "tool", "agent", "preview"]) assert.equal(result.value[field], doubled, field);
+    assert.equal(result.value.project_name, "Al\\pha", "the owner's own project name is shown as typed");
+    assert.equal(result.value.arguments, "{\"t\": \"a\\\\b\"}", "the engine already doubled the arguments' backslashes");
+    const markup = renderToStaticMarkup(createElement(approval.ApprovalPageView, { view: result, now: CREATED, busy: false, failure: "", actions }));
+    assert.ok(text(markup).includes(`Connector: ${doubled}`), text(markup));
+  });
+  await bridged({ ...WAITING, state: "allowed", answered_ms: CREATED, title: typed }, async () => {
+    const result = await api.answerApproval(7, true);
+    assert.equal(result.kind, "ok");
+    assert.equal(result.value.title, doubled, "an answer's reply is shown the same way");
+  });
+});

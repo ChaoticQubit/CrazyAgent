@@ -364,6 +364,14 @@ function shown<T>(value: T): T {
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, shown(item)])) as T;
 }
 
+/** One agent- or vendor-supplied name or text as the approval page shows it: each typed
+ * backslash doubled, then each hidden character escaped, so a typed escape never shows like
+ * the character it names, as the engine shows the full arguments. Input: the text the engine
+ * answered. Output: the text to show. */
+export function approvalText(text: string): string {
+  return displayText(text);
+}
+
 async function connectorCall<T>(command: string, args: Record<string, unknown>): Promise<Result<T>> {
   const result = await call<T>(command, args);
   if (result.kind === "error") return { ...result, message: connectorProblem(result) };
