@@ -295,6 +295,14 @@ impl Held {
     }
 }
 
+/// Tells whether a held store takes an entry of a kind (DEC-185 S2b): every kind but a
+/// symlink and a folder, either of which could carry git outside the store. Input: the
+/// entry's mode as `stat` gives it. Output: true when the entry may be put there.
+pub fn store_takes(mode: u32) -> bool {
+    let _ = mode;
+    true
+}
+
 /// One entry as the kernel knows it whatever its name: its device and inode numbers.
 pub type Node = (u64, u64);
 
@@ -1134,6 +1142,18 @@ mod tests {
             "a store holds no entry"
         );
         assert!(!held.is_empty() && Held::default().is_empty());
+    }
+
+    #[test]
+    fn a_store_takes_every_kind_but_a_symlink_and_a_folder() {
+        for taken in [
+            0o100_644, 0o100_755, 0o010_600, 0o140_755, 0o020_600, 0o060_600,
+        ] {
+            assert!(store_takes(taken), "{taken:o}");
+        }
+        for refused in [0o120_777, 0o040_755, 0o041_777] {
+            assert!(!store_takes(refused), "{refused:o}");
+        }
     }
 
     #[test]

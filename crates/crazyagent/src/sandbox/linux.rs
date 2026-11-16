@@ -2986,9 +2986,28 @@ mod tests {
             flag_values(&words, OWN_TREE).contains(&clone),
             "the clone's own top-level .git is the agent's"
         );
+        let parsed = match HelperRequest::parse(words.clone()) {
+            Ok(HelperRequest::Run { policy, .. }) => policy.guard.held,
+            other => panic!("the wrapped words do not read back: {other:?}"),
+        };
+        assert_eq!(
+            parsed.as_ref(),
+            Some(&guarded),
+            "every held place reads back"
+        );
         let objects = clone.join(".git").join("objects");
         assert_eq!(guarded.stores, vec![objects.clone()]);
         assert!(guarded.entries.contains(&objects.join("ff")));
+        let unsupervised = LinuxSandbox {
+            supervision: None,
+            ..launch
+        };
+        let refused = unsupervised.wrap(&harness).err();
+        assert!(
+            matches!(&refused, Some(SandboxError::Unavailable(reason))
+                if reason == CONFINED_UNAVAILABLE),
+            "an unsupervised clone holds nothing: {refused:?}"
+        );
     }
 
     #[test]
