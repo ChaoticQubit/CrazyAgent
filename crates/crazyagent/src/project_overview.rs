@@ -238,8 +238,10 @@ pub enum Competitors {
 
 /// A project's Overview: the README, the four tabs in [`Tab::ALL`] order, the competitor
 /// state, where the writing run stands, its stored line and whether that line is the wait
-/// for an account (false in an older engine's reply), the project's two Overview settings
-/// and whether the project has to move into the projects home before it can hold tab files.
+/// for an account (false in an older engine's reply), how long until a waiting run is due
+/// (none while a run writes, none waits, or in an older engine's reply), the project's two
+/// Overview settings and whether the project has to move into the projects home before it
+/// can hold tab files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Overview {
     pub readme: Option<Readme>,
@@ -251,6 +253,8 @@ pub struct Overview {
     pub failure: Option<String>,
     #[serde(default)]
     pub waiting_for_account: bool,
+    #[serde(default)]
+    pub due_in_ms: Option<i64>,
     pub refresh: Refresh,
     pub apply: Apply,
     pub needs_home: bool,
@@ -1241,6 +1245,7 @@ pub fn read(
         checked_ms: state.checked_ms,
         waiting_for_account: failure.as_deref().is_some_and(run::waits_for_account),
         failure,
+        due_in_ms: None,
         refresh: state.refresh,
         apply: state.apply,
         needs_home,
