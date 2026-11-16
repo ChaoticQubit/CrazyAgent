@@ -3558,6 +3558,162 @@ fn a_new_project_job_run_in_the_background_finishes_after_its_page_is_gone() {
     assert_eq!(kept_draft(), None, "a made project keeps no draft");
 }
 
+/// Sends a New Project to the background, drops its page with Home, ends its job done and
+/// answers its pool edit. Takes nothing. Returns the shell, the project and the requests the
+/// pool's answer queued.
+fn made_in_background() -> (Shell, ProjectId, Vec<Request>) {
+    let (mut shell, sent) = create_named("Tidepool");
+    let (id, project, start) = setup_start(&sent).expect("Create starts the New Project job");
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1, "Home drops the buried wizard");
+    drain(&mut shell);
+    shell.arrive(intake_reply(
+        start,
+        Ok(crate::tui::client::intake::IntakeView::Job(Some(building(
+            &id, &project,
+        )))),
+    ));
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    drain(&mut shell);
+    shell.arrive(intake_reply(
+        IntakeQuery::JobDismiss { id: id.clone() },
+        Ok(crate::tui::client::intake::IntakeView::JobDismissed(true)),
+    ));
+    shell.arrive(job_status(None));
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    let sent = drain(&mut shell);
+    (shell, project, sent)
+}
+
+/// One setup reply from the owner worker. Takes the query it answers and the result.
+/// Returns the arrival.
+fn setup_reply(query: SetupQuery, result: Result<SetupView, String>) -> Arrival {
+    owner_arrival(OwnerEvent::Setup(Box::new(
+        crate::tui::client::SetupEvent { query, result },
+    )))
+}
+
+/// The agent policy writes the requests hold. Takes the requests. Returns the writes.
+fn access_writes(sent: &[Request]) -> Vec<SetupQuery> {
+    sent.iter()
+        .filter_map(|request| match request {
+            Request::Setup(
+                query @ SetupQuery::Change {
+                    action: crate::project_setup::SetupAction::SetAgentPolicy { .. },
+                    ..
+                },
+            ) => Some(query.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// DEC-177 add.3 decision 4 (rv-sec2 bgjobs-3b F1): a New Project carried in the background
+/// reads its project's agent policy once it is made and saves the picked access at the
+/// version read; a refused read or save says the project stays Sandboxed.
+#[test]
+fn a_new_project_carried_in_the_background_saves_its_agent_access_or_says_it_stays_sandboxed() {
+    use super::project_tests::access_view;
+    use crate::engine::owner::OwnerResult;
+    use crate::sandbox::policy::AgentAccess;
+    assert!(
+        AgentAccess::NEW_PROJECT.unavailable().is_none(),
+        "the wizard preselects a level it can save"
+    );
+    let sandboxed = "The project is made, but its agents stay Sandboxed.";
+
+    let (mut shell, project, sent) = made_in_background();
+    let read = SetupQuery::AgentPolicy {
+        project: project.clone(),
+    };
+    assert_eq!(
+        sent.iter()
+            .filter(|request| matches!(request, Request::Setup(query) if *query == read))
+            .count(),
+        1,
+        "{sent:?}"
+    );
+    shell.arrive(setup_reply(
+        read,
+        Ok(SetupView::AgentPolicy(access_view(
+            AgentAccess::Sandboxed,
+            7,
+        ))),
+    ));
+    let writes = access_writes(&drain(&mut shell));
+    let [write] = writes.as_slice() else {
+        panic!("the carried page saves the access once: {writes:?}");
+    };
+    let SetupQuery::Change {
+        action:
+            crate::project_setup::SetupAction::SetAgentPolicy {
+                project_id,
+                version,
+                policy,
+            },
+        ..
+    } = write
+    else {
+        unreachable!("access_writes keeps agent policy writes only");
+    };
+    assert_eq!(
+        (project_id, *version, policy.access),
+        (&project, 7, AgentAccess::NEW_PROJECT)
+    );
+    shell.arrive(setup_reply(
+        write.clone(),
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    ));
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Tidepool is ready."),
+        "a saved level adds nothing"
+    );
+    assert!(access_writes(&drain(&mut shell)).is_empty());
+
+    let (mut shell, project, _) = made_in_background();
+    shell.arrive(setup_reply(
+        SetupQuery::AgentPolicy { project },
+        Ok(SetupView::AgentPolicy(access_view(
+            AgentAccess::Sandboxed,
+            2,
+        ))),
+    ));
+    let writes = access_writes(&drain(&mut shell));
+    let [write] = writes.as_slice() else {
+        panic!("the carried page saves the access once: {writes:?}");
+    };
+    shell.arrive(setup_reply(
+        write.clone(),
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "agent_policy_version_conflict".into(),
+        })),
+    ));
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some(sandboxed),
+        "a refused save is said"
+    );
+
+    let (mut shell, project, _) = made_in_background();
+    shell.arrive(setup_reply(
+        SetupQuery::AgentPolicy { project },
+        Err("owner_read_failed".into()),
+    ));
+    assert!(access_writes(&drain(&mut shell)).is_empty());
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some(sandboxed),
+        "a refused read is said"
+    );
+    assert_eq!(shell.place(), Some(Place::Home));
+}
+
 /// DEC-177 step 3b: a New Project job that failed keeps the open wizard's answers with the
 /// engine's sentence; one stopped in the background keeps the draft and says so in New
 /// project's words. Each ended job is dismissed once and assigns no pool.

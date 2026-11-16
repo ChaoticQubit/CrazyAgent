@@ -2664,7 +2664,7 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
 
 /// Answers the screen's reads as unavailable until it asks for the read-only folders.
 /// Inputs: the screen and the time of the first read. Output: the folders read.
-fn access_view(access: AgentAccess, version: u64) -> PolicyView {
+pub(super) fn access_view(access: AgentAccess, version: u64) -> PolicyView {
     PolicyView {
         access,
         network: crate::sandbox::policy::AgentNetwork::default(),
