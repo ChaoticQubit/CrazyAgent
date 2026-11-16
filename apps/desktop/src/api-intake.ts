@@ -148,6 +148,7 @@ const COPY: Record<string, string> = {
   github_publish_push_failed: "Git couldn't push to GitHub. Try again.",
   github_publish_push_timed_out: "Pushing to GitHub took too long and was stopped. Try again.",
   github_publish_running: "This project is being published right now. Wait for it to finish.",
+  github_publish_secret_found: "A file in the project gained a secret after it was checked, so nothing was committed or pushed. Remove the secret, then try again.",
   github_publish_secret_in_history: "The secret is already in the project's git history, so leaving the file out doesn't remove it. Remove it from the history, then check again.",
   github_publish_step_invalid: "The publish moved on since this was shown. Look at it again.",
   github_publish_too_large: "This project is too large to publish from CrazyAgent: over 20,000 files or 200 MB.",

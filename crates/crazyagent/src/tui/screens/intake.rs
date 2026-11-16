@@ -301,6 +301,9 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "github_publish_running" => {
             "This project is being published right now. Wait for it to finish."
         }
+        "github_publish_secret_found" => {
+            "A file in the project gained a secret after it was checked, so nothing was committed or pushed. Remove the secret, then try again."
+        }
         "github_publish_secret_in_history" => {
             "The secret is already in the project's git history, so leaving the file out doesn't remove it. Remove it from the history, then check again."
         }
