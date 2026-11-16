@@ -243,7 +243,12 @@ impl TextField {
             let dots = self.len().min(inner.saturating_sub(1));
             return (vec![glyphs.dot.repeat(dots)], 0, dots);
         }
-        let (before, after) = crate::memory::visible_split(&self.value, self.cursor);
+        let (before, after) = if self.multiline {
+            crate::memory::visible_split(&self.value, self.cursor)
+        } else {
+            let at = self.byte_at(self.cursor);
+            (self.value[..at].to_owned(), self.value[at..].to_owned())
+        };
         let lines = wrap_keeping(&format!("{before}{after}"), inner);
         let cursor_lines = wrap_keeping(&before, inner);
         let cursor_row = cursor_lines.len().saturating_sub(1);
