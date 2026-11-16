@@ -422,7 +422,12 @@ fn allowed_writes_show_only_under_ask_once_and_x_revokes_one_at_a_time() {
         ConnectorsEvent::Writes(Ok(allowed(PROJECT, &["linear"]))),
     );
     assert!(said(&shell).contains("gone asks again before its next write."));
-    assert!(!shows(&mut shell, "gone"));
+    assert!(
+        !render(&mut shell, 80, 24)
+            .iter()
+            .any(|row| row.trim().trim_start_matches("> ") == "gone"),
+        "the revoked row is gone, the toast names it"
+    );
     keys(&mut shell, &[Key::End, Key::Char('x')]);
     assert!(matches!(
         one(&mut shell),
