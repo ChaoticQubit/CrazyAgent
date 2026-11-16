@@ -6,7 +6,7 @@ import {
   UPDATE_POLL_MS, UPDATE_POLLS_MAX, UPDATE_SETTINGS_DEFAULT, type CheckWhen, type HarnessJob, type HarnessVersions, type InstallFromApp, type OnlineLookup, type UpdateMode, type UpdateSettings,
 } from "../../api-harness-updates";
 import { installDependency, loadSetupStatus } from "../../api-intake";
-import type { DependencyState, SetupStatus } from "../../engine-client";
+import { NATIVE_HARNESSES, type DependencyState, type SetupStatus } from "../../engine-client";
 import { displayText } from "../conversation";
 import { HARNESS_WORDS, nodeNeeded, nodeOffer, nodeReadsAgain, rowBadge, type NodeOffer } from "../first-run/harnesses";
 import { choosable, chooseHarnessPath, findHarness, harnessFileName, isPathCode, pathCopy, pickHarnessFile, LOOKED_MAX, type ChoosableHarness, type Found } from "../../api-harness-path";
@@ -117,6 +117,17 @@ export function catalogReadAgain(entry: HarnessEntry, versions: HarnessVersions)
   return (entry.status.kind === "cant_run") !== Boolean(versions.needs);
 }
 
+/** What Settings says beside a listed harness that names research (T19b 19b-4, leader 01:01):
+ * it runs research jobs, and which harness kinds run the read-only kinds it cannot. */
+export const LISTED_RESEARCH_WORDS = "Research jobs only. Edit with AI, project mapping, roadmap status checks and the Overview run on Codex or Claude Code.";
+
+/** The research line Settings shows beside one catalog harness: the listed-research words for
+ * a listed harness whose manifest names research. Input: the entry. Output: the words, or null
+ * for any other harness. */
+export function researchLine(entry: HarnessEntry): string | null {
+  return entry.research && !NATIVE_HARNESSES.has(entry.id) ? LISTED_RESEARCH_WORDS : null;
+}
+
 function statusWord(entry: HarnessEntry): string {
   switch (entry.status.kind) {
     case "ready": return "Ready";
@@ -174,12 +185,14 @@ export function HarnessRowView({ entry, versions, mode, problem, checking = fals
   const last = read === null || running ? null : lastLine(read, entry.name);
   const guide = shown?.guide ?? (absent !== null && absent.install === null ? absent.guide : null);
   const said = missing || read?.last?.code?.startsWith("harness_install_") ? "What the installer said" : "What the updater said";
+  const research = researchLine(entry);
   return <>
     <SettingRow label={entry.name}>
       <button type="button" className="set-label" aria-expanded={open} onClick={() => setOpen(!open)}><ProviderMark provider={entry.id} name={entry.name} />{entry.name}</button>
       <span className="set-help">
         <span>Tools: {entry.tools.kind === "switchable" ? "Can turn on or off" : entry.tools.reason}</span>
         <span>Accounts it can use: {entry.account_kinds.map((kind) => KIND_LABEL[kind]).join(", ") || "None"}</span>
+        {research !== null && <span>Research: {research}</span>}
         {blocked !== null && <span className="pj-error">{blocked}</span>}
         {old !== null && <span className="pj-error">{old}</span>}
         {shown !== null && shown.method.kind !== "with_app" && <span>{versionLine(shown)}</span>}

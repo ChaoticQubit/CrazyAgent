@@ -1177,6 +1177,16 @@ impl Harnesses {
             lines.extend(wrap(&line, limit.max(8)).into_iter().map(Line::raw));
         }
         let sentence = control_sentence(entry);
+        let research = crate::research::runner::listed_research_words(&entry.id, entry.research);
+        let labelled = |lines: &mut Vec<Line<'static>>, name: &str, text: &str, room: usize| {
+            for (index, part) in wrap(text, room).into_iter().enumerate() {
+                if index == 0 {
+                    lines.push(label(name, part));
+                } else {
+                    lines.push(Line::raw(format!("{}{part}", " ".repeat(LABEL_WIDTH))));
+                }
+            }
+        };
         match &entry.executable {
             Some(path) => {
                 let room = limit.saturating_sub(LABEL_WIDTH).max(8);
@@ -1190,6 +1200,9 @@ impl Harnesses {
                     } else {
                         lines.push(Line::raw(format!("{}{part}", " ".repeat(LABEL_WIDTH))));
                     }
+                }
+                if let Some(words) = research {
+                    labelled(&mut lines, "Research", words, room);
                 }
                 if let Some(versions) = versions.filter(|_| needs.is_none() && !off) {
                     let mut text = version_line(versions);
@@ -1224,6 +1237,10 @@ impl Harnesses {
             }
             None => {
                 lines.extend(wrap(&sentence, limit.max(8)).into_iter().map(Line::raw));
+                if let Some(words) = research {
+                    let room = limit.saturating_sub(LABEL_WIDTH).max(8);
+                    labelled(&mut lines, "Research", words, room);
+                }
                 match versions {
                     None => lines.push(Line::raw(
                         "Install it yourself, then press r to check again.",

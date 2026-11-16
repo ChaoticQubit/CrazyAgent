@@ -1755,7 +1755,7 @@ impl Session {
         let (request, relay) = route(request)?;
         let key = write_key_file(&request)?;
         let command = command(&request)?;
-        Self::spawn(request, command, None, None, (relay, key), &[])
+        Self::spawn(request, command, None, None, None, (relay, key), &[])
     }
 
     /// Spawns one listed master turn's harness from the command [`listed_command`] built, its
@@ -1769,7 +1769,7 @@ impl Session {
         relay: Option<Relay>,
         servers: &[EngineServer],
     ) -> Result<Self, LaunchError> {
-        Self::spawn(request, command, None, None, (relay, None), servers)
+        Self::spawn(request, command, None, None, None, (relay, None), servers)
     }
 
     /// Spawns the harness for an agent of one project with the project's approved skills,
@@ -1780,11 +1780,41 @@ impl Session {
         request: LaunchRequest,
         context: AgentContext,
     ) -> Result<Self, LaunchError> {
+        Self::start_context(request, context, None)
+    }
+
+    /// Spawns the harness as [`Self::start_with_context`] does and keeps its raw output in
+    /// the run's logs, as a research run on pipes keeps it (T19b 19b-4, QUESTION-0151).
+    /// Inputs: the launch request, the project context and the logs. Output: a running
+    /// session, or a plain refusal code.
+    pub fn start_logged(
+        request: LaunchRequest,
+        context: AgentContext,
+        logs: RunLogs,
+    ) -> Result<Self, LaunchError> {
+        Self::start_context(request, context, Some(logs))
+    }
+
+    /// [`Self::start_with_context`] with the run's logs, if any. Inputs: the request, the
+    /// context and the logs. Output: a running session, or a plain refusal code.
+    fn start_context(
+        request: LaunchRequest,
+        context: AgentContext,
+        logs: Option<RunLogs>,
+    ) -> Result<Self, LaunchError> {
         let (request, relay) = route(request)?;
         let (command, installed) = command_with_context(&request, &context)?;
         drop(context);
         let key = write_key_file(&request)?;
-        Self::spawn(request, command, Some(installed), None, (relay, key), &[])
+        Self::spawn(
+            request,
+            command,
+            Some(installed),
+            None,
+            logs,
+            (relay, key),
+            &[],
+        )
     }
 
     /// Spawns a harness that outlives the engine, unless it is on an engine key relay it needs
@@ -1812,7 +1842,15 @@ impl Session {
         drop(context);
         let io = DurableIo::create(state)?;
         let key = write_key_file(&request)?;
-        Self::spawn(request, command, installed, Some(io), (relay, key), &[])
+        Self::spawn(
+            request,
+            command,
+            installed,
+            Some(io),
+            None,
+            (relay, key),
+            &[],
+        )
     }
 
     fn spawn(
@@ -1820,10 +1858,12 @@ impl Session {
         mut command: Command,
         context: Option<Installed>,
         durable: Option<DurableIo>,
+        logs: Option<RunLogs>,
         (relay, key): (Option<Relay>, Option<KeyFile>),
         listed: &[EngineServer],
     ) -> Result<Self, LaunchError> {
         assert!(context.is_none() || listed.is_empty());
+        assert!(durable.is_none() || logs.is_none());
         let native_threads = context.as_ref().is_some_and(Installed::native_threads);
         let servers = context
             .as_ref()
@@ -1863,16 +1903,30 @@ impl Session {
                     .stderr
                     .take()
                     .ok_or_else(|| failure("launch_stdio_unavailable"))?;
+                let (events, mut errors) = match logs {
+                    Some(logs) => (
+                        Some(Capped::new(logs.events, logs.bytes_max)),
+                        Some(Capped::new(logs.errors, logs.bytes_max)),
+                    ),
+                    None => (None, None),
+                };
                 std::thread::Builder::new()
                     .name("harness-stdout".into())
-                    .spawn(move || forward(stdout, sender))
+                    .spawn(move || forward_logged(stdout, sender, events))
                     .map_err(|_| failure("launch_reader_unavailable"))?;
                 std::thread::Builder::new()
                     .name("harness-stderr".into())
                     .spawn(move || {
                         let mut stderr = stderr;
                         let mut buffer = [0_u8; 4096];
-                        while matches!(stderr.read(&mut buffer), Ok(count) if count > 0) {}
+                        while let Ok(count) = stderr.read(&mut buffer) {
+                            if count == 0 {
+                                break;
+                            }
+                            if let Some(errors) = errors.as_mut() {
+                                errors.write(&buffer[..count]);
+                            }
+                        }
                     })
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
@@ -2315,10 +2369,61 @@ fn stdin_file(pipe: std::process::ChildStdin) -> File {
     File::from(std::os::windows::io::OwnedHandle::from(pipe))
 }
 
+/// A run log written up to a byte cap, past which the bytes are dropped, so a harness's
+/// output never fills the disk while the harness runs on (T19b 19b-4, rv-secreview note 2).
+struct Capped {
+    file: File,
+    left: u64,
+}
+
+impl Capped {
+    /// A log that keeps at most `bytes_max` bytes. Inputs: the open file and the cap.
+    /// Output: the log.
+    fn new(file: File, bytes_max: u64) -> Self {
+        Self {
+            file,
+            left: bytes_max,
+        }
+    }
+
+    /// Writes as much of `bytes` as the cap leaves room for; a write that fails ends the
+    /// log. Input: the bytes. Output: none.
+    fn write(&mut self, bytes: &[u8]) {
+        let before = self.left;
+        let room = before.min(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        let Ok(kept) = usize::try_from(room) else {
+            return;
+        };
+        if kept == 0 {
+            return;
+        }
+        self.left = match self.file.write_all(&bytes[..kept]) {
+            Ok(()) => before - room,
+            Err(_) => 0,
+        };
+        assert!(self.left < before);
+    }
+}
+
+/// The files a headless run keeps its harness's raw output in, as a research run on pipes
+/// keeps them: its stdout and its stderr, each up to `bytes_max` bytes (T19b 19b-4,
+/// QUESTION-0151).
+pub struct RunLogs {
+    pub events: File,
+    pub errors: File,
+    pub bytes_max: u64,
+}
+
 /// Hands each line of a harness's stdout to the session until the output ends. A line
 /// longer than `LINE_BYTES_MAX` is passed over to its newline and reported once as
 /// skipped, so no amount of output ends the session. Takes the stdout and the sender.
 fn forward(stdout: ChildStdout, sender: SyncSender<Line>) {
+    forward_logged(stdout, sender, None);
+}
+
+/// [`forward`], with every byte read also going to the run's events log, when it keeps one,
+/// up to its cap (T19b 19b-4, QUESTION-0151). Takes the stdout, the sender and the log.
+fn forward_logged(stdout: ChildStdout, sender: SyncSender<Line>, mut log: Option<Capped>) {
     let mut reader = BufReader::new(stdout);
     let mut skipping = false;
     loop {
@@ -2330,6 +2435,9 @@ fn forward(stdout: ChildStdout, sender: SyncSender<Line>) {
                 return;
             }
             Ok(_) => {
+                if let Some(log) = log.as_mut() {
+                    log.write(&line);
+                }
                 let ended = line.last() == Some(&b'\n');
                 if skipping {
                     skipping = !ended;

@@ -1977,3 +1977,19 @@ fn a_write_to_a_harness_that_is_gone_fails_once_and_its_exit_is_still_reported()
         exited = matches!(next.unwrap(), Some(LaunchEvent::Exited { .. }));
     }
 }
+
+/// T19b 19b-4 (rv-secreview note 2): a run log keeps a harness's output up to its cap and
+/// drops the rest, so a listed research run's log stays within the bound the bundled runs
+/// keep.
+#[test]
+fn a_run_log_keeps_output_up_to_its_cap_and_drops_the_rest() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("events.jsonl");
+    let mut log = super::Capped::new(std::fs::File::create(&path).unwrap(), 10);
+
+    log.write(b"0123456");
+    log.write(b"789abcdef");
+    log.write(b"ghij");
+
+    assert_eq!(std::fs::read(&path).unwrap(), b"0123456789".to_vec());
+}

@@ -1778,3 +1778,47 @@ fn a_node_row_still_checking_is_read_again_until_it_settles_and_r_reads_it_again
         "r reads setup's Node row again: {calls:?}"
     );
 }
+
+/// T19b 19b-4 (leader 01:01): beside a listed harness whose manifest names research, Settings
+/// says it runs research jobs only and which harness kinds run the read-only kinds it cannot;
+/// a native harness that names research shows no such line.
+#[test]
+fn a_listed_research_harness_says_which_research_it_runs_and_which_harnesses_run_the_rest() {
+    let found = found();
+    let ctx = harness_ctx(120, 40);
+    let codex = found
+        .entries
+        .iter()
+        .find(|entry| entry.id == "codex")
+        .cloned()
+        .unwrap();
+    assert!(codex.research);
+    let listed = HarnessEntry {
+        id: "standin-acp".into(),
+        name: "Stand-in ACP".into(),
+        research: true,
+        ..codex.clone()
+    };
+    let text = |entry: &HarnessEntry| {
+        Harnesses::detail(entry, None, None, false, 116, &ctx)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    let shown = text(&listed);
+    let native = text(&codex);
+
+    let words = crate::research::runner::LISTED_RESEARCH_WORDS;
+    assert!(shown.contains(&format!("Research {words}")), "{shown}");
+    assert!(!native.contains(words), "{native}");
+}

@@ -755,7 +755,8 @@ export const HOOKLESS_WORDS = "unavailable for this account kind";
 /** What the screens show in place of receipts for an agent of a listed harness, whose launch
  * writes no hooks on any account. */
 export const LISTED_HOOKLESS_WORDS = "unavailable for this harness";
-const NATIVE_HARNESSES: ReadonlySet<string> = new Set(["claude-code", "claude", "codex", "rcli"]);
+/** The harness ids and aliases the engine drives itself; every other catalog harness is listed. */
+export const NATIVE_HARNESSES: ReadonlySet<string> = new Set(["claude-code", "claude", "codex", "rcli"]);
 /** The words a hookless agent shows in place of receipts, as the engine's `hookless_words`
  * gives them: the harness reason for a listed harness, the account-kind reason for Claude
  * Code started bare or an agent whose harness is not known. Input: the agent's harness, an id

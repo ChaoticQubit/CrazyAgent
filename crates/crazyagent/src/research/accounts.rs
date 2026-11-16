@@ -252,8 +252,9 @@ pub fn pool_account(
 
 /// Tells which research account one pool member gives a harness, by the one account rule
 /// every harness shares (DEC-141 PA-8): an endpoint whose wire format the harness speaks,
-/// with its key reference when it has one, or a signed-in profile of that harness. Takes the
-/// connection, the harness id and the signed-in check. Returns the account, or none.
+/// with its key reference when it has one, or a signed-in profile of that harness. A listed
+/// harness takes only an endpoint whose wire format its manifest hands over (T19b 19b-4).
+/// Takes the connection, the harness id and the signed-in check. Returns the account, or none.
 fn usable(
     connection: &ModelConnection,
     harness: &str,
@@ -284,6 +285,20 @@ fn usable(
                     model,
                     key,
                 },
+                ResearchHarness::Listed(id) => {
+                    let listed = crate::harnesses::registry::registry().get(id)?;
+                    if !crate::harnesses::accounts::hands_over(listed, connection.protocol.as_str())
+                    {
+                        return None;
+                    }
+                    ResearchAccount::Listed {
+                        harness: id,
+                        connection: connection.clone(),
+                        base_url,
+                        model,
+                        key,
+                    }
+                }
             })
         }
         (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { .. })
@@ -298,6 +313,7 @@ fn usable(
                     connection: connection.clone(),
                     model: model(),
                 },
+                ResearchHarness::Listed(_) => return None,
             })
         }
         _ => None,

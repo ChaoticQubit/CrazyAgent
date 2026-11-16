@@ -1001,3 +1001,27 @@ fn an_acp_launch_refuses_a_keyless_hand_over_on_a_binding_with_a_relay_token() {
         Some("launch_account_handover_mismatch".to_owned())
     );
 }
+
+/// T19b 19b-4 (rv-secreview note 1): the hooks rule a listed install refuses by is one the
+/// research runner can ask before it makes a job's worktree: tools on in a project that
+/// turned hooks on is refused; tools off, or no hooks, is not.
+#[test]
+fn a_context_says_before_a_listed_install_whether_its_hooks_refuse_it() {
+    let hook = EffectiveHook {
+        plugin: "guard".into(),
+        event: "PreToolUse".into(),
+        matcher: None,
+        command: "/usr/bin/true".into(),
+        timeout: None,
+        folder: PathBuf::from("/missing-hook-folder"),
+    };
+    let (_data, hooked) = team_context("OWNER-APP-5c3\n", "", vec![hook]);
+    let (_bare, plain) = team_context("OWNER-APP-5c3\n", "", Vec::new());
+
+    let refused = hooked.listed_hooks_refused(true);
+
+    assert!(refused);
+    assert!(!hooked.listed_hooks_refused(false));
+    assert!(!plain.listed_hooks_refused(true));
+    assert!(!context().listed_hooks_refused(true));
+}
