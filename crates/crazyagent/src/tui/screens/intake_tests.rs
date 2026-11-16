@@ -3053,20 +3053,13 @@ fn job_asks(shell: &mut Shell) -> Vec<IntakeQuery> {
         .collect()
 }
 
-/// The job actions among the intake asks queued so far: a start, a stop or a dismiss, never
-/// a read such as the ones Home sends each time it is shown. Takes the shell. Returns those
-/// actions.
-fn job_actions(shell: &mut Shell) -> Vec<IntakeQuery> {
+/// The intake asks queued so far other than the two reads Home sends each time it is shown,
+/// `Home` and `Found` (home.rs `shown`), so any write at all. Takes the shell. Returns those
+/// asks.
+fn beyond_home_reads(shell: &mut Shell) -> Vec<IntakeQuery> {
     job_asks(shell)
         .into_iter()
-        .filter(|query| {
-            matches!(
-                query,
-                IntakeQuery::JobStart { .. }
-                    | IntakeQuery::JobStop { .. }
-                    | IntakeQuery::JobDismiss { .. }
-            )
-        })
+        .filter(|query| !matches!(query, IntakeQuery::Home | IntakeQuery::Found))
         .collect()
 }
 
@@ -3332,13 +3325,13 @@ fn answering_a_project_move_s_soft_refusal_moves_that_project_or_keeps_it_where_
     );
     shell.key(Key::Enter);
     assert_eq!(shell.place(), Some(Place::Home));
-    let acted = job_actions(&mut shell);
+    let acted = beyond_home_reads(&mut shell);
     assert!(acted.is_empty(), "Keep it here sends nothing: {acted:?}");
 
     let mut shell = answer();
     shell.key(Key::Esc);
     assert_eq!(shell.place(), Some(Place::Home));
-    let acted = job_actions(&mut shell);
+    let acted = beyond_home_reads(&mut shell);
     assert!(acted.is_empty(), "Esc sends nothing: {acted:?}");
 
     let mut shell = answer();

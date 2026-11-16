@@ -504,13 +504,11 @@ pub(in crate::tui) fn project_screen(
         help = vec![("y", "Replace"), ("n", "Keep"), ("Esc", "Keep")];
     }
     if let Some(cursor) = screen.pool_picker {
-        let mut body = vec![
-            Row::of(
-                "Agents of this project use its pool's accounts.",
-                look.muted,
-            ),
-            Row::default(),
-        ];
+        let mut body: Vec<Row> = wrap_words("Agents of this project use its pool's accounts.", 46)
+            .into_iter()
+            .map(|line| Row::of(line, look.muted))
+            .collect();
+        body.push(Row::default());
         let first = cursor.saturating_sub(PICKER_ROWS - 1);
         for (index, choice) in screen
             .pool_choices

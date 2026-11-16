@@ -8317,9 +8317,11 @@ fn sign_in_from_the_publish_question_closes_it_so_g_reads_the_sign_in_again() {
     );
 }
 
-#[test]
-fn g_on_an_overview_with_its_pool_picker_open_leaves_the_publish_question_closed() {
-    let mut ctx = ctx(100, 30);
+/// Opens the notes project's Overview with one pool and no project pool, answers its publish
+/// reads with no publish and the question offered, then presses Enter on Pick a pool.
+/// Input: the width. Output: the shell with the pool picker open.
+fn overview_picker(width: u16) -> Shell {
+    let mut ctx = ctx(width, 30);
     ctx.store.pools = Load::Ready(vec![main_pool()]);
     ctx.store.pool_projects = Load::Ready(Vec::new());
     let project = ProjectId::new("notes").unwrap();
@@ -8341,7 +8343,31 @@ fn g_on_an_overview_with_its_pool_picker_open_leaves_the_publish_question_closed
     assert_eq!(publish_asks(&mut shell), std::slice::from_ref(&prompt));
     publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(true)));
     shell.key(Key::Enter);
-    let picker = "Agents of this project use its pool's accounts.";
+    shell
+}
+
+/// The Pick a pool box wraps its first sentence inside the box, so the owner reads it whole
+/// at 80 and 100 columns; the 50-wide box cut it to "account…" before.
+#[test]
+fn the_pool_picker_wraps_its_sentence_inside_the_box() {
+    for width in [80, 100] {
+        let mut shell = overview_picker(width);
+        let shown = render(&mut shell, width, 30);
+        let lines: Vec<&str> = shown.lines().collect();
+        let first = lines
+            .iter()
+            .position(|line| line.contains("Agents of this project use its pool's"))
+            .unwrap_or_else(|| panic!("the picker is open at {width}: {shown}"));
+        assert!(!lines[first].contains('…'), "{shown}");
+        assert!(lines[first + 1].contains("accounts."), "{shown}");
+        assert!(!lines[first + 1].contains('…'), "{shown}");
+    }
+}
+
+#[test]
+fn g_on_an_overview_with_its_pool_picker_open_leaves_the_publish_question_closed() {
+    let mut shell = overview_picker(100);
+    let picker = "Agents of this project use its pool's";
     let shown = render(&mut shell, 100, 30);
     assert!(shown.contains(picker), "{shown}");
     shell.key(Key::Char('G'));
