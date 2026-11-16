@@ -49,6 +49,7 @@ pub(in crate::connectors) struct Seen {
     pub(in crate::connectors) path: String,
     pub(in crate::connectors) headers: Vec<(String, String)>,
     pub(in crate::connectors) body: Value,
+    pub(in crate::connectors) raw: String,
 }
 
 impl Seen {
@@ -161,6 +162,7 @@ fn read_request(stream: &TcpStream) -> Seen {
         path,
         headers,
         body: serde_json::from_slice(&body).unwrap_or(Value::Null),
+        raw: String::from_utf8_lossy(&body).into_owned(),
     }
 }
 

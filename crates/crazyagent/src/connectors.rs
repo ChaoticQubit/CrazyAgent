@@ -15,6 +15,7 @@ pub mod gateway;
 pub mod grants;
 pub mod launch;
 pub mod mcp_client;
+pub mod oauth;
 pub mod settings;
 pub mod shim;
 
