@@ -344,6 +344,10 @@ pub fn command_with(
     settings: Option<&TerminalSettings>,
 ) -> Result<InteractiveCommand, LaunchError> {
     validate(request)?;
+    let handover = installed.and_then(Installed::handover);
+    if handover.is_some() && request.sandbox_profile.is_none() {
+        return Err(failure("launch_environment_refused"));
+    }
     if request.account.key().is_some() != run.key_file.is_some() {
         return Err(failure("launch_key_file_invalid"));
     }
@@ -406,7 +410,8 @@ pub fn command_with(
             if request.unconfined {
                 return Err(failure("launch_harness_unsupported"));
             }
-            if installed.is_some_and(|installed| !takes_context(settings, installed)) {
+            let harness = request.harness.as_str();
+            if installed.is_some_and(|installed| !takes_context(settings, installed, harness)) {
                 return Err(failure("launch_context_unsupported"));
             }
             if !records::json_files::session_shaped(run.session_id) {
@@ -519,7 +524,6 @@ pub fn command_with(
                 .map(|(name, value)| (name.to_owned(), value)),
         );
     }
-    let handover = installed.and_then(Installed::handover);
     if let Some(handover) = handover {
         super::launch::handover_fits(request, handover)?;
     }
@@ -540,12 +544,23 @@ pub fn command_with(
 
 /// Tells whether a pane run from a manifest's terminal settings may take an installed
 /// project context: one a listed launch wrote for a manifest that renders MCP servers, so
-/// the team tools reach the harness through its MCP file and no other way. Inputs: the
-/// settings and the installed context. Output: the answer.
-fn takes_context(settings: &TerminalSettings, installed: &Installed) -> bool {
-    let listed = installed.files().is_some_and(|files| files.listed);
+/// the team tools reach the harness through its MCP file and no other way. A listed
+/// context was written for the settings' harness, the request's own. Inputs: the settings,
+/// the installed context and the request's harness. Output: the answer.
+fn takes_context(settings: &TerminalSettings, installed: &Installed, harness: &str) -> bool {
+    let id = settings.manifest().id.as_str();
+    let listed = installed.files().filter(|files| files.listed);
+    if let Some(files) = listed {
+        let written = files.home.parent().and_then(Path::file_name);
+        let other = "a listed context written for another harness";
+        assert_eq!(written, Some(OsStr::new(id)), "{other}");
+        let named = super::registry::registry().get(harness);
+        let named = named.map_or(harness, |found| found.manifest().id.as_str());
+        let mismatched = "a pane request for another harness than its settings";
+        assert_eq!(named, id, "{mismatched}");
+    }
     let renders = super::render::read(settings.manifest());
-    listed && renders.is_ok_and(|renders| renders.mcp.is_some())
+    listed.is_some() && renders.is_ok_and(|renders| renders.mcp.is_some())
 }
 
 /// Reads the terminal settings of a catalog harness whose manifest names a manifest
