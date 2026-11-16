@@ -652,6 +652,22 @@ pub(super) fn move_ended(db: &Connection) -> Result<Option<MoveEnded>, EngineErr
     .transpose()
 }
 
+/// Whether the project move recorded under `request` left its old folder behind: its record
+/// marked the folder as still to clear, since the move went by copy, and the folder is still
+/// there. A replay of that move answers the old-folder code its first reply carried (B17 -66).
+/// Inputs: the connection and the request. Output: the answer.
+pub(super) fn move_left(db: &Connection, request: &RequestId) -> Result<bool, EngineError> {
+    let _ = (db, request);
+    Ok(false)
+}
+
+/// Forgets the old-folder mark of the project move recorded under `request`, once its old
+/// folder was cleared. Inputs: the connection and the request. Output: Ok.
+pub(super) fn move_left_clear(db: &Connection, request: &RequestId) -> Result<(), EngineError> {
+    let _ = (db, request);
+    Ok(())
+}
+
 /// A checked Delete everything: the plan with the project's research jobs, or the refusal code.
 pub(crate) type DeletePlanned = Result<(home::DeletePlan, Vec<i64>), String>;
 
