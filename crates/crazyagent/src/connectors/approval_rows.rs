@@ -647,9 +647,10 @@ fn a_held_write_whose_server_died_is_dropped_even_after_an_allow() {
     );
 }
 
-/// DEC-168 Task 12, sec r1 F2: the owner's approval shows every argument the held write will
-/// send, a long text and a nested object whole, a secret form withheld, and the vendor gets
-/// those arguments after the Allow.
+/// DEC-168 Task 12, sec r1 F2 and r2 F2: the owner's approval shows every argument the held
+/// write will send, a long text and a nested object whole, a tag-block payload as escapes in
+/// a view marked as holding hidden characters, a secret form withheld, and the vendor gets
+/// those arguments as sent after the Allow.
 #[test]
 fn the_owner_sees_every_argument_a_held_write_sends_with_secret_forms_withheld() {
     let (vendor, bench, launch) = write_bench();
@@ -657,22 +658,29 @@ fn the_owner_sees_every_argument_a_held_write_sends_with_secret_forms_withheld()
     let fields = json!({
         "title": "Weekly summary",
         "description": long,
+        "sign": "ok\u{e0041}\u{e0042}",
         "extra": {"note": format!("key {KEY}"), "items": [1, 2, 3]},
     });
     let write = call(1, "board__create_issue", fields);
     let mut seen = None;
     let replies = talk_with(&bench, &launch, &[write], WAIT, |bench, id| {
         let view = approvals::get(&bench.case.db, id).unwrap().unwrap();
+        assert!(view.hidden, "the view is marked");
         seen = Some((id, view.arguments));
         owner_answers(bench, id, approvals::Answer::Allow);
     });
     let (id, text) = seen.expect("the write waited for the owner");
+    let calls = vendor_calls(&vendor);
+    let sent = &calls[0].body["params"]["arguments"];
+    assert_eq!(sent["sign"], json!("ok\u{e0041}\u{e0042}"));
     assert!(!text.is_empty(), "the approval shows the arguments");
     assert!(!text.contains(KEY), "{text}");
     let shown_to_owner: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(shown_to_owner["description"], json!(long));
     assert_eq!(shown_to_owner["extra"]["items"], json!([1, 2, 3]));
     assert_eq!(shown_to_owner["extra"]["note"], json!("[withheld]"));
+    let sign = json!("ok\\u{E0041}\\u{E0042}");
+    assert_eq!(shown_to_owner["sign"], sign);
     let (_, error) = shown(&replies[0]);
     assert!(!error);
     assert!(sent_to(&vendor, "create_issue"));
@@ -757,4 +765,69 @@ fn a_failed_launch_read_settles_nothing_and_the_held_write_runs_after_a_later_al
     assert!(text.ends_with("ran create_issue"), "{text}");
     assert_eq!(vendor_calls(&vendor).len(), 1);
     assert_eq!(writes(&bench, "ok", true), 1);
+}
+
+/// A bench like [`write_bench`] whose vendor takes `slow` to answer each tool call.
+/// Input: how long a call takes. Output: the stand-in vendor, the bench and the launch.
+fn slow_write_bench(slow: Duration) -> (Vendor, Bench, GatewayLaunch) {
+    let tools = vec![read_tool("list_issues"), write_tool("create_issue")];
+    let vendor = Vendor::start(move |seen, _, stream| {
+        let reply = legacy(seen, None, "2025-06-18").unwrap_or_else(|| match seen.rpc() {
+            "tools/list" => result(seen, json!({"tools": tools})),
+            "tools/call" => {
+                std::thread::sleep(slow);
+                result(seen, text_result(&format!("ran {}", seen.tool())))
+            }
+            other => panic!("{other}"),
+        });
+        send(stream, &reply);
+    });
+    let (bench, launch) = board_bench(&vendor);
+    (vendor, bench, launch)
+}
+
+/// DEC-168 Task 12, sec r2 F1: the late check counts the time a settle pass has already
+/// spent. When the first allowed write runs long, a second write allowed in the same pass
+/// that could no longer finish before its server gives up is answered expired, never sent.
+#[test]
+fn a_write_allowed_behind_a_slow_one_in_the_same_settle_is_never_sent_too_late() {
+    let slow = Duration::from_secs(2);
+    let (vendor, bench, launch) = slow_write_bench(slow);
+    let mut server = Open::start(&launch, WAIT);
+    server.send(&[
+        call(1, "board__create_issue", json!({"title": "First"})),
+        call(2, "board__create_issue", json!({"title": "Second"})),
+    ]);
+    let ids = until(&bench, "both writes never waited", |bench| {
+        let ids = waiting_ids(bench);
+        (ids.len() == 2).then_some(ids)
+    });
+    for id in &ids {
+        owner_answers(&bench, *id, approvals::Answer::Allow);
+    }
+    let db = &bench.case.db;
+    let first = approvals::get(db, ids[0]).unwrap().unwrap();
+    let room = i64::try_from((shim::HELD_WAIT - ALLOW_BUDGET).as_millis()).unwrap();
+    let margin = i64::try_from((slow / 2).as_millis()).unwrap();
+    let now = first.created_ms + room - margin;
+    assert_eq!(bench.gateway.settle_at(db, now), 2);
+    let deadline = Instant::now() + WAIT;
+    while server.replies().len() < 2 {
+        assert!(Instant::now() < deadline, "a write was never answered");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let replies = server.finish(WAIT);
+    let texts: Vec<String> = [1, 2].map(|id| shown(by_id(&replies, id)).0).to_vec();
+    let expired = texts
+        .iter()
+        .filter(|text| text.starts_with("connector_write_expired"))
+        .count();
+    let ran = texts
+        .iter()
+        .filter(|text| text.ends_with("ran create_issue"))
+        .count();
+    assert_eq!((expired, ran), (1, 1), "{texts:?}");
+    assert_eq!(vendor_calls(&vendor).len(), 1);
+    assert_eq!(writes(&bench, "ok", true), 1);
+    assert_eq!(writes(&bench, "connector_write_expired", false), 1);
 }

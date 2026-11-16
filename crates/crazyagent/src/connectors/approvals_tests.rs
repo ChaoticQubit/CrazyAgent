@@ -20,6 +20,7 @@ fn write(launch: &str, project: &str, connector: &str) -> PendingWrite {
         tool: "create_issue".to_owned(),
         preview: "create_issue: title=\"Fix login\"".to_owned(),
         arguments: "{\"title\":\"Fix login\"}".to_owned(),
+        hidden: false,
     }
 }
 
@@ -328,8 +329,8 @@ fn ask_once_records_an_allowed_write_per_project_and_revoke_removes_it() {
 }
 
 /// DEC-168 Task 12, sec r1 F2: the owner reads every argument a write would send, nested
-/// values and long texts whole, with hidden characters stripped and any value holding one of
-/// the connector's secret forms withheld; arguments past the bound are refused.
+/// values and long texts whole, hidden characters escaped and any value holding one of the
+/// connector's secret forms withheld; arguments past the bound are refused.
 #[test]
 fn the_full_arguments_show_every_value_and_withhold_secret_forms() {
     let secret = SecretString::new(KEY.as_bytes().to_vec()).unwrap();
@@ -344,12 +345,38 @@ fn the_full_arguments_show_every_value_and_withhold_secret_forms() {
     assert!(!text.is_empty(), "the arguments are shown");
     assert!(!text.contains(KEY), "{text}");
     let shown: Value = serde_json::from_str(&text).unwrap_or_else(|_| panic!("{text:?}"));
-    assert_eq!(shown["title"], json!("Weekly summary"));
+    assert_eq!(shown["title"], json!("Weekly\\u{200B} summary"));
     assert_eq!(shown["description"], json!(long));
     assert_eq!(shown["extra"]["items"], json!([1, 2, 3]));
     assert_eq!(shown["extra"]["note"], json!("[withheld]"));
     let huge = json!({"body": "x".repeat(ARGUMENTS_BYTES_MAX)});
     assert_eq!(arguments(huge.as_object().unwrap(), &[]), None);
+}
+
+/// DEC-168 Task 12, sec r2 F2: the full arguments leave out no character the vendor gets. A
+/// tag-block payload, a zero-width joiner, a variation selector and a carriage return each
+/// show as a `\u{XXXX}` escape, in names too, so two names stay two; line breaks and tabs
+/// stay as written, and the write is marked as holding hidden characters.
+#[test]
+fn the_full_arguments_show_every_hidden_character_escaped_and_mark_the_write() {
+    let fields = json!({
+        "body": "Looks good to me\u{e0041}\u{e0042}",
+        "note": "line one\r\nline two\tend",
+        "note\u{200d}": "ok \u{1f44d}\u{fe0f}",
+    });
+    let fields = fields.as_object().unwrap().clone();
+    let text = arguments(&fields, &[]).unwrap();
+    let shown: Value = serde_json::from_str(&text).unwrap_or_else(|_| panic!("{text:?}"));
+    let body = json!("Looks good to me\\u{E0041}\\u{E0042}");
+    assert_eq!(shown["body"], body, "{text}");
+    assert_eq!(shown["note"], json!("line one\\u{000D}\nline two\tend"));
+    assert_eq!(shown["note\\u{200D}"], json!("ok \u{1f44d}\\u{FE0F}"));
+    assert_eq!(shown.as_object().unwrap().len(), 3, "{text}");
+    assert!(hidden(&fields));
+    let ordinary = json!({"title": "Fix login", "body": "two\nlines\tand a tab"});
+    assert!(!hidden(ordinary.as_object().unwrap()));
+    let tagged = json!({"extra": [{"sign\u{e0041}": "x"}]});
+    assert!(hidden(tagged.as_object().unwrap()));
 }
 
 /// DEC-168 Task 12, sec r1 F2: a waiting approval keeps the write's full arguments for the

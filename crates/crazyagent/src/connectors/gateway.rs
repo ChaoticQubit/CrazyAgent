@@ -1298,6 +1298,7 @@ impl Gateway {
                         tool: vendor.clone(),
                         preview: approvals::preview(&vendor, &fields, &forms),
                         arguments,
+                        hidden: approvals::hidden(&fields),
                     };
                     let parked = Parked {
                         launch: launch.clone(),

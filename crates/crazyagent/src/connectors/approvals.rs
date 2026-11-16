@@ -93,7 +93,8 @@ pub enum Answer {
 }
 
 /// One write call that asks the owner: the launch, project and agent it came from, the
-/// connector by name and title, the vendor tool and the call's preview.
+/// connector by name and title, the vendor tool, the call's preview and full arguments, and
+/// whether those arguments hold hidden characters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingWrite {
     pub launch: String,
@@ -104,6 +105,7 @@ pub struct PendingWrite {
     pub tool: String,
     pub preview: String,
     pub arguments: String,
+    pub hidden: bool,
 }
 
 /// One approval as the owner's approval page shows it: what asks, where, the preview,
@@ -120,6 +122,7 @@ pub struct ApprovalView {
     pub tool: String,
     pub preview: String,
     pub arguments: String,
+    pub hidden: bool,
     pub state: State,
     pub created_ms: i64,
     pub expires_ms: i64,
@@ -267,6 +270,13 @@ pub fn arguments(arguments: &Map<String, Value>, secrets: &[SecretString]) -> Op
         return None;
     }
     Some(text)
+}
+
+/// Whether any name or text of one write call's arguments holds a hidden or control
+/// character, which the full arguments show escaped. Input: the arguments. Output: whether
+/// the owner's view is marked.
+pub fn hidden(_arguments: &Map<String, Value>) -> bool {
+    false
 }
 
 /// Records one write that waits for the owner, unless `WAITING_PER_LAUNCH_MAX` of its launch
@@ -431,6 +441,7 @@ pub fn get(db: &Connection, id: i64) -> Result<Option<ApprovalView>, EngineError
                 tool: row.get(6)?,
                 preview: row.get(7)?,
                 arguments: row.get(12)?,
+                hidden: false,
                 state: State::parse(&state).ok_or(rusqlite::Error::InvalidQuery)?,
                 created_ms: row.get(9)?,
                 expires_ms: row.get(10)?,
