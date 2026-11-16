@@ -9,6 +9,7 @@ import type { ActionReceipt, FoundProject, IntakeJob, IntentReceipt, PendingInte
 import { loadFoundProjects, loadIntakeJob } from "./api-intake";
 import { notifyIntake } from "./notify";
 import { FOUND_POLL_MS, intakePollMs, jobEndLine } from "./screens/intake/intake";
+import { carryFollowUps } from "./screens/new-project/carry";
 import { INPUT_DEFAULT, inputChoice } from "./screens/team/terminal-io";
 import type { InputChoice } from "./screens/team/terminal-io";
 import { QUESTIONS_SHOWN_DEFAULT, questionsShown } from "./api-questions";
@@ -319,7 +320,13 @@ export function useSession(): Session {
         const job = result.value;
         setIntake((shown) => keptRead(shown, job));
         if (line && result.value) {
-          if (result.value.id !== followed.current) showToast(line, { name: "home" });
+          const carried = result.value.kind === "setup" && result.value.state.state === "done" && result.value.project_id !== null
+            ? carryFollowUps(result.value.id, result.value.project_id)
+            : null;
+          if (result.value.id !== followed.current) {
+            if (carried) void carried.outcome.then((message) => { showToast(message, { name: "home" }); void refreshProjects(); });
+            else showToast(line, { name: "home" });
+          }
           setFoundTick((value) => value + 1);
           void notifyIntake(result.value.id);
           if (result.value.kind === "move_project" || result.value.kind === "delete" || result.value.kind === "setup") void refreshProjects();

@@ -86,7 +86,9 @@ test("a job not started here carries nothing and Home's Done line still names Se
   const { calls, deps } = api();
   carry.keepStarted(started({ id: "setup-2" }));
   assert.equal(carry.carryFollowUps("setup-9", "other", deps), null);
-  assert.ok(carry.carryFollowUps("setup-2", "notes", deps), "the job started here carries");
+  const mine = carry.carryFollowUps("setup-2", "notes", deps);
+  assert.ok(mine, "the job started here carries");
+  await mine.outcome;
   carry.dropStarted();
   assert.equal(carry.carryFollowUps("setup-3", "notes", deps), null);
   assert.equal(calls.assign.length, 1);
