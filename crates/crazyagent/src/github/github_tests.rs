@@ -2309,6 +2309,60 @@ fn publish_job_falls_back_to_the_baseline_and_says_why_no_agent_drafted() {
 }
 
 #[test]
+fn a_spawned_draft_answers_with_the_job_at_drafting_while_the_agent_still_drafts() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let (_served, _root, _stand, server) = publish_stand(&secret_text, &scratch, &["tool"]);
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let (asked, answered) = std::sync::mpsc::channel::<bool>();
+    let started = account
+        .publish_begin(&project, &plan("tool"))
+        .unwrap()
+        .spawn(move |_| {
+            let released = held.recv_timeout(Duration::from_secs(5)).is_ok();
+            let _ = asked.send(released);
+            Ok("node_modules/\n".to_owned())
+        });
+    assert_eq!(started.step, GitHubPublishStep::Drafting, "{started:?}");
+    assert_eq!(
+        account
+            .publish_start(&project, &plan("tool"), no_draft)
+            .unwrap_err()
+            .0,
+        "github_publish_running"
+    );
+    let _ = release.send(());
+    assert_eq!(
+        answered.recv_timeout(Duration::from_secs(10)),
+        Ok(true),
+        "the Start answered while the agent still drafted"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let drafted = loop {
+        match account.publish_status(&project).unwrap() {
+            Some(job) if job.step != GitHubPublishStep::Drafting => break job,
+            _ => {
+                assert!(Instant::now() < deadline, "the draft was never saved");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    };
+    assert!(
+        matches!(
+            &drafted.step,
+            GitHubPublishStep::Lines {
+                draft: GitHubIgnoreDraft::Agent,
+                ..
+            }
+        ),
+        "{drafted:?}"
+    );
+}
+
+#[test]
 fn publish_start_records_the_job_at_drafting_and_holds_the_publish_while_the_agent_drafts() {
     let scratch = Scratch::new();
     let secret_text = token();
