@@ -57,10 +57,12 @@ pub fn record(folder: &Path, ports: Ports) -> io::Result<()> {
     Ok(())
 }
 
-/// Tells whether a loopback port is free now: a listener binds to it on 127.0.0.1 and is
-/// closed again. Input: the port. Output: the answer.
+/// Tells whether a loopback port is free now: a listener binds to it on 127.0.0.1 without
+/// `SO_REUSEADDR` and is closed again, so a port any socket holds, a wildcard listener of
+/// this user included, is not free (rv-ds241 L1). Input: the port. Output: the answer.
 pub fn free(port: u16) -> bool {
-    port != 0 && crate::spawn_gate::bind_tcp_std(("127.0.0.1", port)).is_ok()
+    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    port != 0 && crate::spawn_gate::bind_tcp_std_exclusive(address).is_ok()
 }
 
 /// Chooses a loopback port that is free now and is not `taken`. Input: a port already in

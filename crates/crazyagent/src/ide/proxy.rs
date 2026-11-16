@@ -545,20 +545,32 @@ async fn connection(mut client: TcpStream, site: Arc<Site>) {
     }
 }
 
-async fn upstream(port: u16) -> io::Result<TcpStream> {
-    tokio::time::timeout(
+/// Opens one request's connection to the IDE server. Nothing goes upstream before the open
+/// has seen the server ready, and each connection is checked before anything is sent on it
+/// ([`super::server::served_by`]), so a process that took the port after the server exited
+/// gets no request and no token (rv-sa241 LEAD-1). Input: the site. Output: the connection.
+async fn upstream(site: &Site) -> io::Result<TcpStream> {
+    let Some(served) = site.served.get() else {
+        return Err(io::Error::other("ide_proxy_not_ready"));
+    };
+    let server = tokio::time::timeout(
         CONNECT_TIME,
-        crate::spawn_gate::connect_tcp(("127.0.0.1", port)),
+        crate::spawn_gate::connect_tcp(("127.0.0.1", site.upstream)),
     )
     .await
-    .map_err(|_| io::Error::other("ide_proxy_upstream_timeout"))?
+    .map_err(|_| io::Error::other("ide_proxy_upstream_timeout"))??;
+    super::server::served_by(site.upstream, served)
+        .await
+        .map_err(|refused| io::Error::other(refused.0))?;
+    assert_eq!(server.peer_addr()?.port(), site.upstream);
+    Ok(server)
 }
 
 async fn page(mut client: TcpStream, request: &Request<'_>, site: &Site) {
     let host = request.values("host").next().unwrap_or_default();
     assert!(workbench_host(host, site.port));
     let fetched = async {
-        let mut server = upstream(site.upstream).await?;
+        let mut server = upstream(site).await?;
         server
             .write_all(&forwarded(request, "HTTP/1.0", &PAGE_DROPPED))
             .await?;
@@ -580,7 +592,7 @@ async fn page(mut client: TcpStream, request: &Request<'_>, site: &Site) {
 }
 
 async fn upgrade(mut client: TcpStream, head: &[u8], rest: &[u8], site: &Site) {
-    let Ok(mut server) = upstream(site.upstream).await else {
+    let Ok(mut server) = upstream(site).await else {
         send(&mut client, &refusal("502 Bad Gateway")).await;
         return;
     };
@@ -599,7 +611,7 @@ async fn forward(
     body: u64,
     site: &Site,
 ) {
-    let Ok(mut server) = upstream(site.upstream).await else {
+    let Ok(mut server) = upstream(site).await else {
         send(&mut client, &refusal("502 Bad Gateway")).await;
         return;
     };
