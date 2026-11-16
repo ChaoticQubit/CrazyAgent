@@ -459,6 +459,41 @@ test("a prompt queued between keys or wheel reports closes their batch, so input
   assert.deepEqual(lane.sent, [["x", false], ["a", false], ["P", "prompt"], ["b", false], ["W", true], ["Q", "prompt"], ["V", true]]);
 });
 
+test("lanes over a queue that wraps a jobQueue, as the wheel fixtures count sends, still merge and still keep a prompt's place (DEC-187 typing A)", async () => {
+  const lane = heldSends();
+  const inner = io.jobQueue(() => assert.fail("no stop"));
+  const run = (job) => inner(async () => job());
+  const lanes = io.inputLanes(run, lane.send);
+  lanes.typed(io.encodeTyped("x"));
+  await until(() => lane.sent.length === 1);
+  for (const key of "abc") lanes.typed(io.encodeTyped(key));
+  assert.equal(run(() => lane.send(io.encodeTyped("P"), "prompt")), true);
+  lanes.typed(io.encodeTyped("d"));
+  lanes.wheel(io.encodeTyped("W"));
+  lanes.wheel(io.encodeTyped("V"));
+  await drain(lane, 5);
+  assert.deepEqual(lane.sent, [["x", false], ["abc", false], ["P", "prompt"], ["d", false], ["WV", true]]);
+});
+
+test("empty input sends nothing and never stops typing, idle or while a batch waits (DEC-187 typing A)", async () => {
+  const lane = heldSends();
+  let stops = 0;
+  const lanes = io.inputLanes(io.jobQueue(() => { stops += 1; }), lane.send);
+  lanes.typed(new Uint8Array());
+  lanes.wheel(new Uint8Array());
+  await until(() => true);
+  assert.deepEqual(lane.sent, [], "nothing to send while idle");
+  lanes.typed(io.encodeTyped("x"));
+  await until(() => lane.sent.length === 1);
+  lanes.typed(io.encodeTyped("a"));
+  lanes.typed(new Uint8Array());
+  lanes.wheel(new Uint8Array());
+  lanes.typed(io.encodeTyped("b"));
+  await drain(lane, 2);
+  assert.deepEqual(lane.sent, [["x", false], ["ab", false]]);
+  assert.equal(stops, 0);
+});
+
 test("a lone Esc closes its batch, so Esc and a quick key after it never go out as one Alt key (DEC-187 typing A)", async () => {
   const lane = heldSends();
   const lanes = io.inputLanes(io.jobQueue(() => assert.fail("no stop")), lane.send);
