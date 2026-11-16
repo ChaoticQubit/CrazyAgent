@@ -553,9 +553,19 @@ pub(crate) fn reconcile(root: &Path) -> Leftover {
 /// What `crazyagent keep-awake restore` says when a recorded change could not be put back.
 pub const RESTORE_LEFT: &str = "Keep awake could not put back every setting it changed. It \
     tries again when the engine starts.";
+/// What `crazyagent keep-awake restore` says while an engine holds the journal.
+pub const RESTORE_ENGINE_RUNNING: &str = "The engine is running and puts these settings back \
+    itself. Stop it, then try again.";
 /// What `crazyagent keep-awake restore` says when its list of changes could not be read.
 pub const RESTORE_UNREADABLE: &str = "Keep awake could not read its list of settings to put \
     back. It tries again when the engine starts.";
+
+/// Takes the journal lock for the engine's whole life (QUESTION 01:16 Q3). Input: the
+/// engine root. Output: the lock, or none.
+pub(crate) fn journal_lock(root: &Path) -> Option<journal::JournalLock> {
+    assert!(!root.as_os_str().is_empty());
+    None
+}
 
 /// `crazyagent keep-awake restore` (plan Task 14, for an uninstaller): runs the engine
 /// start's undo now, while no engine runs. Input: the engine root. Output: Ok when nothing

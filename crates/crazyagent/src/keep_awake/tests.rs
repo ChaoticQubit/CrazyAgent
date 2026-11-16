@@ -1251,3 +1251,17 @@ mod with_a_real_hold {
         keeper.release();
     }
 }
+
+/// rv-sec3 KA T14 r1 F2, QUESTION 01:16 Q3: the engine start takes the journal lock and
+/// keeps it, so a restore cannot run beside the engine; once it is let go, restore runs.
+#[test]
+fn the_engine_start_takes_the_journal_lock_and_restore_waits_for_it() {
+    let root = tempfile::tempdir().unwrap();
+    let lock = journal_lock(root.path());
+    assert!(lock.is_some(), "a free lock is taken at once");
+    let beside = journal::JournalLock::try_take(root.path()).unwrap();
+    assert!(beside.is_none(), "one holder at a time");
+    assert_eq!(restore(root.path()), Err(RESTORE_ENGINE_RUNNING));
+    drop(lock);
+    assert_eq!(restore(root.path()), Ok(()));
+}

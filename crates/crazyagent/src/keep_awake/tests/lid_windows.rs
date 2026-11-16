@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 const PLAN: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
+const OTHER: &str = "a1841308-3541-4fab-bc81-f71556f20b4a";
 /// A lid ask with a rule Off and nothing wanted.
 fn off() -> LidAsk {
     LidAsk::default()
@@ -44,6 +45,8 @@ struct Plans {
     on_ac: Option<bool>,
     writes: Vec<(String, Actions, Vec<Entry>)>,
     slept: Vec<bool>,
+    applied: Vec<String>,
+    unapplied: Option<Refusal>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +91,17 @@ impl LidSetting for StandIn {
         Ok(())
     }
 
+    fn apply(&mut self, plan: &str) -> Result<(), Refusal> {
+        let mut plans = self.plans();
+        if let Some(refusal) = plans.unapplied.clone() {
+            return Err(refusal);
+        }
+        if plans.active == plan {
+            plans.applied.push(plan.to_owned());
+        }
+        Ok(())
+    }
+
     fn closed(&mut self) -> Option<bool> {
         self.plans().closed
     }
@@ -114,6 +128,8 @@ fn line(ac: u32, dc: u32) -> (tempfile::TempDir, StandIn, WindowsLid<StandIn>) {
         on_ac: Some(true),
         writes: Vec::new(),
         slept: Vec::new(),
+        applied: Vec::new(),
+        unapplied: None,
     };
     let setting = StandIn(Arc::new(Mutex::new(plans)));
     let line = WindowsLid::new(setting.clone(), root.path().to_path_buf());
@@ -125,9 +141,13 @@ fn entries(root: &Path) -> Vec<Entry> {
 }
 
 fn saved(ac: u32, dc: u32) -> Entry {
+    saved_in(PLAN, ac, dc)
+}
+
+fn saved_in(plan: &str, ac: u32, dc: u32) -> Entry {
     Entry {
         kind: KIND.into(),
-        restore: format!(r#"{{"scheme":"{PLAN}","ac":{ac},"dc":{dc}}}"#),
+        restore: format!(r#"{{"scheme":"{plan}","ac":{ac},"dc":{dc}}}"#),
     }
 }
 
@@ -389,6 +409,167 @@ fn an_entry_an_earlier_engine_left_is_put_back_by_its_undo() {
     );
 }
 
+/// rv-ds241 KA T14 r1 F1, QUESTION 01:16 Q1: a plan switched during a hold puts the held
+/// plan back and holds the new one in the same ask, so the lid stays held; release puts
+/// each plan back.
+#[test]
+fn a_plan_switched_during_a_hold_is_put_back_and_the_new_plan_held() {
+    let (root, setting, mut line) = line(1, 2);
+    assert_eq!(line.step(wanted(), None), LidSupport::Held);
+    {
+        let mut plans = setting.plans();
+        plans.actions.insert(OTHER.into(), Actions { ac: 2, dc: 3 });
+        plans.active = OTHER.into();
+    }
+    assert_eq!(line.step(wanted(), None), LidSupport::Held, "still held");
+    assert_eq!(
+        setting.now(),
+        Actions { ac: 1, dc: 2 },
+        "the old plan is put back"
+    );
+    assert_eq!(
+        setting.plans().actions[OTHER],
+        NOTHING,
+        "the new plan is held"
+    );
+    assert_eq!(entries(root.path()), [saved_in(OTHER, 2, 3)]);
+    assert_eq!(line.step(wanted(), None), LidSupport::Held);
+    assert_eq!(
+        setting.plans().writes.len(),
+        3,
+        "a held plan is not written again"
+    );
+    assert_eq!(line.step(resting(), None), LidSupport::Held);
+    assert_eq!(setting.plans().actions[OTHER], Actions { ac: 2, dc: 3 });
+    assert!(entries(root.path()).is_empty());
+}
+
+/// rv-ds241 KA T14 r1 F1, QUESTION 01:16 Q1: a lid value set again during a hold, by the
+/// owner or a policy refresh, is put back as it is now and held again in the same ask, so
+/// the lid stays held and that value is what goes back at the end (QUESTION 22:58 Q5).
+#[test]
+fn a_lid_value_set_again_during_a_hold_is_held_again_and_goes_back_at_the_end() {
+    let (root, setting, mut line) = line(1, 2);
+    assert_eq!(line.step(wanted(), None), LidSupport::Held);
+    setting.plans().actions.insert(PLAN.into(), Actions { ac: 3, dc: 0 });
+    assert_eq!(line.step(wanted(), None), LidSupport::Held, "still held");
+    assert_eq!(setting.now(), NOTHING);
+    assert_eq!(entries(root.path()), [saved(3, 2)]);
+    assert_eq!(line.step(resting(), None), LidSupport::Held);
+    assert_eq!(setting.now(), Actions { ac: 3, dc: 2 });
+    assert!(entries(root.path()).is_empty());
+    assert!(setting.plans().slept.is_empty(), "the lid was open");
+}
+
+/// rv-ds241 KA T14 r1 F2, rv-sec3 F3, QUESTION 01:16 Q2: a hold that ends with the lid
+/// closed owes its sleep until the put back works, then sleeps once.
+#[test]
+fn a_hold_that_ends_closed_sleeps_once_its_put_back_works() {
+    let (_root, setting, mut line) = line(1, 2);
+    assert_eq!(line.step(wanted(), None), LidSupport::Held);
+    setting.plans().closed = Some(true);
+    setting.plans().refusing = Some(Refusal::Failed("the power service is busy".into()));
+    assert_eq!(line.step(resting(), None), LidSupport::SleepNotRestored);
+    assert!(
+        setting.plans().slept.is_empty(),
+        "nothing sleeps over Do nothing"
+    );
+    setting.plans().refusing = None;
+    assert_eq!(line.step(resting(), None), LidSupport::Held);
+    assert_eq!(setting.plans().slept, [false], "slept once put back");
+    assert_eq!(line.step(resting(), None), LidSupport::Held);
+    assert_eq!(setting.plans().slept, [false], "and only once");
+}
+
+/// QUESTION 01:16 Q2: a hold whose last answer was not Held owes no sleep when it ends with
+/// the lid closed, since the keeper had stopped holding the lid by then.
+#[test]
+fn a_hold_whose_last_answer_was_not_held_owes_no_sleep() {
+    let (root, setting, mut line) = line(1, 2);
+    assert_eq!(line.step(wanted(), None), LidSupport::Held);
+    setting.plans().check = Err(Refusal::Denied);
+    let needs_admin = LidSupport::NotAvailable {
+        reason: NEEDS_ADMIN.into(),
+    };
+    assert_eq!(line.step(wanted(), None), needs_admin);
+    setting.plans().check = Ok(());
+    setting.plans().closed = Some(true);
+    assert_eq!(line.step(resting(), None), LidSupport::Held);
+    assert_eq!(setting.now(), Actions { ac: 1, dc: 2 });
+    assert!(entries(root.path()).is_empty());
+    assert!(setting.plans().slept.is_empty(), "no sleep is owed");
+}
+
+/// rv-sec3 KA T14 r1 F3, QUESTION 01:16 Q2: a lid line built while an earlier engine's lid
+/// change is still journaled owes a sleep; once the engine start's undo put it back, the
+/// first ask sleeps with the lid closed, and with the lid open nothing is owed.
+#[test]
+fn an_engine_start_over_a_lid_change_left_sleeps_once_it_is_put_back() {
+    for (closed, slept) in [(Some(true), &[false][..]), (Some(false), &[][..])] {
+        let (root, setting, _) = line(0, 0);
+        Journal::open(root.path())
+            .unwrap()
+            .record(saved(1, 2))
+            .unwrap();
+        setting.plans().closed = closed;
+        let mut started = WindowsLid::new(setting.clone(), root.path().to_path_buf());
+        let mut undo = setting.clone();
+        Journal::open(root.path())
+            .unwrap()
+            .reconcile(|entry| undo_with(&mut undo, entry))
+            .unwrap();
+        assert_eq!(setting.now(), Actions { ac: 1, dc: 2 }, "{closed:?}");
+        assert_eq!(
+            started.step(resting(), None),
+            LidSupport::Held,
+            "{closed:?}"
+        );
+        assert_eq!(setting.plans().slept, slept, "{closed:?}");
+        assert_eq!(
+            started.step(resting(), None),
+            LidSupport::Held,
+            "{closed:?}"
+        );
+        assert_eq!(setting.plans().slept, slept, "paid once, {closed:?}");
+    }
+}
+
+/// rv-sec3 KA T14 r1 F4: a put back that finds the saved values already stored applies
+/// them again when its plan is the active one, since Windows applies a stored change to
+/// the active plan only then; a failing apply keeps the entry.
+#[test]
+fn a_put_back_already_stored_is_applied_again_on_the_active_plan() {
+    let (_root, mut setting, _) = line(1, 2);
+    undo_with(&mut setting, &saved(1, 2)).unwrap();
+    assert_eq!(setting.plans().applied, [PLAN], "applied again");
+    assert!(setting.plans().writes.is_empty(), "nothing to write");
+    setting.plans().active = OTHER.into();
+    undo_with(&mut setting, &saved(1, 2)).unwrap();
+    assert_eq!(
+        setting.plans().applied,
+        [PLAN],
+        "a plan not active is not applied"
+    );
+    setting.plans().active = PLAN.into();
+    setting.plans().unapplied = Some(Refusal::Failed("the power service is busy".into()));
+    let kept = undo_with(&mut setting, &saved(1, 2)).unwrap_err();
+    assert!(
+        kept.0.starts_with("keep_awake_lid_not_put_back"),
+        "{kept:?}"
+    );
+}
+
+/// rv-ds241 KA T14 r1 nit 5: a hold whose write and put back both fail leaves its entry
+/// and says SleepNotRestored, as every other ask with a change left does.
+#[test]
+fn a_hold_whose_write_and_put_back_both_fail_reads_sleep_not_restored() {
+    let (root, setting, mut line) = line(1, 2);
+    setting.plans().refusing = Some(Refusal::Failed("the power service is busy".into()));
+    setting.plans().unapplied = Some(Refusal::Failed("the power service is busy".into()));
+    assert_eq!(line.step(wanted(), None), LidSupport::SleepNotRestored);
+    assert_eq!(entries(root.path()), [saved(1, 2)], "the entry stays");
+}
+
 #[cfg(windows)]
 mod on_windows {
     use super::*;
@@ -428,6 +609,11 @@ mod on_windows {
         fn write(&mut self, plan: &str, actions: Actions) -> Result<(), Refusal> {
             assert_eq!(plan, self.0.text(), "rows write only the scratch plan");
             Windows.write(plan, actions)
+        }
+
+        fn apply(&mut self, plan: &str) -> Result<(), Refusal> {
+            assert_eq!(plan, self.0.text(), "rows apply only the scratch plan");
+            Windows.apply(plan)
         }
 
         fn closed(&mut self) -> Option<bool> {

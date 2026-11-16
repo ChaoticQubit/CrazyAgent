@@ -1,3 +1,4 @@
+use crazyagent::keep_awake::journal::JournalLock;
 use std::process::{Command, Stdio};
 
 fn crazyagent(args: &[&str]) -> std::process::Output {
@@ -128,5 +129,36 @@ fn keep_awake_restore_runs_the_engine_start_undo_under_the_data_folder() {
         "{said}"
     );
     assert!(!said.contains("stand_in"), "{said}");
+    assert_eq!(std::fs::read_to_string(&journal).unwrap(), entry);
+}
+
+/// rv-sec3 KA T14 r1 F2 and rv-ds241 nit 1: restore refuses while the engine holds the
+/// journal lock and leaves the journal as it is, and a data folder no engine ever made
+/// has nothing to put back and is not made.
+#[test]
+fn keep_awake_restore_refuses_beside_the_engine_and_makes_no_data_folder() {
+    let home = tempfile::tempdir().unwrap();
+    let never = home.path().join("never-started");
+    let nothing = crazyagent_at(&never, &["keep-awake", "restore"]);
+    let said = String::from_utf8_lossy(&nothing.stdout).into_owned();
+    assert!(nothing.status.success(), "{said}");
+    assert!(
+        said.contains("Keep awake has nothing left to put back."),
+        "{said}"
+    );
+    assert!(!never.exists(), "restore makes no data folder");
+
+    let engine = JournalLock::try_take(home.path()).unwrap();
+    assert!(engine.is_some(), "the row stands in for the engine");
+    let journal = home.path().join("keep-awake").join("journal.json");
+    let entry = r#"[{"kind":"stand_in","restore":"before"}]"#;
+    std::fs::write(&journal, entry).unwrap();
+    let beside = crazyagent_at(home.path(), &["keep-awake", "restore"]);
+    let said = String::from_utf8_lossy(&beside.stderr).into_owned();
+    assert!(!beside.status.success(), "{said}");
+    assert!(
+        said.contains(crazyagent::keep_awake::RESTORE_ENGINE_RUNNING),
+        "{said}"
+    );
     assert_eq!(std::fs::read_to_string(&journal).unwrap(), entry);
 }

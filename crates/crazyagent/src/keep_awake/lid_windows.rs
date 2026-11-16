@@ -67,6 +67,8 @@ pub(crate) trait LidSetting: Send {
     fn read(&mut self, plan: &str) -> Result<Actions, Refusal>;
     /// Writes one plan's lid close action, applied when the plan is the active one.
     fn write(&mut self, plan: &str, actions: Actions) -> Result<(), Refusal>;
+    /// Applies one plan's stored lid close action when the plan is the active one.
+    fn apply(&mut self, plan: &str) -> Result<(), Refusal>;
     /// Whether the lid is closed, none when unknown.
     fn closed(&mut self) -> Option<bool>;
     /// Whether the computer runs on AC power, none when unknown.
@@ -362,6 +364,10 @@ impl LidSetting for Windows {
             dc: actions.dc,
         };
         lid::write(scheme(plan)?, values).map_err(refused)
+    }
+
+    fn apply(&mut self, _plan: &str) -> Result<(), Refusal> {
+        Err(Refusal::Failed("not built yet".into()))
     }
 
     fn closed(&mut self) -> Option<bool> {

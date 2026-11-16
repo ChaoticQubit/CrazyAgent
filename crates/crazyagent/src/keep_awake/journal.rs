@@ -114,6 +114,23 @@ fn read(file: File) -> Result<Vec<Entry>, EngineError> {
     Ok(entries)
 }
 
+/// An exclusive hold on the journal's lock file (rv-sec3 KA T14 r1 F2): the engine holds
+/// it for its whole life and `crazyagent keep-awake restore` for its undo, so the journal
+/// has one writing process at a time. Dropping it lets go.
+#[derive(Debug)]
+pub struct JournalLock {
+    _file: File,
+}
+
+impl JournalLock {
+    /// Takes the lock without waiting. Input: the engine root. Output: the lock, none while
+    /// another holds it, or why the lock file cannot be opened.
+    pub fn try_take(root: &Path) -> Result<Option<Self>, EngineError> {
+        assert!(!root.as_os_str().is_empty());
+        Ok(None)
+    }
+}
+
 impl Journal {
     /// Opens the journal below the engine root, creating its folder. A missing file is an
     /// empty journal. A file that cannot be read stays where it is and is an error, so no

@@ -577,7 +577,8 @@ mod windows {
 #[cfg(unix)]
 mod journal {
     use crazyagent::engine::EngineError;
-    use crazyagent::keep_awake::journal::{Entry, Journal};
+    use crazyagent::keep_awake::journal::{Entry, Journal, JournalLock};
+    use crazyagent::keep_awake::{RESTORE_ENGINE_RUNNING, restore};
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::process::Command;
@@ -636,6 +637,25 @@ mod journal {
         assert_eq!(std::fs::read_to_string(&setting).unwrap(), "before");
         assert!(journal.entries().is_empty());
         assert!(Journal::open(root.path()).unwrap().entries().is_empty());
+    }
+
+    /// rv-sec3 KA T14 r1 F2, QUESTION 01:16 Q3: the journal lock has one holder at a time,
+    /// and restore refuses while another holds it and leaves the journal as it is.
+    #[test]
+    fn the_journal_lock_has_one_holder_and_restore_refuses_beside_it() {
+        let root = tempfile::tempdir().unwrap();
+        let held = JournalLock::try_take(root.path()).unwrap();
+        assert!(held.is_some(), "a free lock is taken");
+        let again = JournalLock::try_take(root.path()).unwrap();
+        assert!(again.is_none(), "a held lock is not taken twice");
+        Journal::open(root.path()).unwrap().record(entry()).unwrap();
+        assert_eq!(restore(root.path()), Err(RESTORE_ENGINE_RUNNING));
+        assert_eq!(Journal::open(root.path()).unwrap().entries(), [entry()]);
+        drop(held);
+        assert!(
+            JournalLock::try_take(root.path()).unwrap().is_some(),
+            "a lock let go is free"
+        );
     }
 
     /// DEC-167 addendum 32: settle undoes the entries of one kind, newest first, keeps the
