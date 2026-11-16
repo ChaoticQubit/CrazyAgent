@@ -5,7 +5,7 @@ use super::{
     LinuxSockets, LinuxSupervisor, OWNER_PORTS, ProjectSandbox, REMOTES_MAX, Routed, Sandbox,
     SandboxError, SandboxNetwork, SandboxRemote, agent_env, clean_absolute, invalid,
 };
-use crazyagent_linux_supervisor::rules::{GitOwn, Reach, is_git};
+use crazyagent_linux_supervisor::rules::{GitOwn, Held, Reach, is_git};
 use crazyagent_linux_supervisor::serve::{self, Supervised};
 use landlock::{
     ABI, Access, AccessFs, AccessNet, BitFlags, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
@@ -65,6 +65,8 @@ const OWN_TREE: &str = "--own-tree";
 const OWN_KIDS: &str = "--own-kids";
 const OWN_GIT: &str = "--own-git";
 const GUARD_SIGNALS: &str = "--guard-signals";
+const GUARD_HELD: &str = "--guard-held";
+const GUARD_HELD_TREE: &str = "--guard-held-tree";
 const PROBE_SUPERVISOR: &str = "--probe-supervisor";
 const PROBE_SUPERVISED: &str = "--probe-supervised";
 /// Where AppArmor says whether it keeps unprivileged programs out of user namespaces, as on
@@ -241,13 +243,15 @@ pub struct LandlockPolicy {
 /// What the helper's call supervisor holds for an agent on a host with no namespaces to
 /// nest it in (DEC-179): `loopback` names the connect ports it reaches on this machine
 /// only, `git` its own git folders, the only `.git` entries it may make, and `signals`
-/// keeps its signals inside the programs it started. With none of them the helper becomes
-/// the harness; with any it stays as the harness's parent and answers its guarded calls.
+/// keeps its signals inside the programs it started, and `held` names the entries it may
+/// not write, move, link or remove (DEC-185 S2). With none of them the helper becomes the
+/// harness; with any it stays as the harness's parent and answers its guarded calls.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Guard {
     pub loopback: Vec<u16>,
     pub git: Option<GitOwn>,
     pub signals: bool,
+    pub held: Option<Held>,
 }
 
 impl Guard {
@@ -1208,6 +1212,7 @@ fn probe_supervisor(folder: &Path) -> ExitCode {
             loopback: vec![port],
             git: Some(GitOwn::default()),
             signals: true,
+            held: None,
         };
         serve::run(all.supervised(&[port]), &mut check)
     });
@@ -2291,6 +2296,7 @@ fn guard(sandbox: &ProjectSandbox, supervision: Supervision) -> Guard {
         loopback,
         git: Some(git_own(sandbox)),
         signals: supervision.signals,
+        held: None,
     };
     assert!(!held.loopback.contains(&0));
     assert!(held.loopback.windows(2).all(|pair| pair[0] < pair[1]));
@@ -2683,6 +2689,89 @@ mod tests {
         };
         let mut harness = Command::new("/bin/true");
         harness.current_dir(&worktree);
+        let refused = launch.wrap(&harness).err();
+        assert!(
+            matches!(&refused, Some(SandboxError::Unavailable(reason))
+                if reason == CONFINED_UNAVAILABLE),
+            "{refused:?}"
+        );
+    }
+
+    fn supervised_launch(sandbox: ProjectSandbox) -> LinuxSandbox {
+        LinuxSandbox {
+            sandbox,
+            backend: LinuxBackend::Landlock { helper: helper() },
+            supervision: Some(Supervision { signals: false }),
+            routed: None,
+        }
+    }
+
+    fn flag_values(words: &[OsString], flag: &str) -> Vec<PathBuf> {
+        words
+            .windows(2)
+            .filter(|pair| pair[0] == flag)
+            .map(|pair| PathBuf::from(&pair[1]))
+            .collect()
+    }
+
+    #[test]
+    fn a_supervised_linked_worktree_launches_with_every_guarded_entry_held() {
+        let (_temp, project, sandbox, worktree) = linked();
+        let confined = sandbox.confine_to_worktree(&worktree).unwrap();
+        let mut guarded = Grants::of(&confined).unwrap().guarded;
+        guarded.sort();
+        let launch = supervised_launch(confined);
+        let mut harness = Command::new("/bin/true");
+        harness.current_dir(&worktree);
+        let wrapped = launch.wrap(&harness);
+        assert!(wrapped.is_ok(), "{:?}", wrapped.as_ref().err());
+        let words: Vec<OsString> = wrapped
+            .unwrap()
+            .get_args()
+            .map(OsStr::to_os_string)
+            .collect();
+        let mut held = flag_values(&words, GUARD_HELD_TREE);
+        held.extend(flag_values(&words, GUARD_HELD));
+        held.sort();
+        assert_eq!(
+            held, guarded,
+            "the supervisor holds the list the tripwire reads"
+        );
+        assert_eq!(flag_values(&words, OWN_TREE), vec![worktree.clone()]);
+        assert_eq!(flag_values(&words, OWN_GIT), vec![project.join(".git")]);
+    }
+
+    #[test]
+    fn a_linked_worktree_agent_makes_entries_in_its_admin_folder_and_no_other_git() {
+        let (_temp, project, sandbox, worktree) = linked();
+        let confined = sandbox.confine_to_worktree(&worktree).unwrap();
+        let own = git_own(&confined);
+        let admin = project.join(".git").join("worktrees").join("agent-1");
+        for made in [
+            admin.join("index.lock"),
+            admin.join("logs").join("HEAD"),
+            worktree.join("src").join("main.rs"),
+        ] {
+            assert!(own.allows(&made), "{}", made.display());
+        }
+        for refused in [
+            worktree.join("vendor").join(".git"),
+            admin.join("modules").join("sub").join(".git"),
+            project.join("other").join(".git").join("config"),
+        ] {
+            assert!(!own.allows(&refused), "{}", refused.display());
+        }
+    }
+
+    #[test]
+    fn a_supervised_clone_is_refused_until_its_store_is_held() {
+        let (_temp, project, sandbox, _) = linked();
+        let clone = project.join("worktrees").join("agent-2");
+        fs::create_dir(&clone).unwrap();
+        git(&clone, &["init", "-q"]);
+        let launch = supervised_launch(sandbox.confine_to_clone(&clone).unwrap());
+        let mut harness = Command::new("/bin/true");
+        harness.current_dir(&clone);
         let refused = launch.wrap(&harness).err();
         assert!(
             matches!(&refused, Some(SandboxError::Unavailable(reason))
@@ -3881,6 +3970,10 @@ mod tests {
                     exact: vec![PathBuf::from("/p/modules/.git")],
                 }),
                 signals: true,
+                held: Some(Held {
+                    entries: vec![PathBuf::from("/p/.git/worktrees/a/HEAD")],
+                    trees: vec![PathBuf::from("/p/.git/worktrees/a/modules")],
+                }),
             },
             ..LandlockPolicy::default()
         }
@@ -3901,6 +3994,10 @@ mod tests {
             OWN_GIT,
             "/p/modules/.git",
             GUARD_SIGNALS,
+            GUARD_HELD,
+            "/p/.git/worktrees/a/HEAD",
+            GUARD_HELD_TREE,
+            "/p/.git/worktrees/a/modules",
         ]
         .iter()
         .map(OsString::from)
@@ -3937,6 +4034,17 @@ mod tests {
         assert_eq!(held(&[GUARD_SIGNALS, "--", "/bin/true"]), Some(signals));
         assert_eq!(held(&[GUARD_GIT, "--", "/bin/true"]), Some(git));
         assert_eq!(held(&["--", "/bin/true"]), Some(Guard::default()));
+        let tree = Guard {
+            held: Some(Held {
+                entries: Vec::new(),
+                trees: vec![PathBuf::from("/p/t")],
+            }),
+            ..Guard::default()
+        };
+        assert_eq!(
+            held(&[GUARD_HELD_TREE, "/p/t", "--", "/bin/true"]),
+            Some(tree)
+        );
         for refused in [
             &[OWN_TREE, "/p", "--", "/bin/true"][..],
             &[OWN_KIDS, "/p", GUARD_GIT, "--", "/bin/true"],
@@ -3948,6 +4056,10 @@ mod tests {
             &[PROBE, GUARD_SIGNALS],
             &[PROBE, GUARD_GIT],
             &[FILTER_SOCKETS, GUARD_SIGNALS, "--", "/bin/true"],
+            &[GUARD_HELD, "p/.git/worktrees/a/HEAD", "--", "/bin/true"],
+            &[GUARD_HELD_TREE, "--", "/bin/true"],
+            &[GUARD_HELD, "/p/a", DIE_WITH, "4242", "--", "/bin/true"],
+            &[PROBE, GUARD_HELD, "/p/a"],
         ] {
             assert!(parse(refused).is_err(), "{refused:?}");
         }
@@ -4228,6 +4340,7 @@ mod tests {
             loopback: vec![8080],
             git: Some(own),
             signals: true,
+            held: None,
         };
         assert_eq!(guard(&sandbox, alone), expected);
         let nested = Guard {
