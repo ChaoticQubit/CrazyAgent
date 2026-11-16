@@ -1644,6 +1644,7 @@ async fn a_headless_master_turn_is_on_the_hidden_folders_list_while_it_runs() {
     prepared.session.project_id = project.clone();
     let (hid, later) = (prepared.cwd.join("vault"), prepared.cwd.join("dump"));
     prepared.hidden_paths = vec![hid.clone()];
+    prepared.agent_policy.access = crate::sandbox::policy::AgentAccess::Sandboxed;
     let listed = listed_master_turn(&prepared.session.project_id).unwrap();
     assert_eq!(
         runs_seeing(project.as_str(), std::slice::from_ref(&hid)),
