@@ -1895,15 +1895,16 @@ fn routes(bwrap: &Path, helper: &Path) -> bool {
         )
 }
 
-/// The route answer kept for this engine's life ([`kept_route`]): the bubblewrap and the
-/// helper it was asked for, and whether the probe passed.
+/// The route answer [`kept_route`] keeps: the bubblewrap and the helper it was asked for,
+/// and whether the probe passed.
 type KeptRoute = Mutex<Option<(PathBuf, PathBuf, bool)>>;
 
-/// Tells whether a nested agent gets a routed network of its own from one answer kept for
-/// the engine's life, so the Agent access page, the launch notice and the launch read the
-/// same fact (rv-code2 SX2-2, SX2B-1): false at once when `refused`, else the answer kept
-/// for this bubblewrap and helper, else the probe's, then kept, with no lock held while the
-/// probe runs. Inputs: the cell, bubblewrap, the helper, the refusal, the probe. Output: it.
+/// Tells whether a nested agent gets a routed network of its own from one kept answer that
+/// the Agent access page, the launch notice and the launch all read (rv-code2 SX2-2,
+/// SX2B-1): false when `refused`, a true kept for this bubblewrap and helper for the
+/// engine's life, a kept false until `again` asks it anew (rv-sa241 SBX-2-R2 N1), else the
+/// probe's, kept, with no lock held while it runs and a true kept meanwhile left in place.
+/// Inputs: the cell, bubblewrap, the helper, the refusal, `again`, the probe. Output: it.
 fn kept_route(
     kept: &KeptRoute,
     bwrap: &Path,
@@ -1912,7 +1913,6 @@ fn kept_route(
     again: bool,
     probe: impl FnOnce() -> bool,
 ) -> bool {
-    let _ = again;
     if refused {
         return false;
     }
@@ -1920,12 +1920,21 @@ fn kept_route(
     if let Some((asked_bwrap, asked_helper, answer)) = held
         && asked_bwrap == bwrap
         && asked_helper == helper
+        && (answer || !again)
     {
         return answer;
     }
     let answer = probe();
-    let asked = (bwrap.to_path_buf(), helper.to_path_buf(), answer);
-    *kept.lock().unwrap_or_else(PoisonError::into_inner) = Some(asked);
+    let mut cell = kept.lock().unwrap_or_else(PoisonError::into_inner);
+    let found_meanwhile = cell
+        .as_ref()
+        .is_some_and(|(asked_bwrap, asked_helper, routed)| {
+            *routed && asked_bwrap == bwrap && asked_helper == helper
+        });
+    if found_meanwhile {
+        return true;
+    }
+    *cell = Some((bwrap.to_path_buf(), helper.to_path_buf(), answer));
     answer
 }
 
@@ -1934,9 +1943,10 @@ static ROUTE_READ: KeptRoute = Mutex::new(None);
 
 /// [`kept_route`] for this machine: refused as root (rv-sa241 NOTE-2), where slirp4netns
 /// would run with root's network before it joins the agent's. The tools check runs inside
-/// the probe, so a kept answer never changes for a key: a tool removed after a true answer
-/// gives a routed launch whose setup fails, which the go byte refuses. Inputs: bubblewrap
-/// and the helper. Output: true when the agent is routed.
+/// the probe, so a kept true never changes for a key: a tool removed after it gives a routed
+/// launch whose setup fails, which the go byte refuses. Inputs: bubblewrap, the helper and
+/// `again`, which the host read sets to ask a kept false anew and a launch leaves unset, so
+/// a launch never waits on the probe for a kept answer. Output: true when it is routed.
 fn route_held(bwrap: &Path, helper: &Path, again: bool) -> bool {
     let root = rustix::process::geteuid().is_root();
     let probe = || {
