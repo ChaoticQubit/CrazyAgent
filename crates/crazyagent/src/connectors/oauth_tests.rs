@@ -942,3 +942,78 @@ fn credentials_from_one_issuer_are_never_sent_to_another() {
     assert!(pending.authorize_url.as_str().starts_with(&elsewhere));
     assert_eq!(query(&pending.authorize_url)["client_id"], CLIENT);
 }
+
+fn stepped(sign: &Sign, challenge: &str, writes: bool) -> Result<Pending, OAuthError> {
+    step_up_with(
+        &sign.case.root,
+        "board",
+        SHA,
+        &sign.spec,
+        challenge,
+        &redirect(),
+        writes,
+        None,
+        &no_lookup(),
+    )
+}
+
+/// A server that wants more scope (RFC 6750 `insufficient_scope`) gets a new sign-in for
+/// the union of what was asked before and what it names, within the scopes the file
+/// declares for the access allowed; after two such sign-ins there is no third until a
+/// plain one, and a refused step-up asks nothing of the server.
+#[test]
+fn step_up_asks_for_the_union_and_stops_after_two_tries() {
+    let sign = signing(shape(), &["127.0.0.1"]);
+    let issuer = sign.issuer();
+    let plain = begun(&sign, false);
+    assert_eq!(query(&plain.authorize_url)["scope"], "read");
+    assert_eq!(finished(&sign, &plain.state, Some(&issuer)), Ok(()));
+    let quiet = sign.vendor.seen().len();
+    for (challenge, writes) in [
+        ("admin", true),
+        ("write", false),
+        ("read admin", true),
+        ("", true),
+        ("read\"", true),
+    ] {
+        assert_eq!(
+            stepped(&sign, challenge, writes),
+            Err(OAuthError("connector_oauth_scope_undeclared")),
+            "{challenge:?} with writes {writes}"
+        );
+    }
+    assert_eq!(
+        sign.vendor.seen().len(),
+        quiet,
+        "a refused step-up asks nothing of the server"
+    );
+    for _ in 0..2 {
+        let more = stepped(&sign, "write", true);
+        assert!(more.is_ok(), "a declared scope is asked for: {more:?}");
+        let more = more.unwrap();
+        assert_eq!(query(&more.authorize_url)["scope"], "read write");
+        assert_eq!(finished(&sign, &more.state, Some(&issuer)), Ok(()));
+    }
+    let quiet = sign.vendor.seen().len();
+    assert_eq!(
+        stepped(&sign, "write", true),
+        Err(OAuthError("connector_oauth_step_up_limit"))
+    );
+    assert_eq!(
+        sign.vendor.seen().len(),
+        quiet,
+        "a third step-up asks nothing"
+    );
+    let plain = begun(&sign, true);
+    assert_eq!(finished(&sign, &plain.state, Some(&issuer)), Ok(()));
+    let again = stepped(&sign, "read", false);
+    assert!(
+        again.is_ok(),
+        "a plain sign-in starts the count again: {again:?}"
+    );
+    assert_eq!(
+        query(&again.unwrap().authorize_url)["scope"],
+        "read",
+        "writes off keeps a write scope out of the union"
+    );
+}

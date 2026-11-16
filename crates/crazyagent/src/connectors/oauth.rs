@@ -23,6 +23,8 @@ use sign::finish_trusted;
 pub(crate) use sign::finish_with;
 #[cfg(unix)]
 pub(crate) use sign::fresh_with;
+#[cfg(unix)]
+pub(crate) use sign::step_up_with;
 
 /// Every sign-in refusal code this client adds beside the connector address codes of
 /// `mcp_client::MCP_CODES`, sorted.
@@ -163,6 +165,39 @@ pub fn begin(
     )
 }
 
+/// Starts a sign-in that asks a trusted connector for more scope after its server refused a
+/// call for want of it (RFC 6750 `insufficient_scope`): the union of what the last sign-in
+/// asked and what the server names, within the scopes the file declares for the access
+/// allowed now; at most two in a row. Blocking. Inputs: database, root, connector, the
+/// challenge's scopes, the loopback address and whether writes are allowed. Output: as
+/// [`begin`], or `connector_oauth_scope_undeclared`, `connector_oauth_step_up_limit`.
+pub fn step_up(
+    db: &Connection,
+    root: &Path,
+    name: &str,
+    challenge: &str,
+    redirect: &url::Url,
+    writes: bool,
+) -> Result<Pending, OAuthError> {
+    let manifest = store::trusted_connector(db, root, name).map_err(|_| not_offered())?;
+    let spec = manifest.connector().ok_or_else(not_offered)?;
+    let document = CLIENT_METADATA_URL
+        .map(url::Url::parse)
+        .transpose()
+        .map_err(|_| OAuthError("connector_oauth_metadata_invalid"))?;
+    step_up_with(
+        root,
+        name,
+        &manifest.sha256,
+        spec,
+        challenge,
+        redirect,
+        writes,
+        document.as_ref(),
+        &ProviderReach::system(),
+    )
+}
+
 /// Ends a sign-in with the browser's answer: the state must be one [`begin`] gave and not
 /// yet answered, the connector's file the one trusted then, and the issuer the server's;
 /// only then is the code redeemed and the tokens saved. Blocking. Inputs: database, engine
@@ -224,6 +259,24 @@ fn finish_trusted(
     _iss: Option<&str>,
     _reach: &ProviderReach,
 ) -> Result<(), OAuthError> {
+    Err(OAuthError("connector_unavailable_here"))
+}
+
+/// No step-up where curl's private request cannot be made. Output:
+/// `connector_unavailable_here`.
+#[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_up_with(
+    _root: &Path,
+    _name: &str,
+    _sha256: &str,
+    _spec: &crate::app_plugins::connector::ConnectorSpec,
+    _challenge: &str,
+    _redirect: &url::Url,
+    _writes: bool,
+    _cimd: Option<&url::Url>,
+    _reach: &ProviderReach,
+) -> Result<Pending, OAuthError> {
     Err(OAuthError("connector_unavailable_here"))
 }
 

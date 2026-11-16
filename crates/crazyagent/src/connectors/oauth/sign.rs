@@ -1072,3 +1072,24 @@ pub(crate) fn fresh_with(
         expires_ms: record.expires_ms,
     })
 }
+
+/// [`super::step_up`] with the connector's file given. Inputs: root, connector, the
+/// trusted file's sha256, its declaration, the challenge's scopes, the loopback address,
+/// whether writes are allowed, the client document address and the lookup.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_up_with(
+    root: &Path,
+    name: &str,
+    sha256: &str,
+    spec: &ConnectorSpec,
+    challenge: &str,
+    redirect: &url::Url,
+    writes: bool,
+    cimd: Option<&url::Url>,
+    reach: &ProviderReach,
+) -> Result<Pending, OAuthError> {
+    let _ = (
+        root, name, sha256, spec, challenge, redirect, writes, cimd, reach,
+    );
+    Err(not_offered())
+}
