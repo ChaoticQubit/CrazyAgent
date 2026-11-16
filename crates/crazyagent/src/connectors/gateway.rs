@@ -81,6 +81,8 @@ const HELD_STALE: Duration = Duration::from_secs(shim::HELD_WAIT.as_secs() + STA
 const PARKED_MAX: usize = 2 * approvals::WAITING_MAX;
 const SETTLING: &str = "approvals";
 const SETTLE_EVERY: Duration = Duration::from_secs(1);
+pub(crate) const ALLOW_BUDGET: Duration =
+    Duration::from_secs(CONNECTOR_WAIT.as_secs() + shim::REPLY_WAIT.as_secs() + 10);
 const SEPARATOR: &str = "__";
 
 const _: () = assert!(LIST_CONNECTOR_BYTES_MAX <= LIST_BYTES_MAX);
@@ -1226,6 +1228,7 @@ impl Gateway {
                         title: title_of(&connector),
                         tool: vendor.clone(),
                         preview: approvals::preview(&vendor, &fields, &forms?),
+                        arguments: String::new(),
                     };
                     let parked = Parked {
                         launch: launch.clone(),

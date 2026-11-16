@@ -646,3 +646,58 @@ fn a_held_write_whose_server_died_is_dropped_even_after_an_allow() {
         "no answer for a server that is gone"
     );
 }
+
+/// DEC-168 Task 12, sec r1 F2: the owner's approval shows every argument the held write will
+/// send, a long text and a nested object whole, a secret form withheld, and the vendor gets
+/// those arguments after the Allow.
+#[test]
+fn the_owner_sees_every_argument_a_held_write_sends_with_secret_forms_withheld() {
+    let (vendor, bench, launch) = write_bench();
+    let long = "Notes for the team ".repeat(20);
+    let fields = json!({
+        "title": "Weekly summary",
+        "description": long,
+        "extra": {"note": format!("key {KEY}"), "items": [1, 2, 3]},
+    });
+    let write = call(1, "board__create_issue", fields);
+    let mut seen = None;
+    let replies = talk_with(&bench, &launch, &[write], WAIT, |bench, id| {
+        let view = approvals::get(&bench.case.db, id).unwrap().unwrap();
+        seen = Some((id, view.arguments));
+        owner_answers(bench, id, approvals::Answer::Allow);
+    });
+    let (id, text) = seen.expect("the write waited for the owner");
+    assert!(!text.is_empty(), "the approval shows the arguments");
+    assert!(!text.contains(KEY), "{text}");
+    let shown_to_owner: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(shown_to_owner["description"], json!(long));
+    assert_eq!(shown_to_owner["extra"]["items"], json!([1, 2, 3]));
+    assert_eq!(shown_to_owner["extra"]["note"], json!("[withheld]"));
+    let (_, error) = shown(&replies[0]);
+    assert!(!error);
+    assert!(sent_to(&vendor, "create_issue"));
+    let answered = approvals::get(&bench.case.db, id).unwrap().unwrap();
+    assert_eq!(answered.arguments, "");
+}
+
+/// DEC-168 Task 12, sec r1 F1: an allowed write that could no longer finish before its
+/// server stops waiting (its age plus one connector wait and one reply wait reaching
+/// `HELD_WAIT`) is answered as expired and never reaches the vendor.
+#[test]
+fn an_allowed_write_too_late_to_finish_before_its_server_gives_up_is_never_sent() {
+    let (vendor, bench, launch) = write_bench();
+    let write = call(1, "board__create_issue", json!({"title": "Fix login"}));
+    let replies = talk_with(&bench, &launch, &[write], WAIT, |bench, id| {
+        owner_answers(bench, id, approvals::Answer::Allow);
+        let db = &bench.case.db;
+        let view = approvals::get(db, id).unwrap().unwrap();
+        let room = shim::HELD_WAIT - ALLOW_BUDGET;
+        let late = view.created_ms + i64::try_from(room.as_millis()).unwrap();
+        assert_eq!(bench.gateway.settle_at(db, late), 1);
+    });
+    let (text, error) = shown(&replies[0]);
+    assert!(error, "{text}");
+    assert!(text.starts_with("connector_write_expired"), "{text}");
+    assert!(!sent_to(&vendor, "create_issue"));
+    assert_eq!(writes(&bench, "connector_write_expired", false), 1);
+}

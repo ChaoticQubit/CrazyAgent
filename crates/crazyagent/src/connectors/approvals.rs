@@ -22,6 +22,8 @@ pub const UNKNOWN: &str = "connector_approval_unknown";
 pub const CLOSED: &str = "connector_approval_closed";
 /// The refusal for a write while the most writes already wait.
 pub const WAITING_FULL: &str = "connector_writes_waiting_full";
+/// The most bytes a waiting write's full arguments may take as the owner reads them.
+pub const ARGUMENTS_BYTES_MAX: usize = 2 * crate::connectors::shim::ASK_BYTES_MAX as usize;
 
 const KEPT_MAX: i64 = 1024;
 const VALUE_CHARS_MAX: usize = 60;
@@ -100,6 +102,7 @@ pub struct PendingWrite {
     pub title: String,
     pub tool: String,
     pub preview: String,
+    pub arguments: String,
 }
 
 /// One approval as the owner's approval page shows it: what asks, where, the preview,
@@ -115,6 +118,7 @@ pub struct ApprovalView {
     pub title: String,
     pub tool: String,
     pub preview: String,
+    pub arguments: String,
     pub state: State,
     pub created_ms: i64,
     pub expires_ms: i64,
@@ -233,6 +237,14 @@ pub fn preview(tool: &str, arguments: &Map<String, Value>, secrets: &[SecretStri
         format!("{named}: {}", parts.join(", "))
     };
     cut(shown, PREVIEW_BYTES_MAX)
+}
+
+/// Every argument of one write call as JSON text, each name and text value shown as a
+/// preview shows it, so the owner reads what the vendor would get. Inputs: the arguments
+/// and the connector's secret forms. Output: the text, or none past `ARGUMENTS_BYTES_MAX`.
+pub fn arguments(arguments: &Map<String, Value>, secrets: &[SecretString]) -> Option<String> {
+    let _ = (arguments, secrets);
+    Some(String::new())
 }
 
 /// Records one write that waits for the owner, unless `WAITING_PER_LAUNCH_MAX` of its launch
@@ -393,6 +405,7 @@ pub fn get(db: &Connection, id: i64) -> Result<Option<ApprovalView>, EngineError
                 title: row.get(5)?,
                 tool: row.get(6)?,
                 preview: row.get(7)?,
+                arguments: String::new(),
                 state: State::parse(&state).ok_or(rusqlite::Error::InvalidQuery)?,
                 created_ms: row.get(9)?,
                 expires_ms: row.get(10)?,

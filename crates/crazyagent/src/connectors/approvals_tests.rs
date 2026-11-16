@@ -19,6 +19,7 @@ fn write(launch: &str, project: &str, connector: &str) -> PendingWrite {
         title: "Board".to_owned(),
         tool: "create_issue".to_owned(),
         preview: "create_issue: title=\"Fix login\"".to_owned(),
+        arguments: "{\"title\":\"Fix login\"}".to_owned(),
     }
 }
 
@@ -324,4 +325,45 @@ fn ask_once_records_an_allowed_write_per_project_and_revoke_removes_it() {
     assert!(!writes_allowed(&case.db, PROJECT, "board").unwrap());
     let left = allowed_writes(&case.db, PROJECT).unwrap();
     assert!(left.connectors.is_empty());
+}
+
+/// DEC-168 Task 12, sec r1 F2: the owner reads every argument a write would send, nested
+/// values and long texts whole, with hidden characters stripped and any value holding one of
+/// the connector's secret forms withheld; arguments past the bound are refused.
+#[test]
+fn the_full_arguments_show_every_value_and_withhold_secret_forms() {
+    let secret = SecretString::new(KEY.as_bytes().to_vec()).unwrap();
+    let long = "Notes for the team ".repeat(20);
+    let fields = json!({
+        "title": "Weekly\u{200b} summary",
+        "description": long,
+        "extra": {"note": format!("key {KEY}"), "items": [1, 2, 3]},
+    });
+    let fields = fields.as_object().unwrap().clone();
+    let text = arguments(&fields, std::slice::from_ref(&secret)).unwrap();
+    assert!(!text.is_empty(), "the arguments are shown");
+    assert!(!text.contains(KEY), "{text}");
+    let shown: Value = serde_json::from_str(&text).unwrap_or_else(|_| panic!("{text:?}"));
+    assert_eq!(shown["title"], json!("Weekly summary"));
+    assert_eq!(shown["description"], json!(long));
+    assert_eq!(shown["extra"]["items"], json!([1, 2, 3]));
+    assert_eq!(shown["extra"]["note"], json!("[withheld]"));
+    let huge = json!({"body": "x".repeat(ARGUMENTS_BYTES_MAX)});
+    assert_eq!(arguments(huge.as_object().unwrap(), &[]), None);
+}
+
+/// DEC-168 Task 12, sec r1 F2: a waiting approval keeps the write's full arguments for the
+/// owner's page, and drops them once it is answered or ends.
+#[test]
+fn a_waiting_approval_shows_its_full_arguments_until_it_is_answered() {
+    let case = case();
+    let id = asked(&case);
+    let view = get(&case.db, id).unwrap().unwrap();
+    assert_eq!(view.arguments, "{\"title\":\"Fix login\"}");
+    let policy = WritePolicy::AskEveryTime;
+    answer(&case.db, id, Answer::Deny, policy, NOW + MINUTE).unwrap();
+    assert_eq!(get(&case.db, id).unwrap().unwrap().arguments, "");
+    let later = asked(&case);
+    expire(&case.db, NOW + 11 * MINUTE).unwrap();
+    assert_eq!(get(&case.db, later).unwrap().unwrap().arguments, "");
 }

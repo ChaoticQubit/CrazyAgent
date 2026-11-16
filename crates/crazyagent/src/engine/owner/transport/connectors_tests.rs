@@ -676,6 +676,7 @@ fn the_owner_answers_a_write_and_takes_back_a_standing_allow_through_the_protoco
         title: "Board".into(),
         tool: "create_issue".into(),
         preview: "create_issue: title=\"Fix login\"".into(),
+        arguments: "{\"title\":\"Fix login\"}".into(),
     };
     let db = crate::questions::open(&root).unwrap();
     let now = crate::semantic::now_ms();
@@ -686,6 +687,7 @@ fn the_owner_answers_a_write_and_takes_back_a_standing_allow_through_the_protoco
     assert_eq!(read["approval"]["id"], id);
     assert_eq!(read["approval"]["state"], "waiting");
     assert_eq!(read["approval"]["preview"], pending.preview.as_str());
+    assert_eq!(read["approval"]["arguments"], pending.arguments.as_str());
     let allow = json!({"kind": "answer", "id": id, "allow": true});
     let done = answered(&root, allow.clone());
     assert_eq!(done["approval"]["state"], "allowed", "{done}");
