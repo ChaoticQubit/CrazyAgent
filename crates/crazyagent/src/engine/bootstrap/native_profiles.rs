@@ -687,6 +687,21 @@ impl NativeProfileCustody {
         Ok(guard)
     }
 
+    /// Takes one execution use of a listed master's slot, as [`Self::acquire_use`] does for a
+    /// sign-in, and refuses a slot whose home holds a sign-in's record. Inputs: the host, the
+    /// binding, the turn and its ordinal. Output: the use, `native_profile_not_listed`, or
+    /// `launch_account_home_holds_sign_in`.
+    pub(crate) fn acquire_listed_use(
+        &mut self,
+        host: &HostStamp,
+        binding: &NativeProfileBinding,
+        operation_id: &RequestId,
+        generation: u64,
+    ) -> Result<NativeProfileUse, EngineError> {
+        let _ = (host, binding, operation_id, generation);
+        Err(failure("native_profile_not_listed"))
+    }
+
     /// Takes the locks that show no custodian holds one native profile, so a stale sign-in
     /// can be settled while agents keep using the account and no custodian can start on it.
     /// Inputs: this engine's host and the profile key. Output: the held locks, an empty
@@ -864,6 +879,19 @@ impl NativeProfileCustody {
         self.verify()?;
         remember_profile(&mut self.profiles, key.clone(), hash.clone());
         Ok((hash, key))
+    }
+
+    /// Prepares the custody slot of a listed master's account (DEC-180 T20 Q7), keyed on its
+    /// connection, with an empty 0700 home and no key or sign-in in it. Inputs: this engine's
+    /// host and the connection. Output: the slot's custody id and key, or
+    /// `native_profile_not_listed` for a sign-in or an account off HTTP.
+    pub(crate) fn prepare_listed(
+        &mut self,
+        host: &HostStamp,
+        connection: &ModelConnection,
+    ) -> Result<(String, String), EngineError> {
+        let _ = (host, connection);
+        Err(failure("native_profile_not_listed"))
     }
 
     pub(crate) fn receipt(

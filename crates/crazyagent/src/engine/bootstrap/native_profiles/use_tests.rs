@@ -1127,4 +1127,85 @@ fn contradictory_epoch_guard_assembly_trips_a_real_internal_assertion() {
     assert!(case.revalidate(&guard).is_ok());
 }
 
+/// A listed master's key account on an HTTP endpoint. Output: the connection.
+fn listed_connection() -> ModelConnection {
+    ModelConnection {
+        id: reference("unit-listed-connection"),
+        provider: reference("unit-provider"),
+        harness: reference("standin-acp"),
+        protocol: reference("openai-chat"),
+        account_ref: reference("unit-listed-account"),
+        endpoint: ModelEndpoint::Http {
+            url: "http://127.0.0.1:9/v1".into(),
+        },
+        model: ModelReference {
+            id: "unit-model".into(),
+            author: reference("unit-author"),
+        },
+        auth: ModelAuthentication::ApiKey {
+            credential_ref: reference("unit-listed-key"),
+        },
+    }
+}
+
+/// The code of a refusal. Input: the result. Output: the code, or none for a success.
+fn refused<T>(result: Result<T, EngineError>) -> Option<String> {
+    result.err().map(|error| error.0)
+}
+
+/// DEC-180 T20 Q7: a listed master's account gets its own custody slot, keyed on its
+/// connection, and an execution use of it whose home is an empty 0700 folder; a sign-in's
+/// use never opens a listed slot, and a sign-in never gets a listed slot or use.
+#[test]
+fn a_listed_account_takes_an_execution_use_of_its_own_keyless_slot() {
+    let mut case = UseCase::new();
+    let listed = listed_connection();
+    let custody = case.custody.as_mut().unwrap();
+    let prepared = custody.prepare_listed(&case.host, &listed);
+    assert!(prepared.is_ok(), "{:?}", prepared.as_ref().err());
+    let (custody_id, key) = prepared.unwrap();
+    assert_eq!(key, digest(b"unit-listed-connection"));
+    let mut binding = case.binding.clone();
+    binding.connection = listed;
+    binding.custody_id = custody_id;
+    let used = custody.acquire_listed_use(&case.host, &binding, &case.operation_id, 1);
+    assert!(used.is_ok(), "{:?}", used.as_ref().err());
+    let used = used.unwrap();
+    let home = used.profile_path().unwrap();
+    assert_eq!(home, case.state.join(ROOT).join(&key).join("home"));
+    let mode = std::fs::metadata(&home).unwrap().permissions().mode();
+    assert_eq!(mode & 0o7777, 0o700);
+    assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+    let native = custody.acquire_use(&case.host, &binding, &case.operation_id, 1, purpose(3));
+    assert_eq!(refused(native), Some("native_profile_not_managed".into()));
+    let signed = custody.prepare_listed(&case.host, &case.binding.connection);
+    assert_eq!(refused(signed), Some("native_profile_not_listed".into()));
+    let sign_in = custody.acquire_listed_use(&case.host, &case.binding, &case.operation_id, 1);
+    assert_eq!(refused(sign_in), Some("native_profile_not_listed".into()));
+}
+
+/// DEC-180 T20 Q7: a listed account's slot whose home holds a sign-in's record, Codex's or
+/// Claude Code's, gives no use, so a listed harness never runs beside a sign-in's tokens.
+#[test]
+fn a_listed_slot_whose_home_holds_a_sign_in_record_gives_no_use() {
+    for record in [CODEX_RECORD, CLAUDE_RECORD] {
+        let mut case = UseCase::new();
+        let custody = case.custody.as_mut().unwrap();
+        let prepared = custody.prepare_listed(&case.host, &listed_connection());
+        assert!(prepared.is_ok(), "{:?}", prepared.as_ref().err());
+        let (custody_id, key) = prepared.unwrap();
+        let mut binding = case.binding.clone();
+        binding.connection = listed_connection();
+        binding.custody_id = custody_id;
+        let home = case.state.join(ROOT).join(&key).join("home");
+        private_file(&home.join(record), b"{}");
+        let used = custody.acquire_listed_use(&case.host, &binding, &case.operation_id, 1);
+        assert_eq!(
+            refused(used).as_deref(),
+            Some("launch_account_home_holds_sign_in"),
+            "{record}"
+        );
+    }
+}
+
 mod agent_copy_tests;
