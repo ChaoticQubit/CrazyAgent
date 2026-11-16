@@ -236,8 +236,10 @@ pub struct NativeTeam {
 
 /// Where one launch wrote its files, as a pane record keeps it, so an engine that adopts
 /// the pane later deletes them when the pane stops: the agent home, whether the launch
-/// was for Codex, which also writes `config.toml` and the skill copies there, and the files
-/// a listed harness's manifest had written, as paths inside the home.
+/// was for Codex, which also writes `config.toml` and the skill copies there, the files
+/// a listed harness's manifest had written, as paths inside the home, and whether the home
+/// is a listed harness's private home, `<agent home>/<harness id>/<account>`, which is
+/// only ever reached by a no-follow walk from the agent home.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstalledFiles {
@@ -245,6 +247,8 @@ pub struct InstalledFiles {
     pub codex: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rendered: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub listed: bool,
 }
 
 struct Budget {
@@ -1086,6 +1090,7 @@ impl AgentContext {
                 home: home.to_path_buf(),
                 codex,
                 rendered: Vec::new(),
+                listed: false,
             }),
             transcripts: self.transcripts,
             hooks: false,
@@ -1357,6 +1362,7 @@ impl AgentContext {
                 home: home.to_path_buf(),
                 codex: false,
                 rendered,
+                listed: true,
             }),
             transcripts: self.transcripts,
             hooks: false,

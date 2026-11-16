@@ -2,6 +2,9 @@ use super::*;
 use crate::harnesses::manifest::parse;
 use crate::plugins::SecretValue;
 
+#[path = "listed_walk_tests.rs"]
+mod walk_tests;
+
 const SMALL: &str = "schema: 1\nkind: harness\nid: \"sample\"\nname: \"Sample\"\nbinaries:\n  - \"sample\"\nheadless: \"sample --json\"\nmodel_selection: true\naccount_kinds:\n  - \"api_key\"\n";
 
 const BLOCKS: &str = "home:\n  env_prefixes:\n    - \"SAMPLE_\"\n  env:\n    SAMPLE_CONFIG: \"{home}/agent\"\n    SAMPLE_UPDATES: \"off\"\n  set_home: true\nmcp:\n  render: \"json-mcp-servers\"\n  path: \"{home}/agent/mcp.json\"\ninstructions:\n  render: \"file\"\n  path: \"{home}/agent/AGENTS.md\"\n";
@@ -12,10 +15,16 @@ fn manifest(blocks: &str) -> crate::harnesses::manifest::Manifest {
     parse(format!("{SMALL}{blocks}").as_bytes()).unwrap()
 }
 
+/// A listed launch's private home as T18 lays it out, `<agent home>/sample/account-1`,
+/// each folder 0700. Output: the agent home's guard and the private home.
 fn private_home() -> (tempfile::TempDir, PathBuf) {
     let folder = tempfile::tempdir().unwrap();
-    let home = folder.path().canonicalize().unwrap();
-    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+    let base = folder.path().canonicalize().unwrap();
+    let home = base.join("sample").join("account-1");
+    fs::create_dir_all(&home).unwrap();
+    for path in [base.clone(), base.join("sample"), home.clone()] {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     (folder, home)
 }
 
@@ -219,9 +228,7 @@ fn a_team_agent_launch_of_a_listed_harness_is_refused_and_writes_nothing() {
 /// runs through a link planted in the home is left alone, and so is what the link names.
 #[test]
 fn an_adopted_listed_launch_removes_only_its_own_files_inside_the_home() {
-    let folder = tempfile::tempdir().unwrap();
-    let home = folder.path().canonicalize().unwrap().join("home");
-    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let (_folder, home) = private_home();
     let outside = tempfile::tempdir().unwrap();
     let kept = outside.path().join("mcp.json");
     fs::write(&kept, "kept").unwrap();
@@ -239,6 +246,7 @@ fn an_adopted_listed_launch_removes_only_its_own_files_inside_the_home() {
             "agent".to_owned(),
             "linked/mcp.json".to_owned(),
         ],
+        listed: true,
     };
 
     let adopted = Installed::adopt(&files);
