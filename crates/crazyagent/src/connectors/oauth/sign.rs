@@ -17,9 +17,10 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 /// The most sign-ins one engine root waits on at once; a new one drops the oldest.
@@ -132,9 +133,22 @@ struct Record {
 }
 
 static FLOWS: Mutex<Vec<Flow>> = Mutex::new(Vec::new());
-/// Held while an access token is renewed or a code redeemed, so two calls never spend one
-/// refresh token twice and a sign-in's saves never interleave with a renewal's.
-static RENEWING: Mutex<()> = Mutex::new(());
+/// The renewal lock of each connector a call renews, signs in or forgets now, by engine
+/// root and connector; one no call holds is dropped at the next look-up.
+static RENEWING: Mutex<BTreeMap<(PathBuf, String), Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
+
+/// The lock held while one connector's access token is renewed, a code redeemed for it,
+/// its own app replaced or its keys removed, so two calls never spend one refresh token
+/// twice and a sign-in's saves never interleave with a renewal's, while a slow vendor
+/// holds up no other connector. Inputs: engine root and connector. Output: its lock.
+fn renewal_lock(root: &Path, name: &str) -> Arc<Mutex<()>> {
+    let mut locks = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
+    locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    let lock = locks
+        .entry((root.to_path_buf(), name.to_owned()))
+        .or_default();
+    Arc::clone(lock)
+}
 
 fn flows() -> MutexGuard<'static, Vec<Flow>> {
     FLOWS.lock().unwrap_or_else(PoisonError::into_inner)
@@ -980,7 +994,8 @@ fn saved_for(key: &str, name: &str) -> bool {
 /// for a connector removed, or trusted again with other hosts. Inputs: engine root and
 /// connector. Output: Ok, or the key store's refusal.
 pub(super) fn forget_keys(root: &Path, name: &str) -> Result<(), OAuthError> {
-    let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
+    let lock = renewal_lock(root, name);
+    let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
     flows().retain(|flow| !(flow.root == root && flow.connector == name));
     let folder = match std::fs::read_dir(root.join(PLUGIN_KEYS)) {
         Ok(folder) => folder,
@@ -1014,7 +1029,8 @@ pub(super) fn own_replaced(
     now_ms: i64,
     save: impl FnOnce() -> Result<(), OAuthError>,
 ) -> Result<(), OAuthError> {
-    let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
+    let lock = renewal_lock(root, name);
+    let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
     flows().retain(|flow| !(flow.root == root && flow.connector == name && flow.client.own));
     if let Some(record) = record_of(root, name)?.filter(|record| record.own) {
         ended(root, name, &record.issuer)?;
@@ -1074,7 +1090,8 @@ fn redeem(
     if !visible(code, CODE_BYTES_MAX) {
         return Err(OAuthError("connector_oauth_code_invalid"));
     }
-    let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
+    let lock = renewal_lock(root, &flow.connector);
+    let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
     if flow.client.own {
         let now = saved(root, &own_ref(&flow.connector)?)?;
         if now.is_none_or(|id| id.expose() != flow.client.id) {
@@ -1263,7 +1280,8 @@ pub(crate) fn refused_with(
     else {
         return Ok(());
     };
-    let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
+    let lock = renewal_lock(root, name);
+    let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
     let still = record_of(root, name)?
         .is_some_and(|record| record.issuer == *issuer && record.expires_ms == *expires_ms);
     if still {
@@ -1299,7 +1317,8 @@ fn current(
     let mut record = record_of(root, name)?.ok_or_else(sign_in_needed)?;
     if force || changed(&record) || ends_soon(&record) {
         let read_ends_ms = record.expires_ms;
-        let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
+        let lock = renewal_lock(root, name);
+        let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
         record = record_of(root, name)?.ok_or_else(sign_in_needed)?;
         if changed(&record) {
             ended(root, name, &record.issuer)?;
