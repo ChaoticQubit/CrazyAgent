@@ -283,16 +283,19 @@ impl Installer for WindowsInstaller {
         self.lookup_program(name).ok()
     }
 
-    /// Finds a pack server's program: uv as the uv setup runs it ([`Self::uv`]), any other
-    /// name as `<name>.cmd`, then `<name>.exe`, in the tool resolver's places only. A name
-    /// that is empty, hidden or holds a path or drive separator is refused. Input: the name.
-    /// Output: the file, or why it is missing.
+    /// Finds a pack server's program: uv as the uv setup runs it ([`Self::uv`]) when it also
+    /// passes the tool resolver's place checks, any other name as `<name>.cmd`, then
+    /// `<name>.exe`, in the resolver's places only. A name that is empty, hidden or holds a
+    /// path or drive separator is refused. Input: the name. Output: the file, or why not.
     fn lookup_program(&self, name: &str) -> Result<PathBuf, crate::tools::Missing> {
         if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\', ':']) {
             return Err(super::program_not_found(name));
         }
         if name == "uv" {
-            return self.uv().ok_or_else(|| super::program_not_found(name));
+            return self
+                .uv()
+                .filter(|uv| matches!(crate::tools::check_place(&self.places, uv), Some(Ok(()))))
+                .ok_or_else(|| super::program_not_found(name));
         }
         ["cmd", "exe"]
             .iter()
