@@ -1,10 +1,11 @@
 use super::words::{
     ADD_HELP, ADD_TITLE, CATALOG, CATALOG_ABOUT, HARNESSES, HARNESSES_ABOUT, KEY_HELP,
-    LOCKED_LABEL, LOCKED_REASON, LOCKED_VALUE, NATIVE_CHOICES, NATIVE_HELP, NATIVE_LABEL, PURPOSE,
-    REFUSED_FILE, REFUSED_LISTED, REFUSED_PASTED, REMOVE_BODY, SETTINGS, SIGN_IN_WITH,
-    SIGN_IN_WITH_HELP, SIZE_CHOICES, SIZE_HELP, SIZE_LABEL, WAIT_CHOICES, WAIT_HELP, WAIT_LABEL,
-    WRITE_CHOICES, WRITE_HELP, WRITE_LABEL, chosen_way, origin_line, reaches_line, refusal,
-    secret_line, secrets_shown, state, trust_lines, way_word,
+    LOCKED_LABEL, LOCKED_REASON, LOCKED_VALUE, NATIVE_CHOICES, NATIVE_HELP, NATIVE_LABEL,
+    OPEN_ADDRESS, PURPOSE, REFUSED_FILE, REFUSED_LISTED, REFUSED_PASTED, REMOVE_BODY, SETTINGS,
+    SIGN_IN_WITH, SIGN_IN_WITH_HELP, SIGN_OUT_HELP, SIZE_CHOICES, SIZE_HELP, SIZE_LABEL,
+    WAIT_CHOICES, WAIT_HELP, WAIT_LABEL, WAITING, WRITE_CHOICES, WRITE_HELP, WRITE_LABEL,
+    chosen_way, origin_line, reaches_line, refusal, secret_line, secrets_shown, signed_in, state,
+    trust_lines, way_word,
 };
 use super::{AddForm, ConnectorsPage, KeyForm, NOT_READ, Open, Row, TITLE, refused};
 use crate::app_plugins::{RunsView, TrustView};
@@ -333,6 +334,7 @@ impl ConnectorsPage {
             lines.extend(wrap(&chosen, width).into_iter().map(Line::raw));
             lines.extend(muted(SIGN_IN_WITH_HELP, width, ctx));
         }
+        lines.extend(self.sign_in_lines(connector, width, ctx));
         self.failure_lines(&mut lines, width, ctx);
         lines.push(Line::default());
         let secrets = secrets_shown(connector);
@@ -355,6 +357,28 @@ impl ConnectorsPage {
         }
         assert!(!lines.is_empty() && !spans.is_empty());
         (lines, spans)
+    }
+
+    /// A connector's browser sign-in lines: the Sign out help while it is signed in, or
+    /// Waiting for the browser with the address to copy while this page's sign-in waits.
+    /// Inputs: the connector, the width and the context. Output: the lines, none otherwise.
+    fn sign_in_lines(
+        &self,
+        connector: &ConnectorView,
+        width: usize,
+        ctx: &Ctx,
+    ) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        let signing = self.signing.as_ref();
+        if signed_in(connector) {
+            lines.extend(muted(SIGN_OUT_HELP, width, ctx));
+        } else if let Some(signing) = signing.filter(|signing| signing.name == connector.name) {
+            let waiting = format!("{WAITING}{}", ctx.glyphs.ellipsis);
+            lines.extend(wrap(&waiting, width).into_iter().map(Line::raw));
+            lines.extend(muted(OPEN_ADDRESS, width, ctx));
+            lines.extend(wrap(&signing.url, width).into_iter().map(Line::raw));
+        }
+        lines
     }
 
     fn add_lines(&self, form: &AddForm, width: usize, ctx: &Ctx) -> Content {

@@ -27,7 +27,7 @@ const TICK: Duration = Duration::from_millis(100);
 const IDLE_WAKE: Duration = Duration::from_millis(500);
 const STREAM_WAKE: Duration = Duration::from_millis(16);
 const FRAMES_PER_PASS: usize = 64;
-const REFRESH: Duration = Duration::from_secs(5);
+pub(in crate::tui) const REFRESH: Duration = Duration::from_secs(5);
 const REPLY_WATCH: Duration = Duration::from_secs(1);
 const RECONNECT: Duration = Duration::from_secs(3);
 /// The most characters of one paste the TUI takes; the rest is dropped.

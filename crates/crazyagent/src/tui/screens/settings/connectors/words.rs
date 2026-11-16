@@ -90,6 +90,23 @@ pub(in crate::tui) const SIGN_IN_WITH_HELP: &str =
 /// The line `k` says on a connector that signs in with the browser now (QUESTION-23:34 Q1).
 pub(in crate::tui) const BROWSER_NO_KEY: &str =
     "This connector signs in with the browser now. Press w to use its key.";
+/// The action that starts a sign-in through the browser, the desktop's words (Task 10).
+pub(in crate::tui) const SIGN_IN: &str = "Sign in";
+/// The action that ends a connector's sign-in on this computer, the desktop's words.
+pub(in crate::tui) const SIGN_OUT: &str = "Sign out";
+/// The line while a sign-in waits for the owner's browser, the desktop's words.
+pub(in crate::tui) const WAITING: &str = "Waiting for the browser";
+/// The line under a signed-in connector, the desktop's words.
+pub(in crate::tui) const SIGN_OUT_HELP: &str =
+    "Sign out forgets the sign-in on this computer; the vendor is not told.";
+/// The line a cancelled sign-in ends with, the desktop's words.
+pub(in crate::tui) const SIGN_IN_CANCELLED: &str = "The sign-in was cancelled.";
+/// The lead when where a sign-in stands could not be read, the desktop's words.
+pub(in crate::tui) const NOT_READ_SIGN_IN: &str = "Couldn't read the sign-in.";
+/// The lead when this machine's opener did not take a sign-in's address (TUI only).
+pub(in crate::tui) const NOT_OPENED: &str = "The browser did not open.";
+/// The line above a waiting sign-in's address, shown for copying (TUI only).
+pub(in crate::tui) const OPEN_ADDRESS: &str = "If the browser did not open, go to this address:";
 /// The connector page's way back to the catalog (WORDS r4).
 pub(in crate::tui) const BACK: &str = "All connectors";
 /// The add dialog's title (WORDS r4).
@@ -329,6 +346,34 @@ pub(in crate::tui) fn other_way(way: SignInWith) -> SignInWith {
 /// connector's title and the way. Output: such as "GitHub signs in with Browser.".
 pub(in crate::tui) fn signs_in_with(title: &str, way: SignInWith) -> String {
     format!("{} signs in with {}.", safe(title), way_word(way))
+}
+
+/// Whether a connector signs in through the browser now: one whose file offers only that,
+/// or offers both and signs in with the browser. Input: the connector. Output: the answer.
+pub(in crate::tui) fn browser_now(connector: &ConnectorView) -> bool {
+    connector.sign_in == SignIn::Browser || chosen_way(connector) == Some(SignInWith::Browser)
+}
+
+/// Whether a connector holds a browser sign-in, whichever way it signs in now, so Sign out
+/// never needs a switch that makes it live first (rv-sec2 F1). Input: the connector. Output:
+/// the answer.
+pub(in crate::tui) fn signed_in(connector: &ConnectorView) -> bool {
+    connector
+        .oauth
+        .as_ref()
+        .is_some_and(|oauth| oauth.signed_in)
+}
+
+/// The line a finished sign-in says, the desktop's words. Input: the connector's title.
+/// Output: "<title> is signed in.".
+pub(in crate::tui) fn signed_in_line(title: &str) -> String {
+    format!("{} is signed in.", safe(title))
+}
+
+/// The line a sign-out confirms with, the desktop's words. Input: the connector's title.
+/// Output: "<title> is signed out.".
+pub(in crate::tui) fn signed_out_line(title: &str) -> String {
+    format!("{} is signed out.", safe(title))
 }
 
 /// Where one secret's key comes from, never the key. Input: the secret. Output: the line.
