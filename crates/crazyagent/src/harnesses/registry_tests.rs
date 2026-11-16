@@ -318,3 +318,16 @@ fn the_spec_of_a_harness_is_built_once_however_often_it_is_asked_for() {
         );
     }
 }
+
+/// rv-ds241 CT-1 (T20 b): a harness's jsonl-append record rules are read once from its
+/// manifest and kept, for a stand-in a test build's `get` finds as for a bundled harness,
+/// and a harness that keeps no jsonl-append record has none.
+#[test]
+fn a_harness_reads_its_jsonl_append_record_rules_once_and_keeps_them() {
+    let found = registry().get("standin-jsonl-append").unwrap();
+    let first = found.appended_rules();
+    assert!(first.is_some_and(|rules| !rules.is_empty()), "{first:?}");
+    let again = found.appended_rules().unwrap();
+    assert!(std::ptr::eq(first.unwrap(), again));
+    assert_eq!(registry().get("codex").unwrap().appended_rules(), None);
+}

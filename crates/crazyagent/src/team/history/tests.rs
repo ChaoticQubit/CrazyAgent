@@ -1350,3 +1350,13 @@ fn record_messages_the_engine_typed_are_searched_as_the_engine_s() {
         assert_eq!(record_role(role, "[team] Agent 4 finished"), role);
     }
 }
+
+/// DEC-180 T20 (b): a jsonl-append record line is passed on to the record reader, whose
+/// manifest rules tell its messages, since no fixed words mark them as Codex and Claude
+/// Code lines are marked; a harness with no record reader still passes none.
+#[test]
+fn a_jsonl_append_record_line_is_read_for_messages() {
+    let line = json!({"type": "started", "prompt": "go on"}).to_string();
+    assert!(maybe_message("standin-jsonl-append", &line));
+    assert!(!maybe_message("no-such-harness", &line));
+}

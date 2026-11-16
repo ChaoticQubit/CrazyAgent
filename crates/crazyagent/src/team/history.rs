@@ -732,9 +732,10 @@ fn record_role(speaker: &'static str, text: &str) -> &'static str {
 }
 
 /// Tells cheaply, before any JSON is parsed, whether a record line can be a message: a
-/// Codex line naming a message, a tool call or a tool's output, or a Claude Code `user` or
-/// `assistant` line. Takes the catalog harness id and the line. Returns false only for
-/// lines that are never messages.
+/// Codex line naming a message, a tool call or a tool's output, a Claude Code `user` or
+/// `assistant` line, or any line of a jsonl-append record, whose manifest's rules alone tell
+/// its messages. Takes the catalog harness id and the line. Returns false only for lines
+/// that are never messages.
 fn maybe_message(harness: &str, line: &str) -> bool {
     match harness {
         "codex" => ["\"message\"", "\"function_call", "\"custom_tool_call"]
@@ -748,7 +749,10 @@ fn maybe_message(harness: &str, line: &str) -> bool {
         ]
         .iter()
         .any(|mark| line.contains(mark)),
-        _ => false,
+        _ => {
+            let reader = crate::harnesses::records::stored(harness);
+            reader == Some(crate::harnesses::records::Reader::JsonlAppend)
+        }
     }
 }
 
