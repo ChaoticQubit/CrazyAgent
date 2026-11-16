@@ -1,12 +1,16 @@
 use super::*;
 use crate::app_plugins::connector::{ConnectorSpec, OAuthSpec, Registration};
 use crate::connectors::mcp_client::tests::{Seen, Vendor, empty, json_reply, no_lookup, send};
+use crate::connectors::mcp_client::{Access, Credential, McpError, McpSession};
+use crate::connectors::settings::SizeCap;
 use crate::connectors::tests::{Case, add, case};
+use crate::protocol::CredentialRef;
 use crate::storage::accounts::PLUGIN_KEYS;
 use base64::Engine;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 const CLIENT: &str = "board-own-client-1";
 const SECRET: &str = "own-secret-0001";
@@ -37,8 +41,9 @@ oauth:
 /// How the stand-in vendor answers: the `resource_metadata` its 401 names (none for a bare
 /// challenge), the authorization servers its resource metadata lists, the two endpoints
 /// its server metadata gives, whether it promises `iss` in every answer, whether it takes
-/// client metadata documents, its registration endpoint and the token endpoint's client
-/// sign-in methods. Each `{base}` becomes the stand-in's own address.
+/// client metadata documents, its registration endpoint, the token endpoint's client
+/// sign-in methods, the tokens and registered client it gives, and the issuer its resource
+/// metadata names instead once one is set. Each `{base}` becomes the stand-in's own address.
 #[derive(Clone)]
 struct Shape {
     hint: Option<&'static str>,
@@ -49,6 +54,10 @@ struct Shape {
     cimd: bool,
     register: Option<&'static str>,
     methods: &'static [&'static str],
+    access: &'static str,
+    refresh: &'static str,
+    client: &'static str,
+    moved: Arc<Mutex<Option<String>>>,
 }
 
 fn shape() -> Shape {
@@ -61,6 +70,10 @@ fn shape() -> Shape {
         cimd: false,
         register: None,
         methods: &[],
+        access: ACCESS,
+        refresh: REFRESH,
+        client: DCR_CLIENT,
+        moved: Arc::new(Mutex::new(None)),
     }
 }
 
@@ -87,7 +100,11 @@ fn vendor(shape: Shape) -> Vendor {
                 )
             }
             ("GET", "/.well-known/oauth-protected-resource/mcp") => {
-                let servers: Vec<String> = shape.servers.iter().copied().map(fill).collect();
+                let moved = shape.moved.lock().unwrap().clone();
+                let servers: Vec<String> = match moved {
+                    Some(issuer) => vec![issuer],
+                    None => shape.servers.iter().copied().map(fill).collect(),
+                };
                 json_reply(
                     "200 OK",
                     &[],
@@ -113,21 +130,26 @@ fn vendor(shape: Shape) -> Vendor {
                 "201 Created",
                 &[],
                 &json!({
-                    "client_id": DCR_CLIENT,
+                    "client_id": shape.client,
                     "token_endpoint_auth_method": "none",
                     "redirect_uris": seen.body["redirect_uris"],
                 }),
             ),
-            ("POST", "/token") => json_reply(
-                "200 OK",
-                &[("Cache-Control", "no-store")],
-                &json!({
-                    "access_token": ACCESS,
-                    "token_type": "Bearer",
-                    "expires_in": 3600,
-                    "refresh_token": REFRESH,
-                }),
-            ),
+            ("POST", "/token") => {
+                let renewing = url::form_urlencoded::parse(seen.raw.as_bytes())
+                    .any(|(key, value)| key == "grant_type" && value == "refresh_token");
+                let suffix = if renewing { "-renewed" } else { "" };
+                json_reply(
+                    "200 OK",
+                    &[("Cache-Control", "no-store")],
+                    &json!({
+                        "access_token": format!("{}{suffix}", shape.access),
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "refresh_token": format!("{}{suffix}", shape.refresh),
+                    }),
+                )
+            }
             _ => empty("404 Not Found", &[]),
         };
         send(stream, &reply);
@@ -704,4 +726,219 @@ fn a_sign_in_whose_connector_file_changed_since_it_began_is_never_redeemed() {
         1,
         "a changed file's code is never sent"
     );
+}
+
+/// An access token longer than a plain key, over 1 KiB, as some vendors give.
+fn long(prefix: &str) -> &'static str {
+    Box::leak(format!("{prefix}{}", "x".repeat(1500)).into_boxed_str())
+}
+
+/// Where the engine saves one kind of `board` token from one issuer.
+fn named(kind: &str, issuer: &str) -> CredentialRef {
+    let digest = Sha256::digest(issuer.as_bytes());
+    let short: String = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    CredentialRef::new(format!("connector-{kind}-board-{short}")).unwrap()
+}
+
+fn clock() -> i64 {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    i64::try_from(since.as_millis()).unwrap()
+}
+
+fn fresh_at(sign: &Sign, now_ms: i64) -> Result<Credential, OAuthError> {
+    fresh_with(&sign.case.root, "board", &sign.spec, now_ms, &no_lookup())
+}
+
+/// The Authorization values the stand-in's MCP address was sent.
+fn bearers(vendor: &Vendor) -> Vec<String> {
+    vendor
+        .seen()
+        .iter()
+        .filter(|seen| seen.path == "/mcp")
+        .filter_map(|seen| seen.header("authorization").map(str::to_owned))
+        .collect()
+}
+
+fn token_calls(vendor: &Vendor) -> Vec<Seen> {
+    vendor
+        .seen()
+        .into_iter()
+        .filter(|seen| seen.path == "/token")
+        .collect()
+}
+
+/// Tokens, a registered client and the owner's own app stay with the issuer they came
+/// from: a renewal goes to the token endpoint of its sign-in, never to a server the
+/// resource names later; a sign-in at a second issuer registers again and leaves no token
+/// of the first behind; the owner's app is refused at an issuer it was not first used at
+/// until it is saved again.
+#[test]
+fn credentials_from_one_issuer_are_never_sent_to_another() {
+    let registering = Shape {
+        register: Some("{base}/register"),
+        ..shape()
+    };
+    let second = vendor(Shape {
+        access: "at-second-1",
+        refresh: "rt-second-1",
+        client: "dcr-second-1",
+        ..registering.clone()
+    });
+    let moved = Arc::new(Mutex::new(None));
+    let first_access = long("at-first-");
+    let sign = prepared(
+        Shape {
+            access: first_access,
+            refresh: "rt-first-1",
+            client: "dcr-first-1",
+            moved: moved.clone(),
+            ..registering
+        },
+        &["127.0.0.1"],
+        &[Registration::Dcr],
+        None,
+    );
+    let first = sign.issuer();
+    let other = format!("http://127.0.0.1:{}", second.port);
+    let pending = begun(&sign, false);
+    assert_eq!(finished(&sign, &pending.state, Some(&first)), Ok(()));
+
+    let now = clock();
+    let got = fresh_at(&sign, now);
+    assert!(
+        matches!(&got, Ok(Credential::OAuth { .. })),
+        "a signed-in connector has its OAuth credential: {got:?}"
+    );
+    let Ok(Credential::OAuth {
+        access,
+        refresh,
+        issuer,
+        expires_ms,
+    }) = got.clone()
+    else {
+        unreachable!()
+    };
+    assert_eq!(access, named("token", &first));
+    assert_eq!(refresh, Some(named("refresh", &first)));
+    assert_eq!(issuer, first);
+    assert!(
+        expires_ms > now && expires_ms <= now + 3_600_000,
+        "{expires_ms}"
+    );
+    let opened = McpSession::open_with(
+        &sign.case.root,
+        &sign.spec.mcp,
+        &got.unwrap(),
+        Access::ReadOnly,
+        SizeCap::Kib256,
+        no_lookup(),
+    )
+    .err();
+    assert!(
+        matches!(opened, Some(McpError::Unauthorized { .. })),
+        "{opened:?}"
+    );
+    let sent = bearers(&sign.vendor);
+    let whole = format!("Bearer {first_access}");
+    assert!(
+        !sent.is_empty() && sent.iter().all(|value| *value == whole),
+        "an access token over 1 KiB is read back and sent whole: {} sent",
+        sent.len()
+    );
+
+    *moved.lock().unwrap() = Some(other.clone());
+    let renewed = fresh_at(&sign, now + 2 * 3_600_000);
+    assert!(
+        matches!(&renewed, Ok(Credential::OAuth { issuer, .. }) if *issuer == first),
+        "{renewed:?}"
+    );
+    assert!(
+        second.seen().is_empty(),
+        "a renewal asks nothing of a server the resource names later"
+    );
+    let calls = token_calls(&sign.vendor);
+    assert_eq!(calls.len(), 2);
+    let sent = form(&calls[1]);
+    assert_eq!(sent["grant_type"], "refresh_token");
+    assert_eq!(sent["refresh_token"], "rt-first-1");
+    assert_eq!(sent["client_id"], "dcr-first-1");
+    assert_eq!(sent["resource"], sign.resource());
+    assert_eq!(calls[1].header("authorization"), None);
+
+    let pending = begun(&sign, false);
+    assert!(pending.authorize_url.as_str().starts_with(&other));
+    assert_eq!(
+        query(&pending.authorize_url)["client_id"],
+        "dcr-second-1",
+        "a second issuer gets a registration of its own"
+    );
+    assert_eq!(finished(&sign, &pending.state, Some(&other)), Ok(()));
+    assert_eq!(
+        saved(&sign.case, "connector-token-board-"),
+        vec!["at-second-1".to_owned()]
+    );
+    assert_eq!(
+        saved(&sign.case, "connector-refresh-board-"),
+        vec!["rt-second-1".to_owned()]
+    );
+    let again = fresh_at(&sign, clock() + 2 * 3_600_000);
+    assert!(
+        matches!(&again, Ok(Credential::OAuth { access, issuer, .. })
+            if *access == named("token", &other) && *issuer == other),
+        "{again:?}"
+    );
+    assert_eq!(token_calls(&sign.vendor).len(), 2);
+    let renewals = token_calls(&second);
+    assert_eq!(renewals.len(), 2);
+    assert_eq!(form(&renewals[1])["refresh_token"], "rt-second-1");
+    assert_eq!(form(&renewals[1])["client_id"], "dcr-second-1");
+    for seen in second.seen() {
+        for gone in ["at-first-", "rt-first-1", "dcr-first-1"] {
+            assert!(!seen.raw.contains(gone), "{} got {gone}", seen.path);
+        }
+        assert_eq!(seen.header("authorization"), None, "{}", seen.path);
+    }
+    for seen in sign.vendor.seen() {
+        for gone in ["at-second-1", "rt-second-1", "dcr-second-1"] {
+            assert!(!seen.raw.contains(gone), "{} got {gone}", seen.path);
+        }
+    }
+
+    let third = vendor(shape());
+    let elsewhere = format!("http://127.0.0.1:{}", third.port);
+    let owned = Arc::new(Mutex::new(None));
+    let own = prepared(
+        Shape {
+            moved: owned.clone(),
+            ..shape()
+        },
+        &["127.0.0.1"],
+        &[Registration::Own],
+        Some((CLIENT, Some(SECRET))),
+    );
+    let pending = begun(&own, false);
+    assert_eq!(finished(&own, &pending.state, Some(&own.issuer())), Ok(()));
+    *owned.lock().unwrap() = Some(elsewhere.clone());
+    assert_eq!(
+        start(&own, false),
+        Err(OAuthError("connector_oauth_issuer_mismatch")),
+        "the owner's app is not taken to an issuer it was not first used at"
+    );
+    for seen in third.seen() {
+        assert_ne!(seen.path, "/token");
+        assert!(!seen.raw.contains(SECRET), "{}", seen.path);
+        assert_eq!(seen.header("authorization"), None, "{}", seen.path);
+    }
+    assert_eq!(
+        set_own_client(&own.case.db, &own.case.root, "board", CLIENT, Some(SECRET)),
+        Ok(())
+    );
+    let pending = begun(&own, false);
+    assert!(pending.authorize_url.as_str().starts_with(&elsewhere));
+    assert_eq!(query(&pending.authorize_url)["client_id"], CLIENT);
 }

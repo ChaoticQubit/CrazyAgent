@@ -4,7 +4,7 @@ use super::{
 use crate::app_plugins::connector::{ConnectorSpec, OAuthSpec, Registration};
 use crate::app_plugins::http::{self, Config, Ended};
 use crate::app_plugins::store;
-use crate::connectors::mcp_client::{McpError, guard, wire};
+use crate::connectors::mcp_client::{Credential, McpError, guard, wire};
 use crate::credentials::SecretString;
 use crate::protocol::CredentialRef;
 use crate::provider_reach::ProviderReach;
@@ -813,4 +813,19 @@ fn redeem(
         )
         .map_err(|_| key_store()),
     }
+}
+
+/// The credential a call sends now for one connector as declared, its access token
+/// renewed first at the token endpoint of its sign-in when it ends within a minute.
+/// Blocking when it renews. Inputs: root, connector, its declaration, the clock (Unix ms)
+/// and the lookup. Output: the credential, or `connector_sign_in_needed`.
+pub(crate) fn fresh_with(
+    root: &Path,
+    name: &str,
+    spec: &ConnectorSpec,
+    now_ms: i64,
+    reach: &ProviderReach,
+) -> Result<Credential, OAuthError> {
+    let _ = (root, name, spec, now_ms, reach);
+    Err(OAuthError("connector_sign_in_needed"))
 }

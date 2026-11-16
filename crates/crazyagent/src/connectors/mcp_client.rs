@@ -6,6 +6,7 @@
 use crate::app_plugins::connector::{KeyAuth, McpEndpoint, Scheme};
 use crate::app_plugins::store::Bound;
 use crate::connectors::settings::SizeCap;
+use crate::protocol::CredentialRef;
 use crate::provider_reach::ProviderReach;
 use serde_json::Value;
 use std::path::Path;
@@ -56,11 +57,18 @@ pub const MCP_CODES: [&str; 19] = [
     "connector_vendor_error",
 ];
 
-/// How the engine signs in to a vendor: today a key the owner entered, named by where it is
-/// saved and never held here by value.
+/// How the engine signs in to a vendor: a key the owner entered, or the tokens of an OAuth
+/// sign-in with the issuer they came from and when the access token ends (Unix ms), each
+/// named by where it is saved and never held here by value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Credential {
     Key(KeyRef),
+    OAuth {
+        access: CredentialRef,
+        refresh: Option<CredentialRef>,
+        issuer: String,
+        expires_ms: i64,
+    },
 }
 
 /// Where a connector's key is saved and how it is sent: the header, the scheme, and the

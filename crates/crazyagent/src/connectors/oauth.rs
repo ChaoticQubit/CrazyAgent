@@ -6,6 +6,7 @@
 
 use crate::app_plugins::connector::Registration;
 use crate::app_plugins::store;
+use crate::connectors::mcp_client::Credential;
 use crate::protocol::CredentialRef;
 use crate::provider_reach::ProviderReach;
 use crate::storage::accounts::{self, PLUGIN_KEYS};
@@ -20,6 +21,8 @@ pub(crate) use sign::begin_with;
 use sign::finish_trusted;
 #[cfg(all(test, unix))]
 pub(crate) use sign::finish_with;
+#[cfg(unix)]
+pub(crate) use sign::fresh_with;
 
 /// Every sign-in refusal code this client adds beside the connector address codes of
 /// `mcp_client::MCP_CODES`, sorted.
@@ -165,6 +168,25 @@ pub fn finish(
     finish_trusted(db, root, state, code, iss, &ProviderReach::system())
 }
 
+/// The credential a call to a trusted connector sends now, its access token renewed first
+/// when it ends within a minute. Blocking when it renews. Inputs: database, engine root
+/// and connector. Output: the credential, or `connector_sign_in_needed` and the codes of
+/// a refused renewal.
+pub fn fresh(db: &Connection, root: &Path, name: &str) -> Result<Credential, OAuthError> {
+    let manifest = store::trusted_connector(db, root, name).map_err(|_| not_offered())?;
+    let spec = manifest.connector().ok_or_else(not_offered)?;
+    fresh_with(root, name, spec, now_ms(), &ProviderReach::system())
+}
+
+/// This computer's clock as Unix milliseconds, 0 before 1970.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
 /// No sign-in where curl's private request cannot be made. Output:
 /// `connector_unavailable_here`.
 #[cfg(not(unix))]
@@ -193,6 +215,19 @@ fn finish_trusted(
     _iss: Option<&str>,
     _reach: &ProviderReach,
 ) -> Result<(), OAuthError> {
+    Err(OAuthError("connector_unavailable_here"))
+}
+
+/// No renewal where curl's private request cannot be made. Output:
+/// `connector_unavailable_here`.
+#[cfg(not(unix))]
+pub(crate) fn fresh_with(
+    _root: &Path,
+    _name: &str,
+    _spec: &crate::app_plugins::connector::ConnectorSpec,
+    _now_ms: i64,
+    _reach: &ProviderReach,
+) -> Result<Credential, OAuthError> {
     Err(OAuthError("connector_unavailable_here"))
 }
 

@@ -87,7 +87,9 @@ pub(in crate::connectors) fn command(scheme: &str) -> Command {
 }
 
 fn keys(root: &Path, auth: &Credential) -> Result<Vec<SecretString>, McpError> {
-    let Credential::Key(key) = auth;
+    let Credential::Key(key) = auth else {
+        return Err(failed());
+    };
     let mut secrets = Vec::with_capacity(key.bindings.len());
     for bound in &key.bindings {
         let secret = store::secret_value(root, bound).map_err(|error| {
@@ -121,7 +123,9 @@ fn config(
     secrets: &[SecretString],
     body: Option<&Path>,
 ) -> Result<Config, McpError> {
-    let Credential::Key(key) = request.auth;
+    let Credential::Key(key) = request.auth else {
+        return Err(failed());
+    };
     let mut config = Config::with_capacity(CONFIG_BYTES);
     http::push_line(&mut config, "url", request.url.as_str()).map_err(engine_failed)?;
     config.push(match request.verb {
