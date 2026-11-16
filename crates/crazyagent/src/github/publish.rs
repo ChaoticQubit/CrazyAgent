@@ -610,7 +610,7 @@ pub(super) fn prepare(
     }
     let ignore = project.join(GITIGNORE);
     let existing = read_gitignore(&ignore)?;
-    let files = generated(project, choices.private)?;
+    let files = generated(project, choices)?;
     if !local.repository {
         let made = run(project_git(git, home, project)
             .env_remove("GIT_DIR")
@@ -728,15 +728,21 @@ fn replace_file(project: &Path, path: &Path, text: &str) -> Result<(), EngineErr
     Ok(())
 }
 
-/// The files publish writes into a project where none of their kind exists: the
-/// security policy on a public repository, and Dependabot version updates for each
-/// ecosystem the project's top level shows. A `.github` that is not a plain folder is
-/// refused. Inputs: the project and whether the repository is private.
+/// The files publish writes into a project where none of their kind exists, each while
+/// its rule is on: the security policy on a public repository, and Dependabot version
+/// updates for each ecosystem the project's top level shows. A `.github` that is not a
+/// plain folder is refused. Inputs: the project and the owner's choices.
 /// Output: each file's path and text, or `github_publish_file_invalid`.
-fn generated(project: &Path, private: bool) -> Result<Vec<(&'static str, String)>, EngineError> {
+fn generated(
+    project: &Path,
+    choices: &GitHubPrepare,
+) -> Result<Vec<(&'static str, String)>, EngineError> {
     let present = |path: &str| std::fs::symlink_metadata(project.join(path)).is_ok();
     let mut files: Vec<(&'static str, String)> = Vec::new();
-    if !private && !SECURITY_PATHS.iter().any(|path| present(path)) {
+    if !choices.private
+        && choices.rules.contains(&GitHubRule::SecurityPolicy)
+        && !SECURITY_PATHS.iter().any(|path| present(path))
+    {
         files.push((SECURITY_PATHS[0], SECURITY_POLICY.to_owned()));
     }
     let mut ecosystems: Vec<&str> = Vec::new();
@@ -745,7 +751,12 @@ fn generated(project: &Path, private: bool) -> Result<Vec<(&'static str, String)
             ecosystems.push(ecosystem);
         }
     }
-    if !ecosystems.is_empty() && !DEPENDABOT_PATHS.iter().any(|path| present(path)) {
+    if choices
+        .rules
+        .contains(&GitHubRule::DependabotVersionUpdates)
+        && !ecosystems.is_empty()
+        && !DEPENDABOT_PATHS.iter().any(|path| present(path))
+    {
         let mut text = String::from("version: 2\nupdates:\n");
         for ecosystem in &ecosystems {
             text.push_str(&format!(

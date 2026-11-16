@@ -233,6 +233,7 @@ impl GitHub {
                 },
             ),
         };
+        let rules = state::load_defaults(&self.root)?;
         let job = GitHubPublishJob {
             project: project.to_path_buf(),
             plan: plan.clone(),
@@ -244,7 +245,7 @@ impl GitHub {
             },
             stopped: None,
             made: None,
-            rules: GitHubRule::defaults(),
+            rules,
         };
         state::save_job(&self.root, &job)?;
         Ok(job)
@@ -528,7 +529,7 @@ impl GitHub {
                             GitHubCi::None
                         },
                     };
-                    let outcomes = self.apply_rules(full_name, &GitHubRule::defaults(), &facts)?;
+                    let outcomes = self.apply_rules(full_name, &job.rules, &facts)?;
                     GitHubPublishStep::Done {
                         full_name: full_name.clone(),
                         outcomes,

@@ -32,6 +32,13 @@ pub(super) struct Saved {
     pub(super) credential: CredentialRef,
 }
 
+/// The rules a new repository starts with, as `github-defaults.json` holds them.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Defaults {
+    on: BTreeSet<GitHubRule>,
+}
+
 fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
 }
@@ -193,19 +200,24 @@ fn write_private_within(
 /// The rules a new repository starts with, as the owner set them in Settings > GitHub:
 /// DEC-182's defaults while no `github-defaults.json` is saved. Input: the engine root.
 /// Output: the rules on, or `github_state_invalid`, `github_config_unsafe`.
-pub(super) fn load_defaults(_root: &Path) -> Result<BTreeSet<GitHubRule>, EngineError> {
-    Ok(BTreeSet::new())
+pub(super) fn load_defaults(root: &Path) -> Result<BTreeSet<GitHubRule>, EngineError> {
+    let Some(bytes) = read_private(&root.join(DEFAULTS))? else {
+        return Ok(GitHubRule::defaults());
+    };
+    let defaults: Defaults =
+        serde_json::from_slice(&bytes).map_err(|_| failure("github_state_invalid"))?;
+    Ok(defaults.on)
 }
 
 /// Saves the rules a new repository starts with as the private 0600
 /// `github-defaults.json` in the engine root, replaced in one rename. Inputs: the engine
 /// root and the rules on. Output: Ok, or `github_state_unavailable`.
 #[cfg(unix)]
-pub(super) fn save_defaults(
-    _root: &Path,
-    _rules: &BTreeSet<GitHubRule>,
-) -> Result<(), EngineError> {
-    Ok(())
+pub(super) fn save_defaults(root: &Path, rules: &BTreeSet<GitHubRule>) -> Result<(), EngineError> {
+    let defaults = Defaults { on: rules.clone() };
+    let bytes = serde_json::to_vec(&defaults).map_err(|_| failure("github_state_unavailable"))?;
+    assert!(bytes.len() as u64 <= FILE_BYTES_MAX);
+    write_private(root, DEFAULTS, &bytes)
 }
 
 /// Refuses to save the defaults where no owner-only file can be made. Takes the engine

@@ -13,6 +13,7 @@ const TOKEN_FRAME_TIME: Duration = Duration::from_secs(5);
 const ACTION_TIME: Duration = Duration::from_secs(75);
 const CLONE_TIME: Duration = Duration::from_secs(1900);
 const PUBLISH_TIME: Duration = Duration::from_secs(1900);
+const RULES_TIME: Duration = Duration::from_secs(300);
 const DRAFT_AGENT: &str = "gitignore-draft";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +78,7 @@ impl Action {
             | Self::PublishExclude { .. }
             | Self::PublishRecheck { .. }
             | Self::PublishContinue { .. } => PUBLISH_TIME,
+            Self::Rules { .. } | Self::RuleSet { .. } => RULES_TIME,
             _ => ACTION_TIME,
         }
     }
