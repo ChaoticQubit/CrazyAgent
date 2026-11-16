@@ -56,10 +56,16 @@ test("the publish actions reach the engine through six bridge commands and come 
 });
 
 test("every code a publish can stop on passes the bridge and has a plain sentence", () => {
-  const engine = ["github/job.rs", "github/publish.rs", "github/api.rs", "github/draft.rs"].map((path) => read(`../../crates/crazyagent/src/${path}`)).join("\n");
-  const codes = [...new Set([...engine.matchAll(/"(github_publish_[a-z_]+|github_repo_[a-z_]+)"/g)].map((match) => match[1]))]
-    .filter((code) => !code.startsWith("github_publish_draft_"));
-  assert.ok(codes.length >= 20, codes.join(","));
+  const engine = ["github/job.rs", "github/publish.rs", "github/api.rs", "github/draft.rs", "github/prompt.rs"].map((path) => read(`../../crates/crazyagent/src/${path}`)).join("\n");
+  const transport = read("../../crates/crazyagent/src/engine/owner/transport/github.rs");
+  const named = [...engine.matchAll(/"(github_publish_[a-z_]+|github_repo_[a-z_]+)"/g)].map((match) => match[1]);
+  const failed = [...`${engine}\n${transport}`.matchAll(/failure\("([a-z_]+)"\)/g)].map((match) => match[1])
+    .filter((code) => !code.startsWith("owner_"));
+  const codes = [...new Set([...named, ...failed])].filter((code) => !code.startsWith("github_publish_draft_"));
+  assert.ok(codes.length >= 40, codes.join(","));
+  for (const code of ["project_folder_missing", "github_publish_project_unknown", "github_publish_unavailable", "github_store_unavailable"]) {
+    assert.ok(codes.includes(code), code);
+  }
   const bridge = read("src-tauri/src/bridge/intake.rs");
   const passed = bridge.slice(bridge.indexOf("const GITHUB_CODES"), bridge.indexOf("];", bridge.indexOf("const GITHUB_CODES")));
   for (const code of codes) {
