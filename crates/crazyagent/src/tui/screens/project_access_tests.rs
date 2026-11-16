@@ -689,7 +689,10 @@ fn the_box_shows_the_ports_line_the_engine_sends_for_the_chosen_network() {
     let words = shown_words(&edit);
     assert!(words.contains(told), "{words}");
     assert!(!words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
-    assert!(!words.contains(LINUX_NESTED_GIT_LINE), "only the engine names it: {words}");
+    assert!(
+        !words.contains(LINUX_NESTED_GIT_LINE),
+        "only the engine names it: {words}"
+    );
     edit.network = AgentNetwork::Open;
     let words = shown_words(&edit);
     assert!(!words.contains(told), "{words}");

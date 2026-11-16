@@ -477,9 +477,12 @@ fn a_config_written_and_restored_outside_a_save_is_never_re_pinned_for_a_master(
     assert_eq!(first.profile_config_sha256, saved.profile_config_sha256);
     write_and_restore(&home.join(".backboard/config.json"));
 
-    let refused = case
-        .custody
-        .register_undone_configured_rcli_profile(&case.host, &case.connection, &master, &home);
+    let refused = case.custody.register_undone_configured_rcli_profile(
+        &case.host,
+        &case.connection,
+        &master,
+        &home,
+    );
 
     assert_eq!(
         refused.unwrap_err().0,
@@ -512,14 +515,23 @@ fn a_master_slot_whose_config_was_replaced_keeps_the_changed_file_refusal() {
     let before = std::fs::symlink_metadata(&config).unwrap();
     let copy = home.join(".backboard/config.json.copy");
     std::fs::write(&copy, std::fs::read(&config).unwrap()).unwrap();
-    std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(before.mode() & 0o7777))
-        .unwrap();
+    std::fs::set_permissions(
+        &copy,
+        std::fs::Permissions::from_mode(before.mode() & 0o7777),
+    )
+    .unwrap();
     std::fs::rename(&copy, &config).unwrap();
-    assert_ne!(std::fs::symlink_metadata(&config).unwrap().ino(), before.ino());
+    assert_ne!(
+        std::fs::symlink_metadata(&config).unwrap().ino(),
+        before.ino()
+    );
 
-    let refused = case
-        .custody
-        .register_undone_configured_rcli_profile(&case.host, &case.connection, &master, &home);
+    let refused = case.custody.register_undone_configured_rcli_profile(
+        &case.host,
+        &case.connection,
+        &master,
+        &home,
+    );
 
     assert_eq!(refused.unwrap_err().0, "rcli_profile_identity_changed");
 }
@@ -544,9 +556,12 @@ fn a_master_slot_whose_config_bytes_changed_is_refused_as_a_changed_config() {
     bytes.push(b'\n');
     std::fs::write(&config, &bytes).unwrap();
 
-    let refused = case
-        .custody
-        .register_undone_configured_rcli_profile(&case.host, &case.connection, &master, &home);
+    let refused = case.custody.register_undone_configured_rcli_profile(
+        &case.host,
+        &case.connection,
+        &master,
+        &home,
+    );
 
     assert_eq!(refused.unwrap_err().0, "rcli_profile_config_changed");
 }

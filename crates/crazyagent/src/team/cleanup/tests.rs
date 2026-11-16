@@ -1409,7 +1409,9 @@ fn a_home_entry_under_a_shut_folder_is_unpinned_through_its_parents_handle_alone
     unpin_home_entry(&parent, c"f");
 
     std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let flags = std::fs::symlink_metadata(shut.join("f")).unwrap().st_flags();
+    let flags = std::fs::symlink_metadata(shut.join("f"))
+        .unwrap()
+        .st_flags();
     assert_eq!(flags & immutable, 0, "the entry kept its flag");
 }
 

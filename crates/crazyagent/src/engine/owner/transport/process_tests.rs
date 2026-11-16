@@ -2175,17 +2175,21 @@ fn the_edit_names_a_skill_its_agents_do_not_get() {
                - Name `plain-word` in prose.\n- Use the `superpowers:grill-me` skill.\n";
     save(&root, Some(project.clone()), own, 0).unwrap();
     let seen = check_prompt(&root, Some(&project));
-    assert!(seen.contains(
-        "- broken_reference, line 2: `ghost-skill` is not a skill these agents get.\n"
-    ));
+    assert!(
+        seen.contains(
+            "- broken_reference, line 2: `ghost-skill` is not a skill these agents get.\n"
+        )
+    );
     assert!(!seen.contains("`grill-me` is not"), "{seen}");
     assert!(!seen.contains("`superpowers:grill-me` is not"), "{seen}");
     assert!(!seen.contains("`plain-word`"), "{seen}");
     save(&root, None, own, 0).unwrap();
     let app = check_prompt(&root, None);
-    assert!(app.contains(
-        "- broken_reference, line 2: `ghost-skill` is not a skill these agents get.\n"
-    ));
+    assert!(
+        app.contains(
+            "- broken_reference, line 2: `ghost-skill` is not a skill these agents get.\n"
+        )
+    );
     assert!(!app.contains("`grill-me` is not"), "{app}");
 }
 

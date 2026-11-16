@@ -3173,10 +3173,15 @@ fn the_ide_plants_no_git_config_or_instructions_under_a_ligature_or_hfs_ignored_
     for kept in [
         s.root.join("Gro\u{df}.md"),
         s.root.join("o\u{fb03}ce.md"),
-        s.root.join("\u{646}\u{627}\u{645}\u{200c}\u{647}\u{627}.md"),
+        s.root
+            .join("\u{646}\u{627}\u{645}\u{200c}\u{647}\u{627}.md"),
     ] {
         assert!(sh(&s.profile, write, &kept), "{}", kept.display());
-        assert!(sh(&s.profile, r#"/bin/cat "$1""#, &kept), "{}", kept.display());
+        assert!(
+            sh(&s.profile, r#"/bin/cat "$1""#, &kept),
+            "{}",
+            kept.display()
+        );
     }
     crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
 }

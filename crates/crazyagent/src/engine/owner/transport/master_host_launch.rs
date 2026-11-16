@@ -1417,8 +1417,7 @@ mod tests {
         for name in ["config", "cargo"] {
             private_directory(&dotfiles.join(name));
             std::fs::write(dotfiles.join(name).join("kept"), name).unwrap();
-            std::os::unix::fs::symlink(dotfiles.join(name), home.join(format!(".{name}")))
-                .unwrap();
+            std::os::unix::fs::symlink(dotfiles.join(name), home.join(format!(".{name}"))).unwrap();
         }
         let repository = base.join("repository");
         let worktree = base.join("worktrees").join("lease");

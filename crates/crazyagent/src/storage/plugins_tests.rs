@@ -341,9 +341,12 @@ fn an_approved_server_whose_stored_spec_fails_the_checks_never_launches() {
         .iter()
         .map(|server| server.name.as_str())
         .collect();
-    assert_eq!(launched, ["kept"], "a spec that fails the checks never launches");
-    let Ok(ResultValue::Server(view)) =
-        execute(&mut connection, root, Command::Server { id: old })
+    assert_eq!(
+        launched,
+        ["kept"],
+        "a spec that fails the checks never launches"
+    );
+    let Ok(ResultValue::Server(view)) = execute(&mut connection, root, Command::Server { id: old })
     else {
         panic!("server view required");
     };

@@ -2689,7 +2689,9 @@ async fn desktop_github_rule_set(
     on: bool,
 ) -> Result<GitHubRepoRules, BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.github_rule_set(&project, repo, rule, on)?;
+    let call = lock(&state)
+        .await?
+        .github_rule_set(&project, repo, rule, on)?;
     call.await
 }
 

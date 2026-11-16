@@ -2247,8 +2247,11 @@ fn kept_hook_switches_never_outlive_their_project() {
         tx.execute("DELETE FROM projects WHERE id='project-1'", [])
             .unwrap();
         plugins::remove_project(&tx, &reused).unwrap();
-        tx.execute("INSERT INTO projects(id, body) VALUES('project-1', '{}')", [])
-            .unwrap();
+        tx.execute(
+            "INSERT INTO projects(id, body) VALUES('project-1', '{}')",
+            [],
+        )
+        .unwrap();
         plugins::remove_project(&tx, &reused).unwrap();
         tx.commit().unwrap();
     }
