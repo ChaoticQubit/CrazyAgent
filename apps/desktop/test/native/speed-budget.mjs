@@ -321,3 +321,43 @@ export function privateFolder(folder) {
   assert.equal(info.mode & 0o022, 0, `${folder}: no group or other user can write it`);
   return folder;
 }
+
+/** Runs in the page: clicks an element and times, with the page's clock, until the page at its
+ * address is usable: the clicked link or button marked current, selected or expanded, a heading
+ * in main, no skeleton left in main, and `want` elements matching `extra` when given. A
+ * MutationObserver and a 4 ms check both look. Inputs: the selector, the extra condition, the
+ * count, the limit in ms and WebDriver's callback. Output: `done` with the ms or an error. */
+export function clickUntilUsable(selector, extra, want, limitMs, done) {
+  const target = document.querySelector(selector);
+  if (!target) {
+    done({ error: `nothing matches ${selector}` });
+    return;
+  }
+  const hash = target.getAttribute("href") ?? location.hash;
+  const marked = () => {
+    const now = document.querySelector(selector);
+    return Boolean(now) && (now.getAttribute("aria-current") === "page" || now.getAttribute("aria-selected") === "true"
+      || now.getAttribute("aria-expanded") === "true");
+  };
+  const ready = () => location.hash === hash && marked() && Boolean(document.querySelector("main h1"))
+    && !document.querySelector("main .skeleton") && (extra === null || document.querySelectorAll(extra).length >= want);
+  let ended = false;
+  let timer = 0;
+  let limit = 0;
+  const observer = new MutationObserver(() => finish());
+  const end = (value) => {
+    if (ended) return;
+    ended = true;
+    observer.disconnect();
+    clearInterval(timer);
+    clearTimeout(limit);
+    done(value);
+  };
+  const began = performance.now();
+  const finish = () => { if (ready()) end({ ms: performance.now() - began }); };
+  target.click();
+  observer.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
+  timer = setInterval(finish, 4);
+  limit = setTimeout(() => end({ error: `not usable in ${limitMs} ms`, text: document.body.innerText.slice(0, 1500) }), limitMs);
+  finish();
+}

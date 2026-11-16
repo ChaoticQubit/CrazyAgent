@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { KEPT_MIN, REFUSED_EXIT, REQUIRED, countFindings, incomplete, joinSample, judge, margin, noise, noiseShares, privateFolder, quiet, sampleMetrics, schedule, stayedQuiet, summary, verdict } from "./speed-budget.mjs";
+import { KEPT_MIN, REFUSED_EXIT, REQUIRED, clickUntilUsable, countFindings, incomplete, joinSample, judge, margin, noise, noiseShares, privateFolder, quiet, sampleMetrics, schedule, stayedQuiet, summary, verdict } from "./speed-budget.mjs";
 
 const QUIET = { load1: 0.8, compilers: [], memoryLevel: 80, onAC: true, screenLocked: false, busy: false };
 
@@ -239,4 +239,54 @@ test("a speed state folder must be a real folder this user owns that no group or
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+/** Runs the page's click function against stand-ins for the page it runs in: a document whose
+ * selector finds `target`, a heading and no skeleton, and an observer that never fires.
+ * Inputs: the target and the limit in ms. Output: what the function passed to `done`. */
+async function clickInPage(target, limitMs) {
+  const kept = { document: globalThis.document, location: globalThis.location, MutationObserver: globalThis.MutationObserver };
+  globalThis.document = {
+    body: { innerText: "page text" },
+    querySelector: (selector) => (selector === "#target" ? target : selector === "main h1" ? {} : null),
+    querySelectorAll: () => [],
+  };
+  globalThis.location = { hash: "#/project" };
+  globalThis.MutationObserver = class { observe() {} disconnect() {} };
+  try {
+    return await new Promise((resolve, reject) => {
+      const guard = setTimeout(() => reject(new Error("done was never called")), 2000);
+      clickUntilUsable("#target", null, 0, limitMs, (value) => { clearTimeout(guard); resolve(value); });
+    });
+  } finally {
+    Object.assign(globalThis, kept);
+  }
+}
+
+/** A button stand-in that counts its clicks and is expanded by one. Input: whether it is
+ * disabled. Output: the button. */
+function button(disabled) {
+  const attributes = { "aria-expanded": "false" };
+  return {
+    disabled,
+    clicks: 0,
+    getAttribute: (name) => attributes[name] ?? null,
+    click() { this.clicks += 1; attributes["aria-expanded"] = "true"; },
+  };
+}
+
+test("the page's click refuses a disabled target at once, naming it, and never clicks it, so a race fails loud and not as a timeout", async () => {
+  const target = button(true);
+  const answer = await clickInPage(target, 1);
+  assert.match(answer.error ?? "", /#target is disabled/);
+  assert.equal(answer.ms, undefined);
+  assert.equal(target.clicks, 0);
+});
+
+test("the page's click clicks an enabled target once and times it until the page is usable", async () => {
+  const target = button(false);
+  const answer = await clickInPage(target, 1000);
+  assert.equal(answer.error, undefined, JSON.stringify(answer));
+  assert.ok(Number.isFinite(answer.ms) && answer.ms >= 0, JSON.stringify(answer));
+  assert.equal(target.clicks, 1);
 });

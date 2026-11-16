@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
-import { footprintMb, webkitHelpers } from "./speed-budget.mjs";
+import { clickUntilUsable, footprintMb, webkitHelpers } from "./speed-budget.mjs";
 
 const evidence = process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE;
 const LOOK_MS = 10;
@@ -57,40 +57,7 @@ async function reloadHome(before) {
  * and a 4 ms check both look, so a hidden window that draws no frames still finishes. Inputs:
  * the element's selector and the extra condition. Output: the ms from click to usable. */
 async function timedClick(selector, extra = null, want = 0) {
-  const result = await browser.executeAsync((selector, extra, want, limitMs, done) => {
-    const target = document.querySelector(selector);
-    if (!target) {
-      done({ error: `nothing matches ${selector}` });
-      return;
-    }
-    const hash = target.getAttribute("href") ?? location.hash;
-    const marked = () => {
-      const now = document.querySelector(selector);
-      return Boolean(now) && (now.getAttribute("aria-current") === "page" || now.getAttribute("aria-selected") === "true"
-        || now.getAttribute("aria-expanded") === "true");
-    };
-    const ready = () => location.hash === hash && marked() && Boolean(document.querySelector("main h1"))
-      && !document.querySelector("main .skeleton") && (extra === null || document.querySelectorAll(extra).length >= want);
-    let ended = false;
-    let timer = 0;
-    let limit = 0;
-    const observer = new MutationObserver(() => finish());
-    const end = (value) => {
-      if (ended) return;
-      ended = true;
-      observer.disconnect();
-      clearInterval(timer);
-      clearTimeout(limit);
-      done(value);
-    };
-    const began = performance.now();
-    const finish = () => { if (ready()) end({ ms: performance.now() - began }); };
-    target.click();
-    observer.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
-    timer = setInterval(finish, 4);
-    limit = setTimeout(() => end({ error: `not usable in ${limitMs} ms`, text: document.body.innerText.slice(0, 1500) }), limitMs);
-    finish();
-  }, selector, extra, want, USABLE_MS_MAX);
+  const result = await browser.executeAsync(clickUntilUsable, selector, extra, want, USABLE_MS_MAX);
   assert.ok(!result.error, `${selector}: ${result.error} ${result.text ?? ""}`);
   assert.ok(Number.isFinite(result.ms) && result.ms >= 0, `a time for ${selector}`);
   return result.ms;
