@@ -461,6 +461,7 @@ fn record_of(pane: &PaneRecord) -> Option<(&'static str, PathBuf, u64)> {
                 sessions: sessions.clone(),
             },
         ),
+        RecordSource::Manifest { .. } => return None,
     };
     if let Some((record, start)) = &pane.resumed {
         return Some((harness, record.clone(), *start));

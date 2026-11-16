@@ -209,6 +209,13 @@ impl Pattern {
         entries
     }
 
+    /// Gives the private home this record path is filled in for, which a pane record keeps
+    /// so a later engine fills the path in again. Input: the pattern. Output: the absolute
+    /// home.
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
     /// The identities of every file this record path matches now, which a reader started
     /// before its harness never takes. Output: the identities.
     pub(super) fn keys(&self) -> Vec<FileKey> {

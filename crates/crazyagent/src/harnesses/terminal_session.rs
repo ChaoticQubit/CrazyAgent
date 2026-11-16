@@ -1,4 +1,5 @@
 use super::codex_folder::{self, Screen};
+use super::interactive::settings::{Step, TerminalSettings};
 use super::interactive::{self, Run, Support, Transcript};
 use super::launch::{
     Ending, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, route,
@@ -47,6 +48,15 @@ const PASTE_END: &str = "\x1b[201~";
 const ENTER: &[u8] = b"\r";
 const ESCAPE: &[u8] = b"\x1b";
 
+/// Gives the keys that submit a prompt and interrupt a turn: those the settings of a
+/// harness run from its manifest name, else Enter and Escape. Input: the settings, if any.
+/// Output: the submit key's bytes and the interrupt key's.
+fn keys(settings: Option<&TerminalSettings>) -> (&'static [u8], &'static [u8]) {
+    settings.map_or((ENTER, ESCAPE), |settings| {
+        (settings.submit().bytes(), settings.interrupt().bytes())
+    })
+}
+
 /// A harness running its own interactive app in a terminal pane of the engine's host.
 /// Prompts are typed into the pane; replies, tool use and turn ends are read from the
 /// harness's own session record, never from the screen. Stop or drop ends the pane.
@@ -62,6 +72,9 @@ pub struct TerminalSession {
     ready: bool,
     first: Option<FirstScreen>,
     folder: Option<FolderStep>,
+    steps: VecDeque<Step>,
+    submit_key: &'static [u8],
+    interrupt_key: &'static [u8],
     turn: bool,
     held: bool,
     over_hold: bool,
@@ -235,7 +248,29 @@ impl TerminalSession {
             .as_ref()
             .map(|context| context.install(&request.harness, request.account.home(), request.tools))
             .transpose()?;
-        Self::open(host, agent, request, installed, context.as_ref(), resume)
+        Self::open(
+            host,
+            agent,
+            request,
+            installed,
+            context.as_ref(),
+            resume,
+            None,
+        )
+    }
+
+    /// Starts a harness from given terminal settings, such as a stand-in outside the
+    /// catalog, continuing the conversation `resume` names when given. Inputs: the host,
+    /// the pane name, the request, the settings and the conversation. Output: the running
+    /// session, or a plain refusal code; nothing is left behind on refusal.
+    pub fn start_with(
+        host: Arc<dyn Host>,
+        agent: AgentId,
+        request: LaunchRequest,
+        settings: TerminalSettings,
+        resume: Option<&Resume>,
+    ) -> Result<Self, LaunchError> {
+        Self::open(host, agent, request, None, None, resume, Some(settings))
     }
 
     /// Starts an agent whose caller already installed the project context into its home,
@@ -248,7 +283,15 @@ impl TerminalSession {
         installed: Installed,
         context: &AgentContext,
     ) -> Result<Self, LaunchError> {
-        Self::open(host, agent, request, Some(installed), Some(context), None)
+        Self::open(
+            host,
+            agent,
+            request,
+            Some(installed),
+            Some(context),
+            None,
+            None,
+        )
     }
 
     fn open(
@@ -258,9 +301,10 @@ impl TerminalSession {
         installed: Option<Installed>,
         context: Option<&AgentContext>,
         resume: Option<&Resume>,
+        settings: Option<TerminalSettings>,
     ) -> Result<Self, LaunchError> {
         validate(&request)?;
-        if interactive::support(&request.harness) != Support::Terminal {
+        if settings.is_none() && interactive::support(&request.harness) != Support::Terminal {
             return Err(failure("launch_terminal_unsupported"));
         }
         if let Some(code) = agent_pane_unavailable(std::env::consts::OS) {
@@ -273,7 +317,13 @@ impl TerminalSession {
             .working_dir
             .canonicalize()
             .map_err(|_| failure("launch_working_dir_unavailable"))?;
-        let claude = matches!(records::reader(&request.harness), Ok(Reader::ClaudeSession));
+        let reader = records::reader(&request.harness);
+        let manifest_record = matches!(reader, Ok(Reader::JsonlAppend | Reader::JsonRewrite));
+        let settings = match settings {
+            None if manifest_record => Some(interactive::catalog_settings(&request.harness)?),
+            settings => settings,
+        };
+        let claude = settings.is_none() && matches!(reader, Ok(Reader::ClaudeSession));
         if claude {
             interactive::prepare_claude_home(&home, &cwd)?;
         }
@@ -281,7 +331,7 @@ impl TerminalSession {
             Some(resume) => resume.id.clone(),
             None => interactive::session_id()?,
         };
-        let command = interactive::command(
+        let command = interactive::command_with(
             &request,
             installed.as_ref(),
             &Run {
@@ -289,7 +339,13 @@ impl TerminalSession {
                 key_file: key.as_ref().map(|key| key.path.as_path()),
                 resume: resume.is_some(),
             },
+            settings.as_ref(),
         )?;
+        let (submit_key, interrupt_key) = keys(settings.as_ref());
+        let steps: VecDeque<Step> = settings
+            .as_ref()
+            .map(|settings| settings.first_screen().iter().cloned().collect())
+            .unwrap_or_default();
         let folder = codex_folder::behind_a_screen(&command.argv).then_some(FolderStep::Waiting);
         if let Some(team) = installed.as_ref().and_then(Installed::native) {
             interactive::write_teammate_command(&home, &command, &request, team)?;
@@ -350,7 +406,7 @@ impl TerminalSession {
         assert_eq!(pane.agent, agent);
         let unkept = host.unkept(&agent);
         let ready = LaunchEvent::Ready {
-            native_session: claude.then_some(session_id),
+            native_session: (claude || settings.is_some()).then_some(session_id),
         };
         let session = Self {
             host,
@@ -364,6 +420,9 @@ impl TerminalSession {
             ready: false,
             first: None,
             folder,
+            steps,
+            submit_key,
+            interrupt_key,
             turn: false,
             held: false,
             over_hold: false,
@@ -515,12 +574,13 @@ impl TerminalSession {
             self.type_bytes(part.as_bytes())?;
         }
         std::thread::sleep(PASTE_SETTLE);
-        self.type_bytes(ENTER)?;
+        self.type_bytes(self.submit_key)?;
         self.turn = true;
         Ok(())
     }
 
-    /// Presses Escape in the app, which stops the running turn in Codex and Claude Code. A
+    /// Presses the app's interrupt key, which stops the running turn: Escape in Codex and
+    /// Claude Code, the key its manifest names for a harness run from its settings. A
     /// turn held open for the app's background commands has no request running for Escape
     /// to stop, so it ends here as interrupted, its commands still counted as running.
     /// Output: Ok once typed or ended, or `launch_not_running` with no turn.
@@ -539,7 +599,7 @@ impl TerminalSession {
             ]);
             return Ok(());
         }
-        self.type_bytes(ESCAPE)
+        self.type_bytes(self.interrupt_key)
     }
 
     /// Waits up to `wait` for the next event of the turn the engine started. Text, tool
@@ -726,7 +786,9 @@ impl TerminalSession {
     /// Looks once, without waiting, whether the app reads keys yet by the rule its first
     /// prompt waits for: it has drawn its screen, nothing changed on it for `READY_QUIET`
     /// and it turned bracketed paste on (see [`Host::input_live`]), or `READY_WAIT` passed
-    /// since the first look. A Codex launch behind its folder access screen is ready only
+    /// since the first look. A harness run from its settings answers its first-screen steps
+    /// first, each within `READY_WAIT` or `launch_first_screen_missing`, and only then waits
+    /// on bracketed paste. A Codex launch behind its folder access screen is ready only
     /// once that screen took its one Enter and the input box is up, and fails instead of
     /// typing when that does not happen in time. A failed look keeps the wait, so the next
     /// look tries again within the same bound. Output: the answer, the failed look's
@@ -749,6 +811,9 @@ impl TerminalSession {
                 }));
             }
         } else if first.started.elapsed() >= READY_WAIT {
+            if !self.steps.is_empty() {
+                return Err(failure("launch_first_screen_missing"));
+            }
             self.ready = true;
             self.first = None;
             return Ok(true);
@@ -790,6 +855,7 @@ impl TerminalSession {
         }
         let ready = first.drawn
             && first.quiet.elapsed() >= READY_QUIET
+            && self.past_first_screen()?
             && self.host.input_live(&self.agent).map_err(host_failure)?
             && self.past_folder_screen()?;
         if ready {
@@ -797,6 +863,28 @@ impl TerminalSession {
             self.first = None;
         }
         Ok(ready)
+    }
+
+    /// Answers the first screen of a harness run from its settings: each step's key once,
+    /// only once its text shows, in order, and each press starts the next step's wait. A
+    /// launch with no step left is past it. Output: whether every step was answered, or
+    /// the failed look's problem.
+    fn past_first_screen(&mut self) -> Result<bool, LaunchError> {
+        let Some(step) = self.steps.front() else {
+            return Ok(true);
+        };
+        let screen = self.host.screen(&self.agent).map_err(host_failure)?;
+        if !String::from_utf8_lossy(&screen).contains(step.seen.as_str()) {
+            return Ok(false);
+        }
+        let press = step.press;
+        self.type_bytes(press.bytes())?;
+        self.steps.pop_front();
+        if let Some(first) = self.first.as_mut() {
+            first.started = Instant::now();
+            first.quiet = Instant::now();
+        }
+        Ok(false)
     }
 
     /// Takes a launch one step past Codex's folder access screen: Enter once, only on
@@ -1417,3 +1505,7 @@ mod tests;
 
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod folder_screen_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "terminal_session/manifest_tests.rs"]
+mod manifest_tests;

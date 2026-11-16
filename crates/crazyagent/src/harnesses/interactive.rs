@@ -17,6 +17,9 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+pub mod settings;
+use settings::TerminalSettings;
+
 pub const KEY_FILE: &str = ".crazyagent-key";
 pub const CLAUDE_PROJECT_NAME_MAX: usize = 200;
 #[cfg(unix)]
@@ -105,11 +108,13 @@ pub struct InteractiveCommand {
 }
 
 /// Where a harness writes its own session record, which the engine reads for status,
-/// replies and task blocks instead of reading the screen.
+/// replies and task blocks instead of reading the screen: a Codex rollout, a Claude Code
+/// transcript, or the record a manifest harness's terminal settings name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Transcript {
     CodexRollouts { sessions: PathBuf },
     ClaudeSession { file: PathBuf },
+    Records(records::Records),
     Unavailable,
 }
 
@@ -323,6 +328,20 @@ pub fn command(
     installed: Option<&Installed>,
     run: &Run<'_>,
 ) -> Result<InteractiveCommand, LaunchError> {
+    command_with(request, installed, run, None)
+}
+
+/// Builds what the terminal host runs for one interactive agent as [`command`] does, from
+/// given terminal settings instead of the catalog's, such as a stand-in's. A harness run
+/// from settings gets their arguments and follows their record; an account with a key,
+/// tools off, Full access and a project context are refused until their tasks land.
+/// Inputs: as for `command`, and the settings. Output: the command, or a refusal code.
+pub fn command_with(
+    request: &LaunchRequest,
+    installed: Option<&Installed>,
+    run: &Run<'_>,
+    settings: Option<&TerminalSettings>,
+) -> Result<InteractiveCommand, LaunchError> {
     validate(request)?;
     if request.account.key().is_some() != run.key_file.is_some() {
         return Err(failure("launch_key_file_invalid"));
@@ -363,13 +382,39 @@ pub fn command(
     }
     let launch = launch_words(&request.executable)?;
     let reader = records::reader(&request.harness);
+    let manifest_record = matches!(reader, Ok(Reader::JsonlAppend | Reader::JsonRewrite));
+    let catalog = if settings.is_none() && manifest_record {
+        Some(catalog_settings(&request.harness)?)
+    } else {
+        None
+    };
+    let settings = settings.or(catalog.as_ref());
     let native_lead = matches!(reader, Ok(Reader::ClaudeSession))
         && installed.and_then(Installed::native).is_some();
     let display = installed
         .map(Installed::terminal_display)
         .unwrap_or_default();
-    let transcript = match reader {
-        Ok(Reader::CodexRollouts) => {
+    let transcript = match (settings, reader) {
+        (Some(settings), _) => {
+            if request.account.key().is_some() {
+                return Err(failure("launch_key_relay_unsupported"));
+            }
+            if !request.tools {
+                return Err(failure("launch_tools_off_unsupported"));
+            }
+            if request.unconfined {
+                return Err(failure("launch_harness_unsupported"));
+            }
+            if installed.is_some() {
+                return Err(failure("launch_context_unsupported"));
+            }
+            argv.extend(launch);
+            let (model, place) = (request.model.as_deref(), text(&cwd)?);
+            let arguments = settings.arguments(run.resume, &home, run.session_id, &place, model)?;
+            argv.extend(arguments);
+            Transcript::Records(settings.records(request.account.home(), run.session_id)?)
+        }
+        (None, Ok(Reader::CodexRollouts)) => {
             let resume = if run.resume {
                 Some(session_id_checked(run.session_id)?.to_owned())
             } else {
@@ -408,7 +453,7 @@ pub fn command(
                 sessions: request.account.home().join("sessions"),
             }
         }
-        Ok(Reader::ClaudeSession) => {
+        (None, Ok(Reader::ClaudeSession)) => {
             argv.extend(launch);
             argv.extend(claude(request, installed, run, key_file.as_deref())?);
             let team = installed.and_then(Installed::native);
@@ -439,7 +484,10 @@ pub fn command(
                     .join(format!("{}.jsonl", session_id_checked(run.session_id)?)),
             }
         }
-        Err(_) => {
+        (None, Ok(Reader::JsonlAppend | Reader::JsonRewrite)) => {
+            unreachable!("the terminal settings of a manifest record are read above")
+        }
+        (None, Err(_)) => {
             argv.extend(launch);
             argv.extend(plain(harness_id(request), request, installed)?);
             Transcript::Unavailable
@@ -474,6 +522,19 @@ pub fn command(
     }
     assert_eq!(built.argv[0] == SANDBOX_EXEC, !request.unconfined);
     Ok(built)
+}
+
+/// Reads the terminal settings of a catalog harness whose manifest names a manifest
+/// record. Input: the catalog id or an alias. Output: the settings, or
+/// `launch_harness_unsupported` for a name outside the catalog or refused settings.
+pub(crate) fn catalog_settings(harness: &str) -> Result<TerminalSettings, LaunchError> {
+    let found = super::registry::registry()
+        .get(harness)
+        .ok_or_else(|| failure("launch_harness_unsupported"))?;
+    TerminalSettings::read(found.manifest()).map_err(|refused| {
+        eprintln!("launch_terminal_settings_refused code={}", refused.code);
+        failure("launch_harness_unsupported")
+    })
 }
 
 /// Passes a pane's variables through the one agent environment builder, so a pane gets

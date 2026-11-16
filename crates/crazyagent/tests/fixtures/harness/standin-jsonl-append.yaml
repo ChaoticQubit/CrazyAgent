@@ -25,6 +25,42 @@ terminal:
     - "{home}"
     - "--resume"
     - "{session}"
+  submit: "enter"
+  interrupt: "ctrl-c"
+  first_screen:
+    trust:
+      seen: "Trust this folder?"
+      press: "enter"
   record:
     reader: "jsonl-append"
     path: "{home}/standin/records/{session}.jsonl"
+    rules: "standin-record"
+rules:
+  standin-record:
+    started:
+      when:
+        type: "started"
+      emit: "turn_started"
+    text:
+      when:
+        type: "text"
+      emit: "text"
+      text: "delta"
+    tool:
+      when:
+        type: "tool"
+      emit: "tool_use"
+      name: "name"
+    stopped:
+      when:
+        type: "stopped"
+      emit: "interrupted"
+    done:
+      when:
+        type: "done"
+      emit: "turn_finished"
+      success: "ok"
+    error:
+      when:
+        type: "error"
+      emit: "turn_error"

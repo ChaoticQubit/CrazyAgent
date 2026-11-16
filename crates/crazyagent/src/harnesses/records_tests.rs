@@ -28,9 +28,9 @@ fn unsupported() -> Result<Reader, LaunchError> {
 fn each_record_kind_has_its_own_answer() {
     assert_eq!(of(RecordKind::CodexRollouts), Ok(Reader::CodexRollouts));
     assert_eq!(of(RecordKind::ClaudeSession), Ok(Reader::ClaudeSession));
+    assert_eq!(of(RecordKind::JsonlAppend), Ok(Reader::JsonlAppend));
+    assert_eq!(of(RecordKind::JsonRewrite), Ok(Reader::JsonRewrite));
     for kind in [
-        RecordKind::JsonlAppend,
-        RecordKind::JsonRewrite,
         RecordKind::SqlitePoll,
         RecordKind::MarkdownHistory,
         RecordKind::Screen,
