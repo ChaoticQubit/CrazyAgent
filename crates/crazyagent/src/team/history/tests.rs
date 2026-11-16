@@ -1384,10 +1384,11 @@ fn a_search_finds_words_in_a_listed_agent_s_jsonl_append_record() {
 
     let hits = hit_lines(&text);
     let has = |prefix: String| hits.iter().any(|hit| hit.starts_with(&prefix));
-    assert!(has(format!("- agent-{agent}/s-7 #0 typed")), "{text}");
-    assert!(has(format!("- agent-{agent}/s-7 #1 agent")), "{text}");
+    let id = format!("agent-{agent}/account-1/s-7");
+    assert!(has(format!("- {id} #0 typed")), "{text}");
+    assert!(has(format!("- {id} #1 agent")), "{text}");
     assert!(hits.iter().all(|hit| !hit.contains("/other #")), "{text}");
-    let (page, _) = fixture.session(&format!("agent-{agent}/s-7"), 0);
+    let (page, _) = fixture.session(&id, 0);
     assert!(page.contains("The zebra plan is done"), "{page}");
 }
 

@@ -353,6 +353,24 @@ impl Pattern {
     pub fn session_of(&self, record: &Path) -> Option<String> {
         let learn = self.learn.as_ref()?;
         assert!(learn.at < self.parts.len());
+        let (names, places) = self.fitted(record)?;
+        let name = names[places[learn.at]];
+        let id = name.strip_prefix(learn.before.as_str())?;
+        let id = id.strip_suffix(learn.after.as_str())?;
+        session_shaped(id).then(|| id.to_owned())
+    }
+
+    /// Tells whether a full path is a record this path names, from its parts alone with no
+    /// folder opened: each plain part equal, each wildcard part fitting and `**` any number
+    /// of folders. Input: the full path. Output: true when it is.
+    pub fn matches(&self, record: &Path) -> bool {
+        self.fitted(record).is_some()
+    }
+
+    /// Lays a full path's names below the home out on this path's parts, kept only when
+    /// every part fits its name. Input: the full path. Output: the names and the place of
+    /// each part's name among them, or none.
+    fn fitted<'a>(&self, record: &'a Path) -> Option<(Vec<&'a str>, Vec<usize>)> {
         let below = record.strip_prefix(&self.home).ok()?;
         let names = below
             .components()
@@ -374,18 +392,14 @@ impl Pattern {
             Some(deep) if at > deep => names.len() + at - self.parts.len(),
             _ => at,
         };
-        let fitting = self.parts.iter().enumerate().all(|(at, part)| match part {
+        let places: Vec<usize> = (0..self.parts.len()).map(place).collect();
+        let fitting = self.parts.iter().zip(&places).all(|(part, &at)| match part {
             Part::Deep => true,
-            Part::Name(name) => name.as_str() == names[place(at)],
-            Part::Glob(glob) => fits(glob, names[place(at)]),
+            Part::Name(name) => name.as_str() == names[at],
+            Part::Glob(glob) => fits(glob, names[at]),
         });
-        if !fitting {
-            return None;
-        }
-        let name = names[place(learn.at)];
-        let id = name.strip_prefix(learn.before.as_str())?;
-        let id = id.strip_suffix(learn.after.as_str())?;
-        session_shaped(id).then(|| id.to_owned())
+        assert_eq!(places.len(), self.parts.len());
+        fitting.then_some((names, places))
     }
 
     /// The identities of every file this record path matches now, which a reader started

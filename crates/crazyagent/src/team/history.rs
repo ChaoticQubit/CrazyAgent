@@ -1,4 +1,5 @@
 use super::tool::{self, Call};
+use crate::harnesses::records::json_files::Pattern;
 use crate::harnesses::transcript::record_message;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, params};
@@ -444,12 +445,14 @@ fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) ->
 }
 
 /// One record folder of a team agent's home the search walks: the folder below the agents
-/// folder, the id prefix and label of its records and the harness that wrote them.
+/// folder, the id prefix and label of its records, the harness that wrote them and, for a
+/// listed agent, the record path each of its records must fit.
 struct Tree {
     place: PathBuf,
     prefix: String,
     label: String,
     harness: &'static str,
+    pattern: Option<Pattern>,
 }
 
 /// Lists the record folders of the project's team agents, newest agent first: each Claude
@@ -485,6 +488,7 @@ fn record_trees(connection: &Connection, project: &ProjectId, agents: &Path) -> 
             prefix: format!("agent-{agent}"),
             label: label.clone(),
             harness,
+            pattern: None,
         });
         if harness == "claude-code" && plain_dir(&agents.join(&mates)) {
             trees.push(Tree {
@@ -492,6 +496,7 @@ fn record_trees(connection: &Connection, project: &ProjectId, agents: &Path) -> 
                 prefix: format!("agent-{agent}/mates"),
                 label: format!("native teammates of {label}"),
                 harness,
+                pattern: None,
             });
         }
     }
@@ -500,9 +505,9 @@ fn record_trees(connection: &Connection, project: &ProjectId, agents: &Path) -> 
 
 /// Lists the record folders of one team agent of a listed harness that keeps a jsonl-append
 /// record: in each account's private home, `<home>/<harness id>/<account>` (T18), the
-/// folder its manifest's record path fixes, for at most `ACCOUNTS_MAX` accounts that are
-/// plain folders. Takes the database, project, agents folder, agent with its role and the
-/// harness. Returns the folders, none for any other harness.
+/// folder its manifest's record path fixes, ids under `agent-N/<account>`, for at most
+/// `ACCOUNTS_MAX` accounts that are plain folders. Takes the database, project, agents
+/// folder, agent with its role and the harness. Returns the folders, none for any other.
 fn listed_trees(
     connection: &Connection,
     project: &ProjectId,
@@ -510,7 +515,7 @@ fn listed_trees(
     (agent, role): (i64, &str),
     harness: &'static str,
 ) -> Vec<Tree> {
-    use crate::harnesses::records::{self, Reader, json_files::Pattern};
+    use crate::harnesses::records::{self, Reader};
     let Some(found) = crate::harnesses::registry::registry().get(harness) else {
         return Vec::new();
     };
@@ -540,12 +545,14 @@ fn listed_trees(
     accounts
         .into_iter()
         .filter_map(|account| {
+            let name = account.file_name()?.to_str()?.to_owned();
             let pattern = Pattern::learning(found.manifest(), &agents.join(&account)).ok()?;
             Some(Tree {
                 place: account.join(pattern.fixed_folder()),
-                prefix: format!("agent-{agent}"),
+                prefix: format!("agent-{agent}/{name}"),
                 label: label.clone(),
                 harness,
+                pattern: Some(pattern),
             })
         })
         .collect()
@@ -569,6 +576,10 @@ fn tree_records(
     let mut records: Vec<Conversation> = paths
         .into_iter()
         .filter_map(|(below, at_ms)| {
+            let named = |pattern: &Pattern| pattern.matches(&agents.join(&below));
+            if !tree.pattern.as_ref().is_none_or(named) {
+                return None;
+            }
             let id = below
                 .file_stem()
                 .and_then(|stem| stem.to_str())
