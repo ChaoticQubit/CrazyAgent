@@ -210,8 +210,33 @@ pub(crate) fn lid_journal(connection: &Connection, unreadable: bool) -> Result<(
 /// subject stay. Inputs: the engine database outside any transaction and the kinds left.
 /// Output: Ok, or the SQLite failure, with nothing changed.
 pub(crate) fn lid_closed_left(connection: &Connection, kinds: &[&str]) -> Result<(), EngineError> {
-    let _ = (connection, kinds);
-    Ok(())
+    assert!(connection.is_autocommit());
+    let lane = [
+        crate::keep_awake::freeze::KIND,
+        crate::keep_awake::mute::KIND,
+    ];
+    assert!(kinds.len() <= lane.len());
+    assert!(kinds.iter().all(|kind| lane.contains(kind)));
+    let tx =
+        Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)?;
+    for kind in lane {
+        let subject = format!("{ENTRY_SUBJECT}{kind}");
+        let changed = if kinds.contains(&kind) {
+            tx.execute(
+                "INSERT INTO keep_awake_restore(subject,unreadable) VALUES(?1,0) \
+                 ON CONFLICT(subject) DO NOTHING",
+                [&subject],
+            )
+        } else {
+            tx.execute(
+                "DELETE FROM keep_awake_restore WHERE subject=?1",
+                [&subject],
+            )
+        }
+        .map_err(error)?;
+        assert!(changed <= 1);
+    }
+    tx.commit().map_err(error)
 }
 
 /// The approval source (QUESTION 35j): one condition while the lid helper waits for the

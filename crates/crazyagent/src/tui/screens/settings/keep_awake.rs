@@ -28,8 +28,8 @@ const ROWS: usize = 11;
 const OPTIONS_MAX: usize = 4;
 const DISPLAY_AWAKE_HELP: &str =
     "Whether a hold also keeps the display on. While it does, the screen stays unlocked.";
-const FREEZE_HELP: &str = "The listed apps pause while a hold runs with the lid closed and go on when the lid opens. If one stays paused, run crazyagent keep-awake restore; the next start also puts it back.";
-const MUTE_HELP: &str = "The sound goes off while a hold runs with the lid closed and comes back as it was when the lid opens.";
+const FREEZE_HELP: &str = "The listed apps pause while a hold runs with the lid closed and go on when the lid opens. Not while an external display is in use. If one stays paused, run crazyagent keep-awake restore; the next start also puts it back.";
+const MUTE_HELP: &str = "The sound goes off while a hold runs with the lid closed and comes back as it was when the lid opens. Not while an external display is in use.";
 const CHOOSER_ROWS: usize = 12;
 const CHOOSER_WIDTH: u16 = 64;
 const SECTIONS: [(&str, &str, &[Setting]); 5] = [

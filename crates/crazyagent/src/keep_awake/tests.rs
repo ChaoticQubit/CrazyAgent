@@ -1129,7 +1129,11 @@ fn freeze_and_mute_cover_a_closed_lid_only_without_an_external_display() {
     let unread = read(Some(true), None);
     let open = read(Some(false), Some(false));
 
-    assert_eq!(lid_cover(true, Some(&desk), cover.clone()), None, "at a desk");
+    assert_eq!(
+        lid_cover(true, Some(&desk), cover.clone()),
+        None,
+        "at a desk"
+    );
     assert_eq!(
         lid_cover(true, Some(&away), cover.clone()),
         Some(cover.clone()),

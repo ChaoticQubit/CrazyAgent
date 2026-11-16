@@ -24,9 +24,13 @@ const NAME_BYTES_MAX: usize = 128;
 const ID_BYTES_MAX: usize = 1024;
 const APPS_BYTES_MAX: usize = 32 * 1024;
 const RUNNING_MAX: usize = 512;
+#[cfg(unix)]
+const AGENTS_MAX: usize = 4096;
 const LOCK: &str = "lid-closed.lock";
 const LOCK_WAIT: Duration = Duration::from_secs(5);
 const LOCK_STEP: Duration = Duration::from_millis(50);
+const GUARD_TRIES: u32 = 6;
+const GUARD_RETRY: Duration = Duration::from_secs(1);
 #[cfg(unix)]
 const OWN_IDS: [&str; 1] = ["dev.crazyagent.desktop"];
 #[cfg(unix)]
@@ -264,8 +268,10 @@ pub fn guard_command(program: &Path, root: &Path) -> Command {
 /// The thaw guard (leader 23:13): waits on the engine's pipe. A byte means the engine
 /// thawed everything itself, so the guard leaves. The end of the pipe means the engine is
 /// gone: it takes the lock, thaws every app whose identity still matches, puts the sound
-/// back, settles those entries and leaves. Inputs: the engine root and the pipe. Output:
-/// Ok, or the first undo that failed (its entry stays for the next engine start).
+/// back, settles those entries and leaves. An entry that fails is tried again at most
+/// `GUARD_TRIES` times, the wait doubling from one second, with the lock let go between
+/// tries (rv-secreview and rv-code T17 r1). Inputs: the engine root and the pipe. Output:
+/// Ok, or the last failure (its entry stays for the next engine start).
 pub fn guard(root: &Path, mut engine: impl Read) -> Result<(), EngineError> {
     let mut byte = [0_u8; 1];
     loop {
@@ -276,6 +282,24 @@ pub fn guard(root: &Path, mut engine: impl Read) -> Result<(), EngineError> {
             Err(_) => break,
         }
     }
+    let mut wait = GUARD_RETRY;
+    let mut last = None;
+    for tried in 1..=GUARD_TRIES {
+        match settle_all(root) {
+            Ok(()) => return Ok(()),
+            Err(problem) => last = Some(problem),
+        }
+        if tried < GUARD_TRIES {
+            std::thread::sleep(wait);
+            wait = wait.saturating_mul(2);
+        }
+    }
+    Err(last.expect("the guard tried at least once"))
+}
+
+/// Takes the lock and undoes every entry of the lid-closed journal once. Input: the engine
+/// root. Output: Ok when nothing is left, or the first failure, its entry kept.
+fn settle_all(root: &Path) -> Result<(), EngineError> {
     let _held = lock(root)?;
     let mut found = journal(root)?;
     found.reconcile(undo)?;
@@ -329,8 +353,28 @@ pub fn choices() -> Result<Vec<FreezeApp>, EngineError> {
 /// Output: true when it does.
 #[cfg(unix)]
 fn serves(args: &str, folders: &[PathBuf]) -> bool {
-    let _ = (args, folders);
-    false
+    folders
+        .iter()
+        .filter(|folder| folder.is_absolute())
+        .any(|folder| args.contains(&format!(" -S {}/", folder.display())))
+}
+
+/// This engine's tmux socket folders (leader 01:57, until T17b): its terminal folder and
+/// the short temp folder of each agent below its team folder, at most `AGENTS_MAX`. Input:
+/// the engine root. Output: the folders.
+#[cfg(unix)]
+fn socket_folders(root: &Path) -> Vec<PathBuf> {
+    let mut folders = vec![root.join(crate::terminal::FOLDER)];
+    let agents = root.join("team").join("agents");
+    let listing = std::fs::read_dir(agents).into_iter().flatten().flatten();
+    for found in listing.take(AGENTS_MAX) {
+        if found.file_name().to_string_lossy().starts_with("agent-") {
+            let home = found.path().join("home");
+            folders.push(crate::sandbox::toolchains::tmp_path(&home));
+        }
+    }
+    assert!(!folders.is_empty() && folders.len() <= AGENTS_MAX + 1);
+    folders
 }
 
 /// Tells whether an executable may never be frozen: a system program, a desktop shell, or
@@ -434,14 +478,27 @@ mod unix {
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::io::Read;
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     const TEXT_BYTES_MAX: usize = 4 * 1024 * 1024;
     const TABLE_MAX: usize = 32 * 1024;
+    const TREE_MAX: usize = 256;
+    const ROOTS_MAX: usize = 1024;
+    const SERVERS_MAX: usize = 256;
     const RUN_WAIT: Duration = Duration::from_secs(2);
     const RUN_STEP: Duration = Duration::from_millis(10);
+    const SHARED: [&str; 7] = [
+        "/bin",
+        "/sbin",
+        "/usr/bin",
+        "/usr/sbin",
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/usr/games",
+    ];
 
     /// One row of the process table: pid, parent pid and owner uid.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -538,17 +595,18 @@ mod unix {
         Ok(rows)
     }
 
-    /// The processes below one pid in the table, nearest first, at most `limit`. Inputs:
-    /// the table, the pid and the limit. Output: the descendants' pids.
-    fn below(rows: &[Row], pid: u32, limit: usize) -> Vec<u32> {
+    /// The processes below a set of pids in the table, nearest first, at most `limit`, the
+    /// starting pids not included. Inputs: the table, the pids and the limit. Output: the
+    /// descendants' pids.
+    fn below(rows: &[Row], starts: &[u32], limit: usize) -> Vec<u32> {
         let mut children: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
         for row in rows.iter().filter(|row| row.pid > 1 && row.pid != row.ppid) {
             children.entry(row.ppid).or_default().push(row.pid);
         }
-        let mut seen = BTreeSet::from([pid]);
+        let mut seen: BTreeSet<u32> = starts.iter().copied().collect();
         let mut found: Vec<u32> = Vec::new();
         let mut next = 0;
-        let mut parents = vec![pid];
+        let mut parents: Vec<u32> = starts.to_vec();
         while next < parents.len() && found.len() < limit {
             let parent = parents[next];
             next += 1;
@@ -579,31 +637,119 @@ mod unix {
         found
     }
 
-    /// Reads who several processes are in one look. Input: the pids. Output: the ones
-    /// found, by pid; a process that is gone is missing.
-    fn identities(pids: &[u32]) -> BTreeMap<u32, Proc> {
-        assert!(pids.len() <= PROCS_MAX + 1);
+    /// What may never be frozen around one engine (rv-secreview T17 r1 F1, F3, F4), checked
+    /// per process: another user's process, pid 1, the engine and every process above or
+    /// below it, every process at or below an agent root the engine hands in (leader 01:57,
+    /// until T17b: the tmux servers it knows), and any executable `kept_out` refuses.
+    struct Fence {
+        own: u32,
+        owners: BTreeMap<u32, u32>,
+        parents: BTreeMap<u32, u32>,
+        upward: BTreeSet<u32>,
+        downward: BTreeSet<u32>,
+        inside: BTreeSet<u32>,
+        here: Option<PathBuf>,
+    }
+
+    impl Fence {
+        /// Reads the fence from one look at the process table. Inputs: the table, the
+        /// engine pid and the agent roots. Output: the fence.
+        fn new(rows: &[Row], engine: u32, roots: &BTreeSet<u32>) -> Self {
+            assert!(engine > 1);
+            assert!(roots.len() <= ROOTS_MAX);
+            let starts: Vec<u32> = roots.iter().copied().collect();
+            let mut inside: BTreeSet<u32> = roots.clone();
+            inside.extend(below(rows, &starts, TABLE_MAX));
+            Self {
+                own: rustix::process::getuid().as_raw(),
+                owners: rows.iter().map(|row| (row.pid, row.uid)).collect(),
+                parents: rows.iter().map(|row| (row.pid, row.ppid)).collect(),
+                upward: above(rows, engine),
+                downward: below(rows, &[engine], TABLE_MAX).into_iter().collect(),
+                inside,
+                here: std::env::current_exe().ok(),
+            }
+        }
+
+        /// Tells whether one process may be frozen. Inputs: its pid and the executable it
+        /// runs. Output: true when nothing in the fence refuses it.
+        fn may(&self, pid: u32, path: &Path) -> bool {
+            pid > 1
+                && self.owners.get(&pid) == Some(&self.own)
+                && !self.upward.contains(&pid)
+                && !self.downward.contains(&pid)
+                && !self.inside.contains(&pid)
+                && !kept_out(path, self.here.as_deref())
+        }
+    }
+
+    /// The folder an app's own code lives in: its outermost `.app` bundle, else the folder
+    /// of its executable, or none when that is a shared program folder, where the app's own
+    /// code is its executable alone. Input: the app's executable. Output: the folder.
+    fn home(path: &Path) -> Option<PathBuf> {
+        let mut at = PathBuf::new();
+        for part in path.components() {
+            at.push(part);
+            if part.as_os_str().to_string_lossy().ends_with(".app") {
+                return Some(at);
+            }
+        }
+        let folder = path.parent()?;
+        let shared = SHARED.iter().any(|shared| folder == Path::new(shared));
+        (!shared && folder.is_absolute()).then(|| folder.to_path_buf())
+    }
+
+    /// The executable a process runs, less the " (deleted)" Linux adds to a replaced file.
+    fn exe(proc: &Proc) -> &str {
+        proc.exe.trim_end_matches(" (deleted)")
+    }
+
+    /// Tells whether a pid is gone, asked with signal 0 (rv-secreview r1 F2): no such
+    /// process means gone, and a process another user owns still runs. Input: the pid.
+    /// Output: true when gone, false when it runs, or why it cannot tell.
+    #[cfg(not(target_os = "linux"))]
+    fn gone(pid: u32) -> Result<bool, EngineError> {
+        let raw = i32::try_from(pid).map_err(|problem| error("keep_awake_freeze_pid", problem))?;
+        let pid = rustix::process::Pid::from_raw(raw)
+            .ok_or_else(|| error("keep_awake_freeze_pid", raw))?;
+        match rustix::process::test_kill_process(pid) {
+            Ok(()) | Err(rustix::io::Errno::PERM) => Ok(false),
+            Err(rustix::io::Errno::SRCH) => Ok(true),
+            Err(problem) => Err(error("keep_awake_freeze_identity", problem)),
+        }
+    }
+
+    /// Reads who several processes are in one look (rv-secreview and rv-code T17 r1): a
+    /// pid is missing only when it is positively gone. On macOS `ps` reads the start time in
+    /// UTC, so a time zone change keeps it, and a pid missing from its answer is gone only
+    /// when signal 0 says so; on Linux only a missing `/proc` entry means gone. Input: the
+    /// pids. Output: the ones running, by pid, or `keep_awake_freeze_identity` when they
+    /// cannot be read, which keeps a journal entry.
+    fn identities(pids: &[u32]) -> Result<BTreeMap<u32, Proc>, EngineError> {
+        assert!(pids.len() <= TREE_MAX + 1);
         if pids.is_empty() {
-            return BTreeMap::new();
+            return Ok(BTreeMap::new());
         }
         #[cfg(target_os = "linux")]
         {
-            pids.iter()
-                .filter_map(|pid| linux::identity(*pid).map(|found| (*pid, found)))
-                .collect()
+            let mut found = BTreeMap::new();
+            for pid in pids {
+                if let Some(proc) = linux::identity(*pid)? {
+                    found.insert(*pid, proc);
+                }
+            }
+            Ok(found)
         }
         #[cfg(not(target_os = "linux"))]
         {
             let list: Vec<String> = pids.iter().map(u32::to_string).collect();
             let list = list.join(",");
-            let asked = ran(&mut tool(
-                "/bin/ps",
-                &["-o", "pid=,lstart=,comm=", "-p", &list],
-            ));
-            let Some((_, text)) = asked else {
-                return BTreeMap::new();
-            };
-            text.lines()
+            let mut command = tool("/bin/ps", &["-o", "pid=,lstart=,comm=", "-p", &list]);
+            command.env("TZ", "UTC0");
+            let (_, text) = ran(&mut command)
+                .ok_or_else(|| error("keep_awake_freeze_identity", "ps did not answer"))?;
+            let found: BTreeMap<u32, Proc> = text
+                .lines()
                 .filter_map(|line| {
                     let mut words = line.split_whitespace();
                     let pid: u32 = words.next()?.parse().ok()?;
@@ -618,14 +764,21 @@ mod unix {
                         (pid, found)
                     })
                 })
-                .collect()
+                .collect();
+            for pid in pids {
+                if !found.contains_key(pid) && !gone(*pid)? {
+                    return Err(error("keep_awake_freeze_identity", pid));
+                }
+            }
+            Ok(found)
         }
     }
 
     /// Reads who a running process is. Input: the pid. Output: its pid, start time and
-    /// executable, or `keep_awake_freeze_gone` when it is not running.
+    /// executable, `keep_awake_freeze_gone` when it is not running, or
+    /// `keep_awake_freeze_identity` when it cannot be read.
     pub fn identity(pid: u32) -> Result<Proc, EngineError> {
-        let found = identities(&[pid]).remove(&pid);
+        let found = identities(&[pid])?.remove(&pid);
         let found = found.ok_or_else(|| error("keep_awake_freeze_gone", pid))?;
         assert_eq!(found.pid, pid);
         assert!(!found.start.is_empty() && !found.exe.is_empty());
@@ -652,7 +805,6 @@ mod unix {
     /// Tells whether a process read now is the one journaled: same start time and same
     /// executable (Linux marks a replaced file " (deleted)", which still matches).
     fn same(now: &Proc, then: &Proc) -> bool {
-        let exe = |proc: &Proc| proc.exe.trim_end_matches(" (deleted)").to_owned();
         now.pid == then.pid && now.start == then.start && exe(now) == exe(then)
     }
 
@@ -669,90 +821,108 @@ mod unix {
         }
     }
 
-    /// Freezes one app: reads its main process and descendants (at most `PROCS_MAX`, all
-    /// the owner's), journals them with their identity and the boot session, synced, then
-    /// sends each SIGSTOP once its identity is read again and still matches. Inputs: the
-    /// lane journal, the app's name and its main pid. Output: the record journaled, or why
-    /// the app was left running.
+    /// Freezes one listed instance of an app (rv-secreview T17 r1 F1, F4; leader 01:57):
+    /// refuses it unless the fence allows this process and it still runs the listed app's
+    /// executable, then keeps each descendant the fence allows that runs the app's own code
+    /// and whose parent is kept, so a shell, a system tool, CrazyAgent or an agent below
+    /// the app keeps running with everything below it. It journals those processes (at most
+    /// `PROCS_MAX`) with their identity and the boot session, synced, then sends each
+    /// SIGSTOP once its identity is read again and still matches. Inputs: the lane journal,
+    /// the listed instance, the engine pid and the agent roots. Output: the record
+    /// journaled, or why the app was left running.
     pub fn freeze(
         journal: &mut Journal,
         listed: &Running,
         engine: u32,
         roots: &BTreeSet<u32>,
     ) -> Result<Frozen, EngineError> {
-        let _ = (engine, roots);
-        let app = listed.app.name.as_str();
+        let name = listed.app.name.as_str();
         let pid = listed.pid;
-        assert!(!app.is_empty());
-        if pid <= 1 {
+        assert!(!name.is_empty());
+        if pid <= 1 || engine <= 1 {
             return Err(error("keep_awake_freeze_pid", pid));
         }
         let rows = table()?;
-        let own = rustix::process::getuid().as_raw();
-        let mut pids = vec![pid];
-        pids.extend(below(&rows, pid, PROCS_MAX));
-        if pids.len() > PROCS_MAX {
-            return Err(error("keep_awake_freeze_too_many", app));
+        let fence = Fence::new(&rows, engine, roots);
+        if !fence.may(pid, &listed.path) || super::OWN_IDS.contains(&listed.app.id.as_str()) {
+            return Err(error("keep_awake_freeze_refused", name));
         }
-        let owned = |pid: &u32| rows.iter().any(|row| row.pid == *pid && row.uid == own);
-        if !pids.iter().all(owned) {
-            return Err(error("keep_awake_freeze_not_owner", app));
+        let tree = below(&rows, &[pid], TREE_MAX);
+        if tree.len() >= TREE_MAX {
+            return Err(error("keep_awake_freeze_too_many", name));
         }
-        let mut found = identities(&pids);
-        let procs: Vec<Proc> = pids.iter().filter_map(|pid| found.remove(pid)).collect();
-        if procs.first().is_none_or(|first| first.pid != pid) {
-            return Err(error("keep_awake_freeze_gone", pid));
+        let mut asked = vec![pid];
+        asked.extend(&tree);
+        let found = identities(&asked)?;
+        let main = found
+            .get(&pid)
+            .ok_or_else(|| error("keep_awake_freeze_gone", pid))?;
+        if Path::new(exe(main)) != listed.path {
+            return Err(error("keep_awake_freeze_moved", name));
+        }
+        let home = home(&listed.path);
+        let owns = |path: &Path| {
+            home.as_ref()
+                .map_or(path == listed.path, |home| path.starts_with(home))
+        };
+        let mut kept = BTreeSet::from([pid]);
+        let mut procs = vec![main.clone()];
+        for child in &tree {
+            let Some(proc) = found.get(child) else {
+                continue;
+            };
+            let path = Path::new(exe(proc));
+            let parent = fence.parents.get(child).copied().unwrap_or(0);
+            if kept.contains(&parent) && fence.may(*child, path) && owns(path) {
+                kept.insert(*child);
+                procs.push(proc.clone());
+            }
+        }
+        if procs.len() > PROCS_MAX {
+            return Err(error("keep_awake_freeze_too_many", name));
         }
         let frozen = Frozen {
-            app: app.into(),
+            app: name.into(),
             boot: boot_session()?,
             procs,
         };
         journal.record(frozen.entry())?;
         let pids: Vec<u32> = frozen.procs.iter().map(|proc| proc.pid).collect();
-        let now = identities(&pids);
+        let now = identities(&pids)?;
         for proc in &frozen.procs {
             if now.get(&proc.pid).is_some_and(|now| same(now, proc)) {
                 signal(proc.pid, rustix::process::Signal::STOP)?;
             }
         }
         assert!(!frozen.procs.is_empty() && frozen.procs.len() <= PROCS_MAX);
+        assert_eq!(frozen.procs[0].pid, pid);
         Ok(frozen)
     }
 
-    /// Thaws one journaled app: in the boot session it was frozen in, SIGCONT to each
-    /// process whose start time and executable, read again just before, still match. Any
-    /// other pid is never signalled, and a record of another boot is only forgotten.
-    /// Input: a `KIND` entry. Output: Ok when nothing is left to thaw, or why not.
+    /// Thaws one journaled app with a given reader of who runs now: in the boot session it
+    /// was frozen in, one read for all its processes, then SIGCONT to each whose start time
+    /// and executable still match. A process positively gone or now another is never
+    /// signalled; a read that fails returns its error, so the entry stays (rv-secreview r1
+    /// F2, rv-code r1 F1, F3). A record of another boot is only forgotten. Inputs: a `KIND`
+    /// entry and the reader. Output: Ok when nothing is left to thaw, or why not.
     pub fn thaw_with(
         entry: &Entry,
         read: impl Fn(&[u32]) -> Result<BTreeMap<u32, Proc>, EngineError>,
     ) -> Result<(), EngineError> {
-        let _ = read;
-        thaw(entry)
-    }
-
-    /// Thaws one journaled app as `thaw_with` does, reading who runs now from the system.
-    /// Input: a `KIND` entry. Output: Ok when nothing is left to thaw, or why not.
-    pub fn thaw(entry: &Entry) -> Result<(), EngineError> {
         assert_eq!(entry.kind, KIND);
         let frozen: Frozen = serde_json::from_str(&entry.restore)
             .map_err(|problem| error("keep_awake_freeze_entry_invalid", problem))?;
-        if frozen.procs.len() > PROCS_MAX {
-            return Err(error(
-                "keep_awake_freeze_entry_invalid",
-                "too many processes",
-            ));
+        if frozen.procs.is_empty() || frozen.procs.len() > PROCS_MAX {
+            return Err(error("keep_awake_freeze_entry_invalid", "process count"));
         }
         if frozen.boot != boot_session()? {
             return Ok(());
         }
+        let pids: Vec<u32> = frozen.procs.iter().map(|proc| proc.pid).collect();
+        let now = read(&pids)?;
         let mut first = None;
         for proc in &frozen.procs {
-            let Ok(now) = identity(proc.pid) else {
-                continue;
-            };
-            if !same(&now, proc) {
+            if !now.get(&proc.pid).is_some_and(|now| same(now, proc)) {
                 continue;
             }
             if let Err(problem) = signal(proc.pid, rustix::process::Signal::CONT) {
@@ -762,59 +932,117 @@ mod unix {
         first.map_or(Ok(()), Err)
     }
 
-    /// Keeps the running apps the owner may pick: never CrazyAgent, the engine, a process
-    /// above or below the engine, another user's process, pid 1, a system program or a
-    /// desktop shell. Inputs: the listed apps and the engine pid. Output: the pickable apps
-    /// by name, one per id, or why the process list cannot be read.
+    /// Thaws one journaled app as `thaw_with` does, reading who runs now from the system.
+    /// Input: a `KIND` entry. Output: Ok when nothing is left to thaw, or why not.
+    pub fn thaw(entry: &Entry) -> Result<(), EngineError> {
+        thaw_with(entry, identities)
+    }
+
+    /// Keeps the listed instances that may be frozen, each checked on its own process
+    /// (rv-secreview T17 r1 F1): never CrazyAgent, the engine, a process above or below the
+    /// engine or at or below an agent root, another user's process, pid 1, a system program
+    /// or a desktop shell. Inputs: the listed instances, the engine pid and the agent
+    /// roots. Output: the instances, in the order listed, or why the process list cannot be
+    /// read.
     pub fn allowed(
         running: &[Running],
         engine: u32,
         roots: &BTreeSet<u32>,
     ) -> Result<Vec<Running>, EngineError> {
-        let _ = (engine, roots);
-        Ok(running.iter().take(RUNNING_MAX).cloned().collect())
+        let rows = table()?;
+        let fence = Fence::new(&rows, engine, roots);
+        let kept: Vec<Running> = running
+            .iter()
+            .take(RUNNING_MAX)
+            .filter(|one| {
+                fence.may(one.pid, &one.path)
+                    && !super::OWN_IDS.contains(&one.app.id.as_str())
+                    && super::validate_apps(std::slice::from_ref(&one.app)).is_ok()
+            })
+            .cloned()
+            .collect();
+        assert!(kept.len() <= RUNNING_MAX);
+        Ok(kept)
     }
 
-    /// The tmux servers this engine knows (leader 01:57, until T17b). Input: the engine
-    /// root. Output: their pids, or why the process list cannot be read.
-    pub fn servers(root: &std::path::Path) -> Result<BTreeSet<u32>, EngineError> {
-        let _ = root;
-        Ok(BTreeSet::new())
+    /// The tmux servers this engine knows (leader 01:57, until T17b): the owner's tmux
+    /// processes whose command line serves a socket in this engine's terminal folder or an
+    /// agent's temp folder. Input: the engine root. Output: their pids, or why they cannot
+    /// be read, which refuses every freeze.
+    pub fn servers(root: &Path) -> Result<BTreeSet<u32>, EngineError> {
+        let folders = super::socket_folders(root);
+        #[cfg(target_os = "linux")]
+        let found = linux::tmux().ok_or_else(|| error("keep_awake_freeze_table", "no tmux"))?;
+        #[cfg(not(target_os = "linux"))]
+        let found = tmux()?;
+        if found.len() > SERVERS_MAX {
+            return Err(error("keep_awake_freeze_table", "too many tmux processes"));
+        }
+        let known: BTreeSet<u32> = found
+            .into_iter()
+            .filter(|(_, args)| super::serves(args, &folders))
+            .map(|(pid, _)| pid)
+            .collect();
+        assert!(known.len() <= SERVERS_MAX);
+        Ok(known)
     }
 
-    /// Keeps the running apps the owner may pick, one per id. Inputs: the listed apps, the
-    /// engine pid and the agent roots. Output: the pickable apps by name, or why the
-    /// process list cannot be read.
+    /// Lists the owner's tmux processes and their command lines: one `ps` for the names,
+    /// one for the command lines of those. Output: pid and command line each, or why not.
+    #[cfg(not(target_os = "linux"))]
+    fn tmux() -> Result<Vec<(u32, String)>, EngineError> {
+        let own = rustix::process::getuid().as_raw();
+        let text = run(&mut tool("/bin/ps", &["-axo", "pid=,uid=,comm="]))
+            .ok_or_else(|| error("keep_awake_freeze_table", "no process list"))?;
+        let pids: Vec<u32> = text
+            .lines()
+            .take(TABLE_MAX)
+            .filter_map(|line| {
+                let mut words = line.split_whitespace();
+                let pid: u32 = words.next()?.parse().ok()?;
+                let uid: u32 = words.next()?.parse().ok()?;
+                let comm = words.collect::<Vec<_>>().join(" ");
+                let named = Path::new(&comm)
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("tmux"));
+                (uid == own && pid > 1 && named).then_some(pid)
+            })
+            .collect();
+        if pids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if pids.len() > SERVERS_MAX {
+            return Err(error("keep_awake_freeze_table", "too many tmux processes"));
+        }
+        let list: Vec<String> = pids.iter().map(u32::to_string).collect();
+        let (_, text) = ran(&mut tool(
+            "/bin/ps",
+            &["-o", "pid=,args=", "-p", &list.join(",")],
+        ))
+        .ok_or_else(|| error("keep_awake_freeze_table", "no command lines"))?;
+        let found: Vec<(u32, String)> = text
+            .lines()
+            .filter_map(|line| {
+                let (pid, args) = line.trim_start().split_once(' ')?;
+                let pid: u32 = pid.parse().ok()?;
+                pids.contains(&pid).then(|| (pid, args.trim().to_owned()))
+            })
+            .collect();
+        assert!(found.len() <= pids.len());
+        Ok(found)
+    }
+
+    /// Keeps the running apps the owner may pick, one per id: the ids of `allowed`.
+    /// Inputs: the listed apps, the engine pid and the agent roots. Output: the pickable
+    /// apps by name, or why the process list cannot be read.
     pub fn pickable(
         running: &[Running],
         engine: u32,
         roots: &BTreeSet<u32>,
     ) -> Result<Vec<FreezeApp>, EngineError> {
-        let _ = roots;
-        assert!(engine > 1);
-        let rows = table()?;
-        let own = rustix::process::getuid().as_raw();
-        let upward = above(&rows, engine);
-        let downward: BTreeSet<u32> = below(&rows, engine, TABLE_MAX).into_iter().collect();
-        let here = std::env::current_exe().ok();
         let mut picked: BTreeMap<String, FreezeApp> = BTreeMap::new();
-        for one in running.iter().take(RUNNING_MAX) {
-            let owner = rows
-                .iter()
-                .find(|row| row.pid == one.pid)
-                .map(|row| row.uid);
-            let allowed = one.pid > 1
-                && owner == Some(own)
-                && !upward.contains(&one.pid)
-                && !downward.contains(&one.pid)
-                && !super::OWN_IDS.contains(&one.app.id.as_str())
-                && !kept_out(&one.path, here.as_deref())
-                && super::validate_apps(std::slice::from_ref(&one.app)).is_ok();
-            if allowed {
-                picked
-                    .entry(one.app.id.clone())
-                    .or_insert_with(|| one.app.clone());
-            }
+        for one in allowed(running, engine, roots)? {
+            picked.entry(one.app.id.clone()).or_insert(one.app);
         }
         let mut apps: Vec<FreezeApp> = picked.into_values().collect();
         apps.sort();
@@ -886,13 +1114,14 @@ mod unix {
 
     #[cfg(target_os = "linux")]
     mod linux {
-        use super::super::{FreezeApp, Proc, RUNNING_MAX, Running, kept_out};
+        use super::super::{EngineError, FreezeApp, Proc, RUNNING_MAX, Running, error, kept_out};
         use super::{Row, TABLE_MAX};
         use std::collections::BTreeMap;
         use std::path::{Path, PathBuf};
 
         const ENTRIES_MAX: usize = 4096;
         const ENTRY_BYTES_MAX: u64 = 64 * 1024;
+        const ARGS_BYTES_MAX: u64 = 64 * 1024;
 
         /// The fields after a process's name in `/proc/<pid>/stat`, from the state on.
         fn stat(pid: u32) -> Option<Vec<String>> {
@@ -935,16 +1164,70 @@ mod unix {
             Some(rows)
         }
 
+        /// Tells whether a `/proc` read failed because the process is gone: no such file
+        /// or no such process. Input: the error. Output: true when gone.
+        fn gone(problem: &std::io::Error) -> bool {
+            problem.kind() == std::io::ErrorKind::NotFound
+                || problem.raw_os_error() == Some(libc::ESRCH)
+        }
+
         /// Reads who one process is: field 22 of its stat (start time in clock ticks since
-        /// boot) and the executable it runs. Output: none when it is gone or not readable.
-        pub(super) fn identity(pid: u32) -> Option<Proc> {
-            let start = stat(pid)?.get(19)?.clone();
-            let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-            Some(Proc {
+        /// boot) and the executable it runs (rv-code T17 r1 F1). Output: none only when it
+        /// is gone, or `keep_awake_freeze_identity` for any other failure, such as too many
+        /// open files, which keeps a journal entry.
+        pub(super) fn identity(pid: u32) -> Result<Option<Proc>, EngineError> {
+            let unread = |problem: std::io::Error| error("keep_awake_freeze_identity", problem);
+            let text = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(text) => text,
+                Err(problem) if gone(&problem) => return Ok(None),
+                Err(problem) => return Err(unread(problem)),
+            };
+            let start = text
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+                .ok_or_else(|| error("keep_awake_freeze_identity", "stat"))?
+                .to_owned();
+            let exe = match std::fs::read_link(format!("/proc/{pid}/exe")) {
+                Ok(exe) => exe,
+                Err(problem) if gone(&problem) => return Ok(None),
+                Err(problem) => return Err(unread(problem)),
+            };
+            assert!(!start.is_empty());
+            Ok(Some(Proc {
                 pid,
                 start,
                 exe: exe.to_string_lossy().into_owned(),
-            })
+            }))
+        }
+
+        /// Lists the owner's tmux processes and their command lines from `/proc`, each line
+        /// at most 64 KiB, its words joined by spaces. Output: pid and command line each, or
+        /// none when the process table cannot be read.
+        pub(super) fn tmux() -> Option<Vec<(u32, String)>> {
+            use std::io::Read;
+            let own = rustix::process::getuid().as_raw();
+            let mut found = Vec::new();
+            for row in table()?.iter().filter(|row| row.uid == own && row.pid > 1) {
+                let Ok(exe) = std::fs::read_link(format!("/proc/{}/exe", row.pid)) else {
+                    continue;
+                };
+                let named = exe
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("tmux"));
+                if !named {
+                    continue;
+                }
+                let Ok(file) = std::fs::File::open(format!("/proc/{}/cmdline", row.pid)) else {
+                    continue;
+                };
+                let mut bytes = Vec::new();
+                if file.take(ARGS_BYTES_MAX).read_to_end(&mut bytes).is_err() {
+                    continue;
+                }
+                let args = String::from_utf8_lossy(&bytes).replace('\0', " ");
+                found.push((row.pid, args.trim().to_owned()));
+            }
+            Some(found)
         }
 
         /// The folders desktop entries live in: the owner's, then the system's, then the
@@ -1089,17 +1372,23 @@ mod unix {
 
 #[cfg(unix)]
 mod lane {
-    use super::{Cover, FreezeApp, Journal, KIND, guard_command, mute};
+    use super::{Cover, FreezeApp, Frozen, Journal, KIND, guard_command, mute};
+    use std::collections::BTreeSet;
     use std::fs::File;
     use std::io::Write;
     use std::path::PathBuf;
     use std::process::{Child, Stdio};
-    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex, mpsc};
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
     const GUARD_WAIT: Duration = Duration::from_secs(2);
     const GUARD_STEP: Duration = Duration::from_millis(10);
+    const RETRY_FIRST: Duration = Duration::from_millis(500);
+    const RETRY_MOST: Duration = Duration::from_secs(60);
+    const NOTICE_AFTER: u32 = 3;
+    const FROZEN_MAX: usize = 32;
+    const _: () = assert!(FROZEN_MAX < super::journal::ENTRIES_MAX);
 
     /// One order to the lane thread.
     #[derive(Debug)]
@@ -1112,11 +1401,15 @@ mod lane {
     /// The lid-closed lane (DEC-167 Task 17): a thread that freezes the chosen apps and
     /// mutes the sound while the lid is closed during a hold, and undoes both when told,
     /// off the team service thread. It alone writes the lid-closed journal while it runs,
-    /// holding its lock, and keeps one thaw guard alive while anything is journaled.
+    /// holding its lock, and keeps one thaw guard alive while anything is journaled. What
+    /// it could not put back it tries again on its own while uncovered, and after three
+    /// failed tries in a row it names those kinds for the owner's notice (rv-secreview and
+    /// rv-code T17 r1).
     #[derive(Debug)]
     pub struct Lane {
         orders: mpsc::Sender<Order>,
         worker: Option<JoinHandle<()>>,
+        stuck: Arc<Mutex<Vec<String>>>,
     }
 
     /// The lane thread's own state.
@@ -1127,8 +1420,9 @@ mod lane {
         engine: u32,
         held: Option<(File, Journal)>,
         guard: Option<(Child, std::io::PipeWriter)>,
-        frozen: Vec<String>,
-        muted: bool,
+        covered: bool,
+        tries: u32,
+        stuck: Arc<Mutex<Vec<String>>>,
     }
 
     impl Lane {
@@ -1144,6 +1438,7 @@ mod lane {
             assert!(root.is_absolute() && program.is_absolute());
             assert!(engine > 1);
             let (orders, inbox) = mpsc::channel();
+            let stuck = Arc::new(Mutex::new(Vec::new()));
             let mut worker = Worker {
                 root,
                 program,
@@ -1151,17 +1446,29 @@ mod lane {
                 engine,
                 held: None,
                 guard: None,
-                frozen: Vec::new(),
-                muted: false,
+                covered: false,
+                tries: 0,
+                stuck: Arc::clone(&stuck),
             };
             let worker = std::thread::Builder::new()
                 .name("keep-awake-lid-closed".into())
                 .spawn(move || {
-                    while let Ok(order) = inbox.recv() {
+                    loop {
+                        let order = match worker.retry_in() {
+                            Some(wait) => match inbox.recv_timeout(wait) {
+                                Ok(order) => Some(order),
+                                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            },
+                            None => match inbox.recv() {
+                                Ok(order) => Some(order),
+                                Err(_) => break,
+                            },
+                        };
                         match order {
-                            Order::Cover(cover) => worker.cover(&cover),
-                            Order::Uncover => worker.uncover(),
-                            Order::Stop => break,
+                            Some(Order::Cover(cover)) => worker.cover(&cover),
+                            Some(Order::Uncover) | None => worker.uncover(),
+                            Some(Order::Stop) => break,
                         }
                     }
                     worker.uncover();
@@ -1169,6 +1476,7 @@ mod lane {
             Ok(Self {
                 orders,
                 worker: Some(worker),
+                stuck,
             })
         }
 
@@ -1186,7 +1494,10 @@ mod lane {
         /// The kinds of entries the lane could not put back after three tries in a row,
         /// for the owner's notice; empty once everything is back. Output: the kinds.
         pub fn stuck(&self) -> Vec<String> {
-            Vec::new()
+            self.stuck
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
         }
 
         /// Asks the lane to undo everything and end, without waiting.
@@ -1227,6 +1538,40 @@ mod lane {
             self.held.as_mut().map(|(_, journal)| journal)
         }
 
+        /// The kinds of the entries the journal holds now, each once. Output: the kinds.
+        fn left(&self) -> Vec<String> {
+            let kinds: BTreeSet<String> = self
+                .held
+                .iter()
+                .flat_map(|(_, journal)| journal.entries())
+                .map(|entry| entry.kind.clone())
+                .collect();
+            kinds.into_iter().collect()
+        }
+
+        /// The main pids of the apps the journal holds frozen, so a later cover never
+        /// journals one again. Output: the pids.
+        fn frozen(&self) -> BTreeSet<u32> {
+            self.held
+                .iter()
+                .flat_map(|(_, journal)| journal.entries())
+                .filter(|entry| entry.kind == KIND)
+                .filter_map(|entry| serde_json::from_str::<Frozen>(&entry.restore).ok())
+                .filter_map(|frozen| frozen.procs.first().map(|first| first.pid))
+                .collect()
+        }
+
+        /// How long to wait before trying the entries left again: none while covered or
+        /// with nothing left, else half a second doubling per failed try, at most a minute.
+        /// Output: the wait, or none to wait for an order alone.
+        fn retry_in(&self) -> Option<Duration> {
+            if self.covered || self.left().is_empty() {
+                return None;
+            }
+            let doubled = self.tries.saturating_sub(1).min(7);
+            Some(RETRY_FIRST.saturating_mul(1 << doubled).min(RETRY_MOST))
+        }
+
         /// Starts the thaw guard when none runs: the read end of a fresh pipe is its stdin,
         /// the write end stays here, so the guard sees the end of the pipe when the engine
         /// dies. Output: true when a guard runs.
@@ -1255,60 +1600,75 @@ mod lane {
         /// Freezes the chosen apps not frozen yet and mutes the sound once, each only with
         /// the journal open and a thaw guard running. Input: the cover.
         fn cover(&mut self, cover: &Cover) {
+            self.covered = true;
             if !cover.any() || self.journal().is_none() || !self.guarded() {
                 return;
             }
             if cover.freeze && !cover.apps.is_empty() {
                 self.freeze(&cover.apps);
             }
-            if cover.mute && !self.muted {
+            let muted = self.left().iter().any(|kind| kind == mute::KIND);
+            if cover.mute && !muted {
                 let Some(tool) = self.sound.clone() else {
                     return;
                 };
                 let Some(journal) = self.journal() else {
                     return;
                 };
-                match mute::mute(journal, &tool) {
-                    Ok(_) => self.muted = true,
-                    Err(problem) => eprintln!("keep awake mute: {}", problem.0),
+                if let Err(problem) = mute::mute(journal, &tool) {
+                    eprintln!("keep awake mute: {}", problem.0);
                 }
             }
         }
 
-        /// Freezes each chosen app that runs now and may still be picked, checked again
-        /// now, not when it was chosen. Input: the chosen apps.
+        /// Freezes each listed instance of a chosen app that may be frozen now, checked
+        /// per process now, not when it was chosen (rv-secreview T17 r1 F1), and never one
+        /// inside a tmux server this engine knows (leader 01:57, until T17b); at most
+        /// `FROZEN_MAX` at once. Input: the chosen apps.
         fn freeze(&mut self, apps: &[FreezeApp]) {
             let engine = self.engine;
-            let none = std::collections::BTreeSet::new();
-            let listed = super::running().and_then(|running| {
-                super::pickable(&running, engine, &none).map(|ok| (running, ok))
+            let found = super::servers(&self.root).and_then(|roots| {
+                let running = super::running()?;
+                super::allowed(&running, engine, &roots).map(|allowed| (roots, allowed))
             });
-            let (running, allowed) = match listed {
-                Ok(listed) => listed,
+            let (roots, allowed) = match found {
+                Ok(found) => found,
                 Err(problem) => {
                     eprintln!("keep awake freeze: {}", problem.0);
                     return;
                 }
             };
-            for one in &running {
-                let chosen = apps.iter().any(|app| app.id == one.app.id);
-                let may = allowed.iter().any(|app| app.id == one.app.id);
-                if !chosen || !may || self.frozen.contains(&one.app.id) {
+            let mut frozen = self.frozen();
+            let chosen = allowed
+                .iter()
+                .filter(|one| apps.iter().any(|app| app.id == one.app.id));
+            for one in chosen {
+                if frozen.contains(&one.pid) {
                     continue;
+                }
+                if frozen.len() >= FROZEN_MAX {
+                    eprintln!("keep awake freeze: at most {FROZEN_MAX} apps at once");
+                    return;
                 }
                 let Some(journal) = self.journal() else {
                     return;
                 };
-                match super::freeze(journal, one, engine, &none) {
-                    Ok(_) => self.frozen.push(one.app.id.clone()),
+                match super::freeze(journal, one, engine, &roots) {
+                    Ok(_) => {
+                        frozen.insert(one.pid);
+                    }
                     Err(problem) => eprintln!("keep awake freeze: {}", problem.0),
                 }
             }
+            assert!(frozen.len() <= FROZEN_MAX);
         }
 
         /// Thaws every app and puts the sound back, settles those entries, then tells the
-        /// guard it may leave. Entries that fail stay for the guard or the next start.
+        /// guard it may leave. Entries that fail stay: the lane tries them again while
+        /// uncovered, names them for the notice after `NOTICE_AFTER` failed tries in a row,
+        /// and keeps a thaw guard running for them.
         fn uncover(&mut self) {
+            self.covered = false;
             if let Some((_, journal)) = self.held.as_mut() {
                 if let Err(problem) = journal.settle(KIND, super::thaw) {
                     eprintln!("keep awake thaw: {}", problem.0);
@@ -1322,17 +1682,25 @@ mod lane {
                     eprintln!("keep awake sound: {}", problem.0);
                 }
             }
-            self.frozen.clear();
-            self.muted = false;
-            let left = self
-                .held
-                .as_ref()
-                .is_some_and(|(_, journal)| !journal.entries().is_empty());
+            let left = self.left();
+            let named = if left.is_empty() {
+                self.tries = 0;
+                Some(Vec::new())
+            } else {
+                self.tries = self.tries.saturating_add(1);
+                (self.tries >= NOTICE_AFTER).then(|| left.clone())
+            };
+            if let Some(named) = named {
+                *self
+                    .stuck
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = named;
+            }
+            if !left.is_empty() {
+                self.guarded();
+                return;
+            }
             if let Some((mut child, mut writer)) = self.guard.take() {
-                if left {
-                    self.guard = Some((child, writer));
-                    return;
-                }
                 let _ = writer.write_all(b"d");
                 drop(writer);
                 let until = Instant::now() + GUARD_WAIT;

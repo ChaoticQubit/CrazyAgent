@@ -609,7 +609,9 @@ pub(crate) fn lid_cover(
     sensors: Option<&Sensors>,
     cover: freeze::Cover,
 ) -> Option<freeze::Cover> {
-    let closed = sensors.is_some_and(|sensors| sensors.lid_closed == Some(true));
+    let closed = sensors.is_some_and(|sensors| {
+        sensors.lid_closed == Some(true) && sensors.external_display != Some(true)
+    });
     (wanted && closed && cover.any()).then_some(cover)
 }
 
@@ -642,6 +644,8 @@ pub struct Keeper {
     #[cfg(unix)]
     lane: Option<freeze::Lane>,
     covered: Option<freeze::Cover>,
+    #[cfg(unix)]
+    lane_noted: Vec<String>,
 }
 
 impl Keeper {
@@ -852,6 +856,31 @@ impl Keeper {
         }
     }
 
+    /// Writes the restore rows of what the lid-closed lane could not put back after three
+    /// tries, and clears them once it put everything back (rv-secreview and rv-code T17
+    /// r1). It writes only when that changes, starting from nothing named, so the engine
+    /// start's own rows stay until the lane names its kinds. A write that fails is logged
+    /// and tried again at the next step. Input: the engine database outside any transaction.
+    fn note_lane(&mut self, connection: &Connection) {
+        #[cfg(unix)]
+        {
+            let Some(lane) = self.lane.as_ref() else {
+                return;
+            };
+            let stuck = lane.stuck();
+            if stuck == self.lane_noted {
+                return;
+            }
+            let kinds: Vec<&str> = stuck.iter().map(String::as_str).collect();
+            match crate::notifications::keep_awake::lid_closed_left(connection, &kinds) {
+                Ok(()) => self.lane_noted = stuck,
+                Err(problem) => eprintln!("keep awake lid closed notice: {}", short(&problem.0)),
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = connection;
+    }
+
     /// Brings the platform hold in step with the wanted state. A hold found lost is logged
     /// and taken again at once; one lost twice in a row, or one that cannot be taken, is
     /// logged and counts as failed. A hold that came back without the lid it was asked for
@@ -926,6 +955,7 @@ impl Keeper {
         if sensed.is_some() {
             self.note_lid_journal(connection);
         }
+        self.note_lane(connection);
         let settled = since(self.evaluated_ms, TICK_MS) && self.work == Some(work);
         if settled && sensed.is_none() && !dirty(connection)? {
             return Ok(None);

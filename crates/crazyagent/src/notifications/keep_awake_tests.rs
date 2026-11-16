@@ -1,6 +1,5 @@
 use super::keep_awake::{
-    APPROVAL_TEXT, LID_JOURNAL_TEXT, ended_text, hot_text, left_over, lid_closed_left,
-    lid_journal,
+    APPROVAL_TEXT, LID_JOURNAL_TEXT, ended_text, hot_text, left_over, lid_closed_left, lid_journal,
 };
 use super::*;
 use crate::config::ModelAccess;
@@ -324,8 +323,16 @@ fn the_lid_closed_lane_items_change_only_their_own_rows() {
         .map(|item| item.text)
         .collect();
     assert_eq!(texts.len(), 4, "{texts:?}");
-    assert!(texts.iter().any(|text| text.contains("could not start an app again")));
-    assert!(texts.iter().any(|text| text.contains("could not put the sound back")));
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("could not start an app again"))
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("could not put the sound back"))
+    );
     assert!(texts.iter().any(|text| text == NOT_PUT_BACK));
     assert!(texts.iter().any(|text| text == LID_JOURNAL_TEXT));
 

@@ -134,7 +134,10 @@ impl StandIn {
                 break;
             }
             let mut line = String::new();
-            assert!(reader.read_line(&mut line).unwrap() > 0, "the stand-in ended");
+            assert!(
+                reader.read_line(&mut line).unwrap() > 0,
+                "the stand-in ended"
+            );
             let Some(rest) = line.trim().strip_prefix("stand-in ") else {
                 continue;
             };
@@ -597,7 +600,9 @@ fn never_freeze_descendants_keep_running_with_their_whole_subtree() {
     let mut want = vec![app.pid(), app.labelled("plain")];
     want.sort_unstable();
     assert_eq!(pids, want, "the app and its own child only");
-    assert!(settles(|| stopped(app.pid()) && stopped(app.labelled("plain"))));
+    assert!(settles(
+        || stopped(app.pid()) && stopped(app.labelled("plain"))
+    ));
     for label in ["system", "inner", "ours"] {
         let pid = app.labelled(label);
         assert!(stays(|| !stopped(pid)), "{label} keeps running");
@@ -638,7 +643,11 @@ fn a_thaw_that_cannot_read_who_runs_keeps_the_app_journaled_until_it_can() {
             .is_err()
     );
 
-    assert_eq!(journal.entries().len(), 1, "the entry stays for a later try");
+    assert_eq!(
+        journal.entries().len(),
+        1,
+        "the entry stays for a later try"
+    );
     assert!(stays(|| stopped(app.pid())), "nothing was sent");
     journal.settle(freeze::KIND, freeze::thaw).unwrap();
     assert!(journal.entries().is_empty());

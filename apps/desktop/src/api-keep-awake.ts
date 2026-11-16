@@ -126,9 +126,9 @@ export const KEEP_AWAKE_SETTINGS: readonly SettingWords[] = [
     options: [{ value: "sleep", label: "Sleep the display" }, { value: "leave_on", label: "Leave on" }] },
   { id: "display_awake", label: "Display awake with the lid open", help: "Whether a hold also keeps the display on. While it does, the screen stays unlocked.",
     options: [{ value: "off", label: "Off" }, { value: "while_holding", label: "While holding" }] },
-  { id: "freeze", label: "Freeze apps while the lid is closed", help: "The listed apps pause while a hold runs with the lid closed and go on when the lid opens. If one stays paused, run crazyagent keep-awake restore; the next start also puts it back.",
+  { id: "freeze", label: "Freeze apps while the lid is closed", help: "The listed apps pause while a hold runs with the lid closed and go on when the lid opens. Not while an external display is in use. If one stays paused, run crazyagent keep-awake restore; the next start also puts it back.",
     options: [{ value: "off", label: "Off" }, { value: "on", label: "On for the listed apps" }] },
-  { id: "mute", label: "Mute audio while the lid is closed", help: "The sound goes off while a hold runs with the lid closed and comes back as it was when the lid opens.",
+  { id: "mute", label: "Mute audio while the lid is closed", help: "The sound goes off while a hold runs with the lid closed and comes back as it was when the lid opens. Not while an external display is in use.",
     options: [{ value: "off", label: "Off" }, { value: "on", label: "On" }] },
 ];
 

@@ -2941,9 +2941,6 @@ fn owner_read(
             settings: crate::notifications::settings(&tx)?,
         },
         OwnerRead::KeepAwake => crate::keep_awake::read(&tx)?,
-        OwnerRead::KeepAwakeApps => OwnerData::KeepAwakeApps {
-            apps: crate::keep_awake::freeze::choices()?,
-        },
         OwnerRead::Memories {
             scope,
             search,
