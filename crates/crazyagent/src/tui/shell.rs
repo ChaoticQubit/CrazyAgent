@@ -100,6 +100,11 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
         kind: "Settings",
         place: Place::Setup { first_run: false },
     });
+    out.push(Target {
+        label: "Settings / GitHub".into(),
+        kind: "Settings",
+        place: Place::GitHubDefaults,
+    });
     for (label, place) in [
         ("New project", Place::NewProject),
         ("Add account", Place::AddAccount),

@@ -2632,6 +2632,7 @@ impl Screen for AppSetup {
             hints.push(hint("h", "Change home"));
             if matches!(&self.github, Load::Ready(github) if github.signed_in) {
                 hints.push(hint("g", "Sign out of GitHub"));
+                hints.push(hint("G", "GitHub rules"));
             }
             hints.push(hint("l", "Linux sockets"));
             hints.push(hint("v", "Linux supervisor"));
@@ -2694,6 +2695,12 @@ impl Screen for AppSetup {
             Key::Char('g') if !self.first_run => {
                 self.ask_sign_out(ctx);
                 Flow::Handled
+            }
+            Key::Char('G')
+                if !self.first_run
+                    && matches!(&self.github, Load::Ready(github) if github.signed_in) =>
+            {
+                Flow::Open(Place::GitHubDefaults)
             }
             Key::Char('l') if !self.first_run => {
                 self.ask_sockets(ctx);
