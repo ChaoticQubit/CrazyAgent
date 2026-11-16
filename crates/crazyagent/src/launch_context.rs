@@ -2485,15 +2485,27 @@ pub(crate) fn lock_kept(metadata: &fs::Metadata) -> bool {
 }
 
 /// Takes a context-less launch's hold on an agent home: the same per-home lock a full
-/// install takes, installing no files. The guard keeps a second launch out of the home
-/// while this one runs, so writing the launch key never lands on a home an agent already
-/// runs on. A Codex home also loses the skills an earlier run left in it, as a full install
-/// does (CTXM1-R2-L1). Inputs: the agent's home and the harness id. Output: the lock guard,
-/// `launch_home_busy` or [`SKILLS_KEPT`].
+/// install takes, installing no files, and for a listed harness's private home only through
+/// its no-follow walk from the agent home ([`lock_listed`]). The guard keeps a second launch
+/// out of the home while this one runs, so writing the launch key never lands on a home an
+/// agent already runs on. A Codex home also loses the skills an earlier run left in it, as a
+/// full install does (CTXM1-R2-L1). Inputs: the agent's home and the harness id. Output: the
+/// lock guard, a `launch_account_home_*` refusal, `launch_home_busy` or [`SKILLS_KEPT`].
 pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
-    crate::harnesses::launch::validate_home(home)?;
-    let lock = lock(home)?;
-    if drivers::piped(harness) == Ok(Piped::Codex) {
+    let piped = drivers::piped(harness);
+    let lock = match piped {
+        Ok(Piped::Acp | Piped::JsonlTurn | Piped::TextTurn) => {
+            let listed = crate::harnesses::registry::registry()
+                .get(harness)
+                .ok_or_else(|| failure("launch_harness_unsupported"))?;
+            lock_listed(home, Some(listed.manifest().id.as_str()))?
+        }
+        _ => {
+            crate::harnesses::launch::validate_home(home)?;
+            lock(home)?
+        }
+    };
+    if piped == Ok(Piped::Codex) {
         remove_copies(home)?;
     }
     Ok(Installed {
