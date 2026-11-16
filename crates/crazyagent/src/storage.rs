@@ -1242,6 +1242,7 @@ fn open_actor_database(
     } else {
         migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
+        crate::project_setup::removed::hold_left(&connection)?;
     }
     assert!(connection.is_autocommit());
     assert_eq!(
@@ -1291,6 +1292,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
     crate::worktrees::reconcile(connection)?;
+    crate::project_setup::removed::initialize(connection)?;
     crate::project_setup::forget_removed(connection, &["repository_admissions"])?;
     worker_dispatch::initialize(connection)?;
     model_gateway::initialize(connection)?;

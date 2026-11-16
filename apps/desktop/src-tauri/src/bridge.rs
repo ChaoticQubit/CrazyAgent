@@ -890,7 +890,9 @@ impl NativeBridge {
         let outcome = match response {
             Ok(OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) => {
                 match operation.result {
-                    OwnerResult::Applied => ActionOutcome::Applied,
+                    OwnerResult::Applied | OwnerResult::OnboardingStarted { .. } => {
+                        ActionOutcome::Applied
+                    }
                     OwnerResult::DispatchPrepared { .. }
                     | OwnerResult::RcliProfileRegistered { .. } => {
                         return Err(failure("unexpected_reply"));

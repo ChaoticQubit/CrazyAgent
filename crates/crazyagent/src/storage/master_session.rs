@@ -5810,9 +5810,13 @@ auth = { method = "none" }"#;
     }
 
     async fn owner_apply(storage: &Storage, started: &Started, id: &str, mutation: OwnerMutation) {
-        assert_eq!(
-            owner_result(storage, started, id, mutation).await,
-            OwnerResult::Applied
+        let result = owner_result(storage, started, id, mutation).await;
+        assert!(
+            matches!(
+                result,
+                OwnerResult::Applied | OwnerResult::OnboardingStarted { .. }
+            ),
+            "{result:?}"
         );
     }
 

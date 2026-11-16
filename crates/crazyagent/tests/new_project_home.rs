@@ -875,3 +875,96 @@ async fn the_demo_lands_once_as_a_seeded_project_with_the_engines_own_question()
     drop(owner);
     engine.stop().await;
 }
+
+/// rv-sec2 22:51 F1 (DEC-178 addendum 1): a demo made again after Delete everything inherits
+/// nothing of the old one: not its notes, not a standing connector allow a V3 build kept for
+/// it, and not its removal record. The connector table is made here as that build makes it.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_demo_made_again_inherits_nothing_of_the_old_one() {
+    use crazyagent::demo::{NAME, PROJECT_ID};
+    use crazyagent::memory::library::MemoryScope;
+    use crazyagent::protocol::CredentialRef;
+    let engine = Engine::with_settings(DEMO_POOL).await;
+    let place = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let home = place.path().canonicalize().unwrap().join("projects");
+    fs::create_dir(&home).unwrap();
+    sign_in(engine.root.path(), "profile-codex");
+    let mut owner = OwnerController::attach(
+        engine.root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    let mut generation = 0;
+    let mut next = || {
+        generation += 1;
+        generation
+    };
+    let pool = CredentialRef::new("pool-codex").unwrap();
+    let response = owner
+        .set_projects_home(home.to_str().unwrap().into(), next())
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let response = owner.create_demo(pool.clone(), next()).await.unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let demo = ProjectId::new(PROJECT_ID).unwrap();
+    let response = owner
+        .add_memory(
+            MemoryScope::Project {
+                project_id: demo.clone(),
+            },
+            "An old demo note.".into(),
+            next(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS connector_write_allowed
+            (project TEXT NOT NULL, connector TEXT NOT NULL);
+         INSERT INTO connector_write_allowed VALUES ('crazyagent-demo','linear');",
+    )
+    .unwrap();
+    let rows = |sql: &str| -> i64 { db.query_row(sql, [], |row| row.get(0)).unwrap() };
+
+    let response = owner
+        .delete_project(demo.clone(), NAME.into(), next())
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(
+        rows("SELECT count(*) FROM projects_removed WHERE project='crazyagent-demo'"),
+        1,
+        "the deleted demo's id is held until a demo is made again"
+    );
+    let response = owner.create_demo(pool, next()).await.unwrap();
+    assert_eq!(
+        result(response),
+        OwnerResult::Applied,
+        "Create demo still works after Delete everything"
+    );
+    for (sql, why) in [
+        (
+            "SELECT count(*) FROM memory_library WHERE project='crazyagent-demo'",
+            "no note of the old demo",
+        ),
+        (
+            "SELECT count(*) FROM connector_write_allowed WHERE project='crazyagent-demo'",
+            "no standing allow of the old demo",
+        ),
+        (
+            "SELECT count(*) FROM projects_removed WHERE project='crazyagent-demo'",
+            "no removal record of the live demo",
+        ),
+    ] {
+        assert_eq!(rows(sql), 0, "{why}");
+    }
+    drop(db);
+    drop(owner);
+    engine.stop().await;
+}

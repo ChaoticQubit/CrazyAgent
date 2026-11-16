@@ -4073,5 +4073,8 @@ fn credential_path(word: &str) -> bool {
 #[cfg(all(test, unix))]
 mod engine_tests;
 pub mod links;
+/// The removal record (DEC-178 addendum 1): which ids removals hold, which folder a
+/// project removed from the dashboard comes back from, and the id a new onboarding gets.
+pub(crate) mod removed;
 #[cfg(all(test, unix))]
 mod tests;

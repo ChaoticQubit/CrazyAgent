@@ -2428,9 +2428,9 @@ fn an_imported_project_memory_is_recalled_in_its_project_only() {
     assert!(recalled(&mut db, &beta, "").is_empty());
 }
 
-/// SA research id reuse (owner decision 11-14): the owner keeps a project's research, removes
-/// the project and adds a different folder that gets the same id; the new project's agents
-/// never get the removed project's kept research.
+/// SA research id reuse (owner decision 11-14, DEC-178 addendum 1): the owner keeps a
+/// project's research and removes the project; a New Project under the same id is refused,
+/// and the removed project's kept research is forgotten, so no agent ever gets it.
 #[tokio::test]
 async fn removed_project_kept_research_does_not_reach_a_project_reusing_the_id() {
     let engine = Engine::start().await;
@@ -2492,11 +2492,12 @@ async fn removed_project_kept_research_does_not_reach_a_project_reusing_the_id()
                 .await
                 .unwrap()
         ),
-        OwnerResult::Applied
+        rejected("project_id_removed"),
+        "a New Project never gets a removed project's id"
     );
     assert!(
         !research(&approved_direct(&engine, &reused)),
-        "the removed project's kept research never reaches the project reusing its id"
+        "the removed project's kept research is forgotten with it"
     );
     assert!(
         !tables_holding(&engine.database(), "Dummy research note R1")
