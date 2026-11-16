@@ -422,7 +422,7 @@ async fn install_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dep
 fn source_key(source: &PackSource) -> String {
     match source {
         PackSource::Git { repo, commit, path } => {
-            format!("{repo}@{commit}/{}", path.as_deref().unwrap_or_default())
+            crate::setup::launch::git_key(repo, commit, path.as_deref())
         }
         PackSource::Bundled { path } => {
             format!("bundled/{path}@{}", crate::setup::bundled::digest(path))
@@ -447,20 +447,16 @@ fn prepare(
             server: None,
             plugin,
         }),
-        PackKind::McpServer => {
-            let resolve = |name: &str| installer.program(name);
-            let plan = fetch::server_plan(entry, &folder, &resolve)?;
-            if let Some((package, version)) = &plan.tool {
-                installer.install_tool(package, version)?;
-            }
-            let spec = fetch::finish_plan(plan, &resolve)?;
-            Ok(Prepared {
-                source,
-                skills: Vec::new(),
-                server: Some((fetch::server_name(entry)?, spec)),
-                plugin,
-            })
-        }
+        PackKind::McpServer => Ok(Prepared {
+            source,
+            skills: Vec::new(),
+            server: Some(crate::setup::launch::pack_server(
+                installer,
+                entry,
+                Some(&folder),
+            )?),
+            plugin,
+        }),
     }
 }
 
@@ -509,39 +505,61 @@ async fn install_entry(
         Ok(Err(code)) => Err(code.0.to_owned()),
         Err(_) => Err("setup_install_failed".to_owned()),
     };
+    settle(root, id, outcome);
+}
+
+/// Installs one pack entry where setup fetches no checkout, since the fetch and bundled
+/// steps keep Unix file modes: an MCP server entry whose program and arguments need no
+/// entry folder is stored and approved ([`crate::setup::launch::server_only`]); any other
+/// entry is marked failed with the reason. Inputs: the storage sender, the installer, the
+/// engine root, the bundled folder (unused) and the entry. Output: none.
+#[cfg(not(unix))]
+async fn install_entry(
+    sender: &mpsc::Sender<Job>,
+    installer: Arc<dyn Installer>,
+    root: &Path,
+    _bundled: Option<PathBuf>,
+    entry: PackManifestEntry,
+) {
+    let id = entry.id.clone();
+    let prepared = tokio::task::spawn_blocking(move || {
+        crate::setup::launch::server_only(installer.as_ref(), &entry)
+    })
+    .await;
+    let outcome = match prepared {
+        Ok(Ok((source, server))) => storage(
+            sender,
+            Command::Install {
+                id: id.clone(),
+                source,
+                skills: Vec::new(),
+                server: Some(server),
+            },
+        )
+        .await
+        .map_err(|problem| problem.0),
+        Ok(Err(code)) => Err(code.0.to_owned()),
+        Err(_) => Err("setup_install_failed".to_owned()),
+    };
+    settle(root, id, outcome);
+}
+
+/// Records how one pack entry's install ended on the setup screen: a finished entry leaves
+/// the list, a failed one shows the plain reason. Inputs: the engine root, the entry id and
+/// the outcome code. Output: none.
+fn settle(root: &Path, id: String, outcome: Result<(), String>) {
     progress::with(root, |state| match outcome {
         Ok(()) => {
             state.pack.remove(&id);
         }
         Err(code) => {
             state.pack.insert(
-                id.clone(),
+                id,
                 PackState::Failed {
                     reason: crate::setup::pack_reason(&code),
                 },
             );
         }
-    });
-}
-
-/// Marks one pack entry failed where its source cannot be fetched or unpacked, since the
-/// fetch and bundled steps keep Unix file modes. Takes the same inputs as the Unix version;
-/// only the engine root and the entry are used.
-#[cfg(not(unix))]
-async fn install_entry(
-    _sender: &mpsc::Sender<Job>,
-    _installer: Arc<dyn Installer>,
-    root: &Path,
-    _bundled: Option<PathBuf>,
-    entry: PackManifestEntry,
-) {
-    progress::with(root, |state| {
-        state.pack.insert(
-            entry.id,
-            PackState::Failed {
-                reason: crate::setup::pack_reason(crate::setup::PLATFORM_UNSUPPORTED),
-            },
-        );
     });
 }
 

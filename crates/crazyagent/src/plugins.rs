@@ -57,19 +57,34 @@ fn printable(text: &str) -> bool {
     !text.chars().any(char::is_control) && !crate::memory::hidden_text(text)
 }
 
+/// Whether a server command is a full path on this system: rooted at `/` on Unix. Input:
+/// the command. Output: the answer.
+#[cfg(unix)]
+pub(crate) fn absolute_command(command: &str) -> bool {
+    command.starts_with('/')
+}
+
+/// Whether a server command is a full path on this system: on Windows a plain drive path
+/// such as `C:\Program Files\nodejs\npx.cmd`, never a `/`, UNC, verbatim, device or stream
+/// path ([`crate::sandbox::windows_clean_text`]). Input: the command. Output: the answer.
+#[cfg(not(unix))]
+pub(crate) fn absolute_command(command: &str) -> bool {
+    crate::sandbox::windows_clean_text(command)
+}
+
 impl ServerSpec {
     /// Checks the command or URL before it is saved, approved or checked, refusing control and
-    /// hidden characters (`crate::memory::hidden_text`) anywhere in it.
-    /// Input: an untrusted spec. Output: Ok, or a code naming the first problem:
-    /// a relative or oversized command, too many or bad arguments, a command and
-    /// arguments over `COMMAND_LINE_BYTES_MAX` together, or a URL that is
-    /// not https (plain http is allowed only for this Mac) or carries a password.
+    /// hidden characters (`crate::memory::hidden_text`) anywhere in it. Input: an untrusted
+    /// spec. Output: Ok, or a code naming the first problem: a command that is not a full path
+    /// ([`absolute_command`]) or is oversized, too many or bad arguments, a command and
+    /// arguments over `COMMAND_LINE_BYTES_MAX` together, or a URL that is not https (plain
+    /// http is allowed only for this Mac) or carries a password.
     pub fn validate(&self) -> Result<(), EngineError> {
         match self {
             Self::Stdio { command, args } => {
                 if command.is_empty()
                     || command.len() > COMMAND_BYTES_MAX
-                    || !command.starts_with('/')
+                    || !absolute_command(command)
                     || !printable(command)
                 {
                     return Err(error("server_command_invalid"));
@@ -410,7 +425,7 @@ pub(crate) const CONTEXT_MODE_PACKAGE: &str = "context-mode";
 const PACKAGE_VERSION_BYTES_MAX: usize = 32;
 
 /// Reads the default pack's pinned context-mode launch from an approved spec: a rooted
-/// `npx`, the leading `/` [`ServerSpec::validate`] asks for on every platform, given exactly
+/// `npx`, as the full path [`ServerSpec::validate`] asks for on this system, given exactly
 /// `-y context-mode@<version>` with an exact version (RV-DS241-153). Input: the spec.
 /// Output: npx's folder and the version, or none for any other spec.
 pub(crate) fn pinned_context_mode(spec: &ServerSpec) -> Option<(&Path, &str)> {

@@ -279,6 +279,30 @@ impl Installer for WindowsInstaller {
         }
     }
 
+    fn program(&self, name: &str) -> Option<PathBuf> {
+        self.lookup_program(name).ok()
+    }
+
+    /// Finds a pack server's program: uv as the uv setup runs it ([`Self::uv`]), any other
+    /// name as `<name>.cmd`, then `<name>.exe`, in the tool resolver's places only. A name
+    /// that is empty, hidden or holds a path or drive separator is refused. Input: the name.
+    /// Output: the file, or why it is missing.
+    fn lookup_program(&self, name: &str) -> Result<PathBuf, crate::tools::Missing> {
+        if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\', ':']) {
+            return Err(super::program_not_found(name));
+        }
+        if name == "uv" {
+            return self.uv().ok_or_else(|| super::program_not_found(name));
+        }
+        ["cmd", "exe"]
+            .iter()
+            .find_map(|extension| {
+                crate::tools::resolve(&format!("{name}.{extension}"), &self.places).ok()
+            })
+            .map(|found| found.entry)
+            .ok_or_else(|| super::program_not_found(name))
+    }
+
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError> {
         let wanted = match (dep, pin) {
             (Dependency::Tmux, _) => return Version::parse(CONPTY),

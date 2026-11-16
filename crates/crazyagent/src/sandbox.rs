@@ -5069,8 +5069,8 @@ fn clean_absolute(path: &Path) -> bool {
 /// joined by `\`, each neither `.` nor `..` nor ending in a space or dot, without control
 /// characters, quotes, `/`, `:` or the characters Windows forbids in names, at most 1024
 /// bytes. Input: the text. Output: true when plain.
-#[cfg(any(target_os = "windows", test))]
-fn windows_clean_text(text: &str) -> bool {
+#[cfg(any(not(unix), test))]
+pub(crate) fn windows_clean_text(text: &str) -> bool {
     let bytes = text.as_bytes();
     if text.len() > PATH_BYTES_MAX
         || bytes.len() < 4
