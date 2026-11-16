@@ -6679,6 +6679,32 @@ auth = { method = "none" }"#;
         case.close().await;
     }
 
+    /// DEC-180 T20 Q7: a listed master keeps its conversation when settings outside it
+    /// change, as the other masters do: the next send moves the session to the new settings
+    /// and its turn is prepared on the same account under them.
+    #[tokio::test]
+    async fn a_listed_master_keeps_its_conversation_after_a_settings_change_outside_it() {
+        let case = Fixture::listed().await;
+        save_key(&case, "listed-key", LISTED_KEY);
+        let (before, prepare) = rebind_after_outside_edit(&case).await;
+        let (session, _) = case.view().await;
+        assert_eq!(session.session_id, case.session.session_id);
+        assert_eq!(session.rebound.len(), 1);
+        assert_ne!(session.binding().0, &before);
+        let result = case.runtime(prepare).await;
+        let ready = matches!(&result, Ok(MasterRuntimeResult::Prepared(_)));
+        assert!(ready, "{:?}", result.as_ref().err());
+        let Ok(MasterRuntimeResult::Prepared(second)) = result else {
+            unreachable!();
+        };
+        assert_eq!(&second.attempt.config_id, session.binding().0);
+        let bound = second.profile.binding();
+        assert_eq!(&bound.config_id, session.binding().0);
+        assert_eq!(bound.source_hash, session.binding().1);
+        assert_eq!(bound.connection, second.attempt.connection);
+        case.close().await;
+    }
+
     /// PA-5 (DEC-141): an RCLI master turn starts with the startup instruction every master
     /// of the project gets, the tools-off one since an RCLI master has no tools: the project
     /// context, approved memories, skill and MCP names and the landing rules.
