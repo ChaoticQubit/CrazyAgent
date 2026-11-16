@@ -1784,6 +1784,53 @@ mod tests {
     }
 
     #[test]
+    fn a_routed_linux_drops_the_port_443_line_with_or_without_the_supervisor() {
+        use crate::sandbox::{
+            LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE, LinuxHost, LinuxSockets,
+        };
+        let host = |supervised, routed| {
+            Some(LinuxHost {
+                nested: true,
+                scoped: false,
+                supervised,
+                root: false,
+                armored: false,
+                routed,
+            })
+        };
+        let ports = Some(LINUX_PORTS_ANY_HOST_LINE.to_owned());
+        let tcp = Some(LinuxSockets::TcpOnly);
+        let high = [AccessGrant::Port { port: 8080 }, AccessGrant::TempFolder];
+        let low = [AccessGrant::Port { port: 8080 }, AccessGrant::Port { port: 80 }];
+        for supervised in [false, true] {
+            let gap = |routed, network, sockets, grants: &[AccessGrant]| {
+                linux_network_gap(network, host(supervised, routed), sockets, grants)
+            };
+            let https = AgentNetwork::Https;
+            assert_eq!(gap(true, https, tcp, &[]), None, "supervised {supervised}");
+            assert_eq!(gap(true, https, tcp, &high), None, "supervised {supervised}");
+            assert_eq!(
+                gap(true, https, tcp, &low),
+                gap(false, https, tcp, &low),
+                "a port below 1024 keeps the shared network: supervised {supervised}"
+            );
+            for sockets in [Some(LinuxSockets::TcpPorts), Some(LinuxSockets::Refuse), None] {
+                assert_eq!(gap(true, https, sockets, &[]), ports, "{sockets:?}");
+            }
+            assert_eq!(gap(true, AgentNetwork::Open, tcp, &[]), ports);
+            assert_eq!(
+                gap(true, AgentNetwork::None, tcp, &high),
+                gap(false, AgentNetwork::None, tcp, &high)
+            );
+        }
+        let unrouted = |supervised| {
+            linux_network_gap(AgentNetwork::Https, host(supervised, false), tcp, &[])
+        };
+        assert_eq!(unrouted(false), ports, "today's line");
+        assert_eq!(unrouted(true), Some(LINUX_DNS_ANY_HOST_LINE.to_owned()), "today's line");
+    }
+
+    #[test]
     fn a_level_says_what_this_linux_cannot_hold_for_it_and_nothing_elsewhere() {
         use crate::sandbox::{
             LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE, LinuxHost,

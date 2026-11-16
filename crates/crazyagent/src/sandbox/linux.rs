@@ -3038,8 +3038,9 @@ mod tests {
         let (_temp, open) = project(SandboxNetwork::Open);
         assert_eq!(said(true, &open), None);
         let plain = Some(super::super::LINUX_PORTS_ANY_HOST_LINE.to_owned());
+        let unrouted = Some(super::super::LINUX_UNROUTED_LINE.to_owned());
         let hosted = launched(&[AnyHost(443), Loopback(8080)]);
-        assert_eq!(said(true, &hosted), plain, "a model on a host, tools off");
+        assert_eq!(said(true, &hosted), unrouted, "a model on a host, tools off");
         assert_eq!(said(false, &hosted), None, "the page says it without a nest");
         let ports = launched(&[Loopback(8080)]).limit_sockets(LinuxSockets::TcpPorts);
         assert_eq!(said(true, &ports), plain);
@@ -3047,10 +3048,42 @@ mod tests {
         assert_eq!(said(true, &launched(&[])), None);
         for choice in [AgentNetwork::Https, AgentNetwork::Open] {
             let said = |sandbox| linux_unbridged_notice_on(host(true), choice, sandbox);
-            assert_eq!(said(&hosted), None, "{choice:?}: the page says it");
+            assert_eq!(said(&hosted), unrouted, "{choice:?}: no network of its own");
             assert_eq!(said(&ports), None, "{choice:?}: the page says it");
             assert_eq!(said(&low), Some(linux_unbridged_line(80)), "{choice:?}");
         }
+    }
+
+    #[test]
+    fn a_launch_that_could_have_a_network_of_its_own_says_why_it_has_none() {
+        use super::super::policy::AgentNetwork;
+        use super::super::{LINUX_UNROUTED_LINE, LinuxHost, linux_unbridged_notice_on};
+        use SandboxRemote::{AnyHost, Loopback};
+        let host = |nested, routed| {
+            Some(LinuxHost {
+                nested,
+                scoped: false,
+                supervised: false,
+                root: false,
+                armored: false,
+                routed,
+            })
+        };
+        let (_temp, eligible) =
+            project(SandboxNetwork::Only(vec![AnyHost(443), Loopback(18080)]));
+        assert!(eligible.routed().is_some());
+        let unrouted = Some(LINUX_UNROUTED_LINE.to_owned());
+        for choice in AgentNetwork::ALL {
+            let said = |held| linux_unbridged_notice_on(held, choice, &eligible);
+            assert_eq!(said(host(true, false)), unrouted, "{choice:?}");
+            assert_eq!(said(host(true, true)), None, "{choice:?}: routed");
+            assert_eq!(said(host(false, false)), None, "{choice:?}: no nest");
+        }
+        assert!(LINUX_UNROUTED_LINE.contains("has no network of its own: "));
+        let ports = eligible.limit_sockets(LinuxSockets::TcpPorts);
+        assert!(ports.routed().is_none());
+        let said = linux_unbridged_notice_on(host(true, false), AgentNetwork::Https, &ports);
+        assert_eq!(said, None, "not routed-eligible, the page says it");
     }
 
     #[test]

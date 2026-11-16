@@ -973,6 +973,11 @@ pub fn linux_unbridged_notice(
     linux_unbridged_notice_on(linux_host_kept(), choice, sandbox)
 }
 
+/// What a launch tells the owner in the agent's messages when this Linux nests agents but
+/// could not give this one the network of its own its ports allow (DEC-179 SBX-2): why it
+/// has none, and what that leaves open.
+pub const LINUX_UNROUTED_LINE: &str = "On this Linux, this agent has no network of its own: slirp4netns or the nf_tables iptables is missing here, or did not start, so every port it may reach on this computer is open to it on every host.";
+
 /// What a limited network cannot hold on Linux, shown there only, under the network choice
 /// in the desktop and the TUI (RV-DS241-83): Landlock limits outbound TCP by port, not by
 /// host, so a port an agent may reach on this computer is open to it on every host.
