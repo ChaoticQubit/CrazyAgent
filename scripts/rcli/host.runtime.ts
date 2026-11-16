@@ -166,6 +166,10 @@ export class HostChannel {
     } catch { this.fail("host_callback_failed"); }
   }
 
+  /** Writes one plain line of the host's own into the running turn's reply. Input: the line.
+   * Output: none; a refused line fails the channel as a refused observation does. */
+  note(_text: string): void {}
+
   complete(turnId: string, status: TurnStatus): void {
     if (this.closed || this.signal.aborted) return;
     try {

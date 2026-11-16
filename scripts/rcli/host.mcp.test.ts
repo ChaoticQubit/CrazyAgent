@@ -13,8 +13,9 @@ import { ToolRegistry } from "../../.local-state/tools/rcli-source/src/core/tool
 import type { ProviderEvent, SendMessageRequest, SubmitToolOutputsRequest } from "../../.local-state/tools/rcli-source/src/providers/backboard/types.ts";
 import { assembleClosedController } from "./host.ts";
 import {
-  GATEWAY_COMMAND, GATEWAY_CONNECT_MS, GATEWAY_LAUNCHES, GATEWAY_SERVER, GATEWAY_TIMEOUT_MS,
-  GATEWAY_TOOLS_MAX, GatewayTools, gatewayConfig, type Gateway,
+  GATEWAY_COMMAND, GATEWAY_CONNECT_MS, GATEWAY_LAUNCHES, GATEWAY_OFF_LINE, GATEWAY_SERVER,
+  GATEWAY_TIMEOUT_MS, GATEWAY_TOOLS_LINE, GATEWAY_TOOLS_MAX, GatewayTools, gatewayConfig,
+  type Gateway,
 } from "./host.mcp.ts";
 import { normalizeSdkObservation } from "./host.observations.ts";
 import { admitLaunch, parseLaunch } from "./host.runtime.ts";
@@ -73,6 +74,15 @@ async function withFixture(run: (fixture: Fixture) => Promise<void>, server = st
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+
+/**
+ * Writes a stand-in gateway that answers like `stubServer` but lists one tool more than the
+ * host takes. Inputs: the folder and the call log. Output: the script text.
+ */
+function crowdedServer(folder: string, calls: string): string {
+  const tools = `Array.from({ length: ${GATEWAY_TOOLS_MAX + 1} }, (_, index) => ({ name: "tool_" + index, description: "a tool", inputSchema: { type: "object", properties: {} } }))`;
+  return stubServer(folder, calls).replace(/const tools = \[[\s\S]*?\n\];/, `const tools = ${tools};`);
 }
 
 /** A model stand-in that plays two scripted streams: the first turn, then the continuation after tool results. */
@@ -186,6 +196,7 @@ test("a granted host lists the gateway's tools once, a read tool runs in manual 
       await tools.sync(AbortSignal.timeout(GATEWAY_CONNECT_MS));
       expect(registry.list().map((tool) => tool.name).sort()).toEqual([CREATE, LIST]);
       expect([...tools.names].sort()).toEqual([CREATE, LIST]);
+      expect(tools.takeNotice()).toBeNull();
       const permissions = buildPermissionContext(cwd, "manual", false);
       expect(decidePermission(registry.get(LIST)!, {}, permissions, cwd).behavior).toBe("allow");
       expect(decidePermission(registry.get(CREATE)!, {}, permissions, cwd).behavior).toBe("ask");
@@ -211,6 +222,65 @@ test("a gateway that does not start leaves the turn without connector tools and 
   }, () => "process.exit(1);\n");
 }, 20_000);
 
+test("a gateway that does not start says so once in the turn, and a turn cancelled while it starts says nothing", async () => {
+  await withFixture(async ({ cwd, gateway }) => {
+    const tools = new GatewayTools(gateway, cwd, new ToolRegistry(), new EventBus());
+    try {
+      await tools.sync(AbortSignal.timeout(GATEWAY_CONNECT_MS));
+      expect(tools.names).toEqual([]);
+      expect(tools.takeNotice()).toBe(GATEWAY_OFF_LINE);
+      expect(tools.takeNotice()).toBeNull();
+    } finally {
+      await tools.close();
+    }
+    const cancelled = new GatewayTools(gateway, cwd, new ToolRegistry(), new EventBus());
+    try {
+      await cancelled.sync(AbortSignal.abort());
+      expect(cancelled.names).toEqual([]);
+      expect(cancelled.takeNotice()).toBeNull();
+    } finally {
+      await cancelled.close();
+    }
+  }, () => "process.exit(1);\n");
+}, 20_000);
+
+test("a gateway that lists more tools than the host takes leaves the turn without them and says why", async () => {
+  await withFixture(async ({ cwd, gateway }) => {
+    const registry = new ToolRegistry();
+    const tools = new GatewayTools(gateway, cwd, registry, new EventBus());
+    try {
+      await tools.sync(AbortSignal.timeout(GATEWAY_CONNECT_MS));
+      expect(registry.list()).toEqual([]);
+      expect(tools.names).toEqual([]);
+      expect(tools.takeNotice()).toBe(GATEWAY_TOOLS_LINE);
+      expect(tools.takeNotice()).toBeNull();
+    } finally {
+      await tools.close();
+    }
+  }, crowdedServer);
+}, 20_000);
+
+test("a granted master turn whose gateway does not start says so once and still runs without connector tools", async () => {
+  await withFixture(async ({ cwd, home, gateway }) => {
+    const client = new ScriptedClient([{ kind: "thread", threadId: "thr_off" }, { kind: "assistant_delta", text: "no tools" }, { kind: "completed" }], []);
+    const config = new Config({ env: { apiKey: "k", apiUrl: "https://example.test/api" }, argv: ["--cwd", cwd], homeDir: home });
+    const notices: string[] = [];
+    const assembled = assembleClosedController({
+      config, permissions: buildPermissionContext(config.cwd, "manual", false), sessionId: "gateway-off", cwd: config.cwd, homeDir: home, gateway,
+      notice: (text) => notices.push(text),
+      client: client as unknown as AgentControllerDeps["client"],
+    });
+    try {
+      expect(await assembled.controller.submit("list my Linear issues")).toBe("completed");
+      expect(notices).toEqual([GATEWAY_OFF_LINE]);
+      expect((client.messages[0]?.tools ?? []).map((tool) => tool.function.name).filter((name) => name.startsWith(`mcp__${GATEWAY_SERVER}__`))).toEqual([]);
+    } finally {
+      await assembled.gateway?.close();
+      await assembled.controller.dispose();
+    }
+  }, () => "process.exit(1);\n");
+}, 30_000);
+
 test("a granted master turn calls a gateway read tool, the write tool is refused before the server, and every event is accepted", async () => {
   await withFixture(async ({ cwd, home, gateway, calls }) => {
     const client = new ScriptedClient(
@@ -222,8 +292,10 @@ test("a granted master turn calls a gateway read tool, the write tool is refused
     );
     const config = new Config({ env: { apiKey: "k", apiUrl: "https://example.test/api" }, argv: ["--cwd", cwd], homeDir: home });
     const permissions = buildPermissionContext(config.cwd, "manual", false);
+    const notices: string[] = [];
     const assembled = assembleClosedController({
       config, permissions, sessionId: "gateway-turn", cwd: config.cwd, homeDir: home, gateway,
+      notice: (text) => notices.push(text),
       client: client as unknown as AgentControllerDeps["client"],
     });
     const events: AgentEvent[] = [];
@@ -239,6 +311,7 @@ test("a granted master turn calls a gateway read tool, the write tool is refused
       expect(await readFile(calls, "utf8")).toBe("linear_list_issues\n");
       expect(events.some((event) => event.type === "tool:result" && event.name === LIST)).toBe(true);
       for (const event of events) expect(() => normalizeSdkObservation(event)).not.toThrow();
+      expect(notices).toEqual([]);
     } finally {
       detach();
       await assembled.gateway?.close();

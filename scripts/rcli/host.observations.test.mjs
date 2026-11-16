@@ -277,3 +277,31 @@ test("a rejected frame does not consume the writer sequence or claim a capture s
   assert.equal(chunks.length, 2);
   assert.equal(JSON.parse(chunks[1].subarray(4).toString()).sequence, 2);
 });
+
+test("the real channel writes a host line into the running turn's reply and nowhere before it", async () => {
+  const output = new PassThrough();
+  const chunks = [];
+  output.on("data", (chunk) => chunks.push(chunk));
+  const channel = new HostChannel(output, "session", "instance");
+  await channel.ready();
+  channel.note("before any turn");
+  channel.receive({ protocol_version: 1, session_id: "session", request_id: "request-one", control: { kind: "prompt", turn_id: "one", text: "work" } });
+  channel.start("one");
+  channel.observe({ type: "turn:start", turnId: "sdk-one" });
+  channel.note("Connector tools are off for this turn.");
+  await channel.close();
+  const bytes = Buffer.concat(chunks);
+  const packets = [];
+  for (let offset = 0; offset < bytes.length;) {
+    const length = bytes.readUInt32BE(offset);
+    packets.push(JSON.parse(bytes.subarray(offset + 4, offset + 4 + length).toString()));
+    offset += length + 4;
+  }
+  assert.deepEqual(packets.map((value) => value.event), [
+    { kind: "ready" },
+    { kind: "message_started", turn_id: "one", message_id: "msg-1" },
+    { kind: "message_delta", turn_id: "one", message_id: "msg-1", text: "Connector tools are off for this turn." },
+    { kind: "message_finished", turn_id: "one", message_id: "msg-1" },
+  ]);
+  assert.equal(channel.signal.aborted, false);
+});

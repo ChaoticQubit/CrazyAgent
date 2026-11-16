@@ -213,6 +213,13 @@ if (status === "failed" && turn.failure !== null) completed.failure = turn.failu
 assert(completed.failure === undefined || completed.status === "failed", "host_turn_state_invariant");
 return [completed];
 }
+/** Says one plain line of the host's own in the running turn, as a finished message of its
+ * own beside the model's. Input: the line. Output: the message frames, or none when no
+ * single turn is running. */
+note(_text: string): EventBody[] {
+this.check();
+return [];
+}
 stop(): void {
 this.check();
 this.stopped = true;

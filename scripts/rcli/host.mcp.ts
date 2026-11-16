@@ -14,6 +14,8 @@ export const GATEWAY_LAUNCHES = "connector-launches";
 export const GATEWAY_TIMEOUT_MS = 250_000;
 export const GATEWAY_CONNECT_MS = 10_000;
 export const GATEWAY_TOOLS_MAX = 512;
+export const GATEWAY_OFF_LINE = "Connector tools are off for this turn: the connector gateway did not start or answer within 10 seconds.";
+export const GATEWAY_TOOLS_LINE = "Connector tools are off for this turn: the connector gateway listed more tools than RCLI takes.";
 
 /**
  * Checks the two gateway paths a launch names: absolute, normal and plain, the folder directly
@@ -92,6 +94,12 @@ export class GatewayTools {
       this.names = [];
     }
     assert(this.names.length <= GATEWAY_TOOLS_MAX, "host_gateway_invariant");
+  }
+
+  /** The line to say once in the turn when the gateway left it without its tools, read once.
+   * A cancelled turn and a turn with the tools get none. Output: the line, or null. */
+  takeNotice(): string | null {
+    return null;
   }
 
   async close(): Promise<void> {
