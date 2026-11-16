@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
-use crazyagent::sandbox::linux::{BWRAP_PATHS, HelperRequest, LinuxBackend, LinuxSandbox, NEST_ARGS};
+use crazyagent::sandbox::linux::{
+    BWRAP_PATHS, HelperRequest, LOADER_REFUSED, LinuxBackend, LinuxSandbox, NEST_ARGS,
+};
 
 use crazyagent::sandbox::{
     InstalledSandbox, LinuxSockets, LinuxSupervisor, ProjectSandbox, Sandbox, SandboxError,
@@ -2421,19 +2423,51 @@ fn a_host_whose_landlock_does_not_hold_reports_the_process_namespace_bubblewrap_
     assert!(!host.supervised, "bubblewrap alone runs no call supervisor: {host:?}");
 }
 
-/// The host report blames AppArmor only where its user namespace restriction is on and
-/// nothing nests here: a host that nests, or one without the restriction, never says so,
-/// and a missing helper nests nothing (DEC-179 SBX-3, addendum 7).
+/// The host report blames AppArmor only where its user namespace restriction is on, nothing
+/// nests here and CrazyAgent does not run as root, whom the restriction does not cover: a
+/// host that nests, or one without the restriction, never says so, and a missing helper
+/// nests nothing (DEC-179 SBX-3, addendum 7, rv-ds241 nit).
 #[test]
 fn the_host_report_names_apparmor_only_where_it_restricts_and_nothing_nests() {
     let setting = fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns");
     let restricted = setting.is_ok_and(|text| text.trim_end_matches('\n') == "1");
     let temp = tempfile::tempdir().unwrap();
     let host = crazyagent::sandbox::linux::read_host(Path::new(HELPER), Some(temp.path()));
-    assert_eq!(host.armored, restricted && !host.nested, "{host:?}");
+    let blamed = restricted && !host.nested && !host.root;
+    assert_eq!(host.armored, blamed, "{host:?}");
     let absent = crazyagent::sandbox::linux::read_host(Path::new("/nonexistent/helper"), None);
     assert!(!absent.nested, "{absent:?}");
-    assert_eq!(absent.armored, restricted, "{absent:?}");
+    assert_eq!(absent.armored, restricted && !absent.root, "{absent:?}");
+}
+
+/// The helper starts no bubblewrap while its environment holds a variable the dynamic
+/// loader reads, and says why: bubblewrap would run in the helper's own AppArmor profile
+/// with it. The refusal comes first, so it holds on a machine that cannot nest too
+/// (DEC-179 SBX-3 fold, rv-sa241 MED-1).
+#[test]
+fn a_nest_refuses_the_dynamic_loaders_variables() {
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    for name in ["LD_LIBRARY_PATH", "GLIBC_TUNABLES"] {
+        let output = crazyagent::spawn_gate::output(
+            Command::new(HELPER)
+                .arg("--nest")
+                .arg("--")
+                .arg(bwrap)
+                .args(NEST_ARGS)
+                .args(["--", HELPER, "--probe"])
+                .env_clear()
+                .env(name, "/nonexistent")
+                .stdin(Stdio::null()),
+        )
+        .unwrap();
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{name}: {said}");
+        assert!(said.contains(LOADER_REFUSED), "{name}: {said}");
+    }
 }
 
 /// The supervisor probe never runs in a folder another process names: folders planted

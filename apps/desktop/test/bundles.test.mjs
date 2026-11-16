@@ -38,7 +38,7 @@ test("the deb stages the helper's AppArmor profile outside /etc/apparmor.d and b
   }
 });
 
-test("the AppArmor profile attaches only to the helper, keeps the bubblewrap it starts in its own profile and holds every other program to no capability (DEC-179 SBX-3)", () => {
+test("the AppArmor profile attaches only to the helper, keeps the bubblewrap it starts in its own profile, holds every other program to no capability and lets only a CrazyAgent process trace the helper (DEC-179 SBX-3, rv-ds241 F1)", () => {
   const profile = packagedText(PROFILE_SOURCE);
   assert.match(profile, /^abi <abi\/4\.0>,$/m, "the AppArmor 4.0 that Ubuntu 24.04 ships");
   const headers = [...profile.matchAll(/^profile (\S+)(?: (\/\S+))? flags=\(attach_disconnected,mediate_deleted\) \{$/gm)];
@@ -54,11 +54,13 @@ test("the AppArmor profile attaches only to the helper, keeps the bubblewrap it 
     assert.ok(agent.split("\n").map((line) => line.trim()).includes(rule), `agent: ${rule}`);
   }
   assert.ok(!agent.split("\n").some((line) => line.trim() === "allow capability,"), "agents hold no capability");
+  const traced = helper.split("\n").map((line) => line.trim()).filter((line) => /\bptrace\b/.test(line));
+  assert.deepEqual(traced, ["allow ptrace (read, trace, readby),", "allow ptrace (tracedby) peer=crazyagent-{landlock,agent},"], "a tracer outside CrazyAgent's two profiles is refused");
   assert.doesNotMatch(profile, /\b[pPcC]?[uU]x\b/, "nothing runs unconfined");
   assert.deepEqual(profile.split("\n").filter((line) => line.trimStart().startsWith("#")), [], "no comment lines");
 });
 
-test("postinst installs and loads the profile only on configure where AppArmor runs, restricts user namespaces and parses the file, and never fails the install; prerm unloads and deletes it on remove (DEC-179 SBX-3)", () => {
+test("postinst installs and loads the profile only on configure where AppArmor runs, restricts user namespaces, parses the file and no admin disabled it, and never fails the install; prerm unloads and deletes it on remove (DEC-179 SBX-3)", () => {
   const postinst = packagedText("linux/deb/postinst");
   const prerm = packagedText("linux/deb/prerm");
   for (const [name, script] of [["postinst", postinst], ["prerm", prerm]]) {
@@ -68,7 +70,7 @@ test("postinst installs and loads the profile only on configure where AppArmor r
     assert.match(script, /^dst=\/etc\/apparmor\.d\/crazyagent-landlock$/m, name);
   }
   assert.match(postinst, new RegExp(`^src=${STAGED_PROFILE.replaceAll("/", "\\/")}$`, "m"));
-  for (const guard of ['[ "$1" = configure ]', "[ -d /sys/kernel/security/apparmor ]", "command -v apparmor_parser", '"$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1', 'apparmor_parser -QT "$src"']) {
+  for (const guard of ['[ "$1" = configure ]', "[ -d /sys/kernel/security/apparmor ]", "[ ! -e /etc/apparmor.d/disable/crazyagent-landlock ]", "command -v apparmor_parser", '"$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1', 'apparmor_parser -QT "$src"']) {
     assert.ok(postinst.includes(guard), guard);
   }
   const steps = ['apparmor_parser -QT "$src"', 'install -m 0644 "$src" "$dst"', 'apparmor_parser -r -T -W "$dst" || true'].map((step) => postinst.indexOf(step));

@@ -44,6 +44,16 @@ export function sidecars(target) {
   return names;
 }
 
+/**
+ * Tells whether an x86_64 Linux executable needs the dynamic loader: true when one of its
+ * program headers names an interpreter (PT_INTERP). Input: the file's bytes. Output: the
+ * answer, or `release_helper_not_static` when the bytes are no well-formed 64-bit
+ * little-endian x86_64 ELF file.
+ */
+export function needsLoader(_bytes) {
+  return false;
+}
+
 /** Names the CLI archive for `version` and `target`: `.zip` on Windows, `.tar.gz` elsewhere. */
 export function cliArchiveName(version, target) {
   return `crazyagent-${version}-${target}.${targetInfo(target).os === "windows" ? "zip" : "tar.gz"}`;

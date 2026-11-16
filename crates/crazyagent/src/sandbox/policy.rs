@@ -1874,7 +1874,8 @@ mod tests {
     /// A Linux where AppArmor keeps unprivileged programs out of user namespaces and agents
     /// get no process space of their own says AppArmor is why, just before the process or
     /// signals line it explains, at every limited level and never under Full; a Linux
-    /// without the restriction says nothing of AppArmor (DEC-179 SBX-3, addendum 7).
+    /// without the restriction, or one where CrazyAgent runs as root, whom the restriction
+    /// does not cover, says nothing of AppArmor (DEC-179 SBX-3, addendum 7, rv-ds241 nit).
     #[test]
     fn an_apparmor_blocked_linux_says_why_agents_share_your_process_space() {
         use crate::sandbox::{
@@ -1902,8 +1903,8 @@ mod tests {
             assert_eq!(gaps(host(false, true, false), false), [said, armor, listed]);
             let kept = [LINUX_KEPT_GIT_LINE, said, armor, listed];
             assert_eq!(gaps(host(false, true, false), true), kept, "four lines at most");
-            let root = [LINUX_ROOT_LINE, git, armor, signals];
-            assert_eq!(gaps(host(false, false, true), false), root);
+            let root = [LINUX_ROOT_LINE, git, signals];
+            assert_eq!(gaps(host(false, false, true), false), root, "root: no AppArmor line");
             let free = LinuxHost {
                 armored: false,
                 ..host(true, false, false)
