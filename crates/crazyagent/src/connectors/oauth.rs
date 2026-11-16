@@ -36,6 +36,8 @@ use sign::own_replaced;
 pub(crate) use sign::refused_with;
 #[cfg(unix)]
 pub(crate) use sign::renew_with;
+#[cfg(all(test, unix))]
+use sign::same_issuer;
 #[cfg(unix)]
 pub(crate) use sign::step_up_with;
 

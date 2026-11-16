@@ -483,6 +483,12 @@ struct Server {
     post_only: bool,
 }
 
+/// Whether the issuer a resource names and the one its server's metadata names are the
+/// same. Inputs: the two names. Output: true when they are equal.
+pub(super) fn same_issuer(asked: &str, named: &str) -> bool {
+    asked == named
+}
+
 /// Reads the authorization server's metadata (RFC 8414, then OpenID) on a declared OAuth
 /// host. Its `issuer` must be the one it was read for, both endpoints must be on declared
 /// OAuth hosts and it must offer PKCE S256. Inputs: the issuer, the OAuth block and the
@@ -515,7 +521,11 @@ fn server(issuer: &str, oauth: &OAuthSpec, reach: &ProviderReach) -> Result<Serv
         }
     }
     let metadata = found.ok_or_else(metadata_invalid)?;
-    if metadata.get("issuer").and_then(Value::as_str) != Some(issuer) {
+    if !metadata
+        .get("issuer")
+        .and_then(Value::as_str)
+        .is_some_and(|named| same_issuer(issuer, named))
+    {
         return Err(metadata_invalid());
     }
     let endpoint = |key: &str| -> Result<url::Url, OAuthError> {

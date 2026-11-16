@@ -1969,6 +1969,65 @@ fn a_bundled_connector_file_edited_by_a_release_ends_its_sign_in_with_one_item()
     );
 }
 
+/// An issuer named with one trailing slash on either side is the same issuer, as Box and
+/// Google name theirs in resource metadata; nothing else is: not a second slash, another
+/// path, another letter case or a written port.
+#[test]
+fn an_issuer_differing_only_by_one_trailing_slash_is_the_same_issuer_and_nothing_else_is() {
+    for (asked, named) in [
+        ("https://x/", "https://x"),
+        ("https://x", "https://x/"),
+        ("https://x", "https://x"),
+        ("https://x/", "https://x/"),
+        ("https://x/a/", "https://x/a"),
+    ] {
+        assert!(same_issuer(asked, named), "{asked} is {named}");
+    }
+    for (asked, named) in [
+        ("https://x/a", "https://x"),
+        ("https://x", "https://x/a"),
+        ("https://x//", "https://x"),
+        ("https://x/", "https://x//"),
+        ("https://X", "https://x"),
+        ("https://x:443", "https://x"),
+        ("https://x/", "https://y"),
+        ("https://x/", ""),
+    ] {
+        assert!(!same_issuer(asked, named), "{asked} is not {named}");
+    }
+}
+
+/// A vendor whose resource metadata names its issuer with a trailing slash signs in,
+/// renews and keeps the owner's app bound under the name its server metadata gives: the
+/// answer's `iss`, the token names and the binding all use that name.
+#[test]
+fn a_resource_naming_its_issuer_with_a_trailing_slash_signs_in_and_renews_under_the_servers_name() {
+    let sign = signing(
+        Shape {
+            servers: vec!["{base}/"],
+            ..shape()
+        },
+        &["127.0.0.1"],
+    );
+    let issuer = sign.issuer();
+    let pending = begun(&sign, false);
+    assert_eq!(finished(&sign, &pending.state, Some(&issuer)), Ok(()));
+    let got = fresh_at(&sign, clock());
+    assert!(
+        matches!(&got, Ok(Credential::OAuth { access, issuer: given, .. })
+            if *access == named("token", &issuer) && *given == issuer),
+        "{got:?}"
+    );
+    let again = fresh_at(&sign, clock() + 2 * 3_600_000);
+    assert!(
+        matches!(&again, Ok(Credential::OAuth { issuer: given, .. }) if *given == issuer),
+        "{again:?}"
+    );
+    assert_eq!(renewals(&sign.vendor), 1);
+    let next = start(&sign, false);
+    assert!(next.is_ok(), "the owner's app stays bound: {next:?}");
+}
+
 /// Every sign-in code a page can show is listed once, sorted, and has a plain sentence
 /// with no code words in it.
 #[test]
