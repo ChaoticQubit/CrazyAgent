@@ -1123,6 +1123,36 @@ pub(crate) fn fresh_with(
     now_ms: i64,
     reach: &ProviderReach,
 ) -> Result<Credential, OAuthError> {
+    current(db, root, name, title, spec, now_ms, false, reach)
+}
+
+/// [`fresh_with`] with the access token renewed whatever its end, for a server that
+/// refused it; a renewal or sign-in another call made since the record was read is used
+/// instead of a second one. Inputs and outputs as there.
+pub(crate) fn renew_with(
+    db: &Connection,
+    root: &Path,
+    name: &str,
+    title: &str,
+    spec: &ConnectorSpec,
+    now_ms: i64,
+    reach: &ProviderReach,
+) -> Result<Credential, OAuthError> {
+    current(db, root, name, title, spec, now_ms, true, reach)
+}
+
+/// The credential now, renewed when it ends within a minute or when `force` asks.
+#[allow(clippy::too_many_arguments)]
+fn current(
+    db: &Connection,
+    root: &Path,
+    name: &str,
+    title: &str,
+    spec: &ConnectorSpec,
+    now_ms: i64,
+    force: bool,
+    reach: &ProviderReach,
+) -> Result<Credential, OAuthError> {
     let oauth = spec.oauth.as_ref().ok_or_else(not_offered)?;
     let usable = |record: Option<Record>| {
         record
@@ -1131,10 +1161,12 @@ pub(crate) fn fresh_with(
     };
     let ends_soon = |record: &Record| now_ms.saturating_add(RENEW_EARLY_MS) >= record.expires_ms;
     let mut record = usable(record_of(root, name)?)?;
-    if ends_soon(&record) {
+    if force || ends_soon(&record) {
+        let read_ends_ms = record.expires_ms;
         let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
         record = usable(record_of(root, name)?)?;
-        if ends_soon(&record) {
+        let renewed_since = record.expires_ms != read_ends_ms;
+        if (force && !renewed_since) || (!force && ends_soon(&record)) {
             match renew(root, name, oauth, &record, now_ms, reach) {
                 Ok(ends_ms) => {
                     record.expires_ms = ends_ms;

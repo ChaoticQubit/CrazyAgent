@@ -13,6 +13,7 @@ use crate::connectors::shim::{self, Answer, Ask};
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
 use crate::provider_reach::ProviderReach;
+use crate::storage::accounts::{self, PLUGIN_KEYS};
 use crate::team::tool::{Mailbox, call_id, call_id_valid};
 use pins::{Endpoint, Pin};
 use rusqlite::{Connection, params};
@@ -418,16 +419,26 @@ fn pin_endpoint(endpoint: &McpEndpoint) -> Endpoint {
 }
 
 /// The forms of a connector's key a vendor reply may echo: the key, and for a Basic key
-/// the encoded user and key as sent. A form shorter than `SECRET_FORM_BYTES_MIN` is not
-/// looked for. Inputs: the engine root, the connector and its bindings. Output: the
-/// forms, or `connector_reply_withheld` when a key cannot be read.
+/// the encoded user and key as sent, or the access token of an OAuth sign-in. A form
+/// shorter than `SECRET_FORM_BYTES_MIN` is not looked for. Inputs: the engine root, the
+/// connector, its bindings and the credential its session sends. Output: the forms, or
+/// `connector_reply_withheld` when a key cannot be read.
 fn secret_forms(
     root: &Path,
     spec: &ConnectorSpec,
     bindings: &[Bound],
+    sent: &Credential,
 ) -> Result<Vec<SecretString>, &'static str> {
     use base64::Engine;
     let withheld = "connector_reply_withheld";
+    if let Credential::OAuth { access, .. } = sent {
+        let token = accounts::read_bearer_in(root, PLUGIN_KEYS, access)
+            .map_err(|_| withheld)?
+            .ok_or(withheld)?;
+        let mut forms = vec![token];
+        forms.retain(|form| form.expose().len() >= SECRET_FORM_BYTES_MIN);
+        return Ok(forms);
+    }
     let Some(auth) = &spec.key else {
         return Ok(Vec::new());
     };
@@ -449,6 +460,23 @@ fn secret_forms(
     forms.push(key);
     forms.retain(|form| form.expose().len() >= SECRET_FORM_BYTES_MIN);
     Ok(forms)
+}
+
+/// Whether a held session signs in as a call would now: the same key, or an OAuth sign-in
+/// at the same issuer under the same token name. A renewed token is read again at each
+/// request, so its new end needs no new session.
+fn same_sign_in(held: &Credential, now: &Credential) -> bool {
+    match (held, now) {
+        (
+            Credential::OAuth {
+                access: held_access,
+                issuer: held_issuer,
+                ..
+            },
+            Credential::OAuth { access, issuer, .. },
+        ) => held_access == access && held_issuer == issuer,
+        _ => held == now,
+    }
 }
 
 fn echoes(forms: &[SecretString], text: &str) -> bool {
@@ -501,6 +529,7 @@ fn refused(code: &str) -> Answer {
 struct Held {
     manifest: String,
     bindings: Vec<Bound>,
+    auth: Credential,
     endpoint: Endpoint,
     session: McpSession,
     tools: BTreeMap<String, (String, ToolKind)>,
@@ -564,6 +593,62 @@ impl Gateway {
     #[cfg(test)]
     pub(crate) fn kept(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
         locked(&self.kept).clone()
+    }
+
+    /// The connector as a call uses it: as its file declares it, or in rows at the stand-in
+    /// vendor given for it, which is its MCP server and its authorization server at once.
+    /// Inputs: the connector and its declaration. Output: the declaration to call.
+    fn spec_of(&self, connector: &str, spec: &ConnectorSpec) -> ConnectorSpec {
+        let mut used = spec.clone();
+        used.mcp = self.endpoint_of(connector, spec);
+        #[cfg(test)]
+        if locked(&self.stand_ins).contains_key(connector)
+            && let Some(oauth) = &mut used.oauth
+        {
+            oauth.hosts.clone_from(&used.mcp.hosts);
+        }
+        used
+    }
+
+    /// The credential a session with a connector sends: its key, or the token of its OAuth
+    /// sign-in, renewed when it ends soon or when `renew` asks. Inputs: the database, the
+    /// connector, its declaration as called and whether to renew. Output: the credential,
+    /// or `connector_sign_in_needed` and the sign-in's other refusals.
+    fn credential(
+        &self,
+        db: &Connection,
+        connector: &GrantedConnector,
+        spec: &ConnectorSpec,
+        renew: bool,
+    ) -> Result<Credential, &'static str> {
+        if let Some(key) = &spec.key {
+            return Ok(Credential::key(key, &connector.loaded.bindings));
+        }
+        assert!(spec.oauth.is_some(), "a connector has a key or a sign-in");
+        let title = title_of(connector);
+        let now = crate::semantic::now_ms();
+        let got = if renew {
+            crate::connectors::oauth::renew_with(
+                db,
+                &self.root,
+                &connector.name,
+                &title,
+                spec,
+                now,
+                &self.reach,
+            )
+        } else {
+            crate::connectors::oauth::fresh_with(
+                db,
+                &self.root,
+                &connector.name,
+                &title,
+                spec,
+                now,
+                &self.reach,
+            )
+        };
+        got.map_err(|problem| problem.0)
     }
 
     fn endpoint_of(&self, connector: &str, spec: &ConnectorSpec) -> McpEndpoint {
@@ -781,43 +866,55 @@ impl Gateway {
     }
 
     /// Takes a launch's session with a connector out of the cache, or opens one: a session
-    /// opened under another manifest or other key bindings is closed and opened again,
-    /// so a connector trusted again or given a new key is never called the old way.
+    /// opened under another manifest, other key bindings or another sign-in is closed and
+    /// opened again, so a connector trusted again, given a new key or signed in elsewhere
+    /// is never called the old way. An OAuth token is renewed first when it ends soon, and
+    /// once more when the server refuses it as a session opens, which then opens with the
+    /// same access.
     fn checkout(
         &self,
+        db: &Connection,
         launch: &Launch,
         connector: &GrantedConnector,
         spec: &ConnectorSpec,
         settings: &ConnectorSettings,
     ) -> Result<Held, &'static str> {
+        let used = self.spec_of(&connector.name, spec);
+        let auth = self.credential(db, connector, &used, false)?;
         let key = (launch.id.clone(), connector.name.clone());
         let found = locked(&self.held).remove(&key);
         if let Some(held) = found {
             let same = held.manifest == connector.loaded.manifest.sha256
-                && held.bindings == connector.loaded.bindings;
+                && held.bindings == connector.loaded.bindings
+                && same_sign_in(&held.auth, &auth);
             if same {
                 return Ok(held);
             }
             self.close_later(held.session);
         }
-        let auth = spec
-            .key
-            .as_ref()
-            .map(|key| Credential::key(key, &connector.loaded.bindings))
-            .ok_or("connector_sign_in_needed")?;
-        let endpoint = self.endpoint_of(&connector.name, spec);
-        let session = McpSession::open_with(
-            &self.root,
-            &endpoint,
-            &auth,
-            Access::ReadOnly,
-            settings.size_cap,
-            self.reach.clone(),
-        )
-        .map_err(|problem| problem.code())?;
+        let endpoint = used.mcp.clone();
+        let open = |auth: &Credential| {
+            McpSession::open_with(
+                &self.root,
+                &endpoint,
+                auth,
+                Access::ReadOnly,
+                settings.size_cap,
+                self.reach.clone(),
+            )
+        };
+        let (auth, session) = match open(&auth) {
+            Err(McpError::Unauthorized { .. }) if matches!(auth, Credential::OAuth { .. }) => {
+                let renewed = self.credential(db, connector, &used, true)?;
+                let session = open(&renewed).map_err(|problem| problem.code())?;
+                (renewed, session)
+            }
+            opened => (auth, opened.map_err(|problem| problem.code())?),
+        };
         Ok(Held {
             manifest: connector.loaded.manifest.sha256.clone(),
             bindings: connector.loaded.bindings.clone(),
+            auth,
             endpoint: pin_endpoint(&endpoint),
             session,
             tools: BTreeMap::new(),
@@ -848,7 +945,7 @@ impl Gateway {
             .ok_or("connectors_unavailable")?;
         let lock = self.lock_for(&connector.name);
         let _one = wait_lock(&lock, self.lock_wait).ok_or("connector_busy")?;
-        let mut held = self.checkout(launch, connector, spec, settings)?;
+        let mut held = self.checkout(db, launch, connector, spec, settings)?;
         let listed = self.relist(db, connector, spec, &mut held, room);
         let keep = match &listed {
             Ok(_) => true,
@@ -883,7 +980,7 @@ impl Gateway {
         if pin == Pin::Changed || stopped {
             return Err("connector_tools_changed");
         }
-        let forms = secret_forms(&self.root, spec, &held.bindings)?;
+        let forms = secret_forms(&self.root, spec, &held.bindings, &held.auth)?;
         let mut entries = Vec::new();
         for tool in &tools {
             let shown = format!("{}{SEPARATOR}{}", connector.name, tool.name);
@@ -981,7 +1078,7 @@ impl Gateway {
             .ok_or("connectors_unavailable")?;
         let lock = self.lock_for(name);
         let _one = wait_lock(&lock, self.lock_wait).ok_or("connector_busy")?;
-        let mut held = self.checkout(launch, &connector, spec, settings)?;
+        let mut held = self.checkout(db, launch, &connector, spec, settings)?;
         let result = self.call_held(db, &connector, spec, &mut held, shown, args, row);
         let keep = match &result {
             Ok(_) => true,
@@ -1033,7 +1130,7 @@ impl Gateway {
             ),
             Err(problem) => return Err(problem.code()),
         };
-        let forms = secret_forms(&self.root, spec, &held.bindings)?;
+        let forms = secret_forms(&self.root, spec, &held.bindings, &held.auth)?;
         if echoes(&forms, &text) {
             return Err("connector_reply_withheld");
         }

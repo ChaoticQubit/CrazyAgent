@@ -25,6 +25,8 @@ pub(crate) use sign::finish_with;
 #[cfg(unix)]
 pub(crate) use sign::fresh_with;
 #[cfg(unix)]
+pub(crate) use sign::renew_with;
+#[cfg(unix)]
 pub(crate) use sign::step_up_with;
 
 /// Every sign-in refusal code this client adds beside the connector address codes of
@@ -346,6 +348,21 @@ fn finish_trusted(
     _iss: Option<&str>,
     _reach: &ProviderReach,
 ) -> Result<(), OAuthError> {
+    Err(OAuthError("connector_unavailable_here"))
+}
+
+/// No renewal where curl's private request cannot be made. Output:
+/// `connector_unavailable_here`.
+#[cfg(not(unix))]
+pub(crate) fn renew_with(
+    _db: &Connection,
+    _root: &Path,
+    _name: &str,
+    _title: &str,
+    _spec: &crate::app_plugins::connector::ConnectorSpec,
+    _now_ms: i64,
+    _reach: &ProviderReach,
+) -> Result<Credential, OAuthError> {
     Err(OAuthError("connector_unavailable_here"))
 }
 
