@@ -283,10 +283,11 @@ async fn handle(
 /// Starts applying the GitHub rule proposals the owner approved (DEC-182 S7) on a thread
 /// of its own once an answer is recorded, so the reply never waits on GitHub and an engine
 /// stop never waits on it either. Nothing starts while no proposal waits (rv-code gh-s7
-/// N5). Inputs: the engine root and its connection, outside any transaction.
-fn apply_later(root: &Path, db: &rusqlite::Connection) {
+/// N5). Inputs: the engine root and its connection, outside any transaction. Output:
+/// whether a pass started.
+fn apply_later(root: &Path, db: &rusqlite::Connection) -> bool {
     if !crate::github::proposals::waiting(db) {
-        return;
+        return false;
     }
     let root = root.to_path_buf();
     let started = std::thread::Builder::new()
@@ -295,6 +296,7 @@ fn apply_later(root: &Path, db: &rusqlite::Connection) {
     if started.is_err() {
         eprintln!("github_rule_proposals_not_started");
     }
+    started.is_ok()
 }
 
 /// Applies the GitHub rule proposals the owner approved with the owner's sign-in and tells
