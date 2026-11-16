@@ -3,6 +3,7 @@ use super::{IDLE, IDLE_AND_LID, NOW_MS, SECOND_MS, agent, engine};
 use crate::keep_awake::{Heat, Keeper, LidSupport, LowPowerSupport, PowerSource};
 use crate::keep_awake::hold_macos::{
     ENDED_TO_PROTECT, HELPER_UNANSWERED, HelperLine, LEASE_S, LID_UNREAD, LID_WITHHELD_MACOS,
+    LOW_POWER_NEEDS_HELPER, LOW_POWER_NOT_ON_THIS_MAC, LOW_POWER_NOT_TAKEN, lines_around,
     LidLine, LidPlatform, PIN_FILE_KEPT, PIN_NONE, PIN_OTHER, READ_EVERY_MS, REMOVE_NOT_PUT_BACK,
     REMOVE_NOT_YOURS, REMOVE_REFUSED, REMOVE_UNANSWERED, REMOVE_UNFINISHED, STATUS_UNREAD,
     TURN_ON_FAILED, UNINSTALL_SLEEP_KEPT, VERSION_UNREAD, gate, macos_major,
@@ -976,4 +977,179 @@ fn every_hold_names_the_display_the_owner_picked() {
         low_power: false,
     };
     assert_eq!(rig.calls(), [HOLD, leave_on], "the owner's pick rides on each Hold (Task 12)");
+}
+
+const LOW_POWER_ONLY: LidAsk = LidAsk {
+    low_power: true,
+    ..RESTING
+};
+const LOW_POWER_RULE_OFF: LidAsk = LidAsk {
+    low_power: true,
+    ..OFF
+};
+const WANTED_LOW_POWER: LidAsk = LidAsk {
+    low_power: true,
+    ..WANTED
+};
+const POWER_ONLY: Request = Request::LowPower { lease_s: LEASE_S };
+
+/// A helper view on a ready helper with the battery's Low Power Mode, none for a Mac without
+/// the key, and whether a lease asks for it.
+fn power_view(low_power: Option<bool>, asked: bool) -> Result<Reply, CallError> {
+    Ok(Reply::State(View {
+        holders: u8::from(asked),
+        lease_left_s: if asked { LEASE_S } else { 0 },
+        low_power,
+        low_power_held: asked,
+        ..view(PinView::You, FloorView::None, true)
+    }))
+}
+
+fn low_power_not_available(reason: &str) -> LowPowerSupport {
+    LowPowerSupport::NotAvailable {
+        reason: reason.into(),
+    }
+}
+
+#[test]
+fn a_wanted_lid_asks_low_power_on_its_hold_and_reads_the_status() {
+    let mut rig = Rig::enabled();
+    rig.answer(Ok(held()), power_view(Some(true), true));
+    assert_eq!(rig.line.step(WANTED_LOW_POWER, NOW_MS), LidSupport::Held);
+    let asked = Request::Hold {
+        lease_s: LEASE_S,
+        lid_display: LidDisplay::Sleep,
+        low_power: true,
+    };
+    assert_eq!(
+        rig.calls(),
+        [asked, Request::Read],
+        "the status read rides the step that asks (QUESTION 40d)"
+    );
+    assert_eq!(rig.line.low_power(), LowPowerSupport::Held);
+}
+
+#[test]
+fn low_power_alone_keeps_a_power_only_lease_even_with_the_lid_rule_off() {
+    for ask in [LOW_POWER_ONLY, LOW_POWER_RULE_OFF] {
+        let mut rig = Rig::enabled();
+        rig.answer(Ok(held()), power_view(Some(true), true));
+        rig.line.step(ask, NOW_MS);
+        assert_eq!(rig.calls().first(), Some(&POWER_ONLY), "{ask:?} (QUESTION 40c)");
+        assert!(rig.calls().contains(&Request::Read), "{ask:?}");
+        assert_eq!(rig.line.low_power(), LowPowerSupport::Held, "{ask:?}");
+        let rest = LidAsk {
+            low_power: false,
+            ..ask
+        };
+        rig.line.step(rest, NOW_MS + READING_MS);
+        assert!(rig.calls().contains(&Request::Release), "{ask:?}: neither asked lets go");
+        assert_eq!(rig.line.low_power(), LowPowerSupport::Ready, "{ask:?}");
+    }
+}
+
+#[test]
+fn the_low_power_status_follows_the_helpers_view() {
+    let mut rig = Rig::enabled();
+    let steps = [
+        (Some(false), LowPowerSupport::Ready, "not set yet is never the owner's"),
+        (Some(true), LowPowerSupport::Held, "on for this hold"),
+        (Some(false), LowPowerSupport::OwnerChanged, "the owner turned it off"),
+        (Some(false), LowPowerSupport::OwnerChanged, "and it stays the owner's"),
+    ];
+    for (step, (low_power, support, why)) in (0_i64..).zip(steps) {
+        rig.answer(Ok(held()), power_view(low_power, true));
+        rig.line.step(LOW_POWER_ONLY, NOW_MS + step * READING_MS);
+        assert_eq!(rig.line.low_power(), support, "{why}");
+    }
+    rig.answer(Ok(held()), power_view(Some(false), false));
+    rig.line.step(RESTING, NOW_MS + 4 * READING_MS);
+    assert_eq!(rig.line.low_power(), LowPowerSupport::Ready, "an ask that ended");
+    rig.answer(Ok(held()), power_view(Some(false), true));
+    rig.line.step(LOW_POWER_ONLY, NOW_MS + 5 * READING_MS);
+    assert_eq!(rig.line.low_power(), LowPowerSupport::Ready, "a new ask starts unseen");
+}
+
+#[test]
+fn a_mac_without_the_key_says_so_and_one_failed_read_keeps_the_status() {
+    let mut bare = Rig::enabled();
+    bare.answer(Ok(held()), power_view(None, true));
+    bare.line.step(LOW_POWER_ONLY, NOW_MS);
+    let not_here = low_power_not_available(LOW_POWER_NOT_ON_THIS_MAC);
+    assert_eq!(bare.line.low_power(), not_here);
+
+    let mut rig = Rig::enabled();
+    rig.answer(Ok(held()), power_view(Some(true), true));
+    rig.line.step(LOW_POWER_ONLY, NOW_MS);
+    rig.answer(Ok(held()), power_view(None, true));
+    rig.line.step(LOW_POWER_ONLY, NOW_MS + READING_MS);
+    let why = "QUESTION 40e: a failed pmset run in the helper";
+    assert_eq!(rig.line.low_power(), LowPowerSupport::Held, "{why}");
+    let unanswered = Err(CallError::Exchange(io::ErrorKind::TimedOut));
+    rig.answer(Ok(held()), unanswered);
+    rig.line.step(LOW_POWER_ONLY, NOW_MS + 2 * READING_MS);
+    assert_eq!(rig.line.low_power(), LowPowerSupport::Held, "an unanswered read");
+}
+
+#[test]
+fn low_power_needs_the_lid_helper_until_it_runs() {
+    let needs = low_power_not_available(LOW_POWER_NEEDS_HELPER);
+    let statuses = [
+        Some(Status::NotRegistered),
+        Some(Status::RequiresApproval),
+        Some(Status::NotFound),
+        None,
+    ];
+    for status in statuses {
+        let mut rig = Rig::new(mac(15), status);
+        rig.line.step(LOW_POWER_ONLY, NOW_MS);
+        assert_eq!(rig.line.low_power(), needs, "{status:?} (QUESTION 39d A)");
+        assert!(rig.calls().is_empty(), "{status:?}");
+    }
+    let mut twelve = Rig::new(mac(12), Some(Status::Enabled));
+    twelve.line.step(LOW_POWER_ONLY, NOW_MS);
+    assert_eq!(twelve.line.low_power(), needs, "the gate's early return too");
+
+    let mut rig = Rig::new(mac(15), Some(Status::NotRegistered));
+    rig.line.step(LOW_POWER_ONLY, NOW_MS);
+    rig.set_status(Some(Status::Enabled));
+    rig.answer(Ok(held()), power_view(Some(true), true));
+    rig.line.step(LOW_POWER_ONLY, NOW_MS + READING_MS);
+    assert_eq!(rig.line.low_power(), LowPowerSupport::Held, "a helper turned on");
+}
+
+#[test]
+fn a_low_power_ask_the_helper_holds_no_lease_for_says_it_was_not_taken() {
+    let mut rig = Rig::enabled();
+    let refused = Reply::Refused {
+        reason: Refusal::Unpinned,
+    };
+    rig.answer(Ok(refused), power_view(Some(false), false));
+    rig.line.step(LOW_POWER_ONLY, NOW_MS);
+    let not_taken = low_power_not_available(LOW_POWER_NOT_TAKEN);
+    assert_eq!(rig.line.low_power(), not_taken);
+}
+
+#[test]
+fn the_lid_and_power_lines_share_one_status_and_the_power_line_never_calls() {
+    let rig = Rig::enabled();
+    rig.answer(Ok(held()), power_view(Some(true), true));
+    let calls = rig.calls.clone();
+    let Rig { line, .. } = rig;
+    let (mut lid, mut power) = lines_around(move || line);
+    assert_eq!(power(true, NOW_MS), LowPowerSupport::Unread, "nothing stepped yet");
+    assert!(calls.lock().unwrap().is_empty(), "the line is made at the first lid step");
+    assert_eq!(lid(WANTED_LOW_POWER, None, NOW_MS), LidSupport::Held);
+    let made = calls.lock().unwrap().len();
+    assert_eq!(power(true, NOW_MS), LowPowerSupport::Held, "QUESTION 40b");
+    assert_eq!(calls.lock().unwrap().len(), made, "the power line never calls the helper");
+}
+
+#[test]
+fn a_step_that_asks_no_low_power_adds_no_read() {
+    let mut rig = Rig::enabled();
+    rig.line.step(WANTED, NOW_MS);
+    rig.line.step(WANTED, NOW_MS + READING_MS);
+    assert_eq!(rig.calls(), [HOLD, HOLD], "no status read without a low power ask");
+    assert_eq!(rig.line.low_power(), LowPowerSupport::Unread);
 }

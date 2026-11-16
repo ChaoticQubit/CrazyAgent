@@ -101,15 +101,6 @@ pub struct LidOrder {
 /// stands in for the reader's.
 pub type LidReader = Box<dyn FnMut(LidAsk, Option<LidCommand>, i64) -> LidSupport + Send>;
 
-/// Builds this platform's lid line: the macOS lid helper, and none elsewhere, where the
-/// reader's own lid support stands. Output: the lid line, if this platform has one.
-pub fn platform_lid() -> Option<LidReader> {
-    #[cfg(target_os = "macos")]
-    let lid = Some(super::hold_macos::lid_reader());
-    #[cfg(not(target_os = "macos"))]
-    let lid = None;
-    lid
-}
 
 /// The power line on the sensor thread (Task 16, QUESTION 39g): handed whether the running
 /// hold asks for low power mode and the engine time with each reading, it holds or lets go
@@ -117,15 +108,22 @@ pub fn platform_lid() -> Option<LidReader> {
 /// the reader's.
 pub type PowerLine = Box<dyn FnMut(bool, i64) -> LowPowerSupport + Send>;
 
-/// Builds this platform's power line: power-profiles-daemon on Linux, and none elsewhere,
-/// where low power mode rides the lid line (macOS) or is not available (Windows). Output:
-/// the power line, if this platform has one.
-pub fn platform_power() -> Option<PowerLine> {
+/// Builds this platform's lid line and power line (QUESTION 40b). On macOS both ride the
+/// lid helper: the power line returns what the lid line's last step left and never calls
+/// the helper. On Linux only the power line runs, on power-profiles-daemon, and the
+/// reader's own lid support stands; Windows has neither. Output: each line, if this
+/// platform has it.
+pub fn platform_lines() -> (Option<LidReader>, Option<PowerLine>) {
+    #[cfg(target_os = "macos")]
+    let lines = {
+        let (lid, power) = super::hold_macos::lines();
+        (Some(lid), Some(power))
+    };
     #[cfg(target_os = "linux")]
-    let power = Some(super::low_power_linux::power_line());
-    #[cfg(not(target_os = "linux"))]
-    let power = None;
-    power
+    let lines = (None, Some(super::low_power_linux::power_line()));
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let lines = (None, None);
+    lines
 }
 
 /// Builds this platform's reader: system tools on macOS, files below `/sys`, `/proc` and

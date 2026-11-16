@@ -1,7 +1,7 @@
 use super::hold::{Held, Hold, HoldError, wanted};
-use super::power::{LID_REFUSED, LidAsk, LidCommand, LidReader};
+use super::power::{LID_REFUSED, LidAsk, LidCommand, LidReader, PowerLine};
 pub(super) use super::power::TURN_ON_FAILED;
-use super::state::{LidSupport, Want};
+use super::state::{LidSupport, LowPowerSupport, Want};
 use crazyagent_mac_power::client::{self, CallError};
 use crazyagent_mac_power::protocol::{
     FloorView, LidDisplay, PinView, Refusal, Reply, Request, View,
@@ -12,6 +12,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex, PoisonError};
 
 const CAFFEINATE: &str = "/usr/bin/caffeinate";
 const SW_VERS: &str = "/usr/bin/sw_vers";
@@ -65,6 +66,14 @@ pub(super) const REMOVE_UNANSWERED: &str = "The lid helper did not answer Remove
 pub(super) const UNINSTALL_SLEEP_KEPT: &str = "The lid helper stays until it can put sleep back";
 /// What uninstall says when the daemon is still registered for another reason.
 pub(super) const UNINSTALL_KEPT: &str = "The lid helper is still turned on";
+/// The low power words while the lid helper does not run for this engine (QUESTION 39d A,
+/// 40a): the row offers the same Turn on lid-closed hold.
+pub(super) const LOW_POWER_NEEDS_HELPER: &str = "Needs the lid helper";
+/// The low power words for a Mac whose battery settings have no Low Power Mode.
+pub(super) const LOW_POWER_NOT_ON_THIS_MAC: &str = "Not available on this Mac";
+/// The low power words when the helper's view shows no lease asking for it after this
+/// engine asked.
+pub(super) const LOW_POWER_NOT_TAKEN: &str = "The lid helper did not take Low Power Mode";
 
 /// The engine's line to the lid helper: one request, one reply.
 pub(super) trait HelperLine: Send + std::fmt::Debug {
@@ -167,7 +176,8 @@ pub(super) fn gate(connect: &mut dyn FnMut() -> io::Result<UnixStream>) -> io::R
 /// It never connects while the lid rule is Off or the daemon is not enabled.
 /// `lease_until_ms` is when the last lease the helper granted runs out at the latest, none
 /// with no lease. `trouble` is what the last owner command could not do, with the daemon
-/// status after it, and stands as the lid support until that status changes.
+/// status after it, and stands as the lid support until that status changes. `low_power`
+/// is the low power support the last step left (QUESTION 40a).
 #[derive(Debug)]
 pub(super) struct LidLine {
     service: Box<dyn Service>,
@@ -177,6 +187,7 @@ pub(super) struct LidLine {
     read_ms: Option<i64>,
     last: Option<LidSupport>,
     trouble: Option<(Option<Status>, LidSupport)>,
+    low_power: LowPowerSupport,
 }
 
 impl LidLine {
@@ -197,7 +208,13 @@ impl LidLine {
             read_ms: None,
             last: None,
             trouble: None,
+            low_power: LowPowerSupport::Unread,
         }
+    }
+
+    /// The low power support the last step left. Output: the support.
+    pub(super) fn low_power(&self) -> LowPowerSupport {
+        self.low_power.clone()
     }
 
     /// Runs one owner command. Turn on runs behind the same gate as every step, so a Mac
@@ -548,20 +565,39 @@ pub(super) fn remove_lid_helper(now_ms: i64) -> Option<String> {
     line.uninstall(now_ms)
 }
 
-/// Builds the engine's lid line: the system's daemon registration, the installed helper,
-/// and this Mac, read on the sensor thread at the first reading so the engine start runs
-/// no system tool for it. Output: the lid line the sensor thread runs.
-pub(super) fn lid_reader() -> LidReader {
+/// Builds the engine's lid line and power line on the system's daemon registration, the
+/// installed helper and this Mac, read on the sensor thread at the first reading so the
+/// engine start runs no system tool for it. Output: both lines.
+pub(super) fn lines() -> (LidReader, PowerLine) {
+    lines_around(|| LidLine::new(Box::new(Daemon), Box::new(Installed), LidPlatform::this_mac()))
+}
+
+/// Builds the lid line and the power line over one lid line (QUESTION 40b). The lid closure
+/// makes the line with `make` at its first call, runs a command when one came, steps, and
+/// leaves the step's low power support in a cell the power closure only returns, so the
+/// power line never calls the helper. The sensor thread runs the lid line first in every
+/// reading. Input: what makes the line. Output: both closures.
+pub(super) fn lines_around(
+    make: impl FnOnce() -> LidLine + Send + 'static,
+) -> (LidReader, PowerLine) {
+    let left = Arc::new(Mutex::new(LowPowerSupport::Unread));
+    let shared = left.clone();
+    let mut make = Some(make);
     let mut line: Option<LidLine> = None;
-    Box::new(move |ask, command, now_ms| {
-        let line = line.get_or_insert_with(|| {
-            LidLine::new(Box::new(Daemon), Box::new(Installed), LidPlatform::this_mac())
-        });
+    let lid: LidReader = Box::new(move |ask, command, now_ms| {
+        let line = line.get_or_insert_with(|| make.take().expect("the line is made once")());
         if let Some(command) = command {
             line.run(command, now_ms);
         }
-        line.step(ask, now_ms)
-    })
+        let support = line.step(ask, now_ms);
+        *shared.lock().unwrap_or_else(PoisonError::into_inner) = line.low_power();
+        support
+    });
+    let power: PowerLine = Box::new(move |_asked, now_ms| {
+        assert!(now_ms > 0);
+        left.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    });
+    (lid, power)
 }
 
 /// The macOS idle hold: one `caffeinate -i -w <engine pid>` child (with `-d` while the
