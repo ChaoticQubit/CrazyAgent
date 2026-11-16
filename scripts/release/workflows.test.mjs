@@ -71,7 +71,7 @@ function sharedLines(text) {
  * Matches workflow text that reads a secret, in any form GitHub expands: `secrets.NAME`,
  * `secrets['NAME']`, a whole-context call such as `toJSON(secrets)`, or the bare context.
  */
-const SECRET = /secrets\./;
+const SECRET = /secrets\.|\bsecrets\b/;
 
 /**
  * Names the jobs of a workflow that read a secret, hand secrets to a called workflow or bind an
