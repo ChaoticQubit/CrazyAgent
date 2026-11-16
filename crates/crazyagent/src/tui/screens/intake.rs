@@ -333,6 +333,9 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "github_repo_unreadable" => {
             "GitHub didn't show this repository. Check that it still exists and that your GitHub sign-in can see it."
         }
+        "github_request_bounds" => "That request was too large for the engine. Try again.",
+        "github_reply_bounds" => "GitHub's reply was too large to show. Try again.",
+        "github_request_invalid" => "The engine couldn't read that request. Reload and try again.",
         "trusted_connection_unavailable" | "trusted_connection_lost" => {
             "The engine connection dropped. CrazyAgent reconnects on its own."
         }
