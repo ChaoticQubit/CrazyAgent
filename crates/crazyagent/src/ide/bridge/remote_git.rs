@@ -687,6 +687,26 @@ fn config_refusal(entry: &Entry, folder: &Path, home: Option<&Path>) -> Option<S
     }
 }
 
+/// Whether every include a `git config --show-origin -z --get-regexp` listing names is a
+/// file [`placed_allowed`] keeps out of each folder, judged as [`config_refusal`] judges an
+/// IDE include, for engine git run with no HOME (rv-sec2 git-config-hooks-241 N1). Inputs:
+/// the listing and the canonical folders. Output: the answer, false for an entry not from a
+/// file named in full, or None for a listing that is not `-z` entries.
+pub(crate) fn includes_placed_outside(listing: &[u8], folders: &[PathBuf]) -> Option<bool> {
+    assert!(!folders.is_empty() && folders.iter().all(|folder| folder.is_absolute()));
+    let listed = entries(listing)?;
+    Some(listed.iter().all(|entry| {
+        entry
+            .origin
+            .strip_prefix("file:")
+            .is_some_and(|file| Path::new(file).is_absolute())
+            && folders.iter().all(|folder| {
+                include_target(entry, folder, None)
+                    .is_some_and(|target| placed_allowed(&target, folder))
+            })
+    }))
+}
+
 /// Whether one entry's origin is safe for git running outside the IDE sandbox: the command
 /// line, or a file [`placed_allowed`] allows. An origin that is not a file is refused.
 /// Inputs: the origin and the canonical project folder. Output: the answer.

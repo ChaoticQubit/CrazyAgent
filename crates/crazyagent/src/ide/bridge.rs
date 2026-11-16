@@ -1403,7 +1403,7 @@ mod comments;
 pub(crate) mod engine_step;
 mod extensions;
 #[cfg(unix)]
-mod remote_git;
+pub(crate) mod remote_git;
 #[cfg(unix)]
 mod terminal;
 #[cfg(all(test, unix))]
