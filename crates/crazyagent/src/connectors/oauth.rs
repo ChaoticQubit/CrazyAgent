@@ -17,7 +17,9 @@ mod sign;
 #[cfg(unix)]
 use sign::finish_trusted;
 #[cfg(unix)]
-pub(crate) use sign::{begin_with, finish_with};
+pub(crate) use sign::begin_with;
+#[cfg(all(test, unix))]
+pub(crate) use sign::finish_with;
 
 /// Every sign-in refusal code this client adds beside the connector address codes of
 /// `mcp_client::MCP_CODES`, sorted.

@@ -549,6 +549,7 @@ pub(super) fn finish_trusted(
 }
 
 /// [`finish_trusted`] without the trust read, for a sign-in begun with a file given.
+#[cfg(test)]
 pub(crate) fn finish_with(
     root: &Path,
     state: &str,
