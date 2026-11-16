@@ -70,12 +70,12 @@ export function githubName(projectName: string): string {
   return name;
 }
 
-/** Makes the project's about text into a repository description: whitespace and control
- * character runs become one space, the text is cut to 350 characters and trimmed.
+/** Makes the project's about text into a repository description: runs of Unicode White_Space
+ * and control characters become one space, the text is cut to 350 characters and trimmed.
  * Input: the about text. Output: the description. */
 export function githubDescription(about: string): string {
-  const folded = about.replace(/[\s\p{Cc}]+/gu, " ").trim();
-  const description = [...folded].slice(0, DESCRIPTION_CHARS_MAX).join("").trimEnd();
+  const folded = about.replace(/[\p{White_Space}\p{Cc}]+/gu, " ").replace(/^ | $/gu, "");
+  const description = [...folded].slice(0, DESCRIPTION_CHARS_MAX).join("").replace(/ $/u, "");
   assert(descriptionValid(description), "githubDescription made an invalid description");
   return description;
 }

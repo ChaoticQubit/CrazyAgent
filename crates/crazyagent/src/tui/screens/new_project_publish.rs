@@ -345,6 +345,7 @@ impl Publish {
         about: &str,
     ) -> PublishReply {
         let mut input = self.input(row, project, about);
+        let before = input.value().to_owned();
         if !input.handle(key) {
             let typed = matches!(key.code, KeyCode::Char(_))
                 && !key.modifiers.contains(KeyModifiers::CONTROL);
@@ -354,7 +355,9 @@ impl Publish {
                 PublishReply::Ignored
             };
         }
-        self.keep(row, input);
+        if input.value() != before {
+            self.keep(row, input);
+        }
         PublishReply::Handled
     }
 
