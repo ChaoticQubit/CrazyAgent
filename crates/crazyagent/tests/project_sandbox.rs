@@ -2159,6 +2159,64 @@ fn a_confined_agent_cannot_chmod_flag_or_acl_the_shared_git_objects_or_its_git_l
     assert_eq!(git(&["cat-file", "-p", &loose]), "loose");
 }
 
+/// A confined agent sets no time on its worktree's git links, whose `gitdir` time git's
+/// worktree prune reads (LINUX-TEAM-TIME-CALLS, Seatbelt side): `touch` with a set time and
+/// with now fails on the admin `commondir` and `gitdir` and the worktree's `.git`, each
+/// time kept, while the agent's own file in the worktree takes the set time.
+#[test]
+fn a_confined_agent_sets_no_time_on_its_git_links() {
+    use std::os::unix::fs::MetadataExt;
+    let case = case();
+    let git = |arguments: &[&str]| {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "start"]);
+    let one = case.project.join("worktrees").join("one");
+    git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        one.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let admin = case.project.join(".git").join("worktrees").join("one");
+    let links = [
+        admin.join("commondir"),
+        admin.join("gitdir"),
+        one.join(".git"),
+    ];
+    let own = one.join("own.txt");
+    fs::write(&own, "own\n").unwrap();
+    let set = "/usr/bin/touch -d 2000-01-02T03:04:05Z";
+    let script = links
+        .iter()
+        .flat_map(|link| {
+            let link = quoted(link);
+            [format!("{set} {link}"), format!("/usr/bin/touch {link}")]
+        })
+        .map(|step| format!("{step} 2>/dev/null && echo \"changed: {step}\"\n"))
+        .collect::<String>();
+    let script = format!("{script}{set} {} && echo tried", quoted(&own));
+    let modified = |path: &PathBuf| fs::symlink_metadata(path).unwrap().mtime();
+    let before: Vec<i64> = links.iter().map(modified).collect();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_worktree(&one)
+        .unwrap();
+    let tried = run(&sandbox, &case.profiles.join("link-times.sb"), &script);
+    let stdout = String::from_utf8_lossy(&tried.stdout).into_owned();
+    let errors = String::from_utf8_lossy(&tried.stderr).into_owned();
+    assert_eq!(stdout, "tried\n", "{errors}");
+    assert_eq!(links.iter().map(modified).collect::<Vec<i64>>(), before);
+    assert_eq!(
+        modified(&own),
+        946_782_245,
+        "the agent's own file took the set time"
+    );
+}
+
 const AGENT_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 
 /// A project whose agent works in its own clone (DEC-102 Own branch): a committed
