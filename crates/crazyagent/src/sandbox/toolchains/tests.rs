@@ -788,3 +788,54 @@ fn launches_that_prepare_one_cargo_home_at_once_all_get_it() {
     }
     assert!(refused.is_empty(), "{refused:?}");
 }
+
+/// Runs only in the process the row below starts: makes an agent home with its short temp
+/// folder, then writes its launch `getconf` under umask 0277, which clears the owner's write
+/// bit, and reports what it got. Input: the folder named in `ROW_FOLDER`; without it, nothing.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn a_launch_getconf_written_under_a_narrow_umask_in_its_own_process() {
+    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    let _scratch = ScopedTmp::make(home.path()).unwrap();
+    fs::create_dir(home.path().join(crate::launch_context::STATE)).unwrap();
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o277));
+    let getconf_folder = getconf_folder(home.path());
+    let outcome = match write_getconf(home.path(), false) {
+        Ok(()) => format!(
+            "ok {:o} {:o}",
+            fs::metadata(&getconf_folder).unwrap().mode() & 0o777,
+            fs::metadata(getconf_folder.join(GETCONF_PROGRAM))
+                .unwrap()
+                .mode()
+                & 0o777
+        ),
+        Err(error) => format!("err {error}"),
+    };
+    fs::write(Path::new(&folder).join("outcome"), outcome).unwrap();
+}
+
+/// UMASK-MODE-ASSERTS: an engine that inherited a umask clearing the owner's write bit still
+/// writes a launch's `getconf` in a private 0700 folder as a private 0700 program, where the
+/// folder came out 0500 and the write was refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_launch_getconf_written_under_a_narrow_umask_is_a_private_program() {
+    let folder = tempfile::tempdir().unwrap();
+    let status = crate::spawn_gate::row_alone(
+        "sandbox::toolchains::tests::a_launch_getconf_written_under_a_narrow_umask_in_its_own_process",
+        ":",
+        folder.path(),
+    );
+    assert!(
+        status.success(),
+        "the write under umask 0277 ended in {status}"
+    );
+    assert_eq!(
+        fs::read_to_string(folder.path().join("outcome")).unwrap(),
+        "ok 700 700"
+    );
+}

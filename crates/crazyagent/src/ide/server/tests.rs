@@ -3261,3 +3261,29 @@ fn the_start_sweep_removes_only_temp_folders_an_earlier_engine_moved_aside() {
     assert_eq!(kept, [true; 3], "open to others, named otherwise, link");
     assert!(outside_kept, "a file behind the link was removed");
 }
+
+/// Runs only in the process the row below starts, under a file size limit of zero with
+/// SIGXFSZ ignored, so the token write fails after the file was made. Input: the folder
+/// named in `ROW_FOLDER`; without it, nothing.
+#[test]
+#[ignore]
+fn an_ide_token_write_cut_short_in_its_own_process() {
+    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+        return;
+    };
+    assert!(token::issue(Path::new(&folder)).is_err());
+}
+
+/// UMASK-MODE-ASSERTS: an IDE token write that fails part way leaves no token file, where
+/// it used to leave the empty file behind.
+#[test]
+fn an_ide_token_write_cut_short_leaves_no_token_file() {
+    let folder = tempfile::tempdir().unwrap();
+    let status = crate::spawn_gate::row_alone(
+        "ide::server::tests::an_ide_token_write_cut_short_in_its_own_process",
+        "trap '' XFSZ; ulimit -f 0",
+        folder.path(),
+    );
+    assert!(status.success(), "the cut token write ended in {status}");
+    assert!(std::fs::symlink_metadata(folder.path().join(token::FILE)).is_err());
+}
