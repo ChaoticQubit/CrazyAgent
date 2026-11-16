@@ -59,6 +59,11 @@ fn the_description_is_the_about_text_on_one_line_within_350_characters() {
             "A tool for things".to_owned(),
         ),
         ("bell\u{7}here".to_owned(), "bell here".to_owned()),
+        ("no\u{a0}break".to_owned(), "no break".to_owned()),
+        (
+            "byte\u{feff}order".to_owned(),
+            "byte\u{feff}order".to_owned(),
+        ),
         (accent.repeat(400), accent.repeat(350)),
         (face.repeat(400), face.repeat(350)),
         (format!("{} b", "a".repeat(349)), "a".repeat(349)),

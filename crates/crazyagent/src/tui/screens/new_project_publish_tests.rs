@@ -348,3 +348,35 @@ fn signed_in_create_waits_on_the_row_a_publish_start_would_refuse_and_then_goes_
     wizard.go(Step::Review);
     assert!(matches!(wizard.key(key(KeyCode::Enter)), Reply::Create(_)));
 }
+
+#[test]
+fn a_cursor_key_in_the_panel_leaves_the_name_and_description_following_about() {
+    let mut wizard = signed_in("Tidepool", "Buoys");
+    wizard.focus_on(Control::Publish);
+    wizard.key(key(KeyCode::Enter));
+    wizard.key(key(KeyCode::Down));
+    wizard.key(key(KeyCode::Down));
+    assert_eq!(wizard.publish.panel, Some(PanelRow::Name));
+    for code in [KeyCode::Right, KeyCode::Left, KeyCode::Home, KeyCode::End] {
+        assert_eq!(wizard.key(key(code)), Reply::Handled);
+    }
+    wizard.key(control('a'));
+    wizard.key(key(KeyCode::Down));
+    assert_eq!(wizard.publish.panel, Some(PanelRow::Description));
+    wizard.key(key(KeyCode::Left));
+    wizard.key(control('e'));
+    wizard.key(key(KeyCode::Esc));
+    assert_eq!(wizard.publish.name, None);
+    assert_eq!(wizard.publish.description, None);
+    assert_eq!(wizard.publish.shown_name("Tidewater"), "Tidewater");
+    assert_eq!(wizard.publish.shown_description("Reefs"), "Reefs");
+
+    wizard.key(key(KeyCode::Enter));
+    wizard.key(key(KeyCode::Down));
+    wizard.key(key(KeyCode::Down));
+    wizard.key(key(KeyCode::Home));
+    type_text(&mut wizard, "x");
+    wizard.key(key(KeyCode::Left));
+    type_text(&mut wizard, "y");
+    assert_eq!(wizard.publish.shown_name("Tidepool"), "Tidepoolxy");
+}

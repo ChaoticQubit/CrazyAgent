@@ -37,6 +37,8 @@ test("the repository name is the project name made safe for GitHub", () => {
 test("the description is the about text on one line within GitHub's 350 characters", () => {
   assert.equal(publish.githubDescription("A  tool\n\nfor\tthings "), "A tool for things");
   assert.equal(publish.githubDescription("bell\u0007here"), "bell here");
+  assert.equal(publish.githubDescription("no\u00a0break"), "no break");
+  assert.equal(publish.githubDescription("byte\ufefforder"), "byte\ufefforder");
   assert.equal(publish.githubDescription("é".repeat(400)), "é".repeat(350));
   const faces = publish.githubDescription("😀".repeat(400));
   assert.equal([...faces].length, 350);
