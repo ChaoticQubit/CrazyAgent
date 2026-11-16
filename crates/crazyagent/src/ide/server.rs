@@ -1588,8 +1588,9 @@ pub(crate) fn listeners(port: u16) -> Result<Vec<(i32, String)>, EngineError> {
 /// Lists the processes listening on a TCP port and the address each binds, through `lsof`
 /// run within [`LISTENERS_TIME`], its process group stopped after, so a listing that hangs
 /// holds no open and no proxied request; given `pids`, only their descriptors are read
-/// (`-a -p`). Inputs: the port and the processes, if any. Output: process ids with
-/// addresses, empty when none listens, or `ide_server_check_failed`.
+/// (`-a -p`), and a listing lsof ends with 1 because one of them is gone still counts.
+/// Inputs: the port and the processes, if any. Output: process ids with addresses, empty
+/// when none listens, or `ide_server_check_failed`.
 #[cfg(target_os = "macos")]
 fn listed(port: u16, pids: Option<&[i32]>) -> Result<Vec<(i32, String)>, EngineError> {
     assert_ne!(port, 0);
@@ -1610,7 +1611,7 @@ fn listed(port: u16, pids: Option<&[i32]>) -> Result<Vec<(i32, String)>, EngineE
         return Err(failure("ide_server_check_failed"));
     }
     let text = std::str::from_utf8(&stdout).map_err(|_| failure("ide_server_check_failed"))?;
-    if !succeeded && !text.is_empty() {
+    if !succeeded && !text.is_empty() && pids.is_none() {
         return Err(failure("ide_server_check_failed"));
     }
     let mut pid = None;
