@@ -994,6 +994,32 @@ fn choosing_tcp_ports_saves_it_and_a_refused_save_says_why() {
     assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
 }
 
+/// A Linux sandbox save refused as stale, as another window saved the sandbox first, says
+/// the setting changed in another window and that the saved one shows now, not the pack's
+/// sentence, and reads the setting again (STRICT-R2-F1). A stale pack change keeps its own
+/// sentence.
+#[test]
+fn a_stale_sandbox_save_says_the_setting_changed_elsewhere_and_reads_it_again() {
+    use crate::storage::versioned::STALE_CODE;
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('l'));
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    assert_eq!(chosen(&mut shell), LinuxSockets::Refuse);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Err(STALE_CODE.into()))));
+    assert_eq!(
+        lead(&shell),
+        "This changed in another window, so yours was not saved. The saved one shows now."
+    );
+    assert!(
+        jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, AppSetupJob::Sandbox)),
+        "a stale save reads the setting again"
+    );
+    assert!(setup_plain(STALE_CODE).starts_with("The pack changed in another window"));
+}
+
 #[test]
 fn settings_show_the_linux_call_supervisor_setting_and_what_each_option_does() {
     let mut shell = settings(120, 72);
