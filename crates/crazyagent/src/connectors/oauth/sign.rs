@@ -113,10 +113,12 @@ struct Client {
 
 /// What a renewal needs of a connector's last sign-in, saved after its tokens in the plugin
 /// key store: the issuer, its token endpoint, the client and how it signs in, the resource
-/// the tokens are for, the scopes it asked, how many step-ups in a row led to it, and when
-/// the access token ends (Unix ms; `i64::MAX` for no end).
+/// the tokens are for, the scopes it asked, how many step-ups in a row led to it, when the
+/// access token ends (Unix ms; `i64::MAX` for no end) and the sha256 of the connector file
+/// the owner signed in under.
 #[derive(Serialize, Deserialize)]
 struct Record {
+    sha256: String,
     issuer: String,
     token: String,
     client: String,
@@ -947,6 +949,56 @@ fn ended(root: &Path, name: &str, issuer: &str) -> Result<(), OAuthError> {
     Ok(())
 }
 
+/// The kinds of key a connector's sign-ins save as `connector-<kind>-<name>-<suffix>`.
+const KEY_KINDS: [&str; 5] = ["token", "refresh", "client", "secret", "issuer"];
+
+/// Whether a plugin key was saved by one connector's sign-ins: its record, or a kind of
+/// key for it whose suffix is an issuer's 16 hex digits or the owner's own app, so a
+/// connector whose name only starts with this one keeps its keys. Inputs: the key's name
+/// and the connector. Output: true for a key of that connector's sign-ins.
+fn saved_for(key: &str, name: &str) -> bool {
+    let issuer = |suffix: &str| {
+        suffix.len() == 16
+            && suffix
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    };
+    key.strip_prefix("connector-signin-") == Some(name)
+        || KEY_KINDS.iter().any(|kind| {
+            key.strip_prefix("connector-")
+                .and_then(|rest| rest.strip_prefix(*kind))
+                .and_then(|rest| rest.strip_prefix('-'))
+                .and_then(|rest| rest.strip_prefix(name))
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|suffix| suffix == "own" || issuer(suffix))
+        })
+}
+
+/// Removes every key a connector's sign-ins saved, at every issuer, and drops its sign-ins
+/// still waiting, under the renewal lock so a renewal running now saves nothing after it:
+/// for a connector removed, or trusted again with other hosts. Inputs: engine root and
+/// connector. Output: Ok, or the key store's refusal.
+pub(super) fn forget_keys(root: &Path, name: &str) -> Result<(), OAuthError> {
+    let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
+    flows().retain(|flow| !(flow.root == root && flow.connector == name));
+    let folder = match std::fs::read_dir(root.join(PLUGIN_KEYS)) {
+        Ok(folder) => folder,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(key_store()),
+    };
+    let mut keys = Vec::new();
+    for entry in folder {
+        let file = entry.map_err(|_| key_store())?.file_name();
+        if let Some(key) = file.to_str().filter(|key| saved_for(key, name)) {
+            keys.push(key.to_owned());
+        }
+    }
+    for key in &keys {
+        accounts::remove_key_in(root, PLUGIN_KEYS, key).map_err(|_| key_store())?;
+    }
+    Ok(())
+}
+
 fn record_ref(name: &str) -> Result<CredentialRef, OAuthError> {
     CredentialRef::new(format!("connector-signin-{name}")).map_err(|_| key_store())
 }
@@ -1027,6 +1079,7 @@ fn redeem(
     let tokens = reply.object().ok_or_else(token_invalid)?;
     let granted = grant(&tokens, now_ms())?;
     let text = record_text(&Record {
+        sha256: flow.sha256.clone(),
         issuer: flow.issuer.clone(),
         token: flow.token.as_str().to_owned(),
         client: flow.client.id.clone(),
@@ -1125,7 +1178,8 @@ fn renew(
 
 /// The credential a call sends now for one connector as declared, its access token
 /// renewed first at the token endpoint of its sign-in when it ends within a minute. A
-/// sign-in for another resource than the one declared is not used. Blocking when it
+/// sign-in for another resource than the one declared is not used, and one made under
+/// another file of the connector is ended and asks the owner again. Blocking when it
 /// renews. Inputs: database, root, connector, its title, the trusted file's sha256, its
 /// declaration, the clock (Unix ms) and the lookup. Output: the credential, or
 /// `connector_sign_in_needed` and a renewal's refusals.
@@ -1202,19 +1256,27 @@ fn current(
     force: bool,
     reach: &ProviderReach,
 ) -> Result<Credential, OAuthError> {
-    let _ = sha256;
     let oauth = spec.oauth.as_ref().ok_or_else(not_offered)?;
-    let usable = |record: Option<Record>| {
-        record
-            .filter(|record| reaches(&record.resource, &spec.mcp))
-            .ok_or_else(sign_in_needed)
+    let usable = |record: Record| {
+        if reaches(&record.resource, &spec.mcp) {
+            Ok(record)
+        } else {
+            Err(sign_in_needed())
+        }
     };
+    let changed = |record: &Record| record.sha256 != sha256;
     let ends_soon = |record: &Record| now_ms.saturating_add(RENEW_EARLY_MS) >= record.expires_ms;
-    let mut record = usable(record_of(root, name)?)?;
-    if force || ends_soon(&record) {
+    let mut record = record_of(root, name)?.ok_or_else(sign_in_needed)?;
+    if force || changed(&record) || ends_soon(&record) {
         let read_ends_ms = record.expires_ms;
         let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
-        record = usable(record_of(root, name)?)?;
+        record = record_of(root, name)?.ok_or_else(sign_in_needed)?;
+        if changed(&record) {
+            ended(root, name, &record.issuer)?;
+            mark_sign_in(db, name, title, now_ms)?;
+            return Err(sign_in_needed());
+        }
+        record = usable(record)?;
         let renewed_since = record.expires_ms != read_ends_ms;
         if (force && !renewed_since) || (!force && ends_soon(&record)) {
             match renew(root, name, oauth, &record, now_ms, reach) {
@@ -1231,6 +1293,7 @@ fn current(
             }
         }
     }
+    let record = usable(record)?;
     let refresh = token_ref("refresh", name, &record.issuer)?;
     let renewable = accounts::key_saved_in(root, PLUGIN_KEYS, &refresh).map_err(|_| key_store())?;
     Ok(Credential::OAuth {

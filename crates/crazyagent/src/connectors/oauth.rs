@@ -11,7 +11,9 @@ use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
 use crate::provider_reach::ProviderReach;
 use crate::storage::accounts::{self, PLUGIN_KEYS};
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
+#[cfg(unix)]
+use rusqlite::params;
 use std::path::Path;
 
 #[cfg(unix)]
@@ -22,6 +24,8 @@ pub(crate) use sign::begin_with;
 use sign::finish_trusted;
 #[cfg(all(test, unix))]
 pub(crate) use sign::finish_with;
+#[cfg(unix)]
+use sign::forget_keys;
 #[cfg(unix)]
 pub(crate) use sign::fresh_with;
 #[cfg(unix)]
@@ -274,12 +278,27 @@ fn mark_sign_in(db: &Connection, name: &str, title: &str, now_ms: i64) -> Result
 /// connector. Output: Ok, or `connectors_unavailable`.
 #[cfg(unix)]
 fn signed_in(db: &Connection, name: &str) -> Result<(), OAuthError> {
-    forget(db, name).map_err(|_| OAuthError("connectors_unavailable"))
+    unmark(db, name).map_err(|_| OAuthError("connectors_unavailable"))
 }
 
-/// Deletes a connector's "Sign in again": when it is signed in, removed or trusted again.
-/// Inputs: the engine database and the connector. Output: Ok, or `connectors_unavailable`.
-pub fn forget(db: &Connection, name: &str) -> Result<(), EngineError> {
+/// Forgets a connector's sign-ins when it is removed or trusted again with other hosts:
+/// every key they saved, the sign-ins still waiting and its "Sign in again". Inputs: the
+/// engine database, root and connector. Output: Ok, `connector_oauth_key_store_unavailable`
+/// or `connectors_unavailable`.
+pub fn forget(db: &Connection, root: &Path, name: &str) -> Result<(), EngineError> {
+    forget_keys(root, name).map_err(|problem| EngineError(problem.0.into()))?;
+    unmark(db, name)
+}
+
+/// No sign-in key is saved where the Unix owner-only key folder does not exist. Output: Ok.
+#[cfg(not(unix))]
+fn forget_keys(_root: &Path, _name: &str) -> Result<(), OAuthError> {
+    Ok(())
+}
+
+/// Deletes a connector's "Sign in again". Inputs: the engine database and the connector.
+/// Output: Ok, or `connectors_unavailable`.
+fn unmark(db: &Connection, name: &str) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(unavailable)?;
     db.execute("DELETE FROM connector_sign_ins WHERE connector=?1", [name])
         .map_err(unavailable)?;
