@@ -357,8 +357,8 @@ impl Viewing for Open {
         true
     }
 
-    fn holds(&self) -> impl Future<Output = bool> + Send {
-        async { true }
+    async fn holds(&self) -> bool {
+        true
     }
 
     fn typed(&self, _: &TerminalRequest) {}
