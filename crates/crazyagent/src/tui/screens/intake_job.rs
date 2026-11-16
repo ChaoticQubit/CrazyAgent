@@ -96,7 +96,8 @@ pub(in crate::tui) fn name(job: &JobView) -> String {
 }
 
 /// What the job does now or how it ended, with the folder's name and the counts as files
-/// land, in the desktop's words. Takes the job. Returns one sentence.
+/// land, in the desktop's words; a count the engine sent past its total is left out, as it
+/// reads as no count. Takes the job. Returns one sentence.
 pub(in crate::tui) fn line(job: &JobView) -> String {
     let name = name(job);
     if running(job) && job.stopping {
@@ -114,8 +115,7 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
     };
     match &job.state {
         JobState::Downloading { progress } => {
-            assert!(progress.done <= progress.total);
-            if progress.total == 0 {
+            if progress.total == 0 || progress.done > progress.total {
                 format!("Downloading {name} from iCloud...")
             } else {
                 let (done, total) = (progress.done, progress.total);
@@ -156,8 +156,7 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
 /// documents it copied. Takes the New Project and its name. Returns one sentence.
 fn setup_line(job: &JobView, name: &str) -> String {
     match &job.state {
-        JobState::Building { done, total } if *total > 0 => {
-            assert!(done <= total, "copied {done} past {total}");
+        JobState::Building { done, total } if *total > 0 && done <= total => {
             let noun = if *total == 1 { "document" } else { "documents" };
             format!("Setting up {name}: {done} of {total} {noun} copied")
         }
@@ -186,25 +185,27 @@ fn delete_line(job: &JobView, name: &str) -> String {
         JobState::Stopping { agents_left } => {
             format!("Waiting for {} of {name} to stop...", agents(*agents_left))
         }
-        JobState::Trashing { done, total } => {
-            assert!(done <= total, "trashed {done} past {total}");
+        JobState::Trashing { done, total } if done <= total => {
             format!(
                 "Moving {name} to the Trash: {done} of {total} {}",
                 folders(*total)
             )
         }
+        JobState::Trashing { .. } => format!("Moving {name} to the Trash..."),
         JobState::Clearing => format!("Removing {name} from CrazyAgent..."),
         JobState::Done => format!("{name} is deleted. Its files are in the Trash."),
         JobState::Cancelled { .. } => {
             format!("Deleting {name} stopped. Nothing was moved to the Trash.")
         }
         JobState::Failed { code, .. } => format!("{name}: {}", copy(code)),
-        JobState::CutShort { trashed, total } => {
-            assert!(trashed <= total, "trashed {trashed} past {total}");
+        JobState::CutShort { trashed, total } if trashed <= total => {
             format!(
                 "Deleting {name} was cut short with {trashed} of {total} {} in the Trash. Finish delete or keep the project.",
                 folders(*total)
             )
+        }
+        JobState::CutShort { .. } => {
+            format!("Deleting {name} was cut short. Finish delete or keep the project.")
         }
         JobState::Downloading { .. }
         | JobState::Copying { .. }
@@ -261,15 +262,17 @@ pub(in crate::tui) fn end_line(
 }
 
 /// The running job's few words for the header on every screen: what it does and its count,
-/// with the folder's name cut short so the crumbs keep their place. Takes a running job and
-/// the ellipsis. Returns the words.
+/// with the folder's name cut short so the crumbs keep their place; a count past its total
+/// is left out. Takes a running job and the ellipsis. Returns the words.
 pub(in crate::tui) fn brief(job: &JobView, ellipsis: &str) -> String {
     assert!(running(job), "an ended job has no brief: {:?}", job.state);
     let name = cut(&name(job), BRIEF_NAME_CELLS_MAX, ellipsis);
     let verb = verb(job.kind);
     let brief = match &job.state {
         _ if job.stopping => format!("Stopping {name}..."),
-        JobState::Downloading { progress } if progress.total > 0 => {
+        JobState::Downloading { progress }
+            if progress.total > 0 && progress.done <= progress.total =>
+        {
             format!(
                 "Downloading {name}: {} of {}",
                 progress.done, progress.total
@@ -285,8 +288,11 @@ pub(in crate::tui) fn brief(job: &JobView, ellipsis: &str) -> String {
         JobState::Copying { .. } if job.kind == JobKind::Delete => format!("{verb} {name}..."),
         JobState::Copying { copied, .. } if *copied > 0 => format!("{verb} {name}: {copied} files"),
         JobState::Copying { .. } => format!("{verb} {name}..."),
-        JobState::Trashing { done, total } => format!("{verb} {name}: {done} of {total}"),
-        JobState::Building { done, total } if *total > 0 => {
+        JobState::Trashing { done, total } if done <= total => {
+            format!("{verb} {name}: {done} of {total}")
+        }
+        JobState::Trashing { .. } => format!("{verb} {name}..."),
+        JobState::Building { done, total } if *total > 0 && done <= total => {
             format!("{verb} {name}: {done} of {total}")
         }
         JobState::Building { .. } => format!("{verb} {name}..."),
