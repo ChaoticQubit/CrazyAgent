@@ -634,6 +634,26 @@ impl Leftovers {
             .name("full-access-hold".into())
             .spawn(move || watch(key, lineage));
     }
+
+    /// Holds as [`Leftovers::hold`] does, for a run on the hidden folders list (SA-VID14):
+    /// `kept`, such as its account lease, goes as `mode` says, and `listed`, its place on that
+    /// list, is held under End and let go for the engine's life under Keep and Ask.
+    /// Inputs: as for `hold`, plus the listing. Output: none.
+    pub fn hold_listed<T: Send + 'static, L: Send + 'static>(
+        self,
+        account: Option<CredentialRef>,
+        kept: T,
+        listed: L,
+        by: HoldBy,
+        mode: LeftoverMode,
+    ) {
+        if mode == LeftoverMode::End {
+            self.hold(account, (kept, listed), by, mode);
+        } else {
+            std::mem::forget(listed);
+            self.hold(account, kept, by, mode);
+        }
+    }
 }
 
 /// How a watcher pass treats the processes of a hold that ends them: SIGTERM once, nothing
@@ -2854,6 +2874,50 @@ pub(crate) mod tests {
         );
         assert!(still_runs, "Keep ended the process");
         assert!(cleared, "a kept process that ended stayed listed");
+    }
+
+    /// SA-VID14-KEEP-SLOTS: a sandboxed run on the hidden folders list whose stop left
+    /// processes stays named while they run and leaves the list once they end, under Keep
+    /// and under Ask then the owner's Keep, so no kept run holds a place on the list, which
+    /// takes at most 256 runs, for the engine's life.
+    #[test]
+    fn a_kept_or_asked_hold_frees_its_hidden_folders_listing_once_its_processes_end() {
+        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
+        for (project, mode) in [
+            ("keep-slots-kept", LeftoverMode::Keep),
+            ("keep-slots-asked", LeftoverMode::Ask),
+        ] {
+            let mut leftover = session_sleeper(false);
+            let pid = i32::try_from(leftover.id()).unwrap();
+            let listed = starting(RunKind::Research, project).expect("the list has room");
+            listed.hid(&[]);
+            let lineage = Lineage::of_sandboxed(leftover.id(), None).unwrap();
+            Leftovers(Box::new(lineage)).hold_listed(None, (), listed, by_in(project), mode);
+            let view = held_in(project);
+            let kept = mode != LeftoverMode::Ask || keep_held(view[0].key, project);
+            let while_running = runs_seeing(project, &saved);
+            let _ = leftover.try_wait();
+            let still_runs = runs(pid);
+            end_pid(pid);
+            let _ = leftover.wait();
+            let cleared = within(LEFTOVER_GRACE, || held_in(project).is_empty());
+            let after = runs_seeing(project, &saved);
+
+            assert_eq!(view.len(), 1, "{mode:?}: {view:?}");
+            assert!(kept, "{mode:?}: the owner's Keep was refused");
+            assert!(still_runs, "{mode:?} ended the process");
+            assert_eq!(
+                while_running,
+                vec![RunKind::Research],
+                "{mode:?}: a run whose processes still run was not named"
+            );
+            assert!(cleared, "{mode:?}: a hold whose processes ended stayed");
+            assert!(
+                after.is_empty(),
+                "{mode:?}: a kept run stayed on the hidden folders list after its processes ended"
+            );
+        }
     }
 
     /// Commands a sandboxed run left count against its agent's next start while the owner

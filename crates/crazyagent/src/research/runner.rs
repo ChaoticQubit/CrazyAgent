@@ -1218,12 +1218,7 @@ impl ResearchRunner {
                         who: format!("research job {}", job.id),
                     };
                     let mode = jobs.leftover_mode(&job.project);
-                    if mode == leftovers::LeftoverMode::End {
-                        left.hold(account, (lease, listed), by, mode);
-                    } else {
-                        std::mem::forget(listed);
-                        left.hold(account, lease, by, mode);
-                    }
+                    left.hold_listed(account, lease, listed, by, mode);
                     return Err(RunError::Uncertain(code));
                 }
             }
