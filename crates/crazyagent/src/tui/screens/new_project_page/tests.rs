@@ -74,10 +74,24 @@ fn a_stopped_or_refused_new_project_job_is_said_in_new_project_words() {
     assert!(!detail.contains("Adding the folder"), "{detail}");
 
     let (title, detail) = said("home_destination_exists");
-    assert_eq!(title, "Could not create the folder.");
+    assert_eq!(title, "Could not create the project.");
+    assert_eq!(
+        detail,
+        "Your projects folder already has a folder with this name. Choose another project name.",
+        "only another name gets past a folder already there (rv-code bgjobs-3b F2)"
+    );
+    let mut wizard = named("Tidepool");
+    wizard.failed("home_destination_exists");
     assert!(
-        detail.starts_with("A folder for this project already exists."),
-        "{detail}"
+        matches!(
+            wizard.phase,
+            Phase::Failed {
+                step: super::super::new_project::Step::About,
+                ..
+            }
+        ),
+        "Enter goes to the name: {:?}",
+        wizard.phase
     );
 
     let (title, detail) = said("project_folder_unavailable");

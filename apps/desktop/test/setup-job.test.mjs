@@ -83,6 +83,10 @@ const SETUP_WORDS = {
   project_documents_too_large: "This project's documents would be over 200 MB. Remove some files first.",
   project_folder_unwritable: "CrazyAgent can't write the project folder. Check the disk and try again.",
   project_folder_unavailable: "Documents can't be copied into a project on this computer yet. Create it without documents.",
+  document_not_found: "One of the documents was moved or deleted. Choose it again.",
+  document_not_a_regular_file: "Can't add a folder or a shortcut. Choose the original file.",
+  document_unreadable: "One of the documents can't be read. Check its permissions.",
+  document_changed_while_copying: "A document changed while it was being copied. Try again.",
 };
 
 test("every code a New Project job is refused or ends with has New Project's own sentence and reaches the window by name", () => {
@@ -152,4 +156,19 @@ test("New Project starts the engine's job, follows it on the page and runs its f
   const client = read("src/engine-client.ts");
   assert.match(client, /export type ProjectJobKind = "add" \| "move_project" \| "delete" \| "setup";/);
   assert.match(client, /\| \{ state: "building"; done: number; total: number \}/);
+});
+
+test("New Project opened again drops the answers of a project its job already made, read from the job or, once the job left Home, from the projects; a page closed during the follow-ups keeps none (rv-code bgjobs-3b F3)", async () => {
+  const flow = await import("../src/screens/new-project/index.tsx");
+  const started = { id: "setup-1", project: "notes" };
+  assert.deepEqual(flow.reopened(setupJob(building(1, 3)), started, []), { follow: "setup-1", keep: true });
+  assert.deepEqual(flow.reopened(setupJob({ state: "done" }), started, []), { follow: null, keep: false });
+  assert.deepEqual(flow.reopened(setupJob({ state: "failed", code: "home_new_project_failed", phase: "building" }), started, []), { follow: null, keep: true });
+  assert.deepEqual(flow.reopened(null, started, ["notes"]), { follow: null, keep: false }, "dismissed after Done: the project is listed");
+  assert.deepEqual(flow.reopened(setupJob(building(0, 0), { id: "setup-2", project_id: "other" }), started, ["reading", "notes"]), { follow: null, keep: false }, "a later job took the slot");
+  assert.deepEqual(flow.reopened(null, started, ["reading"]), { follow: null, keep: true }, "a lost job with no such project keeps the answers");
+  const wizard = read("src/screens/new-project/index.tsx");
+  const finish = wizard.slice(wizard.indexOf("async function finish("));
+  assert.ok(finish.indexOf("kept = null;") >= 0 && finish.indexOf("kept = null;") < finish.indexOf("await setProjectPool("), "a made project keeps no answers before its follow-ups wait");
+  assert.match(wizard, /startedSetup = \{ id: result\.job\.id, project: /, "the started job keeps the project it makes");
 });

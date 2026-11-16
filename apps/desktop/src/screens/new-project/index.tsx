@@ -56,6 +56,14 @@ export async function setupStart(spec: ProjectSpec, setup: ProjectSetup, start =
   return { kind: "refused", note: `${KEPT_LINE} ${await refusalLine(result.code, newProjectCopy(result), read)}` };
 }
 
+/** What New Project opened again keeps of the job it started before the owner left it. Inputs:
+ * the job read, the started job and the project ids the session lists. Output: the job id to
+ * follow, or null, and whether the answers stay. */
+export function reopened(job: IntakeJob | null, started: { id: string; project: string }, projects: readonly string[]): { follow: string | null; keep: boolean } {
+  void job; void started; void projects;
+  return { follow: null, keep: true };
+}
+
 /** Reads the New Project job this page started before the owner left it, as the page opens
  * again: it follows one still building, starts fresh after one that ended done, its follow-ups
  * skipped, and else lets go with the answers kept, Home saying how it ended (DEC-177 add.2 Q1

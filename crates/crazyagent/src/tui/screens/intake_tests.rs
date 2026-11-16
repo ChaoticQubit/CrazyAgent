@@ -3199,6 +3199,35 @@ fn home_opens_new_project_for_a_failed_new_project_job_and_starts_nothing() {
     );
 }
 
+/// rv-code bgjobs-3b F5: a New Project copying its documents reads on Home in the desktop's
+/// words, one document said in the singular; one with no documents counted reads as setting
+/// up.
+#[test]
+fn a_new_project_copying_its_documents_reads_in_the_desktops_words() {
+    let building = |done, total| JobView {
+        id: RequestId::new("setup-1").unwrap(),
+        kind: JobKind::Setup,
+        project_id: Some(ProjectId::new("project-tidepool").unwrap()),
+        source: "Tidepool".to_owned(),
+        mode: AddMode::Move,
+        overrides: Vec::new(),
+        stopping: false,
+        state: JobState::Building { done, total },
+    };
+    assert_eq!(
+        super::intake_job::line(&building(1, 3)),
+        "Setting up Tidepool: 1 of 3 documents copied"
+    );
+    assert_eq!(
+        super::intake_job::line(&building(0, 1)),
+        "Setting up Tidepool: 0 of 1 document copied"
+    );
+    assert_eq!(
+        super::intake_job::line(&building(0, 0)),
+        "Setting up Tidepool..."
+    );
+}
+
 /// DEC-177: Enter on a project move that failed starts it again as a move of that project,
 /// never as an add of its folder, and a refused start is said in the move's words.
 #[test]

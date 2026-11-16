@@ -1333,6 +1333,10 @@ mod tests {
             "project_documents_too_large",
             "project_folder_unwritable",
             "project_folder_unavailable",
+            "document_not_found",
+            "document_not_a_regular_file",
+            "document_unreadable",
+            "document_changed_while_copying",
         ] {
             assert_eq!(intake_code(code), Some(code), "{code}");
             assert_eq!(
@@ -1357,6 +1361,12 @@ mod tests {
         };
         let kept = view(failed("document_too_large"));
         assert_eq!(shown(kept.clone()), kept);
+        let moved = view(failed("document_not_found"));
+        assert_eq!(
+            shown(moved.clone()),
+            moved,
+            "a document moved before its copy keeps the Documents sentence"
+        );
         assert_eq!(
             shown(view(failed("open /Users/mira/notes.pdf: denied"))),
             view(failed("home_new_project_failed"))
