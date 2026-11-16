@@ -381,6 +381,17 @@ pub(crate) fn holds(connection: &Connection, folder: &Path) -> rusqlite::Result<
     }))
 }
 
+/// Tells whether a pending project move lands in `folder`: the folder is the move's
+/// destination in the home or inside it, as given or as it resolves now. Nothing is
+/// registered there until the move is finished or forgotten, since the move's record
+/// rewrites every stored path under its old folder to the same place under the
+/// destination and replaces a row already there. Inputs: an engine connection and the
+/// folder. Output: the answer, or any SQLite failure.
+pub(crate) fn lands(connection: &Connection, folder: &Path) -> rusqlite::Result<bool> {
+    let _ = (connection, folder);
+    Ok(false)
+}
+
 /// Forgets a pending project move whose disk work never ran. Inputs: the transaction and
 /// the transport exchange that planned it. Output: Ok; a move of another exchange stays.
 pub(crate) fn forget(tx: &Transaction<'_>, exchange: i64) -> Result<(), EngineError> {

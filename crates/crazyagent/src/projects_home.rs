@@ -17,6 +17,7 @@ pub use layout::{
     CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
 };
 pub(crate) use move_project::holds as project_move_holds;
+pub(crate) use move_project::lands as project_move_lands;
 pub(crate) use move_project::{
     Asked, Finished, Pending, check as project_move_check, finish, forget, pending, plan,
 };
