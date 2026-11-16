@@ -71,9 +71,9 @@ pub(in crate::tui) fn busy(held: Option<&JobView>) -> String {
 }
 
 /// The line for a refused job request: a busy refusal names the job that runs, any other
-/// refusal says its own sentence. Takes the code and the job read. Returns the line.
+/// refusal says its own sentence, and a code the engine sent empty or unknown says the plain
+/// fallback. Takes the code and the job read. Returns the line.
 pub(in crate::tui) fn refusal(code: &str, held: Option<&JobView>) -> String {
-    assert!(!code.is_empty());
     match code {
         "job_busy" => busy(held),
         code => copy(code),
