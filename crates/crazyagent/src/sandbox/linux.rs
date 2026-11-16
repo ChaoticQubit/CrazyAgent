@@ -1547,7 +1547,7 @@ impl LinuxSandbox {
             if let LinuxBackend::Nested { bwrap, helper } = &detected.backend
                 && let Some(routed) = detected.sandbox.routed()
             {
-                if routes(bwrap, helper) {
+                if route_held(bwrap, helper) {
                     detected.routed = Some(routed);
                 } else {
                     eprintln!("linux_route_not_started: this agent keeps the shared network");
@@ -1750,18 +1750,12 @@ fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
 }
 
 /// Tells whether this machine gives a nested agent a network of its own that leaves only
-/// through its route ports: slirp4netns and the `iptables` programs are at their fixed
-/// places, and the widest routed nest a launch asks for, one route port and one bridged
-/// port, starts the helper's probe inside it within [`ROUTE_PROBE_TIME_MAX`]; that probe
-/// passes only on the setup child's go byte ([`egress::started`]). Inputs: bubblewrap and
-/// the helper. Output: true only when that probe exits 0.
+/// through its route ports: the widest routed nest a launch asks for, one route port and
+/// one bridged port, starts the helper's probe inside it within [`ROUTE_PROBE_TIME_MAX`];
+/// that probe passes only on the setup child's go byte ([`egress::started`]). Asked through
+/// [`route_held`] only. Inputs: bubblewrap and the helper. Output: true when it exits 0.
 fn routes(bwrap: &Path, helper: &Path) -> bool {
-    let tools = SLIRP_PATHS
-        .iter()
-        .chain(egress::IPTABLES_PATHS.iter())
-        .all(|path| Path::new(path).is_file());
-    tools
-        && clean_absolute(bwrap)
+    clean_absolute(bwrap)
         && trusted(bwrap)
         && passes_within(
             Command::new(helper)
@@ -1797,8 +1791,36 @@ fn kept_route(
     refused: bool,
     probe: impl FnOnce() -> bool,
 ) -> bool {
-    let _ = (kept, bwrap, helper, refused);
-    probe()
+    if refused {
+        return false;
+    }
+    let held = kept.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    if let Some((asked_bwrap, asked_helper, answer)) = held
+        && asked_bwrap == bwrap
+        && asked_helper == helper
+    {
+        return answer;
+    }
+    let answer = probe();
+    let asked = (bwrap.to_path_buf(), helper.to_path_buf(), answer);
+    *kept.lock().unwrap_or_else(PoisonError::into_inner) = Some(asked);
+    answer
+}
+
+/// What [`route_held`] answered, read by the host facts and every launch alike.
+static ROUTE_READ: KeptRoute = Mutex::new(None);
+
+/// [`kept_route`] for this machine: refused as root (rv-sa241 NOTE-2), where slirp4netns
+/// would run with root's network before it joins the agent's, and while slirp4netns or an
+/// `iptables` program is missing from its fixed place, so a removed tool answers false at
+/// once. Inputs: bubblewrap and the helper. Output: true when the agent is routed.
+fn route_held(bwrap: &Path, helper: &Path) -> bool {
+    let root = rustix::process::geteuid().is_root();
+    let tools = SLIRP_PATHS
+        .iter()
+        .chain(egress::IPTABLES_PATHS.iter())
+        .all(|path| Path::new(path).is_file());
+    kept_route(&ROUTE_READ, bwrap, helper, root || !tools, || routes(bwrap, helper))
 }
 
 /// Tells whether AppArmor keeps unprivileged programs out of user namespaces, from what
@@ -1813,9 +1835,10 @@ fn restricts(setting: Option<&str>) -> bool {
 /// kernel scopes signals (the helper's `--scoped`), whether a launch gives the agent a
 /// process namespace ([`nests`], or the plain probe fails), whether the call supervisor
 /// holds ([`supervises`]), whether a nested agent gets a routed network of its own
-/// ([`routes`]), whether this runs as root and whether AppArmor's user namespace
-/// restriction, which never covers root, is why nothing nests ([`restricts`]). Inputs: the
-/// helper and the engine's data folder, none where no probe may run. Output: the facts.
+/// ([`route_held`], the answer every launch reads), whether this runs as root and whether
+/// AppArmor's user namespace restriction, which never covers root, is why nothing nests
+/// ([`restricts`]). Inputs: the helper and the engine's data folder, none where no probe
+/// may run. Output: the facts.
 pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     let usable = clean_absolute(helper) && helper.is_file();
     let scoped = usable && passes(Command::new(helper).arg(SCOPED));
@@ -1829,10 +1852,11 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     let root = rustix::process::geteuid().is_root();
     let nest = bwrap.filter(|_| nested);
     let supervised = held && data.is_some_and(|data| supervises(helper, nest, data, root));
-    let routed = held && nest.is_some_and(|bwrap| routes(bwrap, helper));
+    let routed = held && nest.is_some_and(|bwrap| route_held(bwrap, helper));
     let setting = fs::read_to_string(APPARMOR_USERNS).ok();
     let armored = !nested && !root && restricts(setting.as_deref());
     assert!(!routed || nested);
+    assert!(!(root && routed));
     assert!(!(root && supervised));
     assert!(!(armored && nested));
     assert!(!(armored && root));
