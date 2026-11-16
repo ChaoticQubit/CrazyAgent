@@ -1819,16 +1819,20 @@ fn kept_route(
 static ROUTE_READ: KeptRoute = Mutex::new(None);
 
 /// [`kept_route`] for this machine: refused as root (rv-sa241 NOTE-2), where slirp4netns
-/// would run with root's network before it joins the agent's, and while slirp4netns or an
-/// `iptables` program is missing from its fixed place, so a removed tool answers false at
-/// once. Inputs: bubblewrap and the helper. Output: true when the agent is routed.
+/// would run with root's network before it joins the agent's. The tools check runs inside
+/// the probe, so a kept answer never changes for a key: a tool removed after a true answer
+/// gives a routed launch whose setup fails, which the go byte refuses. Inputs: bubblewrap
+/// and the helper. Output: true when the agent is routed.
 fn route_held(bwrap: &Path, helper: &Path) -> bool {
     let root = rustix::process::geteuid().is_root();
-    let tools = SLIRP_PATHS
-        .iter()
-        .chain(egress::IPTABLES_PATHS.iter())
-        .all(|path| Path::new(path).is_file());
-    kept_route(&ROUTE_READ, bwrap, helper, root || !tools, || routes(bwrap, helper))
+    let probe = || {
+        let tools = SLIRP_PATHS
+            .iter()
+            .chain(egress::IPTABLES_PATHS.iter())
+            .all(|path| Path::new(path).is_file());
+        tools && routes(bwrap, helper)
+    };
+    kept_route(&ROUTE_READ, bwrap, helper, root, probe)
 }
 
 /// Tells whether AppArmor keeps unprivileged programs out of user namespaces, from what
@@ -3189,7 +3193,7 @@ mod tests {
             }
         };
         let (bwrap, helper) = (Path::new(BWRAP_PATHS[0]), helper());
-        assert!(!kept_route(&kept, bwrap, &helper, true, probe(true)), "root or no tools");
+        assert!(!kept_route(&kept, bwrap, &helper, true, probe(true)), "as root");
         assert_eq!(probes.get(), 0, "a refusal starts no probe");
         assert!(kept_route(&kept, bwrap, &helper, false, probe(true)));
         assert!(kept_route(&kept, bwrap, &helper, false, probe(false)), "kept");
