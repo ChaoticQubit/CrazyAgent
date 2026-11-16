@@ -514,11 +514,12 @@ pub(super) fn forget_pool_project(
     Ok(())
 }
 
-/// Gives a demo just made exactly the pool its Create picked, so a pool that still lists an
-/// earlier demo of the same id never serves the new one (rv-sa241 LOW-1); when the picked
-/// pool can't take it, the demo leaves every pool. Inputs: the database, the config, the
-/// settings sources, the owner's admission, the demo and the picked pool. Output: Ok once
-/// only the picked pool lists the demo, else the error, with the demo in no pool.
+/// Gives a demo just made exactly the pool its Create picked when another pool still lists
+/// an earlier demo of the same id, so that pool never serves the new one (rv-sa241 LOW-1);
+/// when the picked pool can't take it, the demo leaves every pool. With no such pool it
+/// changes nothing and the client assigns the pool as before. Inputs: the database, the
+/// config, the settings sources, the owner's admission, the demo and the picked pool.
+/// Output: Ok, else the error, with the demo in no pool.
 pub(super) fn settle_demo_pool(
     db: &mut Connection,
     config: &mut EffectiveConfig,
@@ -543,7 +544,7 @@ pub(super) fn settle_demo_pool(
             })
             .unwrap_or_default()
     };
-    if listing(&*config) == [pool.clone()] {
+    if listing(&*config).iter().all(|listed| listed == pool) {
         return Ok(());
     }
     let assigned = publish(

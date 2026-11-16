@@ -989,7 +989,8 @@ async fn a_demo_made_again_inherits_nothing_of_the_old_one() {
     engine.stop().await;
 }
 
-/// A pool that still lists an earlier demo's id, as one does after that demo was deleted.
+/// A pool that still lists an earlier demo's id, as one does after that demo was removed
+/// from the dashboard, or deleted when taking it out of its pools failed.
 #[cfg(target_os = "macos")]
 const DEMO_POOL_LEFT_OVER: &str = r#"
 [[model_access.pools]]
@@ -1011,11 +1012,9 @@ fn pools_listing(root: &Path, project: &str) -> Vec<String> {
         .unwrap()
         .iter()
         .filter(|pool| {
-            pool["projects"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|listed| listed.as_str() == Some(project))
+            pool.get("projects")
+                .and_then(|listed| listed.as_array())
+                .is_some_and(|listed| listed.iter().any(|one| one.as_str() == Some(project)))
         })
         .map(|pool| pool["id"].as_str().unwrap().to_owned())
         .collect()
