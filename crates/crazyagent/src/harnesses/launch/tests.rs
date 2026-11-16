@@ -1845,6 +1845,56 @@ fn an_acp_harness_starts_headless_with_its_manifest_arguments_and_its_tools_off_
     );
 }
 
+/// fix8 QUESTION-01:49 (leader 01:49): a durable ACP agent started with no project context
+/// holds its private home's lock and still runs with the variables its manifest's home
+/// block sets, as one installed with a context does.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_context_less_acp_launch_runs_with_its_home_block_variables() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::Builder::new()
+        .prefix("ca-acp-lone-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let home = base.join("standin-acp").join("account-1");
+    let work = base.join("work");
+    for folder in [&home, &work] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    for folder in [base.clone(), base.join("standin-acp"), home.clone()] {
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let profile = base.join("project.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let request = LaunchRequest {
+        harness: "standin-acp".into(),
+        executable: PathBuf::from("/usr/bin/true"),
+        working_dir: work,
+        account: AccountBinding::Url {
+            home: home.clone(),
+            base_url: "http://127.0.0.1:11434".into(),
+            key: None,
+        },
+        model: None,
+        tools: true,
+        sandbox_profile: Some(profile),
+        unconfined: false,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    };
+
+    let built = super::lone_command(&request);
+
+    assert!(built.is_ok(), "{:?}", built.as_ref().err());
+    let (command, _lock) = built.unwrap();
+    let config = command
+        .get_envs()
+        .find(|(name, _)| *name == "STANDIN_ACP_CONFIG")
+        .and_then(|(_, value)| value);
+    assert_eq!(config, Some(home.join("config").as_os_str()));
+}
+
 /// rv-secreview b6 r2 F1: a headless agent on pipes whose harness reaches its model through
 /// an engine key relay ends when that engine dies, a crash included, as a keyed pane does,
 /// so nothing is left to dial the relay's freed port. Closing the lifeline's pipe without
