@@ -97,6 +97,9 @@ pub(super) fn words(code: &str) -> &'static str {
         "cleanup_refs_unlanded" => {
             "An agent's working copy has a stash, branch or tag that is not saved anywhere else."
         }
+        "cleanup_walk_too_long" => {
+            "An agent's folder held too many files to remove at once, or something kept adding files to it. Try again."
+        }
         "cleanup_worktree_dirty" => {
             "An agent's working copy has changes that are not saved anywhere else."
         }
