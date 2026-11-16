@@ -4229,6 +4229,116 @@ async fn desktop_connector_settings_set(
 }
 
 #[tauri::command]
+async fn desktop_connectors(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: Option<String>,
+) -> Result<crazyagent::connectors::ConnectorsView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connectors(project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_connector_preview(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    yaml: String,
+) -> Result<crazyagent::app_plugins::Preview, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connector_preview(yaml)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_connector_review(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+) -> Result<crazyagent::app_plugins::Preview, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connector_review(name)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_connector_add(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    yaml: String,
+    sha256: String,
+    replace: bool,
+) -> Result<crazyagent::connectors::ConnectorsView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connector_add(yaml, sha256, replace)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_connector_trust(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+    sha256: String,
+) -> Result<crazyagent::connectors::ConnectorsView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connector_trust(name, sha256)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_connector_remove(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+) -> Result<crazyagent::connectors::ConnectorsView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connector_remove(name)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_connector_set_key(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+    secret: String,
+    key: String,
+) -> Result<crazyagent::connectors::ConnectorsView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connector_set_key(name, secret, key)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_connector_clear_key(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+    secret: String,
+) -> Result<crazyagent::connectors::ConnectorsView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connector_clear_key(name, secret)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_connector_grant(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    connector: String,
+    enabled: bool,
+    who: crazyagent::connectors::Who,
+) -> Result<crazyagent::connectors::ConnectorsView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .connector_grant(project, connector, enabled, who)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_app_plugins(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5900,6 +6010,15 @@ native_commands! {
     desktop_scorecard_set,
     desktop_connector_activity,
     desktop_connector_settings_set,
+    desktop_connectors,
+    desktop_connector_preview,
+    desktop_connector_review,
+    desktop_connector_add,
+    desktop_connector_trust,
+    desktop_connector_remove,
+    desktop_connector_set_key,
+    desktop_connector_clear_key,
+    desktop_connector_grant,
     desktop_app_plugins,
     desktop_app_plugin_preview,
     desktop_app_plugin_review,
