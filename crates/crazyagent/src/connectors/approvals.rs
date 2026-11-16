@@ -458,13 +458,13 @@ pub fn state(db: &Connection, id: i64) -> Result<Option<State>, EngineError> {
     Ok(name.as_deref().and_then(State::parse))
 }
 
-/// One approval as the owner's page shows it. Inputs: the database and the id. Output:
-/// the approval, or none.
-pub fn get(db: &Connection, id: i64) -> Result<Option<ApprovalView>, EngineError> {
+/// One approval as the owner's page shows it at `now_ms`. Inputs: the database, the id and
+/// the time now. Output: the approval, or none.
+pub fn get(db: &Connection, id: i64, now_ms: i64) -> Result<Option<ApprovalView>, EngineError> {
     if !asked_before(db)? {
         return Ok(None);
     }
-    db.query_row(
+    let view = db.query_row(
         "SELECT a.id, a.project, json_extract(p.body, '$.spec.name'), a.agent, a.connector,
                 a.title, a.tool, a.preview, a.state, a.created_ms, a.expires_ms, a.answered_ms,
                 a.arguments, a.hidden
@@ -491,9 +491,21 @@ pub fn get(db: &Connection, id: i64) -> Result<Option<ApprovalView>, EngineError
                 answered_ms: row.get(11)?,
             })
         },
-    )
-    .optional()
-    .map_err(sqlite)
+    );
+    let view = view.optional().map_err(sqlite)?;
+    Ok(view.map(|view| as_of(view, now_ms)))
+}
+
+/// An approval as it stands at `now_ms`: a wait that ran out reads as `expire` leaves it,
+/// expired at its end with no arguments, before any gateway tick marked the row. Inputs:
+/// the approval as stored and the time now. Output: the approval.
+fn as_of(mut view: ApprovalView, now_ms: i64) -> ApprovalView {
+    if view.state == State::Waiting && now_ms >= view.expires_ms {
+        view.state = State::Expired;
+        view.arguments = String::new();
+        view.answered_ms = Some(view.expires_ms);
+    }
+    view
 }
 
 /// Ends the waits that ran out, each at its own end. Inputs: the database and the time now.
@@ -623,20 +635,26 @@ pub fn forget_project(db: &Connection, project: &str) -> Result<(), EngineError>
     Ok(())
 }
 
-/// The waiting approvals for their notices. Inputs: the database and the most to read.
-/// Output: them in id order, or none before any approval was asked.
-pub fn waiting(db: &Connection, max: usize) -> Result<Option<Vec<Waiting>>, EngineError> {
+/// The approvals still waiting at `now_ms`, for their notices. Inputs: the database, the
+/// most to read and the time now. Output: them in id order, or none before any approval
+/// was asked.
+pub fn waiting(
+    db: &Connection,
+    max: usize,
+    now_ms: i64,
+) -> Result<Option<Vec<Waiting>>, EngineError> {
     if !asked_before(db)? {
         return Ok(None);
     }
+    let most = i64::try_from(max).unwrap_or(i64::MAX);
     let rows: Vec<Waiting> = db
         .prepare(
             "SELECT a.id, a.project, json_extract(p.body, '$.spec.name'), a.title, a.tool
              FROM connector_approvals a LEFT JOIN projects p ON p.id = a.project
-             WHERE a.state='waiting' ORDER BY a.id LIMIT ?1",
+             WHERE a.state='waiting' AND a.expires_ms>?2 ORDER BY a.id LIMIT ?1",
         )
         .map_err(sqlite)?
-        .query_map([i64::try_from(max).unwrap_or(i64::MAX)], |row| {
+        .query_map(params![most, now_ms], |row| {
             let project: String = row.get(1)?;
             Ok(Waiting {
                 id: row.get(0)?,

@@ -721,3 +721,37 @@ fn the_owner_answers_a_write_and_takes_back_a_standing_allow_through_the_protoco
         assert!(CONNECTORS_CODES.contains(&code), "{code}");
     }
 }
+
+/// fix10 on T12: the owner's read of a write whose wait ran out answers expired, with no
+/// arguments and the wait's end as its answer time, though no gateway tick marked it yet,
+/// so the desktop, the terminal and the notice's page never offer Allow on it; an answer
+/// to it is refused as closed.
+#[test]
+fn the_owner_reads_a_write_past_its_wait_as_expired_through_the_protocol() {
+    let (_tmp, root) = engine();
+    let pending = approvals::PendingWrite {
+        launch: "0123456789abcdef0123456789abcdef".into(),
+        project: PROJECT.into(),
+        agent: "Agent 1".into(),
+        connector: "board".into(),
+        title: "Board".into(),
+        tool: "create_issue".into(),
+        preview: "create_issue: title=\"Fix login\"".into(),
+        arguments: "{\"title\":\"Fix login\"}".into(),
+        hidden: false,
+    };
+    let db = crate::questions::open(&root).unwrap();
+    let minute = 60 * 1000;
+    let long_ago = crate::semantic::now_ms() - 11 * minute;
+    let wait = Wait::Minutes10;
+    let id = approvals::ask(&db, &pending, wait, long_ago).unwrap();
+
+    let read = answered(&root, json!({"kind": "approval", "id": id}));
+    assert_eq!(read["approval"]["state"], "expired", "{read}");
+    assert_eq!(read["approval"]["arguments"], "", "{read}");
+    assert_eq!(read["approval"]["answered_ms"], long_ago + 10 * minute);
+    let allow = json!({"kind": "answer", "id": id, "allow": true});
+    assert_eq!(refused(&root, allow), "connector_approval_closed");
+    let again = answered(&root, json!({"kind": "approval", "id": id}));
+    assert_eq!(again, read);
+}

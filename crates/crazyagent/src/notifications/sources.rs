@@ -128,11 +128,13 @@ fn connector_tools(connection: &Connection, _: &ModelAccess) -> Result<Option<Fo
 }
 
 /// Connector writes waiting for the owner's Allow or Deny (DEC-168 Task 12): one item per
-/// waiting write in its project, naming the connector, the tool and the project, never an
-/// argument. Inputs: the database and the model access (unused). Output: the conditions,
-/// or none before any write asked.
+/// write whose wait has not run out, in its project, naming the connector, the tool and the
+/// project, never an argument. Inputs: the database and the model access (unused). Output:
+/// the conditions, or none before any write asked.
 fn writes(connection: &Connection, _: &ModelAccess) -> Result<Option<Found>, EngineError> {
-    let Some(rows) = crate::connectors::approvals::waiting(connection, SOURCE_ROWS_MAX)? else {
+    let now = crate::semantic::now_ms();
+    let read = crate::connectors::approvals::waiting(connection, SOURCE_ROWS_MAX, now)?;
+    let Some(rows) = read else {
         return Ok(None);
     };
     let capped = rows.len() >= SOURCE_ROWS_MAX;

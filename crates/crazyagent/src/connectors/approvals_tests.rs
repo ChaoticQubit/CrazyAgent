@@ -169,13 +169,13 @@ fn an_unanswered_write_expires_at_the_wait_setting() {
     let case = case();
     for wait in Wait::ALL {
         let id = ask(&case.db, &write(LAUNCH, PROJECT, "board"), wait, NOW).unwrap();
-        let view = get(&case.db, id).unwrap().unwrap();
+        let view = get(&case.db, id, NOW).unwrap().unwrap();
         assert_eq!(view.created_ms, NOW);
         assert_eq!(view.expires_ms, NOW + i64::from(wait.minutes()) * MINUTE);
         assert_eq!(expire(&case.db, view.expires_ms - 1).unwrap(), 0);
         assert_eq!(state(&case.db, id).unwrap(), Some(State::Waiting));
         assert_eq!(expire(&case.db, view.expires_ms).unwrap(), 1);
-        let view = get(&case.db, id).unwrap().unwrap();
+        let view = get(&case.db, id, NOW).unwrap().unwrap();
         assert_eq!(view.state, State::Expired);
         assert_eq!(view.answered_ms, Some(view.expires_ms));
     }
@@ -227,7 +227,7 @@ fn waiting_approvals_are_capped_per_launch_and_in_all() {
         NOW,
     );
     assert_eq!(full.unwrap_err().0, "connector_writes_waiting_full");
-    let listed = waiting(&case.db, WAITING_MAX + 1).unwrap().unwrap();
+    let listed = waiting(&case.db, WAITING_MAX + 1, NOW).unwrap().unwrap();
     assert_eq!(listed.len(), WAITING_MAX);
 }
 
@@ -237,7 +237,9 @@ fn waiting_approvals_are_capped_per_launch_and_in_all() {
 #[test]
 fn answering_resolves_the_action_notice() {
     let mut case = case();
-    let id = asked(&case);
+    let now = crate::semantic::now_ms();
+    let asking = write(LAUNCH, PROJECT, "board");
+    let id = ask(&case.db, &asking, Wait::Minutes10, now).unwrap();
     let name: Option<String> = case
         .db
         .query_row(
@@ -265,7 +267,7 @@ fn answering_resolves_the_action_notice() {
         id,
         Answer::Allow,
         WritePolicy::AskEveryTime,
-        NOW + MINUTE,
+        now + MINUTE,
     )
     .unwrap();
     assert!(pending(&mut case).is_empty());
@@ -391,12 +393,56 @@ fn the_full_arguments_show_every_hidden_character_escaped_and_mark_the_write() {
 fn a_waiting_approval_shows_its_full_arguments_until_it_is_answered() {
     let case = case();
     let id = asked(&case);
-    let view = get(&case.db, id).unwrap().unwrap();
+    let view = get(&case.db, id, NOW).unwrap().unwrap();
     assert_eq!(view.arguments, "{\"title\":\"Fix login\"}");
     let policy = WritePolicy::AskEveryTime;
     answer(&case.db, id, Answer::Deny, policy, NOW + MINUTE).unwrap();
-    assert_eq!(get(&case.db, id).unwrap().unwrap().arguments, "");
+    assert_eq!(get(&case.db, id, NOW).unwrap().unwrap().arguments, "");
     let later = asked(&case);
     expire(&case.db, NOW + 11 * MINUTE).unwrap();
-    assert_eq!(get(&case.db, later).unwrap().unwrap().arguments, "");
+    assert_eq!(get(&case.db, later, NOW).unwrap().unwrap().arguments, "");
+}
+
+/// fix10 on T12: a read of an approval at or past the end of its wait answers expired, with
+/// no arguments and that end as its answer time, before any gateway tick marked the row,
+/// and writes nothing; it reads exactly as the tick then leaves it, and its notice row ends
+/// at that moment too.
+#[test]
+fn a_read_at_the_end_of_the_wait_answers_expired_before_any_tick() {
+    let case = case();
+    let id = asked(&case);
+    let end = NOW + 10 * MINUTE;
+    let before = get(&case.db, id, end - 1).unwrap().unwrap();
+    assert_eq!(before.state, State::Waiting);
+    assert_eq!(before.arguments, "{\"title\":\"Fix login\"}");
+    assert_eq!(before.answered_ms, None);
+    let waits = waiting(&case.db, WAITING_MAX, end - 1).unwrap().unwrap();
+    assert_eq!(waits.iter().map(|row| row.id).collect::<Vec<_>>(), [id]);
+    for now in [end, end + MINUTE] {
+        let view = get(&case.db, id, now).unwrap().unwrap();
+        assert_eq!(view.state, State::Expired, "{now}");
+        assert_eq!(view.arguments, "");
+        assert_eq!(view.answered_ms, Some(end));
+        assert_eq!(view.expires_ms, end);
+        let left = waiting(&case.db, WAITING_MAX, now).unwrap().unwrap();
+        assert!(left.is_empty(), "{left:?}");
+    }
+    assert_eq!(state(&case.db, id).unwrap(), Some(State::Waiting));
+    let derived = get(&case.db, id, end).unwrap().unwrap();
+    assert_eq!(expire(&case.db, end).unwrap(), 1);
+    assert_eq!(get(&case.db, id, end).unwrap().unwrap(), derived);
+}
+
+/// fix10 on T12: a write whose wait ran out raises no Action notice though no gateway tick
+/// marked it yet, so the notice center never opens an approval that can no longer be
+/// answered.
+#[test]
+fn a_write_past_its_wait_raises_no_action_notice() {
+    let mut case = case();
+    let asking = write(LAUNCH, PROJECT, "board");
+    let long_ago = crate::semantic::now_ms() - 11 * MINUTE;
+    let id = ask(&case.db, &asking, Wait::Minutes10, long_ago).unwrap();
+    assert_eq!(state(&case.db, id).unwrap(), Some(State::Waiting));
+    let notices = pending(&mut case);
+    assert!(notices.is_empty(), "{notices:?}");
 }
