@@ -327,3 +327,85 @@ fn an_unlinked_own_socket_is_no_server_only_once_its_held_keeper_ended_cleanly()
     );
     std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
 }
+
+/// v242 MR-1 (rv-code2): a lead's server start, which waits up to `KEEPER_READY` for its
+/// socket to accept, holds neither keeper map while it waits, so a call on another lead,
+/// which reads those maps in `own()` and `mates()`, never waits on that start. A stand-in
+/// server program that never binds its socket keeps each start waiting until its keeper
+/// exits, and the row reads the map that start fills while the start still waits.
+#[test]
+fn a_lead_server_start_waiting_for_its_socket_holds_no_keeper_map() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_root, base_host, _) = fresh_host();
+    let base = base_host.root.clone();
+    drop(base_host);
+    let marks = base.join("marks");
+    private_folder(&marks);
+    let started = marks.join("started");
+    let program = base.join("never-binds");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\n: > '{}'\nexec /bin/sleep 3\n",
+            started.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let host = Servers::new(
+        Tmux::open(Some(program.clone()), &base.join(crate::terminal::FOLDER)),
+        &base,
+        Some(program),
+    );
+    let (lead, socket) = own_lead(&host, 7);
+    let team = base.join("team");
+    for profile in [
+        crate::team::runtime::agent_profile(&team, 7),
+        crate::team::runtime::agent_teammates_profile(&team, 7),
+    ] {
+        std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    }
+    for mates in [false, true] {
+        let target = if mates {
+            socket.with_file_name("row-teammates.sock")
+        } else {
+            socket.clone()
+        };
+        let _ = std::fs::remove_file(&started);
+        std::thread::scope(|scope| {
+            let start = scope.spawn(|| host.keep_server(&lead, &target, mates, false));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !started.exists() {
+                assert!(
+                    !start.is_finished(),
+                    "the start ended before its server program ran"
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "the stand-in server program never ran"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let kept = if mates {
+                &host.mates_keepers
+            } else {
+                &host.keepers
+            };
+            let free = kept.try_lock().is_ok();
+            assert!(
+                !start.is_finished(),
+                "the start ended before the row read its keeper map"
+            );
+            assert!(
+                free,
+                "a start waiting for its socket held the keeper map (teammates: {mates})"
+            );
+            assert_eq!(
+                start.join().unwrap(),
+                Err(failure("terminal_unavailable")),
+                "a start whose server never bound its socket did not fail"
+            );
+        });
+    }
+    std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
+}
