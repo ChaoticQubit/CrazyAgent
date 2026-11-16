@@ -5,7 +5,8 @@ use crate::app_plugins::{
     Problem, ReadOnlyTrust, RunsView, SecretView, TrustView,
 };
 use crate::connectors::{
-    ConnectorSettings, ConnectorView, ConnectorsView, NativeConnectors, SignIn, SizeCap,
+    ConnectorSettings, ConnectorView, ConnectorsView, NativeConnectors, SignIn, SizeCap, Wait,
+    WritePolicy,
 };
 use crate::engine::owner::ConnectorsSaved;
 use crate::tui::client::OwnerEvent;
@@ -293,6 +294,48 @@ fn the_native_setting_and_the_size_cap_wait_for_enter_and_save_with_the_version_
     assert!(said(&shell).contains("The connector settings changed elsewhere."));
     assert!(read_all(&one(&mut shell)), "a stale save reads the page again");
     assert!(shows(&mut shell, "[256 KiB]"), "a stale save drops the pick");
+}
+
+#[test]
+fn write_actions_and_approval_wait_come_first_and_save_with_the_other_two() {
+    let mut shell = page(view());
+    keys(&mut shell, &[Key::End, Key::Up, Key::Up, Key::Up]);
+    assert!(shows(&mut shell, "[Ask every time]"));
+    keys(&mut shell, &[Key::Right, Key::Left, Key::Enter]);
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a pick equal to the read is no change"
+    );
+    keys(&mut shell, &[Key::Right]);
+    assert!(requests(&mut shell).is_empty(), "a pick waits for Enter");
+    assert!(shows(&mut shell, "[Ask once per project and connector]"));
+    assert!(shows(&mut shell, "Enter Save changes"));
+    keys(&mut shell, &[Key::Down, Key::Left]);
+    assert!(shows(&mut shell, "[2 min]"));
+    keys(&mut shell, &[Key::Enter]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::SaveSettings { settings, version: 7 } if settings == ConnectorSettings {
+            write: WritePolicy::AskOncePerProject,
+            wait: Wait::Minutes2,
+            ..ConnectorSettings::DEFAULT
+        }
+    ));
+    let mut read = view();
+    read.settings.write = WritePolicy::ReadOnly;
+    let mut shell = page(read);
+    keys(
+        &mut shell,
+        &[Key::End, Key::Up, Key::Up, Key::Up, Key::Right, Key::Enter],
+    );
+    assert!(
+        matches!(
+            one(&mut shell),
+            ConnectorsJob::SaveSettings { settings, .. }
+                if settings.write == WritePolicy::AskEveryTime
+        ),
+        "the choices wrap from Read-only to Ask every time"
+    );
 }
 
 #[test]

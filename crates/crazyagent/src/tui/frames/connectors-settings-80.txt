@@ -1,14 +1,14 @@
  [◆▪◆▪] CrazyAgent  /  Settings  /  Connectors                                  
 ────────────────────────────────────────────────────────────────────────────────
-      Reaches board.example.com                                                 
-                                                                                
-  Harnesses                                                                     
-  Which harnesses reach connectors through the engine.                          
-  Claude Code: yes                                                              
-  Codex: yes                                                                    
-  RCLI: yes (master)                                                            
-                                                                                
-  Connector settings                                                            
+    Write actions              [Ask every time]                                 
+                                Ask once per project and connector              
+                                Read-only                                       
+      What happens when an agent calls a connector tool that changes            
+      something: each call waits for your Allow, your first Allow in a project  
+      lets later calls run, or those tools stay hidden.                         
+    Approval wait               2 min  [10 min]  30 min                         
+      How long a call that changes something waits for your answer before it    
+      fails.                                                                    
     Harness-native connectors  [Off]  On                                        
       Connectors from the harness's own account (claude.ai connectors in        
       Claude Code, ChatGPT apps in Codex). The engine neither filters nor logs  
