@@ -14,6 +14,7 @@ mod draft;
 pub(crate) mod http;
 mod job;
 mod plan;
+mod prompt;
 mod publish;
 mod rules;
 mod state;
@@ -30,6 +31,7 @@ pub use job::{
     GitHubPublishStep,
 };
 pub use plan::{GitHubPlanField, default_description, default_repo_name, plan_problem};
+pub use prompt::{GitHubPromptAnswer, SNOOZE_MS};
 pub use publish::{
     GitHubCommitted, GitHubHistory, GitHubLocal, GitHubPrepare, GitHubSecretFinding,
     GitHubSecretKind, GitHubSecretScan,
