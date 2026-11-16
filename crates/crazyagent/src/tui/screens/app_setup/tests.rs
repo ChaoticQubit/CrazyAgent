@@ -2450,13 +2450,20 @@ fn below_80x24_no_key_reaches_setup_so_enter_installs_and_approves_nothing() {
     }
 }
 
-/// DEC-182 S6c: signed in, Setup shows G beside g and opens Settings / GitHub, the rules a
-/// new repository starts with; signed out, the bar has no G and G does nothing.
+/// DEC-182 S6c: signed in, G opens Settings / GitHub, the rules a new repository starts
+/// with, and the Keys overlay lists it while Setup's bar leaves it out for the settings
+/// it already carries; signed out, G does nothing and neither lists it.
 #[test]
 fn signed_in_setup_opens_the_github_rules_for_new_repositories_with_g_upper() {
+    let shows = |rows: &[String], text: &str| rows.iter().any(|row| row.contains(text));
+    let listed = format!("{:<10}GitHub rules", "G");
     let mut shell = settings(240, 80);
     let rows = render(&mut shell, 240, 80);
-    assert!(bar(&rows).contains("G GitHub rules"), "{}", bar(&rows));
+    assert!(!shows(&rows, "GitHub rules"), "{}", bar(&rows));
+    shell.key(Key::Char('?'));
+    let rows = render(&mut shell, 240, 80);
+    assert!(shows(&rows, &listed), "{rows:#?}");
+    shell.key(Key::Esc);
     shell.key(Key::Char('G'));
     assert_eq!(shell.place(), Some(Place::GitHubDefaults));
     let mut shell = settings(240, 80);
@@ -2465,7 +2472,11 @@ fn signed_in_setup_opens_the_github_rules_for_new_repositories_with_g_upper() {
         ..signed_in()
     }))));
     let rows = render(&mut shell, 240, 80);
-    assert!(!bar(&rows).contains("G GitHub rules"), "{}", bar(&rows));
+    assert!(!shows(&rows, "GitHub rules"), "{}", bar(&rows));
+    shell.key(Key::Char('?'));
+    let rows = render(&mut shell, 240, 80);
+    assert!(!shows(&rows, "GitHub rules"), "{rows:#?}");
+    shell.key(Key::Esc);
     shell.key(Key::Char('G'));
     assert_eq!(shell.place(), Some(Place::Setup { first_run: false }));
 }
