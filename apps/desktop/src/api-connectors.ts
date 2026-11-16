@@ -37,7 +37,10 @@ export interface ActivityView {
 }
 export type ConnectorSettingsSave = { kind: "saved" } | { kind: "stale"; current: number };
 export type Who = "both" | "master" | "agents";
-export type SignIn = "key" | "not_yet";
+export type SignIn = "key" | "browser" | "both" | "not_yet";
+export type SignInWith = "key" | "browser";
+export interface OwnAppView { client_id: string; secret_saved: boolean }
+export interface OAuthView { signed_in: boolean; own_app_allowed: boolean; own_app: OwnAppView | null; redirect: string; using: SignInWith }
 export interface ConnectorRuns { kind: "connector"; url: string; hosts: string[]; oauth_hosts: string[]; vendor_read_only: boolean }
 export interface ConnectorView {
   name: string;
@@ -47,6 +50,7 @@ export interface ConnectorView {
   origin: Origin;
   status: PluginStatus;
   sign_in: SignIn;
+  oauth: OAuthView | null;
   runs: ConnectorRuns | null;
   secrets: SecretView[];
   sha256: string;
@@ -177,6 +181,8 @@ export const CONNECTORS_PAGE = {
   add: "Add connector",
   back: "All connectors",
   oauthNotYet: "Signs in with OAuth, which this build does not have.",
+  signInWith: "Sign in with",
+  signInWithHelp: "Only the way you choose is used; the other stays saved.",
   refusedFile: "Fix its file, or remove it on the App plugins page.",
   settings: "Connector settings",
   write: "Write actions",
@@ -220,6 +226,39 @@ export const NATIVE_CHOICES: { choice: NativeConnectors; label: string }[] = [{ 
 export const SIZE_CHOICES: { choice: SizeCap; label: string }[] = [
   { choice: "kib64", label: "64 KiB" }, { choice: "kib256", label: "256 KiB" }, { choice: "mib1", label: "1 MiB" },
 ];
+/** The ways a connector that offers both signs in, in the order both apps list them; Key is
+ * the default. */
+export const SIGN_IN_WITH_CHOICES: { choice: SignInWith; label: string }[] = [{ choice: "key", label: "Key" }, { choice: "browser", label: "Browser" }];
+
+/** The way a connector whose file offers a key and a browser sign-in signs in now, or null
+ * for a connector with one way, which has nothing to choose. Input: the connector. Output:
+ * the way or null. */
+export function chosenWay(connector: ConnectorView): SignInWith | null {
+  return connector.sign_in === "both" && connector.oauth !== null ? connector.oauth.using : null;
+}
+
+/** Whether a connector's page shows its keys: one that signs in with a key, or offers both
+ * and signs in with its key now. Input: the connector. Output: the answer. */
+export function keysShown(connector: ConnectorView): boolean {
+  return connector.sign_in === "key" || chosenWay(connector) === "key";
+}
+
+/** The secrets a connector's page lists: every one while it signs in with a key, and under
+ * Browser only those with a saved key, so a key can be cleared without making it live first
+ * (rv-sec2 F1). Input: the connector. Output: the secrets in their declared order. */
+export function secretsShown(connector: ConnectorView): SecretView[] {
+  const keys = keysShown(connector);
+  const browser = chosenWay(connector) === "browser";
+  return connector.secrets.filter((secret) => keys || (browser && secret.binding.kind !== "none"));
+}
+
+/** The line a chosen way is confirmed with, the same in the TUI. Inputs: the connector's
+ * title and the way. Output: the line. */
+export function signsInWithLine(title: string, way: SignInWith): string {
+  const choice = SIGN_IN_WITH_CHOICES.find((option) => option.choice === way);
+  if (choice === undefined) throw new Error(`no way ${way}`);
+  return `${title} signs in with ${choice.label}.`;
+}
 const NOT_CONNECTOR: Problem = { code: "app_plugin_not_connector", line: null, field: "kind", message: "this is not a connector; add it on the App plugins page." };
 
 /** The settings an owner has until they pick others: the engine's `ConnectorSettings::DEFAULT`. */
@@ -321,6 +360,7 @@ export const CONNECTOR_REFUSALS: Record<string, string> = {
   connector_request_invalid: "The request could not be read.",
   connector_request_bounds: "The request is too large.",
   connector_outcome_unknown: "The engine did not answer in time; check the list again.",
+  connector_sign_in_one_way: "This connector signs in one way only, so there is nothing to choose.",
 };
 
 /** The app's sentence, in connector words, for each other refusal the Connectors protocol
@@ -570,4 +610,11 @@ export function loadAllowedWrites(project: string): Promise<Result<AllowedWrites
  * connector. Output: the standing allows left. */
 export function revokeWrites(project: string, connector: string): Promise<Result<AllowedWrites>> {
   return connectorCall<AllowedWrites>("desktop_connector_revoke_writes", { project, connector });
+}
+
+/** Chooses how a connector whose file offers a key and a browser sign-in signs in; only
+ * the way chosen is used and the other stays saved. Inputs: the connector and the way.
+ * Output: the page. */
+export function setConnectorSignInWith(name: string, way: SignInWith): Promise<Result<ConnectorsView>> {
+  return connectorCall<ConnectorsView>("desktop_connector_set_sign_in_with", { name, way });
 }

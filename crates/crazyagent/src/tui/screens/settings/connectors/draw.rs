@@ -1,9 +1,10 @@
 use super::words::{
     ADD_HELP, ADD_TITLE, CATALOG, CATALOG_ABOUT, HARNESSES, HARNESSES_ABOUT, KEY_HELP,
     LOCKED_LABEL, LOCKED_REASON, LOCKED_VALUE, NATIVE_CHOICES, NATIVE_HELP, NATIVE_LABEL, PURPOSE,
-    REFUSED_FILE, REFUSED_LISTED, REFUSED_PASTED, REMOVE_BODY, SETTINGS, SIZE_CHOICES, SIZE_HELP,
-    SIZE_LABEL, WAIT_CHOICES, WAIT_HELP, WAIT_LABEL, WRITE_CHOICES, WRITE_HELP, WRITE_LABEL,
-    origin_line, reaches_line, refusal, secret_line, state, trust_lines,
+    REFUSED_FILE, REFUSED_LISTED, REFUSED_PASTED, REMOVE_BODY, SETTINGS, SIGN_IN_WITH,
+    SIGN_IN_WITH_HELP, SIZE_CHOICES, SIZE_HELP, SIZE_LABEL, WAIT_CHOICES, WAIT_HELP, WAIT_LABEL,
+    WRITE_CHOICES, WRITE_HELP, WRITE_LABEL, chosen_way, origin_line, reaches_line, refusal,
+    secret_line, secrets_shown, state, trust_lines, way_word,
 };
 use super::{AddForm, ConnectorsPage, KeyForm, NOT_READ, Open, Row, TITLE, refused};
 use crate::app_plugins::{RunsView, TrustView};
@@ -28,11 +29,7 @@ const _: () = assert!(NATIVE_LABEL.len() >= WAIT_LABEL.len());
 
 /// The page's lines, the first and last line the cursor's part needs in view, and where
 /// a typing cursor sits.
-type Content = (
-    Vec<Line<'static>>,
-    Option<(usize, usize)>,
-    Option<Position>,
-);
+type Content = (Vec<Line<'static>>, Option<(usize, usize)>, Option<Position>);
 
 /// The first line to draw so the focused part stays in view: its last line at the
 /// window's bottom when it would fall below, never past its first line. Inputs: the top
@@ -100,7 +97,10 @@ fn choices<T: Copy + PartialEq>(
     ctx: &Ctx,
 ) -> Vec<Line<'static>> {
     assert!(label.len() <= LABEL_WIDTH);
-    assert!(options.iter().any(|(choice, _)| *choice == now), "the pick is offered");
+    assert!(
+        options.iter().any(|(choice, _)| *choice == now),
+        "the pick is offered"
+    );
     let indent = LABEL_WIDTH + 2;
     let mut lines = Vec::new();
     let mut spans = vec![Span::raw(format!("{label:<LABEL_WIDTH$}  "))];
@@ -148,7 +148,10 @@ impl ConnectorsPage {
             (Some(_), Some(connector)) => self.detail_lines(connector, width, ctx),
             (Some(name), None) => {
                 let missing = format!("No connector named {}.", safe(name));
-                (vec![styled(missing, Role::Warning, &ctx.theme)], vec![(0, 0)])
+                (
+                    vec![styled(missing, Role::Warning, &ctx.theme)],
+                    vec![(0, 0)],
+                )
             }
             (None, _) => self.list_lines(view, width, ctx),
         };
@@ -309,7 +312,11 @@ impl ConnectorsPage {
             lines.extend(description.into_iter().map(Line::raw));
         }
         if let Some(line) = line {
-            lines.extend(wrap(&line, width).into_iter().map(|part| styled(part, role, theme)));
+            lines.extend(
+                wrap(&line, width)
+                    .into_iter()
+                    .map(|part| styled(part, role, theme)),
+            );
         }
         if refused(connector) {
             lines.extend(wrap(REFUSED_FILE, width).into_iter().map(Line::raw));
@@ -321,14 +328,27 @@ impl ConnectorsPage {
             let address = format!("Address: {}", safe(url));
             lines.extend(wrap(&address, width).into_iter().map(Line::raw));
         }
+        if let Some(way) = chosen_way(connector) {
+            let chosen = format!("{SIGN_IN_WITH}: {}", way_word(way));
+            lines.extend(wrap(&chosen, width).into_iter().map(Line::raw));
+            lines.extend(muted(SIGN_IN_WITH_HELP, width, ctx));
+        }
         self.failure_lines(&mut lines, width, ctx);
         lines.push(Line::default());
+        let secrets = secrets_shown(connector);
         let mut spans = Vec::new();
-        for (at, secret) in connector.secrets.iter().enumerate() {
+        for (at, secret) in secrets.iter().enumerate() {
             let first = if at == 0 { 0 } else { lines.len() };
             spans.push((first, lines.len()));
             let text = Line::raw(secret_line(secret));
-            lines.push(list_row(text, width, at == self.secret, true, theme, ctx.glyphs));
+            lines.push(list_row(
+                text,
+                width,
+                at == self.secret,
+                true,
+                theme,
+                ctx.glyphs,
+            ));
         }
         if spans.is_empty() {
             spans.push((0, lines.len() - 1));
@@ -371,7 +391,10 @@ impl ConnectorsPage {
         let cursor = at.map(|at| Position::new(at.x, at.y.saturating_add(top)));
         lines.extend(drawn);
         lines.push(styled(KEY_HELP, Role::Muted, theme));
-        assert!(lines.len() >= 4, "the heading, the line, the field and the helper");
+        assert!(
+            lines.len() >= 4,
+            "the heading, the line, the field and the helper"
+        );
         (lines, None, cursor)
     }
 
@@ -382,7 +405,12 @@ impl ConnectorsPage {
         let mut body = Vec::new();
         self.failure_lines(&mut body, room, ctx);
         let lines = trust_lines(trust);
-        body.extend(lines.iter().flat_map(|text| wrap(text, room)).map(Line::raw));
+        body.extend(
+            lines
+                .iter()
+                .flat_map(|text| wrap(text, room))
+                .map(Line::raw),
+        );
         assert!(body.len() >= lines.len());
         body
     }

@@ -1,7 +1,9 @@
 use crate::app_plugins::{
     Binding, Origin, PluginStatus, ReadOnlyTrust, RunsView, SecretView, TrustView,
 };
-use crate::connectors::{ConnectorView, NativeConnectors, SignIn, SizeCap, Wait, WritePolicy};
+use crate::connectors::{
+    ConnectorView, NativeConnectors, SignIn, SignInWith, SizeCap, Wait, WritePolicy,
+};
 use crate::tui::screens::settings::app_plugins::{problem_text, safe};
 use crate::tui::screens::settings::connector_activity::problem_words;
 use crate::tui::theme::Role;
@@ -79,6 +81,15 @@ pub(in crate::tui) const STALE: &str =
 /// The line a connector that only signs in with OAuth shows in place of its keys.
 pub(in crate::tui) const OAUTH_NOT_YET: &str =
     "Signs in with OAuth, which this build does not have.";
+/// The label of the way a connector that offers a key and a browser sign-in signs in, the
+/// desktop's words (QUESTION-23:34 Q1).
+pub(in crate::tui) const SIGN_IN_WITH: &str = "Sign in with";
+/// The line under Sign in with, the desktop's words (QUESTION-23:34 Q1).
+pub(in crate::tui) const SIGN_IN_WITH_HELP: &str =
+    "Only the way you choose is used; the other stays saved.";
+/// The line `k` says on a connector that signs in with the browser now (QUESTION-23:34 Q1).
+pub(in crate::tui) const BROWSER_NO_KEY: &str =
+    "This connector signs in with the browser now. Press w to use its key.";
 /// The connector page's way back to the catalog (WORDS r4).
 pub(in crate::tui) const BACK: &str = "All connectors";
 /// The add dialog's title (WORDS r4).
@@ -86,7 +97,8 @@ pub(in crate::tui) const ADD_TITLE: &str = "Add a connector";
 /// The add dialog's manifest field (WORDS r4).
 pub(in crate::tui) const ADD_FIELD: &str = "Connector manifest (YAML)";
 /// The add dialog's helper line (WORDS r4).
-pub(in crate::tui) const ADD_HELP: &str = "Paste a manifest or pick a .yaml file. Nothing is used until you confirm its trust screen.";
+pub(in crate::tui) const ADD_HELP: &str =
+    "Paste a manifest or pick a .yaml file. Nothing is used until you confirm its trust screen.";
 /// The add dialog's check action and its busy line (WORDS r4).
 pub(in crate::tui) const CHECK: &str = "Check";
 /// The status line while a manifest is checked (WORDS r4).
@@ -249,11 +261,9 @@ pub(in crate::tui) fn state(connector: &ConnectorView) -> (&'static str, Role, O
             Role::Warning,
             Some("Review this connector before a project can use it.".into()),
         ),
-        _ if connector.sign_in == SignIn::NotYet => (
-            "Unavailable",
-            Role::Warning,
-            Some(OAUTH_NOT_YET.into()),
-        ),
+        _ if connector.sign_in == SignIn::NotYet => {
+            ("Unavailable", Role::Warning, Some(OAUTH_NOT_YET.into()))
+        }
         PluginStatus::NeedsKey => (
             "Needs a key",
             Role::Warning,
@@ -266,6 +276,59 @@ pub(in crate::tui) fn state(connector: &ConnectorView) -> (&'static str, Role, O
         ),
         PluginStatus::Ready => (READY, Role::Success, None),
     }
+}
+
+/// The way a connector whose file offers a key and a browser sign-in signs in now, or
+/// `None` for a connector with one way, which has nothing to switch. Input: the connector.
+/// Output: the way.
+pub(in crate::tui) fn chosen_way(connector: &ConnectorView) -> Option<SignInWith> {
+    match (&connector.sign_in, &connector.oauth) {
+        (SignIn::Both, Some(oauth)) => Some(oauth.using),
+        _ => None,
+    }
+}
+
+/// Whether a connector's page shows and sets its keys, as on the desktop: one that signs in
+/// with a key, or offers both and signs in with its key now. Input: the connector. Output:
+/// the answer.
+pub(in crate::tui) fn keys_shown(connector: &ConnectorView) -> bool {
+    connector.sign_in == SignIn::Key || chosen_way(connector) == Some(SignInWith::Key)
+}
+
+/// The secrets a connector's page lists: every one while it signs in with a key, and under
+/// Browser only those with a saved key, so a key can be cleared without making it live
+/// first (rv-sec2 F1). Input: the connector. Output: the secrets in their declared order.
+pub(in crate::tui) fn secrets_shown(connector: &ConnectorView) -> Vec<&SecretView> {
+    let keys = keys_shown(connector);
+    let browser = chosen_way(connector) == Some(SignInWith::Browser);
+    connector
+        .secrets
+        .iter()
+        .filter(|secret| keys || (browser && secret.binding != Binding::None))
+        .collect()
+}
+
+/// A way's word, the desktop's choice label. Input: the way. Output: "Key" or "Browser".
+pub(in crate::tui) fn way_word(way: SignInWith) -> &'static str {
+    match way {
+        SignInWith::Key => "Key",
+        SignInWith::Browser => "Browser",
+    }
+}
+
+/// The way `w` switches a connector that offers both to. Input: the way now. Output: the
+/// other way.
+pub(in crate::tui) fn other_way(way: SignInWith) -> SignInWith {
+    match way {
+        SignInWith::Key => SignInWith::Browser,
+        SignInWith::Browser => SignInWith::Key,
+    }
+}
+
+/// The line a chosen way is confirmed with, the desktop's `signsInWithLine`. Inputs: the
+/// connector's title and the way. Output: such as "GitHub signs in with Browser.".
+pub(in crate::tui) fn signs_in_with(title: &str, way: SignInWith) -> String {
+    format!("{} signs in with {}.", safe(title), way_word(way))
 }
 
 /// Where one secret's key comes from, never the key. Input: the secret. Output: the line.
@@ -325,15 +388,27 @@ pub(in crate::tui) fn trust_lines(trust: &TrustView) -> Vec<String> {
             lines.push(format!("Signs in on {}", listed(&oauth.hosts)));
             let ways: Vec<String> = oauth.registration.iter().map(|way| safe(way)).collect();
             lines.push(format!("Registers by {}", ways.join(", then ")));
-            lines.push(format!("Scopes while reading: {}", listed(&oauth.scopes_read)));
-            lines.push(format!("Scopes when writing: {}", listed(&oauth.scopes_write)));
+            lines.push(format!(
+                "Scopes while reading: {}",
+                listed(&oauth.scopes_read)
+            ));
+            lines.push(format!(
+                "Scopes when writing: {}",
+                listed(&oauth.scopes_write)
+            ));
         }
-        lines.push(format!("Tools it says only read: {}", listed(&block.read_tools)));
+        lines.push(format!(
+            "Tools it says only read: {}",
+            listed(&block.read_tools)
+        ));
     }
     lines.push(format!("Secrets it needs: {}", listed(&trust.secrets)));
     lines.push(format!("SHA-256 {}", safe(&trust.sha256)));
     if trust.replaces {
-        lines.push(format!("Replaces your connector named {}.", safe(&trust.name)));
+        lines.push(format!(
+            "Replaces your connector named {}.",
+            safe(&trust.name)
+        ));
     }
     assert!(lines.len() >= 4, "version, reaches, secrets and the hash");
     lines

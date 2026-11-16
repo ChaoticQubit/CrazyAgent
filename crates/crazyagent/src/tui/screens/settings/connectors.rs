@@ -1,7 +1,7 @@
 use crate::app_plugins::{Binding, Origin, PluginStatus, Preview, Problem, TrustView};
 use crate::connectors::{
-    ConnectorSettings, ConnectorView, ConnectorsView, NativeConnectors, SignIn, SizeCap, Wait,
-    WritePolicy,
+    ConnectorSettings, ConnectorView, ConnectorsView, NativeConnectors, SignIn, SignInWith,
+    SizeCap, Wait, WritePolicy,
 };
 use crate::engine::owner::{AccountSecret, ConnectorsSaved};
 use crate::tui::client::app_plugins::MANIFEST_BYTES_MAX;
@@ -21,8 +21,9 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 use std::path::PathBuf;
 use words::{
-    ADD_FIELD, BACK, CHECK, CHECKING, KEY_EMPTY, KEY_FIELD, NOT_CONNECTOR, OAUTH_NOT_YET, SAVE,
-    SAVED, STALE, hosts, refusal,
+    ADD_FIELD, BACK, BROWSER_NO_KEY, CHECK, CHECKING, KEY_EMPTY, KEY_FIELD, NOT_CONNECTOR,
+    OAUTH_NOT_YET, SAVE, SAVED, STALE, chosen_way, hosts, keys_shown, other_way, refusal,
+    secrets_shown, signs_in_with, way_word,
 };
 
 mod draw;
@@ -102,8 +103,9 @@ enum Open {
 
 /// Settings, Connectors (DEC-168 addenda 18, 27 and 32): the catalog of every connector with
 /// its state, the harnesses that reach connectors and the four connector settings beside the
-/// locked line. Enter opens a connector's page with its address and secrets, where `k` sets
-/// a key typed once, `u` clears it, Enter reviews a changed file and `x` removes the
+/// locked line. Enter opens a connector's page with its address and secrets, where `w`
+/// switches one that offers both between Key and Browser, `k` sets a key typed once and `u`
+/// clears it while it signs in with a key, Enter reviews a changed file and `x` removes the
 /// owner's own; `a` adds a manifest only after its trust screen, scrolled to its end, is
 /// confirmed with `y`. A settings pick waits for Enter and saves with the version read. One
 /// request at a time, and Esc waits for it.
@@ -183,6 +185,11 @@ impl ConnectorsPage {
         self.connectors()
             .iter()
             .find(|connector| connector.name == *name)
+    }
+
+    fn secrets_listed(&self) -> usize {
+        self.opened()
+            .map_or(0, |connector| secrets_shown(connector).len())
     }
 
     fn edited(&self) -> bool {
@@ -286,7 +293,10 @@ impl ConnectorsPage {
             return;
         }
         if connector.origin == Origin::Bundled {
-            ctx.say(Message::error("Not removed.", &refusal("app_plugin_bundled")));
+            ctx.say(Message::error(
+                "Not removed.",
+                &refusal("app_plugin_bundled"),
+            ));
             return;
         }
         self.open = Open::Remove {
@@ -304,6 +314,10 @@ impl ConnectorsPage {
         }
         if connector.sign_in == SignIn::NotYet {
             ctx.say(Message::warning("No key here.", OAUTH_NOT_YET));
+            return;
+        }
+        if chosen_way(connector) == Some(SignInWith::Browser) {
+            ctx.say(Message::warning("No key here.", BROWSER_NO_KEY));
             return;
         }
         let Some(secret) = connector.secrets.get(self.secret) else {
@@ -326,11 +340,14 @@ impl ConnectorsPage {
         let Some(connector) = self.opened() else {
             return;
         };
-        let Some(secret) = connector.secrets.get(self.secret) else {
+        let Some(secret) = secrets_shown(connector).get(self.secret).copied() else {
             return;
         };
         if secret.binding == Binding::None {
-            ctx.say(Message::warning("Nothing to clear.", "This secret has no key."));
+            ctx.say(Message::warning(
+                "Nothing to clear.",
+                "This secret has no key.",
+            ));
             return;
         }
         let job = ConnectorsJob::ClearKey {
@@ -338,6 +355,22 @@ impl ConnectorsPage {
             secret: secret.name.clone(),
         };
         self.done = Some(format!("{} no longer has a key.", safe(&secret.name)));
+        self.ask(job, Pending::Change, ctx);
+    }
+
+    fn switch_way(&mut self, ctx: &mut Ctx) {
+        let Some(connector) = self.opened() else {
+            return;
+        };
+        let Some(now) = chosen_way(connector) else {
+            return;
+        };
+        let way = other_way(now);
+        let name = connector.name.clone();
+        let done = signs_in_with(&connector.title, way);
+        assert_ne!(way, now, "w always switches");
+        self.done = Some(done);
+        let job = ConnectorsJob::SetSignInWith { name, way };
         self.ask(job, Pending::Change, ctx);
     }
 
@@ -357,7 +390,11 @@ impl ConnectorsPage {
             return;
         };
         self.done = Some(format!("The key for {} was saved.", safe(&secret)));
-        self.ask(ConnectorsJob::SetKey { name, secret, key }, Pending::Change, ctx);
+        self.ask(
+            ConnectorsJob::SetKey { name, secret, key },
+            Pending::Change,
+            ctx,
+        );
     }
 
     fn check(&mut self, ctx: &mut Ctx) {
@@ -458,8 +495,8 @@ impl ConnectorsPage {
         }
         self.stored = Load::Ready(view.clone());
         self.moved(self.selected);
-        let secrets = self.opened().map_or(0, |connector| connector.secrets.len());
-        self.secret = self.secret.min(secrets.saturating_sub(1));
+        self.secret = self.secret.min(self.secrets_listed().saturating_sub(1));
+        assert!(self.secret < self.secrets_listed().max(1));
         assert!(self.stored.ready().is_some());
     }
 
@@ -499,12 +536,7 @@ impl ConnectorsPage {
         }
     }
 
-    fn preview(
-        &mut self,
-        read: Option<&String>,
-        result: &Result<Preview, String>,
-        ctx: &mut Ctx,
-    ) {
+    fn preview(&mut self, read: Option<&String>, result: &Result<Preview, String>, ctx: &mut Ctx) {
         let yaml = match &self.open {
             Open::Add(_) => read.cloned().or_else(|| self.sent.take()),
             _ => None,
@@ -664,7 +696,7 @@ impl ConnectorsPage {
     }
 
     fn detail_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
-        let secrets = self.opened().map_or(0, |connector| connector.secrets.len());
+        let secrets = self.secrets_listed();
         match key {
             Key::Esc => {
                 self.detail = None;
@@ -674,6 +706,7 @@ impl ConnectorsPage {
             Key::Up => self.secret = self.secret.saturating_sub(1),
             Key::Down => self.secret = (self.secret + 1).min(secrets.saturating_sub(1)),
             Key::Enter => self.review(ctx),
+            Key::Char('w') => self.switch_way(ctx),
             Key::Char('k') => self.key_form(ctx),
             Key::Char('u') => self.clear_key(ctx),
             Key::Char('x') => self.remove(ctx),
@@ -735,7 +768,9 @@ impl ConnectorsPage {
     fn detail_hints(&self, ctx: &Ctx) -> Vec<Hint> {
         let mut hints = Vec::new();
         if let Some(connector) = self.opened() {
-            if connector.secrets.len() > 1 {
+            let keys = keys_shown(connector);
+            let listed = secrets_shown(connector);
+            if listed.len() > 1 {
                 hints.push(hint(
                     &format!("{}{}", ctx.glyphs.up, ctx.glyphs.down),
                     "Move",
@@ -744,8 +779,12 @@ impl ConnectorsPage {
             if connector.status == PluginStatus::NeedsReview {
                 hints.push(hint("Enter", "Review"));
             }
-            let secret = connector.secrets.get(self.secret);
-            if connector.sign_in == SignIn::Key && secret.is_some() {
+            if let Some(now) = chosen_way(connector) {
+                let other = format!("{} {}", words::SIGN_IN_WITH, way_word(other_way(now)));
+                hints.push(hint("w", &other));
+            }
+            let secret = listed.get(self.secret);
+            if keys && secret.is_some() {
                 hints.push(hint("k", "Set key"));
             }
             if secret.is_some_and(|secret| secret.binding != Binding::None) {

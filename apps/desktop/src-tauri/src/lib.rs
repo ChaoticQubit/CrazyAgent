@@ -4339,6 +4339,18 @@ async fn desktop_connector_grant(
 }
 
 #[tauri::command]
+async fn desktop_connector_set_sign_in_with(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+    way: crazyagent::connectors::SignInWith,
+) -> Result<crazyagent::connectors::ConnectorsView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.connector_set_sign_in_with(name, way)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_connector_reach(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -6076,6 +6088,7 @@ native_commands! {
     desktop_connector_set_key,
     desktop_connector_clear_key,
     desktop_connector_grant,
+    desktop_connector_set_sign_in_with,
     desktop_connector_reach,
     desktop_connector_approval,
     desktop_connector_answer,

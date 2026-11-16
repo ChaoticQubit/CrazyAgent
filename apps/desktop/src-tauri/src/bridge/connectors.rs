@@ -2,7 +2,7 @@ use super::*;
 use crazyagent::app_plugins::Preview;
 use crazyagent::connectors::approvals::{AllowedWrites, ApprovalView};
 use crazyagent::connectors::audit::ActivityView;
-use crazyagent::connectors::{ConnectorSettings, ConnectorsView, Who};
+use crazyagent::connectors::{ConnectorSettings, ConnectorsView, SignInWith, Who};
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{CONNECTORS_CODES, ConnectorsSaved, OwnerClient};
 use serde::Serialize;
@@ -274,6 +274,22 @@ impl NativeBridge {
         }))
     }
 
+    /// Chooses how a connector whose file offers a key and a browser sign-in signs in, run
+    /// without the bridge lock. Inputs: the connector and the way. Output: the page.
+    pub fn connector_set_sign_in_with(
+        &self,
+        name: String,
+        way: SignInWith,
+    ) -> Result<Unlocked<ConnectorsView>, BridgeError> {
+        let client = self.connectors_client()?;
+        Ok(Box::pin(async move {
+            client
+                .connector_set_sign_in_with(name, way)
+                .await
+                .map_err(connector_error)
+        }))
+    }
+
     /// What the Connectors page says each harness reaches, one row per harness kind in
     /// settings order, in the engine crate's own words (DEC-141), with no engine call.
     /// Output: the rows.
@@ -410,6 +426,16 @@ mod tests {
             serde_json::from_value::<Who>(serde_json::json!("both")).unwrap(),
             Who::Both,
             "the window's Who words are the engine's"
+        );
+        assert_eq!(
+            refused(bridge.connector_set_sign_in_with(text(), SignInWith::Browser)),
+            "not_connected"
+        );
+        let way = serde_json::from_value::<SignInWith>(serde_json::json!("browser"));
+        assert_eq!(
+            way.unwrap(),
+            SignInWith::Browser,
+            "the window's way words are the engine's"
         );
     }
 }

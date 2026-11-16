@@ -4,7 +4,7 @@ use super::*;
 use crate::app_plugins::Preview;
 use crate::connectors::approvals::{AllowedWrites, ApprovalView};
 use crate::connectors::audit::ActivityView;
-use crate::connectors::{ConnectorSettings, ConnectorsView, Who};
+use crate::connectors::{ConnectorSettings, ConnectorsView, SignInWith, Who};
 use crate::engine::EngineError;
 use crate::engine::owner::{AccountSecret, ConnectorsSaved};
 use std::path::PathBuf;
@@ -74,6 +74,10 @@ pub(in crate::tui) enum ConnectorsJob {
         project: String,
         connector: String,
     },
+    SetSignInWith {
+        name: String,
+        way: SignInWith,
+    },
 }
 
 impl std::fmt::Debug for ConnectorsJob {
@@ -132,7 +136,8 @@ fn failed(job: &ConnectorsJob, code: String) -> ConnectorsEvent {
         | ConnectorsJob::Remove { .. }
         | ConnectorsJob::SetKey { .. }
         | ConnectorsJob::ClearKey { .. }
-        | ConnectorsJob::Grant { .. } => ConnectorsEvent::Page(Err(code)),
+        | ConnectorsJob::Grant { .. }
+        | ConnectorsJob::SetSignInWith { .. } => ConnectorsEvent::Page(Err(code)),
         ConnectorsJob::Approval { id } | ConnectorsJob::Answer { id, .. } => {
             ConnectorsEvent::Approval {
                 id: *id,
@@ -168,6 +173,7 @@ pub(in crate::tui) fn job_name(job: &ConnectorsJob) -> &'static str {
         ConnectorsJob::Answer { .. } => "ConnectorAnswer",
         ConnectorsJob::Writes { .. } => "ConnectorWrites",
         ConnectorsJob::Revoke { .. } => "ConnectorRevokeWrites",
+        ConnectorsJob::SetSignInWith { .. } => "ConnectorSetSignInWith",
     }
 }
 
@@ -198,7 +204,10 @@ impl NativeOwner {
             }
             other => (other, None),
         };
-        assert!(!matches!(job, ConnectorsJob::ReadFile { .. }), "a typed path is read above");
+        assert!(
+            !matches!(job, ConnectorsJob::ReadFile { .. }),
+            "a typed path is read above"
+        );
         let controller = match self.settings_controller() {
             Ok(controller) => controller,
             Err(code) => return failed(&job, code),
@@ -296,6 +305,9 @@ async fn page(
             controller
                 .connector_grant(project, connector, enabled, who)
                 .await
+        }
+        ConnectorsJob::SetSignInWith { name, way } => {
+            controller.connector_set_sign_in_with(name, way).await
         }
         ConnectorsJob::Activity { .. }
         | ConnectorsJob::SaveSettings { .. }

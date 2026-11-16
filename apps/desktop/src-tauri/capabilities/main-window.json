@@ -301,6 +301,7 @@
     "allow-desktop-connector-set-key",
     "allow-desktop-connector-clear-key",
     "allow-desktop-connector-grant",
+    "allow-desktop-connector-set-sign-in-with",
     "allow-desktop-connector-reach",
     "allow-desktop-connector-approval",
     "allow-desktop-connector-answer",
