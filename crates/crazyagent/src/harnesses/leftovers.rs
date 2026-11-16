@@ -205,13 +205,16 @@ pub struct HeldView {
 
 /// One hold of a Full access stop: the account it keeps, if any, the report naming what
 /// still runs, what the stop holds, such as the agent's account lease, until the
-/// hold ends or the owner keeps the processes running, who left it, the names it shows, where
-/// it stands, when it began and whether a sandboxed run left it ([`confined_left_by`]).
+/// hold ends or the owner keeps the processes running, the run's place on the hidden folders
+/// list, if it has one, until the hold ends in any mode ([`end_hold`]), who left it, the names
+/// it shows, where it stands, when it began and whether a sandboxed run left it
+/// ([`confined_left_by`]).
 struct Held {
     account: Option<CredentialRef>,
     report: String,
     #[allow(dead_code)]
     kept: Option<Box<dyn Send>>,
+    listed: Option<Box<dyn Send>>,
     by: HoldBy,
     names: String,
     state: HoldState,
@@ -229,20 +232,32 @@ fn held() -> MutexGuard<'static, BTreeMap<u64, Held>> {
 }
 
 /// Lets go of every hold a Full access stop keeps on one account, while what it named may
-/// still run, because the owner chose to sign the account out anyway. Input: the account.
-/// Output: how many holds ended.
+/// still run, because the owner chose to sign the account out anyway. A hold of a run on the
+/// hidden folders list stays as the owner's Keep leaves it, without the account and what it
+/// held for it, so the run stays named until its processes end. Input: the account.
+/// Output: how many holds let the account go.
 pub fn release(account: &CredentialRef) -> usize {
-    let released: Vec<Held> = {
+    let (count, let_go): (usize, Vec<Box<dyn Send>>) = {
         let mut held = held();
         let keys: Vec<u64> = held
             .iter()
             .filter(|(_, hold)| hold.account.as_ref() == Some(account))
             .map(|(key, _)| *key)
             .collect();
-        keys.iter().filter_map(|key| held.remove(key)).collect()
+        let mut let_go: Vec<Box<dyn Send>> = Vec::new();
+        for key in &keys {
+            let listed = held.get(key).is_some_and(|hold| hold.listed.is_some());
+            if !listed {
+                let_go.extend(held.remove(key).map(|hold| Box::new(hold) as Box<dyn Send>));
+            } else if let Some(hold) = held.get_mut(key) {
+                hold.state = HoldState::Kept;
+                hold.account = None;
+                let_go.extend(hold.kept.take());
+            }
+        }
+        (keys.len(), let_go)
     };
-    let count = released.len();
-    drop(released);
+    drop(let_go);
     count
 }
 
@@ -308,8 +323,9 @@ pub fn end_held(key: u64, project: &str) -> bool {
 
 /// Lets one hold of a project keep its processes running, the owner's Keep: the account and
 /// what the stop held for it, such as the account lease, are let go at once, and
-/// the processes stay listed until they end. Inputs: the hold's key and the project it must
-/// belong to. Output: whether it is now kept.
+/// the processes stay listed, as does the run's place on the hidden folders list, until they
+/// end. Inputs: the hold's key and the project it must belong to. Output: whether it is now
+/// kept.
 pub fn keep_held(key: u64, project: &str) -> bool {
     let released = {
         let mut held = held();
@@ -591,8 +607,8 @@ impl Leftovers {
     /// `account` with this report and `by`, until a watcher pass shows no process of the agent
     /// running, both the table and the token's processes read, or the owner signs the account
     /// out ([`release`]), then drops it; the engine's exit ends the hold too. A pass that
-    /// cannot read both is retried, never taken as clean; with none named, the hold ends after
-    /// `UNCHECKED_HOLD_MAX` even while no listing works. `mode` starts it: End has the watcher
+    /// cannot read both is retried, never taken as clean; with none named, the hold ends once
+    /// no pass could check for `UNCHECKED_HOLD_MAX` in a row. `mode` starts it: End has the watcher
     /// end the processes, Keep lets `kept` and the account go at once, Ask waits for the
     /// owner's [`end_held`] or [`keep_held`]. When no watching thread starts, only the owner's
     /// sign-out ends it. Inputs: the leftovers, the account they keep, if any, what they hold,
@@ -601,6 +617,39 @@ impl Leftovers {
         self,
         account: Option<CredentialRef>,
         kept: T,
+        by: HoldBy,
+        mode: LeftoverMode,
+    ) {
+        self.begin(account, Box::new(kept), None, by, mode);
+    }
+
+    /// Holds as [`Leftovers::hold`] does, for a run on the hidden folders list (SA-VID14):
+    /// `kept`, such as its account lease, goes as `mode` says, and `listed`, its place on that
+    /// list, stays in every mode, through Keep, the owner's [`keep_held`] and a sign-out
+    /// ([`release`]), until the hold ends, so a kept run is named while its processes, or a
+    /// child they handed off to that holds the launch's token, run and frees its place once
+    /// they end. Inputs: as for `hold`, plus the listing. Output: none.
+    pub fn hold_listed<T: Send + 'static, L: Send + 'static>(
+        self,
+        account: Option<CredentialRef>,
+        kept: T,
+        listed: L,
+        by: HoldBy,
+        mode: LeftoverMode,
+    ) {
+        assert!(by.project.is_some(), "a listed run belongs to a project");
+        self.begin(account, Box::new(kept), Some(Box::new(listed)), by, mode);
+    }
+
+    /// Starts one hold for [`Leftovers::hold`] and [`Leftovers::hold_listed`]: records it, with
+    /// `kept` let go at once under Keep and `listed` kept whatever the mode, and starts its
+    /// watcher. Inputs: the account, what it keeps, the listing, if any, who left it and the
+    /// owner's setting. Output: none.
+    fn begin(
+        self,
+        account: Option<CredentialRef>,
+        kept: Box<dyn Send>,
+        listed: Option<Box<dyn Send>>,
         by: HoldBy,
         mode: LeftoverMode,
     ) {
@@ -614,19 +663,21 @@ impl Leftovers {
         };
         let (state, account, kept): (HoldState, Option<CredentialRef>, Option<Box<dyn Send>>) =
             match mode {
-                LeftoverMode::End => (HoldState::Ending, account, Some(Box::new(kept))),
-                LeftoverMode::Ask => (HoldState::Held, account, Some(Box::new(kept))),
+                LeftoverMode::End => (HoldState::Ending, account, Some(kept)),
+                LeftoverMode::Ask => (HoldState::Held, account, Some(kept)),
                 LeftoverMode::Keep => {
                     drop(kept);
                     (HoldState::Kept, None, None)
                 }
             };
+        let listing = listed.is_some();
         let previous = held().insert(
             key,
             Held {
                 account,
                 report,
                 kept,
+                listed,
                 by,
                 names,
                 state,
@@ -638,7 +689,7 @@ impl Leftovers {
         let lineage = *self.0;
         let _ = std::thread::Builder::new()
             .name("full-access-hold".into())
-            .spawn(move || watch(key, lineage));
+            .spawn(move || watch(key, lineage, listing));
     }
 }
 
@@ -650,27 +701,30 @@ enum Ending {
     Kill,
 }
 
-/// Watches one hold until its processes are gone and could be checked, or `UNCHECKED_HOLD_MAX`
-/// passes with none named, or the hold is let go: each pass reads the table, retries a token
-/// scan that failed, and under Ending sends SIGTERM once, then SIGKILL past [`LEFTOVER_GRACE`],
-/// only to processes that same pass found with the start they were known by. Inputs: the
-/// hold's key and its lineage. Output: none; the hold is removed at the end.
-fn watch(key: u64, mut lineage: Lineage) {
-    let begun = Instant::now();
+/// Watches one hold until a checked pass ([`Lineage::pass`]) finds none of its processes,
+/// passes find none and cannot check for `UNCHECKED_HOLD_MAX` in a row, or the hold is let
+/// go. Under Ending it sends SIGTERM once, then SIGKILL past [`LEFTOVER_GRACE`].
+/// Inputs: the hold's key, its lineage and whether the hold has a listing. Output: none; the
+/// hold ends through [`end_hold`].
+fn watch(key: u64, mut lineage: Lineage, listed: bool) {
     let mut termed: Option<Instant> = None;
+    let mut blind: Option<Instant> = None;
+    let mut checked = false;
     while let Some(state) = state_of(key) {
         let signal = match (state, termed) {
             (HoldState::Ending, None) => Some(Ending::Term),
             (HoldState::Ending, Some(at)) if at.elapsed() >= LEFTOVER_GRACE => Some(Ending::Kill),
             _ => None,
         };
-        let read = lineage.pass(signal);
+        let read = lineage.pass(signal, listed);
         if signal == Some(Ending::Term) && read.is_some() {
             termed = Some(Instant::now());
         }
-        let checked = read == Some(true);
+        checked = read == Some(true);
         assert_eq!(checked, !lineage.unchecked);
-        if lineage.known.is_empty() && (checked || begun.elapsed() >= UNCHECKED_HOLD_MAX) {
+        let none = lineage.known.is_empty();
+        blind = (none && !checked).then(|| blind.unwrap_or_else(Instant::now));
+        if none && (checked || blind.is_some_and(|at| at.elapsed() >= UNCHECKED_HOLD_MAX)) {
             break;
         }
         lineage.name();
@@ -681,8 +735,21 @@ fn watch(key: u64, mut lineage: Lineage) {
             HOLD_POLL
         });
     }
+    end_hold(key, checked);
+}
+
+/// Ends one hold once its watcher stops: removes it and drops what it keeps outside the lock,
+/// except that a listing whose last pass could not check, under Keep or Ask, is forgotten, so
+/// a run whose processes may still run stays on the hidden folders list for the engine's life.
+/// Inputs: the hold's key and whether its last pass was checked. Output: none.
+fn end_hold(key: u64, checked: bool) {
     let ended = held().remove(&key);
-    drop(ended);
+    if let Some(mut hold) = ended {
+        if !checked && hold.state != HoldState::Ending {
+            std::mem::forget(hold.listed.take());
+        }
+        drop(hold);
+    }
 }
 
 impl Lineage {
@@ -774,12 +841,13 @@ impl Lineage {
 
     /// One pass of a hold's watcher: reads the table and applies it, sends `signal`, if any,
     /// to the known processes that same table shows with the start they were known by, then
-    /// retries the token scan while it has not read. A failed read is a retry, never clean.
-    /// Inputs: the lineage and the signal. Output: none when the table could not be read,
-    /// else whether the lineage is now checked, the token's processes read too; `unchecked`
-    /// is set to the opposite.
+    /// scans for the token while it has not read, and again for a `listed` hold that knows
+    /// none, so a child its parent left keeps the run named. A failed read is a retry, never
+    /// clean. Inputs: the lineage, the signal and whether the hold has a listing. Output: none
+    /// when the table could not be read, else whether the lineage is now checked, the token's
+    /// processes read too; `unchecked` is set to the opposite.
     #[cfg(unix)]
-    fn pass(&mut self, signal: Option<Ending>) -> Option<bool> {
+    fn pass(&mut self, signal: Option<Ending>, listed: bool) -> Option<bool> {
         let Ok(rows) = rows(self.table, &mut self.pending) else {
             self.unchecked = true;
             return None;
@@ -788,7 +856,7 @@ impl Lineage {
         if let Some(signal) = signal {
             self.signal(&rows, signal);
         }
-        if !self.scanned {
+        if !self.scanned || (listed && self.known.is_empty()) {
             self.scanned = self.add_carriers().is_ok();
         }
         self.unchecked = !self.scanned;
@@ -797,7 +865,7 @@ impl Lineage {
 
     /// Reads nothing where no process table is read. Input: unused. Output: none.
     #[cfg(not(unix))]
-    fn pass(&mut self, _signal: Option<Ending>) -> Option<bool> {
+    fn pass(&mut self, _signal: Option<Ending>, _listed: bool) -> Option<bool> {
         self.unchecked = true;
         None
     }
@@ -2996,6 +3064,247 @@ pub(crate) mod tests {
         );
         assert!(still_runs, "Keep ended the process");
         assert!(cleared, "a kept process that ended stayed listed");
+    }
+
+    /// SA-VID14-KEEP-SLOTS: a sandboxed run on the hidden folders list whose stop left
+    /// processes stays named while they run and leaves the list once they end, under Keep
+    /// and under Ask then the owner's Keep, so no kept run holds a place on the list, which
+    /// takes at most 256 runs, for the engine's life.
+    #[test]
+    fn a_kept_or_asked_hold_frees_its_hidden_folders_listing_once_its_processes_end() {
+        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
+        for (project, mode) in [
+            ("keep-slots-kept", LeftoverMode::Keep),
+            ("keep-slots-asked", LeftoverMode::Ask),
+        ] {
+            let mut leftover = session_sleeper(false);
+            let pid = i32::try_from(leftover.id()).unwrap();
+            let listed = starting(RunKind::Research, project).expect("the list has room");
+            listed.hid(&[]);
+            let lineage = Lineage::of_sandboxed(leftover.id(), None).unwrap();
+            Leftovers(Box::new(lineage)).hold_listed(None, (), listed, by_in(project), mode);
+            let view = held_in(project);
+            let kept = mode != LeftoverMode::Ask || keep_held(view[0].key, project);
+            let while_running = runs_seeing(project, &saved);
+            let _ = leftover.try_wait();
+            let still_runs = runs(pid);
+            end_pid(pid);
+            let _ = leftover.wait();
+            let cleared = within(LEFTOVER_GRACE, || held_in(project).is_empty());
+            let freed = within(LEFTOVER_GRACE, || runs_seeing(project, &saved).is_empty());
+
+            assert_eq!(view.len(), 1, "{mode:?}: {view:?}");
+            assert!(kept, "{mode:?}: the owner's Keep was refused");
+            assert!(still_runs, "{mode:?} ended the process");
+            assert_eq!(
+                while_running,
+                vec![RunKind::Research],
+                "{mode:?}: a run whose processes still run was not named"
+            );
+            assert!(cleared, "{mode:?}: a hold whose processes ended stayed");
+            assert!(
+                freed,
+                "{mode:?}: a kept run stayed on the hidden folders list after its processes ended"
+            );
+        }
+    }
+
+    /// SA-VID14-KEEP-SLOTS: signing out the account an asked hold keeps lets the account and
+    /// its lease go, but the run stays on the hidden folders list while its processes run, as
+    /// the owner's Keep leaves it, and frees its place once they end.
+    #[test]
+    fn signing_out_keeps_a_listed_hold_named_until_its_processes_end() {
+        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        let project = "keep-slots-signed-out";
+        let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
+        let mut leftover = session_sleeper(false);
+        let pid = i32::try_from(leftover.id()).unwrap();
+        let account = CredentialRef::new("keep-slots-signed-out").unwrap();
+        let (lease, released) = std::sync::mpsc::channel::<()>();
+        let listed = starting(RunKind::Research, project).expect("the list has room");
+        listed.hid(&[]);
+        let lineage = Lineage::of_sandboxed(leftover.id(), None).unwrap();
+        Leftovers(Box::new(lineage)).hold_listed(
+            Some(account.clone()),
+            lease,
+            listed,
+            by_in(project),
+            LeftoverMode::Ask,
+        );
+        let ended = release(&account);
+        let let_go = released.recv_timeout(Duration::from_millis(500));
+        let reports = held_by(&account);
+        let while_running = runs_seeing(project, &saved);
+        let _ = leftover.try_wait();
+        let still_runs = runs(pid);
+        end_pid(pid);
+        let _ = leftover.wait();
+        let freed = within(LEFTOVER_GRACE, || runs_seeing(project, &saved).is_empty());
+
+        assert_eq!(ended, 1, "the sign-out did not count the hold");
+        assert_eq!(
+            let_go,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "the sign-out kept the lease"
+        );
+        assert!(reports.is_empty(), "{reports:?}");
+        assert!(still_runs, "the sign-out ended the process");
+        assert_eq!(
+            while_running,
+            vec![RunKind::Research],
+            "a signed-out run whose processes still run was not named"
+        );
+        assert!(
+            freed,
+            "a signed-out run stayed on the hidden folders list after its processes ended"
+        );
+    }
+
+    /// A run on the hidden folders list belongs to a project: a listed hold with none refuses
+    /// before anything is held, and the run leaves the list as its listing drops.
+    #[test]
+    fn a_listed_hold_without_a_project_refuses() {
+        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        let project = "keep-slots-no-project";
+        let mut leftover = session_sleeper(false);
+        let listed = starting(RunKind::Research, project).expect("the list has room");
+        let lineage = Lineage::of_sandboxed(leftover.id(), None).unwrap();
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Leftovers(Box::new(lineage)).hold_listed(None, (), listed, by(), LeftoverMode::Keep);
+        }));
+        let after = runs_seeing(
+            project,
+            &[std::path::PathBuf::from("/tmp/keep-slots/vault")],
+        );
+        end_pid(i32::try_from(leftover.id()).unwrap());
+        let _ = leftover.wait();
+
+        let payload = refused.expect_err("a listed hold with no project was taken");
+        let text = payload
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned());
+        assert_eq!(text.as_deref(), Some("a listed run belongs to a project"));
+        assert!(after.is_empty(), "a refused listed hold kept its listing");
+    }
+
+    /// SA-VID14-KEEP-SLOTS r1 F1: a kept run whose process handed off to a child its parent
+    /// left, as a daemon does, stays on the hidden folders list while that child runs: before
+    /// a listed hold ends with nothing known, its watcher scans for the launch's token once
+    /// more and finds the child, and frees the run's place once the child ends too.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_kept_run_whose_process_handed_off_to_an_orphan_stays_on_the_hidden_folders_list() {
+        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        let project = "keep-slots-handed-off";
+        let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
+        let ids = |names: &str| -> Vec<String> {
+            names
+                .split(", ")
+                .filter_map(|one| one.split(' ').next())
+                .map(str::to_owned)
+                .collect()
+        };
+        let folder = tempfile::tempdir().unwrap();
+        let ours = LineageToken::new().unwrap();
+        let mut leftover = session_sleeper(false);
+        let pid = i32::try_from(leftover.id()).unwrap();
+        let (_, orphan) = detached(folder.path(), "orphan.pid", &ours, ("UNUSED", "x"));
+        let mut lineage = Lineage::of_sandboxed(leftover.id(), Some(ours)).unwrap();
+        lineage.scanned = true;
+        let known: Vec<i32> = lineage.known.iter().map(|process| process.pid).collect();
+        let listed = starting(RunKind::Research, project).expect("the list has room");
+        listed.hid(&[]);
+        Leftovers(Box::new(lineage)).hold_listed(
+            None,
+            (),
+            listed,
+            by_in(project),
+            LeftoverMode::Keep,
+        );
+        end_pid(pid);
+        let _ = leftover.wait();
+        let named = within(HOLD_POLL * 3, || {
+            held_in(project)
+                .iter()
+                .any(|hold| ids(&hold.names) == [orphan.to_string()])
+        });
+        let while_orphan_runs = runs_seeing(project, &saved);
+        let orphan_ran = runs(orphan);
+        end_pid(orphan);
+        let freed = within(LEFTOVER_GRACE, || runs_seeing(project, &saved).is_empty());
+
+        assert_eq!(
+            known,
+            vec![pid],
+            "the lineage did not start from the leftover alone"
+        );
+        assert!(orphan_ran, "the orphan ended before the check");
+        assert!(
+            named,
+            "the hold never named the orphan its process handed off to"
+        );
+        assert_eq!(
+            while_orphan_runs,
+            vec![RunKind::Research],
+            "a run whose handed-off process still runs left the hidden folders list"
+        );
+        assert!(
+            freed,
+            "the run stayed on the hidden folders list after the orphan ended"
+        );
+    }
+
+    /// SA-VID14-KEEP-SLOTS r1 F1: a listed hold its watcher ends unchecked under Keep or Ask
+    /// keeps the run on the hidden folders list, since its processes may still run; a
+    /// checked end, and an unchecked end under End, free its place.
+    #[test]
+    fn an_unchecked_end_keeps_a_kept_or_asked_run_on_the_hidden_folders_list() {
+        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
+        let mut after = Vec::new();
+        for (project, state, checked) in [
+            ("keep-slots-unchecked-kept", HoldState::Kept, false),
+            ("keep-slots-unchecked-asked", HoldState::Held, false),
+            ("keep-slots-unchecked-ending", HoldState::Ending, false),
+            ("keep-slots-checked-kept", HoldState::Kept, true),
+        ] {
+            let listed = starting(RunKind::Research, project).expect("the list has room");
+            listed.hid(&[]);
+            let key = NEXT_HELD.fetch_add(1, Ordering::Relaxed);
+            let previous = held().insert(
+                key,
+                Held {
+                    account: None,
+                    report: String::new(),
+                    kept: None,
+                    listed: Some(Box::new(listed)),
+                    by: by_in(project),
+                    names: String::new(),
+                    state,
+                    since_ms: now_ms(),
+                    sandboxed: true,
+                },
+            );
+            assert!(previous.is_none());
+            end_hold(key, checked);
+            after.push((
+                project,
+                held_in(project).len(),
+                runs_seeing(project, &saved),
+            ));
+        }
+
+        assert_eq!(
+            after,
+            vec![
+                ("keep-slots-unchecked-kept", 0, vec![RunKind::Research]),
+                ("keep-slots-unchecked-asked", 0, vec![RunKind::Research]),
+                ("keep-slots-unchecked-ending", 0, vec![]),
+                ("keep-slots-checked-kept", 0, vec![]),
+            ]
+        );
     }
 
     /// Commands a sandboxed run left count against its agent's next start while the owner
