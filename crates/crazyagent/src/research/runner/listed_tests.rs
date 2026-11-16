@@ -232,3 +232,19 @@ fn a_listed_research_run_its_harness_can_never_take_is_refused_in_plain_words_be
         assert!(!line.contains('_'), "{line}");
     }
 }
+
+/// T19b 19b-4 (QUESTION-0100 Q6): a listed harness runs no hooks, so a tools-on research job
+/// in a project that turned hooks on is refused at its start, as a listed team agent is; the
+/// job ends with a plain line that spends no second attempt.
+#[test]
+fn a_listed_research_job_refused_for_its_projects_hooks_ends_in_plain_words() {
+    let failure = listed_start_failure(LaunchError("launch_listed_hooks_unsupported".into(), None));
+
+    let line = match failure {
+        RunError::Invalid(line) => line,
+        other => panic!("{other:?}"),
+    };
+    assert!(owner_refusal(&line), "{line}");
+    assert!(line.contains("hooks"), "{line}");
+    assert!(!line.contains('_'), "{line}");
+}

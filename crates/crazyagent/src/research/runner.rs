@@ -2742,13 +2742,18 @@ fn listed_session(
     let handover = crate::harnesses::accounts::handover(listed, connection, relay)
         .map_err(|problem| RunError::Invalid(problem.0))?;
     let context = context.with_tool_home(home).with_handover(handover);
-    Session::start_with_context(request(&own)?, context).map_err(|problem| {
-        if problem.1.is_some() {
-            RunError::Context(problem)
-        } else {
-            RunError::Invalid(format!("listed harness: {}", problem.0))
-        }
-    })
+    Session::start_with_context(request(&own)?, context).map_err(listed_start_failure)
+}
+
+/// The failure of a listed harness's research session that would not start: a context
+/// refusal as the context's, anything else under its code. Input: the launch refusal.
+/// Output: the runner's failure.
+fn listed_start_failure(problem: LaunchError) -> RunError {
+    if problem.1.is_some() {
+        RunError::Context(problem)
+    } else {
+        RunError::Invalid(format!("listed harness: {}", problem.0))
+    }
 }
 
 /// Names the account and model a research pane launches on, in the agent's home.
