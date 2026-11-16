@@ -431,6 +431,7 @@ pub(super) fn claude_master_turn(
                 place.policy,
                 place.trust,
                 place.hidden,
+                None,
             )?,
             None,
         ),
@@ -447,6 +448,7 @@ pub(super) fn claude_master_turn(
                 place.policy,
                 place.trust,
                 place.hidden,
+                None,
             )?;
             let tmp = sandbox.sandbox().agent_tmp();
             let drop = tmp.join(crate::team::tool::DROP_FILE);
@@ -531,6 +533,7 @@ pub(super) fn codex_master_turn(
                 place.policy,
                 place.trust,
                 place.hidden,
+                None,
             )?,
             home,
             credential,
@@ -549,6 +552,7 @@ pub(super) fn codex_master_turn(
         place.policy,
         place.trust,
         place.hidden,
+        None,
     )?;
     let tmp = sandbox.sandbox().agent_tmp();
     let drop = tmp.join(crate::team::tool::DROP_FILE);
@@ -1040,11 +1044,21 @@ fn delegate_servers(
     Ok(setting)
 }
 
+/// One master turn's connector server: the engine executable it runs as and the turn's own
+/// launch folder in the engine root's launches folder, which the turn's boundary lets it run
+/// and use.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ConnectorTurn<'a> {
+    pub(super) engine: &'a Path,
+    pub(super) folder: &'a Path,
+}
+
 /// Builds and installs the Seatbelt boundary of one tools-off master turn. The master writes
 /// only in its leased worktree, its turn home that holds a copy of the account's sign-in (an
 /// rcli master: its profile's home), its temp folder and, on macOS, its tool cache (T8); it
 /// reads the repository without writing refs or admin folders, the harness install and the
-/// turn folder, and reaches only its model endpoint. Output: the sandbox, or the refusal.
+/// turn folder, and reaches only its model endpoint. With `connector` it also runs that
+/// engine executable and uses that one launch folder. Output: the sandbox, or the refusal.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn master_sandbox(
@@ -1058,6 +1072,7 @@ pub(super) fn master_sandbox(
     policy: &AgentPolicy,
     trust: crate::trust::Trust,
     hidden: &[PathBuf],
+    connector: Option<ConnectorTurn<'_>>,
 ) -> Result<InstalledSandbox, EngineError> {
     turn_sandbox(
         root,
@@ -1071,6 +1086,7 @@ pub(super) fn master_sandbox(
         policy,
         trust,
         hidden,
+        connector,
     )
 }
 
@@ -1080,7 +1096,8 @@ pub(super) fn master_sandbox(
 /// install folder, the turn directory and the folder of the engine executable that serves
 /// its `delegate` tool, and reaches only its model endpoint. Under the None network a model
 /// off loopback is refused with `network_none_master_tools`, since a master turn has no
-/// model proxy and its tools would reach every host on that port (S4B-M1). Output: the
+/// model proxy and its tools would reach every host on that port (S4B-M1). With `connector`,
+/// the turn's own launch folder, its connector server uses that one folder too. Output: the
 /// installed sandbox, or the refusal.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
@@ -1096,6 +1113,7 @@ pub(super) fn master_tools_sandbox(
     policy: &AgentPolicy,
     trust: crate::trust::Trust,
     hidden: &[PathBuf],
+    connector: Option<&Path>,
 ) -> Result<InstalledSandbox, EngineError> {
     turn_sandbox(
         root,
@@ -1109,6 +1127,7 @@ pub(super) fn master_tools_sandbox(
         policy,
         trust,
         hidden,
+        connector.map(|folder| ConnectorTurn { engine, folder }),
     )
 }
 
@@ -1192,7 +1211,9 @@ fn turn_sandbox(
     policy: &AgentPolicy,
     trust: crate::trust::Trust,
     hidden: &[PathBuf],
+    connector: Option<ConnectorTurn<'_>>,
 ) -> Result<InstalledSandbox, EngineError> {
+    let _ = connector;
     if policy.access.unavailable().is_some() {
         return Err(failure("agent_access_unavailable"));
     }
@@ -1344,6 +1365,7 @@ pub(super) fn master_sandbox(
     _policy: &AgentPolicy,
     _trust: crate::trust::Trust,
     _hidden: &[PathBuf],
+    _connector: Option<ConnectorTurn<'_>>,
 ) -> Result<InstalledSandbox, EngineError> {
     Err(failure("master_sandbox_unavailable"))
 }
@@ -1365,6 +1387,7 @@ pub(super) fn master_tools_sandbox(
     _policy: &AgentPolicy,
     _trust: crate::trust::Trust,
     _hidden: &[PathBuf],
+    _connector: Option<&Path>,
 ) -> Result<InstalledSandbox, EngineError> {
     Err(failure("master_sandbox_unavailable"))
 }
@@ -1604,6 +1627,7 @@ mod tests {
             &AgentPolicy::default(),
             crate::trust::Trust::Reviewed,
             &[],
+            None,
         )
     }
 
@@ -2037,6 +2061,7 @@ mod tests {
             &AgentPolicy::default(),
             crate::trust::Trust::Reviewed,
             &[],
+            None,
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
@@ -2110,6 +2135,7 @@ mod tests {
                 &policy,
                 crate::trust::Trust::Reviewed,
                 &[],
+                None,
             )
             .unwrap();
             let profile = sandbox.sandbox().profile();
@@ -2163,6 +2189,7 @@ mod tests {
                     &policy,
                     crate::trust::Trust::Reviewed,
                     &[],
+                    None,
                 )
                 .err()
                 .map(|error| error.0);
@@ -2182,6 +2209,7 @@ mod tests {
                 &policy,
                 crate::trust::Trust::Reviewed,
                 &[],
+                None,
             )
             .unwrap();
             assert!(!sandbox.is_unconfined(), "{access:?}");
@@ -2223,6 +2251,7 @@ mod tests {
             &AgentPolicy::default(),
             crate::trust::Trust::Reviewed,
             &[],
+            None,
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
@@ -2434,6 +2463,7 @@ mod tests {
                 &AgentPolicy::default(),
                 crate::trust::Trust::Reviewed,
                 &[],
+                None,
             )
             .is_err()
         );
@@ -2463,6 +2493,7 @@ mod tests {
                     &AgentPolicy::default(),
                     crate::trust::Trust::Reviewed,
                     &[],
+                    None,
                 )
                 .unwrap_err()
                 .0,
@@ -2490,6 +2521,7 @@ mod tests {
             &AgentPolicy::default(),
             crate::trust::Trust::Reviewed,
             &[],
+            None,
         )
         .unwrap()
         .sandbox()
@@ -2542,6 +2574,7 @@ mod tests {
             &AgentPolicy::default(),
             crate::trust::Trust::Reviewed,
             &[],
+            None,
         )
         .unwrap();
         let text = sandbox.sandbox().profile();
@@ -2638,6 +2671,7 @@ mod tests {
             &AgentPolicy::default(),
             crate::trust::Trust::Reviewed,
             std::slice::from_ref(&hidden),
+            None,
         )
         .unwrap();
         assert!(
@@ -2700,6 +2734,7 @@ mod tests {
                 &AgentPolicy::default(),
                 crate::trust::Trust::Reviewed,
                 listed,
+                None,
             )
             .map(drop)
             .map_err(|error| error.0);
@@ -2762,6 +2797,7 @@ mod tests {
                 &AgentPolicy::default(),
                 crate::trust::Trust::Reviewed,
                 std::slice::from_ref(&hidden),
+                None,
             )
             .unwrap_err()
             .0,
@@ -2861,6 +2897,7 @@ mod tests {
             &AgentPolicy::default(),
             crate::trust::Trust::Reviewed,
             &[],
+            None,
         )
         .unwrap();
         let run = |program: &Path, args: &[&str]| {
@@ -2991,6 +3028,7 @@ mod tests {
             &none,
             crate::trust::Trust::Reviewed,
             &[],
+            None,
         )
         .err()
         .map(|error| error.0);
@@ -3007,6 +3045,7 @@ mod tests {
             &none,
             crate::trust::Trust::Reviewed,
             &[],
+            None,
         )
         .map(|sandbox| sandbox.sandbox().profile());
         assert!(
@@ -3015,6 +3054,164 @@ mod tests {
             "a tools-off master turn under None still reaches its model: {:?}",
             off.err().map(|error| error.0)
         );
+    }
+
+    /// Task 3r master slice: a master turn given its connector launch folder, tools off (the
+    /// RCLI master's shape) or on, runs the engine executable as its connector server and
+    /// writes in that one folder, never in another launch's folder or the launches folder;
+    /// with no folder neither the engine nor any launch is granted, and a folder outside the
+    /// engine root's launches folder is refused.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_master_turn_with_its_connector_folder_runs_the_engine_and_uses_only_its_own_launch() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let launches = root
+            .engine_root()
+            .unwrap()
+            .join(crate::connectors::gateway::LAUNCHES_FOLDER);
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        let engine_bin = base.join("engine").join("bin");
+        let own = launches.join("0".repeat(32));
+        let other = launches.join("1".repeat(32));
+        let outside = base
+            .join("x")
+            .join(crate::connectors::gateway::LAUNCHES_FOLDER)
+            .join("2".repeat(32));
+        for directory in [
+            &repository,
+            &worktree,
+            &home,
+            &install,
+            &engine_bin,
+            &own,
+            &other,
+            &outside,
+        ] {
+            private_directory(directory);
+        }
+        let script = |path: &Path, body: &str| {
+            std::fs::write(
+                path,
+                format!("#!/bin/sh\n[ \"$1\" = first-exec ] && exit 3\n{body}"),
+            )
+            .unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let first = crate::spawn_gate::first_run(
+                Command::new(path).arg("first-exec").current_dir(&base),
+            );
+            assert_eq!(first.code(), Some(3));
+        };
+        let executable = install.join("codex");
+        script(&executable, "exit 0\n");
+        let engine = engine_bin.join("crazyagent");
+        script(
+            &engine,
+            "[ \"$1\" = connector-mcp ] || exit 2\necho call >> \"$2/probe\"\n",
+        );
+        let shown_engine = std::fs::canonicalize(&engine)
+            .unwrap()
+            .display()
+            .to_string();
+        let build = |tools: bool, connector: Option<&Path>| {
+            let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+            if tools {
+                master_tools_sandbox(
+                    &root,
+                    &runtime_ref,
+                    &repository,
+                    &worktree,
+                    &home,
+                    &executable,
+                    &ModelEndpoint::Native {},
+                    &engine,
+                    &AgentPolicy::default(),
+                    crate::trust::Trust::Reviewed,
+                    &[],
+                    connector,
+                )
+            } else {
+                master_sandbox(
+                    &root,
+                    &runtime_ref,
+                    &repository,
+                    &worktree,
+                    &home,
+                    &executable,
+                    &ModelEndpoint::Native {},
+                    &AgentPolicy::default(),
+                    crate::trust::Trust::Reviewed,
+                    &[],
+                    connector.map(|folder| ConnectorTurn {
+                        engine: &engine,
+                        folder,
+                    }),
+                )
+            }
+        };
+        for tools in [false, true] {
+            let sandbox = build(tools, Some(&own)).unwrap();
+            let roots: Vec<&PathBuf> = sandbox.sandbox().writable_roots().collect();
+            assert!(roots.contains(&&own), "{tools}: {roots:?}");
+            assert!(
+                roots
+                    .iter()
+                    .all(|root| **root != launches && **root != other),
+                "{tools}: {roots:?}"
+            );
+            assert!(
+                sandbox.sandbox().profile().contains(&shown_engine),
+                "{tools}"
+            );
+            let run = |program: &Path, args: &[&Path]| {
+                let mut child = Command::new(program);
+                child.args(args).current_dir(&worktree);
+                let mut child = sandbox.wrap(&child).unwrap();
+                child
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                crate::spawn_gate::status(&mut child).unwrap().success()
+            };
+            let _ = std::fs::remove_file(own.join("probe"));
+            assert!(
+                run(&engine, &[Path::new("connector-mcp"), &own]),
+                "{tools}: the connector server runs and writes its own launch"
+            );
+            assert_eq!(
+                std::fs::read_to_string(own.join("probe")).unwrap(),
+                "call\n"
+            );
+            assert!(
+                !run(&engine, &[Path::new("connector-mcp"), &other]),
+                "{tools}: another launch's folder is denied"
+            );
+            assert!(!other.join("probe").exists(), "{tools}");
+            assert!(
+                !run(Path::new("/bin/ls"), &[&launches]),
+                "{tools}: the launches folder is not listed"
+            );
+        }
+        let plain = build(false, None).unwrap();
+        assert!(
+            plain
+                .sandbox()
+                .writable_roots()
+                .all(|root| !root.starts_with(&launches))
+        );
+        assert!(!plain.sandbox().profile().contains(&shown_engine));
+        for tools in [false, true] {
+            assert_eq!(
+                build(tools, Some(&outside)).err().map(|error| error.0),
+                Some("master_sandbox_unavailable".to_owned()),
+                "{tools}: a folder outside the launches folder is refused"
+            );
+        }
     }
 
     /// A tools-on master writes in its worktree and its own folders, nowhere else, and starts
@@ -3080,6 +3277,7 @@ mod tests {
             &AgentPolicy::default(),
             crate::trust::Trust::Reviewed,
             &[],
+            None,
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
@@ -3267,6 +3465,7 @@ mod tests {
                 &policy,
                 crate::trust::Trust::Untrusted,
                 &[],
+                None,
             )
             .unwrap_err();
             assert_eq!(refused.0, crate::trust::ACCESS_CODE, "{access:?}");
@@ -3282,6 +3481,7 @@ mod tests {
                     &policy,
                     crate::trust::Trust::Reviewed,
                     &[],
+                    None,
                 )
                 .is_ok(),
                 "{access:?} runs for a reviewed project"
@@ -3339,6 +3539,7 @@ mod tests {
                 &AgentPolicy::default(),
                 trust,
                 &[],
+                None,
             )
             .unwrap();
             assert_eq!(

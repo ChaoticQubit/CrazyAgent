@@ -287,6 +287,7 @@ impl OwnerRuntimeHandle {
             &prepared.agent_policy,
             prepared.agent_project.trust,
             &prepared.hidden_paths,
+            None,
         )?;
         if !text.is_empty() {
             launch.instructions = Some(super::master_host_launch::write_master_instructions(
