@@ -1522,22 +1522,25 @@ async fn owned_listener(port: u16, group: Pid) -> Result<Vec<i32>, EngineError> 
 }
 
 /// Checks, before anything is sent on a proxied connection, that a process the open saw ready
-/// still listens on 127.0.0.1 at the server port, reading only those processes' sockets: no
-/// other socket can then hold that address, and a wildcard listener beside it gets no
-/// 127.0.0.1 connection (rv-sa241 LEAD-1 and LOW-1, rv-ds241 F2). Inputs: the port and those
-/// processes. Output: done, `ide_server_port_taken` or `ide_server_check_failed`.
+/// still listens on 127.0.0.1 at the server port and that every other holder of a listener
+/// there is one of them too, a process sharing the socket included (rv-sa241 LEAD-1, LEAD-2);
+/// a wildcard listener gets no 127.0.0.1 connection, so it fails nothing (LOW-1). Inputs:
+/// the port and those processes. Output: done, `ide_server_port_taken` or a check failure.
 #[cfg(target_os = "macos")]
 pub(super) async fn served_by(port: u16, served: &[i32]) -> Result<(), EngineError> {
     assert!(!served.is_empty());
-    let pids = served.to_vec();
-    let listeners = tokio::task::spawn_blocking(move || listed(port, Some(&pids)))
+    let listeners = tokio::task::spawn_blocking(move || listeners(port))
         .await
         .map_err(|_| failure("ide_server_check_failed"))??;
     let loopback = format!("127.0.0.1:{port}");
+    let wildcard = format!("*:{port}");
     let held = listeners
         .iter()
         .any(|(pid, address)| served.contains(pid) && *address == loopback);
-    if !held {
+    let foreign = listeners
+        .iter()
+        .any(|(pid, address)| *address != wildcard && !served.contains(pid));
+    if !held || foreign {
         return Err(failure("ide_server_port_taken"));
     }
     assert!(!listeners.is_empty());
@@ -1577,32 +1580,19 @@ pub(super) async fn served_by(_port: u16, _served: &[i32]) -> Result<(), EngineE
     Err(failure("ide_platform_unqualified"))
 }
 
-/// Lists every process listening on a TCP port and the address each binds ([`listed`]).
-/// Input: the port. Output: process ids with addresses, empty when none listens, or
-/// `ide_server_check_failed`.
+/// Lists every process listening on a TCP port and the address each binds, through `lsof`
+/// run within [`LISTENERS_TIME`], its process group stopped after, so a listing that hangs
+/// holds no open and no proxied request. Every process holding a listening socket there is
+/// named, one sharing another's socket included. Input: the port. Output: process ids with
+/// addresses, empty when none listens, or `ide_server_check_failed`.
 #[cfg(target_os = "macos")]
 pub(crate) fn listeners(port: u16) -> Result<Vec<(i32, String)>, EngineError> {
-    listed(port, None)
-}
-
-/// Lists the processes listening on a TCP port and the address each binds, through `lsof`
-/// run within [`LISTENERS_TIME`], its process group stopped after, so a listing that hangs
-/// holds no open and no proxied request; given `pids`, only their descriptors are read
-/// (`-a -p`), and a listing lsof ends with 1 because one of them is gone still counts.
-/// Inputs: the port and the processes, if any. Output: process ids with addresses, empty
-/// when none listens, or `ide_server_check_failed`.
-#[cfg(target_os = "macos")]
-fn listed(port: u16, pids: Option<&[i32]>) -> Result<Vec<(i32, String)>, EngineError> {
     assert_ne!(port, 0);
     let mut command = Command::new("/usr/sbin/lsof");
-    command.env_clear().env("LC_ALL", "C").arg("-nP");
-    if let Some(pids) = pids {
-        assert!(!pids.is_empty());
-        assert!(pids.iter().all(|pid| *pid > 0));
-        let list: Vec<String> = pids.iter().map(i32::to_string).collect();
-        command.args(["-a", "-p"]).arg(list.join(","));
-    }
     command
+        .env_clear()
+        .env("LC_ALL", "C")
+        .arg("-nP")
         .arg(format!("-iTCP:{port}"))
         .args(["-sTCP:LISTEN", "-Fpn"]);
     let (succeeded, stdout) = crate::setup::process::run_command(command, LISTENERS_TIME)
@@ -1611,7 +1601,7 @@ fn listed(port: u16, pids: Option<&[i32]>) -> Result<Vec<(i32, String)>, EngineE
         return Err(failure("ide_server_check_failed"));
     }
     let text = std::str::from_utf8(&stdout).map_err(|_| failure("ide_server_check_failed"))?;
-    if !succeeded && !text.is_empty() && pids.is_none() {
+    if !succeeded && !text.is_empty() {
         return Err(failure("ide_server_check_failed"));
     }
     let mut pid = None;

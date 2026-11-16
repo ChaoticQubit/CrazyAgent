@@ -798,8 +798,8 @@ async fn a_wildcard_listener_beside_the_server_fails_no_request() {
 }
 
 /// A launch can list more than one process on its port at ready. One of them ending while
-/// another still listens on 127.0.0.1 fails no request and flags nothing: lsof exits 1 when a
-/// process it was asked for is gone, and that listing of the live one still counts.
+/// another still listens on 127.0.0.1 fails no request and flags nothing: a served process
+/// that is gone holds no listener, so the listing names only the live one.
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_served_process_that_ended_beside_one_still_listening_fails_nothing() {
