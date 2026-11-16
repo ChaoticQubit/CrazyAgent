@@ -5,7 +5,7 @@ use crate::projects_home::FoundState;
 use crate::protocol::ProjectSpec;
 use std::os::unix::fs::PermissionsExt;
 
-const POOL_SETTINGS: &str = "version = 1\ntimeout_ms = 10000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:7b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\"]\nprojects = []\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
+const POOL_SETTINGS: &str = "version = 1\ntimeout_ms = 10000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://LOCAL_ADDRESS/v1\" }\nmodel = { id = \"qwen2.5:7b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\"]\nprojects = []\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
 
 fn took(response: &OwnerResponse) -> bool {
     matches!(
@@ -58,9 +58,11 @@ fn a_started_onboarding_is_named_like_the_engine_names_it() {
 async fn a_started_onboarding_opens_the_project_the_engine_gave_when_the_slug_is_held() {
     let root = private_root("ca-tonb-");
     let work = private_root("ca-tonb-work-");
+    let (_refusing, settings) = crate::tui::test_home::refusing_settings(POOL_SETTINGS);
     let global = root.path().join("global.toml");
-    std::fs::write(&global, POOL_SETTINGS).unwrap();
+    std::fs::write(&global, &settings).unwrap();
     std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    crate::tui::test_home::assert_no_host_model_server(&global).await;
     let (_stop, stopped) = tokio::sync::watch::channel(false);
     let mut service = EngineService::start_with_settings_sources(
         root.path(),
