@@ -428,3 +428,62 @@ fn a_save_stopped_at_any_step_never_strands_the_account_on_a_config_it_does_not_
     assert!(finished);
     assert!(stopped > 0);
 }
+
+/// Writes other bytes over a generated home's config and then its own bytes back, in place,
+/// and resets its modified time, the way a confined master can, so only its change time
+/// moves. Input: the config file. Output: none; the row's own asserts check the result.
+fn write_and_restore(config: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let bytes = std::fs::read(config).unwrap();
+    let before = std::fs::symlink_metadata(config).unwrap();
+    std::fs::write(config, b"{}").unwrap();
+    std::fs::write(config, &bytes).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(config)
+        .unwrap()
+        .set_modified(before.modified().unwrap())
+        .unwrap();
+    let after = std::fs::symlink_metadata(config).unwrap();
+    assert_eq!(std::fs::read(config).unwrap(), bytes);
+    assert_eq!(
+        (after.dev(), after.ino(), after.mode(), after.nlink()),
+        (before.dev(), before.ino(), before.mode(), before.nlink())
+    );
+    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+    assert_ne!(
+        (after.ctime(), after.ctime_nsec()),
+        (before.ctime(), before.ctime_nsec())
+    );
+}
+
+/// rv-sec3 G4 r2 F1: a master slot on an account's generated SDK home whose config was
+/// written and put back outside a save is refused by the master turn's re-pin, so the change
+/// stays visible; the owner's own registration still re-pins it, at the next generation.
+#[test]
+fn a_config_written_and_restored_outside_a_save_is_never_re_pinned_for_a_master() {
+    let mut case = ConfiguredCase::new(false, false);
+    let saved = case
+        .custody
+        .prepare_configured_rcli_profile(&case.host, &case.connection, &case.profile, None)
+        .unwrap();
+    let home = case.custody.generated_configured_home(&case.profile);
+    let master = reference("master-target-profile");
+    let first = case
+        .custody
+        .register_configured_rcli_profile(&case.host, &case.connection, &master, &home)
+        .unwrap();
+    assert_eq!(first.profile_config_sha256, saved.profile_config_sha256);
+    write_and_restore(&home.join(".backboard/config.json"));
+
+    let refused = case
+        .custody
+        .register_undone_configured_rcli_profile(&case.host, &case.connection, &master, &home);
+
+    assert_eq!(refused.unwrap_err().0, "rcli_profile_identity_changed");
+    let owner = case
+        .custody
+        .register_configured_rcli_profile(&case.host, &case.connection, &master, &home)
+        .unwrap();
+    assert_eq!(owner.profile_generation, first.profile_generation + 1);
+}

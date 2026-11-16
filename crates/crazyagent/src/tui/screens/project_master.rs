@@ -1260,6 +1260,28 @@ mod tests {
         }
     }
 
+    /// rv-sec3 G4 r2 F1: a turn refused because the local model's config file changed outside
+    /// a save says a new conversation is needed, since trying the same one again never helps;
+    /// a send refused for it says the same.
+    #[test]
+    fn a_turn_refused_for_a_changed_local_model_config_says_to_end_the_conversation() {
+        let line = "The local model's config file changed since this conversation started, so the master cannot use it. Press e to end it, then send again. (rcli_profile_identity_changed)";
+        let mut stopped = turn(
+            1,
+            3,
+            MasterTurnPhase::Blocked,
+            Some(MasterReason::RuntimeUnavailable),
+        );
+        stopped.cause = Some("rcli_profile_identity_changed".to_owned());
+        let transcript = build(
+            Some(MasterSessionPhase::Configured),
+            &[stopped],
+            &[entry(3, "Go.")],
+        );
+        assert_eq!(transcript.messages.last().unwrap().text, line);
+        assert_eq!(master_problem("rcli_profile_identity_changed"), line);
+    }
+
     #[test]
     fn a_closed_master_is_stopped_and_says_so() {
         let transcript = build(Some(MasterSessionPhase::Closed), &[], &[]);

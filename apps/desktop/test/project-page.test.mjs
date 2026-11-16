@@ -422,6 +422,13 @@ test("every refusal the engine gives a master send, start or end has its own pla
   for (const code of codes) assert.notEqual(research.sendFailureLine(code), "Couldn't send. Try again.", code);
 });
 
+test("a turn or send refused for a changed local model config says to end the conversation (rv-sec3 G4 r2 F1)", () => {
+  const sentence = "The local model's config file changed since this conversation started, so the master can't use it. End the conversation, then send again.";
+  const refused = { id: "t", ordinal: 1, phase: "blocked", reason: "runtime_unavailable", cause: "rcli_profile_identity_changed", detail: null, reply: null };
+  assert.equal(research.turnLine(refused), `${sentence} (rcli_profile_identity_changed)`);
+  assert.equal(research.sendFailureLine("rcli_profile_identity_changed"), `Couldn't send. ${sentence}`);
+});
+
 test("only a send refused because the settings changed starts a new conversation", () => {
   const receipt = (outcome, rejection) => ({ operation_id: "op", outcome, pending: false, rejection });
   assert.equal(research.restartForSettings(receipt("rejected", "master_source_conflict")), true);

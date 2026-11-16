@@ -6861,12 +6861,13 @@ auth = { method = "none" }"#;
         case.close().await;
     }
 
-    /// RV-DS241-50 r1 (rv-code4 A2, rv-sec3 F1): an account save undone after its swap puts
-    /// the old config back with its inode and bytes but a new change time. The master's next
-    /// turn re-pins its slot on that home and prepares; before, every turn was refused with
-    /// rcli_profile_identity_changed until the owner opened a new session.
+    /// rv-sec3 G4 r2 F1 (RV-DS241-50 r1): the master's generated SDK home config written over
+    /// and put back outside an account save, the same bytes and inode with its modified time
+    /// reset, moves only its change time. The master's next turn is refused with
+    /// rcli_profile_identity_changed and its slot keeps its generation; at RV-DS241-50 r1 the
+    /// turn re-pinned it unseen. An undone save's put-back still re-pins, in custody's rows.
     #[tokio::test]
-    async fn a_master_turn_after_an_undone_save_moved_its_config_change_time_still_prepares() {
+    async fn a_master_turn_after_its_config_was_written_and_restored_outside_a_save_is_refused() {
         use std::os::unix::fs::MetadataExt;
         let case = Fixture::new(true).await;
         let connection = case
@@ -6893,31 +6894,40 @@ auth = { method = "none" }"#;
         };
         fail_first(&case, &first, MasterReason::RuntimeUnavailable).await;
         let config = generated.join(".backboard/config.json");
-        let aside = generated.join(".backboard/config.json.undone");
+        let bytes = std::fs::read(&config).unwrap();
         let before = std::fs::symlink_metadata(&config).unwrap();
-        std::fs::rename(&config, &aside).unwrap();
-        std::fs::rename(&aside, &config).unwrap();
+        std::fs::write(&config, b"{}").unwrap();
+        std::fs::write(&config, &bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&config)
+            .unwrap()
+            .set_modified(before.modified().unwrap())
+            .unwrap();
         let after = std::fs::symlink_metadata(&config).unwrap();
-        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        assert_eq!(std::fs::read(&config).unwrap(), bytes);
+        assert_eq!(
+            (after.dev(), after.ino(), after.mode(), after.nlink()),
+            (before.dev(), before.ino(), before.mode(), before.nlink())
+        );
+        assert_eq!(after.modified().unwrap(), before.modified().unwrap());
         assert_ne!(
             (after.ctime(), after.ctime_nsec()),
             (before.ctime(), before.ctime_nsec())
         );
 
-        let prepare = next_turn(&case, "after-undone-save").await;
-        let prepared = match case.runtime(prepare).await {
-            Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
-            Ok(MasterRuntimeResult::Turn(turn)) => panic!(
-                "a config put back in place must not block the master: {:?}",
-                turn.cause
+        let prepare = next_turn(&case, "after-write-and-restore").await;
+        let refused = match case.runtime(prepare).await {
+            Ok(MasterRuntimeResult::Turn(turn)) => turn.cause,
+            Ok(MasterRuntimeResult::Prepared(prepared)) => panic!(
+                "a config written and put back outside a save must not prepare {:?}",
+                prepared.attempt.connection
             ),
-            Ok(_) => panic!("a config put back in place must prepare the master turn"),
-            Err(failure) => {
-                panic!("a config put back in place must not stop the master: {failure:?}")
-            }
+            Ok(_) => None,
+            Err(failure) => Some(failure.0),
         };
 
-        assert_eq!(prepared.attempt.connection, connection);
+        assert_eq!(refused.as_deref(), Some("rcli_profile_identity_changed"));
         let mut db = case.db();
         let tx = db.transaction().unwrap();
         let record = registration(
@@ -6927,7 +6937,7 @@ auth = { method = "none" }"#;
         )
         .unwrap()
         .unwrap();
-        assert_eq!(record.proof.generation, 2);
+        assert_eq!(record.proof.generation, 1);
         drop(tx);
         case.close().await;
     }
