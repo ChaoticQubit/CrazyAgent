@@ -1,4 +1,5 @@
 import { call, knownError, namedFailure, type Result } from "./api";
+import type { Origin, PluginStatus, SecretView } from "./api-app-plugins";
 
 export type WritePolicy = "ask_every_time" | "ask_once_per_project" | "read_only";
 export type Wait = "minutes2" | "minutes10" | "minutes30";
@@ -33,6 +34,37 @@ export interface ActivityView {
   version: number;
 }
 export type ConnectorSettingsSave = { kind: "saved" } | { kind: "stale"; current: number };
+export type Who = "both" | "master" | "agents";
+export type SignIn = "key" | "not_yet";
+export interface ConnectorRuns { kind: "connector"; url: string; hosts: string[]; oauth_hosts: string[]; vendor_read_only: boolean }
+export interface ConnectorView {
+  name: string;
+  title: string;
+  version: string;
+  description: string;
+  origin: Origin;
+  status: PluginStatus;
+  sign_in: SignIn;
+  runs: ConnectorRuns;
+  secrets: SecretView[];
+  sha256: string;
+}
+export interface Grant { connector: string; enabled: boolean; who: Who }
+export interface ConnectorsView {
+  connectors: ConnectorView[];
+  more: boolean;
+  settings: ConnectorSettings;
+  version: number;
+  project: string | null;
+  grants: Grant[];
+}
+
+/** The Who a project switch change sends: the project's row's Who, so turning a connector
+ * off and on again keeps the owner's last choice, or both when the project has no row for
+ * it. Inputs: the page and the connector. Output: the Who. */
+export function switchWho(_view: ConnectorsView, _connector: string): Who {
+  return "agents";
+}
 
 /** The keep choices in the order both apps list them, with their words. */
 export const KEEP_CHOICES: { choice: KeepLog; label: string }[] = [
