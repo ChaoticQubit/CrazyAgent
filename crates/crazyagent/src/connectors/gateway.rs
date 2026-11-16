@@ -1156,8 +1156,11 @@ fn serve_with(
     let gateway = Arc::new(Gateway::new(root));
     let busy: Arc<Mutex<BTreeSet<String>>> = Arc::default();
     let mut held: Option<Connection> = None;
-    while !stop.load(Ordering::SeqCst) {
+    loop {
         let seen = launched();
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
         if held.is_none() {
             held = open(root)
                 .ok()
