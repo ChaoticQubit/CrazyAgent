@@ -15,7 +15,7 @@ pub mod pinned;
 pub(crate) mod process;
 pub mod progress;
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
-mod run;
+pub(crate) mod run;
 #[cfg(any(target_os = "windows", test))]
 pub mod windows;
 
