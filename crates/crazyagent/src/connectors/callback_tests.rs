@@ -54,6 +54,22 @@ fn closed(port: u16) -> bool {
     TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err()
 }
 
+/// A connection that sends one byte of a request head every 100 ms for `lasting`, or until
+/// the callback closes it, on a thread of its own. Inputs: the port and how long. Output:
+/// the thread.
+fn dripping(port: u16, lasting: Duration) -> JoinHandle<()> {
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    std::thread::spawn(move || {
+        let began = Instant::now();
+        for byte in b"GET /callback?state=".iter().cycle() {
+            if began.elapsed() >= lasting || stream.write_all(&[*byte]).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    })
+}
+
 /// DEC-168 Task 10: the callback listens on loopback at a port of its own under
 /// `/callback`. Every request that is not a GET of that path with the sign-in's one state
 /// and a code is refused without ending the wait; the one that is ends it with its code and
@@ -126,6 +142,38 @@ fn the_callback_closes_after_five_minutes() {
     assert!(took < Duration::from_secs(3), "{took:?}");
     drop(idle);
     assert!(closed(port));
+}
+
+/// rv-code2 CTA10-1: a connection that sends a byte now and then has one budget for its
+/// head and the drain after its answer, never more than the time left, so the callback
+/// still closes at its limit while it drips.
+#[test]
+fn a_connection_that_drips_bytes_is_closed_at_its_budget_and_the_wait_still_expires() {
+    let started = Instant::now();
+    let (port, _stop, thread) = waiting(Duration::from_millis(300));
+    let drip = dripping(port, Duration::from_secs(3));
+    assert_eq!(thread.join().unwrap(), Waited::Expired);
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(2), "{took:?}");
+    assert!(closed(port));
+    drip.join().unwrap();
+}
+
+/// rv-code2 CTA10-1: a cancel ends the wait at once even while a connection drips bytes, so
+/// a local program cannot hold a cancelled sign-in's thread and port.
+#[test]
+fn a_cancel_ends_the_wait_while_a_connection_drips_bytes() {
+    let (port, stop, thread) = waiting(WAIT);
+    let drip = dripping(port, Duration::from_secs(10));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!thread.is_finished(), "the drip ended the wait");
+    let stopped = Instant::now();
+    stop.store(true, Ordering::SeqCst);
+    assert_eq!(thread.join().unwrap(), Waited::Stopped);
+    let took = stopped.elapsed();
+    assert!(took < Duration::from_secs(2), "{took:?}");
+    assert!(closed(port));
+    drip.join().unwrap();
 }
 
 /// DEC-168 addendum 30 decision 6: an answer with the sign-in's state and an `error` ends
