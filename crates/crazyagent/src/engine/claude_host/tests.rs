@@ -2123,8 +2123,9 @@ exit 122
 "#;
 
 /// #101 r1 (rv-sec3 N1): a held stop that leaves a process holding the harness's output
-/// still closes with the cleanup's own fault, so a run that left something behind stays
-/// uncertain; the held cause outranks only what the run itself reported.
+/// ends the host on its own, without waiting on that output, and still closes with the
+/// cleanup's own fault, so a run that left something behind stays uncertain; the held
+/// cause outranks only what the run itself reported.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_claude_master_held_stop_that_left_a_process_closes_uncertain() {
@@ -2133,6 +2134,24 @@ async fn a_claude_master_held_stop_that_left_a_process_closes_uncertain() {
     let mut fixture = MasterFixture::new("claude");
     let mut claude = stand_in_master(&mut fixture, HELD_STOP_LEAVING_HARNESS).await;
     let processes = HarnessProcesses::wait(&fixture.project);
+    let own_end = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if !matches!(
+                claude.status.borrow().phase,
+                Phase::Starting | Phase::Running
+            ) {
+                return true;
+            }
+            if claude.status.changed().await.is_err() {
+                return false;
+            }
+        }
+    })
+    .await;
+    assert!(
+        matches!(own_end, Ok(true)),
+        "the host did not end on the held exit by itself: {own_end:?}"
+    );
     let closed = claude.close().await.map_err(|error| error.0);
     assert!(closed.is_err(), "{closed:?}");
     assert_ne!(closed, Err(crate::sandbox::HELD_STOP_CAUSE.to_owned()));
