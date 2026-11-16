@@ -73,6 +73,7 @@ pub const PROCESS_CODES: &[&str] = &[
     "process_commit_staged",
     "process_folder_missing",
     "process_folder_unsafe",
+    "process_import_agents_can_write",
     "process_import_missing",
     "process_import_outside",
     "process_import_unmovable",
@@ -397,6 +398,8 @@ fn read_kind(action: &Action) -> Option<&'static str> {
         Action::PendingImport { .. } => Some("process.pending_import"),
         Action::UncommittedImport { .. } => Some("process.uncommitted_import"),
         Action::ReadFile { .. } => Some("process.read_file"),
+        Action::Sources => Some("process.sources"),
+        Action::ReadSource { .. } => Some("process.read_source"),
         Action::Default => Some("process.default"),
         Action::Given { .. } => Some("process.given"),
         Action::Agent { .. } => Some("process.agent"),
@@ -512,6 +515,31 @@ impl OwnerClient {
             return Err(failure("process_request_invalid"));
         }
         self.process_text_reply(Action::ReadFile { path }).await
+    }
+
+    /// Lists each harness's own instruction file in the owner's home that the owner's import
+    /// into the app-wide instructions may read, as its manifest's `import.instructions` names
+    /// it; reads no file. Output: the sources in catalog order, empty when none is there.
+    pub async fn instruction_sources(&self) -> Result<Vec<InstructionSource>, EngineError> {
+        match self.process_exchange(Action::Sources, None).await? {
+            (Reply::Sources { sources }, None)
+                if sources.len() <= crate::harnesses::registry::HARNESSES_MAX =>
+            {
+                Ok(sources)
+            }
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads one harness's own instruction file for the app-wide instructions editor the
+    /// owner may then save; the engine takes the path from the harness's manifest. Input: the
+    /// harness id. Output: the text, at most `agent_home::TEXT_BYTES_MAX` bytes, or a
+    /// `PROCESS_CODES` refusal such as `process_import_agents_can_write`.
+    pub async fn read_instruction_source(&self, harness: String) -> Result<String, EngineError> {
+        if harness.is_empty() || harness.len() > crate::harnesses::manifest::NAME_BYTES_MAX {
+            return Err(failure("process_request_invalid"));
+        }
+        self.process_text_reply(Action::ReadSource { harness }).await
     }
 
     /// Lists the project's own instruction files (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md,
@@ -1307,6 +1335,28 @@ fn run(root: &Path, action: Action, text: Option<String>) -> Result<Answer, Engi
         ),
         (Action::ReadFile { path }, None) => {
             Answer::Text(crate::instruction_files::read_picked(&path)?)
+        }
+        (Action::Sources, None) => Answer::Sources(
+            crate::skills::import::home()
+                .map(|home| {
+                    crate::instruction_files::sources::sources(
+                        &home,
+                        crate::harnesses::registry::registry(),
+                    )
+                })
+                .unwrap_or_default(),
+        ),
+        (Action::ReadSource { harness }, None) => {
+            let registry = crate::harnesses::registry::registry();
+            if crate::instruction_files::sources::file_of(registry, &harness).is_none() {
+                return Err(failure("process_request_invalid"));
+            }
+            let home =
+                crate::skills::import::home().ok_or_else(|| failure("process_import_missing"))?;
+            let places = crate::tools::Places::from_environment(Some(root));
+            Answer::Text(crate::instruction_files::sources::read(
+                &home, registry, &places, &harness,
+            )?)
         }
         (Action::Default, None) => Answer::Text(crate::agent_home::DEFAULT_PROCESS.to_owned()),
         (Action::ConfirmImport { project }, None) => {
