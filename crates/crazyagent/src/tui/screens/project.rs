@@ -661,6 +661,7 @@ pub(in crate::tui) enum ProjectReply {
     RefreshOverview,
     MoveHome(crate::projects_home::AddMode),
     DeleteEverything(String),
+    GitHubRules,
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.

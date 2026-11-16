@@ -1719,6 +1719,10 @@ impl ProjectPage {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::GitHubRules => Flow::Open(Place::ProjectGitHub {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            }),
             ProjectReply::Usage => Flow::Open(Place::Usage),
             ProjectReply::AccountOrder(strategy) => {
                 self.set_order(strategy, ctx);

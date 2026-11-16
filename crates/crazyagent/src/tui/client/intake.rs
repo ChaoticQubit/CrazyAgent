@@ -5,10 +5,12 @@ use crate::github::{
     CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
     GitHubPublishPlan, GitHubRepoPage, GitHubStatus,
 };
+use crate::github::{GitHubRepoRules, GitHubRule};
 use crate::onboarding::OnboardingView;
 use crate::projects_home::job::{JobSubject, JobView};
 use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crate::protocol::{CredentialRef, RequestId};
+use std::collections::BTreeSet;
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -83,6 +85,19 @@ pub(in crate::tui) enum IntakeQuery {
     JobDismiss {
         id: RequestId,
     },
+    GitHubRuleDefaults,
+    GitHubRuleDefaultsSet {
+        rules: BTreeSet<GitHubRule>,
+    },
+    GitHubRules {
+        project: ProjectId,
+    },
+    GitHubRuleSet {
+        project: ProjectId,
+        repo: String,
+        rule: GitHubRule,
+        on: bool,
+    },
 }
 
 /// A fresh id for one start of the engine's intake job, which the job that start makes
@@ -124,6 +139,8 @@ pub(in crate::tui) enum IntakeView {
     Job(Option<JobView>),
     JobStopped(bool),
     JobDismissed(bool),
+    RuleDefaults(BTreeSet<GitHubRule>),
+    Rules(Box<GitHubRepoRules>),
 }
 
 /// One intake reply for the screens.
@@ -330,6 +347,29 @@ impl NativeOwner {
             IntakeQuery::JobDismiss { id } => {
                 IntakeView::JobDismissed(controller.job_dismiss(id).await.map_err(problem)?)
             }
+            IntakeQuery::GitHubRuleDefaults => {
+                IntakeView::RuleDefaults(controller.github_rule_defaults().await.map_err(problem)?)
+            }
+            IntakeQuery::GitHubRuleDefaultsSet { rules } => IntakeView::RuleDefaults(
+                controller
+                    .github_rule_defaults_set(rules)
+                    .await
+                    .map_err(problem)?,
+            ),
+            IntakeQuery::GitHubRules { project } => IntakeView::Rules(Box::new(
+                controller.github_rules(project).await.map_err(problem)?,
+            )),
+            IntakeQuery::GitHubRuleSet {
+                project,
+                repo,
+                rule,
+                on,
+            } => IntakeView::Rules(Box::new(
+                controller
+                    .github_rule_set(project, repo, rule, on)
+                    .await
+                    .map_err(problem)?,
+            )),
         })
     }
 }
