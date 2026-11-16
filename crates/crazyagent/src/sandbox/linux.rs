@@ -4249,6 +4249,46 @@ mod tests {
         assert!(parse(&[NEST]).is_err());
     }
 
+    /// rv-sa241 SBX-2-R2 N2: between the fixed nest arguments and the nest's `--` the helper
+    /// takes only `--unshare-net` and then `--chdir` with an absolute path, the options its
+    /// own builders write, and needs a command after that `--`, so no caller adds a
+    /// capability, a seccomp filter, a namespace or a bind to the agent's bubblewrap.
+    #[test]
+    fn a_nest_takes_only_its_network_and_working_folder_before_the_command() {
+        use bridge::UNSHARE_NET;
+        let nest = |options: &[&str]| {
+            let mut words = vec![NEST, "--", BWRAP_PATHS[0]];
+            words.extend(NEST_ARGS);
+            words.extend(options);
+            HelperRequest::parse(words.iter().map(OsString::from).collect())
+        };
+        let helper = "/opt/helper";
+        for kept in [
+            &["--", helper][..],
+            &[UNSHARE_NET, "--", helper],
+            &["--chdir", "/work", "--", helper],
+            &[UNSHARE_NET, "--chdir", "/work", "--", helper, NESTED],
+        ] {
+            assert!(nest(kept).is_ok(), "{kept:?}");
+        }
+        for refused in [
+            &[UNSHARE_NET, "--cap-add", "CAP_NET_ADMIN", "--", helper][..],
+            &["--seccomp", "5", "--", helper],
+            &["--userns", "5", "--", helper],
+            &["--bind", "/", "/", "--", helper],
+            &["--chdir", "work", "--", helper],
+            &["--chdir", "/work/../etc", "--", helper],
+            &["--chdir", "/work", UNSHARE_NET, "--", helper],
+            &[UNSHARE_NET, UNSHARE_NET, "--", helper],
+            &["--chdir", "/a", "--chdir", "/b", "--", helper],
+            &["--chdir", "--", helper],
+            &[helper],
+            &[UNSHARE_NET, "--"],
+        ] {
+            assert!(nest(refused).is_err(), "{refused:?}");
+        }
+    }
+
     #[test]
     fn a_nested_policy_reads_back_from_its_own_arguments() {
         let policy = LandlockPolicy {
