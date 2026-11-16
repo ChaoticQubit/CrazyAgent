@@ -178,7 +178,7 @@ const page = (patch = {}) => renderToStaticMarkup(createElement(settingsPage.Con
   busy: false, saving: false, failure: "", problem: "", actions, ...patch,
 }));
 const pageLink = (markup, name, title) => new RegExp(`<a[^>]*href="#/settings/connectors\\?connector=${name}"[^>]*>${title}</a>`, "u").test(markup);
-const radios = (markup, name) => [...markup.matchAll(new RegExp(`<input type="radio" name="${name}" value="([a-z0-9_]+)"( checked="")?`, "gu"))].map((match) => [match[1], match[2] !== undefined]);
+const radios = (markup, name) => [...markup.matchAll(new RegExp(`<input type="radio" name="${name}"( checked="")? value="([a-z0-9_]+)"( checked="")?`, "gu"))].map((match) => [match[2], match[1] !== undefined || match[3] !== undefined]);
 const saveButton = (markup) => markup.match(/<button[^>]*>Save changes<\/button>/u)?.[0] ?? "";
 const TRUST = {
   name: "board", title: "Board", version: "2.1.0", description: "Board through its own MCP server.", kind: "connector",
