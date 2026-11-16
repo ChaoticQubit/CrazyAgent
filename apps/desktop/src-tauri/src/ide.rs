@@ -906,12 +906,13 @@ fn beat(app: AppHandle, project: ProjectId) -> JoinHandle<()> {
     })
 }
 
-/// Drops a project's IDE whose server has gone: its own window closes and its webview closes,
-/// so the next open loads the new server. Inputs: the app and the project. Output: none.
+/// Drops a project's IDE whose server has gone: its webview closes first, so no show finds it
+/// in between, then its own window, so the next open loads the new server. Inputs: the app and
+/// the project. Output: none.
 async fn server_gone<R: Runtime>(app: AppHandle<R>, project: ProjectId) {
     let views = app.state::<IdeViews>();
-    let _ = bring_home(&app, &views, &project);
     let _ = close(&app, &views, &project);
+    let _ = bring_home(&app, &views, &project);
 }
 
 async fn touch(state: &crate::NativeState, project: &ProjectId) -> Result<bool, BridgeError> {
