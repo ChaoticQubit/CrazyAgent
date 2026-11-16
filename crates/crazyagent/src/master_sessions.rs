@@ -2786,7 +2786,7 @@ struct Exchange {
 fn typed_lead(stored: &Stored) -> &'static str {
     let seen = stored.source == TERMINAL && stored.message.text.is_some();
     match stored.message.speaker {
-        MessageSpeaker::Engine => "Engine, in",
+        MessageSpeaker::Engine if seen => "Engine, in",
         MessageSpeaker::Owner if seen => "Owner, in",
         _ => "Typed in",
     }
