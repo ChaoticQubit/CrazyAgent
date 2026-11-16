@@ -73,9 +73,12 @@ fn the_production_policy_pins_team_identifier_developer_id_runtime_and_no_entitl
          \"crazyagent\" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate \
          leaf[field.1.2.840.113635.100.6.1.13] exists"
     );
-    assert_eq!(PRODUCTION.requirement, REQUIREMENT);
-    assert!(PRODUCTION.runtime_required);
-    assert!(PRODUCTION.entitlements_allowed.is_empty());
+    let expected = Policy {
+        requirement: REQUIREMENT,
+        runtime_required: true,
+        entitlements_allowed: &[],
+    };
+    assert_eq!(PRODUCTION, expected);
 }
 
 #[test]
