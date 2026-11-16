@@ -5272,8 +5272,8 @@ fn a_folder_cut_to_its_tail_fits_its_cells() {
 }
 
 /// SA-VID14-A: on the Settings tab the running agents that can still open a folder hidden
-/// after they started are named under the hidden folders, with r to restart them, which
-/// sends Restart them for the project; with none listed r sends nothing. The editor says the
+/// after they started are named under the hidden folders, with R to restart them, which
+/// sends Restart them for the project; with none listed R sends nothing. The editor says the
 /// list covers team agents, and that engine runs started before are named too (r1,
 /// SA-VID14-R2-N1, SA-VID14-R2-N2).
 #[test]
@@ -5331,7 +5331,7 @@ fn settings_name_agents_that_can_still_open_a_hidden_folder_and_r_restarts_them(
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(!shown.contains("can still open"), "{shown}");
     assert!(!matches!(
-        screen.key(key(KeyCode::Char('r'))),
+        screen.key(key(KeyCode::Char('R'))),
         ProjectReply::TeamChange(_)
     ));
 
@@ -5346,11 +5346,11 @@ fn settings_name_agents_that_can_still_open_a_hidden_folder_and_r_restarts_them(
         "{shown}"
     );
     assert!(
-        shown.contains("          Master, Ada can still open a hidden folder   r Restart them"),
+        shown.contains("          Master, Ada can still open a hidden folder   R Restart them"),
         "{shown}"
     );
     assert_eq!(
-        screen.key(key(KeyCode::Char('r'))),
+        screen.key(key(KeyCode::Char('R'))),
         ProjectReply::TeamChange(Box::new(TeamAction::RestartHiddenSeers {
             project_id: project.clone(),
         }))
@@ -5411,7 +5411,7 @@ fn settings_name_engine_runs_that_can_still_open_a_hidden_folder() {
         "{shown}"
     );
     assert!(
-        !shown.contains("r Restart them"),
+        !shown.contains("R Restart them"),
         "a run has no restart key: {shown}"
     );
     screen.hidden_paths = Some(saved(Vec::new()));

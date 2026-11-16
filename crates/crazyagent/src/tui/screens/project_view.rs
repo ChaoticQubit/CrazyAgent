@@ -2646,7 +2646,7 @@ fn seers_line(screen: &ProjectScreen, look: &Look) -> Option<Row> {
             format!("{} can still open a hidden folder", seers.join(", ")),
             look.warning,
         )
-        .push("   r Restart them", look.muted)
+        .push("   R Restart them", look.muted)
     })
 }
 

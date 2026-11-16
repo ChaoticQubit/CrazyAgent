@@ -2632,7 +2632,7 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
-            KeyCode::Char('r') if !self.hidden_seers().is_empty() => {
+            KeyCode::Char('R') if !self.hidden_seers().is_empty() => {
                 ProjectReply::TeamChange(Box::new(crate::team::TeamAction::RestartHiddenSeers {
                     project_id: self.project.clone(),
                 }))
