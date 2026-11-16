@@ -296,30 +296,53 @@ impl HeldNodes {
         held: &Held,
         stat: impl Fn(&Path) -> io::Result<Option<Node>>,
     ) -> io::Result<Self> {
-        let _ = (held, stat);
-        Ok(Self::default())
+        let mut nodes = Self::default();
+        let entries = held.entries.iter().map(|path| (path, false));
+        for (path, tree) in entries.chain(held.trees.iter().map(|path| (path, true))) {
+            let (Some(folder), Some(name)) = (path.parent(), path.file_name()) else {
+                return Err(io::ErrorKind::InvalidInput.into());
+            };
+            if !path.is_absolute() {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            if let Some(node) = stat(path)? {
+                nodes.nodes.push(node);
+                if tree {
+                    nodes.trees.push(node);
+                }
+            }
+            let there = |path: &Path| stat(path)?.ok_or_else(|| io::ErrorKind::NotFound.into());
+            nodes.names.push((there(folder)?, name.to_os_string()));
+            for above in path.ancestors().skip(1) {
+                nodes.above.push(there(above)?);
+            }
+        }
+        nodes.above.sort_unstable();
+        nodes.above.dedup();
+        assert_eq!(nodes.names.len(), held.entries.len() + held.trees.len());
+        assert!(nodes.trees.iter().all(|tree| nodes.nodes.contains(tree)));
+        Ok(nodes)
     }
 
     /// Tells whether a target is held. Inputs: the target's node, none when it does not
     /// exist, and the nodes of its folder and each folder above it, nearest first. Output:
     /// true for a held node, or when a folder on that chain is a held tree.
     pub fn holds(&self, target: Option<Node>, chain: &[Node]) -> bool {
-        let _ = (target, chain);
-        false
+        target.is_some_and(|node| self.nodes.contains(&node))
+            || chain.iter().any(|folder| self.trees.contains(folder))
     }
 
     /// Tells whether moving a target away would carry a held entry with it. Inputs: as
     /// [`HeldNodes::holds`]. Output: true when it is held or a folder above a held path.
     pub fn pins(&self, target: Option<Node>, chain: &[Node]) -> bool {
-        let _ = (target, chain);
-        false
+        self.holds(target, chain) || target.is_some_and(|node| self.above.contains(&node))
     }
 
     /// The held names that live in one folder, which a new entry there must not turn out to
     /// be. Input: the folder's node. Output: those last names.
     pub fn names_in(&self, folder: Node) -> Vec<&OsStr> {
-        let _ = folder;
-        Vec::new()
+        let here = self.names.iter().filter(|(parent, _)| *parent == folder);
+        here.map(|(_, name)| name.as_os_str()).collect()
     }
 }
 
