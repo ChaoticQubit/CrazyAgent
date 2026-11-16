@@ -34,7 +34,8 @@ pub enum SignIn {
 }
 
 /// One connector as the owner's page lists it: what it is, where it came from, whether it
-/// is trusted and has its key, what it reaches and where each secret is bound.
+/// is trusted and has its key, what it reaches and where each secret is bound. A refused
+/// file whose kind reads as connector has no `runs`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectorView {
@@ -45,7 +46,7 @@ pub struct ConnectorView {
     pub origin: Origin,
     pub status: PluginStatus,
     pub sign_in: SignIn,
-    pub runs: RunsView,
+    pub runs: Option<RunsView>,
     pub secrets: Vec<SecretView>,
     pub sha256: String,
 }
@@ -224,7 +225,7 @@ pub fn view(
                 } else {
                     SignIn::Key
                 },
-                runs: plugin.runs?,
+                runs: Some(plugin.runs?),
                 name: plugin.name,
                 title: plugin.title,
                 version: plugin.version,

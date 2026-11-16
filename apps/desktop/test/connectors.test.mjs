@@ -106,9 +106,14 @@ test("Project Settings has a Connectors section right after Plugins and skills, 
 });
 
 const PROBLEM = { code: "app_plugin_url_not_https", line: 7, field: "connector.url", message: "The address must start with https://." };
+const TAKEN = { code: "app_plugin_name_taken", line: null, field: "name", message: "a plugin with this name already exists; remove it or choose replace." };
+const refusedFile = (name, problem) => ({
+  name, title: name, version: "", description: "", origin: "user", status: { kind: "refused", problem }, sign_in: "not_yet",
+  runs: null, secrets: [], sha256: HASH,
+});
 const CATALOG = {
   ...VIEW, project: null, grants: [],
-  connectors: [...VIEW.connectors, connector("broken", "Broken", { kind: "refused", problem: PROBLEM }, { origin: "user" })],
+  connectors: [...VIEW.connectors, refusedFile("broken", PROBLEM), refusedFile("linear", TAKEN)],
 };
 const actions = new Proxy({}, { get: () => forbidden });
 const REACH = ["Harness A: yes", "Harness B: yes", "Harness C: yes (master)"];
@@ -137,7 +142,7 @@ test("Settings, Connectors lists every connector with its state word and line, w
   const shown = text(markup);
   assert.ok(shown.startsWith("Connectors"), shown);
   for (const words of [api.CONNECTORS_PAGE.purpose, "Catalog", api.CONNECTORS_PAGE.catalogAbout, "Add connector"]) assert.ok(shown.includes(words), `the page shows ${words}`);
-  for (const [name, title] of [["linear", "Linear"], ["github", "GitHub"], ["atlassian", "Atlassian"], ["board", "Board"], ["desk", "Desk"], ["broken", "Broken"]]) {
+  for (const [name, title] of [["linear", "Linear"], ["github", "GitHub"], ["atlassian", "Atlassian"], ["board", "Board"], ["desk", "Desk"]]) {
     assert.ok(pageLink(markup, name, title), `${title} links to its own page`);
   }
   const rowOf = (name) => text(markup.match(new RegExp(`<li[^>]*data-connector="${name}"[^>]*>.*?</li>`, "su"))?.[0] ?? "");
@@ -148,7 +153,7 @@ test("Settings, Connectors lists every connector with its state word and line, w
   assert.ok(rowOf("desk").includes("Needs a key Signs in with OAuth, which this build does not have."), "a connector that signs in with OAuth says so instead of asking for a key");
   assert.ok(rowOf("broken").includes("Refused The address must start with https://. (app_plugin_url_not_https, line 7, connector.url)"), rowOf("broken"));
   for (const hidden of [HASH, "lin_api"]) assert.ok(!markup.includes(hidden), `the catalog never shows ${hidden}`);
-  assert.ok(text(page({ view: { kind: "ok", value: { ...CATALOG, more: true } } })).includes("Showing the first 6 connectors."));
+  assert.ok(text(page({ view: { kind: "ok", value: { ...CATALOG, more: true } } })).includes("Showing the first 7 connectors."));
 });
 
 test("A connector's state is checked in a fixed order, Refused, Needs review, Needs a key, Ready, and matches the project section's word", () => {
@@ -414,4 +419,95 @@ test("No TypeScript spells a harness row: the words come only from connectors::l
   for (const file of ["../src/api-connectors.ts", "../src/screens/settings/connectors.tsx", "../src/screens/settings/connector-detail.tsx"]) {
     for (const word of words) assert.ok(!source(file).includes(word), `${file} never spells ${word}`);
   }
+});
+
+test("A refused connector file is listed under its file name with its reason and where to remove it, with no link, version or address, even beside a built-in one of its name", () => {
+  const markup = page();
+  const userRow = (name) => text(markup.match(new RegExp(`<li[^>]*data-connector="${name}" data-origin="user"[^>]*>.*?</li>`, "su"))?.[0] ?? "");
+  assert.ok(userRow("broken").includes("broken. Added by you. Refused The address must start with https://. (app_plugin_url_not_https, line 7, connector.url)"), userRow("broken"));
+  assert.ok(userRow("linear").includes("linear. Added by you. Refused a plugin with this name already exists; remove it or choose replace. (app_plugin_name_taken, name)"), userRow("linear"));
+  for (const name of ["broken", "linear"]) {
+    assert.ok(userRow(name).includes(api.CONNECTORS_PAGE.refusedFile), `${name} says where its file can be removed: ${userRow(name)}`);
+    for (const absent of ["Reaches", "version"]) assert.ok(!userRow(name).includes(absent), `${name} shows no ${absent}`);
+  }
+  assert.ok(!/href="#\/settings\/connectors\?connector=broken"/u.test(markup), "a refused file has no page of its own to open");
+  assert.equal([...markup.matchAll(/href="#\/settings\/connectors\?connector=linear"/gu)].length, 1, "only the built-in Linear links to the page of that name");
+  assert.equal(api.originLine(refusedFile("broken", PROBLEM)), "broken. Added by you.");
+  const shown = text(page({ open: "broken" }));
+  for (const words of ["broken. Added by you.", "Refused", "(app_plugin_url_not_https, line 7, connector.url)", api.CONNECTORS_PAGE.refusedFile]) {
+    assert.ok(shown.includes(words), `broken's page shows ${words}: ${shown}`);
+  }
+  for (const absent of ["Reaches", "Address:", "Remove", "Review", "Set key"]) assert.ok(!shown.includes(absent), `broken's page has no ${absent}`);
+});
+
+async function bridged(reply, run) {
+  const sent = [];
+  const before = globalThis.window;
+  globalThis.window = { __TAURI_INTERNALS__: { async invoke(command, args) {
+    sent.push([command, args]);
+    return reply;
+  } } };
+  try {
+    await run(sent);
+  } finally {
+    globalThis.window = before;
+  }
+}
+
+test("Every manifest and vendor string the Connectors pages read from the engine shows its hidden characters as escapes, and names stay as sent", async () => {
+  const sneaky = "Line‮ar​\u{e0041}";
+  const escaped = "Line\\u202ear\\u200b\\u{e0041}";
+  const listed = connector("linear", sneaky, { kind: "ready" }, { description: `Reads ${sneaky}` });
+  await bridged({ ...CATALOG, connectors: [listed] }, async () => {
+    const result = await api.loadConnectors(null);
+    assert.equal(result.kind, "ok");
+    assert.equal(result.value.connectors[0].title, escaped);
+    assert.equal(result.value.connectors[0].description, `Reads ${escaped}`);
+    assert.equal(result.value.connectors[0].name, "linear", "a name is plain text already and goes back as sent");
+    const markup = page({ view: result });
+    for (const hidden of ["‮", "​", "\u{e0041}"]) assert.ok(!markup.includes(hidden), `the catalog never holds ${JSON.stringify(hidden)}`);
+    assert.ok(text(markup).includes(escaped), "the escapes are shown");
+  });
+  await bridged({ kind: "ready", trust: { ...TRUST, title: sneaky, description: sneaky } }, async () => {
+    const result = await api.previewConnector("schema: 1");
+    assert.equal(result.kind, "ok");
+    assert.equal(result.value.trust.title, escaped);
+    assert.equal(result.value.trust.description, escaped);
+    assert.equal(result.value.trust.sha256, HASH, "the SHA-256 the add names is the one sent");
+  });
+  const call = {
+    connector: "linear", tool: `get_${sneaky}`, kind: "read", project: "alpha", project_name: `Alpha ${sneaky}`, agent: `agent ${sneaky}`,
+    started_ms: 1, ms: 2, bytes_in: 3, bytes_out: 4, outcome: "ok", outcome_text: sneaky,
+  };
+  const activity = { calls: [call], more: false, connector: null, project: null, connectors: ["linear"], projects: [{ id: "alpha", name: `Alpha ${sneaky}` }], settings: SETTINGS, version: 1 };
+  await bridged(activity, async () => {
+    const result = await api.loadConnectorActivity(null, null);
+    assert.equal(result.kind, "ok");
+    const [shown] = result.value.calls;
+    assert.deepEqual([shown.tool, shown.project_name, shown.agent, shown.outcome_text], [`get_${escaped}`, `Alpha ${escaped}`, `agent ${escaped}`, escaped]);
+    assert.deepEqual([shown.connector, shown.project, result.value.projects[0].id], ["linear", "alpha", "alpha"]);
+    assert.equal(result.value.projects[0].name, `Alpha ${escaped}`);
+  });
+});
+
+test("The trust types name the same fields as the engine's TrustView, ConnectorTrust, KeyTrust, OAuthTrust and ReadOnlyTrust", () => {
+  const rust = source("../../../crates/crazyagent/src/app_plugins.rs");
+  const ts = source("../src/api-connectors.ts");
+  const rustFields = (name) => [...(rust.match(new RegExp(`pub struct ${name} \\{\\n(.*?)\\n\\}`, "su"))?.[1] ?? "").matchAll(/^\s+pub (\w+):/gmu)].map((match) => match[1]).sort();
+  const tsFields = (name) => [...(ts.match(new RegExp(`export interface ${name} \\{(.*?)\\}`, "su"))?.[1] ?? "").matchAll(/(\w+):/gu)].map((match) => match[1]).sort();
+  for (const [engine, page] of [["TrustView", "ConnectorTrustView"], ["ConnectorTrust", "ConnectorTrust"], ["KeyTrust", "KeyTrust"], ["OAuthTrust", "OAuthTrust"]]) {
+    assert.ok(rustFields(engine).length >= 3, `${engine} is read from the engine`);
+    assert.deepEqual(tsFields(page), rustFields(engine), `${page} names ${engine}'s fields`);
+  }
+  const variants = [...(rust.match(/pub enum ReadOnlyTrust \{\n(.*?)\n\}/su)?.[1] ?? "").matchAll(/^\s+(\w+)(?: \{ ([^}]*) \})?,$/gmu)]
+    .map((match) => [match[1].toLowerCase(), [...(match[2] ?? "").matchAll(/(\w+):/gu)].map((field) => field[1])]);
+  const union = ts.match(/export type ReadOnlyTrust = (.*);$/mu)?.[1] ?? "";
+  const shapes = [...union.matchAll(/\{ kind: "(\w+)"([^}]*)\}/gu)].map((match) => [match[1], [...match[2].matchAll(/(\w+):/gu)].map((field) => field[1])]);
+  assert.equal(variants.length, 3, "ReadOnlyTrust is read from the engine");
+  assert.deepEqual(shapes, variants);
+});
+
+test("Removing the connector whose page is open replaces that page in the history, so Back never opens a page for a connector that is gone", () => {
+  const screen = source("../src/screens/settings/connectors.tsx");
+  assert.match(screen, /connector === name\) navigate\(\{ name: "settings", tab: "connectors" \}, true\);/u);
 });

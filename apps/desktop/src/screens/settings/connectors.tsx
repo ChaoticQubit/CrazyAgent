@@ -68,7 +68,7 @@ function CatalogRow({ connector }: { connector: ConnectorView }) {
     </div>
     {state.detail && <p className="small">{state.detail}</p>}
     {connector.description && <p className="secondary">{connector.description}</p>}
-    <p className="small">{reachesLine(connector.runs.hosts)}</p>
+    {connector.runs && <p className="small">{reachesLine(connector.runs.hosts)}</p>}
   </li>;
 }
 

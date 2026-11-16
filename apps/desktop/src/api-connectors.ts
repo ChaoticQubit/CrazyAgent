@@ -46,7 +46,7 @@ export interface ConnectorView {
   origin: Origin;
   status: PluginStatus;
   sign_in: SignIn;
-  runs: ConnectorRuns;
+  runs: ConnectorRuns | null;
   secrets: SecretView[];
   sha256: string;
 }

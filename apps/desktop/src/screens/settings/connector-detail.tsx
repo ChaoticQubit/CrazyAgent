@@ -30,8 +30,8 @@ export function ConnectorDetailView({ name, connector, busy, failure, actions }:
     <div className="pj-stack-s">
       {connector.description && <p className="secondary">{connector.description}</p>}
       <div className="pj-row"><StatusBadge word={state.word} tone={state.tone} />{state.detail && <span className="small">{state.detail}</span>}</div>
-      <p className="small">{reachesLine(connector.runs.hosts)}</p>
-      <p className="small">{`Address: ${connector.runs.url}`}</p>
+      {connector.runs && <p className="small">{reachesLine(connector.runs.hosts)}</p>}
+      {connector.runs && <p className="small">{`Address: ${connector.runs.url}`}</p>}
       {keys && connector.secrets.length > 0 && <ul className="pj-rows" aria-label={`Secrets of ${connector.title}`}>{connector.secrets.map((secret) => <li key={secret.name} className="pj-row between">
         <span>{secretLine(secret)}</span>
         {secret.binding.kind === "none"
