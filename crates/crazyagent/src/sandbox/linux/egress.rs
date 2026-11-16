@@ -802,7 +802,9 @@ pub(super) fn placed(args: &[OsString]) -> Result<(), String> {
     }
     let mut fds: Vec<RawFd> = Vec::with_capacity(DESCRIPTOR_FLAGS.len());
     for (pair, flag) in written[1..written.len() - 1]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .zip(DESCRIPTOR_FLAGS)
     {
         let fd = pair[1]
