@@ -1,9 +1,10 @@
 use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS, RELAY_PORTS};
 use super::{
-    BRIDGE_PORT_MIN, GIT_STATE_FILES, GIT_STATE_TREES, KEPT_PORTS_MAX, LINUX_HARNESS_UNCHECKED,
-    LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK, LINUX_RESOLVER_NEEDS_UDP,
-    LinuxSockets, LinuxSupervisor, OWNER_PORTS, ProjectSandbox, REMOTES_MAX, Routed, Sandbox,
-    SandboxError, SandboxNetwork, SandboxRemote, agent_env, clean_absolute, invalid,
+    ADMIN_LINKS, ADMIN_WRITES, BRIDGE_PORT_MIN, GIT_STATE_FILES, GIT_STATE_TREES, KEPT_PORTS_MAX,
+    LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK,
+    LINUX_RESOLVER_NEEDS_UDP, LinuxSockets, LinuxSupervisor, OWNER_PORTS, ProjectSandbox,
+    REMOTES_MAX, Routed, Sandbox, SandboxError, SandboxNetwork, SandboxRemote, agent_env,
+    clean_absolute, invalid,
 };
 use crazyagent_linux_supervisor::rules::{GitOwn, Held, Reach, is_git};
 use crazyagent_linux_supervisor::serve::{self, Supervised};
@@ -196,13 +197,6 @@ const CONFINED_UNAVAILABLE: &str = "an agent confined to its own worktree cannot
 const CONFINED_NEEDS_LANDLOCK: &str = "an agent confined to its own worktree or clone needs \
      Landlock file rules on Linux (Linux 6.2 or newer), and this Linux runs agents under \
      bubblewrap alone, which cannot give the git folders their own rights";
-
-/// The entries of a linked worktree's admin folder that Seatbelt keeps out of agent hands by
-/// name (the admin `HEAD` deny and `git_link_denies`) and that Landlock cannot carve out of
-/// the admin folder's git grant, so a launch stays refused until the call supervisor and the
-/// nested binds hold each one (DEC-185 S1, rv-ds241 F1, rv-sa241 LOW-1). Linux only: macOS
-/// lets a worktree-adding profile create `commondir` and `gitdir` once.
-const ADMIN_HELD: [&str; 4] = ["HEAD", "commondir", "gitdir", "config.worktree"];
 
 const LANDLOCK_DEVICES: &[&str] = &[
     "/dev/null",
@@ -2169,9 +2163,10 @@ impl Sandbox for LinuxSandbox {
 
 /// What a launch's Landlock rules grant: folders read, folders written whole, git folders
 /// written with [`git_folder_rights`], and `guarded`, the entries Landlock cannot keep
-/// read-only under those grants (protected paths in a git grant, [`ADMIN_HELD`], the
-/// worktree's `.git` link and a clone's whole git folder), which the call supervisor must
-/// hold before a confined launch starts, the nested binds a second layer (DEC-185 S1, S2).
+/// read-only under those grants (protected paths in a git grant, [`ADMIN_WRITES`] and
+/// [`ADMIN_LINKS`] in the admin folder, the worktree's `.git` link and a clone's whole git
+/// folder), which the call supervisor must hold before a confined launch starts, the
+/// nested binds a second layer (DEC-185 S1, S2).
 struct Grants {
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
@@ -2256,7 +2251,8 @@ impl Grants {
             .collect();
         if let Some(checkout) = checkout {
             if git_write.contains(&checkout.admin) {
-                guarded.extend(ADMIN_HELD.iter().map(|name| checkout.admin.join(name)));
+                let held = ADMIN_WRITES.iter().chain(&ADMIN_LINKS);
+                guarded.extend(held.map(|name| checkout.admin.join(name)));
             }
             if write.contains(&checkout.worktree) {
                 guarded.push(checkout.worktree.join(".git"));

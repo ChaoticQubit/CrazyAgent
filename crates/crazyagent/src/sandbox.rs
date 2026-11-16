@@ -928,7 +928,8 @@ pub const GIT_STATE_FILES: [&str; 6] = [
 
 /// The links in a linked worktree's admin folder that tie it to the project and to its
 /// worktree: no confined agent rewrites, removes or relinks one. Seatbelt denies each by
-/// name and the Linux call supervisor holds each (DEC-185 S2a).
+/// name, letting a worktree-adding profile create one, and the Linux call supervisor holds
+/// each (DEC-185 S2a).
 pub const ADMIN_LINKS: [&str; 2] = ["commondir", "gitdir"];
 
 /// The files in a linked worktree's admin folder no confined agent writes: the branch it
@@ -3089,10 +3090,10 @@ impl ProjectSandbox {
         text.push_str(&self.ancestry_denies());
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
+            let [head, _] = ADMIN_WRITES.map(any_case);
             text.push_str(&format!(
-                "(deny file-write*\n  (regex #\"^{}/{}$\"))\n",
-                seatbelt_pattern(&checkout.admin),
-                any_case("HEAD")
+                "(deny file-write*\n  (regex #\"^{}/{head}$\"))\n",
+                seatbelt_pattern(&checkout.admin)
             ));
         }
         if let Some(clone) = &self.clone {
@@ -3346,10 +3347,9 @@ impl ProjectSandbox {
         } else {
             " file-write-create"
         };
+        let [commondir, gitdir] = ADMIN_LINKS.map(any_case);
         let mut links = format!(
-            "(deny file-write-unlink file-write-data file-write-mode file-write-flags file-write-acl file-link{create}\n  (regex #\"^{admin}/({}|{})$\")\n  (regex #\"^{checkouts}/{git}$\")",
-            any_case("commondir"),
-            any_case("gitdir")
+            "(deny file-write-unlink file-write-data file-write-mode file-write-flags file-write-acl file-link{create}\n  (regex #\"^{admin}/({commondir}|{gitdir})$\")\n  (regex #\"^{checkouts}/{git}$\")"
         );
         for worktree in &self.worktrees {
             moves.push_str(&format!("\n  (literal \"{}\")", worktree.display()));
@@ -3358,9 +3358,9 @@ impl ProjectSandbox {
                 seatbelt_pattern(worktree)
             ));
         }
+        let [_, worktree_config] = ADMIN_WRITES.map(any_case);
         let text = format!(
-            "{moves})\n{links})\n(deny file-write*\n  (regex #\"^{admin}/{}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{pattern}/{git}/\") (vnode-type SYMLINK)))\n",
-            any_case("config.worktree")
+            "{moves})\n{links})\n(deny file-write*\n  (regex #\"^{admin}/{worktree_config}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{pattern}/{git}/\") (vnode-type SYMLINK)))\n"
         );
         assert_eq!(
             text.matches("(regex #\"^/").count(),
