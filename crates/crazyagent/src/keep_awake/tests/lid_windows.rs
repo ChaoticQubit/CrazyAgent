@@ -1,5 +1,5 @@
-use crate::keep_awake::LidSupport;
-use crate::keep_awake::journal::{Entry, Journal};
+use crate::keep_awake::journal::{Entry, Journal, JournalLock};
+use crate::keep_awake::{LidSupport, RESTORE_ENGINE_RUNNING, restore};
 use crate::keep_awake::lid_windows::{
     Actions, KIND, LidSetting, NEEDS_ADMIN, NOT_CHANGED, Refusal, WindowsLid, undo_with,
 };
@@ -570,6 +570,19 @@ fn a_hold_whose_write_and_put_back_both_fail_reads_sleep_not_restored() {
     setting.plans().unapplied = Some(Refusal::Failed("the power service is busy".into()));
     assert_eq!(line.step(wanted(), None), LidSupport::SleepNotRestored);
     assert_eq!(entries(root.path()), [saved(1, 2)], "the entry stays");
+}
+
+/// rv-ds241 KA T14 r2 N1: the lid line keeps the journal lock it is handed until it is
+/// dropped with the sensor thread, so a restore cannot write the journal before then.
+#[test]
+fn the_lid_line_keeps_the_journal_lock_until_it_is_dropped() {
+    let (root, _setting, line) = line(1, 2);
+    let lock = JournalLock::try_take(root.path()).unwrap().unwrap();
+    let line = line.with_lock(lock);
+    assert!(JournalLock::try_take(root.path()).unwrap().is_none());
+    assert_eq!(restore(root.path()), Err(RESTORE_ENGINE_RUNNING));
+    drop(line);
+    assert!(JournalLock::try_take(root.path()).unwrap().is_some());
 }
 
 #[cfg(windows)]

@@ -745,8 +745,9 @@ impl Keeper {
     }
 
     /// Keeps the journal lock the engine start took for the keeper's whole life (QUESTION
-    /// 01:16 Q3), so `crazyagent keep-awake restore` refuses while this engine runs. Input:
-    /// the lock, none when it was not taken. Output: the keeper.
+    /// 01:16 Q3), so `crazyagent keep-awake restore` refuses while this engine runs; on
+    /// Windows the lid line holds it instead, until the sensor thread ends. Input: the
+    /// lock, none when it was not taken or the lid line holds it. Output: the keeper.
     pub fn with_journal(mut self, lock: Option<journal::JournalLock>) -> Self {
         assert!(self.journal.is_none());
         self.journal = lock;

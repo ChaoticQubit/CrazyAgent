@@ -1,3 +1,4 @@
+use super::journal::JournalLock;
 use super::state::{Heat, LidSupport, LowPowerSupport, PowerSource, Sensors};
 use crate::paths::Platform;
 use serde::{Deserialize, Serialize};
@@ -103,19 +104,21 @@ pub struct LidOrder {
 pub type LidReader = Box<dyn FnMut(LidAsk, Option<LidCommand>, i64) -> LidSupport + Send>;
 
 /// Builds this platform's lid line: the macOS lid helper, the Windows lid close action
-/// with its journal under the engine root, and none on Linux, where the reader's own lid
-/// support stands. The Windows line writes the journal, so it is built only while this
-/// engine holds the journal lock (QUESTION 01:16 Q3). Inputs: the engine root and whether
-/// the lock is held. Output: the lid line, if this platform has one.
+/// and none on Linux, where the reader's own lid support stands. The Windows line writes
+/// the journal, so it is built only with the engine's journal lock, which it takes and
+/// keeps until the sensor thread ends (rv-ds241 KA T14 r2 N1). Inputs: the engine root
+/// and the lock, left in place off Windows. Output: the lid line, if there is one.
 pub fn platform_lid(
     root: &Path,
-    #[cfg_attr(not(windows), allow(unused_variables))] journaled: bool,
+    #[cfg_attr(not(windows), allow(unused_variables))] journal: &mut Option<JournalLock>,
 ) -> Option<LidReader> {
     assert!(!root.as_os_str().is_empty());
     #[cfg(target_os = "macos")]
     let lid = Some(super::hold_macos::lid_reader());
     #[cfg(windows)]
-    let lid = journaled.then(|| super::lid_windows::lid_reader(root));
+    let lid = journal
+        .take()
+        .map(|lock| super::lid_windows::lid_reader(root, lock));
     #[cfg(not(any(target_os = "macos", windows)))]
     let lid = None;
     lid

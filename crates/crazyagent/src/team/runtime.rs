@@ -15126,9 +15126,10 @@ pub fn start_for_engine(
         .map_err(|e| format!("team runtime: {e}"))?;
     let state = runtime.join("team");
     private_directory(&state).map_err(|e| e.0)?;
-    let journal = crate::keep_awake::journal_lock(&runtime);
-    let lid = crate::keep_awake::power::platform_lid(&runtime, journal.is_some());
-    let leftover = if journal.is_some() {
+    let mut journal = crate::keep_awake::journal_lock(&runtime);
+    let journaled = journal.is_some();
+    let lid = crate::keep_awake::power::platform_lid(&runtime, &mut journal);
+    let leftover = if journaled {
         crate::keep_awake::reconcile(&runtime)
     } else {
         crate::keep_awake::Leftover::Unreadable

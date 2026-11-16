@@ -1,4 +1,4 @@
-use super::journal::{Entry, Journal};
+use super::journal::{Entry, Journal, JournalLock};
 use super::power::{LidAsk, LidCommand};
 use super::state::LidSupport;
 use crate::engine::EngineError;
@@ -91,13 +91,14 @@ struct Saved {
 /// wanted it journals the active plan's old lid close action, sets Do nothing and holds
 /// that plan; when the lid is no longer wanted it puts the old value back and pays the
 /// sleep a closed lid owes (`owed`, QUESTION 01:16 Q2). It is the journal's one writer
-/// while the engine runs, under the engine's journal lock.
+/// while the engine runs, and holds the journal lock until the sensor thread ends.
 pub(crate) struct WindowsLid<S> {
     setting: S,
     root: PathBuf,
     journal: Option<Journal>,
     held: Option<String>,
     owed: bool,
+    lock: Option<JournalLock>,
 }
 
 impl<S: LidSetting> WindowsLid<S> {
@@ -115,7 +116,18 @@ impl<S: LidSetting> WindowsLid<S> {
             journal: None,
             held: None,
             owed,
+            lock: None,
         }
+    }
+
+    /// Hands the line the engine's journal lock, which it keeps until it is dropped with
+    /// the sensor thread, so a restore never writes the journal while this line still can
+    /// (rv-ds241 KA T14 r2 N1). Input: the lock. Output: the line.
+    pub(crate) fn with_lock(mut self, lock: JournalLock) -> Self {
+        assert!(self.lock.is_none());
+        assert!(self.held.is_none());
+        self.lock = Some(lock);
+        self
     }
 
     /// Answers one ask of the keeper: a wanted ask holds the lid or reads a held one again;
@@ -463,10 +475,11 @@ fn refused(problem: lid::LidError) -> Refusal {
     }
 }
 
-/// Builds the Windows lid line around this computer's lid close action. Input: the engine
-/// root. Output: the lid line, which opens its journal at its first ask.
+/// Builds the Windows lid line around this computer's lid close action. Inputs: the engine
+/// root and the journal lock, which the line keeps until the sensor thread ends. Output:
+/// the lid line, which opens its journal at its first ask.
 #[cfg(windows)]
-pub(crate) fn lid_reader(root: &std::path::Path) -> super::power::LidReader {
-    let mut line = WindowsLid::new(Windows, root.to_path_buf());
+pub(crate) fn lid_reader(root: &std::path::Path, lock: JournalLock) -> super::power::LidReader {
+    let mut line = WindowsLid::new(Windows, root.to_path_buf()).with_lock(lock);
     Box::new(move |ask, command, _now_ms| line.step(ask, command))
 }
