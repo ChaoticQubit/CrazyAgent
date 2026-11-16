@@ -296,6 +296,19 @@ pub(in crate::tui) fn keys_shown(connector: &ConnectorView) -> bool {
     connector.sign_in == SignIn::Key || chosen_way(connector) == Some(SignInWith::Key)
 }
 
+/// The secrets a connector's page lists: every one while it signs in with a key, and under
+/// Browser only those with a saved key, so a key can be cleared without making it live
+/// first (rv-sec2 F1). Input: the connector. Output: the secrets in their declared order.
+pub(in crate::tui) fn secrets_shown(connector: &ConnectorView) -> Vec<&SecretView> {
+    let keys = keys_shown(connector);
+    let browser = chosen_way(connector) == Some(SignInWith::Browser);
+    connector
+        .secrets
+        .iter()
+        .filter(|secret| keys || (browser && secret.binding != Binding::None))
+        .collect()
+}
+
 /// A way's word, the desktop's choice label. Input: the way. Output: "Key" or "Browser".
 pub(in crate::tui) fn way_word(way: SignInWith) -> &'static str {
     match way {

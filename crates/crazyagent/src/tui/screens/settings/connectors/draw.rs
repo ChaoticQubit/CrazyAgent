@@ -3,8 +3,8 @@ use super::words::{
     LOCKED_LABEL, LOCKED_REASON, LOCKED_VALUE, NATIVE_CHOICES, NATIVE_HELP, NATIVE_LABEL, PURPOSE,
     REFUSED_FILE, REFUSED_LISTED, REFUSED_PASTED, REMOVE_BODY, SETTINGS, SIGN_IN_WITH,
     SIGN_IN_WITH_HELP, SIZE_CHOICES, SIZE_HELP, SIZE_LABEL, WAIT_CHOICES, WAIT_HELP, WAIT_LABEL,
-    WRITE_CHOICES, WRITE_HELP, WRITE_LABEL, chosen_way, keys_shown, origin_line, reaches_line,
-    refusal, secret_line, state, trust_lines, way_word,
+    WRITE_CHOICES, WRITE_HELP, WRITE_LABEL, chosen_way, origin_line, reaches_line, refusal,
+    secret_line, secrets_shown, state, trust_lines, way_word,
 };
 use super::{AddForm, ConnectorsPage, KeyForm, NOT_READ, Open, Row, TITLE, refused};
 use crate::app_plugins::{RunsView, TrustView};
@@ -329,11 +329,7 @@ impl ConnectorsPage {
         }
         self.failure_lines(&mut lines, width, ctx);
         lines.push(Line::default());
-        let secrets = if keys_shown(connector) {
-            connector.secrets.as_slice()
-        } else {
-            &[]
-        };
+        let secrets = secrets_shown(connector);
         let mut spans = Vec::new();
         for (at, secret) in secrets.iter().enumerate() {
             let first = if at == 0 { 0 } else { lines.len() };

@@ -243,6 +243,15 @@ export function keysShown(connector: ConnectorView): boolean {
   return connector.sign_in === "key" || chosenWay(connector) === "key";
 }
 
+/** The secrets a connector's page lists: every one while it signs in with a key, and under
+ * Browser only those with a saved key, so a key can be cleared without making it live first
+ * (rv-sec2 F1). Input: the connector. Output: the secrets in their declared order. */
+export function secretsShown(connector: ConnectorView): SecretView[] {
+  const keys = keysShown(connector);
+  const browser = chosenWay(connector) === "browser";
+  return connector.secrets.filter((secret) => keys || (browser && secret.binding.kind !== "none"));
+}
+
 /** The line a chosen way is confirmed with, the same in the TUI. Inputs: the connector's
  * title and the way. Output: the line. */
 export function signsInWithLine(title: string, way: SignInWith): string {

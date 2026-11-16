@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use words::{
     ADD_FIELD, BACK, BROWSER_NO_KEY, CHECK, CHECKING, KEY_EMPTY, KEY_FIELD, NOT_CONNECTOR,
     OAUTH_NOT_YET, SAVE, SAVED, STALE, chosen_way, hosts, keys_shown, other_way, refusal,
-    signs_in_with, way_word,
+    secrets_shown, signs_in_with, way_word,
 };
 
 mod draw;
@@ -187,6 +187,11 @@ impl ConnectorsPage {
             .find(|connector| connector.name == *name)
     }
 
+    fn secrets_listed(&self) -> usize {
+        self.opened()
+            .map_or(0, |connector| secrets_shown(connector).len())
+    }
+
     fn edited(&self) -> bool {
         self.stored.ready().is_some_and(|view| {
             view.settings.write != self.write
@@ -332,10 +337,7 @@ impl ConnectorsPage {
         let Some(connector) = self.opened() else {
             return;
         };
-        if !keys_shown(connector) {
-            return;
-        }
-        let Some(secret) = connector.secrets.get(self.secret) else {
+        let Some(secret) = secrets_shown(connector).get(self.secret).copied() else {
             return;
         };
         if secret.binding == Binding::None {
@@ -483,8 +485,8 @@ impl ConnectorsPage {
         }
         self.stored = Load::Ready(view.clone());
         self.moved(self.selected);
-        let secrets = self.opened().map_or(0, |connector| connector.secrets.len());
-        self.secret = self.secret.min(secrets.saturating_sub(1));
+        self.secret = self.secret.min(self.secrets_listed().saturating_sub(1));
+        assert!(self.secret < self.secrets_listed().max(1));
         assert!(self.stored.ready().is_some());
     }
 
@@ -689,10 +691,7 @@ impl ConnectorsPage {
     }
 
     fn detail_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
-        let secrets = self
-            .opened()
-            .filter(|connector| keys_shown(connector))
-            .map_or(0, |connector| connector.secrets.len());
+        let secrets = self.secrets_listed();
         match key {
             Key::Esc => {
                 self.detail = None;
@@ -765,7 +764,8 @@ impl ConnectorsPage {
         let mut hints = Vec::new();
         if let Some(connector) = self.opened() {
             let keys = keys_shown(connector);
-            if keys && connector.secrets.len() > 1 {
+            let listed = secrets_shown(connector);
+            if listed.len() > 1 {
                 hints.push(hint(
                     &format!("{}{}", ctx.glyphs.up, ctx.glyphs.down),
                     "Move",
@@ -778,8 +778,8 @@ impl ConnectorsPage {
                 let other = format!("{} {}", words::SIGN_IN_WITH, way_word(other_way(now)));
                 hints.push(hint("w", &other));
             }
-            let secret = connector.secrets.get(self.secret).filter(|_| keys);
-            if secret.is_some() {
+            let secret = listed.get(self.secret);
+            if keys && secret.is_some() {
                 hints.push(hint("k", "Set key"));
             }
             if secret.is_some_and(|secret| secret.binding != Binding::None) {
