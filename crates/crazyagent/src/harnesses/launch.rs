@@ -34,6 +34,14 @@ const LINE_BYTES_MAX: usize = crate::adapters::LINE_BYTES_MAX;
 /// The longest prompt a launch sends: half of one outbound Codex frame, which leaves room
 /// for the JSON-RPC envelope around it.
 pub(crate) const PROMPT_BYTES_MAX: usize = crate::adapters::codex::FRAME_BYTES_MAX / 2;
+/// The most input bytes a session keeps for a harness that has not taken them yet: room for
+/// the largest prompt frame with every byte escaped to six, its envelope and an interrupt, so
+/// only a harness that stopped reading reaches it (T20 sec r1 F1).
+const INPUT_PENDING_MAX: usize = 8 * PROMPT_BYTES_MAX;
+const _: () = assert!(6 * PROMPT_BYTES_MAX + 8192 <= INPUT_PENDING_MAX);
+/// How long `next_event` waits on output between tries to hand a harness the input it has
+/// not taken yet.
+const INPUT_RETRY: Duration = Duration::from_millis(20);
 pub(super) const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
 pub(super) const TOOLS_ON_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
@@ -1664,17 +1672,18 @@ impl Driver {
     }
 }
 
-/// A running harness process driven through its headless interface.
-/// The process leads its own process group, and a harness on pipes has a warden in its
-/// sandbox, so stop reaches every descendant, those in their own sessions included.
+/// A running harness process driven through its headless interface, leading its own process
+/// group with a warden in its sandbox, so stop reaches every descendant, sessions included.
 /// `uncertain` is set once its warden did not confirm that sandbox empty; `follower` follows a
-/// Full access run's processes, which no warden reaches, from its start to its stop.
+/// Full access run's processes, which no warden reaches. One on an engine key relay holds the
+/// engine's lifeline, so its group ends with the engine (b6 r2 F1), released once stopped.
 pub struct Session {
     child: Child,
     warden: Option<crate::sandbox::warden::Warden>,
     uncertain: bool,
     follower: Option<Follower>,
     stdin: Option<File>,
+    pending: Vec<u8>,
     lines: Receiver<Line>,
     driver: Driver,
     queue: VecDeque<LaunchEvent>,
@@ -1685,6 +1694,8 @@ pub struct Session {
     _context: Option<Installed>,
     _relay: Option<Relay>,
     _key: Option<KeyFile>,
+    #[cfg(unix)]
+    lifeline: Option<crate::research::runner::Lifeline>,
 }
 
 impl Session {
@@ -1700,8 +1711,9 @@ impl Session {
 
     /// Spawns one listed master turn's harness from the command [`listed_command`] built, its
     /// ACP session opened with the given engine servers, holding the relay of a keyed account
-    /// while the session lives (DEC-180 Task 20). Inputs: the checked request, the command,
-    /// the relay, if any, and the servers. Output: a running session, or a plain refusal code.
+    /// and with it the engine's lifeline while the session lives (DEC-180 Task 20, T20 r1 F2).
+    /// Inputs: the checked request, the command, the relay, if any, and the servers. Output:
+    /// a running session, or a plain refusal code.
     pub fn start_listed(
         request: LaunchRequest,
         command: Command,
@@ -1726,10 +1738,10 @@ impl Session {
         Self::spawn(request, command, Some(installed), None, (relay, key), &[])
     }
 
-    /// Spawns a harness that outlives the engine: its input is a FIFO it holds open for
-    /// reading and writing, so it never sees end of input when the engine dies, and its
-    /// output goes to a private log whose lock it holds for as long as any process of its
-    /// group lives. Input: the request, the project context for a project agent and the
+    /// Spawns a harness that outlives the engine, unless it is on an engine key relay it needs
+    /// (b6 r2 F1): its input is a FIFO it holds open, so it never sees end of input when the
+    /// engine dies, and its output goes to a private log whose lock it holds while any process
+    /// of its group lives. Input: the request, the project context for a project agent and the
     /// agent's empty 0700 state directory. Output: a running session, or a plain refusal.
     pub fn start_durable(
         request: LaunchRequest,
@@ -1819,12 +1831,19 @@ impl Session {
         let follower = request
             .unconfined
             .then(|| Follower::start(child.id(), Some(token)));
+        #[cfg(unix)]
+        let relayed = relay.is_some()
+            || request
+                .account
+                .key()
+                .is_some_and(|key| crate::model_gateway::relay::is_relay_token(key.reveal()));
         let mut session = Self {
             child,
             warden,
             uncertain: false,
             follower,
             stdin,
+            pending: Vec::new(),
             lines,
             driver,
             queue: VecDeque::new(),
@@ -1835,7 +1854,19 @@ impl Session {
             _context: context,
             _relay: relay,
             _key: key,
+            #[cfg(unix)]
+            lifeline: None,
         };
+        #[cfg(unix)]
+        if relayed {
+            let lifeline = crate::research::runner::Lifeline::watch(session.child.id())
+                .map_err(|_| failure("launch_spawn_failed"))?;
+            session.lifeline = Some(lifeline);
+        }
+        #[cfg(unix)]
+        if let Some(input) = &session.stdin {
+            never_waits(input)?;
+        }
         for bytes in startup {
             session.write(&bytes)?;
         }
@@ -1891,10 +1922,17 @@ impl Session {
                 self.stop_group();
                 return Err(failure("launch_deadline"));
             }
+            self.flush_input()?;
             if now >= until {
                 return Ok(None);
             }
-            match self.lines.recv_timeout(until.min(self.deadline) - now) {
+            let wait = until.min(self.deadline) - now;
+            let wait = if self.pending.is_empty() {
+                wait
+            } else {
+                wait.min(INPUT_RETRY)
+            };
+            match self.lines.recv_timeout(wait) {
                 Ok(Line::Bytes(line)) => {
                     let (events, writes) = match self.driver.receive(&line) {
                         Ok(result) => result,
@@ -1948,15 +1986,45 @@ impl Session {
         Ok(())
     }
 
+    /// Hands bytes to the harness's input without ever waiting on it: what its pipe has room
+    /// for goes now and the rest is kept, in order, for the next write and each pass of
+    /// `next_event`, so a harness that stops reading never holds the engine past a stop or the
+    /// run clock (T20 sec r1 F1). Input: the bytes. Output: Ok, `launch_input_closed`, or
+    /// `launch_input_full` once more than `INPUT_PENDING_MAX` bytes would wait.
     fn write(&mut self, bytes: &[u8]) -> Result<(), LaunchError> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| failure("launch_input_closed"))?;
-        stdin
-            .write_all(bytes)
-            .and_then(|()| stdin.flush())
-            .map_err(|_| failure("launch_input_closed"))
+        if self.stdin.is_none() {
+            return Err(failure("launch_input_closed"));
+        }
+        if self.pending.len() + bytes.len() > INPUT_PENDING_MAX {
+            return Err(failure("launch_input_full"));
+        }
+        self.pending.extend_from_slice(bytes);
+        self.flush_input()
+    }
+
+    /// Writes as much of the input the harness has not taken yet as its pipe has room for
+    /// now, never waiting. Output: Ok, also with bytes still kept or with the input a stop
+    /// closed, or `launch_input_closed` once the harness's end of the pipe is gone, the kept
+    /// bytes dropped with it, so that call fails and later event passes do not.
+    fn flush_input(&mut self) -> Result<(), LaunchError> {
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Ok(());
+        };
+        while !self.pending.is_empty() {
+            match stdin.write(&self.pending) {
+                Ok(taken) if taken > 0 => {
+                    assert!(taken <= self.pending.len());
+                    self.pending.drain(..taken);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+                Ok(_) | Err(_) => {
+                    self.pending.clear();
+                    return Err(failure("launch_input_closed"));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn reap(&mut self, wait: Duration) -> Option<i32> {
@@ -2003,6 +2071,9 @@ impl Session {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         let _ = self.child.kill();
         let status = self.child.wait().ok();
+        if let Some(mut lifeline) = self.lifeline.take() {
+            lifeline.release();
+        }
         self.uncertain =
             crate::sandbox::warden::fire_reported(self.warden.take(), "harness").is_err();
         assert!(self.stdin.is_none());
@@ -2167,6 +2238,18 @@ pub fn trim_unread_output(output: &Path, probe: &File) -> bool {
         opened.is_file() && (opened.dev(), opened.ino()) == (probed.dev(), probed.ino())
     });
     same && log.set_len(0).is_ok()
+}
+
+/// Makes the engine's own open of a harness's input never wait on the harness: a write takes
+/// what the pipe has room for now and reports would-block for the rest. The harness's end of
+/// the pipe is an open of its own and stays as it was. Input: the file. Output: Ok, or
+/// `launch_stdio_unavailable`.
+#[cfg(unix)]
+fn never_waits(input: &File) -> Result<(), LaunchError> {
+    let unavailable = |_: rustix::io::Errno| failure("launch_stdio_unavailable");
+    let flags = rustix::fs::fcntl_getfl(input).map_err(unavailable)?;
+    rustix::fs::fcntl_setfl(input, flags | OFlags::NONBLOCK)
+        .map_err(unavailable)
 }
 
 /// Turns a child's stdin pipe into the file the session writes prompts to.

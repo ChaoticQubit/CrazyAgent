@@ -1843,4 +1843,137 @@ fn an_acp_harness_starts_headless_with_its_manifest_arguments_and_its_tools_off_
             "--no-tools".into()
         ])
     );
+
+/// rv-secreview b6 r2 F1: a headless agent on pipes whose harness reaches its model through
+/// an engine key relay ends when that engine dies, a crash included, as a keyed pane does,
+/// so nothing is left to dial the relay's freed port. Closing the lifeline's pipe without
+/// `done` stands in for the engine's death.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut launch = team_launch("claude-code");
+    let base = launch.work.parent().unwrap().to_path_buf();
+    let (harness, pid) = (base.join("pid-harness"), base.join("harness-pid"));
+    std::fs::write(
+        &harness,
+        format!(
+            "#!/bin/sh\necho $$ > {}\nexec /bin/cat > /dev/null\n",
+            pid.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let token = format!(
+        "{}{}",
+        crate::model_gateway::relay::TOKEN_PREFIX,
+        "a".repeat(64)
+    );
+    launch.request.executable = harness;
+    launch.request.tools = false;
+    launch.request.account = AccountBinding::Url {
+        home: launch.request.account.home().to_path_buf(),
+        base_url: "http://127.0.0.1:9/v1".into(),
+        key: Some(super::Secret::new(token).unwrap()),
+    };
+    let mut session = super::Session::start(launch.request).unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let started = loop {
+        let text = std::fs::read_to_string(&pid).unwrap_or_default();
+        let read = text.trim().parse::<i32>().ok();
+        if let Some(started) = read.and_then(rustix::process::Pid::from_raw) {
+            break started;
+        }
+        assert!(std::time::Instant::now() < until, "the harness starts");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(session.child.try_wait().unwrap().is_none());
+    assert!(
+        session.lifeline.is_some(),
+        "a headless agent on an engine key relay has no lifeline"
+    );
+    if let Some(lifeline) = session.lifeline.as_mut() {
+        lifeline.sever();
+    }
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while session.child.try_wait().unwrap().is_none()
+        || rustix::process::test_kill_process(started).is_ok()
+    {
+        assert!(
+            std::time::Instant::now() < until,
+            "the keyed harness outlived the engine that held its relay"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// T20 code r1 F2: a listed harness on pipes that reaches its model through the relay its
+/// turn started from the account's saved key holds the engine's lifeline, as one given a
+/// relay token as its key does, so it ends with the engine; a keyless one, with no relay,
+/// holds none. Its request names no key, as a listed hand-over carries the relay's token.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_listed_harness_on_its_own_relay_holds_the_engine_s_lifeline_and_a_keyless_one_none() {
+    use crate::credentials::SecretString;
+    use crate::model_gateway::relay::Relay;
+    use std::os::unix::fs::PermissionsExt;
+    const URL: &str = "http://127.0.0.1:9/v1";
+    for keyed in [true, false] {
+        let mut launch = team_launch("claude-code");
+        let harness = launch.work.parent().unwrap().join("listed-harness");
+        std::fs::write(&harness, "#!/bin/sh\nexec /bin/cat > /dev/null\n").unwrap();
+        std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+        launch.request.executable = harness;
+        launch.request.tools = false;
+        launch.request.account = AccountBinding::Url {
+            home: launch.request.account.home().to_path_buf(),
+            base_url: URL.into(),
+            key: None,
+        };
+        let saved = SecretString::new(b"sk-listed-row-saved".to_vec()).unwrap();
+        let relay = keyed.then(|| Relay::start(URL, saved).unwrap());
+        let command = super::command(&launch.request).unwrap();
+        let started = super::Session::start_listed(launch.request, command, relay, &[]);
+        assert!(started.is_ok(), "{:?}", started.as_ref().err());
+        let session = started.unwrap();
+        assert_eq!(session.lifeline.is_some(), keyed, "keyed: {keyed}");
+        assert!(session.stop().is_ok());
+    }
+}
+
+/// T20 r1 sec F1 follow-up: a write the harness can no longer take fails that call only, as
+/// it did before the session kept input for a harness: once the harness is gone, a prompt
+/// fails with `launch_input_closed`, and the session still reports the harness's exit.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_write_to_a_harness_that_is_gone_fails_once_and_its_exit_is_still_reported() {
+    use rustix::process::{Pid, Signal, kill_process_group};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+    let mut launch = team_launch("claude-code");
+    let harness = launch.work.parent().unwrap().join("gone-harness");
+    std::fs::write(&harness, "#!/bin/sh\nexec /bin/sleep 60\n").unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    launch.request.executable = harness;
+    launch.request.tools = false;
+    let mut session = super::Session::start(launch.request).unwrap();
+    let group = Pid::from_raw(i32::try_from(session.process_group()).unwrap()).unwrap();
+    kill_process_group(group, Signal::KILL).unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    while session.child.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < until, "the harness never ended");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let sent = session.send("Are you there?");
+
+    assert_eq!(sent.err(), Some(super::failure("launch_input_closed")));
+    let until = Instant::now() + Duration::from_secs(10);
+    let mut exited = false;
+    while !exited {
+        assert!(Instant::now() < until, "its exit was never reported");
+        let next = session.next_event(Duration::from_millis(200));
+        assert!(next.is_ok(), "{:?}", next.as_ref().err());
+        exited = matches!(next.unwrap(), Some(LaunchEvent::Exited { .. }));
+    }
 }

@@ -144,6 +144,7 @@ fn a_listed_master_stops_for_the_reasons_every_master_stops_for() {
         ("launch_spawn_failed", MasterReason::RuntimeUnavailable),
         ("launch_closed", MasterReason::RuntimeUnavailable),
         ("launch_input_closed", MasterReason::RuntimeUnavailable),
+        ("launch_input_full", MasterReason::RuntimeUnavailable),
         ("launch_protocol_failed", MasterReason::ProtocolFault),
         ("launch_request_failed", MasterReason::ProtocolFault),
         (
@@ -754,5 +755,103 @@ mod launch {
         assert!(session.stop().is_ok());
         let sent = std::fs::read_to_string(state.join("stdin-1")).unwrap();
         assert_eq!(sent.matches("session/cancel").count(), 1);
+    }
+
+    const DEAF_ACP: &str = r#"#!/bin/sh
+IFS= read -r line
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+IFS= read -r line
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"sess-listed"}}'
+exec /bin/sleep 60
+"#;
+
+    /// Kills one process group after `after` unless `done` is set first, so a row whose
+    /// engine is held in a write to that group's harness fails by its assertions instead of
+    /// hanging. Inputs: the group, the wait and the flag.
+    fn watchdog(group: u32, after: Duration, done: Arc<AtomicBool>) {
+        use rustix::process::{Pid, Signal, kill_process_group};
+        let group = Pid::from_raw(i32::try_from(group).unwrap()).unwrap();
+        std::thread::spawn(move || {
+            let until = Instant::now() + after;
+            while !done.load(Ordering::SeqCst) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if !done.load(Ordering::SeqCst) {
+                let _ = kill_process_group(group, Signal::KILL);
+            }
+        });
+    }
+
+    /// T20 sec r1 F1: a listed master turn whose harness stops reading its input after its
+    /// handshake still stops: its prompt frame, larger than the pipe takes, goes out as far
+    /// as the pipe takes it and the rest is kept, so the stop loop runs and the turn ends
+    /// cancelled in its grace. A watchdog ends the harness after 10 seconds, so an engine
+    /// held in that write fails the row instead of hanging it.
+    #[test]
+    fn a_listed_master_turn_on_a_harness_that_stops_reading_still_stops_in_its_grace() {
+        let turn = turn(false);
+        std::fs::write(&turn.request.executable, DEAF_ACP).unwrap();
+        let (mut session, _state, _folder) = started(turn);
+        let done = Arc::new(AtomicBool::new(false));
+        let group = session.process_group();
+        watchdog(group, Duration::from_secs(10), Arc::clone(&done));
+        let prompt = "\u{1}".repeat(20_000);
+        let framed = serde_json::to_string(&prompt).unwrap();
+        assert!(framed.len() > 2 * 65_536, "{}", framed.len());
+        let began = Instant::now();
+        let stop = || began.elapsed() >= Duration::from_secs(1);
+        let driven = drive(&mut session, &prompt, &stop);
+        let waited = began.elapsed();
+        done.store(true, Ordering::SeqCst);
+        assert!(driven.is_ok(), "{:?}", driven.as_ref().err());
+        assert_eq!(driven.unwrap().ended, Some(Err(CANCELLED)));
+        assert!(waited < Duration::from_secs(8), "{waited:?}");
+        assert!(session.stop().is_ok());
+    }
+
+    /// T20 r1 code F3: a listed master turn whose thread is dropped mid-turn, as its future
+    /// is at engine shutdown, stops its harness within the stop grace, as the guard the thread
+    /// holds sets its stop flag. Without that guard the stand-in sleeps on for 30 seconds and
+    /// the row fails; the go signal went first, so a closed channel cannot stand in for it.
+    #[tokio::test]
+    async fn a_listed_master_turn_dropped_mid_turn_stops_its_harness_in_its_grace() {
+        let turn = turn(false);
+        let lines = [chunk("hi"), "@standin sleep 30".into(), chunk("never")];
+        script(&turn, &lines);
+        let (folder, request) = (turn.folder, turn.request);
+        let state = request.account.home().join("standin");
+        let grace = request.limits.stop_grace;
+        let (handover, relay) = hand_over(standin(), &connection(false), None).unwrap();
+        let file = tempfile::tempfile_in(folder.path()).unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let listed = ListedTurn {
+            harness: standin(),
+            request,
+            handover,
+            relay,
+            instructions: STARTUP.into(),
+            prompt: "keep working".into(),
+            capture: Capture::new(file, 8192).unwrap(),
+        };
+        let mut thread = ListedThread::start(listed);
+        let opened = (&mut thread.opened).await.unwrap();
+        assert!(opened.is_ok(), "{:?}", opened.as_ref().err());
+        let (group, _) = opened.unwrap();
+        thread.go.send(true).unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while !state.join("turns").exists() {
+            assert!(Instant::now() < until, "the stand-in never began its turn");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        drop(thread);
+
+        let group = rustix::process::Pid::from_raw(i32::try_from(group).unwrap()).unwrap();
+        let until = Instant::now() + grace + Duration::from_secs(5);
+        while rustix::process::test_kill_process_group(group).is_ok() {
+            assert!(Instant::now() < until, "it outlived its dropped turn");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }

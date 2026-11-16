@@ -1545,7 +1545,8 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         | super::master_listed::TOO_OLD
         | "launch_spawn_failed"
         | "launch_closed"
-        | "launch_input_closed" => MasterReason::RuntimeUnavailable,
+        | "launch_input_closed"
+        | "launch_input_full" => MasterReason::RuntimeUnavailable,
         _ => MasterReason::Unknown,
     }
 }
