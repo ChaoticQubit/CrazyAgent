@@ -889,3 +889,7 @@ impl Host for Servers {
         first.map_or(Ok(()), Err)
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "servers/tests.rs"]
+mod tests;
