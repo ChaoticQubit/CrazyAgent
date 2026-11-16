@@ -514,7 +514,6 @@ mod tests {
             rest[..rest.find("\",\n").unwrap()].to_owned()
         };
         let intake = read("api-intake.ts");
-        let moved = read("screens/project/move-home.tsx");
         assert_eq!(
             copy("home_copy_names_fold"),
             "Two names in the folder differ only in case or accents, and your projects folder can't keep both. Rename one of them, then try again. The original is untouched."
@@ -541,7 +540,7 @@ mod tests {
             (
                 "move_project_old_folder_left",
                 super::super::project::plain_problem("move_project_old_folder_left"),
-                desktop(&moved, "move_project_old_folder_left"),
+                desktop(&intake, "move_project_old_folder_left"),
             ),
         ] {
             assert_eq!(said, words, "{code}");
