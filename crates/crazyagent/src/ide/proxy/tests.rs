@@ -489,6 +489,7 @@ async fn the_proxy_serves_webview_files_without_the_token_and_nothing_else() {
             token: token.clone(),
             workspace: WORKSPACE.to_owned(),
             served: Arc::default(),
+            refused: Arc::default(),
         },
     ));
     assert_eq!(
