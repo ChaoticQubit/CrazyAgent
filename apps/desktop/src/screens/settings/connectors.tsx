@@ -7,7 +7,7 @@ import {
   type ConnectorPreview, type ConnectorView, type ConnectorsView, type ConnectorTrustView, type NativeConnectors, type SizeCap,
 } from "../../api-connectors";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, Dialog, LoadError, NotReady, Notice, SecretField, SettingLine, SettingSection, Skeleton, StatusBadge, TextArea, formatRoute } from "../../ui";
+import { Button, ConfirmDialog, Dialog, LoadError, NotReady, Notice, SecretField, SettingLine, SettingSection, Skeleton, StatusBadge, TextArea, formatRoute, navigate } from "../../ui";
 import { ConnectorDetailView } from "./connector-detail";
 import "../notifications/notifications.css";
 import "../project/projects.css";
@@ -247,7 +247,8 @@ export function ConnectorsSettingsView({ view, reach, open, dialog, native, size
 /** Settings, Connectors: reads the page, adds a pasted or picked manifest only after its
  * trust screen is confirmed, reviews a changed file, removes the owner's own, sets and
  * clears each secret's key, and saves the two connector settings at the version read. A
- * change reads the page again, so the version a save names is always the last read.
+ * change reads the page again, so the version a save names is always the last read, and
+ * removing the connector whose page is open goes back to the catalog.
  * Input: the connector whose page the route opened, if any. Output: the tab. */
 export function ConnectorsSettings({ connector }: { connector?: string }) {
   const session = useAppSession();
@@ -295,12 +296,19 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
     await check(picked);
   }
 
-  async function changed(work: () => Promise<Result<ConnectorsView>>, words: string) {
+  async function changed(work: () => Promise<Result<ConnectorsView>>, words: string): Promise<boolean> {
     const saved = await attempt(work);
-    if (saved === undefined) return;
+    if (saved === undefined) return false;
     setDialog({ kind: "none" });
     session.showToast(words);
     reload();
+    return true;
+  }
+
+  async function remove() {
+    if (dialog.kind !== "remove") return;
+    const { connector: name, title } = dialog;
+    if (await changed(() => removeConnector(name), `${title} was removed.`) && connector === name) navigate({ name: "settings", tab: "connectors" });
   }
 
   async function confirm() {
@@ -358,7 +366,7 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
     onClose: close,
     onReview: (name) => { if (!busy) void review(name); },
     onRemove: (shown) => { setFailure(""); setDialog({ kind: "remove", connector: shown.name, title: shown.title }); },
-    onConfirmRemove: () => { if (dialog.kind === "remove" && !busy) void changed(() => removeConnector(dialog.connector), `${dialog.title} was removed.`); },
+    onConfirmRemove: () => { if (!busy) void remove(); },
     onSetKey: (shown, secret) => { setFailure(""); setDialog({ kind: "key", connector: shown.name, title: shown.title, hosts: shown.runs.hosts, secret }); },
     onSaveKey: () => { if (!busy) void saveKey(); },
     onClearKey: (name, secret) => { if (!busy) void changed(() => clearConnectorKey(name, secret), `${secret} no longer has a key.`); },
