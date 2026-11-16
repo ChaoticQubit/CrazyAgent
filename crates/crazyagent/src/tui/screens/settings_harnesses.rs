@@ -460,14 +460,18 @@ pub fn works_with(kinds: &[AccountKind]) -> String {
 }
 
 /// One sentence on how much CrazyAgent controls a harness.
-/// Input: the catalog entry. Output: the sentence with the engine's reasons.
+/// Input: the catalog entry. Output: the sentence with the engine's reasons, each once: a
+/// harness limited only by its tools is served that reason as its status too.
 pub fn control_sentence(entry: &HarnessEntry) -> String {
     let mut reasons: Vec<&str> = Vec::new();
     if let HarnessStatus::Limited { reason } = &entry.status {
         reasons.push(reason.trim_end_matches('.'));
     }
     if let ToolControl::Limited { reason } = &entry.tools {
-        reasons.push(reason.trim_end_matches('.'));
+        let reason = reason.trim_end_matches('.');
+        if !reasons.contains(&reason) {
+            reasons.push(reason);
+        }
     }
     if !reasons.is_empty() {
         return format!("Limited control: {}.", reasons.join("; "));
