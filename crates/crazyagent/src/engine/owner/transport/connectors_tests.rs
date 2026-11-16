@@ -720,3 +720,48 @@ fn the_owner_answers_a_write_and_takes_back_a_standing_allow_through_the_protoco
         assert!(CONNECTORS_CODES.contains(&code), "{code}");
     }
 }
+
+/// DEC-168 Task 10: the owner starts, reads and cancels a connector's sign-in through the
+/// protocol. Names are bounded, only a connector's name is taken, a connector with no OAuth
+/// sign-in is refused at once, and one never started reads none. Every code a sign-in can
+/// answer reaches the owner's app as itself, with a plain sentence.
+#[test]
+fn the_owner_starts_reads_and_cancels_a_sign_in_through_the_protocol() {
+    let (_tmp, root) = engine();
+    let sha256 = sha(BOARD);
+    ask(
+        &root,
+        json!({"kind": "add", "yaml": BOARD, "sha256": sha256, "replace": false}),
+    );
+    let start = json!({"kind": "sign_in", "name": "board"});
+    assert_eq!(refused(&root, start), "connector_oauth_not_offered");
+    let read = answered(&root, json!({"kind": "sign_in_state", "name": "board"}));
+    let none = json!({"kind": "sign_in_state", "sign_in": {"state": "none"}});
+    assert_eq!(read, none);
+    let stop = answered(&root, json!({"kind": "cancel_sign_in", "name": "board"}));
+    assert_eq!(stop, none);
+    for kind in ["sign_in", "sign_in_state", "cancel_sign_in"] {
+        let ghost = json!({"kind": kind, "name": "ghost"});
+        assert_eq!(refused(&root, ghost), "app_plugin_not_found", "{kind}");
+        for name in [String::new(), "n".repeat(NAME_BYTES_MAX + 1)] {
+            let action = json!({"kind": kind, "name": name});
+            let bytes = serde_json::to_vec(&request(action)).unwrap();
+            let code = parse(&bytes).unwrap_err().0;
+            assert_eq!(code, "connector_request_invalid", "{kind}");
+        }
+    }
+
+    let oauth = crate::connectors::oauth::OAUTH_CODES;
+    let mcp = crate::connectors::mcp_client::MCP_CODES;
+    for code in oauth.iter().chain(mcp.iter()) {
+        assert!(CONNECTORS_CODES.contains(code), "{code}");
+        assert!(crate::connectors::plain_problem(code).is_some(), "{code}");
+    }
+    for code in [
+        "connector_oauth_callback_expired",
+        "connector_oauth_callback_flooded",
+        "connector_oauth_callback_unavailable",
+    ] {
+        assert!(oauth.contains(&code), "{code}");
+    }
+}

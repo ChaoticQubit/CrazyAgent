@@ -20,6 +20,7 @@ pub mod mcp_client;
 pub mod oauth;
 pub mod settings;
 pub mod shim;
+pub mod sign_in;
 
 pub use grants::{Grant, GrantedConnector, Role, Who};
 pub use settings::{ConnectorSettings, KeepLog, NativeConnectors, SizeCap, Wait, WritePolicy};

@@ -2,6 +2,7 @@ use super::*;
 use crate::app_plugins::{PluginKind, Preview, store};
 use crate::connectors::approvals::{self, AllowedWrites, ApprovalView};
 use crate::connectors::audit::{self, ActivityView};
+use crate::connectors::sign_in::{self, SignInState};
 use crate::connectors::{ConnectorSettings, ConnectorsView, Who};
 use crate::engine::owner::AccountSecret;
 use crate::protocol::encode_frame;
@@ -51,9 +52,10 @@ pub const CONNECTORS_CODES: &[&str] = &[
 ];
 
 /// One Connectors request. Reads: the page, a manifest's trust screen, the activity log,
-/// one write approval and a project's standing write allows. Changes: add, trust, remove,
-/// save a key sent in the frame after the request, clear a key, turn a connector on or off
-/// for a project, save the settings, answer a waiting write and take back a standing allow.
+/// one write approval, a project's standing write allows and where a sign-in stands.
+/// Changes: add, trust, remove, save a key sent in the frame after the request, clear a key,
+/// turn a connector on or off for a project, save the settings, answer a waiting write, take
+/// back a standing allow, and start or cancel a sign-in through the owner's browser.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
@@ -114,6 +116,15 @@ enum Action {
         project: String,
         connector: String,
     },
+    SignIn {
+        name: String,
+    },
+    SignInState {
+        name: String,
+    },
+    CancelSignIn {
+        name: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -131,6 +142,8 @@ enum Reply {
     Activity { view: Box<ActivityView> },
     Approval { approval: Box<ApprovalView> },
     Writes { writes: AllowedWrites },
+    SignIn { authorize_url: String },
+    SignInState { sign_in: SignInState },
     Stale { current: u64 },
     Rejected { code: String },
 }
@@ -318,6 +331,34 @@ impl OwnerClient {
             .await
     }
 
+    /// Starts a connector's sign-in through the owner's browser: the engine opens its
+    /// loopback callback and answers the address the owner's app opens. Input: the
+    /// connector. Output: the authorization address.
+    pub async fn connector_sign_in(&self, name: String) -> Result<String, EngineError> {
+        match self.connectors_exchange(Action::SignIn { name }, None).await? {
+            Reply::SignIn { authorize_url } => Ok(authorize_url),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads where a connector's sign-in stands. Input: the connector. Output: its state.
+    pub async fn connector_sign_in_state(&self, name: String) -> Result<SignInState, EngineError> {
+        self.sign_in_reply(Action::SignInState { name }).await
+    }
+
+    /// Cancels a connector's waiting sign-in and closes its callback. Input: the connector.
+    /// Output: where it stands after, still waiting while the browser's answer is redeemed.
+    pub async fn cancel_connector_sign_in(&self, name: String) -> Result<SignInState, EngineError> {
+        self.sign_in_reply(Action::CancelSignIn { name }).await
+    }
+
+    async fn sign_in_reply(&self, action: Action) -> Result<SignInState, EngineError> {
+        match self.connectors_exchange(action, None).await? {
+            Reply::SignInState { sign_in } => Ok(sign_in),
+            _ => Err(unknown()),
+        }
+    }
+
     async fn approval_reply(&self, action: Action) -> Result<ApprovalView, EngineError> {
         match self.connectors_exchange(action, None).await? {
             Reply::Approval { approval } => Ok(*approval),
@@ -484,9 +525,12 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         return Err(failure("connector_request_invalid"));
     }
     let names: &[&str] = match &connectors {
-        Action::Review { name } | Action::Trust { name, .. } | Action::Remove { name } => {
-            &[name.as_str()]
-        }
+        Action::Review { name }
+        | Action::Trust { name, .. }
+        | Action::Remove { name }
+        | Action::SignIn { name }
+        | Action::SignInState { name }
+        | Action::CancelSignIn { name } => &[name.as_str()],
         Action::SetKey { name, secret } | Action::ClearKey { name, secret } => {
             &[name.as_str(), secret.as_str()]
         }
@@ -521,7 +565,10 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         | Action::ClearKey { .. }
         | Action::Set { .. }
         | Action::Approval { .. }
-        | Action::Answer { .. } => None,
+        | Action::Answer { .. }
+        | Action::SignIn { .. }
+        | Action::SignInState { .. }
+        | Action::CancelSignIn { .. } => None,
     };
     let id_invalid = matches!(
         connectors,
@@ -667,6 +714,25 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
             approvals::revoke_writes(&db, &project, &connector)?;
             Ok(Reply::Writes {
                 writes: approvals::allowed_writes(&db, &project)?,
+            })
+        }
+        Action::SignIn { name } => {
+            connector(root, &name)?;
+            let opened = sign_in::start(&db, root, &name)?;
+            Ok(Reply::SignIn {
+                authorize_url: String::from(opened),
+            })
+        }
+        Action::SignInState { name } => {
+            connector(root, &name)?;
+            Ok(Reply::SignInState {
+                sign_in: sign_in::state_of(root, &name),
+            })
+        }
+        Action::CancelSignIn { name } => {
+            connector(root, &name)?;
+            Ok(Reply::SignInState {
+                sign_in: sign_in::cancel(root, &name),
             })
         }
     }
