@@ -2,7 +2,8 @@ use super::console;
 use super::new_project::{any_harness_total, display_path, harness_name, size_label, team_summary};
 use super::new_project_input::cells;
 use super::new_project_view::{
-    Look, Row, Screen, columns, list_row, modal, research_glyph, spread, tab_strip, wrap_words,
+    Look, Row, Screen, columns, list_row, modal, research_glyph, shown_tail, spread, tab_strip,
+    wrap_words,
 };
 use super::planning_line::{planning, planning_value};
 use super::project::{
@@ -34,6 +35,7 @@ const REMOVE_FOLDERS_SHOWN: usize = 3;
 const REMOVE_LOSSES_SHOWN: usize = 6;
 const REMOVE_WORDS: &str = "Its master conversation ends, its agents stop and what its research found is forgotten. CrazyAgent keeps your notes, imports and saved selections for it, and brings them back if you add this same folder again. The project folder stays on disk, with every file in it.";
 const DELETE_WORDS: &str = "Stops its agents, moves its folders to the Trash and removes its records, your notes, imports and saved selections for it included. Its token counts stay under Removed projects.";
+const DELETE_NOTE: &str = "Your notes, imports and saved selections go too.";
 
 /// The project tabs for the tab strip: each label after its section glyph, with the count of
 /// running agents on Agents. When the labels with glyphs and the narrowest gaps do not fit
@@ -662,7 +664,11 @@ fn remove_ask(screen: &ProjectScreen, inner: usize, room: usize, look: &Look) ->
             body.push(Row::default());
             body.push(pick(everything, "Delete everything"));
             if everything {
-                let rows = room.saturating_sub(body.len() + 2);
+                let mut rows = room.saturating_sub(body.len() + 2);
+                if rows >= 3 {
+                    body.push(indented(DELETE_NOTE, look.muted));
+                    rows -= 1;
+                }
                 let typed = &screen.remove_typed;
                 body.extend(delete_details(removal, typed, inner, rows, look));
             } else {
@@ -729,10 +735,11 @@ fn delete_details(
     let folder_need = removal.folders.len().min(REMOVE_FOLDERS_SHOWN + 1);
     let folder_room = folder_need.min(lists.saturating_sub(loss_need.min(lists / 2)));
     let loss_room = (lists - folder_room).min(REMOVE_LOSSES_SHOWN + 1);
-    let mut body = vec![indented("Moves to the Trash:", look.muted)];
+    let mut body = vec![indented(&trash_header(removal), look.muted)];
     let (shown, more) = fitted(removal.folders.len(), folder_room);
     for folder in removal.folders.iter().take(shown) {
-        body.push(indented(&format!("  {folder}"), look.fg));
+        let tail = shown_tail(folder, inner - 6);
+        body.push(indented(&format!("  {tail}"), look.fg));
     }
     if more {
         let more = removal.folders.len() - shown;
@@ -772,7 +779,7 @@ fn wrapped_details(
     look: &Look,
 ) -> Vec<Row> {
     let indented = |line: &str, style: Style| Row::of(format!("    {line}"), style);
-    let mut body = vec![indented("Moves to the Trash:", look.muted)];
+    let mut body = vec![indented(&trash_header(removal), look.muted)];
     for folder in removal.folders.iter().take(REMOVE_FOLDERS_SHOWN) {
         for line in wrap_words(folder, inner - 6) {
             body.push(indented(&format!("  {line}"), look.fg));
@@ -802,6 +809,14 @@ fn wrapped_details(
         look.fg,
     ));
     body
+}
+
+/// The heading over the folders Delete everything moves to the Trash, counting them all, so a
+/// list cut short still says how many go. Input: the preview. Output: the heading.
+fn trash_header(removal: &crate::team::cleanup::RemovalPreview) -> String {
+    let count = removal.folders.len();
+    let noun = if count == 1 { "folder" } else { "folders" };
+    format!("Moves to the Trash ({count} {noun}):")
 }
 
 /// How many of `len` lines fit in `rows`, one row kept to count the rest when not all fit.
