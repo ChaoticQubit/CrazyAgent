@@ -68,6 +68,7 @@ pub fn provider_line(provider: Provider) -> &'static str {
         Provider::AnthropicApi => "Pay-as-you-go Anthropic API key",
         Provider::OpenaiCompatible => "Any server that speaks the OpenAI API",
         Provider::Local => "Ollama, LM Studio or another server on this Mac",
+        Provider::Gemini => "Pay-as-you-go Google Gemini API key",
     }
 }
 

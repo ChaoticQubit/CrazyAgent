@@ -28,7 +28,7 @@ const CLIENT_TIME: Duration = Duration::from_secs(60);
 const UPSTREAM_CONNECT_SECS: &str = "15";
 const UPSTREAM_TIME_SECS: &str = "1800";
 const POLL: Duration = Duration::from_millis(50);
-const REQUEST_DROPPED: [&str; 14] = [
+const REQUEST_DROPPED: [&str; 15] = [
     "host",
     "connection",
     "keep-alive",
@@ -43,6 +43,7 @@ const REQUEST_DROPPED: [&str; 14] = [
     "accept-encoding",
     "x-api-key",
     "authorization",
+    "x-goog-api-key",
 ];
 const RESPONSE_DROPPED: [&str; 6] = [
     "connection",
@@ -443,6 +444,7 @@ pub(crate) struct Incoming {
 pub(crate) enum KeyHeader {
     XApiKey,
     Bearer,
+    XGoogApiKey,
 }
 
 fn serve(mut stream: TcpStream, shared: &Shared, id: u64) {
@@ -716,10 +718,12 @@ fn read_chunked(reader: &mut impl BufRead) -> Result<Vec<u8>, u16> {
     }
 }
 
-/// Finds the placeholder the harness sent: `x-api-key: <token>` or
-/// `authorization: Bearer <token>`, compared in constant time. When a harness sends both,
-/// as Claude Code's key helper does, `x-api-key` wins, since provider keys go there.
-/// Output: which header carried it, or none when the token is missing or wrong.
+/// Finds the placeholder the harness sent: `x-api-key: <token>`,
+/// `authorization: Bearer <token>` or, as Google's SDK sends a Gemini key,
+/// `x-goog-api-key: <token>`, compared in constant time and looked for in that order. When a
+/// harness sends both of the first two, as Claude Code's key helper does, `x-api-key` wins,
+/// since provider keys go there. Output: which header carried it, or none when the token is
+/// missing or wrong.
 pub(crate) fn authorized(incoming: &Incoming, token: &str) -> Option<KeyHeader> {
     let matches = |value: &str| bool::from(value.as_bytes().ct_eq(token.as_bytes()));
     let presented = |wanted: &'static str| {
@@ -732,10 +736,15 @@ pub(crate) fn authorized(incoming: &Incoming, token: &str) -> Option<KeyHeader> 
     if presented("x-api-key").any(matches) {
         return Some(KeyHeader::XApiKey);
     }
-    presented("authorization")
+    if presented("authorization")
         .filter_map(|value| value.strip_prefix("Bearer "))
         .any(matches)
-        .then_some(KeyHeader::Bearer)
+    {
+        return Some(KeyHeader::Bearer);
+    }
+    presented("x-goog-api-key")
+        .any(matches)
+        .then_some(KeyHeader::XGoogApiKey)
 }
 
 /// Keeps the agent inside the provider base path: the target's path must be the base path
@@ -841,6 +850,7 @@ pub(crate) fn upstream_config(
     let key_header = match scheme {
         KeyHeader::XApiKey => format!("x-api-key: {}", key.expose()),
         KeyHeader::Bearer => format!("Authorization: Bearer {}", key.expose()),
+        KeyHeader::XGoogApiKey => format!("x-goog-api-key: {}", key.expose()),
     };
     config.push_str(&format!("header = {}\n", quoted(&key_header)?));
     if let Some(body) = body {

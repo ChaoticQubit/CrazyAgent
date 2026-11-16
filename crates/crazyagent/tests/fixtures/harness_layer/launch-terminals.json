@@ -1,0 +1,1344 @@
+{
+  "claude-code/api_key/tools-off": {
+    "launch": {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<WORK>/project.sb",
+        "<BIN>/claude",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "",
+        "--settings",
+        "{\"apiKeyHelper\":\"/bin/cat '<HOME>/.crazyagent-key'\",\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false,\"skipDangerousModePermissionPrompt\":true}",
+        "--session-id",
+        "00000000-0000-4000-8000-000000000001",
+        "--system-prompt-snapshot",
+        "off",
+        "--mcp-config",
+        "{\"mcpServers\":{}}",
+        "--model",
+        "unit-model",
+        "--tools",
+        "",
+        "--disable-slash-commands",
+        "--system-prompt",
+        "You are Claude, answering inside CrazyAgent with no tools. You cannot run commands, read or write files, browse or call any tool, and no tool results will ever come back. Never write tool calls, function call markup or commands for yourself to run. Answer directly in plain text from the conversation and the text you are given.",
+        "--bare"
+      ],
+      "cwd": "<WORK>",
+      "env": [
+        [
+          "HOME",
+          "<HOME>"
+        ],
+        [
+          "PATH",
+          "/usr/bin:/bin"
+        ],
+        [
+          "LANG",
+          "en_US.UTF-8"
+        ],
+        [
+          "LC_ALL",
+          "en_US.UTF-8"
+        ],
+        [
+          "CLAUDE_CONFIG_DIR",
+          "<HOME>"
+        ],
+        [
+          "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+          "<HOME>"
+        ],
+        [
+          "CLAUDE_CODE_TMPDIR",
+          "<HOME>"
+        ],
+        [
+          "DISABLE_TELEMETRY",
+          "1"
+        ],
+        [
+          "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+          "1"
+        ],
+        [
+          "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN",
+          "1"
+        ],
+        [
+          "ANTHROPIC_BASE_URL",
+          "http://127.0.0.1:<RELAY_PORT>"
+        ],
+        [
+          "ANTHROPIC_SMALL_FAST_MODEL",
+          "unit-model"
+        ],
+        [
+          "CARGO_HOME",
+          "<HOME>/.cargo"
+        ],
+        [
+          "RUSTUP_HOME",
+          "<OWNER_RUSTUP>"
+        ],
+        [
+          "RUSTUP_AUTO_INSTALL",
+          "0"
+        ],
+        [
+          "UV_PYTHON_DOWNLOADS",
+          "never"
+        ],
+        [
+          "COREPACK_ENABLE_NETWORK",
+          "0"
+        ],
+        [
+          "HOMEBREW_NO_AUTO_UPDATE",
+          "1"
+        ],
+        [
+          "SDKROOT",
+          "<DEVELOPER_TOOLS>/SDKs/MacOSX.sdk"
+        ],
+        [
+          "GIT_CONFIG_NOSYSTEM",
+          "1"
+        ],
+        [
+          "GIT_TERMINAL_PROMPT",
+          "0"
+        ],
+        [
+          "GIT_CONFIG_COUNT",
+          "2"
+        ],
+        [
+          "GIT_CONFIG_KEY_0",
+          "credential.helper"
+        ],
+        [
+          "GIT_CONFIG_VALUE_0",
+          ""
+        ],
+        [
+          "GIT_CONFIG_KEY_1",
+          "safe.bareRepository"
+        ],
+        [
+          "GIT_CONFIG_VALUE_1",
+          "explicit"
+        ],
+        [
+          "SSL_CERT_FILE",
+          "/private/etc/ssl/cert.pem"
+        ],
+        [
+          "GIT_CONFIG_GLOBAL",
+          "/dev/null"
+        ],
+        [
+          "PYTHONNOUSERSITE",
+          "1"
+        ],
+        [
+          "NPM_CONFIG_USERCONFIG",
+          "/dev/null"
+        ]
+      ],
+      "transcript": "ClaudeSession { file: \"<HOME>/projects/<WORK_AS_CLAUDE_PROJECT>/00000000-0000-4000-8000-000000000001.jsonl\" }"
+    },
+    "prepare_refused": null,
+    "written": {
+      "home": {
+        ".claude.json": {
+          "mode": "600",
+          "text": "{\n  \"customApiKeyResponses\": {\n    \"approved\": [\n      \"crazyagent-local\"\n    ],\n    \"rejected\": []\n  },\n  \"hasCompletedOnboarding\": true,\n  \"projects\": {\n    \"<WORK>\": {\n      \"hasTrustDialogAccepted\": true\n    }\n  }\n}"
+        },
+        ".crazyagent-key": {
+          "mode": "600",
+          "text": "<RELAY_TOKEN>"
+        }
+      },
+      "work": {
+        "project.sb": {
+          "mode": "644",
+          "text": "(version 1)\n(allow default)\n(deny file-write* (subpath \"/Users\"))\n(allow file-write* (subpath \"<WORK>\") (subpath \"<HOME>\"))\n"
+        }
+      }
+    }
+  },
+  "claude-code/api_key/tools-on": {
+    "launch": {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<WORK>/project.sb",
+        "<BIN>/claude",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "",
+        "--settings",
+        "{\"apiKeyHelper\":\"/bin/cat '<HOME>/.crazyagent-key'\",\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false,\"skipDangerousModePermissionPrompt\":true}",
+        "--session-id",
+        "00000000-0000-4000-8000-000000000001",
+        "--system-prompt-snapshot",
+        "off",
+        "--mcp-config",
+        "{\"mcpServers\":{}}",
+        "--model",
+        "unit-model",
+        "--tools",
+        "default",
+        "--permission-mode",
+        "bypassPermissions",
+        "--disallowedTools",
+        "Agent",
+        "Workflow",
+        "TeamCreate",
+        "--bare"
+      ],
+      "cwd": "<WORK>",
+      "env": [
+        [
+          "HOME",
+          "<HOME>"
+        ],
+        [
+          "PATH",
+          "<RUSTUP_BIN>:/opt/homebrew/bin:/usr/local/bin:<DEVELOPER_TOOLS>/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:<GRAPHIFY_TOOL>/bin"
+        ],
+        [
+          "LANG",
+          "en_US.UTF-8"
+        ],
+        [
+          "LC_ALL",
+          "en_US.UTF-8"
+        ],
+        [
+          "CLAUDE_CONFIG_DIR",
+          "<HOME>"
+        ],
+        [
+          "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+          "<HOME>"
+        ],
+        [
+          "CLAUDE_CODE_TMPDIR",
+          "<HOME>"
+        ],
+        [
+          "DISABLE_TELEMETRY",
+          "1"
+        ],
+        [
+          "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+          "1"
+        ],
+        [
+          "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN",
+          "1"
+        ],
+        [
+          "SHELL",
+          "/bin/zsh"
+        ],
+        [
+          "MCP_TIMEOUT",
+          "60000"
+        ],
+        [
+          "ANTHROPIC_BASE_URL",
+          "http://127.0.0.1:<RELAY_PORT>"
+        ],
+        [
+          "ANTHROPIC_SMALL_FAST_MODEL",
+          "unit-model"
+        ],
+        [
+          "CARGO_HOME",
+          "<HOME>/.cargo"
+        ],
+        [
+          "RUSTUP_HOME",
+          "<OWNER_RUSTUP>"
+        ],
+        [
+          "RUSTUP_AUTO_INSTALL",
+          "0"
+        ],
+        [
+          "UV_PYTHON_DOWNLOADS",
+          "never"
+        ],
+        [
+          "COREPACK_ENABLE_NETWORK",
+          "0"
+        ],
+        [
+          "HOMEBREW_NO_AUTO_UPDATE",
+          "1"
+        ],
+        [
+          "SDKROOT",
+          "<DEVELOPER_TOOLS>/SDKs/MacOSX.sdk"
+        ],
+        [
+          "GIT_CONFIG_NOSYSTEM",
+          "1"
+        ],
+        [
+          "GIT_TERMINAL_PROMPT",
+          "0"
+        ],
+        [
+          "GIT_CONFIG_COUNT",
+          "2"
+        ],
+        [
+          "GIT_CONFIG_KEY_0",
+          "credential.helper"
+        ],
+        [
+          "GIT_CONFIG_VALUE_0",
+          ""
+        ],
+        [
+          "GIT_CONFIG_KEY_1",
+          "safe.bareRepository"
+        ],
+        [
+          "GIT_CONFIG_VALUE_1",
+          "explicit"
+        ],
+        [
+          "SSL_CERT_FILE",
+          "/private/etc/ssl/cert.pem"
+        ],
+        [
+          "GIT_CONFIG_GLOBAL",
+          "/dev/null"
+        ],
+        [
+          "PYTHONNOUSERSITE",
+          "1"
+        ],
+        [
+          "NPM_CONFIG_USERCONFIG",
+          "/dev/null"
+        ]
+      ],
+      "transcript": "ClaudeSession { file: \"<HOME>/projects/<WORK_AS_CLAUDE_PROJECT>/00000000-0000-4000-8000-000000000001.jsonl\" }"
+    },
+    "prepare_refused": null,
+    "written": {
+      "home": {
+        ".claude.json": {
+          "mode": "600",
+          "text": "{\n  \"customApiKeyResponses\": {\n    \"approved\": [\n      \"crazyagent-local\"\n    ],\n    \"rejected\": []\n  },\n  \"hasCompletedOnboarding\": true,\n  \"projects\": {\n    \"<WORK>\": {\n      \"hasTrustDialogAccepted\": true\n    }\n  }\n}"
+        },
+        ".crazyagent-key": {
+          "mode": "600",
+          "text": "<RELAY_TOKEN>"
+        }
+      },
+      "work": {
+        "project.sb": {
+          "mode": "644",
+          "text": "(version 1)\n(allow default)\n(deny file-write* (subpath \"/Users\"))\n(allow file-write* (subpath \"<WORK>\") (subpath \"<HOME>\"))\n"
+        }
+      }
+    }
+  },
+  "claude-code/subscription/tools-off": {
+    "launch": {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<WORK>/project.sb",
+        "<BIN>/claude",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "",
+        "--settings",
+        "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false,\"skipDangerousModePermissionPrompt\":true}",
+        "--session-id",
+        "00000000-0000-4000-8000-000000000001",
+        "--system-prompt-snapshot",
+        "off",
+        "--mcp-config",
+        "{\"mcpServers\":{}}",
+        "--model",
+        "unit-model",
+        "--tools",
+        "",
+        "--disable-slash-commands",
+        "--system-prompt",
+        "You are Claude, answering inside CrazyAgent with no tools. You cannot run commands, read or write files, browse or call any tool, and no tool results will ever come back. Never write tool calls, function call markup or commands for yourself to run. Answer directly in plain text from the conversation and the text you are given."
+      ],
+      "cwd": "<WORK>",
+      "env": [
+        [
+          "HOME",
+          "<HOME>"
+        ],
+        [
+          "PATH",
+          "/usr/bin:/bin"
+        ],
+        [
+          "LANG",
+          "en_US.UTF-8"
+        ],
+        [
+          "LC_ALL",
+          "en_US.UTF-8"
+        ],
+        [
+          "CLAUDE_CONFIG_DIR",
+          "<HOME>"
+        ],
+        [
+          "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+          "<HOME>"
+        ],
+        [
+          "CLAUDE_CODE_TMPDIR",
+          "<HOME>"
+        ],
+        [
+          "DISABLE_TELEMETRY",
+          "1"
+        ],
+        [
+          "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+          "1"
+        ],
+        [
+          "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN",
+          "1"
+        ],
+        [
+          "CARGO_HOME",
+          "<HOME>/.cargo"
+        ],
+        [
+          "RUSTUP_HOME",
+          "<OWNER_RUSTUP>"
+        ],
+        [
+          "RUSTUP_AUTO_INSTALL",
+          "0"
+        ],
+        [
+          "UV_PYTHON_DOWNLOADS",
+          "never"
+        ],
+        [
+          "COREPACK_ENABLE_NETWORK",
+          "0"
+        ],
+        [
+          "HOMEBREW_NO_AUTO_UPDATE",
+          "1"
+        ],
+        [
+          "SDKROOT",
+          "<DEVELOPER_TOOLS>/SDKs/MacOSX.sdk"
+        ],
+        [
+          "GIT_CONFIG_NOSYSTEM",
+          "1"
+        ],
+        [
+          "GIT_TERMINAL_PROMPT",
+          "0"
+        ],
+        [
+          "GIT_CONFIG_COUNT",
+          "2"
+        ],
+        [
+          "GIT_CONFIG_KEY_0",
+          "credential.helper"
+        ],
+        [
+          "GIT_CONFIG_VALUE_0",
+          ""
+        ],
+        [
+          "GIT_CONFIG_KEY_1",
+          "safe.bareRepository"
+        ],
+        [
+          "GIT_CONFIG_VALUE_1",
+          "explicit"
+        ],
+        [
+          "SSL_CERT_FILE",
+          "/private/etc/ssl/cert.pem"
+        ],
+        [
+          "GIT_CONFIG_GLOBAL",
+          "/dev/null"
+        ],
+        [
+          "PYTHONNOUSERSITE",
+          "1"
+        ],
+        [
+          "NPM_CONFIG_USERCONFIG",
+          "/dev/null"
+        ]
+      ],
+      "transcript": "ClaudeSession { file: \"<HOME>/projects/<WORK_AS_CLAUDE_PROJECT>/00000000-0000-4000-8000-000000000001.jsonl\" }"
+    },
+    "prepare_refused": null,
+    "written": {
+      "home": {
+        ".claude.json": {
+          "mode": "600",
+          "text": "{\n  \"customApiKeyResponses\": {\n    \"approved\": [\n      \"crazyagent-local\"\n    ],\n    \"rejected\": []\n  },\n  \"hasCompletedOnboarding\": true,\n  \"projects\": {\n    \"<WORK>\": {\n      \"hasTrustDialogAccepted\": true\n    }\n  }\n}"
+        }
+      },
+      "work": {
+        "project.sb": {
+          "mode": "644",
+          "text": "(version 1)\n(allow default)\n(deny file-write* (subpath \"/Users\"))\n(allow file-write* (subpath \"<WORK>\") (subpath \"<HOME>\"))\n"
+        }
+      }
+    }
+  },
+  "claude-code/subscription/tools-on": {
+    "launch": {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<WORK>/project.sb",
+        "<BIN>/claude",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "",
+        "--settings",
+        "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false,\"skipDangerousModePermissionPrompt\":true}",
+        "--session-id",
+        "00000000-0000-4000-8000-000000000001",
+        "--system-prompt-snapshot",
+        "off",
+        "--mcp-config",
+        "{\"mcpServers\":{}}",
+        "--model",
+        "unit-model",
+        "--tools",
+        "default",
+        "--permission-mode",
+        "bypassPermissions",
+        "--disallowedTools",
+        "Agent",
+        "Workflow",
+        "TeamCreate"
+      ],
+      "cwd": "<WORK>",
+      "env": [
+        [
+          "HOME",
+          "<HOME>"
+        ],
+        [
+          "PATH",
+          "<RUSTUP_BIN>:/opt/homebrew/bin:/usr/local/bin:<DEVELOPER_TOOLS>/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:<GRAPHIFY_TOOL>/bin"
+        ],
+        [
+          "LANG",
+          "en_US.UTF-8"
+        ],
+        [
+          "LC_ALL",
+          "en_US.UTF-8"
+        ],
+        [
+          "CLAUDE_CONFIG_DIR",
+          "<HOME>"
+        ],
+        [
+          "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+          "<HOME>"
+        ],
+        [
+          "CLAUDE_CODE_TMPDIR",
+          "<HOME>"
+        ],
+        [
+          "DISABLE_TELEMETRY",
+          "1"
+        ],
+        [
+          "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+          "1"
+        ],
+        [
+          "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN",
+          "1"
+        ],
+        [
+          "SHELL",
+          "/bin/zsh"
+        ],
+        [
+          "MCP_TIMEOUT",
+          "60000"
+        ],
+        [
+          "CARGO_HOME",
+          "<HOME>/.cargo"
+        ],
+        [
+          "RUSTUP_HOME",
+          "<OWNER_RUSTUP>"
+        ],
+        [
+          "RUSTUP_AUTO_INSTALL",
+          "0"
+        ],
+        [
+          "UV_PYTHON_DOWNLOADS",
+          "never"
+        ],
+        [
+          "COREPACK_ENABLE_NETWORK",
+          "0"
+        ],
+        [
+          "HOMEBREW_NO_AUTO_UPDATE",
+          "1"
+        ],
+        [
+          "SDKROOT",
+          "<DEVELOPER_TOOLS>/SDKs/MacOSX.sdk"
+        ],
+        [
+          "GIT_CONFIG_NOSYSTEM",
+          "1"
+        ],
+        [
+          "GIT_TERMINAL_PROMPT",
+          "0"
+        ],
+        [
+          "GIT_CONFIG_COUNT",
+          "2"
+        ],
+        [
+          "GIT_CONFIG_KEY_0",
+          "credential.helper"
+        ],
+        [
+          "GIT_CONFIG_VALUE_0",
+          ""
+        ],
+        [
+          "GIT_CONFIG_KEY_1",
+          "safe.bareRepository"
+        ],
+        [
+          "GIT_CONFIG_VALUE_1",
+          "explicit"
+        ],
+        [
+          "SSL_CERT_FILE",
+          "/private/etc/ssl/cert.pem"
+        ],
+        [
+          "GIT_CONFIG_GLOBAL",
+          "/dev/null"
+        ],
+        [
+          "PYTHONNOUSERSITE",
+          "1"
+        ],
+        [
+          "NPM_CONFIG_USERCONFIG",
+          "/dev/null"
+        ]
+      ],
+      "transcript": "ClaudeSession { file: \"<HOME>/projects/<WORK_AS_CLAUDE_PROJECT>/00000000-0000-4000-8000-000000000001.jsonl\" }"
+    },
+    "prepare_refused": null,
+    "written": {
+      "home": {
+        ".claude.json": {
+          "mode": "600",
+          "text": "{\n  \"customApiKeyResponses\": {\n    \"approved\": [\n      \"crazyagent-local\"\n    ],\n    \"rejected\": []\n  },\n  \"hasCompletedOnboarding\": true,\n  \"projects\": {\n    \"<WORK>\": {\n      \"hasTrustDialogAccepted\": true\n    }\n  }\n}"
+        }
+      },
+      "work": {
+        "project.sb": {
+          "mode": "644",
+          "text": "(version 1)\n(allow default)\n(deny file-write* (subpath \"/Users\"))\n(allow file-write* (subpath \"<WORK>\") (subpath \"<HOME>\"))\n"
+        }
+      }
+    }
+  },
+  "codex/api_key/tools-off": {
+    "launch": {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<WORK>/project.sb",
+        "<BIN>/codex",
+        "--no-daemon",
+        "-c",
+        "cli_auth_credentials_store=\"file\"",
+        "-c",
+        "model_providers.crazyagent={name=\"CrazyAgent\",base_url=\"http://127.0.0.1:<RELAY_PORT>/v1\",wire_api=\"responses\",auth={command=\"/bin/cat\",args=[\"<HOME>/.crazyagent-key\"]}}",
+        "-c",
+        "model_provider=\"crazyagent\"",
+        "-c",
+        "model=\"unit-model\"",
+        "-c",
+        "sandbox_mode=\"read-only\"",
+        "-c",
+        "approval_policy=\"never\"",
+        "-c",
+        "features.shell_tool=false",
+        "-c",
+        "features.apply_patch_freeform=false",
+        "-c",
+        "features.unified_exec=false",
+        "-c",
+        "features.view_image=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.code_mode=false",
+        "-c",
+        "features.apps=false",
+        "-c",
+        "features.plugins=false",
+        "-c",
+        "features.goals=false",
+        "-c",
+        "web_search=\"disabled\"",
+        "-c",
+        "mcp_servers={}",
+        "-c",
+        "tools.experimental_request_user_input.enabled=false",
+        "-c",
+        "check_for_update_on_startup=false",
+        "-c",
+        "projects={\"<WORK>\"={trust_level=\"trusted\"}}",
+        "-c",
+        "tui.alternate_screen=\"never\""
+      ],
+      "cwd": "<WORK>",
+      "env": [
+        [
+          "HOME",
+          "<HOME>"
+        ],
+        [
+          "PATH",
+          "/usr/bin:/bin"
+        ],
+        [
+          "LANG",
+          "en_US.UTF-8"
+        ],
+        [
+          "LC_ALL",
+          "en_US.UTF-8"
+        ],
+        [
+          "CODEX_HOME",
+          "<HOME>"
+        ],
+        [
+          "TMPDIR",
+          "<HOME>"
+        ],
+        [
+          "CARGO_HOME",
+          "<HOME>/.cargo"
+        ],
+        [
+          "RUSTUP_HOME",
+          "<OWNER_RUSTUP>"
+        ],
+        [
+          "RUSTUP_AUTO_INSTALL",
+          "0"
+        ],
+        [
+          "UV_PYTHON_DOWNLOADS",
+          "never"
+        ],
+        [
+          "COREPACK_ENABLE_NETWORK",
+          "0"
+        ],
+        [
+          "HOMEBREW_NO_AUTO_UPDATE",
+          "1"
+        ],
+        [
+          "SDKROOT",
+          "<DEVELOPER_TOOLS>/SDKs/MacOSX.sdk"
+        ],
+        [
+          "TMPPREFIX",
+          "<HOME>/zsh"
+        ],
+        [
+          "GIT_CONFIG_NOSYSTEM",
+          "1"
+        ],
+        [
+          "GIT_TERMINAL_PROMPT",
+          "0"
+        ],
+        [
+          "GIT_CONFIG_COUNT",
+          "2"
+        ],
+        [
+          "GIT_CONFIG_KEY_0",
+          "credential.helper"
+        ],
+        [
+          "GIT_CONFIG_VALUE_0",
+          ""
+        ],
+        [
+          "GIT_CONFIG_KEY_1",
+          "safe.bareRepository"
+        ],
+        [
+          "GIT_CONFIG_VALUE_1",
+          "explicit"
+        ],
+        [
+          "SSL_CERT_FILE",
+          "/private/etc/ssl/cert.pem"
+        ],
+        [
+          "GIT_CONFIG_GLOBAL",
+          "/dev/null"
+        ],
+        [
+          "PYTHONNOUSERSITE",
+          "1"
+        ],
+        [
+          "NPM_CONFIG_USERCONFIG",
+          "/dev/null"
+        ]
+      ],
+      "transcript": "CodexRollouts { sessions: \"<HOME>/sessions\" }"
+    },
+    "prepare_refused": null,
+    "written": {
+      "home": {
+        ".crazyagent-key": {
+          "mode": "600",
+          "text": "<RELAY_TOKEN>"
+        }
+      },
+      "work": {
+        "project.sb": {
+          "mode": "644",
+          "text": "(version 1)\n(allow default)\n(deny file-write* (subpath \"/Users\"))\n(allow file-write* (subpath \"<WORK>\") (subpath \"<HOME>\"))\n"
+        }
+      }
+    }
+  },
+  "codex/api_key/tools-on": {
+    "launch": {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<WORK>/project.sb",
+        "/bin/sh",
+        "-c",
+        "e=$1; r=$2; shift 2\nn=$CRAZYAGENT_INTERPRETER\ns=$CODEX_HOME/app-server-control/app-server-control.sock\n/bin/rm -f \"$s\"\n${n:+\"$n\"} \"$e\" app-server --listen unix:// \"$@\" </dev/null >/dev/null 2>&1 &\na=$!\ni=0\nwhile [ ! -S \"$s\" ] && kill -0 \"$a\" 2>/dev/null && [ \"$i\" -lt 50 ]; do /bin/sleep 0.1; i=$((i+1)); done\nif [ -S \"$s\" ]; then set -- --remote unix:// \"$@\"; else kill \"$a\" 2>/dev/null; fi\nif [ -n \"$r\" ]; then ${n:+\"$n\"} \"$e\" \"$@\" resume \"$r\"; else ${n:+\"$n\"} \"$e\" \"$@\"; fi\nc=$?\nkill \"$a\" 2>/dev/null\nexit \"$c\"\n",
+        "codex-bridge",
+        "<BIN>/codex",
+        "",
+        "-c",
+        "cli_auth_credentials_store=\"file\"",
+        "-c",
+        "model_providers.crazyagent={name=\"CrazyAgent\",base_url=\"http://127.0.0.1:<RELAY_PORT>/v1\",wire_api=\"responses\",auth={command=\"/bin/cat\",args=[\"<HOME>/.crazyagent-key\"]}}",
+        "-c",
+        "model_provider=\"crazyagent\"",
+        "-c",
+        "model=\"unit-model\"",
+        "-c",
+        "sandbox_mode=\"danger-full-access\"",
+        "-c",
+        "approval_policy=\"never\"",
+        "-c",
+        "features.apps=false",
+        "-c",
+        "features.plugins=false",
+        "-c",
+        "features.goals=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.multi_agent_v2=false",
+        "-c",
+        "mcp_servers={}",
+        "-c",
+        "check_for_update_on_startup=false",
+        "-c",
+        "projects={\"<WORK>\"={trust_level=\"trusted\"}}",
+        "-c",
+        "tui.alternate_screen=\"never\""
+      ],
+      "cwd": "<WORK>",
+      "env": [
+        [
+          "HOME",
+          "<HOME>"
+        ],
+        [
+          "PATH",
+          "<RUSTUP_BIN>:/opt/homebrew/bin:/usr/local/bin:<DEVELOPER_TOOLS>/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:<GRAPHIFY_TOOL>/bin"
+        ],
+        [
+          "LANG",
+          "en_US.UTF-8"
+        ],
+        [
+          "LC_ALL",
+          "en_US.UTF-8"
+        ],
+        [
+          "CODEX_HOME",
+          "<HOME>"
+        ],
+        [
+          "TMPDIR",
+          "<HOME>"
+        ],
+        [
+          "CARGO_HOME",
+          "<HOME>/.cargo"
+        ],
+        [
+          "RUSTUP_HOME",
+          "<OWNER_RUSTUP>"
+        ],
+        [
+          "RUSTUP_AUTO_INSTALL",
+          "0"
+        ],
+        [
+          "UV_PYTHON_DOWNLOADS",
+          "never"
+        ],
+        [
+          "COREPACK_ENABLE_NETWORK",
+          "0"
+        ],
+        [
+          "HOMEBREW_NO_AUTO_UPDATE",
+          "1"
+        ],
+        [
+          "SDKROOT",
+          "<DEVELOPER_TOOLS>/SDKs/MacOSX.sdk"
+        ],
+        [
+          "TMPPREFIX",
+          "<HOME>/zsh"
+        ],
+        [
+          "GIT_CONFIG_NOSYSTEM",
+          "1"
+        ],
+        [
+          "GIT_TERMINAL_PROMPT",
+          "0"
+        ],
+        [
+          "GIT_CONFIG_COUNT",
+          "2"
+        ],
+        [
+          "GIT_CONFIG_KEY_0",
+          "credential.helper"
+        ],
+        [
+          "GIT_CONFIG_VALUE_0",
+          ""
+        ],
+        [
+          "GIT_CONFIG_KEY_1",
+          "safe.bareRepository"
+        ],
+        [
+          "GIT_CONFIG_VALUE_1",
+          "explicit"
+        ],
+        [
+          "SSL_CERT_FILE",
+          "/private/etc/ssl/cert.pem"
+        ],
+        [
+          "GIT_CONFIG_GLOBAL",
+          "/dev/null"
+        ],
+        [
+          "PYTHONNOUSERSITE",
+          "1"
+        ],
+        [
+          "NPM_CONFIG_USERCONFIG",
+          "/dev/null"
+        ]
+      ],
+      "transcript": "CodexRollouts { sessions: \"<HOME>/sessions\" }"
+    },
+    "prepare_refused": null,
+    "written": {
+      "home": {
+        ".crazyagent-key": {
+          "mode": "600",
+          "text": "<RELAY_TOKEN>"
+        }
+      },
+      "work": {
+        "project.sb": {
+          "mode": "644",
+          "text": "(version 1)\n(allow default)\n(deny file-write* (subpath \"/Users\"))\n(allow file-write* (subpath \"<WORK>\") (subpath \"<HOME>\"))\n"
+        }
+      }
+    }
+  },
+  "codex/subscription/tools-off": {
+    "launch": {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<WORK>/project.sb",
+        "<BIN>/codex",
+        "--no-daemon",
+        "-c",
+        "cli_auth_credentials_store=\"file\"",
+        "-c",
+        "model_provider=\"openai\"",
+        "-c",
+        "model=\"unit-model\"",
+        "-c",
+        "sandbox_mode=\"read-only\"",
+        "-c",
+        "approval_policy=\"never\"",
+        "-c",
+        "features.shell_tool=false",
+        "-c",
+        "features.apply_patch_freeform=false",
+        "-c",
+        "features.unified_exec=false",
+        "-c",
+        "features.view_image=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.code_mode=false",
+        "-c",
+        "features.apps=false",
+        "-c",
+        "features.plugins=false",
+        "-c",
+        "features.goals=false",
+        "-c",
+        "web_search=\"disabled\"",
+        "-c",
+        "mcp_servers={}",
+        "-c",
+        "tools.experimental_request_user_input.enabled=false",
+        "-c",
+        "check_for_update_on_startup=false",
+        "-c",
+        "projects={\"<WORK>\"={trust_level=\"trusted\"}}",
+        "-c",
+        "tui.alternate_screen=\"never\""
+      ],
+      "cwd": "<WORK>",
+      "env": [
+        [
+          "HOME",
+          "<HOME>"
+        ],
+        [
+          "PATH",
+          "/usr/bin:/bin"
+        ],
+        [
+          "LANG",
+          "en_US.UTF-8"
+        ],
+        [
+          "LC_ALL",
+          "en_US.UTF-8"
+        ],
+        [
+          "CODEX_HOME",
+          "<HOME>"
+        ],
+        [
+          "TMPDIR",
+          "<HOME>"
+        ],
+        [
+          "CARGO_HOME",
+          "<HOME>/.cargo"
+        ],
+        [
+          "RUSTUP_HOME",
+          "<OWNER_RUSTUP>"
+        ],
+        [
+          "RUSTUP_AUTO_INSTALL",
+          "0"
+        ],
+        [
+          "UV_PYTHON_DOWNLOADS",
+          "never"
+        ],
+        [
+          "COREPACK_ENABLE_NETWORK",
+          "0"
+        ],
+        [
+          "HOMEBREW_NO_AUTO_UPDATE",
+          "1"
+        ],
+        [
+          "SDKROOT",
+          "<DEVELOPER_TOOLS>/SDKs/MacOSX.sdk"
+        ],
+        [
+          "TMPPREFIX",
+          "<HOME>/zsh"
+        ],
+        [
+          "GIT_CONFIG_NOSYSTEM",
+          "1"
+        ],
+        [
+          "GIT_TERMINAL_PROMPT",
+          "0"
+        ],
+        [
+          "GIT_CONFIG_COUNT",
+          "2"
+        ],
+        [
+          "GIT_CONFIG_KEY_0",
+          "credential.helper"
+        ],
+        [
+          "GIT_CONFIG_VALUE_0",
+          ""
+        ],
+        [
+          "GIT_CONFIG_KEY_1",
+          "safe.bareRepository"
+        ],
+        [
+          "GIT_CONFIG_VALUE_1",
+          "explicit"
+        ],
+        [
+          "SSL_CERT_FILE",
+          "/private/etc/ssl/cert.pem"
+        ],
+        [
+          "GIT_CONFIG_GLOBAL",
+          "/dev/null"
+        ],
+        [
+          "PYTHONNOUSERSITE",
+          "1"
+        ],
+        [
+          "NPM_CONFIG_USERCONFIG",
+          "/dev/null"
+        ]
+      ],
+      "transcript": "CodexRollouts { sessions: \"<HOME>/sessions\" }"
+    },
+    "prepare_refused": null,
+    "written": {
+      "home": {},
+      "work": {
+        "project.sb": {
+          "mode": "644",
+          "text": "(version 1)\n(allow default)\n(deny file-write* (subpath \"/Users\"))\n(allow file-write* (subpath \"<WORK>\") (subpath \"<HOME>\"))\n"
+        }
+      }
+    }
+  },
+  "codex/subscription/tools-on": {
+    "launch": {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<WORK>/project.sb",
+        "/bin/sh",
+        "-c",
+        "e=$1; r=$2; shift 2\nn=$CRAZYAGENT_INTERPRETER\ns=$CODEX_HOME/app-server-control/app-server-control.sock\n/bin/rm -f \"$s\"\n${n:+\"$n\"} \"$e\" app-server --listen unix:// \"$@\" </dev/null >/dev/null 2>&1 &\na=$!\ni=0\nwhile [ ! -S \"$s\" ] && kill -0 \"$a\" 2>/dev/null && [ \"$i\" -lt 50 ]; do /bin/sleep 0.1; i=$((i+1)); done\nif [ -S \"$s\" ]; then set -- --remote unix:// \"$@\"; else kill \"$a\" 2>/dev/null; fi\nif [ -n \"$r\" ]; then ${n:+\"$n\"} \"$e\" \"$@\" resume \"$r\"; else ${n:+\"$n\"} \"$e\" \"$@\"; fi\nc=$?\nkill \"$a\" 2>/dev/null\nexit \"$c\"\n",
+        "codex-bridge",
+        "<BIN>/codex",
+        "",
+        "-c",
+        "cli_auth_credentials_store=\"file\"",
+        "-c",
+        "model_provider=\"openai\"",
+        "-c",
+        "model=\"unit-model\"",
+        "-c",
+        "sandbox_mode=\"danger-full-access\"",
+        "-c",
+        "approval_policy=\"never\"",
+        "-c",
+        "features.apps=false",
+        "-c",
+        "features.plugins=false",
+        "-c",
+        "features.goals=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.multi_agent_v2=false",
+        "-c",
+        "mcp_servers={}",
+        "-c",
+        "check_for_update_on_startup=false",
+        "-c",
+        "projects={\"<WORK>\"={trust_level=\"trusted\"}}",
+        "-c",
+        "tui.alternate_screen=\"never\""
+      ],
+      "cwd": "<WORK>",
+      "env": [
+        [
+          "HOME",
+          "<HOME>"
+        ],
+        [
+          "PATH",
+          "<RUSTUP_BIN>:/opt/homebrew/bin:/usr/local/bin:<DEVELOPER_TOOLS>/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:<GRAPHIFY_TOOL>/bin"
+        ],
+        [
+          "LANG",
+          "en_US.UTF-8"
+        ],
+        [
+          "LC_ALL",
+          "en_US.UTF-8"
+        ],
+        [
+          "CODEX_HOME",
+          "<HOME>"
+        ],
+        [
+          "TMPDIR",
+          "<HOME>"
+        ],
+        [
+          "CARGO_HOME",
+          "<HOME>/.cargo"
+        ],
+        [
+          "RUSTUP_HOME",
+          "<OWNER_RUSTUP>"
+        ],
+        [
+          "RUSTUP_AUTO_INSTALL",
+          "0"
+        ],
+        [
+          "UV_PYTHON_DOWNLOADS",
+          "never"
+        ],
+        [
+          "COREPACK_ENABLE_NETWORK",
+          "0"
+        ],
+        [
+          "HOMEBREW_NO_AUTO_UPDATE",
+          "1"
+        ],
+        [
+          "SDKROOT",
+          "<DEVELOPER_TOOLS>/SDKs/MacOSX.sdk"
+        ],
+        [
+          "TMPPREFIX",
+          "<HOME>/zsh"
+        ],
+        [
+          "GIT_CONFIG_NOSYSTEM",
+          "1"
+        ],
+        [
+          "GIT_TERMINAL_PROMPT",
+          "0"
+        ],
+        [
+          "GIT_CONFIG_COUNT",
+          "2"
+        ],
+        [
+          "GIT_CONFIG_KEY_0",
+          "credential.helper"
+        ],
+        [
+          "GIT_CONFIG_VALUE_0",
+          ""
+        ],
+        [
+          "GIT_CONFIG_KEY_1",
+          "safe.bareRepository"
+        ],
+        [
+          "GIT_CONFIG_VALUE_1",
+          "explicit"
+        ],
+        [
+          "SSL_CERT_FILE",
+          "/private/etc/ssl/cert.pem"
+        ],
+        [
+          "GIT_CONFIG_GLOBAL",
+          "/dev/null"
+        ],
+        [
+          "PYTHONNOUSERSITE",
+          "1"
+        ],
+        [
+          "NPM_CONFIG_USERCONFIG",
+          "/dev/null"
+        ]
+      ],
+      "transcript": "CodexRollouts { sessions: \"<HOME>/sessions\" }"
+    },
+    "prepare_refused": null,
+    "written": {
+      "home": {},
+      "work": {
+        "project.sb": {
+          "mode": "644",
+          "text": "(version 1)\n(allow default)\n(deny file-write* (subpath \"/Users\"))\n(allow file-write* (subpath \"<WORK>\") (subpath \"<HOME>\"))\n"
+        }
+      }
+    }
+  }
+}

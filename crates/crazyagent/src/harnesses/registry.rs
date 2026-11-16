@@ -251,6 +251,7 @@ impl Registry {
                 });
             }
             super::drivers::acp::check(&manifest)
+                .and_then(|()| super::accounts::check(&manifest))
                 .and_then(|()| crate::skills::import::check(&manifest))
                 .map_err(|refused| Refused {
                     code: refused.code,
