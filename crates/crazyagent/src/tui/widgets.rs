@@ -549,6 +549,25 @@ mod tests {
     }
 
     #[test]
+    fn a_single_line_field_keeps_a_typed_joiner_and_the_paste_box_shows_it_escaped() {
+        let typed = "\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}";
+        let mut name = TextField::new("Name", 100);
+        assert!(name.key(&Key::Paste(typed.into())));
+        let (lines, cursor) = name.lines(40, true, &theme(), &UNICODE);
+        assert!(plain(&lines[1]).starts_with(&format!("[ {typed}")));
+        assert!(!plain(&lines[1]).contains("\\u200c"));
+        let column = 2 + typed.chars().map(char_width).sum::<usize>();
+        assert_eq!(
+            cursor,
+            Some(Position::new(u16::try_from(column).unwrap(), 1))
+        );
+        let mut pasted = TextField::new("Manifest", 1000).multiline();
+        assert!(pasted.key(&Key::Paste(typed.into())));
+        let (lines, _) = pasted.lines(40, true, &theme(), &UNICODE);
+        assert!(plain(&lines[1]).starts_with("[ \u{645}\u{6cc}\\u200c\u{62e}"));
+    }
+
+    #[test]
     fn multiline_fields_wrap_and_follow_the_cursor() {
         let mut bio = TextField::new("Short bio", 1000).multiline();
         bio.set("Building tools for marine researchers. Ten years of TypeScript, learning Rust.");
