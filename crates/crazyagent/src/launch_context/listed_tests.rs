@@ -4,7 +4,7 @@ use crate::plugins::SecretValue;
 
 const SMALL: &str = "schema: 1\nkind: harness\nid: \"sample\"\nname: \"Sample\"\nbinaries:\n  - \"sample\"\nheadless: \"sample --json\"\nmodel_selection: true\naccount_kinds:\n  - \"api_key\"\n";
 
-const BLOCKS: &str = "home:\n  env:\n    SAMPLE_CONFIG: \"{home}/agent\"\n    SAMPLE_UPDATES: \"off\"\n  set_home: true\nmcp:\n  render: \"json-mcp-servers\"\n  path: \"{home}/agent/mcp.json\"\ninstructions:\n  render: \"file\"\n  path: \"{home}/agent/AGENTS.md\"\n";
+const BLOCKS: &str = "home:\n  env_prefixes:\n    - \"SAMPLE_\"\n  env:\n    SAMPLE_CONFIG: \"{home}/agent\"\n    SAMPLE_UPDATES: \"off\"\n  set_home: true\nmcp:\n  render: \"json-mcp-servers\"\n  path: \"{home}/agent/mcp.json\"\ninstructions:\n  render: \"file\"\n  path: \"{home}/agent/AGENTS.md\"\n";
 
 const INSTRUCTIONS: &str = "# Project context from CrazyAgent\n";
 
@@ -181,6 +181,35 @@ fn a_listed_launch_refuses_a_manifest_whose_blocks_do_not_read_and_writes_nothin
     assert_eq!(
         refused.err().map(|problem| problem.0),
         Some("launch_manifest_invalid".to_owned())
+    );
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+}
+
+/// T18 r2 F3 (rv-code4 A4): a team agent's launch carries project instruction files only
+/// the Codex and Claude Code homes know where to put, so a listed harness refuses it with
+/// `launch_harness_unsupported` and writes nothing into the private home.
+#[test]
+fn a_team_agent_launch_of_a_listed_harness_is_refused_and_writes_nothing() {
+    let (_folder, home) = private_home();
+    let project = tempfile::tempdir().unwrap();
+    let mut context = context();
+    context.process = Some(Box::new(Process {
+        project: crate::agent_home::AgentProject {
+            data: project.path().join("data"),
+            id: ProjectId::new("listed").unwrap(),
+            folder: Some(project.path().join("project")),
+            mode: crate::instruction_files::Mode::Both,
+            repeated: crate::agent_home::Repeated::LeaveOut,
+        },
+        hooks: Vec::new(),
+        agent: String::new(),
+    }));
+
+    let refused = context.install_listed(&manifest(BLOCKS), &home, true);
+
+    assert_eq!(
+        refused.err().map(|problem| problem.0),
+        Some("launch_harness_unsupported".to_owned())
     );
     assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
 }

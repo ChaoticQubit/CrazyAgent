@@ -1056,9 +1056,10 @@ impl AgentContext {
     /// jsonl-turn or text-turn driver ([`drivers::piped`]), else `launch_harness_unsupported`,
     /// a harness of the last three written as its manifest asks ([`Self::install_listed`]),
     /// the agent's 0700 home (its CODEX_HOME, CLAUDE_CONFIG_DIR or private home) and the
-    /// tools switch; with tools off no skill or MCP server is given. On macOS the files hold the agent's own `getconf`
-    /// ([`crate::sandbox::toolchains::write_getconf`]). Output: the guard holding the files
-    /// and the harness arguments, or `launch_home_busy` while another launch uses the home.
+    /// tools switch; with tools off no skill or MCP server is given. On macOS the files hold
+    /// the agent's own `getconf` ([`crate::sandbox::toolchains::write_getconf`]). Output: the
+    /// guard holding the files and the harness arguments, or `launch_home_busy` while another
+    /// launch uses the home.
     pub fn install(
         &self,
         harness: &str,

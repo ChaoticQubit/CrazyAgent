@@ -74,7 +74,7 @@ pub fn read(manifest: &Manifest) -> Result<Renders, Refused> {
         .map(|block| entry(block, "instructions", "instructions", &INSTRUCTIONS_RENDERS))
         .transpose()?;
     if let (Some(mcp), Some(instructions)) = (&mcp, &instructions)
-        && mcp.path == instructions.path
+        && mcp.path.eq_ignore_ascii_case(&instructions.path)
     {
         return refuse(
             manifest::VALUE,
@@ -146,7 +146,9 @@ fn entry<K: Copy>(
     let Some(path) = inside_home(&path) else {
         return refuse(
             manifest::VALUE,
-            format!("{key}.path: this must be {{home}} followed by a file inside it."),
+            format!(
+                "{key}.path: this must be {{home}} followed by a file inside it, each name only ASCII letters, digits, ., _ and -."
+            ),
         );
     };
     let first = path.split('/').next().unwrap_or_default();
@@ -169,13 +171,21 @@ fn inside_home(path: &str) -> Option<String> {
     plain(rest).then(|| rest.to_owned())
 }
 
-/// Whether a path inside the private home is one to [`PATH_PARTS_MAX`] plain names joined by
-/// `/`, none empty, `.`, `..` or holding a brace. Input: the path. Output: the answer.
+/// Whether a path inside the private home is one to [`PATH_PARTS_MAX`] names joined by `/`,
+/// each only ASCII letters, digits, `.`, `_` and `-`, none empty, `.` or `..`. A macOS folder
+/// folds Unicode letter case and spelling, so with ASCII names only, two names open one file
+/// exactly when they match ignoring ASCII case, which is how the engine-name and duplicate
+/// checks compare them. Input: the path. Output: the answer.
 pub(crate) fn plain(path: &str) -> bool {
     let parts: Vec<&str> = path.split('/').collect();
     parts.len() <= PATH_PARTS_MAX
         && parts.iter().all(|part| {
-            !part.is_empty() && *part != "." && *part != ".." && !part.contains(['{', '}'])
+            !part.is_empty()
+                && *part != "."
+                && *part != ".."
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
         })
 }
 
