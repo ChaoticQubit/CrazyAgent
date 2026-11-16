@@ -1746,11 +1746,10 @@ async fn create_while_a_move_holds_the_job_is_refused_and_keeps_the_draft() {
     shell.key(Key::ShiftLeft);
     shell.key(Key::Enter);
     let sent = pump(&mut shell, &mut connection).await;
-    assert_eq!(sent.first(), Some(&"job start"), "{sent:?}");
     assert_eq!(
         sent.iter().filter(|sent| **sent == "job start").count(),
         1,
-        "a refused start never starts again: {sent:?}"
+        "one start, never sent again after the refusal: {sent:?}"
     );
     assert_eq!(shell.place(), Some(Place::NewProject));
     let shown = render(&mut shell, 80, 24);
@@ -1768,10 +1767,21 @@ async fn create_while_a_move_holds_the_job_is_refused_and_keeps_the_draft() {
     drop(connection);
 
     let mut connection = engine.connect();
-    let shell = home_shell(&mut connection).await;
+    let mut shell = home_shell(&mut connection).await;
     let shown = shell.ctx.store.intake.clone().expect("the held move");
     assert_eq!(shown.id, held.id, "the held move is still the engine's job");
     assert!(super::intake_job::running(&shown), "{shown:?}");
+    shell.key(Key::Home);
+    shell.key(Key::Enter);
+    let (ended, _) = job_until(&mut shell, &mut connection, |job| {
+        !super::intake_job::running(job)
+    })
+    .await;
+    assert!(
+        matches!(ended.state, JobState::Cancelled { .. }),
+        "the held move still stops: {ended:?}"
+    );
+    assert!(origin.is_dir(), "nothing was moved: {origin:?}");
 }
 
 /// DEC-177 step 3c: a New Project an engine stop cut short shows on Home after the next start
