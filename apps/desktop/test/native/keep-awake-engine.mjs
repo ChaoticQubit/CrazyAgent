@@ -165,6 +165,14 @@ export async function engineAct(bridge, action) {
   assert.equal(receipt.outcome, "applied", `the engine takes ${JSON.stringify(action)}: ${JSON.stringify(receipt)}`);
 }
 
+/** Sends one Keep awake change through the bridge with a fresh generation and gives back
+ * the engine's receipt, applied or not, for a row that proves a refusal. Inputs: the bridge
+ * and the change. Output: the receipt. */
+export async function engineTry(bridge, action) {
+  bridge.generation += 1;
+  return value(bridge, "desktop_keep_awake_act", { action, generation: bridge.generation });
+}
+
 /** The words on the Keep awake control. Input: the page. Output: the label, or null when no
  * control is shown. */
 export async function controlLabel(page) {

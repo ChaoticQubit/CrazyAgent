@@ -38,30 +38,37 @@ export type KeepAwakeEnd =
   | { kind: "cap"; hours: number }
   | { kind: "battery_unread" | "heat" | "manual" | "off" | "hold_lost" };
 
-/** Whether a hold covers the closed lid, or the reason it does not. */
+/** Whether a hold covers the closed lid, or the reason it does not: on macOS also a lid
+ * helper not turned on, one to remove with why, and a helper journal that cannot be read. */
 export type LidSupport =
-  | { kind: "held" | "off" | "idle_only_on_battery" | "needs_macos13" | "needs_approval" | "helper_missing" | "locked_by_policy" }
-  | { kind: "not_available"; reason: string };
+  | { kind: "held" | "off" | "idle_only_on_battery" | "needs_macos13" | "needs_approval" | "helper_missing" | "not_turned_on" | "sleep_not_restored" | "locked_by_policy" }
+  | { kind: "not_available" | "remove_helper"; reason: string };
 
 export type KeepAwakePlatform = "mac_os" | "linux" | "windows";
 
 /** Keep awake as the engine last evaluated it: the settings, the decision, the lid support,
- * the platform and how many agents work. */
+ * what this computer itself says of the lid whatever the rule, the platform and how many
+ * agents work. */
 export interface KeepAwakeView {
   settings: KeepAwakeSettings;
   state: { want: KeepAwakeWant; reason: KeepAwakeReason; ends_at_ms: number | null; ended: KeepAwakeEnd | null };
   lid_support: LidSupport;
+  lid_platform: LidSupport;
   platform: KeepAwakePlatform;
   work: number;
 }
 
-/** One change the owner makes: start a timer, move the running one later, end the hold, or
- * save the settings. */
+/** One change the owner makes: start a timer, move the running one later, end the hold,
+ * save the settings, or on macOS turn on the lid-closed hold or remove the lid helper. */
 export type KeepAwakeAction =
   | { start: { minutes: number } }
   | { extend: { minutes: number } }
   | "end"
-  | { set: { settings: KeepAwakeSettings } };
+  | { set: { settings: KeepAwakeSettings } }
+  | LidAction;
+
+/** The two lid helper commands, sent by their engine names. */
+export type LidAction = "turn_on_lid_hold" | "remove_lid_helper";
 
 export const MINUTES_MIN = 1;
 export const MINUTES_MAX = 1440;

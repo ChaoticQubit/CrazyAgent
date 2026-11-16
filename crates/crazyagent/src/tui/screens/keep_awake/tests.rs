@@ -1,4 +1,4 @@
-use super::words::{self, Form, Tone};
+use super::words::{self, Form, LidOffers, LidPlace, Tone};
 use crate::keep_awake::{
     BatteryFloor, Cap, Decision, EndReason, HeatEnd, KeepAwakeAction, KeepAwakeSettings,
     KeepAwakeView, LidRule, LidSupport, Mode, Reason, Want,
@@ -635,4 +635,184 @@ fn the_keep_awake_screen_frames_match_the_design() {
             &[],
         );
     }
+}
+
+const APPROVAL: &str = "Allow the lid helper in System Settings to hold with the lid closed.";
+const PIN_NONE: &str = "The lid helper was approved with no account at the screen";
+const TURN_ON: &str = "Turn on lid-closed hold";
+const LOGIN_ITEMS: &str = "Open Login Items";
+
+/// Keep awake at rest on a Mac with the lid rule on, where the lid line says `lid`.
+/// Input: the lid support. Output: the view.
+pub(in crate::tui) fn on_mac(lid: LidSupport) -> KeepAwakeView {
+    let mut view = resting();
+    view.settings.lid = LidRule::AcOnly;
+    view.lid_support = lid.clone();
+    view.lid_platform = lid;
+    view
+}
+
+fn offers(turn_on: Option<&'static str>, remove: bool) -> LidOffers {
+    LidOffers { turn_on, remove }
+}
+
+#[test]
+fn the_lid_helper_keys_follow_what_this_mac_says_of_the_lid_on_macos_only() {
+    let failed = "Lid-closed hold could not be turned on: Invalid argument".to_string();
+    let none = offers(None, false);
+    let cases = [
+        (LidSupport::NotTurnedOn, offers(Some(TURN_ON), false), offers(Some(TURN_ON), false)),
+        (
+            LidSupport::NeedsApproval,
+            offers(Some(LOGIN_ITEMS), true),
+            offers(Some(LOGIN_ITEMS), false),
+        ),
+        (
+            LidSupport::NotAvailable { reason: failed },
+            offers(Some(TURN_ON), false),
+            offers(Some(TURN_ON), false),
+        ),
+        (LidSupport::Held, offers(None, true), none),
+        (
+            LidSupport::RemoveHelper {
+                reason: PIN_NONE.into(),
+            },
+            offers(None, true),
+            offers(None, true),
+        ),
+        (LidSupport::SleepNotRestored, offers(None, true), none),
+        (
+            LidSupport::NotAvailable {
+                reason: "The lid helper did not answer".into(),
+            },
+            offers(None, true),
+            none,
+        ),
+        (LidSupport::HelperMissing, none, none),
+        (LidSupport::NeedsMacos13, none, none),
+        (LidSupport::LockedByPolicy, none, none),
+    ];
+    for (lid, settings, screen) in cases {
+        let mac = on_mac(lid.clone());
+        assert_eq!(words::lid_offers(&mac, LidPlace::Settings), settings, "{lid:?}");
+        assert_eq!(words::lid_offers(&mac, LidPlace::Screen), screen, "{lid:?}");
+        let mut ruled_off = mac.clone();
+        ruled_off.settings.lid = LidRule::Off;
+        ruled_off.lid_support = LidSupport::Off;
+        let anyway = words::lid_offers(&ruled_off, LidPlace::Settings);
+        assert_eq!(anyway, settings, "Settings whatever the rule: {lid:?}");
+        let hidden = words::lid_offers(&ruled_off, LidPlace::Screen);
+        assert_eq!(hidden, none, "the screen while the rule is Off: {lid:?}");
+        for platform in [Platform::Linux, Platform::Windows] {
+            let mut other = mac.clone();
+            other.platform = platform;
+            for place in [LidPlace::Screen, LidPlace::Settings] {
+                assert_eq!(words::lid_offers(&other, place), none, "{platform:?} {lid:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_lid_helper_line_has_the_approval_line_while_it_waits() {
+    let line = |lid: LidSupport| words::lid_helper_line(&on_mac(lid));
+    assert_eq!(line(LidSupport::NeedsApproval), APPROVAL);
+    assert_eq!(line(LidSupport::Held), "Turned on");
+    assert_eq!(line(LidSupport::NotTurnedOn), "Not turned on yet");
+    assert_eq!(line(LidSupport::HelperMissing), "Not set up on this computer yet");
+    assert_eq!(
+        line(LidSupport::SleepNotRestored),
+        "Sleep not restored: see Notifications"
+    );
+    let reason = "r".repeat(300);
+    let cut = line(LidSupport::RemoveHelper { reason });
+    assert_eq!(cut.chars().count(), 200, "a long reason is cut");
+}
+
+#[test]
+fn a_none_pin_makes_the_screen_offer_remove_lid_helper_on_d() {
+    let pin = LidSupport::RemoveHelper {
+        reason: PIN_NONE.into(),
+    };
+    let mut shell = screen(on_mac(pin));
+    let text = shown(&mut shell);
+    assert!(text.contains(PIN_NONE), "the screen says why: {text}");
+    assert!(text.contains("d  Remove lid helper"), "{text}");
+    assert!(!text.contains(TURN_ON), "{text}");
+    assert_eq!(
+        action(pressed(&mut shell, 'd')),
+        KeepAwakeAction::RemoveLidHelper
+    );
+    shell.key(Key::Char('t'));
+    assert_eq!(changes(&mut shell), Vec::new(), "no Turn on to offer");
+}
+
+#[test]
+fn t_turns_on_the_lid_hold_then_opens_login_items_with_the_approval_line() {
+    let mut shell = screen(on_mac(LidSupport::NotTurnedOn));
+    let text = shown(&mut shell);
+    assert!(text.contains("t  Turn on lid-closed hold"), "{text}");
+    assert_eq!(
+        action(pressed(&mut shell, 't')),
+        KeepAwakeAction::TurnOnLidHold
+    );
+    let mut shell = screen(on_mac(LidSupport::NeedsApproval));
+    let text = shown(&mut shell);
+    assert!(text.contains("t  Open Login Items"), "{text}");
+    assert!(text.contains(APPROVAL), "the approval screen's line: {text}");
+    assert_eq!(
+        action(pressed(&mut shell, 't')),
+        KeepAwakeAction::TurnOnLidHold,
+        "pressed while approval waits it opens Login Items again (QUESTION 35j)"
+    );
+    shell.key(Key::Char('d'));
+    assert_eq!(changes(&mut shell), Vec::new(), "the screen offers Remove only for a pin");
+}
+
+#[test]
+fn a_failed_unregister_keeps_offering_remove_lid_helper_on_the_screen() {
+    let reason = "Remove lid helper did not finish: Operation not permitted";
+    let mut shell = screen(on_mac(LidSupport::RemoveHelper {
+        reason: reason.into(),
+    }));
+    let text = shown(&mut shell);
+    assert!(text.contains(reason), "{text}");
+    assert!(text.contains("d  Remove lid helper"), "{text}");
+    assert_eq!(
+        action(pressed(&mut shell, 'd')),
+        KeepAwakeAction::RemoveLidHelper
+    );
+}
+
+#[test]
+fn without_a_lid_helper_offer_t_and_d_send_nothing() {
+    let mut linux = on_mac(LidSupport::NotTurnedOn);
+    linux.platform = Platform::Linux;
+    let mut ruled_off = on_mac(LidSupport::NotTurnedOn);
+    ruled_off.settings.lid = LidRule::Off;
+    ruled_off.lid_support = LidSupport::Off;
+    for view in [resting(), linux, ruled_off] {
+        let mut shell = screen(view.clone());
+        for key in ['t', 'd'] {
+            shell.key(Key::Char(key));
+            assert_eq!(changes(&mut shell), Vec::new(), "{key} {view:?}");
+        }
+        let text = shown(&mut shell);
+        assert!(!text.contains(TURN_ON), "{text}");
+        assert!(!text.contains("Remove lid helper"), "{text}");
+    }
+}
+
+#[test]
+fn a_refused_lid_command_says_why_and_the_next_key_is_taken() {
+    let mut shell = screen(on_mac(LidSupport::NotTurnedOn));
+    shell.key(Key::Char('t'));
+    let sent = changes(&mut shell);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    answer(&mut shell, sent[0].clone(), Err("keep_awake_no_lid_helper".into()));
+    let text = shown(&mut shell);
+    assert!(text.contains("Keep awake was not changed."), "{text}");
+    assert!(text.contains("Lid-closed hold is set up only on macOS."), "{text}");
+    shell.key(Key::Char('t'));
+    assert_eq!(changes(&mut shell).len(), 1, "the next key is taken");
 }

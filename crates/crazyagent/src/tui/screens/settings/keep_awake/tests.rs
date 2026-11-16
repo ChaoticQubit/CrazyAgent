@@ -8,7 +8,7 @@ use crate::tui::client::keep_awake::{KeepAwakeEvent, KeepAwakeQuery, KeepAwakeRe
 use crate::tui::keys::Key;
 use crate::tui::render_tests::{ready, render, shell_at};
 use crate::tui::screens::Place;
-use crate::tui::screens::keep_awake::tests::resting;
+use crate::tui::screens::keep_awake::tests::{on_mac, resting};
 use crate::tui::seam::{Arrival, Request};
 use crate::tui::shell::Shell;
 
@@ -405,4 +405,98 @@ fn before_the_first_read_no_key_changes_anything_and_a_failed_read_offers_r() {
     shell.key(Key::Char('r'));
     let reads: Vec<Request> = std::iter::from_fn(|| shell.ctx.next_request()).collect();
     assert!(reads.iter().any(is_read), "{reads:?}");
+}
+
+const APPROVAL: &str = "Allow the lid helper in System Settings to hold with the lid closed.";
+
+/// The settings page on a Mac where the lid line says `lid`, under the lid rule given.
+/// Inputs: the lid support and the rule. Output: the shell.
+fn helper_page(lid: LidSupport, rule: LidRule) -> Shell {
+    let mut view = on_mac(lid);
+    view.settings.lid = rule;
+    if rule == LidRule::Off {
+        view.lid_support = LidSupport::Off;
+    }
+    page(view)
+}
+
+/// Presses one key and returns the one lid command it sent, answered as applied. Inputs:
+/// the shell and the key. Output: the command.
+fn lid_key(shell: &mut Shell, key: char) -> crate::keep_awake::KeepAwakeAction {
+    shell.key(Key::Char(key));
+    let mut sent = saves(shell);
+    assert_eq!(sent.len(), 1, "{key} sends one change: {sent:?}");
+    let query = sent.remove(0);
+    answer(shell, query.clone(), Ok(KeepAwakeReply::Done));
+    let KeepAwakeQuery::Act { action, generation } = query else {
+        panic!("not a command: {query:?}");
+    };
+    assert!(generation > 0);
+    action
+}
+
+#[test]
+fn the_settings_page_shows_the_lid_helper_line_and_its_keys_whatever_the_rule() {
+    let mut shell = helper_page(LidSupport::NeedsApproval, LidRule::Off);
+    let text = shown(&mut shell);
+    assert!(text.contains(&format!("Lid helper  {APPROVAL}")), "{text}");
+    assert!(text.contains("Open Login Items"), "the hint for t: {text}");
+    assert!(text.contains("Remove lid helper"), "the hint for d: {text}");
+    use crate::keep_awake::KeepAwakeAction;
+    assert_eq!(lid_key(&mut shell, 't'), KeepAwakeAction::TurnOnLidHold);
+    assert_eq!(lid_key(&mut shell, 'd'), KeepAwakeAction::RemoveLidHelper);
+
+    let mut shell = helper_page(LidSupport::NotTurnedOn, LidRule::AcOnly);
+    let text = shown(&mut shell);
+    assert!(text.contains("Lid helper  Not turned on yet"), "{text}");
+    assert!(text.contains("Turn on lid-closed hold"), "{text}");
+    assert_eq!(lid_key(&mut shell, 't'), KeepAwakeAction::TurnOnLidHold);
+    shell.key(Key::Char('d'));
+    assert_eq!(saves(&mut shell), Vec::new(), "nothing to remove yet");
+}
+
+#[test]
+fn a_failed_unregister_keeps_offering_remove_lid_helper_in_settings() {
+    let reason = "Remove lid helper did not finish: Operation not permitted";
+    let lid = LidSupport::RemoveHelper {
+        reason: reason.into(),
+    };
+    let mut shell = helper_page(lid, LidRule::AcOnly);
+    let text = shown(&mut shell);
+    assert!(text.contains(&format!("Lid helper  {reason}")), "{text}");
+    assert_eq!(
+        lid_key(&mut shell, 'd'),
+        crate::keep_awake::KeepAwakeAction::RemoveLidHelper
+    );
+}
+
+#[test]
+fn the_settings_page_has_no_lid_helper_line_off_macos() {
+    let mut view = on_mac(LidSupport::NotTurnedOn);
+    view.platform = Platform::Linux;
+    let mut shell = page(view);
+    let text = shown(&mut shell);
+    assert!(!text.contains("Lid helper"), "{text}");
+    for key in ['t', 'd'] {
+        shell.key(Key::Char(key));
+        assert_eq!(saves(&mut shell), Vec::new(), "{key}");
+    }
+    let mut shell = page(resting());
+    let text = shown(&mut shell);
+    assert!(text.contains("Lid helper  Not set up on this computer yet"), "{text}");
+    assert!(!text.contains("Turn on lid-closed hold"), "{text}");
+}
+
+#[test]
+fn a_refused_lid_command_in_settings_says_why_and_keeps_the_picks() {
+    let mut shell = helper_page(LidSupport::NotTurnedOn, LidRule::AcOnly);
+    shell.key(Key::Right);
+    shell.key(Key::Char('t'));
+    let sent = saves(&mut shell);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    answer(&mut shell, sent[0].clone(), Err("keep_awake_no_lid_helper".into()));
+    let text = shown(&mut shell);
+    assert!(text.contains("The lid helper was not changed."), "{text}");
+    assert!(text.contains("Lid-closed hold is set up only on macOS."), "{text}");
+    assert!(text.contains("Save changes"), "the pick is still there: {text}");
 }

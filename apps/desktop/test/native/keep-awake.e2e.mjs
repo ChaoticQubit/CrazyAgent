@@ -1,7 +1,8 @@
 import "../load-source.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CONTROL, FORM, PANEL, SETTINGS_TITLE, controlLabel, engineAct, engineView, minutesLeft, onEngine, openPanel, panelText, until } from "./keep-awake-engine.mjs";
+import { setTimeout as pause } from "node:timers/promises";
+import { CONTROL, FORM, PANEL, SETTINGS_TITLE, controlLabel, engineAct, engineTry, engineView, minutesLeft, onEngine, openPanel, panelText, until } from "./keep-awake-engine.mjs";
 
 const { KEEP_AWAKE_DEFAULTS, KEEP_AWAKE_SETTINGS } = await import("../../src/api-keep-awake.ts");
 
@@ -213,4 +214,35 @@ test("Keep awake: a Settings save keeps a mode changed in the panel or by anothe
     const stored = (await engineView(bridge)).settings;
     return { mode: stored.mode, grace: stored.grace, cap: stored.cap };
   });
+}));
+
+const LID_BUTTONS = ["Turn on lid-closed hold", "Open Login Items", "Remove lid helper"];
+const LID_HELD_STILL_MS = 5000;
+
+/** The lid helper buttons the page shows now, by their words. Input: the page. Output: the
+ * words of each one shown. */
+async function lidButtons(page) {
+  return page.evaluate(`[...document.querySelectorAll("button")].map((entry) => entry.innerText.trim()).filter((words) => ${JSON.stringify(LID_BUTTONS)}.includes(words))`);
+}
+
+test("Keep awake: an engine with no lid helper in its bundle offers no lid helper button, and a lid command sent anyway reaches nothing", { timeout: 600000 }, (t) => onEngine(t, "ca-ka-lid-helper-", async ({ bridge, me, page, open }) => {
+  const first = await engineView(bridge);
+  if (first.platform !== "mac_os") {
+    for (const action of ["turn_on_lid_hold", "remove_lid_helper"]) {
+      const receipt = await engineTry(bridge, action);
+      assert.deepEqual([receipt.outcome, receipt.rejection], ["rejected", "keep_awake_no_lid_helper"], action);
+    }
+    return;
+  }
+  await until("the lid line read this engine's bundle first (QUESTION 35k)", "helper_missing", async () => (await engineView(bridge)).lid_platform.kind);
+  await settingsPage(me, open);
+  await me.waitFor("the lid helper line", (text) => text.includes("Lid helper") && text.includes("Not set up on this computer yet"));
+  assert.deepEqual(await lidButtons(page), [], "Settings offers no lid helper button");
+  await openPanel(me, page);
+  assert.deepEqual(await lidButtons(page), [], "the panel offers none either");
+  for (const action of ["turn_on_lid_hold", "remove_lid_helper"]) await engineAct(bridge, action);
+  for (const deadline = Date.now() + LID_HELD_STILL_MS; Date.now() < deadline; await pause(500)) {
+    assert.equal((await engineView(bridge)).lid_platform.kind, "helper_missing", "a lid command stops at the bundle check");
+  }
+  assert.deepEqual(await lidButtons(page), []);
 }));

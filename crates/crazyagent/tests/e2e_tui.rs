@@ -3082,6 +3082,38 @@ mod keep_awake {
         };
         assert_eq!(after.settings, want);
     }
+
+    /// The lid helper keys on a real engine (QUESTION 37a): a test engine has no helper in
+    /// its bundle, so its lid line stops at helper_missing before SMAppService, and neither
+    /// the screen nor Settings offers t or d. The row proves helper_missing first, so no key
+    /// it presses can reach the real daemon registration (35k).
+    #[test]
+    fn the_tui_offers_no_lid_helper_key_on_an_engine_with_no_helper_in_its_bundle() {
+        let offers = ["Turn on lid-closed hold", "Open Login Items", "Remove lid helper"];
+        let after = on_screen(&[], |pty, runtime, engine| {
+            let first = settled(runtime, engine, "the lid line read the bundle", |view| {
+                view.platform != crazyagent::paths::Platform::MacOs
+                    || view.lid_platform == crazyagent::keep_awake::LidSupport::HelperMissing
+            });
+            pty.keys(&["t", "d", "s"]);
+            pty.until("s opens Settings / Keep awake", |screen| {
+                header_row(screen).contains("Settings  /  Keep awake")
+                    && screen.contains("When it holds")
+            });
+            let mac = first.platform == crazyagent::paths::Platform::MacOs;
+            pty.until("the lid helper line, on macOS only", |screen| {
+                screen.contains("Lid helper  Not set up on this computer yet") == mac
+            });
+            pty.keys(&["t", "d"]);
+            let screen = pty.screen();
+            for words in offers {
+                assert!(!screen.contains(words), "{words} is not offered: {screen}");
+            }
+            let later = view(runtime, engine);
+            assert_eq!(later.lid_platform, first.lid_platform, "nothing was sent");
+        });
+        assert_eq!(after.settings, KeepAwakeSettings::DEFAULT);
+    }
 }
 
 /// The Models page rows (DEC-150): each model choice option the TUI offers, on a real engine

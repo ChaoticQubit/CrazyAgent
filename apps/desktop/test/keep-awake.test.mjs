@@ -28,6 +28,15 @@ const SHELL = source("../src/ui/shell.tsx");
 const APP = source("../src/app.tsx");
 const NOTICE_CSS = source("../src/screens/notifications/notifications.css");
 const SETTINGS_PAGE = source("../src/screens/settings/keep-awake.tsx");
+const PANEL_PAGE = source("../src/screens/keep-awake/panel.tsx");
+const ENGINE_LID = `${source("../../../crates/crazyagent/src/keep_awake/hold_macos.rs")}\n${source("../../../crates/crazyagent/src/keep_awake/power.rs")}`;
+const TUI_WORDS = source("../../../crates/crazyagent/src/tui/screens/keep_awake/words.rs");
+const engineWords = (name) => {
+  const found = new RegExp(`pub(?:\\(super\\))? const ${name}: &str =\\s*"([^"]+)";`).exec(ENGINE_LID);
+  assert.ok(found, `the engine's lid words have ${name}`);
+  return found[1];
+};
+const APPROVAL = "Allow the lid helper in System Settings to hold with the lid closed.";
 
 const NOW = 1_800_000_000_000;
 const MINUTE = 60_000;
@@ -47,6 +56,7 @@ const view = (state = {}, extra = {}) => ({
   settings: { ...api.KEEP_AWAKE_DEFAULTS, ...extra.settings },
   state: { want: { kind: "nothing" }, reason: "idle", ends_at_ms: null, ended: null, ...state },
   lid_support: extra.lid_support ?? { kind: "helper_missing" },
+  lid_platform: extra.lid_platform ?? { kind: "helper_missing" },
   platform: extra.platform ?? "mac_os",
   work: extra.work ?? 0,
 });
@@ -89,10 +99,10 @@ test("the window names every engine option and default of Keep awake as the engi
   }
   const defaults = Object.fromEntries([...ENGINE_SETTINGS.slice(ENGINE_SETTINGS.indexOf("pub const DEFAULT: Self = Self {")).split("};")[0].matchAll(/(\w+): \w+::(\w+),/g)].map(([, field, variant]) => [field, snake(variant)]));
   assert.deepEqual(api.KEEP_AWAKE_DEFAULTS, defaults, "the defaults are the engine's");
-  assert.deepEqual(variants(ENGINE_STATE, "LidSupport"), ["held", "off", "idle_only_on_battery", "needs_macos13", "needs_approval", "helper_missing", "locked_by_policy", "not_available"]);
+  assert.deepEqual(variants(ENGINE_STATE, "LidSupport"), ["held", "off", "idle_only_on_battery", "needs_macos13", "needs_approval", "helper_missing", "not_turned_on", "remove_helper", "sleep_not_restored", "locked_by_policy", "not_available"]);
   assert.deepEqual(variants(ENGINE_STATE, "EndReason"), ["battery", "battery_unread", "heat", "cap", "manual", "off", "hold_lost"]);
   assert.deepEqual(variants(ENGINE_STATE, "Reason"), ["work", "timer", "grace", "idle", "off"]);
-  assert.deepEqual(variants(ENGINE, "KeepAwakeAction"), ["start", "extend", "end", "set"]);
+  assert.deepEqual(variants(ENGINE, "KeepAwakeAction"), ["start", "extend", "end", "set", "turn_on_lid_hold", "remove_lid_helper"]);
   assert.match(ENGINE, /minutes outside 1 to 1440/);
   assert.deepEqual([api.MINUTES_MIN, api.MINUTES_MAX], [1, 1440]);
 });
@@ -167,6 +177,7 @@ test("every refusal of a Keep awake change has its own sentence, the engine's se
     keep_awake_no_timer: "The timer already ended. Start a new one.",
     keep_awake_not_holding: "Nothing is held right now.",
     keep_awake_minutes_invalid: "Enter whole minutes from 1 to 1440.",
+    keep_awake_no_lid_helper: "Lid-closed hold is set up only on macOS.",
   };
   const refused = new Set([...ENGINE.matchAll(/return Some\("(keep_awake_[a-z_]+)"\);/g)].map(([, code]) => code));
   assert.deepEqual([...refused].sort(), Object.keys(words).sort(), "the engine refuses with these codes and no other");
@@ -229,6 +240,17 @@ test("the Lid closed line says the rule, and why this computer cannot hold it", 
   const refused = /pub const LID_REFUSED: &str = "([^"]+)";/.exec(source("../../../crates/crazyagent/src/keep_awake/power.rs"))[1];
   assert.equal(model.lidReason(view({}, { lid_support: { kind: "not_available", reason: refused } })), refused, "the engine's reason for a refused lid lock shows whole");
   assert.equal(model.lidReason(view({}, { lid_support: { kind: "off" }, settings: { lid: "off" } })), null);
+  const pin = engineWords("PIN_NONE");
+  const newer = [
+    [{ kind: "not_turned_on" }, "Not turned on yet"],
+    [{ kind: "remove_helper", reason: pin }, pin],
+    [{ kind: "sleep_not_restored" }, "Sleep not restored: see Notifications"],
+  ];
+  for (const [lid, words] of newer) {
+    assert.equal(model.lidReason(view({}, { lid_support: lid })), words, lid.kind);
+    assert.ok(lid.kind === "remove_helper" || TUI_WORDS.includes(JSON.stringify(words)), `the TUI says ${words}`);
+  }
+  assert.equal(model.lidReason(view({}, { lid_support: { kind: "remove_helper", reason: "r".repeat(300) } })).length, 200, "a long reason is cut");
 });
 
 test("a setting this computer cannot honour carries its reason, and the others none", () => {
@@ -291,7 +313,7 @@ test("before the first read and without an engine the control reads Keep awake, 
 
 const panelView = (loaded, extra = {}) => renderToStaticMarkup(createElement(panel.KeepAwakePanelView, {
   view: loaded, now: NOW, custom: false, typed: "", busy: false, problem: "",
-  onStart: forbidden, onCustom: forbidden, onType: forbidden, onExtend: forbidden, onEnd: forbidden, onMode: forbidden, onRetry: forbidden, ...extra,
+  onStart: forbidden, onCustom: forbidden, onType: forbidden, onExtend: forbidden, onEnd: forbidden, onMode: forbidden, onLid: forbidden, onRetry: forbidden, ...extra,
 }));
 const button = (markup, label) => [...markup.matchAll(/<button[^>]*>.*?<\/button>/g)].map(([tag]) => tag).find((tag) => text(tag) === label);
 const disabled = (markup, label) => {
@@ -439,7 +461,7 @@ test("Settings lists Keep awake in the App group, right after Notifications", ()
 });
 
 const settingsView = (loaded, extra = {}) => renderToStaticMarkup(createElement(settings.KeepAwakeSettingsView, {
-  view: loaded, picks: {}, saving: false, problem: "", onPick: forbidden, onSave: forbidden, onRetry: forbidden, ...extra,
+  view: loaded, picks: {}, saving: false, problem: "", onPick: forbidden, onSave: forbidden, onLid: forbidden, onRetry: forbidden, ...extra,
 }));
 const MARK = '<span class="set-changed">changed</span>';
 const saveDisabled = (markup) => /<button type="submit"[^>]*disabled=""/.test(markup);
@@ -512,7 +534,7 @@ test("Settings shows the reason on a setting this computer cannot honour and kee
   assert.ok(text(lineOf(windows, "lid")).includes("Lid-closed hold is not set up on this computer"));
   assert.equal(text(lineOf(windows, "mode")).includes("Not available"), false);
   assert.equal(/<fieldset[^>]*disabled=""/.test(windows), false, "the choice stays editable and is stored");
-  const mac = settingsView(ok(view({}, { lid_support: { kind: "held" } })));
+  const mac = settingsView(ok(view({}, { lid_support: { kind: "held" }, lid_platform: { kind: "held" } })));
   for (const words of ["Not available on Windows", "Only on macOS", "Not set up on this computer yet"]) assert.equal(text(mac).includes(words), false, words);
 });
 
@@ -540,4 +562,115 @@ test("the window reads and changes Keep awake through two commands the app regis
   assert.throws(() => api.keepAwakeArgs("end", 0), /generation/);
   assert.match(API, /call<KeepAwakeView>\("desktop_keep_awake_read"\)/);
   assert.match(API, /call<IntentReceipt>\("desktop_keep_awake_act", keepAwakeArgs\(/);
+});
+
+test("the lid helper buttons follow what this Mac says of the lid, on macOS only", () => {
+  const failed = `${engineWords("TURN_ON_FAILED")}Invalid argument`;
+  assert.equal(model.TURN_ON_FAILED, engineWords("TURN_ON_FAILED"), "the window knows a failed Turn on by the engine's words");
+  const TURN_ON = { turnOn: "Turn on lid-closed hold", remove: false };
+  const LOGIN_ITEMS = "Open Login Items";
+  const cases = [
+    [{ kind: "not_turned_on" }, TURN_ON, TURN_ON],
+    [{ kind: "needs_approval" }, { turnOn: LOGIN_ITEMS, remove: true }, { turnOn: LOGIN_ITEMS, remove: false }],
+    [{ kind: "not_available", reason: failed }, TURN_ON, TURN_ON],
+    [{ kind: "held" }, { turnOn: null, remove: true }, { turnOn: null, remove: false }],
+    [{ kind: "remove_helper", reason: engineWords("PIN_NONE") }, { turnOn: null, remove: true }, { turnOn: null, remove: true }],
+    [{ kind: "sleep_not_restored" }, { turnOn: null, remove: true }, { turnOn: null, remove: false }],
+    [{ kind: "not_available", reason: engineWords("HELPER_UNANSWERED") }, { turnOn: null, remove: true }, { turnOn: null, remove: false }],
+    [{ kind: "helper_missing" }, { turnOn: null, remove: false }, { turnOn: null, remove: false }],
+    [{ kind: "needs_macos13" }, { turnOn: null, remove: false }, { turnOn: null, remove: false }],
+    [{ kind: "locked_by_policy" }, { turnOn: null, remove: false }, { turnOn: null, remove: false }],
+  ];
+  const none = { turnOn: null, remove: false };
+  for (const [lid, inSettings, inPanel] of cases) {
+    const mac = view({}, { lid_platform: lid });
+    assert.deepEqual(model.lidOffers(mac, "settings"), inSettings, `settings ${lid.kind}`);
+    assert.deepEqual(model.lidOffers(mac, "panel"), inPanel, `panel ${lid.kind}`);
+    const ruledOff = view({}, { lid_platform: lid, lid_support: { kind: "off" }, settings: { lid: "off" } });
+    assert.deepEqual(model.lidOffers(ruledOff, "settings"), inSettings, `Settings offers ${lid.kind} whatever the rule (QUESTION 36c)`);
+    assert.deepEqual(model.lidOffers(ruledOff, "panel"), none, `the panel offers nothing for ${lid.kind} while the rule is Off`);
+    for (const platform of ["linux", "windows"]) {
+      for (const place of ["settings", "panel"]) assert.deepEqual(model.lidOffers(view({}, { platform, lid_platform: lid }), place), none, `${platform} ${place} ${lid.kind}`);
+    }
+  }
+});
+
+test("Settings says where the lid helper stands, with the approval line while it waits", () => {
+  const line = (lid) => model.lidHelperLine(view({}, { lid_platform: lid }));
+  assert.equal(line({ kind: "needs_approval" }), APPROVAL);
+  assert.equal(line({ kind: "held" }), "Turned on");
+  assert.equal(line({ kind: "not_turned_on" }), "Not turned on yet");
+  assert.equal(line({ kind: "helper_missing" }), "Not set up on this computer yet");
+  assert.equal(line({ kind: "sleep_not_restored" }), "Sleep not restored: see Notifications");
+  const pin = engineWords("PIN_OTHER");
+  assert.equal(line({ kind: "remove_helper", reason: pin }), pin);
+  assert.ok(TUI_WORDS.includes(JSON.stringify("Turned on")), "the TUI says the same");
+});
+
+test("a none pin makes the panel offer Remove lid helper, and only while the lid rule is on", () => {
+  const pin = engineWords("PIN_NONE");
+  const lid = { kind: "remove_helper", reason: pin };
+  const markup = panelView(ok(working(2, { lid_support: lid, lid_platform: lid })));
+  assert.ok(text(markup).includes(pin), "the panel says why");
+  assert.equal(disabled(markup, "Remove lid helper"), false);
+  assert.equal(button(markup, "Turn on lid-closed hold"), undefined);
+  assert.equal(disabled(panelView(ok(working(2, { lid_support: lid, lid_platform: lid })), { busy: true }), "Remove lid helper"), true, "one change at a time");
+  const ruledOff = panelView(ok(view({}, { lid_support: { kind: "off" }, lid_platform: lid, settings: { lid: "off" } })));
+  assert.equal(button(ruledOff, "Remove lid helper"), undefined, "Settings offers it while the rule is Off");
+  assert.match(PANEL_PAGE, /onLid=\{\(action\) => void send\(action\)\}/, "a press sends the command as it is");
+});
+
+test("the panel offers Turn on lid-closed hold, then Open Login Items with the approval line while approval waits", () => {
+  const off = { kind: "not_turned_on" };
+  const first = panelView(ok(view({}, { lid_support: off, lid_platform: off })));
+  assert.equal(disabled(first, "Turn on lid-closed hold"), false);
+  assert.ok(text(first).includes("Not turned on yet"));
+  const waiting = { kind: "needs_approval" };
+  const pending = panelView(ok(view({}, { lid_support: waiting, lid_platform: waiting })));
+  assert.equal(disabled(pending, "Open Login Items"), false, "pressed again it opens Login Items again (QUESTION 35j)");
+  assert.equal(button(pending, "Turn on lid-closed hold"), undefined);
+  assert.ok(text(pending).includes(APPROVAL), "the approval screen's line");
+  const failed = { kind: "not_available", reason: `${engineWords("TURN_ON_FAILED")}Invalid argument` };
+  const again = panelView(ok(view({}, { lid_support: failed, lid_platform: failed })));
+  assert.ok(text(again).includes("Invalid argument"), "a failed Turn on says why");
+  assert.equal(disabled(again, "Turn on lid-closed hold"), false, "and can be pressed again");
+});
+
+test("a failed unregister keeps offering Remove lid helper in the panel and in Settings", () => {
+  const reason = `${engineWords("REMOVE_UNFINISHED")}Operation not permitted`;
+  const lid = { kind: "remove_helper", reason };
+  const inPanel = panelView(ok(view({}, { lid_support: lid, lid_platform: lid })));
+  assert.ok(text(inPanel).includes(reason));
+  assert.equal(disabled(inPanel, "Remove lid helper"), false);
+  const inSettings = settingsView(ok(view({}, { lid_support: lid, lid_platform: lid })));
+  assert.ok(text(inSettings).includes(reason));
+  assert.equal(disabled(inSettings, "Remove lid helper"), false);
+});
+
+test("Settings shows the lid helper line and its buttons whatever the lid rule, on macOS only", () => {
+  const waiting = { kind: "needs_approval" };
+  const ruledOff = settingsView(ok(view({}, { lid_support: { kind: "off" }, lid_platform: waiting, settings: { lid: "off" } })));
+  assert.ok(text(ruledOff).includes(`Lid helper ${APPROVAL}`), text(ruledOff));
+  assert.equal(disabled(ruledOff, "Open Login Items"), false);
+  assert.equal(disabled(ruledOff, "Remove lid helper"), false);
+  assert.equal(disabled(settingsView(ok(view({}, { lid_platform: waiting })), { saving: true }), "Open Login Items"), true, "one change at a time");
+  const missing = settingsView(ok(view()));
+  assert.ok(text(missing).includes("Lid helper Not set up on this computer yet"));
+  for (const label of ["Turn on lid-closed hold", "Open Login Items", "Remove lid helper"]) assert.equal(button(missing, label), undefined, label);
+  const linux = settingsView(ok(view({}, { platform: "linux", lid_platform: { kind: "held" } })));
+  assert.equal(text(linux).includes("Lid helper"), false, "only macOS has a lid helper");
+  assert.match(SETTINGS_PAGE, /onLid=\{\(action\) => void lid\(action\)\}/, "a press sends the command as it is");
+});
+
+test("Settings reads Keep awake again every 5 s while open, so a lid helper command shows what it did", () => {
+  assert.match(SETTINGS_PAGE, /window\.setInterval\(reload, KEEP_AWAKE_POLL_MS\)/);
+  assert.match(SETTINGS_PAGE, /window\.clearInterval\(/);
+});
+
+test("the two lid helper commands go to the engine by their plain names", () => {
+  for (const action of ["turn_on_lid_hold", "remove_lid_helper"]) {
+    assert.doesNotThrow(() => api.keepAwakeArgs(action, 7), action);
+    assert.deepEqual(api.keepAwakeArgs(action, 7), { action, generation: 7 });
+  }
+  assert.match(ENGINE, /KeepAwakeAction::TurnOnLidHold => power::LidCommand::TurnOn/);
 });

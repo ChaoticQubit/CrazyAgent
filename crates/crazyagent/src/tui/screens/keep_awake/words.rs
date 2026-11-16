@@ -214,6 +214,40 @@ pub(in crate::tui) fn ends_by_itself(settings: &KeepAwakeSettings) -> String {
     }
 }
 
+/// Where lid helper keys show: the Keep awake screen, only while the lid rule is on, or
+/// Settings, whatever the rule (QUESTION 36c).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum LidPlace {
+    Screen,
+    Settings,
+}
+
+/// The lid helper keys one place offers: t with its words, or none, and whether d removes
+/// the lid helper.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct LidOffers {
+    pub turn_on: Option<&'static str>,
+    pub remove: bool,
+}
+
+/// The lid helper keys a view offers in one place, from what this Mac says of the lid
+/// (QUESTION 35f, 35i, 35j, 36c), the desktop's buttons. Inputs: the view and the place.
+/// Output: the offers.
+pub(in crate::tui) fn lid_offers(view: &KeepAwakeView, place: LidPlace) -> LidOffers {
+    let _ = (view, place);
+    LidOffers {
+        turn_on: None,
+        remove: false,
+    }
+}
+
+/// The Settings line on the lid helper: the approval line while it waits, else why it
+/// cannot hold, else that it is on. Input: the view. Output: the words.
+pub(in crate::tui) fn lid_helper_line(view: &KeepAwakeView) -> String {
+    let _ = view;
+    String::new()
+}
+
 /// What the lid rule does with a closed lid. Input: the rule. Output: the words.
 pub(in crate::tui) fn lid_closed(rule: LidRule) -> &'static str {
     match rule {

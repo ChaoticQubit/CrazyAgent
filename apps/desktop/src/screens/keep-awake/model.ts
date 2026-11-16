@@ -173,6 +173,32 @@ export function lidReason(view: KeepAwakeView): string | null {
   }
 }
 
+/** The start of the lid words for a Turn on that macOS refused, the engine's
+ * `TURN_ON_FAILED`. */
+export const TURN_ON_FAILED = "";
+
+/** Where lid helper buttons show: the panel, only while the lid rule is on, or Settings. */
+export type LidPlace = "panel" | "settings";
+
+/** The lid helper buttons one place offers: the Turn on button's words, or null, and
+ * whether Remove lid helper shows. */
+export interface LidOffers { turnOn: string | null; remove: boolean }
+
+/** The lid helper buttons a view offers in one place, from what this Mac says of the lid
+ * (QUESTION 35f, 35i, 35j, 36c). Inputs: the view and the place. Output: the offers. */
+export function lidOffers(view: KeepAwakeView, place: LidPlace): LidOffers {
+  void view;
+  void place;
+  return { turnOn: null, remove: false };
+}
+
+/** The Settings line on the lid helper: the approval line while it waits, else why it
+ * cannot hold, else that it is on. Input: the view. Output: the words. */
+export function lidHelperLine(view: KeepAwakeView): string {
+  void view;
+  return "";
+}
+
 /** Why this computer cannot honour one setting, or null when it can. Inputs: the setting
  * and the view. Output: the reason shown on the setting's line, or null. */
 export function unavailable(id: KeepAwakeSettingId, view: KeepAwakeView): string | null {
