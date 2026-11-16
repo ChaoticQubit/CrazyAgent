@@ -1390,3 +1390,30 @@ fn a_search_finds_words_in_a_listed_agent_s_jsonl_append_record() {
     let (page, _) = fixture.session(&format!("agent-{agent}/s-7"), 0);
     assert!(page.contains("The zebra plan is done"), "{page}");
 }
+
+/// rv-ds241 t20trees nits: a listed agent's records are named with their account, so two
+/// accounts' records of the same name are both found, and only files its manifest's record
+/// path names are records, never another file in the record folder's subfolders.
+#[test]
+fn a_listed_agent_s_records_are_named_with_their_account_and_only_its_record_path_counts() {
+    let fixture = Fixture::new();
+    let (agent, home) = fixture.agent("standin-jsonl-append");
+    let listed = home.join("standin-jsonl-append");
+    for (account, said) in [("account-1", "zebra one"), ("account-2", "zebra two")] {
+        let records = listed.join(account).join("standin").join("records");
+        let line = json!({"type": "started", "prompt": said}).to_string();
+        record(&records.join("s-7.jsonl"), &[line]);
+    }
+    let stray = json!({"type": "started", "prompt": "zebra stray"}).to_string();
+    let old = listed.join("account-1").join("standin").join("records");
+    record(&old.join("old").join("s-9.jsonl"), &[stray]);
+
+    let text = fixture.sessions("zebra");
+
+    let hits = hit_lines(&text);
+    let has = |prefix: String| hits.iter().any(|hit| hit.starts_with(&prefix));
+    let typed = |account: &str| format!("- agent-{agent}/{account}/s-7 #0 typed");
+    assert!(has(typed("account-1")), "{text}");
+    assert!(has(typed("account-2")), "{text}");
+    assert!(hits.iter().all(|hit| !hit.contains("/s-9 #")), "{text}");
+}
