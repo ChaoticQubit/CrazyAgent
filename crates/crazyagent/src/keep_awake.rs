@@ -405,7 +405,7 @@ fn view_of(
     stored: &Stored,
 ) -> KeepAwakeView {
     assert!(freeze_apps.len() <= freeze::APPS_MAX);
-    let view = KeepAwakeView {
+    KeepAwakeView {
         settings,
         version,
         state: stored.decision,
@@ -415,9 +415,7 @@ fn view_of(
         work: stored.work,
         freeze_apps,
         low_power: stored.sensors.low_power.clone(),
-    };
-    assert_eq!(view.low_power, stored.sensors.low_power);
-    view
+    }
 }
 
 /// Evaluates Keep awake now: counts the running work, decides, and stores the run state
