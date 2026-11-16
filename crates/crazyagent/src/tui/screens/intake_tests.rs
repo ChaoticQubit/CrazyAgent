@@ -3053,20 +3053,13 @@ fn job_asks(shell: &mut Shell) -> Vec<IntakeQuery> {
         .collect()
 }
 
-/// The job changes among the intake requests queued so far: starts, stops and dismissals,
-/// leaving out the reads a page asks when it opens, such as Home's projects folder and
-/// found folders. Takes the shell. Returns those changes.
-fn job_changes(shell: &mut Shell) -> Vec<IntakeQuery> {
+/// The intake requests queued so far, leaving out only the two reads Home asks each time it
+/// is shown: its projects folder and the found folders. Takes the shell. Returns every other
+/// intake request, so any write sent past those reads stays in the result.
+fn past_home_reads(shell: &mut Shell) -> Vec<IntakeQuery> {
     job_asks(shell)
         .into_iter()
-        .filter(|query| {
-            matches!(
-                query,
-                IntakeQuery::JobStart { .. }
-                    | IntakeQuery::JobStop { .. }
-                    | IntakeQuery::JobDismiss { .. }
-            )
-        })
+        .filter(|query| !matches!(query, IntakeQuery::Home | IntakeQuery::Found))
         .collect()
 }
 
@@ -3281,7 +3274,7 @@ fn home_starts_a_failed_project_move_again_by_its_project_and_says_a_refusal_in_
 
 /// DEC-177: answering a project move's soft refusal asks that question with Keep it here in
 /// place of Use where it is, since the project is set up already. Keep it here and Esc go
-/// Home and start, stop or dismiss no job, while Home asks its own reads; Move anyway starts
+/// Home and send nothing past the reads Home asks when shown; Move anyway starts
 /// the move of that project again with the new override and says so.
 #[test]
 fn answering_a_project_move_s_soft_refusal_moves_that_project_or_keeps_it_where_it_is() {
@@ -3333,16 +3326,16 @@ fn answering_a_project_move_s_soft_refusal_moves_that_project_or_keeps_it_where_
     shell.key(Key::Enter);
     assert_eq!(shell.place(), Some(Place::Home));
     assert!(
-        job_changes(&mut shell).is_empty(),
-        "Keep it here starts, stops and dismisses nothing"
+        past_home_reads(&mut shell).is_empty(),
+        "Keep it here sends nothing past Home's own reads"
     );
 
     let mut shell = answer();
     shell.key(Key::Esc);
     assert_eq!(shell.place(), Some(Place::Home));
     assert!(
-        job_changes(&mut shell).is_empty(),
-        "Esc starts, stops and dismisses nothing"
+        past_home_reads(&mut shell).is_empty(),
+        "Esc sends nothing past Home's own reads"
     );
 
     let mut shell = answer();
