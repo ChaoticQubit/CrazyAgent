@@ -114,7 +114,7 @@ pub(in crate::tui) const REFUSED_FILE: &str = "Fix its file, or remove it on the
 pub(in crate::tui) const READ_TO_THE_END: &str =
     "Read the trust screen to its end first, with Down or PgDn.";
 
-const REFUSALS: [(&str, &str); 17] = [
+const REFUSALS: [(&str, &str); 19] = [
     (
         "app_plugin_bundled",
         "Built-in connectors can't be removed or replaced.",
@@ -175,6 +175,11 @@ const REFUSALS: [(&str, &str); 17] = [
         "app_plugins_unavailable",
         "Connectors aren't available in this engine yet.",
     ),
+    (
+        "connector_approval_closed",
+        "This write was already answered or its wait ran out. The page now shows where it stands.",
+    ),
+    ("connector_approval_unknown", "That approval is gone."),
     (
         "connector_project_unknown",
         "That project is not set up here any more.",
