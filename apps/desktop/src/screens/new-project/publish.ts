@@ -14,6 +14,8 @@ export const SIGN_IN_UNREAD = "CrazyAgent couldn't read your GitHub sign-in.";
 export const OVERVIEW_DETAILS_WAIT = "Fix the GitHub details above first.";
 export const PUBLISH_STARTED = "Publishing on GitHub has started.";
 export const PUBLISH_NOT_STARTED = "Publishing on GitHub didn't start.";
+export const PUBLISH_MAY_HAVE_STARTED = "Publishing on GitHub may have started. The project's Overview shows where it stands.";
+const START_REPLY_LOST = ["github_outcome_unknown", "github_reply_bounds"];
 const ENGINE_STARTING = "CrazyAgent's engine is still starting.";
 export const REPO_NAME_BYTES_MAX = 100;
 export const OWNER_BYTES_MAX = 39;
@@ -171,11 +173,13 @@ export function startPublish(projectId: string, publish: PublishDraft, projectNa
   return plan ? startGitHubPublish(projectId, plan) : null;
 }
 
-/** Words what a made project's publish Start answered, for the message Create shows.
- * Input: the Start's result, or null when nothing was started. Output: the sentence, or
- * "" when nothing was started. */
+/** Words what a publish Start answered, for the message Create or the Overview shows: it
+ * started, it may have started when its reply was lost after the engine ran it, or why it
+ * didn't start. Input: the Start's result, or null when nothing was started. Output: the
+ * sentence, or "" when nothing was started. */
 export function publishOutcome(result: Result<GitHubPublishJob> | null): string {
   if (!result) return "";
   if (result.kind === "ok") return PUBLISH_STARTED;
+  if (result.kind === "error" && START_REPLY_LOST.includes(result.code)) return PUBLISH_MAY_HAVE_STARTED;
   return `${PUBLISH_NOT_STARTED} ${result.kind === "error" ? result.message : ENGINE_STARTING}`;
 }

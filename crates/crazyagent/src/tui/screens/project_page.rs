@@ -1,7 +1,9 @@
 use super::intake_job;
 use super::new_project::harness_name;
 use super::new_project_page::{hints_of, key_event, look, paint, pool_choices_from};
-use super::new_project_publish::{PUBLISH_NOT_STARTED, PUBLISH_STARTED};
+use super::new_project_publish::{
+    PUBLISH_MAY_HAVE_STARTED, PUBLISH_NOT_STARTED, PUBLISH_STARTED, PUBLISH_WHERE_IT_STANDS,
+};
 use super::new_project_view::{Row, Screen as View};
 use super::project::{
     MasterStatus, OpenRequest, ProjectReply, ProjectScreen, Speaker, Tab, Transcript,
@@ -60,6 +62,7 @@ const CHANGED_MISSING: &str =
 const CHANGED_NOTE: &str =
     "That was your copy in the project folder. The agent's version lands there when you accept.";
 const ANSWER_NOT_TAKEN: &str = "The publish answer wasn't taken.";
+const START_REPLY_LOST: [&str; 2] = ["github_outcome_unknown", "github_reply_bounds"];
 const ASK_STARTING: &str = "Starting the publish...";
 const ASK_SENDING: &str = "Sending your answer...";
 const ASK_READING: &str = "Checking...";
@@ -734,9 +737,9 @@ impl ProjectPage {
         }
     }
 
-    /// The line a made project's GitHub publish Start reply gives: the project is ready and
-    /// publishing started, or why publishing did not start. Takes the project's name and the
-    /// reply. Returns the message.
+    /// The line a GitHub publish Start reply gives: the project is ready and publishing
+    /// started, it may have started when the reply was lost after the engine ran it, or why
+    /// it did not start. Takes the project's name and the reply. Returns the message.
     pub(in crate::tui) fn publish_start_said(
         name: &str,
         result: &Result<IntakeView, String>,
@@ -745,11 +748,10 @@ impl ProjectPage {
             Ok(IntakeView::Publish(_)) => {
                 Message::success(&format!("{name} is ready."), PUBLISH_STARTED)
             }
-            Ok(_) => Message::warning(
-                PUBLISH_NOT_STARTED,
-                &super::intake::copy("github_outcome_unknown"),
-            ),
-            Err(code) => Message::warning(PUBLISH_NOT_STARTED, &super::intake::copy(code)),
+            Err(code) if !START_REPLY_LOST.contains(&code.as_str()) => {
+                Message::warning(PUBLISH_NOT_STARTED, &super::intake::copy(code))
+            }
+            _ => Message::warning(PUBLISH_MAY_HAVE_STARTED, PUBLISH_WHERE_IT_STANDS),
         }
     }
 

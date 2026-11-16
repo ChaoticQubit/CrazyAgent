@@ -120,6 +120,7 @@ export function GitHubPublishCard({ projectId, name, about }: { projectId: strin
   function started(made: GitHubPublishJob | null, line: string) {
     if (!made) {
       setProblem(line);
+      setTick((value) => value + 1);
       return;
     }
     setForm(false);
