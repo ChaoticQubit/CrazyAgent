@@ -379,74 +379,68 @@ pub(super) fn execute(
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(error)?;
             check_owner_admission(&tx, admission)?;
+            #[cfg(unix)]
+            let saved = registered(&tx, &id)?.map(|(_, record)| record.connection.auth);
             tx.execute("DELETE FROM accounts WHERE id=?1", [id.as_str()])
                 .map_err(error)?;
             crate::usage::forget_limits(&tx, &id)?;
+            #[cfg(not(unix))]
             if let ModelAuthentication::ApiKey { credential_ref } = &connection.auth {
                 super::trash::put(&tx, super::trash::ACCOUNT_KEY, credential_ref.as_str())?;
             }
             #[cfg(unix)]
-            let left = account_files(&connection.auth);
+            let left: std::collections::BTreeSet<(&str, &str)> = account_files(&connection.auth)
+                .into_iter()
+                .chain(saved.iter().flat_map(account_files))
+                .collect();
             #[cfg(unix)]
-            if let Some((kind, name)) = left {
+            for (kind, name) in &left {
                 super::trash::put(&tx, kind, name)?;
             }
             tx.commit().map_err(error)?;
             #[cfg(unix)]
-            {
-                let catalog = config.settings.model_access.as_ref();
-                if let ModelAuthentication::ApiKey { credential_ref } = &connection.auth {
-                    settle_removed(
-                        db,
-                        catalog,
-                        super::trash::ACCOUNT_KEY,
-                        credential_ref.as_str(),
-                    );
-                }
-                if let Some((kind, name)) = left {
-                    settle_removed(db, catalog, kind, name);
-                }
+            for (kind, name) in &left {
+                settle_removed(db, config.settings.model_access.as_ref(), kind, name);
             }
             Ok(ResultValue::Removed(Box::new(connection)))
         }
     }
 }
 
-/// Names the files a removed account leaves to delete beside its key: a native account's
-/// sign-in or an API key account's generated SDK home. Input: the account's authentication.
-/// Output: the trash kind and reference, none for an account with neither.
+/// Names the files an account's authentication leaves to delete once nothing names it: an
+/// API key account's key and generated SDK home, or a native account's sign-in.
+/// Input: the authentication. Output: each trash kind with its reference, none for others.
 #[cfg(unix)]
-fn account_files(auth: &ModelAuthentication) -> Option<(&'static str, &str)> {
+fn account_files(auth: &ModelAuthentication) -> Vec<(&'static str, &str)> {
     match auth {
-        ModelAuthentication::ApiKey { credential_ref } => {
-            Some((super::trash::GENERATED_HOME, credential_ref.as_str()))
-        }
+        ModelAuthentication::ApiKey { credential_ref } => vec![
+            (super::trash::ACCOUNT_KEY, credential_ref.as_str()),
+            (super::trash::GENERATED_HOME, credential_ref.as_str()),
+        ],
         ModelAuthentication::NativeManaged { profile_ref } => {
-            Some((super::trash::NATIVE_SIGN_IN, profile_ref.as_str()))
+            vec![(super::trash::NATIVE_SIGN_IN, profile_ref.as_str())]
         }
-        _ => None,
+        _ => Vec::new(),
     }
 }
 
-/// Names the API keys a settings change leaves no connection naming: each key reference an
-/// API key connection held before the change that no API key connection holds after it.
-/// Inputs: the catalogs before and after. Output: those references, each once.
+/// Names the files a settings change leaves no connection naming: each file of a connection
+/// before the change that no connection after it names with the same kind and reference.
+/// Inputs: the catalogs before and after. Output: those kinds with their references, once each.
 #[cfg(unix)]
-pub(super) fn dropped_keys(
+pub(super) fn dropped_files(
     before: Option<&crate::config::ModelAccess>,
     after: Option<&crate::config::ModelAccess>,
-) -> std::collections::BTreeSet<CredentialRef> {
-    let keys = |catalog: Option<&crate::config::ModelAccess>| {
+) -> std::collections::BTreeSet<(&'static str, String)> {
+    let files = |catalog: Option<&crate::config::ModelAccess>| {
         catalog
             .into_iter()
             .flat_map(|access| &access.connections)
-            .filter_map(|connection| match &connection.auth {
-                ModelAuthentication::ApiKey { credential_ref } => Some(credential_ref.clone()),
-                _ => None,
-            })
+            .flat_map(|connection| account_files(&connection.auth))
+            .map(|(kind, name)| (kind, name.to_owned()))
             .collect::<std::collections::BTreeSet<_>>()
     };
-    keys(before).difference(&keys(after)).cloned().collect()
+    files(before).difference(&files(after)).cloned().collect()
 }
 
 /// Deletes a removed account's files, or a dropped connection's, straight after the change

@@ -100,7 +100,7 @@ fn main_window<R: Runtime>(webview: &Webview<R>) -> Result<(), BridgeError> {
 /// Admits the main window and the terminal wall windows to the terminal, graph, stop and
 /// Terminals per window commands; any other window gets `window_denied`. Takes the calling
 /// page. Returns unit or the refusal.
-fn terminal_window(webview: &Webview) -> Result<(), BridgeError> {
+fn terminal_window<R: Runtime>(webview: &Webview<R>) -> Result<(), BridgeError> {
     if !bridge::terminal::window_label_valid(webview.label()) {
         return Err(engine_failure("window_denied"));
     }
@@ -111,7 +111,7 @@ fn terminal_window(webview: &Webview) -> Result<(), BridgeError> {
 /// terminal wall window only for the project its label was made for; any other window or
 /// project gets `window_denied`. Takes the calling page and the project id. Returns unit or
 /// the refusal.
-fn terminal_window_for(webview: &Webview, id: &str) -> Result<(), BridgeError> {
+fn terminal_window_for<R: Runtime>(webview: &Webview<R>, id: &str) -> Result<(), BridgeError> {
     terminal_window(webview)?;
     let label = webview.label();
     let admitted = label == "main"
@@ -2036,9 +2036,9 @@ fn desktop_focus_terminal_window(
 /// Inputs: the calling window, the app and the project id. Output: unit, `window_denied`
 /// from any other window or a wall window of another project, or `invalid_project`.
 #[tauri::command]
-fn desktop_close_project_walls(
-    webview: Webview,
-    app: AppHandle,
+fn desktop_close_project_walls<R: Runtime>(
+    webview: Webview<R>,
+    app: AppHandle<R>,
     id: String,
 ) -> Result<(), BridgeError> {
     terminal_window_for(&webview, &id)?;
@@ -2049,14 +2049,19 @@ fn desktop_close_project_walls(
 }
 
 /// Closes the terminal wall windows: every one, or only one project's. Inputs: the app and
-/// the project, if any. Output: none; a window that refuses to close stays open.
-fn close_walls(app: &AppHandle, project: Option<&ProjectId>) {
+/// the project, if any. Output: the labels of the walls asked to close and accepting it; a
+/// window that refuses to close stays open and is not listed.
+fn close_walls<R: Runtime>(app: &AppHandle<R>, project: Option<&ProjectId>) -> Vec<String> {
     let open = app.webview_windows();
+    let mut closed = Vec::new();
     for label in bridge::terminal::walls_to_close(open.keys().map(String::as_str), project) {
-        if let Some(wall) = open.get(label) {
-            let _ = wall.close();
+        if let Some(wall) = open.get(label)
+            && wall.close().is_ok()
+        {
+            closed.push(label.to_owned());
         }
     }
+    closed
 }
 
 /// Whether a webview may load a URL: the app's own pages only, and the dev server in a
@@ -5660,6 +5665,75 @@ mod tests {
             },
         )
         .map(|_| ())
+    }
+
+    /// UI-5-F3: the close walls command refuses a wall of another project and admits the main
+    /// window and the project's own wall; close_walls closes every wall of the removed project
+    /// and no other window, and every wall once main is gone. The mock runtime keeps a closed
+    /// window listed, as it runs no event loop, so the walls a close reached are read from
+    /// close_walls's own answer.
+    #[test]
+    fn a_removal_closes_every_wall_of_its_project_and_only_those_and_another_project_s_wall_is_refused()
+     {
+        let app = mock_builder()
+            .manage(ide::IdeViews::default())
+            .invoke_handler(admit_pages(tauri::generate_handler![
+                desktop_close_project_walls,
+            ]))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let page = |label: &str| {
+            WebviewWindowBuilder::new(&app, label, WebviewUrl::default())
+                .build()
+                .unwrap()
+        };
+        let (one, other) = (
+            ProjectId::new("project-one").unwrap(),
+            ProjectId::new("project-other").unwrap(),
+        );
+        let own = [
+            bridge::terminal::wall_label(&one, 1),
+            bridge::terminal::wall_label(&one, 2),
+        ];
+        let other_wall = bridge::terminal::wall_label(&other, 1);
+        let main = page("main");
+        let own_page = page(&own[0]);
+        let _ = page(&own[1]);
+        let other_page = page(&other_wall);
+        let close = json!({ "id": one.as_str() });
+        let refused = ask(
+            other_page.as_ref(),
+            "desktop_close_project_walls",
+            close.clone(),
+        )
+        .unwrap_err();
+        assert_eq!(refused["code"], "window_denied");
+        for admitted in [&own_page, &main] {
+            assert_eq!(
+                ask(
+                    admitted.as_ref(),
+                    "desktop_close_project_walls",
+                    close.clone()
+                ),
+                Ok(()),
+                "{}",
+                admitted.label()
+            );
+        }
+        let sorted = |mut labels: Vec<String>| {
+            labels.sort();
+            labels
+        };
+        assert_eq!(
+            sorted(close_walls(app.handle(), Some(&one))),
+            sorted(own.to_vec()),
+            "every wall of the removed project closes, and no other window"
+        );
+        assert_eq!(
+            sorted(close_walls(app.handle(), None)),
+            sorted(vec![own[0].clone(), own[1].clone(), other_wall.clone()]),
+            "once main is gone every wall closes, and main is not one"
+        );
     }
 
     #[test]

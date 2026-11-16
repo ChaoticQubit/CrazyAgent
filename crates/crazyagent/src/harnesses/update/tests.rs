@@ -1984,7 +1984,8 @@ fn an_npm_codex_with_no_node_the_resolver_finds_reads_needs_node_until_node_is_i
 /// v241 leader 20:31 fix 3: while a found harness still needs a program the resolver cannot
 /// find, a versions read never asks the harness for its version, so the Settings and first-run
 /// reads that wait on Node start nothing however often they come; the first read after the
-/// resolver finds the program asks once.
+/// resolver finds Node asks once, through the `node` beside the entry that `env` takes, which
+/// vid 1's vetted runs because it is Node (update.rs:874).
 #[test]
 fn a_harness_that_still_needs_a_program_is_never_asked_its_version_until_the_resolver_finds_it() {
     let machine = Machine::new();
@@ -1993,12 +1994,12 @@ fn a_harness_that_still_needs_a_program_is_never_asked_its_version_until_the_res
         .root
         .path()
         .join("node/lib/node_modules/@openai/codex/bin/codex.js");
-    executable(&real, "#!/usr/bin/env ca-version-runtime\n");
+    executable(&real, "#!/usr/bin/env node\n");
     let codex = machine.root.path().join("node/bin/codex");
     std::os::unix::fs::symlink(&real, &codex).unwrap();
     let asked = machine.root.path().join("asked");
     executable(
-        &machine.root.path().join("node/bin/ca-version-runtime"),
+        &machine.root.path().join("node/bin/node"),
         &format!(
             "#!/bin/sh\necho asked >> {}\necho 'codex-cli 0.167.1'\n",
             asked.display()
@@ -2017,7 +2018,7 @@ fn a_harness_that_still_needs_a_program_is_never_asked_its_version_until_the_res
                 .needs
                 .as_ref()
                 .and_then(|needs| needs.program.as_deref()),
-            Some("ca-version-runtime")
+            Some("node")
         );
         assert_eq!(versions.installed, None);
     }
@@ -2025,7 +2026,7 @@ fn a_harness_that_still_needs_a_program_is_never_asked_its_version_until_the_res
         !asked.exists(),
         "a harness that still needs its program is never run for its version"
     );
-    case.machine.program("setup/bin/ca-version-runtime", 0o755);
+    case.machine.program("setup/bin/node", 0o755);
     let versions = case.versions(false);
     assert_eq!(versions.needs, None);
     assert_eq!(versions.installed.as_deref(), Some("0.167.1"));

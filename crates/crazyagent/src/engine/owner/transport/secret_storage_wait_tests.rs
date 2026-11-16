@@ -894,48 +894,69 @@ async fn a_key_replaced_after_its_connection_was_removed_stays_for_the_other_on_
     busy.stop().await;
 }
 
-/// Removes one connection from the settings through the owner's ModelAccess edit, as the
-/// model-access screen does, on the basis the engine reads back, and asserts it applies.
-/// Inputs: the engine and the connection id.
-async fn remove_connection(busy: &Busy, id: &str) {
+/// Reads one model-access page or record from the owner. Inputs: the engine, a request
+/// label and the read. Output: the state the engine reads back.
+async fn owner_read(busy: &Busy, label: &str, query: OwnerRead) -> OwnerReadReply {
     let read = OwnerRequest {
         protocol_version: PROTOCOL_VERSION,
-        request_id: RequestId::new(format!("read-{id}")).unwrap(),
+        request_id: RequestId::new(format!("read-{label}")).unwrap(),
         expected_revision: Cursor::new(0),
-        operation: OwnerOperation::Read {
-            query: OwnerRead::ModelAccessPage {
-                collection: ModelAccessCollection::Connections,
-                cursor: None,
-                limit: 16,
-            },
-        },
+        operation: OwnerOperation::Read { query },
     };
     let reply = busy.client.request(read).await.unwrap();
     let OwnerResponse::Read { state } = reply.response else {
-        panic!("the model access page reads: {reply:?}");
+        panic!("the owner read answers: {reply:?}");
     };
+    state
+}
+
+/// Applies one settings edit through the owner's ModelAccess mutation, as the model-access
+/// screen does, on the basis the engine reads back, and asserts it applies. Inputs: the
+/// engine, a request label and the edit.
+async fn owner_edit(busy: &Busy, label: &str, edit: crate::config::ModelAccessEdit) {
+    let state = owner_read(
+        busy,
+        label,
+        OwnerRead::ModelAccessPage {
+            collection: ModelAccessCollection::Connections,
+            cursor: None,
+            limit: 16,
+        },
+    )
+    .await;
     let OwnerData::ModelAccessPage { source_hash, .. } = state.data else {
         panic!("the read answers with the model access page");
     };
     let change = OwnerRequest {
         protocol_version: PROTOCOL_VERSION,
-        request_id: RequestId::new(format!("remove-{id}")).unwrap(),
+        request_id: RequestId::new(format!("edit-{label}")).unwrap(),
         expected_revision: state.revision,
         operation: OwnerOperation::Apply {
             mutation: OwnerMutation::ModelAccess {
                 expected_config_id: state.config_id,
                 expected_source_hash: source_hash,
-                edit: crate::config::ModelAccessEdit::RemoveConnection {
-                    id: CredentialRef::new(id).unwrap(),
-                },
+                edit,
             },
         },
     };
     let reply = busy.client.request(change).await.unwrap();
     let OwnerResponse::Applied { operation } = &reply.response else {
-        panic!("the removal is applied: {reply:?}");
+        panic!("the edit is applied: {reply:?}");
     };
     assert_eq!(operation.result, OwnerResult::Applied);
+}
+
+/// Removes one connection from the settings, as the model-access screen does.
+/// Inputs: the engine and the connection id.
+async fn remove_connection(busy: &Busy, id: &str) {
+    owner_edit(
+        busy,
+        &format!("remove-{id}"),
+        crate::config::ModelAccessEdit::RemoveConnection {
+            id: CredentialRef::new(id).unwrap(),
+        },
+    )
+    .await;
 }
 
 /// ACCOUNT-REMOVE-KEY rv-secreview F1: an API key whose connections leave the settings
@@ -981,5 +1002,166 @@ async fn a_key_whose_last_connection_leaves_the_settings_goes_with_its_generated
         "the key goes once the last connection naming it leaves the settings"
     );
     assert!(!home.exists(), "its generated home goes whole");
+    busy.stop().await;
+}
+
+/// Reads one connection of the settings catalog. Inputs: the engine and the connection id.
+/// Output: the connection as the settings hold it.
+async fn catalog_connection(busy: &Busy, id: &CredentialRef) -> crate::config::ModelConnection {
+    let state = owner_read(
+        busy,
+        &format!("connection-{id}"),
+        OwnerRead::ModelAccessRecord {
+            collection: ModelAccessCollection::Connections,
+            id: id.clone(),
+        },
+    )
+    .await;
+    let OwnerData::ModelAccessRecord {
+        record: ModelAccessRecord::Connection { connection },
+        ..
+    } = state.data
+    else {
+        panic!("the settings hold the connection {id}");
+    };
+    connection
+}
+
+/// ACCOUNT-RECORD-LEG (rv-sec3 r2 F1): a saved API key account whose catalog connection was
+/// moved to another key reference, then removed, leaves neither its key file nor its
+/// generated home on disk, though the catalog no longer named that key at the removal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_saved_account_moved_to_another_key_and_removed_leaves_its_first_key_nowhere() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::DirBuilderExt;
+    let busy = Busy::with_settings("timeout_ms = 10000\n").await;
+    let listener = crate::spawn_gate::bind_tcp("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    let secret = format!("sk-record-leg-{}", std::process::id());
+    let added = busy
+        .client
+        .add_account(
+            AccountDraft {
+                provider: Provider::OpenaiCompatible,
+                method: SignInMethod::Url,
+                name: "Lab server".into(),
+                url: Some(url),
+                model: Some("lab-model".into()),
+            },
+            Some(AccountSecret::new(secret.as_bytes().to_vec()).unwrap()),
+        )
+        .await
+        .unwrap();
+    owner_edit(
+        &busy,
+        "pool",
+        crate::config::ModelAccessEdit::CreatePool {
+            pool: crate::config::AccountPool {
+                id: CredentialRef::new("lab-pool").unwrap(),
+                name: None,
+                members: vec![added.id.clone()],
+                projects: vec![],
+                roles: vec![],
+                fallback_allowed: false,
+                provider_quota_policy: Default::default(),
+            },
+        },
+    )
+    .await;
+    let mut moved = catalog_connection(&busy, &added.id).await;
+    let crate::config::ModelAuthentication::ApiKey { credential_ref } = &mut moved.auth else {
+        panic!("the pooled account keeps its API key");
+    };
+    let home = busy
+        .engine_root()
+        .join("configured-sdk-homes")
+        .join(format!(
+            "{:x}",
+            Sha256::digest(credential_ref.as_str().as_bytes())
+        ));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(home.join(".backboard"))
+        .unwrap();
+    std::fs::write(home.join(".backboard/keys.json"), secret.as_bytes()).unwrap();
+    std::fs::set_permissions(
+        home.join(".backboard/keys.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert_eq!(holders(&busy.engine_root(), secret.as_bytes()), 2);
+    *credential_ref = CredentialRef::new("lab-moved-key").unwrap();
+    owner_edit(
+        &busy,
+        "move",
+        crate::config::ModelAccessEdit::ReplaceConnection { connection: moved },
+    )
+    .await;
+    assert_eq!(
+        holders(&busy.engine_root(), secret.as_bytes()),
+        2,
+        "the saved account still names its first key"
+    );
+
+    busy.client.remove_account(added.id.clone()).await.unwrap();
+    assert!(
+        none_hold(&busy.engine_root(), secret.as_bytes()).await,
+        "the first key of the removed saved account goes with its generated home"
+    );
+    assert!(!home.exists(), "the generated home goes whole");
+    busy.stop().await;
+}
+
+/// ACCOUNT-NATIVE-SIGN-IN-NOTE (rv-ds241 N1): a native connection that leaves the settings
+/// with no saved account naming its profile loses its sign-in files, and the rest of its
+/// profile slot stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_native_connection_that_leaves_the_settings_loses_its_sign_in_files() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::DirBuilderExt;
+    let profile = "lab-native-profile";
+    let busy = Busy::with_settings(&format!(
+        "timeout_ms = 10000\n\n[model_access]\naccounts = [\"lab-native-account\"]\nconnections = [\n  {{ id = \"lab-native\", provider = \"provider-chatgpt\", harness = \"codex\", protocol = \"native\", account_ref = \"lab-native-account\", endpoint = {{ kind = \"native\" }}, model = {{ id = \"model-chatgpt\", author = \"author-chatgpt\" }}, auth = {{ method = \"native_managed\", profile_ref = \"{profile}\" }} }},\n]\n"
+    ))
+    .await;
+    let secret = format!("native-sign-in-{}", std::process::id());
+    let slot = busy
+        .engine_root()
+        .join("native-profiles")
+        .join(format!("{:x}", Sha256::digest(profile.as_bytes())));
+    let home = slot.join("home");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(home.join("Library/Keychains"))
+        .unwrap();
+    let kept = [slot.join("identity.json"), home.join("keep.txt")];
+    let signed = [
+        home.join("auth.json"),
+        home.join(".credentials.json"),
+        home.join("Library/Keychains/login.keychain-db"),
+    ];
+    for (file, bytes) in kept
+        .iter()
+        .map(|file| (file, b"kept".as_slice()))
+        .chain(signed.iter().map(|file| (file, secret.as_bytes())))
+    {
+        std::fs::write(file, bytes).unwrap();
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    assert_eq!(holders(&busy.engine_root(), secret.as_bytes()), 3);
+
+    remove_connection(&busy, "lab-native").await;
+    assert!(
+        none_hold(&busy.engine_root(), secret.as_bytes()).await,
+        "the sign-in files of a profile nothing names go"
+    );
+    for file in &kept {
+        assert!(file.exists(), "{}", file.display());
+    }
     busy.stop().await;
 }

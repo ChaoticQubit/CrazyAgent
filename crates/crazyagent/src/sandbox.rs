@@ -3802,6 +3802,17 @@ pub trait Sandbox: Send + Sync {
     fn wrap(&self, harness: &Command) -> Result<Command, SandboxError>;
 }
 
+/// What a run's stop checks, once its process group is killed, of the processes the run
+/// left outside that group: nothing where its boundary ends them all, its Full access
+/// lineage, or a sandboxed lineage where a confined process that starts its own session
+/// outlives the group kill (LINUX-KILL-GROUP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineageCheck {
+    Unneeded,
+    FullAccess,
+    Sandboxed,
+}
+
 /// A project sandbox whose profile is already installed on disk. Launch paths take
 /// this instead of a bare command, so no agent process can start outside its
 /// boundary: Seatbelt on macOS, Landlock or bubblewrap on Linux, AppContainer with a job
@@ -3908,6 +3919,22 @@ impl InstalledSandbox {
     /// Whether this boundary runs its commands with no Seatbelt profile.
     pub fn is_unconfined(&self) -> bool {
         self.unconfined
+    }
+
+    /// What a run's stop inside this boundary checks of the processes it left outside its
+    /// group: its Full access lineage when unconfined, a sandboxed one on Linux where the
+    /// backend leaves a process in a session of its own running (`LinuxSandbox::ends_every_session`),
+    /// else nothing, as the warden, a process namespace or the job ends them all. Output: the
+    /// check.
+    pub fn lineage_check(&self) -> LineageCheck {
+        if self.unconfined {
+            return LineageCheck::FullAccess;
+        }
+        #[cfg(target_os = "linux")]
+        if !self.linux.ends_every_session() {
+            return LineageCheck::Sandboxed;
+        }
+        LineageCheck::Unneeded
     }
 
     /// The program every wrapped command starts: `sandbox-exec` on macOS, or the session
