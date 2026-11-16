@@ -107,9 +107,9 @@ fn grant_board(fixture: &Fixture) {
     .unwrap();
 }
 
-/// The network lines of a launch's installed profile, its agent folder and model proxy
-/// port named the same for every agent, so two agents' remotes compare. Inputs: the
-/// runtime, the plan and the agent id. Output: the lines.
+/// The host and port lines of a launch's installed profile, its model proxy port named the
+/// same for every agent, so two agents' remotes compare; socket lines name each agent's own
+/// files and are left out. Inputs: the runtime, the plan and the agent id. Output: the lines.
 fn network_lines(runtime: &TeamRuntime, plan: &Plan, id: i64) -> Vec<String> {
     let mut text = std::fs::read_to_string(&plan.sandbox_profile)
         .unwrap()
@@ -118,7 +118,7 @@ fn network_lines(runtime: &TeamRuntime, plan: &Plan, id: i64) -> Vec<String> {
         text = text.replace(&format!("localhost:{}", proxy.port()), "localhost:PROXY");
     }
     text.lines()
-        .filter(|line| line.contains("network"))
+        .filter(|line| line.contains("network") && line.contains(" ip \""))
         .map(str::to_owned)
         .collect()
 }

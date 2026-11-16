@@ -58,6 +58,7 @@ async fn a_real_claude_master_turn_is_signed_in_inside_the_master_sandbox() {
         StepLimit::NoLimit,
         &crate::harness_settings::apply::Applied::default(),
         crate::provider_retry::ProviderRetry::RetryBriefly,
+        None,
     )
     .unwrap();
     let MasterTurnLaunch {
@@ -203,6 +204,7 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
         StepLimit::NoLimit,
         &crate::harness_settings::apply::Applied::default(),
         crate::provider_retry::ProviderRetry::RetryBriefly,
+        None,
     )
     .unwrap();
     let record = tool_record.unwrap();
@@ -213,6 +215,7 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
             drop: &record,
             mailbox: &record.with_file_name(crate::team::tool::MAILBOX_FOLDER),
             off: &[],
+            connector: None,
         }),
     )
     .unwrap();
@@ -352,6 +355,7 @@ async fn a_real_claude_master_asked_for_a_background_task_ends_its_turn_at_the_r
         StepLimit::NoLimit,
         &crate::harness_settings::apply::Applied::default(),
         crate::provider_retry::ProviderRetry::RetryBriefly,
+        None,
     )
     .unwrap();
     let mut master = ClaudeHost::spawn(
@@ -530,6 +534,7 @@ async fn start_detaching_master(base: &Path, name: &str) -> DetachingMaster {
         StepLimit::NoLimit,
         &crate::harness_settings::apply::Applied::default(),
         crate::provider_retry::ProviderRetry::RetryBriefly,
+        None,
     )
     .unwrap();
     let mut master = ClaudeHost::spawn(
