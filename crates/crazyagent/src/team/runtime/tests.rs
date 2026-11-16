@@ -34366,3 +34366,62 @@ fn a_native_leads_teammates_home_is_reset_at_each_launch() {
     }
     assert!(mates.join(".claude.json").is_file());
 }
+
+/// SECRET-PARSE-COPIES R2, leader 16:05: a Codex agent whose launch left no readable hook key
+/// list, as one an earlier CrazyAgent started, fails closed. The engine never asks Codex about
+/// keys it could not read nor counts them as trusted; it keeps asking until `HOOK_TRUST_WAIT`
+/// and then keeps a notice that says why in plain words. The other answers keep their texts.
+#[test]
+fn a_codex_agent_with_no_readable_hook_key_list_is_never_taken_as_trusted_and_is_told_why() {
+    use crate::coord::settings::{
+        CODEX_HOOKS_UNCHECKED, CODEX_HOOKS_UNLISTED, CODEX_HOOKS_UNTRUSTED,
+    };
+    let unasked = |_: &[String]| -> Result<bool, &'static str> {
+        panic!("Codex was asked about hook keys the engine could not read")
+    };
+    assert_eq!(hook_trust(None, unasked, false), HookTrust::Later);
+    assert_eq!(
+        hook_trust(None, unasked, true),
+        HookTrust::Notice(CODEX_HOOKS_UNLISTED),
+        "an unreadable key list says why once the wait is over"
+    );
+    assert!(
+        CODEX_HOOKS_UNLISTED.contains("started before this update")
+            && CODEX_HOOKS_UNLISTED.contains("until the agent restarts")
+            && !CODEX_HOOKS_UNLISTED.contains('_'),
+        "the notice names the cause and the way out in plain words: {CODEX_HOOKS_UNLISTED}"
+    );
+    assert_eq!(
+        hook_trust(Some(Vec::new()), unasked, true),
+        HookTrust::Settled
+    );
+    let keys = vec!["/h/config.toml:pre_tool_use:0:0".to_owned()];
+    let expected = keys.clone();
+    let asked = |answer: Result<bool, &'static str>| {
+        let expected = expected.clone();
+        move |given: &[String]| {
+            assert_eq!(given, expected.as_slice());
+            answer
+        }
+    };
+    assert_eq!(
+        hook_trust(Some(keys.clone()), asked(Ok(true)), false),
+        HookTrust::Settled
+    );
+    assert_eq!(
+        hook_trust(Some(keys.clone()), asked(Ok(false)), false),
+        HookTrust::Notice(CODEX_HOOKS_UNTRUSTED)
+    );
+    assert_eq!(
+        hook_trust(
+            Some(keys.clone()),
+            asked(Err("codex_bridge_peer_unknown")),
+            false
+        ),
+        HookTrust::Later
+    );
+    assert_eq!(
+        hook_trust(Some(keys), asked(Err("codex_bridge_peer_unknown")), true),
+        HookTrust::Notice(CODEX_HOOKS_UNCHECKED)
+    );
+}

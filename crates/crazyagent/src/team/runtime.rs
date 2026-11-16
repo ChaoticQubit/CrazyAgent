@@ -5893,16 +5893,15 @@ impl TeamRuntime {
             let pane = AgentId::team(id).ok()?;
             host.pane_pid(&pane).ok().flatten()
         });
-        let answer = match crate::launch_context::codex_pinned_keys(home) {
-            Some(keys) if keys.is_empty() => return true,
-            Some(keys) => crate::coord::delivery::codex::hooks_trusted(home, pane, &keys),
-            None => Err("codex_config_unreadable"),
-        };
-        let text = match answer {
-            Ok(true) => return true,
-            Ok(false) => crate::coord::settings::CODEX_HOOKS_UNTRUSTED,
-            Err(_) if worker.spawned.elapsed() < HOOK_TRUST_WAIT => return false,
-            Err(_) => crate::coord::settings::CODEX_HOOKS_UNCHECKED,
+        let trust = hook_trust(
+            crate::launch_context::codex_pinned_keys(home),
+            |keys| crate::coord::delivery::codex::hooks_trusted(home, pane, keys),
+            worker.spawned.elapsed() >= HOOK_TRUST_WAIT,
+        );
+        let text = match trust {
+            HookTrust::Settled => return true,
+            HookTrust::Later => return false,
+            HookTrust::Notice(text) => text,
         };
         let Ok(tx) = self.connection.unchecked_transaction() else {
             return false;
@@ -14728,6 +14727,38 @@ fn test_by() -> HoldBy {
     HoldBy {
         project: None,
         who: "a test agent".to_owned(),
+    }
+}
+
+/// Where a Codex agent's hook trust check stands (PA1213R2-F2): settled with nothing to say,
+/// to be asked again on a later tick, or settled once the engine's notice with this text is
+/// kept in the agent's Messages timeline.
+#[derive(Debug, PartialEq, Eq)]
+enum HookTrust {
+    Settled,
+    Later,
+    Notice(&'static str),
+}
+
+/// Judges a Codex agent's hook trust from the keys its launch pinned, asking its app-server
+/// only about keys read from the launch's own list, so a hook the engine could not read is
+/// never asked about nor taken as trusted. Inputs: the keys, the question to the app-server
+/// and whether `HOOK_TRUST_WAIT` has passed since the agent started. Output: the [`HookTrust`].
+fn hook_trust(
+    keys: Option<Vec<String>>,
+    ask: impl FnOnce(&[String]) -> Result<bool, &'static str>,
+    waited: bool,
+) -> HookTrust {
+    let answer = match keys {
+        Some(keys) if keys.is_empty() => return HookTrust::Settled,
+        Some(keys) => ask(&keys),
+        None => Err("codex_hook_keys_unread"),
+    };
+    match answer {
+        Ok(true) => HookTrust::Settled,
+        Ok(false) => HookTrust::Notice(crate::coord::settings::CODEX_HOOKS_UNTRUSTED),
+        Err(_) if !waited => HookTrust::Later,
+        Err(_) => HookTrust::Notice(crate::coord::settings::CODEX_HOOKS_UNCHECKED),
     }
 }
 
