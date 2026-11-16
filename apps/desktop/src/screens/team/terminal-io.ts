@@ -5,6 +5,7 @@ export const INPUT_BYTES_MAX = 4096;
 export const SIZE_MIN = 2;
 export const SIZE_MAX = 1000;
 export const QUEUED_CHUNKS_MAX = 256;
+const ESC = 0x1b;
 
 /** Where the owner types to a master or an agent: straight into its terminal, only in the
  * message box under it, or in both. */
@@ -157,34 +158,52 @@ export function keyQueue(run: (job: () => Promise<boolean>) => boolean, send: (c
   };
 }
 
-/** Splits a terminal's input into a typed lane and a wheel lane on one send queue. Wheel
- * reports that arrive while earlier input is still being sent wait as one batch that later
- * reports join, so a fast scroll costs a few sends rather than one per wheel event and never
- * fills the queue. Typed bytes close the batch, so keys and scrolling keep their order.
- * Inputs: the queue and the send call for one chunk, told whether the wheel made it.
+/** One lane's waiting batch on a shared send queue. Bytes that arrive while earlier input is
+ * still being sent join the one batch that waits, up to `INPUT_BYTES_MAX`, and go out as one
+ * send when the queue reaches it; nothing waits on a timer. Bytes over the limit close the
+ * batch and go out in chunks. Inputs: the queue and the send call for one chunk. Output: `add`,
+ * which queues bytes and closes the batch after them when told, and `close`. */
+function batchLane(run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[]) => Promise<boolean>): { add: (bytes: Uint8Array, last: boolean) => void; close: () => void } {
+  const chunks = keyQueue(run, send);
+  let waiting: number[] | null = null;
+  const add = (bytes: Uint8Array, last: boolean) => {
+    if (bytes.length > INPUT_BYTES_MAX) {
+      waiting = null;
+      return chunks(bytes);
+    }
+    if (waiting && waiting.length + bytes.length <= INPUT_BYTES_MAX) {
+      waiting.push(...bytes);
+    } else {
+      const batch = Array.from(bytes);
+      waiting = run(() => {
+        if (waiting === batch) waiting = null;
+        return send(batch);
+      }) ? batch : null;
+    }
+    if (last) waiting = null;
+    assert(waiting === null || waiting.length <= INPUT_BYTES_MAX, "a waiting batch fits one send");
+  };
+  return { add, close: () => { waiting = null; } };
+}
+
+/** Splits a terminal's input into a typed lane and a wheel lane on one send queue. Keys typed
+ * or wheel reports that arrive while earlier input is still being sent wait as one batch per
+ * lane that later input of the same lane joins, so fast typing or a fast scroll costs one send
+ * per round trip rather than one per key or wheel event, and never fills the queue. Input of
+ * the other lane closes a lane's batch, so keys and scrolling keep their order. A lone Esc
+ * closes its batch after it, so Esc and a quick key after it never reach the app as one Alt
+ * key. Inputs: the queue and the send call for one chunk, told whether the wheel made it.
  * Output: the two lanes. */
 export function inputLanes(run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[], wheel: boolean) => Promise<boolean>): { typed: (bytes: Uint8Array) => void; wheel: (bytes: Uint8Array) => void } {
-  const keys = keyQueue(run, (chunk) => send(chunk, false));
-  const scrolls = keyQueue(run, (chunk) => send(chunk, true));
-  let batch: number[] | null = null;
+  const keys = batchLane(run, (chunk) => send(chunk, false));
+  const scrolls = batchLane(run, (chunk) => send(chunk, true));
   const typed = (bytes: Uint8Array) => {
-    batch = null;
-    keys(bytes);
+    scrolls.close();
+    keys.add(bytes, bytes.length === 1 && bytes[0] === ESC);
   };
   const wheel = (bytes: Uint8Array) => {
-    if (bytes.length > INPUT_BYTES_MAX) {
-      batch = null;
-      return scrolls(bytes);
-    }
-    if (batch && batch.length + bytes.length <= INPUT_BYTES_MAX) {
-      batch.push(...bytes);
-      return;
-    }
-    const waiting = Array.from(bytes);
-    batch = run(() => {
-      if (batch === waiting) batch = null;
-      return send(waiting, true);
-    }) ? waiting : null;
+    keys.close();
+    scrolls.add(bytes, false);
   };
   return { typed, wheel };
 }
