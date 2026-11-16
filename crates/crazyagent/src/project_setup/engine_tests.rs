@@ -4262,8 +4262,7 @@ async fn hidden_paths_read_names_engine_runs_that_started_before_a_folder_was_hi
     let secret = stored.project_folder().join("secret");
     std::fs::create_dir_all(&secret).unwrap();
     let secret = std::fs::canonicalize(&secret).unwrap();
-    let run =
-        crate::sandbox::hidden_paths::running(RunKind::Research, project.as_str(), &[]).unwrap();
+    let run = crate::sandbox::hidden_paths::starting(RunKind::Research, project.as_str()).unwrap();
     let saved = owner
         .set_project_hidden_paths(
             project.clone(),
@@ -4281,14 +4280,21 @@ async fn hidden_paths_read_names_engine_runs_that_started_before_a_folder_was_hi
             .unwrap()
             .runs,
         vec![RunKind::Research],
-        "a run that started before the folder was hidden is named while it runs"
+        "a run that started before the folder was hidden is named before it records its folders"
     );
-    let after = crate::sandbox::hidden_paths::running(
-        RunKind::Overview,
-        project.as_str(),
-        std::slice::from_ref(&secret),
-    )
-    .unwrap();
+    run.hid(&[]);
+    assert_eq!(
+        owner
+            .project_hidden_paths(project.clone())
+            .await
+            .unwrap()
+            .runs,
+        vec![RunKind::Research],
+        "and while it runs after"
+    );
+    let after =
+        crate::sandbox::hidden_paths::starting(RunKind::Overview, project.as_str()).unwrap();
+    after.hid(std::slice::from_ref(&secret));
     drop(run);
     assert_eq!(
         owner

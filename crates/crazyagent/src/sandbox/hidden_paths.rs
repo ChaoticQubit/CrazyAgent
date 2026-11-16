@@ -181,10 +181,10 @@ pub enum RunKind {
 }
 
 /// One running engine run as the list keeps it: its project and the folders it hid as
-/// [`digest`]s, and its kind. No path or project text is kept.
+/// [`digest`]s, none until it has read them, and its kind. No path or project text is kept.
 struct Running {
     project: String,
-    hidden: Vec<String>,
+    hidden: Option<Vec<String>>,
     kind: RunKind,
 }
 
@@ -207,7 +207,12 @@ impl Registry {
     /// or none when the list is full or the keys ran out.
     fn add(&mut self, running: Running) -> Option<u64> {
         assert!(digest_plain(&running.project));
-        assert!(running.hidden.len() <= HIDDEN_PATHS_MAX);
+        assert!(
+            running
+                .hidden
+                .as_ref()
+                .is_none_or(|hidden| hidden.len() <= HIDDEN_PATHS_MAX)
+        );
         if self.runs.len() >= RUNS_MAX {
             return None;
         }
@@ -233,7 +238,7 @@ impl Registry {
         let kinds: BTreeSet<RunKind> = self
             .runs
             .values()
-            .filter(|run| run.project == project && !covers(Some(&run.hidden), saved))
+            .filter(|run| run.project == project && !covers(run.hidden.as_deref(), saved))
             .map(|run| run.kind)
             .collect();
         kinds.into_iter().collect()
@@ -247,6 +252,14 @@ static RUNS: Mutex<Registry> = Mutex::new(Registry::new());
 #[must_use = "the run is listed only while this is held"]
 #[derive(Debug)]
 pub struct HiddenRun(u64);
+
+impl HiddenRun {
+    /// Records the folders this run's sandbox hides, once it has read them (SA-VID14 r1
+    /// F2). Stub: records nothing yet. Input: the folders.
+    pub fn hid(&self, hidden: &[PathBuf]) {
+        let _ = (self, hidden);
+    }
+}
 
 impl Drop for HiddenRun {
     fn drop(&mut self) {
@@ -263,7 +276,24 @@ pub fn running(kind: RunKind, project: &str, hidden: &[PathBuf]) -> Option<Hidde
     assert!(hidden.len() <= HIDDEN_PATHS_MAX);
     let entry = Running {
         project: digest(Path::new(project)),
-        hidden: hidden.iter().map(|folder| digest(folder)).collect(),
+        hidden: Some(hidden.iter().map(|folder| digest(folder)).collect()),
+        kind,
+    };
+    let key = RUNS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .add(entry)?;
+    Some(HiddenRun(key))
+}
+
+/// Puts one engine run on the list as it starts, before it reads the project's saved hidden
+/// folders, so a hide saved meanwhile never misses it (SA-VID14 r1 F2): until
+/// [`HiddenRun::hid`] records what it hid, it counts as hiding nothing. Inputs: the kind and
+/// the project id. Output: the guard to hold until it ends, or none when the list is full.
+pub fn starting(kind: RunKind, project: &str) -> Option<HiddenRun> {
+    let entry = Running {
+        project: digest(Path::new(project)),
+        hidden: None,
         kind,
     };
     let key = RUNS
@@ -488,6 +518,14 @@ pub fn none_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<(), &'st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lists one run as a seam does: before its load, then what it hid. Inputs: the kind,
+    /// the project id and the folders. Output: the guard.
+    fn listed_run(kind: RunKind, project: &str, hidden: &[PathBuf]) -> HiddenRun {
+        let run = starting(kind, project).unwrap();
+        run.hid(hidden);
+        run
+    }
     use rusqlite::Connection;
 
     fn project() -> tempfile::TempDir {
@@ -772,16 +810,15 @@ mod tests {
             PathBuf::from("/tmp/n2-listed/vault/keys"),
             PathBuf::from("/tmp/n2-listed/dump"),
         );
-        let research = running(RunKind::Research, project, std::slice::from_ref(&above)).unwrap();
+        let research = listed_run(RunKind::Research, project, std::slice::from_ref(&above));
         assert!(runs_seeing(project, std::slice::from_ref(&inside)).is_empty());
         assert_eq!(
             runs_seeing(project, &[inside.clone(), other.clone()]),
             vec![RunKind::Research]
         );
         assert!(runs_seeing("n2-listed-elsewhere", std::slice::from_ref(&other)).is_empty());
-        let overview =
-            running(RunKind::Overview, project, &[above.clone(), other.clone()]).unwrap();
-        let twice = running(RunKind::Research, project, &[]).unwrap();
+        let overview = listed_run(RunKind::Overview, project, &[above.clone(), other.clone()]);
+        let twice = listed_run(RunKind::Research, project, &[]);
         assert_eq!(
             runs_seeing(project, &[inside.clone(), other.clone()]),
             vec![RunKind::Research],
@@ -798,13 +835,14 @@ mod tests {
     fn a_run_leaves_the_list_on_every_exit_path() {
         let project = "n2-exits";
         let saved = [PathBuf::from("/tmp/n2-exits/secret")];
-        let held = running(RunKind::Roadmap, project, &[]).unwrap();
+        let held = listed_run(RunKind::Roadmap, project, &[]);
         assert_eq!(runs_seeing(project, &saved), vec![RunKind::Roadmap]);
         drop(held);
         assert!(runs_seeing(project, &saved).is_empty(), "a return");
 
         let refused = || -> Result<(), &'static str> {
-            let _run = running(RunKind::Lockfiles, project, &[]).ok_or("full")?;
+            let _run = starting(RunKind::Lockfiles, project).ok_or("full")?;
+            _run.hid(&[]);
             assert_eq!(runs_seeing(project, &saved), vec![RunKind::Lockfiles]);
             Err("sandbox_refused")?;
             Ok(())
@@ -816,7 +854,7 @@ mod tests {
         );
 
         let panicked = std::panic::catch_unwind(|| {
-            let _run = running(RunKind::Onboarding, project, &[]).unwrap();
+            let _run = listed_run(RunKind::Onboarding, project, &[]);
             assert_eq!(runs_seeing(project, &saved), vec![RunKind::Onboarding]);
             panic!("the run ended in a panic");
         });
@@ -835,7 +873,7 @@ mod tests {
     fn the_run_list_holds_digests_and_kinds_only() {
         let project = "n2-plain-project";
         let secret = PathBuf::from("/tmp/n2-plain/secret-plain");
-        let _run = running(RunKind::CodeGraph, project, std::slice::from_ref(&secret)).unwrap();
+        let _run = listed_run(RunKind::CodeGraph, project, std::slice::from_ref(&secret));
         let runs = RUNS.lock().unwrap_or_else(PoisonError::into_inner);
         let ours: Vec<&Running> = runs
             .runs
@@ -846,8 +884,8 @@ mod tests {
         let run = ours[0];
         assert_eq!(run.kind, RunKind::CodeGraph);
         assert!(digest_plain(&run.project));
-        assert_eq!(run.hidden, vec![digest(&secret)]);
-        for kept in std::iter::once(&run.project).chain(&run.hidden) {
+        assert_eq!(run.hidden, Some(vec![digest(&secret)]));
+        for kept in std::iter::once(&run.project).chain(run.hidden.iter().flatten()) {
             assert!(digest_plain(kept), "{kept}");
             assert!(
                 !kept.contains("n2-plain") && !kept.contains("secret"),
@@ -863,7 +901,7 @@ mod tests {
         let mut registry = Registry::new();
         let entry = || Running {
             project: digest(Path::new("n2-bound")),
-            hidden: Vec::new(),
+            hidden: None,
             kind: RunKind::Research,
         };
         let keys: Vec<u64> = (0..RUNS_MAX)
@@ -889,12 +927,29 @@ mod tests {
     #[test]
     fn every_loader_of_saved_hidden_folders_holds_the_guard_or_is_classified() {
         let guarded: BTreeMap<&str, &[&str]> = BTreeMap::from([
-            ("landing/lockfiles.rs", &["RunKind::Lockfiles"][..]),
-            ("onboarding/service.rs", &["RunKind::CodeGraph"][..]),
-            ("research/runner.rs", &["RunKind::Research", "run.kind"][..]),
+            (
+                "landing/lockfiles.rs",
+                &["RunKind::Lockfiles", "listed.hid(&hidden)"][..],
+            ),
+            (
+                "onboarding/service.rs",
+                &[
+                    "RunKind::CodeGraph",
+                    "listed.hid(&hidden)",
+                    "std::mem::forget(listed)",
+                ][..],
+            ),
+            (
+                "research/runner.rs",
+                &["RunKind::Research", "run.kind", "listed.hid(&hidden)"][..],
+            ),
             (
                 "engine/owner/transport/master_runtime.rs",
-                &["RunKind::Master", "listed_master_turn(&prepared)?"][..],
+                &[
+                    "RunKind::Master",
+                    "listed.hid(master_turn_hides(&prepared))",
+                    "keep_listed_if_uncertain(listed, &",
+                ][..],
             ),
         ]);
         let classified = BTreeSet::from([
@@ -953,10 +1008,60 @@ mod tests {
         }
         for (file, kinds) in &guarded {
             let source = std::fs::read_to_string(src.join(file)).unwrap();
-            assert!(source.contains("hidden_paths::running("), "{file}");
+            assert!(source.contains("hidden_paths::starting("), "{file}");
             for kind in *kinds {
                 assert!(source.contains(kind), "{file} lists {kind}");
             }
+            assert!(
+                source.matches("std::mem::forget(listed)").count()
+                    >= source.matches("std::mem::forget(lease)").count(),
+                "{file}: every exit that keeps a lease because its processes may still run keeps its run named"
+            );
         }
+    }
+
+    /// SA-VID14 r1 (rv-code4 F1, rv-sec2 F2): a run is listed before it reads the saved
+    /// hidden folders, so a hide saved meanwhile names it. Until it records what it hid it
+    /// counts as hiding nothing; after, only folders it did not hide name it.
+    #[test]
+    fn a_run_listed_before_its_load_is_named_for_any_saved_folder_until_it_records_its_folders() {
+        let project = "n2-before-load";
+        let (vault, dump) = (
+            PathBuf::from("/tmp/n2-before-load/vault"),
+            PathBuf::from("/tmp/n2-before-load/dump"),
+        );
+        let run = starting(RunKind::Research, project).unwrap();
+        assert!(
+            runs_seeing(project, &[]).is_empty(),
+            "nothing saved, nothing named"
+        );
+        assert_eq!(
+            runs_seeing(project, std::slice::from_ref(&vault)),
+            vec![RunKind::Research],
+            "a hide saved before its load names it"
+        );
+        run.hid(std::slice::from_ref(&vault));
+        assert!(
+            runs_seeing(project, std::slice::from_ref(&vault)).is_empty(),
+            "a folder it hid does not"
+        );
+        assert_eq!(
+            runs_seeing(project, &[vault, dump]),
+            vec![RunKind::Research],
+            "a folder hidden after its load does"
+        );
+        drop(run);
+    }
+
+    /// SA-VID14 r1 (rv-sec2 F1): a run whose stop was uncertain, or whose processes the
+    /// owner keeps, forgets its guard as it forgets its lease, so it stays named while its
+    /// processes may still run, until the engine starts again.
+    #[test]
+    fn a_run_left_running_stays_named_after_its_launch_returns() {
+        let project = "n2-left-running";
+        let saved = [PathBuf::from("/tmp/n2-left-running/secret")];
+        let run = listed_run(RunKind::Research, project, &[]);
+        std::mem::forget(run);
+        assert_eq!(runs_seeing(project, &saved), vec![RunKind::Research]);
     }
 }

@@ -759,7 +759,7 @@ impl OwnerRuntimeHandle {
         {
             return Err(failure("master_runtime_binding"));
         }
-        let _listed = listed_master_turn(&prepared)?;
+        let _listed = listed_master_turn(&prepared.session.project_id)?;
         let result = match self.record_master_start(&prepared).await {
             Ok(()) if prepared.session.selection.backend == MasterBackend::Rcli => {
                 return self.launch_rcli_master_turn(&prepared, turn_id).await;
@@ -1438,14 +1438,20 @@ pub(super) fn account_failure(read: &AuthControl) -> Result<(), EngineError> {
 /// RCLI sandbox are built from `hidden_paths`. Input: the prepared turn. Output: the guard,
 /// or `master_sandbox_unavailable` when the list is full.
 fn listed_master_turn(
-    prepared: &PreparedMasterTurn,
+    project: &ProjectId,
 ) -> Result<crate::sandbox::hidden_paths::HiddenRun, EngineError> {
-    crate::sandbox::hidden_paths::running(
+    crate::sandbox::hidden_paths::starting(
         crate::sandbox::hidden_paths::RunKind::Master,
-        prepared.session.project_id.as_str(),
-        &prepared.hidden_paths,
+        project.as_str(),
     )
     .ok_or_else(|| failure("master_sandbox_unavailable"))
+}
+
+/// The folders a headless master turn's sandbox keeps it out of, as the hidden folders list
+/// records them (SA-VID14 r1 sec F3). Stub: the prepared hidden folders whatever the access.
+/// Input: the prepared turn. Output: the folders.
+fn master_turn_hides(prepared: &PreparedMasterTurn) -> &[std::path::PathBuf] {
+    &prepared.hidden_paths
 }
 
 fn cleanup_uncertain(error: &EngineError) -> bool {
