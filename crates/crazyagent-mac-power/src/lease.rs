@@ -76,6 +76,11 @@ impl Leases {
         Ok(())
     }
 
+    /// Whether `holder` has a live lease.
+    pub fn holds(&self, holder: &Holder) -> bool {
+        self.held.contains_key(holder)
+    }
+
     /// Ends `holder`'s own lease. Output: whether it had one.
     pub fn release(&mut self, holder: &Holder) -> bool {
         let had = self.held.remove(holder).is_some();

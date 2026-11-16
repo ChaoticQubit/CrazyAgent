@@ -57,6 +57,14 @@ pub struct Helper {
     leases: Leases,
     pin: Pin,
     floor: Option<Floor>,
+    sleep_owed: bool,
+}
+
+/// Opens the journal in `config`'s folder, logging why when it cannot be used.
+fn open_journal(config: &Config) -> Option<Journal> {
+    Journal::open(&config.folder, config.owner_uid)
+        .inspect_err(|error| ffi::log(&format!("journal unusable: {error:?}")))
+        .ok()
 }
 
 impl Helper {
@@ -64,9 +72,7 @@ impl Helper {
     /// writes the pin. Input: the configuration. Output: the helper.
     pub fn start(config: Config) -> Self {
         let pmset = Pmset::new(&config.pmset);
-        let journal = Journal::open(&config.folder, config.owner_uid)
-            .inspect_err(|error| ffi::log(&format!("journal unusable: {error:?}")))
-            .ok();
+        let journal = open_journal(&config);
         let mut helper = Self {
             config,
             pmset,
@@ -74,6 +80,7 @@ impl Helper {
             leases: Leases::default(),
             pin: Pin::None,
             floor: None,
+            sleep_owed: false,
         };
         helper.put_back(None, false);
         let config = &helper.config;
@@ -101,6 +108,7 @@ impl Helper {
         };
         assert!(self.leases.len() <= HOLDERS_MAX);
         assert!(self.floor.is_none() || self.leases.is_empty());
+        assert!(!self.sleep_owed || self.pending());
         reply
     }
 
@@ -166,18 +174,20 @@ impl Helper {
         journal.is_some_and(|journal| !journal.entries().is_empty())
     }
 
-    /// Starts or renews `holder`'s lease once the pin, the floor and the journal allow it, and
-    /// makes sure `SleepDisabled` is 1. Output: `Held`, or why the hold was refused.
+    /// Starts or renews `holder`'s lease once the pin, the floor and the journal allow it and
+    /// `SleepDisabled` is 1. When that fails, a renewal keeps the lease it had, to run out and
+    /// put sleep back on its own; a new hold changes nothing. Output: `Held`, or the refusal.
     fn hold(&mut self, holder: Holder, lease_s: u16, now_ms: u64, lid: Option<Lid>) -> Reply {
         assert!(lease_s >= LEASE_S_MIN);
         assert!(lease_s <= LEASE_S_MAX);
+        let renewing = self.leases.holds(&holder);
         let refusal = if self.pin != Pin::Uid(holder.euid) {
             Some(Refusal::Unpinned)
         } else if self.floor.is_some() {
             Some(Refusal::Floor)
         } else if self.journal.is_none() {
             Some(Refusal::JournalUnreadable)
-        } else if self.leases.hold(holder, now_ms, lease_s).is_err() {
+        } else if !renewing && self.leases.len() == HOLDERS_MAX {
             Some(Refusal::HoldersFull)
         } else {
             None
@@ -186,12 +196,15 @@ impl Helper {
             return Reply::Refused { reason };
         }
         if let Err(reason) = self.ensure_disabled() {
-            self.leases.release(&holder);
             if self.leases.is_empty() {
                 self.put_back(lid, false);
             }
+            assert_eq!(self.leases.holds(&holder), renewing);
             return Reply::Refused { reason };
         }
+        let held = self.leases.hold(holder, now_ms, lease_s);
+        assert!(held.is_ok(), "room for a new holder was checked before pmset ran");
+        self.sleep_owed = false;
         Reply::Held {
             lease_left_s: lease_s,
         }
@@ -206,7 +219,10 @@ impl Helper {
     }
 
     /// Forgets the pin (Remove lid helper): allowed for the pinned uid, or under no pin for the
-    /// non-system console user. Ends every lease and puts sleep back first. Output: the reply.
+    /// non-system console user. Ends every lease and puts sleep back first. The pin stays, on
+    /// disk and in memory, while the journal cannot be read (opened again here, so a journal
+    /// the owner removed no longer blocks it) or a value is still not put back, so the engine
+    /// keeps reporting it instead of unregistering. Output: the reply.
     fn forget(&mut self, holder: Holder, lid: Option<Lid>) -> Reply {
         let allowed = match self.pin {
             Pin::Uid(uid) => uid == holder.euid,
@@ -217,9 +233,23 @@ impl Helper {
                 reason: Refusal::Unpinned,
             };
         }
+        if self.journal.is_none() {
+            self.journal = open_journal(&self.config);
+        }
+        if self.journal.is_none() {
+            assert!(self.leases.is_empty(), "no hold starts without a journal");
+            return Reply::Refused {
+                reason: Refusal::JournalUnreadable,
+            };
+        }
         let was_holding = !self.leases.is_empty();
         self.leases.clear();
         self.put_back(lid, was_holding);
+        if self.pending() {
+            return Reply::Refused {
+                reason: Refusal::Pmset,
+            };
+        }
         self.pin = Pin::None;
         let folder = journal::checked_folder(&self.config.folder, self.config.owner_uid);
         match folder.and_then(|folder| pin::forget(&folder)) {
@@ -303,9 +333,12 @@ impl Helper {
     }
 
     /// Puts every journaled value back, removing each entry only after `pmset` succeeded, and
-    /// sleeps the Mac now when a hold just ended, sleep was put back and the lid sleeps alone.
+    /// sleeps the Mac now when a hold ended (now, or earlier with its put-back failed, so sleep
+    /// is owed), sleep was put back and the lid sleeps alone.
     fn put_back(&mut self, lid: Option<Lid>, was_holding: bool) {
+        let owed = was_holding || self.sleep_owed;
         let Some(journal) = self.journal.as_mut() else {
+            assert!(!self.sleep_owed);
             return;
         };
         let entries = journal.entries().to_vec();
@@ -320,7 +353,9 @@ impl Helper {
                 ffi::log(&format!("entry not removed: {error:?}"));
             }
         }
-        let sleeps = was_holding && sleep_back && lid.is_some_and(Lid::sleeps_now);
+        let entry = journal.entry(Key::SleepDisabled);
+        self.sleep_owed = owed && entry.is_some_and(|entry| entry.before == 0);
+        let sleeps = owed && sleep_back && lid.is_some_and(Lid::sleeps_now);
         if sleeps && let Err(error) = self.pmset.sleep_now() {
             ffi::log(&format!("sleepnow failed: {error:?}"));
         }
