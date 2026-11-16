@@ -735,6 +735,70 @@ fn old_agent_folders_never_refuse_the_freeze() {
     assert_eq!(roots.unwrap(), BTreeSet::from([lead.pid()]));
 }
 
+/// rv-secreview T17b r2 F1: the names the engine gives its tmux sockets keep a small cap
+/// of their own. A lead that leaves more dead teammates' sockets in its temp folder than
+/// one freeze asks refuses the freeze as agents unknown, while plain files there never
+/// count (`a_full_agent_temp_folder_never_refuses_the_freeze`).
+#[test]
+fn more_dead_tmux_sockets_in_one_agent_folder_than_a_freeze_asks_refuse_it() {
+    let (_disk, root, _terminal, tmp) = engine_root();
+    dead_sockets(&tmp.0, 0..freeze::ROOTS_MAX + 1);
+
+    let roots = freeze::servers(&root);
+
+    let Err(problem) = roots else {
+        panic!(
+            "{} dead sockets were asked, not refused",
+            freeze::ROOTS_MAX + 1
+        );
+    };
+    assert!(
+        problem.0.starts_with("keep_awake_freeze_agents_unknown"),
+        "{}",
+        problem.0
+    );
+}
+
+/// rv-secreview T17b r2 F1: the cap counts every socket one freeze asks across the
+/// agents' temp folders, so dead sockets spread over two leads refuse it too.
+#[test]
+fn dead_tmux_sockets_spread_over_agent_folders_count_together() {
+    let (_disk, root, _terminal, tmp) = engine_root();
+    let home = root
+        .join("team")
+        .join("agents")
+        .join("agent-2")
+        .join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let second = Made::new(crazyagent::sandbox::toolchains::tmp_path(&home));
+    let half = freeze::ROOTS_MAX / 2 + 1;
+    dead_sockets(&tmp.0, 0..half);
+    dead_sockets(&second.0, half..2 * half);
+
+    let roots = freeze::servers(&root);
+
+    let Err(problem) = roots else {
+        panic!(
+            "{} dead sockets in two folders were asked, not refused",
+            2 * half
+        );
+    };
+    assert!(
+        problem.0.starts_with("keep_awake_freeze_agents_unknown"),
+        "{}",
+        problem.0
+    );
+}
+
+/// Leaves dead teammates' sockets in a folder: each is bound and closed, so its file stays
+/// and nothing listens at it. Inputs: the folder and the numbers that name them.
+fn dead_sockets(folder: &Path, numbers: std::ops::Range<usize>) {
+    for number in numbers {
+        let socket = folder.join(format!("teammates-{number:016x}.sock"));
+        drop(crazyagent::spawn_gate::bind_unix_std(&socket).unwrap());
+    }
+}
+
 /// T17b code r1 F2: an agent's short temp folder sits in the shared temp folder under a
 /// name anyone can work out. One that is a link, or another user's, is not this engine's,
 /// which never makes its sockets there, so it is skipped and never refuses the freeze.

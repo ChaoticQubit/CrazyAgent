@@ -26,6 +26,9 @@ const APPS_BYTES_MAX: usize = 32 * 1024;
 const RUNNING_MAX: usize = 512;
 #[cfg(unix)]
 const SCAN_MAX: usize = 1 << 20;
+/// The most agent roots one freeze accepts.
+#[cfg(unix)]
+pub const ROOTS_MAX: usize = 1024;
 /// The code of a freeze refused because the agents could not be told apart (rv-code
 /// T17b r1 F1); the keeper names it in the owner's notice.
 #[cfg(unix)]
@@ -508,7 +511,7 @@ mod other {
 mod unix {
     use super::{
         AGENTS_UNKNOWN, EngineError, Entry, FreezeApp, Frozen, Journal, KIND, PROCS_MAX, Proc,
-        RUNNING_MAX, Running, SCAN_MAX, error, kept_out,
+        ROOTS_MAX, RUNNING_MAX, Running, SCAN_MAX, error, kept_out,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::io::Read;
@@ -520,7 +523,6 @@ mod unix {
     const TEXT_BYTES_MAX: usize = 4 * 1024 * 1024;
     const TABLE_MAX: usize = 32 * 1024;
     const TREE_MAX: usize = 256;
-    const ROOTS_MAX: usize = 1024;
     const RUN_WAIT: Duration = Duration::from_secs(2);
     const RUN_STEP: Duration = Duration::from_millis(10);
     const SHARED: [&str; 7] = [
