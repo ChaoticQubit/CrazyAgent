@@ -343,26 +343,96 @@ pub(crate) fn private_folder(
     base: &Path,
     names: &[&str],
 ) -> Result<std::os::fd::OwnedFd, LaunchError> {
-    use rustix::fs::{Mode, OFlags};
+    let parent = rustix::fs::open(base, FOLDER, rustix::fs::Mode::empty())
+        .map_err(|_| failure("launch_account_home_unsafe"))?;
+    walk(parent, names, Walk::Make)
+}
+
+/// How a no-follow walk below a folder treats each name on the way: made 0700 when missing
+/// and checked, only opened and checked, or only opened. A check refuses a folder of another
+/// owner or a mode other than 0700.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Walk {
+    Make,
+    Check,
+    Open,
+}
+
+#[cfg(unix)]
+const FOLDER: rustix::fs::OFlags = rustix::fs::OFlags::RDONLY
+    .union(rustix::fs::OFlags::DIRECTORY)
+    .union(rustix::fs::OFlags::NOFOLLOW)
+    .union(rustix::fs::OFlags::CLOEXEC);
+
+/// Opens each plain folder name below an open folder in turn, never through a link, as the
+/// walk says. Inputs: the open folder, the names in order and the walk. Output: the last
+/// folder, open, or `launch_account_home_unsafe` for a link, a file, a missing name that is
+/// not made, or a folder a check refuses.
+#[cfg(unix)]
+fn walk(
+    mut parent: std::os::fd::OwnedFd,
+    names: &[&str],
+    step: Walk,
+) -> Result<std::os::fd::OwnedFd, LaunchError> {
+    use rustix::fs::Mode;
     let unsafe_home = || failure("launch_account_home_unsafe");
-    let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let owner = rustix::process::geteuid().as_raw();
-    let mut parent = rustix::fs::open(base, folder, Mode::empty()).map_err(|_| unsafe_home())?;
     for name in names {
         assert!(!name.is_empty() && *name != "." && *name != ".." && !name.contains('/'));
-        match rustix::fs::mkdirat(&parent, *name, Mode::RWXU) {
-            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-            Err(_) => return Err(unsafe_home()),
+        if step == Walk::Make {
+            match rustix::fs::mkdirat(&parent, *name, Mode::RWXU) {
+                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                Err(_) => return Err(unsafe_home()),
+            }
         }
         let child =
-            rustix::fs::openat(&parent, *name, folder, Mode::empty()).map_err(|_| unsafe_home())?;
+            rustix::fs::openat(&parent, *name, FOLDER, Mode::empty()).map_err(|_| unsafe_home())?;
         let stat = rustix::fs::fstat(&child).map_err(|_| unsafe_home())?;
-        if stat.st_uid != owner || u32::from(stat.st_mode) & 0o7777 != 0o700 {
+        if step != Walk::Open && (stat.st_uid != owner || u32::from(stat.st_mode) & 0o7777 != 0o700)
+        {
             return Err(unsafe_home());
         }
         parent = child;
     }
     Ok(parent)
+}
+
+/// Opens a folder of a listed launch's private home, `<agent home>/<harness id>/<account>`
+/// as [`prepare`] lays it out, by a no-follow walk from the agent home through the harness
+/// folder, the account folder and the folders below, so a link a harness plants at any of
+/// them is refused, never followed. A walk that only opens skips every owner and mode check.
+/// Inputs: the private home, the harness id it must name when known, the folders below and
+/// the walk for them. Output: the last folder, open, or `launch_account_home_unsafe` for a
+/// home of another shape, another harness's folder, an account name that is no account
+/// reference or a refused step, or the agent home's own `launch_account_home_*` refusal.
+#[cfg(unix)]
+pub(crate) fn listed_folder(
+    home: &Path,
+    id: Option<&str>,
+    below: &[&str],
+    step: Walk,
+) -> Result<std::os::fd::OwnedFd, LaunchError> {
+    let unsafe_home = || failure("launch_account_home_unsafe");
+    let name = |path: &Path| path.file_name().and_then(|name| name.to_str());
+    let account = name(home).ok_or_else(unsafe_home)?;
+    let folder = home.parent().ok_or_else(unsafe_home)?;
+    let harness = name(folder).ok_or_else(unsafe_home)?;
+    let base = folder.parent().ok_or_else(unsafe_home)?;
+    CredentialRef::new(account).map_err(|_| unsafe_home())?;
+    if id.is_some_and(|id| id != harness) {
+        return Err(unsafe_home());
+    }
+    let fixed = if step == Walk::Open {
+        Walk::Open
+    } else {
+        super::launch::validate_home(base)?;
+        Walk::Check
+    };
+    let opened =
+        rustix::fs::open(base, FOLDER, rustix::fs::Mode::empty()).map_err(|_| unsafe_home())?;
+    let home = walk(opened, &[harness, account], fixed)?;
+    walk(home, below, step)
 }
 
 /// Refuses a private home where its Unix owner and 0700 mode cannot be checked. Inputs:

@@ -1346,8 +1346,7 @@ impl AgentContext {
         let invalid = |_: crate::harnesses::manifest::Refused| failure("launch_manifest_invalid");
         let renders = crate::harnesses::render::read(manifest).map_err(invalid)?;
         let asked = crate::harnesses::home::read(manifest).map_err(invalid)?;
-        crate::harnesses::launch::validate_home(home)?;
-        let lock = lock(home)?;
+        let lock = lock_listed(home, Some(manifest.id.as_str()))?;
         let rendered: Vec<String> = [
             renders.mcp.as_ref().map(|file| file.path.clone()),
             renders.instructions.as_ref().map(|file| file.path.clone()),
@@ -1467,8 +1466,12 @@ impl Installed {
     /// Output: the guard, a `launch_account_home_*` code for a home that is no longer a
     /// private agent home, or `launch_home_busy` while another launch uses it.
     pub fn adopt(files: &InstalledFiles) -> Result<Self, LaunchError> {
-        crate::harnesses::launch::validate_home(&files.home)?;
-        let lock = lock(&files.home)?;
+        let lock = if files.listed {
+            lock_listed(&files.home, None)?
+        } else {
+            crate::harnesses::launch::validate_home(&files.home)?;
+            lock(&files.home)?
+        };
         Ok(Self {
             arguments: Vec::new(),
             files: Some(files.clone()),
@@ -1494,8 +1497,13 @@ impl Installed {
 }
 
 impl InstalledFiles {
-    /// Lists the generated file and folder paths a launch deletes, all inside its home.
+    /// Lists the generated file and folder paths a launch deletes by path, all inside its
+    /// home; none for a listed harness's private home, whose files go only through a
+    /// no-follow walk from the agent home.
     fn removals(&self) -> Vec<PathBuf> {
+        if self.listed {
+            return Vec::new();
+        }
         let mut paths = vec![self.home.join(STATE)];
         if self.codex {
             paths.push(self.home.join("config.toml"));
@@ -2368,6 +2376,13 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
         crate::team::cleanup::release_acls([home, path.as_path()]);
         open()
     });
+    held(opened)
+}
+
+/// Locks a home's launch lock once opened, only one [`lock_kept`] passes. Input: the open.
+/// Output: the locked file, `launch_context_unsafe` or `launch_home_busy`.
+#[cfg(unix)]
+fn held(opened: rustix::io::Result<std::os::fd::OwnedFd>) -> Result<File, LaunchError> {
     let file = File::from(opened.map_err(|_| failure("launch_context_unsafe"))?);
     let found = rustix::fs::fstat(&file).map_err(|_| failure("launch_context_unsafe"))?;
     if !lock_kept(&found) {
@@ -2376,6 +2391,31 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
     rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
         .map_err(|_| failure("launch_home_busy"))?;
     Ok(file)
+}
+
+/// Opens and locks a listed launch's private home's launch lock as [`lock`] does, relative
+/// to the home walked to from the agent home without following a link
+/// ([`crate::harnesses::home::listed_folder`]); no flag or ACL is cleared, as that works by
+/// path. Inputs: the private home and the harness id it must name when known. Output: the
+/// locked file, a `launch_account_home_*` refusal, `launch_context_unsafe` or
+/// `launch_home_busy`.
+#[cfg(unix)]
+fn lock_listed(home: &Path, id: Option<&str>) -> Result<File, LaunchError> {
+    use crate::harnesses::home::{Walk, listed_folder};
+    let folder = listed_folder(home, id, &[], Walk::Check)?;
+    held(rustix::fs::openat(
+        &folder,
+        LOCK,
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    ))
+}
+
+/// Refuses a listed launch's lock where owner-only no-follow creation does not exist.
+/// Takes its inputs, all unused. Returns `launch_context_unavailable`.
+#[cfg(not(unix))]
+fn lock_listed(_home: &Path, _id: Option<&str>) -> Result<File, LaunchError> {
+    Err(failure("launch_context_unavailable"))
 }
 
 /// Whether a home's launch lock is held and kept: this user's plain file, on macOS with no

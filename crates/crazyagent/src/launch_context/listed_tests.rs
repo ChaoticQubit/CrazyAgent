@@ -15,17 +15,24 @@ fn manifest(blocks: &str) -> crate::harnesses::manifest::Manifest {
     parse(format!("{SMALL}{blocks}").as_bytes()).unwrap()
 }
 
-/// A listed launch's private home as T18 lays it out, `<agent home>/sample/account-1`,
-/// each folder 0700. Output: the agent home's guard and the private home.
-fn private_home() -> (tempfile::TempDir, PathBuf) {
+/// A listed launch's private home as T18 lays it out, `<agent home>/<harness id>/account-1`,
+/// each folder 0700. Input: the harness id. Output: the agent home's guard and the private
+/// home.
+fn harness_home(id: &str) -> (tempfile::TempDir, PathBuf) {
     let folder = tempfile::tempdir().unwrap();
     let base = folder.path().canonicalize().unwrap();
-    let home = base.join("sample").join("account-1");
+    let home = base.join(id).join("account-1");
     fs::create_dir_all(&home).unwrap();
-    for path in [base.clone(), base.join("sample"), home.clone()] {
+    for path in [base.clone(), base.join(id), home.clone()] {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     }
     (folder, home)
+}
+
+/// The private home [`harness_home`] lays out for the sample manifest's harness.
+/// Output: the agent home's guard and the private home.
+fn private_home() -> (tempfile::TempDir, PathBuf) {
+    harness_home("sample")
 }
 
 fn context() -> AgentContext {

@@ -12,11 +12,17 @@ fn renders_of(blocks: &str) -> Result<Renders, (&'static str, String)> {
     read(&manifest).map_err(|refused| (refused.code, refused.message))
 }
 
+/// A listed launch's private home as T18 lays it out, `<agent home>/sample/account-1`,
+/// each folder 0700. Output: the agent home's guard and the private home.
 fn private_home() -> (tempfile::TempDir, PathBuf) {
-    let home = tempfile::tempdir().unwrap();
-    let path = home.path().canonicalize().unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-    (home, path)
+    let folder = tempfile::tempdir().unwrap();
+    let base = folder.path().canonicalize().unwrap();
+    let home = base.join("sample").join("account-1");
+    std::fs::create_dir_all(&home).unwrap();
+    for path in [base.clone(), base.join("sample"), home.clone()] {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    (folder, home)
 }
 
 fn files_server() -> LaunchServer {
