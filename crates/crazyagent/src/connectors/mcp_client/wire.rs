@@ -448,8 +448,13 @@ impl Reader {
         if (300..400).contains(&self.status) {
             return Err(McpError::Refused("connector_redirect_refused"));
         }
-        if self.status == 401 || (self.status == 403 && insufficient(&self.challenges)) {
+        if self.status == 401 {
             return Err(McpError::Unauthorized {
+                scope: scope(&self.challenges),
+            });
+        }
+        if self.status == 403 && insufficient(&self.challenges) {
+            return Err(McpError::InsufficientScope {
                 scope: scope(&self.challenges),
             });
         }

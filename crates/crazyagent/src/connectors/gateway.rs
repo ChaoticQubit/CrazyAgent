@@ -624,7 +624,6 @@ impl Gateway {
         if let Some(key) = &spec.key {
             return Ok(Credential::key(key, &connector.loaded.bindings));
         }
-        assert!(spec.oauth.is_some(), "a connector has a key or a sign-in");
         let title = title_of(connector);
         let now = crate::semantic::now_ms();
         let got = if renew {
@@ -869,8 +868,9 @@ impl Gateway {
     /// opened under another manifest, other key bindings or another sign-in is closed and
     /// opened again, so a connector trusted again, given a new key or signed in elsewhere
     /// is never called the old way. An OAuth token is renewed first when it ends soon, and
-    /// once more when the server refuses it as a session opens, which then opens with the
-    /// same access.
+    /// once more when the server refuses it (401, not a scope challenge) as a session
+    /// opens, which then opens with the same access; a renewed token refused too ends the
+    /// sign-in and asks the owner for a new one.
     fn checkout(
         &self,
         db: &Connection,
@@ -906,8 +906,23 @@ impl Gateway {
         let (auth, session) = match open(&auth) {
             Err(McpError::Unauthorized { .. }) if matches!(auth, Credential::OAuth { .. }) => {
                 let renewed = self.credential(db, connector, &used, true)?;
-                let session = open(&renewed).map_err(|problem| problem.code())?;
-                (renewed, session)
+                match open(&renewed) {
+                    Ok(session) => (renewed, session),
+                    Err(problem) => {
+                        if matches!(problem, McpError::Unauthorized { .. }) {
+                            crate::connectors::oauth::refused_with(
+                                db,
+                                &self.root,
+                                &connector.name,
+                                &title_of(connector),
+                                &renewed,
+                                crate::semantic::now_ms(),
+                            )
+                            .map_err(|refusal| refusal.0)?;
+                        }
+                        return Err(problem.code());
+                    }
+                }
             }
             opened => (auth, opened.map_err(|problem| problem.code())?),
         };

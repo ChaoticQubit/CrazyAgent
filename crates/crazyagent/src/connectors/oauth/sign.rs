@@ -1143,6 +1143,35 @@ pub(crate) fn renew_with(
     current(db, root, name, title, spec, now_ms, true, reach)
 }
 
+/// Ends a sign-in whose server refused the token just renewed for it, and raises its
+/// Connector sign-in item, so later calls ask the vendor nothing until a new sign-in. A
+/// sign-in another call renewed or began since, or a key, is left as it is. Inputs: the
+/// database, root, connector, its title, the refused credential and the time. Output:
+/// nothing, or the key store's or database's refusal.
+pub(crate) fn refused_with(
+    db: &Connection,
+    root: &Path,
+    name: &str,
+    title: &str,
+    refused: &Credential,
+    now_ms: i64,
+) -> Result<(), OAuthError> {
+    let Credential::OAuth {
+        issuer, expires_ms, ..
+    } = refused
+    else {
+        return Ok(());
+    };
+    let _one = RENEWING.lock().unwrap_or_else(PoisonError::into_inner);
+    let still = record_of(root, name)?
+        .is_some_and(|record| record.issuer == *issuer && record.expires_ms == *expires_ms);
+    if still {
+        ended(root, name, issuer)?;
+        mark_sign_in(db, name, title, now_ms)?;
+    }
+    Ok(())
+}
+
 /// The credential now, renewed when it ends within a minute or when `force` asks.
 #[allow(clippy::too_many_arguments)]
 fn current(

@@ -25,6 +25,8 @@ pub(crate) use sign::finish_with;
 #[cfg(unix)]
 pub(crate) use sign::fresh_with;
 #[cfg(unix)]
+pub(crate) use sign::refused_with;
+#[cfg(unix)]
 pub(crate) use sign::renew_with;
 #[cfg(unix)]
 pub(crate) use sign::step_up_with;
@@ -347,6 +349,20 @@ fn finish_trusted(
     _code: &str,
     _iss: Option<&str>,
     _reach: &ProviderReach,
+) -> Result<(), OAuthError> {
+    Err(OAuthError("connector_unavailable_here"))
+}
+
+/// No sign-in to end where the Unix owner-only key folder does not exist. Output:
+/// `connector_unavailable_here`.
+#[cfg(not(unix))]
+pub(crate) fn refused_with(
+    _db: &Connection,
+    _root: &Path,
+    _name: &str,
+    _title: &str,
+    _refused: &Credential,
+    _now_ms: i64,
 ) -> Result<(), OAuthError> {
     Err(OAuthError("connector_unavailable_here"))
 }
