@@ -114,7 +114,20 @@ fn forget_grants(db: &Connection, root: &Path, name: &str) -> Result<(), EngineE
     crate::connectors::grants::forget_connector(db, name)
         .and_then(|()| crate::connectors::gateway::pins::forget_connector(db, name))
         .and_then(|()| crate::connectors::oauth::forget(db, root, name))
+        .and_then(|()| crate::connectors::sign_in::forget_choice(db, name))
         .map_err(|_| error("app_plugins_unavailable"))
+}
+
+/// Whether a connector signs in through the browser though its file also declares a key:
+/// its file offers both ways and the owner chose Browser. Inputs: the database and the
+/// file. Output: the answer, or `app_plugins_unavailable`.
+fn by_browser(db: &Connection, manifest: &Manifest) -> Result<bool, EngineError> {
+    if !crate::connectors::sign_in::both_ways(manifest) {
+        return Ok(false);
+    }
+    let way = crate::connectors::sign_in::chosen(db, &manifest.name)
+        .map_err(|_| error("app_plugins_unavailable"))?;
+    Ok(way == crate::connectors::SignInWith::Browser)
 }
 
 /// Creates the store's tables and drops what an older plugin of the owner's left under a
@@ -473,9 +486,10 @@ fn view(db: &Connection, root: &Path, found: Found) -> Result<PluginView, Engine
         });
     }
     let reviewed = reviewed(db, found.origin, &manifest)?;
+    let browser = by_browser(db, &manifest)?;
     let status = if !reviewed {
         PluginStatus::NeedsReview
-    } else if secrets.iter().any(|secret| secret.binding == Binding::None) {
+    } else if !browser && secrets.iter().any(|secret| secret.binding == Binding::None) {
         PluginStatus::NeedsKey
     } else {
         PluginStatus::Ready
@@ -902,18 +916,21 @@ fn load(db: &Connection, root: &Path, name: &str, launch: bool) -> Result<Loaded
     if !launch && !enabled_flag(db, &manifest.name, found.origin)? {
         return Err(error("app_plugin_off"));
     }
-    let mut bindings = Vec::with_capacity(manifest.secrets().len());
-    for secret in manifest.secrets() {
+    let browser = by_browser(db, &manifest)?;
+    let secrets: &[String] = if browser { &[] } else { manifest.secrets() };
+    let mut bindings = Vec::with_capacity(secrets.len());
+    for secret in secrets {
         let (_, bound) = resolve(db, root, &manifest.name, secret)?;
         let bound = bound.filter(|bound| !launch || matches!(bound, Bound::Key(_)));
         bindings.push(bound.ok_or_else(|| error("app_plugin_needs_key"))?);
     }
-    assert_eq!(bindings.len(), manifest.secrets().len());
+    assert_eq!(bindings.len(), secrets.len());
+    assert!(!browser || bindings.is_empty());
     Ok(Loaded {
         manifest,
         origin: found.origin,
         bindings,
-        browser: false,
+        browser,
     })
 }
 

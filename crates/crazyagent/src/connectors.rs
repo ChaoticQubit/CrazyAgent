@@ -4,7 +4,9 @@
 //! never part of a view; only where it is bound is.
 
 use crate::app_plugins::store;
-use crate::app_plugins::{Origin, PluginKind, PluginStatus, RunsView, SecretView};
+use crate::app_plugins::{
+    Origin, PluginKind, PluginStatus, PluginView, Preview, RunsView, SecretView,
+};
 use crate::engine::EngineError;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -311,6 +313,10 @@ const PLAIN: &[(&str, &str)] = &[
         "connector_oauth_trust_changed",
         "the connector's file changed since this sign-in began; start it again.",
     ),
+    (
+        "connector_sign_in_one_way",
+        "this connector signs in one way only, so there is nothing to choose.",
+    ),
 ];
 
 /// The plain sentence for a code the Connectors page can show: this module's own, or an
@@ -332,6 +338,53 @@ pub(crate) fn project_known(db: &Connection, project: &str) -> Result<bool, Engi
     .map_err(|_| EngineError("connectors_unavailable".into()))
 }
 
+/// How a listed connector signs in, read from its file: a key, the browser, either one or
+/// not yet, and for a file that declares a browser sign-in, that sign-in as its page shows
+/// it. Inputs: the engine database and root and the listed connector. Output: the two, or
+/// the store's refusal.
+fn signing_in(
+    db: &Connection,
+    root: &Path,
+    plugin: &PluginView,
+) -> Result<(SignIn, Option<OAuthView>), EngineError> {
+    let trust = match plugin.runs {
+        None => None,
+        Some(_) => match store::review(root, &plugin.name)? {
+            Preview::Ready { trust } => trust.connector,
+            Preview::Refused { .. } => None,
+        },
+    };
+    let key = trust.as_ref().is_some_and(|declared| declared.key.is_some());
+    let Some(declared) = trust.and_then(|declared| declared.oauth) else {
+        let sign_in = if key { SignIn::Key } else { SignIn::NotYet };
+        return Ok((sign_in, None));
+    };
+    let offers = |way: &str| declared.registration.iter().any(|named| named == way);
+    let document = offers("cimd") && oauth::CLIENT_METADATA_URL.is_some();
+    let usable = offers("own") || offers("dcr") || document;
+    let sign_in = match (key, usable) {
+        (true, _) => SignIn::Both,
+        (false, true) => SignIn::Browser,
+        (false, false) => SignIn::NotYet,
+    };
+    let using = match sign_in {
+        SignIn::Both => sign_in::chosen(db, &plugin.name)?,
+        _ => SignInWith::Browser,
+    };
+    let own_app = oauth::own_app(root, &plugin.name);
+    let view = OAuthView {
+        signed_in: oauth::signed_in_now(root, &plugin.name),
+        own_app_allowed: offers("own"),
+        own_app: own_app.map(|(client_id, secret_saved)| OwnAppView {
+            client_id,
+            secret_saved,
+        }),
+        redirect: callback::REDIRECT_TO_REGISTER.to_owned(),
+        using,
+    };
+    Ok((sign_in, Some(view)))
+}
+
 /// Reads the Connectors page, with each refused file whose kind reads as connector listed
 /// under its file name with its reason. Inputs: the engine database and root, and the
 /// project whose switches to include. Output: the page, `connector_project_unknown`, or
@@ -347,34 +400,30 @@ pub fn view(
         Some(_) => return Err(EngineError(PROJECT_UNKNOWN.into())),
     };
     let listing = store::list(db, root)?;
-    let connectors: Vec<ConnectorView> = listing
-        .plugins
-        .into_iter()
-        .filter(|plugin| plugin.kind == PluginKind::Connector)
-        .map(|plugin| {
-            assert!(
-                plugin.runs.is_some() || matches!(plugin.status, PluginStatus::Refused { .. }),
-                "only a refused file has no address"
-            );
-            ConnectorView {
-                sign_in: if plugin.secrets.is_empty() {
-                    SignIn::NotYet
-                } else {
-                    SignIn::Key
-                },
-                oauth: None,
-                runs: plugin.runs,
-                name: plugin.name,
-                title: plugin.title,
-                version: plugin.version,
-                description: plugin.description,
-                origin: plugin.origin,
-                status: plugin.status,
-                secrets: plugin.secrets,
-                sha256: plugin.sha256,
-            }
-        })
-        .collect();
+    let mut connectors: Vec<ConnectorView> = Vec::with_capacity(listing.plugins.len());
+    for plugin in listing.plugins {
+        if plugin.kind != PluginKind::Connector {
+            continue;
+        }
+        assert!(
+            plugin.runs.is_some() || matches!(plugin.status, PluginStatus::Refused { .. }),
+            "only a refused file has no address"
+        );
+        let (sign_in, oauth) = signing_in(db, root, &plugin)?;
+        connectors.push(ConnectorView {
+            sign_in,
+            oauth,
+            runs: plugin.runs,
+            name: plugin.name,
+            title: plugin.title,
+            version: plugin.version,
+            description: plugin.description,
+            origin: plugin.origin,
+            status: plugin.status,
+            secrets: plugin.secrets,
+            sha256: plugin.sha256,
+        });
+    }
     assert!(connectors.len() <= store::PLUGINS_MAX);
     let (settings, version) = settings::load(db)?;
     Ok(ConnectorsView {

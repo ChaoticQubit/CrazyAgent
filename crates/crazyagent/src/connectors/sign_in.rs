@@ -3,9 +3,11 @@
 //! address for the owner's app to open, and waits on a thread of its own for the browser to
 //! come back. At most one sign-in waits per connector, and the pages read where it stands.
 
+use crate::app_plugins::manifest::Manifest;
+use crate::app_plugins::store;
+use crate::connectors::SignInWith;
 use crate::connectors::callback::{CALLBACK_WAIT, Callback, Waited};
 use crate::connectors::oauth::{self, OAuthError, Pending};
-use crate::connectors::SignInWith;
 use crate::connectors::settings::{self, WritePolicy};
 use crate::engine::EngineError;
 use rusqlite::Connection;
@@ -76,6 +78,15 @@ fn unavailable() -> EngineError {
 }
 
 const FINISHING: &str = "connector_oauth_sign_in_finishing";
+
+const WAY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS connector_sign_in_with (
+    connector TEXT PRIMARY KEY CHECK(length(connector) BETWEEN 1 AND 40),
+    way TEXT NOT NULL CHECK(way IN ('key', 'browser'))
+);";
+
+fn stored(_: rusqlite::Error) -> EngineError {
+    EngineError("connectors_unavailable".into())
+}
 
 /// Whether the owner's app may open an authorization address: https, or in rows only the
 /// loopback stand-in vendor's http address.
@@ -370,20 +381,67 @@ pub fn sign_out(db: &Connection, root: &Path, name: &str) -> Result<(), EngineEr
 /// The way a connector whose file offers a key and a browser sign-in signs in, as the owner
 /// chose it; Key until the owner chooses. Inputs: the engine database and the connector.
 /// Output: the way, or `connectors_unavailable`.
-pub(crate) fn chosen(_db: &Connection, _name: &str) -> Result<SignInWith, EngineError> {
-    Ok(SignInWith::Key)
+pub(crate) fn chosen(db: &Connection, name: &str) -> Result<SignInWith, EngineError> {
+    use rusqlite::OptionalExtension;
+    db.execute_batch(WAY_SCHEMA).map_err(stored)?;
+    let way: Option<String> = db
+        .query_row(
+            "SELECT way FROM connector_sign_in_with WHERE connector=?1",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(stored)?;
+    Ok(match way.as_deref() {
+        Some("browser") => SignInWith::Browser,
+        _ => SignInWith::Key,
+    })
 }
 
 /// Chooses how a connector whose file offers a key and a browser sign-in signs in. Inputs:
 /// the engine database and root, the connector and the way. Output: Ok, or
 /// `connector_sign_in_one_way` for a file that offers one way only, or the store's refusal.
 pub fn choose(
-    _db: &Connection,
-    _root: &Path,
-    _name: &str,
-    _way: SignInWith,
+    db: &Connection,
+    root: &Path,
+    name: &str,
+    way: SignInWith,
 ) -> Result<(), EngineError> {
-    Err(EngineError("sign_in_with_not_built".into()))
+    let manifest = store::trusted_connector(db, root, name)?;
+    if !both_ways(&manifest) {
+        return Err(EngineError("connector_sign_in_one_way".into()));
+    }
+    let text = match way {
+        SignInWith::Key => "key",
+        SignInWith::Browser => "browser",
+    };
+    db.execute_batch(WAY_SCHEMA).map_err(stored)?;
+    db.execute(
+        "INSERT INTO connector_sign_in_with(connector, way) VALUES(?1, ?2)
+         ON CONFLICT(connector) DO UPDATE SET way=excluded.way",
+        [name, text],
+    )
+    .map_err(stored)?;
+    assert_eq!(chosen(db, name)?, way);
+    Ok(())
+}
+
+/// Whether a connector's file offers a key and a browser sign-in, so the owner chooses
+/// between them. Input: the file.
+pub(crate) fn both_ways(manifest: &Manifest) -> bool {
+    manifest
+        .connector()
+        .is_some_and(|spec| spec.key.is_some() && spec.oauth.is_some())
+}
+
+/// Forgets the owner's choice for a connector, which then signs in with its key again,
+/// once it is removed or trusted again with other hosts. Inputs: the engine database and
+/// the connector. Output: Ok, or `connectors_unavailable`.
+pub(crate) fn forget_choice(db: &Connection, name: &str) -> Result<(), EngineError> {
+    db.execute_batch(WAY_SCHEMA).map_err(stored)?;
+    db.execute("DELETE FROM connector_sign_in_with WHERE connector=?1", [name])
+        .map_err(stored)?;
+    Ok(())
 }
 
 #[cfg(test)]

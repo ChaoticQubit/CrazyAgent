@@ -739,7 +739,9 @@ impl Gateway {
         spec: &ConnectorSpec,
         renew: bool,
     ) -> Result<Credential, &'static str> {
-        if let Some(key) = &spec.key {
+        if let Some(key) = &spec.key
+            && !connector.loaded.browser
+        {
             return Ok(Credential::key(key, &connector.loaded.bindings));
         }
         let title = title_of(connector);

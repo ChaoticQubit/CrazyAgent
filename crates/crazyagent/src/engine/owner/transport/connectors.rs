@@ -69,6 +69,7 @@ pub const CONNECTORS_CODES: &[&str] = &[
     "connector_request_invalid",
     "connector_request_too_large",
     "connector_sign_in_needed",
+    "connector_sign_in_one_way",
     "connector_timeout",
     "connector_tool_name_invalid",
     "connector_tool_unknown",

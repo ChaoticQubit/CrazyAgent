@@ -127,6 +127,28 @@ fn own_issuer_ref(name: &str) -> Result<CredentialRef, OAuthError> {
     CredentialRef::new(format!("connector-issuer-{name}-own")).map_err(|_| key_store())
 }
 
+/// Whether a connector has a sign-in saved now, whichever client made it. Inputs: the
+/// engine root and the connector. Output: true once its tokens are saved.
+pub(crate) fn signed_in_now(root: &Path, name: &str) -> bool {
+    let Ok(record) = CredentialRef::new(format!("connector-signin-{name}")) else {
+        return false;
+    };
+    let saved = accounts::key_saved_in(root, PLUGIN_KEYS, &record);
+    saved.unwrap_or(false)
+}
+
+/// The owner's own OAuth app saved for a connector: its client id and whether a client
+/// secret is saved, never the secret. Inputs: the engine root and the connector. Output:
+/// the two, or none when no app is saved or the key store cannot be read.
+pub(crate) fn own_app(root: &Path, name: &str) -> Option<(String, bool)> {
+    let reference = own_ref(name).ok()?;
+    let read = accounts::read_key_in(root, PLUGIN_KEYS, &reference);
+    let id = read.ok()??;
+    let secret = own_secret_ref(name).ok()?;
+    let saved = accounts::key_saved_in(root, PLUGIN_KEYS, &secret);
+    Some((id.expose().to_owned(), saved.unwrap_or(false)))
+}
+
 /// A connector's trusted file for a sign-in step, with a file waiting for the owner's review
 /// named so and any other refusal read as offering no sign-in. Inputs: database, engine
 /// root and connector. Output: the file, or `app_plugin_needs_review`, `_oauth_not_offered`.

@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 
 /// The path the browser comes back to.
 pub const CALLBACK_PATH: &str = "/callback";
+/// The address to register for the owner's own OAuth app: the loopback callback at any
+/// port, as RFC 8252 lets a native app ask.
+pub const REDIRECT_TO_REGISTER: &str = "http://127.0.0.1/callback";
 /// How long a sign-in waits for the browser.
 pub const CALLBACK_WAIT: Duration = Duration::from_secs(5 * 60);
 /// How many refused requests close a callback before its answer came; a connection that
