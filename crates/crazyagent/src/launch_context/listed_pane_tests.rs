@@ -122,3 +122,77 @@ fn a_listed_pane_is_handed_its_keyless_account_and_refuses_one_for_another_addre
     let mismatch = failure("launch_account_handover_mismatch");
     assert_eq!(refused.err(), Some(mismatch));
 }
+
+/// rv-ds241 N1 (T20 M8): a pane is given its account hand-over only inside the project
+/// sandbox, as the piped launch is, so a hand-over to a pane at Full access is refused as
+/// the piped launch refuses it, before any other check of the pane.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_listed_pane_at_full_access_is_refused_its_hand_over() {
+    let (_folder, home) = harness_home("standin-jsonl-append");
+    let scratch = tempfile::tempdir().unwrap();
+    let work = scratch.path().canonicalize().unwrap();
+    let run = Run {
+        session_id: "standin-1",
+        key_file: None,
+        resume: false,
+    };
+    let appended = parse(APPEND.as_bytes()).unwrap();
+    let settings = TerminalSettings::read(&appended).unwrap();
+    let registry = crate::harnesses::registry::registry();
+    let harness = registry.get("standin-jsonl-append").unwrap();
+    let connection = openai_chat(KEYLESS_URL, false);
+    let handover = crate::harnesses::accounts::handover(harness, &connection, None);
+    let context = context().with_handover(handover.unwrap());
+    let installed = context.install_listed(&appended, &home, true).unwrap();
+    let unused = work.join("project.sb");
+    let mut request = pane_request("standin-jsonl-append", &home, &work, &unused);
+    request.sandbox_profile = None;
+    request.unconfined = true;
+
+    let refused = command_with(&request, Some(&installed), &run, Some(&settings));
+
+    assert_eq!(refused.err(), Some(failure("launch_environment_refused")));
+}
+
+/// Builds a pane on crossed harnesses: a context installed for one stand-in's manifest in
+/// that stand-in's own home, the terminal settings of a manifest and a request naming a
+/// harness, and drops what [`command_with`] gives. Inputs: the installed manifest, the
+/// settings' manifest and the request's harness.
+#[cfg(target_os = "macos")]
+fn crossed(installed: &str, settings: &str, harness: &str) {
+    let written = parse(installed.as_bytes()).unwrap();
+    let (_folder, home) = harness_home(&written.id);
+    let scratch = tempfile::tempdir().unwrap();
+    let work = scratch.path().canonicalize().unwrap();
+    let profile = work.join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let run = Run {
+        session_id: "standin-1",
+        key_file: None,
+        resume: false,
+    };
+    let context = context().install_listed(&written, &home, true).unwrap();
+    let read = parse(settings.as_bytes()).unwrap();
+    let settings = TerminalSettings::read(&read).unwrap();
+    let request = pane_request(harness, &home, &work, &profile);
+    let _ = command_with(&request, Some(&context), &run, Some(&settings));
+}
+
+/// rv-sa241 N2 (T20 M8): a listed context installed for one harness is never used under
+/// another harness's settings, so one harness's MCP file never reaches another's pane.
+#[cfg(target_os = "macos")]
+#[test]
+#[should_panic(expected = "a listed context written for another harness")]
+fn a_listed_context_of_one_harness_under_another_s_settings_trips_its_assert() {
+    crossed(APPEND, REWRITE, "standin-json-rewrite");
+}
+
+/// rv-sa241 N2 (T20 M8): a pane's settings name the request's own harness, so a request
+/// for another harness than its settings and installed context trips the assert.
+#[cfg(target_os = "macos")]
+#[test]
+#[should_panic(expected = "a pane request for another harness than its settings")]
+fn a_listed_pane_for_another_harness_than_its_settings_trips_its_assert() {
+    crossed(APPEND, APPEND, "standin-json-rewrite");
+}

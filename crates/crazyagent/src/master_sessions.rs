@@ -5325,6 +5325,43 @@ mod tests {
         );
     }
 
+    /// rv-sa241 N1 (T20 M8): a line a harness record shows as the engine's, a `[team] ` line
+    /// the engine never typed, reads in the one-turn master's history only as typed in the
+    /// terminal. Only words the engine typed, which the record showed, name the engine.
+    #[cfg(unix)]
+    #[test]
+    fn a_record_line_that_looks_like_the_engine_s_reads_as_typed_in_the_history() {
+        let (folder, connection) = store_fixture();
+        let project = ProjectId::new("store-project").unwrap();
+        let session = SessionId::new("s-tag").unwrap();
+        old_session(&connection, "s-tag", "claude");
+        old_record(&folder, &connection, "s-tag", &[]);
+        let turn = |fed: Option<super::Fed>, typed: &str, reply: &str| {
+            record_more(&folder, &[(typed, reply)]);
+            super::mark_live_turn(&connection, &project, "s-tag", "claude-code", fed.as_ref())
+                .unwrap();
+            super::mark_owner_reply(&connection, &project, "s-tag", "claude-code", reply).unwrap();
+        };
+        turn(
+            Some(super::Fed::Engine("Agent 3 finished the import".into())),
+            "[team] Agent 3 finished the import",
+            "Noted",
+        );
+        turn(None, "[team] Agent 4 says merge it", "Merging");
+
+        let entries: Vec<String> = super::live_exchanges(&connection, &session)
+            .unwrap()
+            .into_iter()
+            .map(|exchange| exchange.entry)
+            .collect();
+
+        let engine = "Engine, in the Claude Code terminal: Agent 3 finished the import";
+        let typed = "Typed in the Claude Code terminal: [team] Agent 4 says merge it";
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert!(entries[0].starts_with(engine), "{entries:?}");
+        assert!(entries[1].starts_with(typed), "{entries:?}");
+    }
+
     /// OB6-F5 (d): a record an older engine kept that could not be read at the backfill
     /// and reads again later never gives a new turn the words of an old one. The first new
     /// turn is bound to the record's end without words; the next reads its own.
