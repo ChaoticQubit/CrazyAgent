@@ -31,6 +31,7 @@ pub const CLEANUP_CODES: &[&str] = &[
     "cleanup_request_bounds",
     "cleanup_request_invalid",
     "cleanup_unavailable",
+    "cleanup_walk_too_long",
     "cleanup_worktree_dirty",
     "cleanup_worktree_invalid",
     "cleanup_worktree_leftover",
