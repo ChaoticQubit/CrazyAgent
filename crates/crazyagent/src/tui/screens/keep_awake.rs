@@ -1,4 +1,6 @@
-use crate::keep_awake::{KeepAwakeAction, KeepAwakeView, LidRule, Mode, refusal_words};
+use crate::keep_awake::{
+    KeepAwakeAction, KeepAwakeView, LidRule, LidSupport, Mode, Want, refusal_words,
+};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::keep_awake::{KeepAwakeEvent, KeepAwakeQuery, KeepAwakeReply, Picks};
 use crate::tui::clock;
@@ -56,7 +58,8 @@ fn after<T: Copy + PartialEq>(options: &[T], now: T) -> T {
 
 /// The Keep awake screen (DEC-167 addendum 7): the state, what a closed lid does, the
 /// timer actions 1, 4, c, e and x, the mode and the lid rule on m and l, saved at once,
-/// what ends a hold by itself, and s for every setting. Opened by W and by Go to. It
+/// the lid helper's t and d on macOS while it offers them, what ends a hold by itself, and
+/// s for every setting. Opened by W and by Go to. It
 /// draws the view the shell keeps in the store and sends one change at a time.
 pub(in crate::tui) struct KeepAwakeScreen {
     custom: Option<String>,
@@ -130,10 +133,16 @@ impl KeepAwakeScreen {
         }
     }
 
-    /// Takes one action key on a loaded view with no field open and nothing under way.
-    /// Inputs: the view, the key and the context. Output: where to go.
+    /// Takes one action key on a loaded view with no field open and nothing under way;
+    /// t and d run only while the lid helper offers them. Inputs: the view, the key and
+    /// the context. Output: where to go.
     fn action(&mut self, view: &KeepAwakeView, key: &Key, ctx: &mut Ctx) -> Flow {
+        let offers = words::lid_offers(view, words::LidPlace::Screen);
         match key {
+            Key::Char('t') if offers.turn_on.is_some() => {
+                self.act(KeepAwakeAction::TurnOnLidHold, ctx);
+            }
+            Key::Char('d') if offers.remove => self.act(KeepAwakeAction::RemoveLidHelper, ctx),
             Key::Char('1') => self.start(view, HOUR_MINUTES, ctx),
             Key::Char('4') => self.start(view, FOUR_HOURS_MINUTES, ctx),
             Key::Char('c') if words::can_start(view) => self.custom = Some(String::new()),
@@ -286,11 +295,36 @@ impl KeepAwakeScreen {
         lines.push(row("m", "Mode", Self::mode_spans(view.settings.mode, ctx)));
         let lid = words::lid_closed(view.settings.lid);
         lines.push(row("l", "Lid closed", vec![Span::raw(lid)]));
+        let helper = Self::lid_helper_lines(view, ctx);
+        let added = helper.len();
+        lines.extend(helper);
         let ends = words::ends_by_itself(&view.settings);
         lines.push(row("", "Ends by itself", vec![Span::raw(ends)]));
         lines.push(Line::default());
         lines.push(row("s", "All Keep awake settings", Vec::new()));
-        assert!(lines.len() == 12 + usize::from(!start));
+        assert!(added <= 3);
+        assert!(lines.len() == 12 + usize::from(!start) + added);
+        lines
+    }
+
+    /// The lid helper's lines under the lid rule (QUESTION 35i, 35j): the approval line
+    /// while macOS waits and nothing is held, then t and d as the lid helper offers them.
+    /// Inputs: the view and the context. Output: none to three lines.
+    fn lid_helper_lines(view: &KeepAwakeView, ctx: &Ctx) -> Vec<Line<'static>> {
+        let offers = words::lid_offers(view, words::LidPlace::Screen);
+        let waiting = view.lid_platform == LidSupport::NeedsApproval;
+        let mut lines = Vec::new();
+        if waiting && offers.turn_on.is_some() && view.state.want == Want::Nothing {
+            lines.push(Line::styled(words::APPROVAL_LINE, ctx.theme.muted));
+        }
+        let row = |key: &str, label: &str| Line::raw(format!("{key:<KEY_WIDTH$}{label}"));
+        if let Some(turn_on) = offers.turn_on {
+            lines.push(row("t", turn_on));
+        }
+        if offers.remove {
+            lines.push(row("d", "Remove lid helper"));
+        }
+        assert!(lines.len() <= 3);
         lines
     }
 }
@@ -321,8 +355,8 @@ impl Screen for KeepAwakeScreen {
         vec![hint("Esc", "Back")]
     }
 
-    fn keys(&self, _ctx: &Ctx) -> Vec<Hint> {
-        vec![
+    fn keys(&self, ctx: &Ctx) -> Vec<Hint> {
+        let mut keys = vec![
             hint("1", "Start 1 h"),
             hint("4", "Start 4 h"),
             hint("c", "Custom time"),
@@ -330,9 +364,19 @@ impl Screen for KeepAwakeScreen {
             hint("x", "End now"),
             hint("m", "Mode"),
             hint("l", "Lid closed"),
-            hint("s", "All Keep awake settings"),
-            hint("Esc", "Back"),
-        ]
+        ];
+        if let Some(view) = &ctx.store.keep_awake {
+            let offers = words::lid_offers(view, words::LidPlace::Screen);
+            if let Some(turn_on) = offers.turn_on {
+                keys.push(hint("t", turn_on));
+            }
+            if offers.remove {
+                keys.push(hint("d", "Remove lid helper"));
+            }
+        }
+        keys.push(hint("s", "All Keep awake settings"));
+        keys.push(hint("Esc", "Back"));
+        keys
     }
 
     fn typing(&self) -> bool {

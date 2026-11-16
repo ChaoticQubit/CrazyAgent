@@ -121,7 +121,7 @@ function assert(condition: boolean, message: string): asserts condition {
  * throw. */
 export function keepAwakeArgs(action: KeepAwakeAction, generation: number): { action: KeepAwakeAction; generation: number } {
   assert(Number.isSafeInteger(generation) && generation > 0, "a Keep awake change needs a draft generation");
-  if (action !== "end" && !("set" in action)) {
+  if (typeof action === "object" && !("set" in action)) {
     const minutes = "start" in action ? action.start.minutes : action.extend.minutes;
     assert(Number.isInteger(minutes) && minutes >= MINUTES_MIN && minutes <= MINUTES_MAX, `Keep awake minutes must be ${MINUTES_MIN} to ${MINUTES_MAX}`);
   }

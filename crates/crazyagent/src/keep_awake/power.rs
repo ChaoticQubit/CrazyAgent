@@ -11,6 +11,10 @@ pub const READ_MS: i64 = 30_000;
 /// lid-closed part of it.
 pub const LID_REFUSED: &str = "The system did not allow the lid-closed hold";
 
+/// The start of the lid words for a Turn on that SMAppService refused, which the window and
+/// the TUI read to offer Turn on again.
+pub const TURN_ON_FAILED: &str = "Lid-closed hold could not be turned on: ";
+
 const PERCENT_MAX: u8 = 100;
 const LATE_READS: i64 = 2;
 const THREAD_NAME: &str = "keep-awake-sensors";

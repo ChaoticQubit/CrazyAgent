@@ -1,5 +1,6 @@
 use super::hold::{Held, Hold, HoldError, wanted};
 use super::power::{LID_REFUSED, LidAsk, LidCommand, LidReader};
+pub(super) use super::power::TURN_ON_FAILED;
 use super::state::{LidSupport, Want};
 use crazyagent_mac_power::client::{self, CallError};
 use crazyagent_mac_power::protocol::{FloorView, PinView, Refusal, Reply, Request, View};
@@ -44,8 +45,6 @@ pub(super) const PIN_OTHER: &str = "The lid helper belongs to another account on
 pub(super) const PIN_NONE: &str = "The lid helper was approved with no account at the screen";
 /// The lid words while the rule is Off and the helper was never read.
 pub(super) const LID_UNREAD: &str = "The lid helper is read once the lid rule is on";
-/// The start of the lid words for a Turn on that SMAppService refused.
-pub(super) const TURN_ON_FAILED: &str = "Lid-closed hold could not be turned on: ";
 /// The start of the Remove lid helper reason for an unregister that failed.
 pub(super) const REMOVE_UNFINISHED: &str = "Remove lid helper did not finish: ";
 /// The Remove lid helper reason for a Forget refused while the journal reads fine: the

@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from "react";
-import { MINUTES_MAX, MINUTES_MIN, sendKeepAwake, type KeepAwakeAction, type KeepAwakeMode, type KeepAwakeView } from "../../api-keep-awake";
+import { MINUTES_MAX, MINUTES_MIN, sendKeepAwake, type KeepAwakeAction, type KeepAwakeMode, type KeepAwakeView, type LidAction } from "../../api-keep-awake";
 import type { Loaded } from "../../state";
 import { Button, LoadError, NotReady, Skeleton, formatRoute } from "../../ui";
-import { canEnd, canExtend, canStart, customMinutes, endsByItself, lidClosedLine, lidReason, panelLine } from "./model";
+import { APPROVAL_LINE, canEnd, canExtend, canStart, customMinutes, endsByItself, lidClosedLine, lidOffers, lidReason, panelLine, type LidPlace } from "./model";
 import "../notifications/notifications.css";
 import "./keep-awake.css";
 
@@ -33,11 +33,25 @@ function CustomTimer({ typed, busy, onType, onStart }: { typed: string; busy: bo
   </form>;
 }
 
+/** The lid helper buttons one place offers (QUESTION 35i, 35j): Turn on lid-closed hold or
+ * Open Login Items, and Remove lid helper, or nothing. Inputs: the view, the place, a lock
+ * flag and the command handler. Output: the buttons, or null. */
+export function LidHelperButtons({ view, place, busy, onLid }: { view: KeepAwakeView; place: LidPlace; busy: boolean; onLid: (action: LidAction) => void }) {
+  const offers = lidOffers(view, place);
+  if (offers.turnOn === null && !offers.remove) return null;
+  return <div className="keep-awake-row">
+    {offers.turnOn !== null && <Button disabled={busy} onClick={() => onLid("turn_on_lid_hold")}>{offers.turnOn}</Button>}
+    {offers.remove && <Button disabled={busy} onClick={() => onLid("remove_lid_helper")}>Remove lid helper</Button>}
+  </div>;
+}
+
 /** The mode switch and the two lines under the actions: what a closed lid does, with the
- * reason this computer cannot hold it, and what ends a hold by itself. Inputs: the view, a
- * lock flag and the mode handler. Output: the rows. */
-function PanelFacts({ view, busy, onMode }: { view: KeepAwakeView; busy: boolean; onMode: (mode: KeepAwakeMode) => void }) {
+ * reason this computer cannot hold it, the approval line while macOS waits and nothing is
+ * held, the lid helper buttons, and what ends a hold by itself. Inputs: the view, a lock
+ * flag and the mode and lid command handlers. Output: the rows. */
+function PanelFacts({ view, busy, onMode, onLid }: { view: KeepAwakeView; busy: boolean; onMode: (mode: KeepAwakeMode) => void; onLid: (action: LidAction) => void }) {
   const reason = lidReason(view);
+  const approval = view.lid_platform.kind === "needs_approval" && view.settings.lid !== "off" && view.state.want.kind === "nothing";
   return <>
     <div className="keep-awake-kv">
       <span id="keep-awake-panel-mode">Mode</span>
@@ -50,16 +64,19 @@ function PanelFacts({ view, busy, onMode }: { view: KeepAwakeView; busy: boolean
     </div>
     <div className="keep-awake-kv"><span>Lid closed</span><span>{lidClosedLine(view)}</span></div>
     {reason !== null && view.settings.lid !== "off" && <p className="keep-awake-hint">{reason}</p>}
+    {approval && <p className="keep-awake-hint">{APPROVAL_LINE}</p>}
+    <LidHelperButtons view={view} place="panel" busy={busy} onLid={onLid} />
     <div className="keep-awake-kv"><span>Ends by itself</span><span>{endsByItself(view.settings)}</span></div>
   </>;
 }
 
 /** The panel the Keep awake control opens, as a view of its state: what holds, Start 1 h,
- * Start 4 h, Custom, Extend 1 h and End now, the mode, the lid and end lines, and the link to
- * the settings (DEC-167 addendum 5). In mode Off the Starts are off and one line says why. Inputs: the view read, now in milliseconds, whether the
+ * Start 4 h, Custom, Extend 1 h and End now, the mode, the lid and end lines with the lid
+ * helper buttons, and the link to the settings (DEC-167 addendum 5). In mode Off the Starts
+ * are off and one line says why. Inputs: the view read, now in milliseconds, whether the
  * custom field is open, its text, a lock flag, the last problem and the handlers. Output:
  * the dialog. */
-export function KeepAwakePanelView({ view, now, custom, typed, busy, problem, onStart, onCustom, onType, onExtend, onEnd, onMode, onRetry, onClose }: {
+export function KeepAwakePanelView({ view, now, custom, typed, busy, problem, onStart, onCustom, onType, onExtend, onEnd, onMode, onLid, onRetry, onClose }: {
   view: Loaded<KeepAwakeView>;
   now: number;
   custom: boolean;
@@ -72,6 +89,7 @@ export function KeepAwakePanelView({ view, now, custom, typed, busy, problem, on
   onExtend: () => void;
   onEnd: () => void;
   onMode: (mode: KeepAwakeMode) => void;
+  onLid: (action: LidAction) => void;
   onRetry: () => void;
   onClose?: () => void;
 }) {
@@ -100,7 +118,7 @@ export function KeepAwakePanelView({ view, now, custom, typed, busy, problem, on
       {startable && !canExtend(loaded) && <p className="keep-awake-hint">Extend works while a timer runs. Start one first.</p>}
       {problem && <p className="notice-problem" role="alert">{problem}</p>}
       <hr className="keep-awake-rule" />
-      <PanelFacts view={loaded} busy={busy} onMode={onMode} />
+      <PanelFacts view={loaded} busy={busy} onMode={onMode} onLid={onLid} />
       <a href={SETTINGS_HREF} onClick={onClose}>All Keep awake settings</a>
     </>}
   </section>;
@@ -132,5 +150,6 @@ export function KeepAwakePanel({ view, now, onRetry, onClose }: { view: Loaded<K
   }
   return <KeepAwakePanelView view={view} now={now} custom={custom} typed={typed} busy={busy} problem={problem}
     onStart={(minutes) => void start(minutes)} onCustom={() => setCustom(!custom)} onType={(text) => { setTyped(text); setProblem(""); }}
-    onExtend={() => void send({ extend: { minutes: HOUR_MINUTES } })} onEnd={() => void send("end")} onMode={mode} onRetry={onRetry} onClose={onClose} />;
+    onExtend={() => void send({ extend: { minutes: HOUR_MINUTES } })} onEnd={() => void send("end")} onMode={mode}
+    onLid={(action) => void send(action)} onRetry={onRetry} onClose={onClose} />;
 }

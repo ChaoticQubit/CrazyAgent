@@ -1,14 +1,17 @@
 use crate::keep_awake::{
-    BatteryFloor, Cap, DisplayAwake, Grace, HeatEnd, HeatNotice, KeepAwakeSettings, KeepAwakeView,
-    LidDisplay, LidRule, Mode,
+    BatteryFloor, Cap, DisplayAwake, Grace, HeatEnd, HeatNotice, KeepAwakeAction,
+    KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, Mode,
 };
+use crate::paths::Platform;
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::keep_awake::{KeepAwakeEvent, KeepAwakeQuery, KeepAwakeReply, Picks};
 use crate::tui::ctx::Ctx;
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::screens::keep_awake::refusal;
-use crate::tui::screens::keep_awake::words::{Setting, unavailable};
+use crate::tui::screens::keep_awake::words::{
+    LidOffers, LidPlace, Setting, lid_helper_line, lid_offers, unavailable,
+};
 use crate::tui::screens::settings_accounts::plain;
 use crate::tui::screens::{Flow, Place, Screen};
 use crate::tui::seam::{Arrival, Request};
@@ -94,6 +97,7 @@ const DISPLAY_AWAKE: [(DisplayAwake, &str); 2] = [
 const SAVED: &str = "Keep awake settings saved.";
 const NOT_SAVED: &str = "The Keep awake settings were not saved.";
 const NOT_READ: &str = "Couldn't load the Keep awake settings.";
+const LID_NOT_CHANGED: &str = "The lid helper was not changed.";
 
 /// One setting's label and help, in the desktop Settings page's words. Input: the
 /// setting. Output: the label and the help sentence.
@@ -207,14 +211,17 @@ fn pick(setting: Setting, at: usize, picks: &mut Picks) {
 }
 
 /// Settings, Keep awake (DEC-167 addendum 7): the nine settings in the desktop's four
-/// sections, with its labels, help, options and reasons. Left and Right pick; the picks
-/// stay unsaved until Enter saves them over the settings the engine holds at that moment,
-/// and Esc drops them first. Opened by Go to and by s on the Keep awake screen.
+/// sections, with its labels, help, options and reasons, and on macOS the lid helper's
+/// line under the lid rule with t and d as it offers them, whatever the rule (QUESTION
+/// 36c). Left and Right pick; the picks stay unsaved until Enter saves them over the
+/// settings the engine holds at that moment, and Esc drops them first. Opened by Go to and
+/// by s on the Keep awake screen.
 pub(in crate::tui) struct KeepAwakeSettingsPage {
     picks: Picks,
     selected: usize,
     top: usize,
     saving: Option<KeepAwakeQuery>,
+    acting: Option<KeepAwakeQuery>,
     problem: Option<String>,
 }
 
@@ -227,8 +234,27 @@ impl KeepAwakeSettingsPage {
             selected: 0,
             top: 0,
             saving: None,
+            acting: None,
             problem: None,
         }
+    }
+
+    /// Sends one lid helper command, unless a save or another command is on its way.
+    /// Inputs: the command and the context. Output: none.
+    fn lid(&mut self, action: KeepAwakeAction, ctx: &mut Ctx) {
+        assert!(matches!(
+            action,
+            KeepAwakeAction::TurnOnLidHold | KeepAwakeAction::RemoveLidHelper
+        ));
+        if self.saving.is_some() || self.acting.is_some() {
+            return;
+        }
+        let query = KeepAwakeQuery::Act {
+            action,
+            generation: ctx.next_generation(),
+        };
+        self.acting = Some(query.clone());
+        ctx.request(Request::KeepAwake(Box::new(query)));
     }
 
     fn edited(&self, stored: &KeepAwakeSettings) -> bool {
@@ -269,6 +295,13 @@ impl KeepAwakeSettingsPage {
                 Ok(KeepAwakeReply::Done) => self.problem.take(),
                 Err(code) => Some(code.clone()),
             };
+            return;
+        }
+        if self.acting.as_ref() == Some(&event.query) {
+            self.acting = None;
+            if let Err(code) = &event.result {
+                ctx.say(Message::error(LID_NOT_CHANGED, refusal(code)));
+            }
             return;
         }
         if self.saving.as_ref() != Some(&event.query) {
@@ -354,6 +387,17 @@ impl KeepAwakeSettingsPage {
                 if let Some(reason) = unavailable(*setting, view) {
                     lines.push(Line::styled(format!("  {reason}"), theme.warning));
                 }
+                if *setting == Setting::Lid && view.platform == Platform::MacOs {
+                    let helper = format!("Lid helper  {}", lid_helper_line(view));
+                    let room = width.saturating_sub(2).max(8);
+                    if helper.chars().count() <= room {
+                        lines.push(Line::raw(format!("  {helper}")));
+                    } else {
+                        for part in wrap(&helper, room) {
+                            lines.push(Line::raw(format!("  {part}")));
+                        }
+                    }
+                }
                 spans.push((start, lines.len() - 1));
                 start = lines.len();
             }
@@ -373,7 +417,7 @@ impl Screen for KeepAwakeSettingsPage {
     }
 
     fn status(&self, ctx: &Ctx) -> Line<'static> {
-        if self.saving.is_some() {
+        if self.saving.is_some() || self.acting.is_some() {
             return Line::styled(format!("Saving{}", ctx.glyphs.ellipsis), ctx.theme.muted);
         }
         Line::default()
@@ -390,12 +434,19 @@ impl Screen for KeepAwakeSettingsPage {
             }
             return vec![hint("Esc", "Back")];
         };
-        if self.saving.is_some() {
+        if self.saving.is_some() || self.acting.is_some() {
             return Vec::new();
         }
         let vertical = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
         let sideways = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
         let mut hints = vec![hint(&vertical, "Move"), hint(&sideways, "Change")];
+        let offers = lid_offers(view, LidPlace::Settings);
+        if let Some(turn_on) = offers.turn_on {
+            hints.push(hint("t", turn_on));
+        }
+        if offers.remove {
+            hints.push(hint("d", "Remove lid helper"));
+        }
         if self.edited(&view.settings) {
             hints.push(hint("Enter", "Save changes"));
             hints.push(hint("Esc", "Discard changes"));
@@ -406,6 +457,12 @@ impl Screen for KeepAwakeSettingsPage {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let none = LidOffers {
+            turn_on: None,
+            remove: false,
+        };
+        let offers = (ctx.store.keep_awake.as_ref())
+            .map_or(none, |view| lid_offers(view, LidPlace::Settings));
         let Some(stored) = ctx.store.keep_awake.as_ref().map(|view| view.settings) else {
             if self.problem.is_some() && *key == Key::Char('r') {
                 ctx.request(Request::KeepAwake(Box::new(KeepAwakeQuery::Read)));
@@ -413,10 +470,14 @@ impl Screen for KeepAwakeSettingsPage {
             }
             return Flow::Ignored;
         };
-        if self.saving.is_some() {
+        if self.saving.is_some() || self.acting.is_some() {
             return Flow::Handled;
         }
         match key {
+            Key::Char('t') if offers.turn_on.is_some() => {
+                self.lid(KeepAwakeAction::TurnOnLidHold, ctx);
+            }
+            Key::Char('d') if offers.remove => self.lid(KeepAwakeAction::RemoveLidHelper, ctx),
             Key::Up => self.moved(self.selected.saturating_sub(1)),
             Key::Down => self.moved(self.selected + 1),
             Key::Home => self.moved(0),
@@ -437,7 +498,10 @@ impl Screen for KeepAwakeSettingsPage {
                     self.take(event, ctx);
                 }
             }
-            Arrival::Disconnected(_) => self.saving = None,
+            Arrival::Disconnected(_) => {
+                self.saving = None;
+                self.acting = None;
+            }
             _ => {}
         }
         Flow::Handled

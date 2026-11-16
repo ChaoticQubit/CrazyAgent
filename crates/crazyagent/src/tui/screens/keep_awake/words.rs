@@ -2,6 +2,7 @@ use crate::keep_awake::{
     BatteryFloor, Cap, EndReason, HeatEnd, KeepAwakeSettings, KeepAwakeView, LidRule, LidSupport,
     MINUTES_MAX, Mode, Reason, Want,
 };
+use crate::keep_awake::power::TURN_ON_FAILED;
 use crate::paths::Platform;
 
 /// The longest Keep awake label the header shows, in characters.
@@ -11,6 +12,13 @@ const COUNT_MAX: u32 = 999;
 const MINUTE_MS: i64 = 60_000;
 const MINUTES_SHOWN_MAX: i64 = 999 * 60 + 59;
 const REASON_CHARS_MAX: usize = 200;
+const TURN_ON: &str = "Turn on lid-closed hold";
+const LOGIN_ITEMS: &str = "Open Login Items";
+const TURNED_ON: &str = "Turned on";
+
+/// The line the lid helper's approval screen and notice say while macOS waits for it.
+pub(in crate::tui) const APPROVAL_LINE: &str =
+    "Allow the lid helper in System Settings to hold with the lid closed.";
 const PERCENT_MAX: u8 = 100;
 const CAP_HOURS_MAX: u8 = 24;
 
@@ -234,18 +242,51 @@ pub(in crate::tui) struct LidOffers {
 /// (QUESTION 35f, 35i, 35j, 36c), the desktop's buttons. Inputs: the view and the place.
 /// Output: the offers.
 pub(in crate::tui) fn lid_offers(view: &KeepAwakeView, place: LidPlace) -> LidOffers {
-    let _ = (view, place);
-    LidOffers {
+    let none = LidOffers {
         turn_on: None,
         remove: false,
+    };
+    let hidden = place == LidPlace::Screen && view.settings.lid == LidRule::Off;
+    if view.platform != Platform::MacOs || hidden {
+        return none;
     }
+    let lid = &view.lid_platform;
+    let failed = matches!(
+        lid,
+        LidSupport::NotAvailable { reason } if reason.starts_with(TURN_ON_FAILED)
+    );
+    let turn_on = match lid {
+        LidSupport::NeedsApproval => Some(LOGIN_ITEMS),
+        LidSupport::NotTurnedOn => Some(TURN_ON),
+        _ if failed => Some(TURN_ON),
+        _ => None,
+    };
+    let removable = matches!(
+        lid,
+        LidSupport::NeedsApproval
+            | LidSupport::Held
+            | LidSupport::RemoveHelper { .. }
+            | LidSupport::SleepNotRestored
+            | LidSupport::NotAvailable { .. }
+    );
+    let remove = match place {
+        LidPlace::Screen => matches!(lid, LidSupport::RemoveHelper { .. }),
+        LidPlace::Settings => removable && !failed,
+    };
+    assert!(turn_on.is_none() || !remove || *lid == LidSupport::NeedsApproval);
+    LidOffers { turn_on, remove }
 }
 
 /// The Settings line on the lid helper: the approval line while it waits, else why it
 /// cannot hold, else that it is on. Input: the view. Output: the words.
 pub(in crate::tui) fn lid_helper_line(view: &KeepAwakeView) -> String {
-    let _ = view;
-    String::new()
+    if view.lid_platform == LidSupport::NeedsApproval {
+        return APPROVAL_LINE.into();
+    }
+    let line = lid_reason(&view.lid_platform).unwrap_or_else(|| TURNED_ON.into());
+    assert!(!line.is_empty());
+    assert!(line.chars().count() <= REASON_CHARS_MAX);
+    line
 }
 
 /// What the lid rule does with a closed lid. Input: the rule. Output: the words.

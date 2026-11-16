@@ -1,4 +1,4 @@
-import { MINUTES_MAX, MINUTES_MIN, type KeepAwakeSettingId, type KeepAwakeSettings, type KeepAwakeView } from "../../api-keep-awake";
+import { MINUTES_MAX, MINUTES_MIN, type KeepAwakeSettingId, type KeepAwakeSettings, type KeepAwakeView, type LidSupport } from "../../api-keep-awake";
 
 /** How the control draws a state: green holds, amber holds with a lid limit, red ended by
  * itself, plain is not holding (DEC-167 addendum 5). */
@@ -17,6 +17,12 @@ const CAP_HOURS_MAX = 24;
 const BATTERY_WORDS = { off: null, pct5: "5% battery", pct10: "10% battery", pct20: "20% battery" } as const;
 const HEAT_WORDS = { critical: "critical heat", serious: "serious heat", never: null } as const;
 const LID_WORDS = { ac_only: "Hold on AC power only", always: "Hold always", off: "Sleep as usual" } as const;
+const TURN_ON_WORDS = "Turn on lid-closed hold";
+const LOGIN_ITEMS_WORDS = "Open Login Items";
+const REMOVABLE: ReadonlySet<LidSupport["kind"]> = new Set(["needs_approval", "held", "remove_helper", "sleep_not_restored", "not_available"]);
+
+/** The line the lid helper's approval screen and notice say while macOS waits for it. */
+export const APPROVAL_LINE = "Allow the lid helper in System Settings to hold with the lid closed.";
 
 function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -124,7 +130,7 @@ function afterLabel(view: KeepAwakeView): string {
   switch (view.lid_support.kind) {
     case "idle_only_on_battery": return "A closed lid sleeps the computer until it is on AC power.";
     case "needs_macos13": return "A closed lid sleeps the computer.";
-    case "needs_approval": return "Allow the lid helper in System Settings to hold with the lid closed.";
+    case "needs_approval": return APPROVAL_LINE;
     default: break;
   }
   if (view.state.reason === "timer") return "Sleep comes back when the timer ends.";
@@ -157,25 +163,34 @@ export function lidClosedLine(view: KeepAwakeView): string {
   return LID_WORDS[view.settings.lid];
 }
 
-/** Why this computer cannot hold with the lid closed, or null when it can, the rule is Off
- * or only the power source stands in the way. Input: the view. Output: the reason or null. */
-export function lidReason(view: KeepAwakeView): string | null {
-  const lid = view.lid_support;
+/** Why one lid support cannot hold with the lid closed, or null when it can, the rule is
+ * Off or only the power source stands in the way. Input: the lid support. Output: the
+ * reason, cut to 200 characters, or null. */
+function supportReason(lid: LidSupport): string | null {
   switch (lid.kind) {
     case "needs_macos13": return "Needs macOS 13 or newer";
     case "needs_approval": return "Waits for your approval in System Settings";
     case "helper_missing": return "Not set up on this computer yet";
+    case "not_turned_on": return "Not turned on yet";
+    case "sleep_not_restored": return "Sleep not restored: see Notifications";
     case "locked_by_policy": return "Locked by your organization";
-    case "not_available": return lid.reason.slice(0, REASON_MAX);
+    case "not_available":
+    case "remove_helper": return lid.reason.slice(0, REASON_MAX);
     case "held":
     case "off":
     case "idle_only_on_battery": return null;
   }
 }
 
+/** Why this computer cannot hold with the lid closed, or null when it can, the rule is Off
+ * or only the power source stands in the way. Input: the view. Output: the reason or null. */
+export function lidReason(view: KeepAwakeView): string | null {
+  return supportReason(view.lid_support);
+}
+
 /** The start of the lid words for a Turn on that macOS refused, the engine's
  * `TURN_ON_FAILED`. */
-export const TURN_ON_FAILED = "";
+export const TURN_ON_FAILED = "Lid-closed hold could not be turned on: ";
 
 /** Where lid helper buttons show: the panel, only while the lid rule is on, or Settings. */
 export type LidPlace = "panel" | "settings";
@@ -185,18 +200,28 @@ export type LidPlace = "panel" | "settings";
 export interface LidOffers { turnOn: string | null; remove: boolean }
 
 /** The lid helper buttons a view offers in one place, from what this Mac says of the lid
- * (QUESTION 35f, 35i, 35j, 36c). Inputs: the view and the place. Output: the offers. */
+ * (QUESTION 35f, 35i, 35j, 36c): Turn on while it is not turned on or a Turn on failed,
+ * Open Login Items while approval waits, and Remove lid helper in the panel for a pin to
+ * remove, in Settings wherever a helper may be registered. Nothing off macOS, nothing in
+ * the panel while the lid rule is Off. Inputs: the view and the place. Output: the offers. */
 export function lidOffers(view: KeepAwakeView, place: LidPlace): LidOffers {
-  void view;
-  void place;
-  return { turnOn: null, remove: false };
+  if (view.platform !== "mac_os" || (place === "panel" && view.settings.lid === "off")) return { turnOn: null, remove: false };
+  const lid = view.lid_platform;
+  const failed = lid.kind === "not_available" && lid.reason.startsWith(TURN_ON_FAILED);
+  const turnOn = lid.kind === "needs_approval" ? LOGIN_ITEMS_WORDS : lid.kind === "not_turned_on" || failed ? TURN_ON_WORDS : null;
+  const remove = place === "panel" ? lid.kind === "remove_helper" : REMOVABLE.has(lid.kind) && !failed;
+  assert(turnOn === null || !remove || lid.kind === "needs_approval", "Turn on and Remove lid helper show together only while approval waits");
+  return { turnOn, remove };
 }
 
 /** The Settings line on the lid helper: the approval line while it waits, else why it
  * cannot hold, else that it is on. Input: the view. Output: the words. */
 export function lidHelperLine(view: KeepAwakeView): string {
-  void view;
-  return "";
+  const lid = view.lid_platform;
+  if (lid.kind === "needs_approval") return APPROVAL_LINE;
+  const line = supportReason(lid) ?? "Turned on";
+  assert(line.length > 0 && line.length <= REASON_MAX, "the lid helper line is 1 to 200 characters");
+  return line;
 }
 
 /** Why this computer cannot honour one setting, or null when it can. Inputs: the setting
