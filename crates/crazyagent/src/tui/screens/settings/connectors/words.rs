@@ -107,6 +107,25 @@ pub(in crate::tui) const NOT_READ_SIGN_IN: &str = "Couldn't read the sign-in.";
 pub(in crate::tui) const NOT_OPENED: &str = "The browser did not open.";
 /// The line above a waiting sign-in's address, shown for copying (TUI only).
 pub(in crate::tui) const OPEN_ADDRESS: &str = "If the browser did not open, go to this address:";
+/// The own app section's title, the desktop's words (addendum 30 Q4 A).
+pub(in crate::tui) const OWN_APP: &str = "Your own OAuth app";
+/// The line under the own app section and form, the desktop's words.
+pub(in crate::tui) const OWN_APP_HELP: &str = "Use an OAuth app you registered with the vendor. Saving or removing it signs the connector out.";
+/// The line while no own app is saved, the desktop's words.
+pub(in crate::tui) const OWN_APP_NONE: &str = "No app saved.";
+/// The own app form's client id field, the desktop's words.
+pub(in crate::tui) const CLIENT_ID: &str = "Client id";
+/// The own app form's secret field, the desktop's words.
+pub(in crate::tui) const CLIENT_SECRET: &str = "Client secret (empty for a public app)";
+/// The line under the secret field, the desktop's words.
+pub(in crate::tui) const CLIENT_SECRET_HELP: &str =
+    "The secret is sent to the engine once and never shown again.";
+/// The form's line when Save is pressed with no client id, the desktop's words.
+pub(in crate::tui) const ENTER_CLIENT_ID: &str = "Enter a client id.";
+/// The action that opens the own app form, the desktop's words.
+pub(in crate::tui) const USE_OWN_APP: &str = "Use my own app";
+/// The action that removes a saved own app, the desktop's words.
+pub(in crate::tui) const REMOVE_OWN_APP: &str = "Remove my app";
 /// The connector page's way back to the catalog (WORDS r4).
 pub(in crate::tui) const BACK: &str = "All connectors";
 /// The add dialog's title (WORDS r4).
@@ -368,6 +387,46 @@ pub(in crate::tui) fn signed_in(connector: &ConnectorView) -> bool {
 /// Output: "<title> is signed in.".
 pub(in crate::tui) fn signed_in_line(title: &str) -> String {
     format!("{} is signed in.", safe(title))
+}
+
+/// The redirect an own app registers, with any port, the desktop's words. Input: the
+/// engine's redirect. Output: "Redirect: <redirect> (any port)".
+pub(in crate::tui) fn redirect_line(redirect: &str) -> String {
+    format!("Redirect: {} (any port)", safe(redirect))
+}
+
+/// The own app form's heading, the desktop's words. Input: the connector's title. Output:
+/// "Your own OAuth app for <title>".
+pub(in crate::tui) fn own_app_heading(title: &str) -> String {
+    format!("Your own OAuth app for {}", safe(title))
+}
+
+/// A saved own app's client id line, the desktop's words. Input: the client id. Output:
+/// "Client id: <id>".
+pub(in crate::tui) fn client_id_line(client_id: &str) -> String {
+    format!("Client id: {}", safe(client_id))
+}
+
+/// Whether a saved own app holds a secret, never the secret, the desktop's words. Input:
+/// whether one is saved. Output: the line.
+pub(in crate::tui) fn client_secret_line(saved: bool) -> &'static str {
+    if saved {
+        "Client secret: saved"
+    } else {
+        "Client secret: none"
+    }
+}
+
+/// The line Save app confirms with, the desktop's words. Input: the connector's title.
+/// Output: "<title> signs in with your own app.".
+pub(in crate::tui) fn own_app_saved(title: &str) -> String {
+    format!("{} signs in with your own app.", safe(title))
+}
+
+/// The line Remove my app confirms with, the desktop's words. Input: the connector's title.
+/// Output: "<title> no longer uses your own app.".
+pub(in crate::tui) fn own_app_removed(title: &str) -> String {
+    format!("{} no longer uses your own app.", safe(title))
 }
 
 /// The line on another connector's page while one sign-in waits, the desktop's words

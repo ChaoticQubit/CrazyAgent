@@ -191,6 +191,15 @@ export const CONNECTORS_PAGE = {
   signOutHelp: "Sign out forgets the sign-in on this computer; the vendor is not told.",
   signInCancelled: "The sign-in was cancelled.",
   notReadSignIn: "Couldn't read the sign-in.",
+  ownApp: "Your own OAuth app",
+  ownAppHelp: "Use an OAuth app you registered with the vendor. Saving or removing it signs the connector out.",
+  ownAppNone: "No app saved.",
+  clientId: "Client id",
+  clientSecret: "Client secret (empty for a public app)",
+  clientSecretHelp: "The secret is sent to the engine once and never shown again.",
+  enterClientId: "Enter a client id.",
+  useOwnApp: "Use my own app",
+  removeOwnApp: "Remove my app",
   refusedFile: "Fix its file, or remove it on the App plugins page.",
   settings: "Connector settings",
   write: "Write actions",
@@ -302,6 +311,42 @@ export function signInFirstLine(title: string): string {
  * Output: "<title> is signed out.". */
 export function signedOutLine(title: string): string {
   return `${title} is signed out.`;
+}
+
+/** The redirect an owner registers for their own app, any port, the same in the TUI. Input:
+ * the engine's redirect. Output: "Redirect: <redirect> (any port)". */
+export function redirectLine(redirect: string): string {
+  return `Redirect: ${redirect} (any port)`;
+}
+
+/** The dialog's heading for a connector's own app, the same in the TUI. Input: the
+ * connector's title. Output: "Your own OAuth app for <title>". */
+export function ownAppHeading(title: string): string {
+  return `${CONNECTORS_PAGE.ownApp} for ${title}`;
+}
+
+/** The saved own app's client id line, the same in the TUI. Input: the client id. Output:
+ * "Client id: <id>". */
+export function clientIdLine(clientId: string): string {
+  return `${CONNECTORS_PAGE.clientId}: ${clientId}`;
+}
+
+/** Whether a secret is saved for the own app, never the secret, the same in the TUI. Input:
+ * whether one is saved. Output: "Client secret: saved" or "Client secret: none". */
+export function clientSecretLine(saved: boolean): string {
+  return saved ? "Client secret: saved" : "Client secret: none";
+}
+
+/** The line a saved own app confirms with, the same in the TUI. Input: the connector's
+ * title. Output: "<title> signs in with your own app.". */
+export function ownAppSavedLine(title: string): string {
+  return `${title} signs in with your own app.`;
+}
+
+/** The line a removed own app confirms with, the same in the TUI. Input: the connector's
+ * title. Output: "<title> no longer uses your own app.". */
+export function ownAppRemovedLine(title: string): string {
+  return `${title} no longer uses your own app.`;
 }
 
 /** The page's next step for where a sign-in stands: waiting keeps reading; every end stops,
@@ -717,4 +762,17 @@ export function cancelConnectorSignIn(name: string): Promise<Result<SignInState>
  * Output: the page. */
 export function signOutConnector(name: string): Promise<Result<ConnectorsView>> {
   return connectorCall<ConnectorsView>("desktop_connector_sign_out", { name });
+}
+
+/** Saves the owner's own OAuth app for a connector, which signs it out; only the engine keeps
+ * the secret, and an empty one is a public app's none. Inputs: the connector, the client id
+ * and the typed secret. Output: the page, which never holds the secret. */
+export function setConnectorOwnApp(name: string, clientId: string, secret: string): Promise<Result<ConnectorsView>> {
+  return connectorCall<ConnectorsView>("desktop_connector_set_own_app", { name, clientId, secret });
+}
+
+/** Removes the owner's own OAuth app from a connector, which signs it out. Input: the
+ * connector. Output: the page. */
+export function clearConnectorOwnApp(name: string): Promise<Result<ConnectorsView>> {
+  return connectorCall<ConnectorsView>("desktop_connector_clear_own_app", { name });
 }

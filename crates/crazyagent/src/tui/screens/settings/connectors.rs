@@ -24,10 +24,12 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 use std::path::PathBuf;
 use words::{
-    ADD_FIELD, BACK, BROWSER_NO_KEY, CHECK, CHECKING, KEY_EMPTY, KEY_FIELD, NOT_CONNECTOR,
-    NOT_OPENED, NOT_READ_SIGN_IN, OAUTH_NOT_YET, SAVE, SAVED, SIGN_IN, SIGN_IN_CANCELLED, SIGN_OUT,
-    STALE, browser_now, chosen_way, hosts, keys_shown, other_way, refusal, secrets_shown,
-    sign_in_first, signed_in, signed_in_line, signed_out_line, signs_in_with, way_word,
+    ADD_FIELD, BACK, BROWSER_NO_KEY, CHECK, CHECKING, CLIENT_ID, CLIENT_SECRET, ENTER_CLIENT_ID,
+    KEY_EMPTY, KEY_FIELD, NOT_CONNECTOR, NOT_OPENED, NOT_READ_SIGN_IN, OAUTH_NOT_YET,
+    REMOVE_OWN_APP, SAVE, SAVED, SIGN_IN, SIGN_IN_CANCELLED, SIGN_OUT, STALE, USE_OWN_APP,
+    browser_now, chosen_way, hosts, keys_shown, other_way, own_app_removed, own_app_saved, refusal,
+    secrets_shown, sign_in_first, signed_in, signed_in_line, signed_out_line, signs_in_with,
+    way_word,
 };
 
 mod draw;
@@ -39,6 +41,7 @@ pub(in crate::tui) mod words;
 pub(in crate::tui) const TITLE: &str = "Connectors";
 const GUTTER: u16 = 2;
 const KEY_CHARS_MAX: usize = 1024;
+const CLIENT_ID_CHARS_MAX: usize = 255;
 const PATH_CHARS_MAX: usize = 1024;
 const SETTING_ROWS: usize = 4;
 const SIGN_IN_READS_MAX: usize = 72;
@@ -103,8 +106,20 @@ fn refused(connector: &ConnectorView) -> bool {
     matches!(connector.status, PluginStatus::Refused { .. })
 }
 
+/// The own app form for one connector: its title and redirect, the client id field and the
+/// masked secret field, with the one that has focus.
+struct OwnAppForm {
+    name: String,
+    title: String,
+    redirect: String,
+    client_id: TextField,
+    secret: TextField,
+    on_secret: bool,
+}
+
 enum Open {
     None,
+    OwnApp(Box<OwnAppForm>),
     Add(Box<AddForm>),
     Trust {
         yaml: Option<String>,
@@ -465,6 +480,79 @@ impl ConnectorsPage {
         send(ctx, SettingsJob::Connectors(Box::new(job)));
     }
 
+    fn own_app_form(&mut self) {
+        let Some(connector) = self.opened() else {
+            return;
+        };
+        let allowed = connector
+            .oauth
+            .as_ref()
+            .filter(|oauth| oauth.own_app_allowed);
+        let Some(oauth) = allowed.filter(|_| !refused(connector)) else {
+            return;
+        };
+        let form = OwnAppForm {
+            name: connector.name.clone(),
+            title: connector.title.clone(),
+            redirect: oauth.redirect.clone(),
+            client_id: TextField::new(CLIENT_ID, CLIENT_ID_CHARS_MAX),
+            secret: TextField::secret(CLIENT_SECRET, KEY_CHARS_MAX),
+            on_secret: false,
+        };
+        self.failure = None;
+        self.open = Open::OwnApp(Box::new(form));
+    }
+
+    fn remove_own_app(&mut self, ctx: &mut Ctx) {
+        let Some(connector) = self.opened() else {
+            return;
+        };
+        let saved = connector
+            .oauth
+            .as_ref()
+            .and_then(|oauth| oauth.own_app.as_ref());
+        if saved.is_none() || refused(connector) {
+            return;
+        }
+        let name = connector.name.clone();
+        let done = own_app_removed(&connector.title);
+        self.done = Some(done);
+        self.ask(ConnectorsJob::ClearOwnApp { name }, Pending::Change, ctx);
+    }
+
+    fn save_own_app(&mut self, ctx: &mut Ctx) {
+        let Open::OwnApp(form) = &mut self.open else {
+            return;
+        };
+        let client_id = form.client_id.value().trim().to_owned();
+        if client_id.is_empty() {
+            self.failure = Some(ENTER_CLIENT_ID.into());
+            return;
+        }
+        let secret = if form.secret.is_empty() {
+            None
+        } else {
+            let typed = AccountSecret::new(form.secret.take_secret());
+            assert!(
+                form.secret.is_empty(),
+                "the typed secret leaves the field once"
+            );
+            let Ok(typed) = typed else {
+                self.failure = Some(refusal("connector_oauth_client_invalid"));
+                return;
+            };
+            Some(typed)
+        };
+        let name = form.name.clone();
+        self.done = Some(own_app_saved(&form.title));
+        let job = ConnectorsJob::SetOwnApp {
+            name,
+            client_id,
+            secret,
+        };
+        self.ask(job, Pending::Change, ctx);
+    }
+
     fn save_key(&mut self, ctx: &mut Ctx) {
         let Open::Key(form) = &mut self.open else {
             return;
@@ -792,6 +880,30 @@ impl ConnectorsPage {
         Flow::Handled
     }
 
+    fn own_app_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let Open::OwnApp(form) = &mut self.open else {
+            return Flow::Ignored;
+        };
+        match key {
+            Key::Esc if self.pending.is_none() => {
+                self.open = Open::None;
+                self.failure = None;
+            }
+            Key::Esc | Key::Enter if self.pending.is_some() => {}
+            Key::Enter => self.save_own_app(ctx),
+            Key::Tab | Key::BackTab => form.on_secret = !form.on_secret,
+            other => {
+                let field = if form.on_secret {
+                    &mut form.secret
+                } else {
+                    &mut form.client_id
+                };
+                field.key(other);
+            }
+        }
+        Flow::Handled
+    }
+
     /// Moves the trust screen's first line for a scroll key and notes once its end was on
     /// screen (rv-ds241 T5 F1). Inputs: the key, the trust screen's line count and the
     /// context. Output: none.
@@ -865,6 +977,8 @@ impl ConnectorsPage {
             Key::Char('w') => self.switch_way(ctx),
             Key::Char('s') => self.sign_in_or_out(ctx),
             Key::Char('c') => self.cancel_sign_in(ctx),
+            Key::Char('o') => self.own_app_form(),
+            Key::Char('d') => self.remove_own_app(ctx),
             Key::Char('k') => self.key_form(ctx),
             Key::Char('u') => self.clear_key(ctx),
             Key::Char('x') => self.remove(ctx),
@@ -952,6 +1066,14 @@ impl ConnectorsPage {
             } else if browser_now(connector) && !refused(connector) && self.signing.is_none() {
                 hints.push(hint("s", SIGN_IN));
             }
+            if let Some(oauth) = connector.oauth.as_ref().filter(|_| !refused(connector)) {
+                if oauth.own_app_allowed {
+                    hints.push(hint("o", USE_OWN_APP));
+                }
+                if oauth.own_app.is_some() {
+                    hints.push(hint("d", REMOVE_OWN_APP));
+                }
+            }
             let secret = listed.get(self.secret);
             if keys && secret.is_some() {
                 hints.push(hint("k", "Set key"));
@@ -1003,7 +1125,16 @@ impl Screen for ConnectorsPage {
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         match &self.open {
-            Open::Add(_) | Open::Key(_) if self.pending.is_some() => return Vec::new(),
+            Open::Add(_) | Open::Key(_) | Open::OwnApp(_) if self.pending.is_some() => {
+                return Vec::new();
+            }
+            Open::OwnApp(_) => {
+                return vec![
+                    hint("Enter", "Save"),
+                    hint("Tab", "Next field"),
+                    hint("Esc", "Cancel"),
+                ];
+            }
             Open::Add(_) => {
                 return vec![
                     hint("Enter", CHECK),
@@ -1030,13 +1161,14 @@ impl Screen for ConnectorsPage {
     }
 
     fn typing(&self) -> bool {
-        matches!(self.open, Open::Add(_) | Open::Key(_))
+        matches!(self.open, Open::Add(_) | Open::Key(_) | Open::OwnApp(_))
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         match &self.open {
             Open::Add(_) => return self.add_key(key, ctx),
             Open::Key(_) => return self.key_key(key, ctx),
+            Open::OwnApp(_) => return self.own_app_key(key, ctx),
             Open::Trust { .. } | Open::Refused { .. } | Open::Remove { .. } => {
                 return self.dialog_key(key, ctx);
             }
@@ -1105,6 +1237,7 @@ impl Screen for ConnectorsPage {
         match &self.open {
             Open::Add(form) => !form.yaml.is_empty() || !form.path.is_empty(),
             Open::Key(form) => !form.key.is_empty(),
+            Open::OwnApp(form) => !form.client_id.is_empty() || !form.secret.is_empty(),
             Open::None | Open::Trust { .. } | Open::Refused { .. } | Open::Remove { .. } => false,
         }
     }

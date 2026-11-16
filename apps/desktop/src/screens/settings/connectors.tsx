@@ -3,29 +3,32 @@ import type { Result } from "../../api";
 import { pickAppPluginFile, problemText, type Problem } from "../../api-app-plugins";
 import {
   CONNECTOR_DEFAULTS, CONNECTORS_PAGE, NATIVE_CHOICES, SIGN_IN_READ_MS, SIGN_IN_READS_MAX, SIZE_CHOICES, WAIT_CHOICES, WRITE_CHOICES, addConnector, cancelConnectorSignIn,
-  clearConnectorKey, connectorState, keyLine, loadConnectorReach, loadConnectorSignIn, loadConnectors, originLine, reachesLine, removeConnector, reviewConnector, previewConnector,
-  saveConnectorSettings, setConnectorKey, setConnectorSignInWith, settingsToSave, signInConnector, signInStep, signOutConnector, signedOutLine, signsInWithLine,
+  clearConnectorKey, clearConnectorOwnApp, connectorState, keyLine, loadConnectorReach, loadConnectorSignIn, loadConnectors, originLine, ownAppHeading, ownAppRemovedLine,
+  ownAppSavedLine, reachesLine, redirectLine, removeConnector, reviewConnector, previewConnector, saveConnectorSettings, setConnectorKey, setConnectorOwnApp, setConnectorSignInWith,
+  settingsToSave, signInConnector, signInStep, signOutConnector, signedOutLine, signsInWithLine,
   trustConnector, trustLines, type ConnectorPreview, type ConnectorView, type ConnectorsView, type ConnectorTrustView, type NativeConnectors, type SettingPicks, type SignInWith,
   type SizeCap, type Wait, type WritePolicy,
 } from "../../api-connectors";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, Dialog, LoadError, NotReady, Notice, SecretField, SettingLine, SettingSection, Skeleton, StatusBadge, TextArea, formatRoute, navigate } from "../../ui";
+import { Button, ConfirmDialog, Dialog, LoadError, NotReady, Notice, SecretField, SettingLine, SettingSection, Skeleton, StatusBadge, TextArea, TextField, formatRoute, navigate } from "../../ui";
 import { ConnectorDetailView } from "./connector-detail";
 import "../notifications/notifications.css";
 import "../project/projects.css";
 
 const NOT_READY = "The engine is not ready yet. Try again.";
 const MANIFEST_CHARS_MAX = 16384;
+const CLIENT_ID_CHARS_MAX = 255;
 
 /** What Settings, Connectors has open over the page: nothing, the paste box, a trust screen
  * (for a new manifest, or a review of a listed file), a refused manifest, the key entry for
- * one secret, or the remove confirm. */
+ * one secret, the owner's own OAuth app entry, or the remove confirm. */
 export type ConnectorDialog =
   | { kind: "none" }
   | { kind: "add"; yaml: string }
   | { kind: "trust"; yaml: string | null; trust: ConnectorTrustView; review: boolean }
   | { kind: "refused"; yaml: string | null; problem: Problem }
   | { kind: "key"; connector: string; title: string; hosts: string[]; secret: string }
+  | { kind: "own_app"; connector: string; title: string; redirect: string; clientId: string }
   | { kind: "remove"; connector: string; title: string };
 
 /** Everything the Connectors views ask their container to do. */
@@ -49,6 +52,10 @@ export interface ConnectorActions {
   onSignIn: (connector: ConnectorView) => void;
   onCancelSignIn: (connector: ConnectorView) => void;
   onSignOut: (connector: ConnectorView) => void;
+  onUseOwnApp: (connector: ConnectorView) => void;
+  onClientId: (clientId: string) => void;
+  onSaveApp: () => void;
+  onRemoveApp: (connector: ConnectorView) => void;
   onPickNative: (native: NativeConnectors) => void;
   onPickSize: (sizeCap: SizeCap) => void;
   onSave: () => void;
@@ -141,6 +148,19 @@ function ConnectorDialogs({ dialog, busy, failure, keyRef, actions }: {
         <p className="secondary">{keyLine(dialog.title, dialog.hosts)}</p>
         {problem}
         <SecretField id="connector-key" label="Key" inputRef={keyRef ?? { current: null }} helper={CONNECTORS_PAGE.keyHelp} />
+      </div>
+    </Dialog>;
+  }
+  if (dialog.kind === "own_app") {
+    return <Dialog open title={ownAppHeading(dialog.title)} onClose={actions.onClose} busy={busy}
+      footer={<><Button disabled={busy} onClick={actions.onClose}>Cancel</Button>
+        <Button variant="primary" pending={busy} pendingLabel="Saving..." onClick={actions.onSaveApp}>Save</Button></>}>
+      <div className="pj-stack-s">
+        <p className="secondary">{redirectLine(dialog.redirect)}</p>
+        <p className="small muted">{CONNECTORS_PAGE.ownAppHelp}</p>
+        {problem}
+        <TextField id="connector-client-id" label={CONNECTORS_PAGE.clientId} value={dialog.clientId} maxLength={CLIENT_ID_CHARS_MAX} onValue={actions.onClientId} autoComplete="off" spellCheck={false} />
+        <SecretField id="connector-app-secret" label={CONNECTORS_PAGE.clientSecret} inputRef={keyRef ?? { current: null }} helper={CONNECTORS_PAGE.clientSecretHelp} />
       </div>
     </Dialog>;
   }
@@ -399,6 +419,19 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
     await changed(() => setConnectorKey(name, secret, key), `The key for ${secret} was saved.`);
   }
 
+  async function saveApp() {
+    if (dialog.kind !== "own_app" || keyRef.current === null) return;
+    const clientId = dialog.clientId.trim();
+    if (clientId === "") {
+      setFailure(CONNECTORS_PAGE.enterClientId);
+      return;
+    }
+    const secret = keyRef.current.value;
+    keyRef.current.value = "";
+    const { connector: name, title } = dialog;
+    await changed(() => setConnectorOwnApp(name, clientId, secret), ownAppSavedLine(title));
+  }
+
   async function save() {
     if (view.kind !== "ok") return;
     const read = view.value.settings;
@@ -446,6 +479,14 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
     onSignIn: (shown) => { if (!busy && signing === null) void signIn(shown); },
     onCancelSignIn: (shown) => { if (!busy && signing?.name === shown.name) void attempt(() => cancelConnectorSignIn(shown.name)); },
     onSignOut: (shown) => { if (!busy) void changed(() => signOutConnector(shown.name), signedOutLine(shown.title)); },
+    onUseOwnApp: (shown) => {
+      assert(shown.oauth !== null && shown.oauth.own_app_allowed, "only a connector whose file offers an own app opens its entry");
+      setFailure("");
+      setDialog({ kind: "own_app", connector: shown.name, title: shown.title, redirect: shown.oauth.redirect, clientId: "" });
+    },
+    onClientId: (clientId) => { if (dialog.kind === "own_app") setDialog({ ...dialog, clientId }); },
+    onSaveApp: () => { if (!busy) void saveApp(); },
+    onRemoveApp: (shown) => { if (!busy) void changed(() => clearConnectorOwnApp(shown.name), ownAppRemovedLine(shown.title)); },
     onPickNative: (choice) => { setNative(choice); setProblem(""); },
     onPickSize: (choice) => { setSizeCap(choice); setProblem(""); },
     onSave: () => { if (!saving && !reading) void save(); },

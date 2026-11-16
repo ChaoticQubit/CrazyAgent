@@ -1,4 +1,7 @@
-import { CONNECTORS_PAGE, SIGN_IN_WITH_CHOICES, browserNow, chosenWay, connectorState, originLine, reachesLine, secretsShown, signInFirstLine, signedIn, type ConnectorView } from "../../api-connectors";
+import {
+  CONNECTORS_PAGE, SIGN_IN_WITH_CHOICES, browserNow, chosenWay, clientIdLine, clientSecretLine, connectorState, originLine, reachesLine, redirectLine, secretsShown, signInFirstLine,
+  signedIn, type ConnectorView,
+} from "../../api-connectors";
 import { Button, Notice, StatusBadge, formatRoute } from "../../ui";
 import { secretLine } from "./app-plugins";
 import type { ConnectorActions } from "./connectors";
@@ -6,8 +9,8 @@ import type { ConnectorActions } from "./connectors";
 const BACK = formatRoute({ name: "settings", tab: "connectors" });
 
 /** A connector's own page: the way back, title, origin, state, hosts, Sign in with, Sign in,
- * Waiting for the browser with Cancel, or Sign out, its keys, Review and Remove; a refused
- * file shows only its reason. Inputs: the name, the connector when listed, a busy flag,
+ * Waiting for the browser with Cancel, or Sign out, the owner's own OAuth app, its keys,
+ * Review and Remove; a refused file shows only its reason. Inputs: the name, the connector when listed, a busy flag,
  * whether its sign-in waits, the title of another connector whose sign-in waits, the last
  * failure and the actions. Output: the page. */
 export function ConnectorDetailView({ name, connector, busy, waiting, elsewhere = null, failure, actions }: {
@@ -28,6 +31,8 @@ export function ConnectorDetailView({ name, connector, busy, waiting, elsewhere 
   const runs = connector.runs;
   const signed = !refused && signedIn(connector);
   const offered = !refused && !signed && !waiting && browserNow(connector);
+  const oauth = refused ? null : connector.oauth;
+  const ownApp = oauth !== null && (oauth.own_app_allowed || oauth.own_app !== null) ? oauth : null;
   return <div className="pj-stack">
     {back}
     <div className="settings-top"><div>
@@ -61,6 +66,18 @@ export function ConnectorDetailView({ name, connector, busy, waiting, elsewhere 
         <Button size="small" variant="primary" aria-label={`Sign in to ${connector.title}`} disabled={busy || elsewhere !== null} onClick={() => actions.onSignIn(connector)}>{CONNECTORS_PAGE.signIn}</Button>
       </div>}
       {offered && elsewhere !== null && <p className="small muted">{signInFirstLine(elsewhere)}</p>}
+      {ownApp !== null && <div className="pj-stack-s" data-setting="own_app">
+        <h3>{CONNECTORS_PAGE.ownApp}</h3>
+        <p className="small">{redirectLine(ownApp.redirect)}</p>
+        {ownApp.own_app === null
+          ? <p className="small">{CONNECTORS_PAGE.ownAppNone}</p>
+          : <><p className="small">{clientIdLine(ownApp.own_app.client_id)}</p><p className="small">{clientSecretLine(ownApp.own_app.secret_saved)}</p></>}
+        <p className="small muted">{CONNECTORS_PAGE.ownAppHelp}</p>
+        <div className="pj-row">
+          {ownApp.own_app_allowed && <Button size="small" aria-label={`Use my own app for ${connector.title}`} disabled={busy} onClick={() => actions.onUseOwnApp(connector)}>{CONNECTORS_PAGE.useOwnApp}</Button>}
+          {ownApp.own_app !== null && <Button size="small" variant="quiet" aria-label={`Remove my app from ${connector.title}`} disabled={busy} onClick={() => actions.onRemoveApp(connector)}>{CONNECTORS_PAGE.removeOwnApp}</Button>}
+        </div>
+      </div>}
       {secrets.length > 0 && <ul className="pj-rows" aria-label={`Secrets of ${connector.title}`}>{secrets.map((secret) => <li key={secret.name} className="pj-row between">
         <span>{secretLine(secret)}</span>
         {secret.binding.kind === "none"

@@ -1,13 +1,14 @@
 use super::words::{
-    ADD_HELP, ADD_TITLE, CATALOG, CATALOG_ABOUT, HARNESSES, HARNESSES_ABOUT, KEY_HELP,
-    LOCKED_LABEL, LOCKED_REASON, LOCKED_VALUE, NATIVE_CHOICES, NATIVE_HELP, NATIVE_LABEL,
-    OPEN_ADDRESS, PURPOSE, REFUSED_FILE, REFUSED_LISTED, REFUSED_PASTED, REMOVE_BODY, SETTINGS,
-    SIGN_IN_WITH, SIGN_IN_WITH_HELP, SIGN_OUT_HELP, SIZE_CHOICES, SIZE_HELP, SIZE_LABEL,
-    WAIT_CHOICES, WAIT_HELP, WAIT_LABEL, WAITING, WRITE_CHOICES, WRITE_HELP, WRITE_LABEL,
-    browser_now, chosen_way, origin_line, reaches_line, refusal, secret_line, secrets_shown,
-    sign_in_first, signed_in, state, trust_lines, way_word,
+    ADD_HELP, ADD_TITLE, CATALOG, CATALOG_ABOUT, CLIENT_SECRET_HELP, HARNESSES, HARNESSES_ABOUT,
+    KEY_HELP, LOCKED_LABEL, LOCKED_REASON, LOCKED_VALUE, NATIVE_CHOICES, NATIVE_HELP, NATIVE_LABEL,
+    OPEN_ADDRESS, OWN_APP, OWN_APP_HELP, OWN_APP_NONE, PURPOSE, REFUSED_FILE, REFUSED_LISTED,
+    REFUSED_PASTED, REMOVE_BODY, SETTINGS, SIGN_IN_WITH, SIGN_IN_WITH_HELP, SIGN_OUT_HELP,
+    SIZE_CHOICES, SIZE_HELP, SIZE_LABEL, WAIT_CHOICES, WAIT_HELP, WAIT_LABEL, WAITING,
+    WRITE_CHOICES, WRITE_HELP, WRITE_LABEL, browser_now, chosen_way, client_id_line,
+    client_secret_line, origin_line, own_app_heading, reaches_line, redirect_line, refusal,
+    secret_line, secrets_shown, sign_in_first, signed_in, state, trust_lines, way_word,
 };
-use super::{AddForm, ConnectorsPage, KeyForm, NOT_READ, Open, Row, TITLE, refused};
+use super::{AddForm, ConnectorsPage, KeyForm, NOT_READ, Open, OwnAppForm, Row, TITLE, refused};
 use crate::app_plugins::{RunsView, TrustView};
 use crate::connectors::launch::reach;
 use crate::connectors::{ConnectorView, ConnectorsView};
@@ -143,6 +144,7 @@ impl ConnectorsPage {
         match &self.open {
             Open::Add(form) => return self.add_lines(form, width, ctx),
             Open::Key(form) => return self.key_lines(form, width, ctx),
+            Open::OwnApp(form) => return self.own_app_lines(form, width, ctx),
             Open::None | Open::Trust { .. } | Open::Refused { .. } | Open::Remove { .. } => {}
         }
         let (lines, spans) = match (&self.detail, self.opened()) {
@@ -335,6 +337,7 @@ impl ConnectorsPage {
             lines.extend(muted(SIGN_IN_WITH_HELP, width, ctx));
         }
         lines.extend(self.sign_in_lines(connector, width, ctx));
+        lines.extend(own_app_section(connector, width, ctx));
         self.failure_lines(&mut lines, width, ctx);
         lines.push(Line::default());
         let secrets = secrets_shown(connector);
@@ -398,6 +401,35 @@ impl ConnectorsPage {
             lines.extend(drawn);
         }
         assert!(cursor.is_none() || lines.len() > 2);
+        (lines, None, cursor)
+    }
+
+    fn own_app_lines(&self, form: &OwnAppForm, width: usize, ctx: &Ctx) -> Content {
+        let theme = &ctx.theme;
+        let heading = own_app_heading(&form.title);
+        let mut lines = vec![styled(heading, Role::Heading, theme)];
+        let redirect = redirect_line(&form.redirect);
+        lines.extend(wrap(&redirect, width).into_iter().map(Line::raw));
+        lines.extend(muted(OWN_APP_HELP, width, ctx));
+        self.failure_lines(&mut lines, width, ctx);
+        let mut cursor = None;
+        let fields = [
+            (&form.client_id, !form.on_secret),
+            (&form.secret, form.on_secret),
+        ];
+        for (field, focused) in fields {
+            let top = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+            let (drawn, at) = field.lines(width, focused, theme, ctx.glyphs);
+            if let Some(at) = at {
+                cursor = Some(Position::new(at.x, at.y.saturating_add(top)));
+            }
+            lines.extend(drawn);
+        }
+        lines.push(styled(CLIENT_SECRET_HELP, Role::Muted, theme));
+        assert!(
+            lines.len() >= 5,
+            "the heading, redirect, help, two fields and the helper"
+        );
         (lines, None, cursor)
     }
 
@@ -513,7 +545,7 @@ impl ConnectorsPage {
                 let hints = vec![hint("y", "Remove"), hint("Esc", "Cancel")];
                 (format!("Remove {title}?"), hints)
             }
-            Open::None | Open::Add(_) | Open::Key(_) => return None,
+            Open::None | Open::Add(_) | Open::Key(_) | Open::OwnApp(_) => return None,
         };
         assert!(!body.is_empty(), "a dialog says something");
         let hints = if self.pending.is_some() {
@@ -529,4 +561,31 @@ impl ConnectorsPage {
         };
         Some((modal, hints))
     }
+}
+
+/// A connector's own app section where its file offers one or one is saved: the redirect
+/// with any port, the saved client id and whether a secret is saved, never the secret, and
+/// the help. Inputs: the connector, the width and the context. Output: the lines, none
+/// for a connector with no own app.
+fn own_app_section(connector: &ConnectorView, width: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+    let Some(oauth) = connector.oauth.as_ref().filter(|_| !refused(connector)) else {
+        return Vec::new();
+    };
+    if !oauth.own_app_allowed && oauth.own_app.is_none() {
+        return Vec::new();
+    }
+    let mut lines = vec![styled(OWN_APP, Role::Heading, &ctx.theme)];
+    let redirect = redirect_line(&oauth.redirect);
+    lines.extend(wrap(&redirect, width).into_iter().map(Line::raw));
+    match &oauth.own_app {
+        Some(app) => {
+            let id = client_id_line(&app.client_id);
+            lines.extend(wrap(&id, width).into_iter().map(Line::raw));
+            lines.push(Line::raw(client_secret_line(app.secret_saved)));
+        }
+        None => lines.push(Line::raw(OWN_APP_NONE)),
+    }
+    lines.extend(muted(OWN_APP_HELP, width, ctx));
+    assert!(lines.len() >= 4);
+    lines
 }

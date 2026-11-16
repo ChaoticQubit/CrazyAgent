@@ -3694,6 +3694,34 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_sign_out(name)?; call.await }.await;
             routed(result)
         }
+        "desktop_connector_set_own_app" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+                client_id: String,
+                secret: String,
+            }
+            let Args { name, client_id, secret } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .connector_set_own_app(name, client_id, secret)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_connector_clear_own_app" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+            }
+            let Args { name } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.connector_clear_own_app(name)?; call.await }.await;
+            routed(result)
+        }
         "desktop_connector_reach" => {
             let result: Result<_, BridgeError> = async { Ok(read(state).await?.connector_reach()) }.await;
             routed(result)

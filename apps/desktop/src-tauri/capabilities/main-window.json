@@ -306,6 +306,8 @@
     "allow-desktop-connector-sign-in-state",
     "allow-desktop-connector-cancel-sign-in",
     "allow-desktop-connector-sign-out",
+    "allow-desktop-connector-set-own-app",
+    "allow-desktop-connector-clear-own-app",
     "allow-desktop-connector-reach",
     "allow-desktop-connector-approval",
     "allow-desktop-connector-answer",
