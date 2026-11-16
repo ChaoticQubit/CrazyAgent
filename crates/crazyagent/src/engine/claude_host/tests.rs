@@ -2088,7 +2088,8 @@ exit 122
 
 /// DEC-185 S2a (rv-sec3 F1): a Claude master whose harness ends with the held-stop code
 /// ends its turn with the sandbox cause, not a protocol fault for the half line nor the
-/// native exit code, so the owner reads that the sandbox stopped it.
+/// native exit code, and closes clean, so the master runtime stores SandboxStopped rather
+/// than an uncertain cleanup (#101 r1, rv-code4 F1).
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_claude_master_the_sandbox_stopped_for_a_held_name_says_so() {
@@ -2107,6 +2108,35 @@ async fn a_claude_master_the_sandbox_stopped_for_a_held_name_says_so() {
         }
     };
     assert_eq!(failed, crate::sandbox::HELD_STOP_CAUSE);
+    assert_eq!(claude.close().await.map_err(|error| error.0), Ok(()));
+}
+
+/// A stand-in Claude Code that leaves a descendant in its own group holding its output,
+/// waits until that descendant has left, then exits with the Linux call supervisor's
+/// held-stop code.
+#[cfg(target_os = "linux")]
+const HELD_STOP_LEAVING_HARNESS: &str = r#"#!/bin/sh
+/usr/bin/perl -e 'setpgrp(0, 0) or exit 1; open(my $file, ">", "run/descendant.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' &
+echo $$ > run/leader.pid
+while [ ! -s run/descendant.pid ]; do /bin/sleep 0.01; done
+exit 122
+"#;
+
+/// #101 r1 (rv-sec3 N1): a held stop that leaves a process holding the harness's output
+/// still closes with the cleanup's own fault, so a run that left something behind stays
+/// uncertain; the held cause outranks only what the run itself reported.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_claude_master_held_stop_that_left_a_process_closes_uncertain() {
+    use crate::engine::master_host_fixture::{HarnessProcesses, MasterFixture};
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = stand_in_master(&mut fixture, HELD_STOP_LEAVING_HARNESS).await;
+    let processes = HarnessProcesses::wait(&fixture.project);
+    let closed = claude.close().await.map_err(|error| error.0);
+    assert!(closed.is_err(), "{closed:?}");
+    assert_ne!(closed, Err(crate::sandbox::HELD_STOP_CAUSE.to_owned()));
+    let _ = rustix::process::kill_process(processes.descendant, rustix::process::Signal::KILL);
 }
 
 const EARLY_ASSISTANT_HARNESS: &str = r#"#!/bin/sh

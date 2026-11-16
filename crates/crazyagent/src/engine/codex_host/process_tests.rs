@@ -55,7 +55,8 @@ async fn codex_host_process_real_pipe_input_output_eof_and_reap_are_retained() {
 
 /// DEC-185 S2a (rv-sec3 F1): a Codex host process that exits with the Linux call
 /// supervisor's held-stop code ends with the sandbox cause once it is reaped, past what it
-/// wrote, never as a plain exit the host reads as a disconnect.
+/// wrote, never as a plain exit the host reads as a disconnect; and it closes clean, so the
+/// master runtime stores SandboxStopped (#101 r1, the Claude host's parity).
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn codex_host_process_the_sandbox_stopped_ends_with_the_sandbox_cause() {
@@ -75,6 +76,9 @@ async fn codex_host_process_the_sandbox_stopped_ends_with_the_sandbox_cause() {
     .await
     .unwrap();
     assert_eq!(ended.as_deref(), Some(crate::sandbox::HELD_STOP_CAUSE));
+    let closed = process.close().await.map(|status| status.code());
+    assert_eq!(closed.map_err(|error| error.0), Ok(Some(122)));
+    assert_eq!(process.operation_result().map_err(|error| error.0), Ok(()));
 }
 
 /// A shell script that writes 5,600 numbered lines of 101 bytes, 565,600 bytes: more than
