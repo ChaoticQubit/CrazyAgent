@@ -7766,22 +7766,39 @@ fn a_lead_may_merge_its_own_workers_tip_and_is_refused_for_any_other_branch() {
     assert_eq!(case.view(&id).state, ChangeState::Pending);
 }
 
-/// The master's worktree as the engine leases it, in the case's store: the project and
-/// its repository admitted, and a master bootstrap lease checked out on its own
-/// `crazyagent/` branch, the only HEAD a master change set is recorded from. Input: the
-/// case. Output: the master's workspace.
-fn master_agent(case: &Case) -> Workspace {
-    use crate::protocol::{Outcome, ProjectSpec, SessionId, TaskId};
-    let engine = case.repo.parent().unwrap().join("engine");
+/// The case's project and its repository admitted in the case's store, as the engine has
+/// them before any agent works there. A case whose master comes in after its first turn
+/// calls this before that turn: the store refuses an id its rows already carry without a
+/// live project (S1). Does nothing once the project exists. Input: the case.
+fn master_project(case: &Case) {
+    use crate::protocol::{Outcome, ProjectSpec};
     let project = &case.workspace.project;
+    let known = |db: &Connection| -> bool {
+        let tabled: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        tabled
+            && db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+                    [project.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+    };
+    if known(&case.db) {
+        return;
+    }
     crate::storage::initialize_authority_schemas(&case.db).unwrap();
     let repository = case.repo.to_str().unwrap();
     let spec = ProjectSpec {
         name: "Project one".into(),
         repositories: vec![repository.into()],
     };
-    let task = TaskId::new("master-bootstrap-1").unwrap();
-    let session = SessionId::new("session-1").unwrap();
     let tx = case.db.unchecked_transaction().unwrap();
     assert_eq!(
         crate::storage::create_project(&tx, project, &spec).unwrap(),
@@ -7791,6 +7808,23 @@ fn master_agent(case: &Case) -> Workspace {
         crate::worktrees::admit(&tx, project, repository).unwrap(),
         Outcome::Applied
     );
+    tx.commit().unwrap();
+    assert!(known(&case.db), "the case's project is live");
+}
+
+/// The master's worktree as the engine leases it, in the case's store: the project and
+/// its repository admitted ([`master_project`]), and a master bootstrap lease checked out
+/// on its own `crazyagent/` branch, the only HEAD a master change set is recorded from.
+/// Input: the case. Output: the master's workspace.
+fn master_agent(case: &Case) -> Workspace {
+    use crate::protocol::{Outcome, SessionId, TaskId};
+    master_project(case);
+    let engine = case.repo.parent().unwrap().join("engine");
+    let project = &case.workspace.project;
+    let repository = case.repo.to_str().unwrap();
+    let task = TaskId::new("master-bootstrap-1").unwrap();
+    let session = SessionId::new("session-1").unwrap();
+    let tx = case.db.unchecked_transaction().unwrap();
     assert_eq!(
         crate::worktrees::reserve_master_bootstrap(
             &tx, &engine, project, &task, &session, repository
@@ -8015,6 +8049,7 @@ fn at_full_access_the_master_s_merge_of_a_foreign_commit_or_a_closed_set_is_refu
 fn at_full_access_a_sub_agent_s_or_a_lead_s_merge_of_an_open_set_is_refused() {
     use crate::sandbox::policy::AgentAccess;
     let case = Case::new();
+    master_project(&case);
     case.start();
     case.edit("open.txt", "open\n");
     let open = case.turn(TurnOutcome::Succeeded).unwrap();
@@ -9696,6 +9731,7 @@ fn conflicted_set_changing(
     on_main: impl FnOnce(&Case),
 ) -> (ChangeSetId, String, Workspace) {
     use crate::sandbox::policy::AgentAccess;
+    master_project(case);
     case.start();
     in_set(case);
     let sub = case.turn(TurnOutcome::Succeeded).unwrap();
@@ -9886,6 +9922,7 @@ fn an_ordinary_master_set_waits_for_the_owner_under_merges() {
 fn a_later_turn_merging_in_another_set_leaves_the_earlier_turns_edit_waiting() {
     use crate::sandbox::policy::AgentAccess;
     let case = Case::new();
+    master_project(&case);
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
     let sub = case.turn(TurnOutcome::Succeeded).unwrap();
@@ -9948,6 +9985,7 @@ fn a_master_set_bringing_in_another_set_with_no_conflict_waits_for_the_owner() {
     use crate::sandbox::policy::AgentAccess;
     for how in ["--no-ff", "--ff-only"] {
         let case = Case::new();
+        master_project(&case);
         case.start();
         case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
         let sub = case.turn(TurnOutcome::Succeeded).unwrap();
@@ -10216,6 +10254,7 @@ fn a_conflict_fix_above_a_discarded_edit_the_worktree_kept_waits_for_the_owner()
 fn a_conflict_fix_on_a_base_the_land_on_branch_lacks_waits_for_the_owner() {
     use crate::sandbox::policy::AgentAccess;
     let case = Case::new();
+    master_project(&case);
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
     let sub = case.turn(TurnOutcome::Succeeded).unwrap();
@@ -10260,6 +10299,7 @@ fn a_conflict_fix_on_a_base_the_land_on_branch_lacks_waits_for_the_owner() {
 fn an_owner_accept_of_a_master_set_that_dropped_a_sets_work_leaves_that_set_open() {
     use crate::sandbox::policy::AgentAccess;
     let case = Case::new();
+    master_project(&case);
     let other = numbered_agent(&case, 3);
     record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
     write(&other.worktree.join("src/kept.rs"), "kept\n");
@@ -10506,6 +10546,7 @@ fn two_conflicted_sets_and_master(
     case: &Case,
 ) -> ((ChangeSetId, String), (ChangeSetId, String), Workspace) {
     use crate::sandbox::policy::AgentAccess;
+    master_project(case);
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
     let first = case.turn(TurnOutcome::Succeeded).unwrap();
@@ -10884,6 +10925,7 @@ fn a_master_land_at_a_path_the_set_never_had_leaves_the_set_open() {
 fn a_set_on_both_sides_of_a_conflict_fix_leaves_the_master_set_waiting() {
     use crate::sandbox::policy::AgentAccess;
     let case = Case::new();
+    master_project(&case);
     let held = numbered_agent(&case, 3);
     record_worktree_start(&case.db, &held.repository, &held.worktree, &held.git_dir).unwrap();
     write(&held.worktree.join("NOTES"), "on both sides\n");
@@ -10965,6 +11007,7 @@ fn a_master_set_held_in_conflict_or_mid_step_does_not_land_itself() {
 fn a_master_merge_with_more_than_one_merge_base_waits_for_the_owner() {
     use crate::sandbox::policy::AgentAccess;
     let case = Case::new();
+    master_project(&case);
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
     let sub = case.turn(TurnOutcome::Succeeded).unwrap();
@@ -11028,6 +11071,7 @@ fn a_master_merge_with_more_than_one_merge_base_waits_for_the_owner() {
 fn a_set_fast_forwarded_in_beside_a_conflict_fix_leaves_the_master_set_waiting() {
     use crate::sandbox::policy::AgentAccess;
     let case = Case::new();
+    master_project(&case);
     let other = numbered_agent(&case, 3);
     record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
     write(
@@ -11072,6 +11116,7 @@ fn a_set_fast_forwarded_in_beside_a_conflict_fix_leaves_the_master_set_waiting()
 #[test]
 fn a_pure_conflict_fix_waits_with_ask_on_and_lands_with_ask_off() {
     let case = Case::new();
+    master_project(&case);
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
     case.edit("src/new.rs", "fn main() {}\n");
