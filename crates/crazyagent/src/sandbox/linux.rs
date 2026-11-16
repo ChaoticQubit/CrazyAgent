@@ -1591,6 +1591,9 @@ impl LinuxSandbox {
             if let Some(bwrap) = nest
                 && !nests(bwrap, &helper, &flags)
             {
+                eprintln!(
+                    "linux_nest_not_started: this agent is refused, not moved to Landlock alone"
+                );
                 return Err(SandboxError::Unavailable(LINUX_NEST_NOT_STARTED.into()));
             }
             let backend = match nest {
@@ -1894,20 +1897,26 @@ type KeptNest = Mutex<Option<(PathBuf, PathBuf)>>;
 /// page and every launch read (rv-sa241 SBX-2-R2 LOW-1): a nest found for this bubblewrap and
 /// helper is kept for the engine's life, and one not found is asked again each time, so a
 /// machine that starts to nest is seen at its next read. No lock is held while the probe
-/// runs. Inputs: the cell, bubblewrap, the helper, the probe. Output: true when it nests.
+/// runs, and a failed probe reads the cell again, so a nest another caller found meanwhile
+/// holds. Inputs: the cell, bubblewrap, the helper, the probe. Output: true when it nests.
 fn kept_nest(kept: &KeptNest, bwrap: &Path, helper: &Path, probe: impl FnOnce() -> bool) -> bool {
-    let held = kept.lock().unwrap_or_else(PoisonError::into_inner).clone();
-    if held
-        .is_some_and(|(asked_bwrap, asked_helper)| asked_bwrap == bwrap && asked_helper == helper)
-    {
+    let found = || {
+        kept.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|(asked_bwrap, asked_helper)| {
+                asked_bwrap == bwrap && asked_helper == helper
+            })
+    };
+    if found() {
         return true;
     }
-    if !probe() {
-        return false;
+    if probe() {
+        let asked = (bwrap.to_path_buf(), helper.to_path_buf());
+        *kept.lock().unwrap_or_else(PoisonError::into_inner) = Some(asked);
+        return true;
     }
-    let found = (bwrap.to_path_buf(), helper.to_path_buf());
-    *kept.lock().unwrap_or_else(PoisonError::into_inner) = Some(found);
-    true
+    found()
 }
 
 /// What [`nest_held`] found, read by the host facts and every launch alike.
@@ -3706,6 +3715,15 @@ mod tests {
             "its miss keeps the found one"
         );
         assert_eq!(probes.get(), 3);
+        let racing: KeptNest = Mutex::new(None);
+        let found_meanwhile = || {
+            *racing.lock().unwrap() = Some((bwrap.to_path_buf(), helper.clone()));
+            false
+        };
+        assert!(
+            kept_nest(&racing, bwrap, &helper, found_meanwhile),
+            "a nest another caller found while this probe failed holds"
+        );
     }
 
     #[test]
