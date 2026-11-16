@@ -1,4 +1,5 @@
-from tui_speed import ENTER, PROJECT, STEPS, TAB, at, crumb, metrics, step_paths, usable
+from tui_flow import screen_text
+from tui_speed import ENTER, PROJECT, STEPS, TAB, at, crumb, metrics, ready, step_paths, usable
 
 HOME = (" [◆▪◆▪] CrazyAgent  /  Home" + " " * 60 + "2 agents running \n"
         + "─" * 100 + "\n  Projects  1\n  ▌ Speed Project\n")
@@ -99,3 +100,23 @@ if __name__ == "__main__":
     for check in checks:
         check()
     print("tui_speed_checks=%d" % len(checks))
+
+
+def test_a_frame_cut_mid_write_is_not_ready_until_it_ends():
+    home = ("\x1b[1;1H [◆▪◆▪] CrazyAgent  /  Home\x1b[3;1H  Projects  1"
+            "\x1b[4;1H  ▌ Speed Project\x1b[0m\x1b[?25l").encode()
+    top = "\x1b[1;1H [◆▪◆▪] CrazyAgent  /  Settings  /  Accounts".encode()
+    body = ("\x1b[3;1H  Accounts      \x1b[4;1H                 "
+            "\x1b[5;1H  ⠦ Loading accounts\x1b[0m\x1b[?25l").encode()
+    loaded = "\x1b[5;1H  > Local models    \x1b[0m\x1b[?25l".encode()
+    path = [("Settings", "Accounts")]
+    cut = home + top
+    assert usable(screen_text(cut, 100, 24), path[0], PROJECT), "the cut frame shows the crumb over the old body"
+    assert not ready(cut, screen_text(cut, 100, 24), path, PROJECT)
+    whole = cut + body
+    assert not ready(whole, screen_text(whole, 100, 24), path, PROJECT)
+    done = whole + loaded
+    assert ready(done, screen_text(done, 100, 24), path, PROJECT)
+    assert not ready(done[:-3], screen_text(done[:-3], 100, 24), path, PROJECT)
+    cursor = done + b"\x1b[?25h\x1b[6;5H"
+    assert ready(cursor, screen_text(cursor, 100, 24), path, PROJECT)

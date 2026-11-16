@@ -167,17 +167,25 @@ export function readQuiet() {
   return { load1, compilers, memoryLevel, onAC, screenLocked, busy };
 }
 
+/** The kinds of WebKit helper process the speed rows read, as their process names end. */
+export const WEBKIT_KINDS = ["WebContent", "Networking", "GPU"];
+
+/** Finds the WebKit helpers in a `ps -axo pid=,comm=` listing. Input: the listing. Output:
+ * `[{ pid, kind }]` for every WebContent, Networking and GPU process, in listing order. */
+export function webkitHelpersIn(listing) {
+  const helpers = listing.split("\n").flatMap((line) => {
+    const found = line.trim().match(/^(\d+)\s+(?:.*\/)?com\.apple\.WebKit\.(WebContent|Networking|GPU)$/);
+    return found ? [{ pid: Number(found[1]), kind: found[2] }] : [];
+  });
+  assert.ok(helpers.every(({ pid, kind }) => Number.isInteger(pid) && pid > 1 && WEBKIT_KINDS.includes(kind)));
+  return helpers;
+}
+
 /** WebKit helper processes run under launchd, not under the app, and their command lines name
  * no client; the speed rows find the ones the app started as the pids new since its launch.
- * Input: none. Output: the pids of every WebKit WebContent, Networking and GPU process. */
+ * Input: none. Output: `[{ pid, kind }]` for every WebKit helper running now. */
 export function webkitHelpers() {
-  const listed = output("/bin/ps", ["-axo", "pid=,comm="]).split("\n");
-  const pids = listed.flatMap((line) => {
-    const found = line.trim().match(/^(\d+)\s+(?:.*\/)?com\.apple\.WebKit\.(WebContent|Networking|GPU)$/);
-    return found ? [Number(found[1])] : [];
-  });
-  assert.ok(pids.every((pid) => Number.isInteger(pid) && pid > 1));
-  return pids;
+  return webkitHelpersIn(output("/bin/ps", ["-axo", "pid=,comm="]));
 }
 
 /** Reads one process's memory footprint, the number Activity Monitor shows as Memory.
@@ -194,7 +202,8 @@ export function footprintMb(pid) {
 /** Fewest valid samples per side a metric needs to be judged (DEC-169 keeps 10). */
 export const KEPT_MIN = 8;
 /** Metrics read and shown but never failing a run until their reading is proven (DEC-169 Q9). */
-export const REPORT_ONLY = new Set(["memory_webkit_mb"]);
+export const REPORT_ONLY = new Set(["memory_webkit_mb", "memory_webkit_idle_mb", "memory_app_idle_mb",
+  ...WEBKIT_KINDS.flatMap((kind) => [`memory_webkit_${kind.toLowerCase()}_mb`, `memory_webkit_${kind.toLowerCase()}_idle_mb`])]);
 /** Metrics a run may lack: the launch is only timed when the spec's first look comes before
  * Home is usable; `launch_webview_ms` and `reload_home_ms` always time the launch path. */
 const OPTIONAL = new Set(["launch_ms"]);
@@ -224,7 +233,18 @@ export function sampleMetrics(engine, app) {
   for (const [cmd, times] of Object.entries(engine.round_trip_ms)) metrics[`round_trip_${cmd}_ms`] = summary(times).median;
   metrics.memory_engine_mb = app.memory.engine_mb;
   metrics.memory_app_mb = app.memory.app_mb;
-  metrics.memory_webkit_mb = round(app.memory.webkit_mb.reduce((total, mb) => total + mb, 0));
+  const { webkit_mb: webkit, webkit_kinds: kinds, idle } = app.memory;
+  assert.ok(Array.isArray(kinds) && kinds.length === webkit.length, "a kind for each WebKit helper");
+  assert.ok(idle && Array.isArray(idle.webkit_mb) && idle.webkit_mb.length === webkit.length, "an idle reading for each WebKit helper");
+  metrics.memory_webkit_mb = round(webkit.reduce((total, mb) => total + mb, 0));
+  metrics.memory_app_idle_mb = idle.app_mb;
+  metrics.memory_webkit_idle_mb = round(idle.webkit_mb.reduce((total, mb) => total + mb, 0));
+  for (const [index, kind] of kinds.entries()) {
+    assert.ok(WEBKIT_KINDS.includes(kind), `a WebKit helper kind: ${kind}`);
+    const name = `memory_webkit_${kind.toLowerCase()}`;
+    metrics[`${name}_mb`] = round((metrics[`${name}_mb`] ?? 0) + webkit[index]);
+    metrics[`${name}_idle_mb`] = round((metrics[`${name}_idle_mb`] ?? 0) + idle.webkit_mb[index]);
+  }
   for (const [metric, value] of Object.entries(metrics)) assert.ok(Number.isFinite(value) && value >= 0, `${metric} is a reading: ${value}`);
   return metrics;
 }
