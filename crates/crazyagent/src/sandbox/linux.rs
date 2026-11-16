@@ -3294,6 +3294,61 @@ mod tests {
         }
     }
 
+    /// rv-sa241 SBX-2-R2 LOW-1: where this computer's nest check passes, a launch whose own
+    /// nest probe fails is refused with words to try again or restart, instead of running on
+    /// the shared network with Landlock rules only while the Agent access page says it is
+    /// nested; where the nest check fails too, the launch is a Landlock one, as the page says.
+    #[test]
+    fn a_launch_whose_own_nest_probe_fails_where_this_computer_nests_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let place = temp.path().canonicalize().unwrap();
+        let bwrap = place.join("bwrap");
+        fs::write(&bwrap, b"").unwrap();
+        fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(trusted(&bwrap));
+        let fake = |name: &str, failing: &str| {
+            let helper = place.join(name);
+            let script = format!(
+                "#!/bin/sh\nnest=0\nfailing=0\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    \
+                 {NEST}) nest=1 ;;\n    {failing}) failing=1 ;;\n  esac\ndone\n\
+                 [ \"$nest\" = 1 ] && [ \"$failing\" = 1 ] && exit 1\nexit 0\n"
+            );
+            fs::write(&helper, script).unwrap();
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+            helper
+        };
+        let flagged = fake("flagged", KEEP_FREE);
+        let neither = fake("neither", PROBE);
+        assert!(
+            nests(&bwrap, &flagged, &[PROBE.into()]),
+            "this computer nests"
+        );
+        let (_project, sandbox) = project(SandboxNetwork::Open);
+        let answer = LinuxSandbox::detect_among(sandbox.clone(), &flagged, &[bwrap.as_path()]);
+        let shown = match &answer {
+            Ok(sandbox) => format!("{:?}", sandbox.backend()),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            matches!(
+                &answer,
+                Err(SandboxError::Unavailable(reason)) if reason.contains("restart CrazyAgent")
+            ),
+            "a launch that cannot nest where this computer nests is refused, never run on \
+             Landlock alone: {shown}"
+        );
+        assert!(
+            !nests(&bwrap, &neither, &[PROBE.into()]),
+            "this computer does not nest"
+        );
+        let landlock = LinuxSandbox::detect_among(sandbox, &neither, &[bwrap.as_path()]).unwrap();
+        assert!(
+            matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+            "where nothing nests the launch is a Landlock one, as the page says"
+        );
+    }
+
     #[test]
     fn an_agent_kept_on_this_network_by_a_low_port_names_the_lowest_one() {
         use SandboxRemote::{AnyHost, Loopback};
