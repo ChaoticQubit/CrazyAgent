@@ -3641,6 +3641,10 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state) .await? .connector_grant(project, connector, enabled, who)?; call.await }.await;
             routed(result)
         }
+        "desktop_connector_reach" => {
+            let result: Result<_, BridgeError> = async { Ok(read(state).await?.connector_reach()) }.await;
+            routed(result)
+        }
         "desktop_app_plugins" => {
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugins()?; call.await }.await;
             routed(result)

@@ -2,12 +2,12 @@ import { useEffect, useRef, useState, type FormEvent, type RefObject } from "rea
 import type { Result } from "../../api";
 import { pickAppPluginFile, problemText, type Problem } from "../../api-app-plugins";
 import {
-  CONNECTOR_DEFAULTS, CONNECTORS_PAGE, NATIVE_CHOICES, SIZE_CHOICES, addConnector, clearConnectorKey, connectorState, keyLine, loadConnectors,
+  CONNECTOR_DEFAULTS, CONNECTORS_PAGE, NATIVE_CHOICES, SIZE_CHOICES, addConnector, clearConnectorKey, connectorState, keyLine, loadConnectorReach, loadConnectors,
   originLine, reachesLine, removeConnector, reviewConnector, previewConnector, saveConnectorSettings, setConnectorKey, settingsToSave, trustConnector, trustLines,
   type ConnectorPreview, type ConnectorView, type ConnectorsView, type ConnectorTrustView, type NativeConnectors, type SizeCap,
 } from "../../api-connectors";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, Dialog, LoadError, NotReady, Notice, SecretField, SettingLine, SettingSection, Skeleton, StatusBadge, TextArea, formatRoute } from "../../ui";
+import { Button, ConfirmDialog, Dialog, LoadError, NotReady, Notice, SecretField, SettingLine, SettingSection, Skeleton, StatusBadge, TextArea, formatRoute, navigate } from "../../ui";
 import { ConnectorDetailView } from "./connector-detail";
 import "../notifications/notifications.css";
 import "../project/projects.css";
@@ -193,11 +193,12 @@ function SettingsForm({ page, native, sizeCap, saving, problem, actions }: {
 /** Settings, Connectors as a view of its state: the title in every state, then the catalog
  * with each connector's state, hosts and page, Add connector, and the connector settings
  * with the locked line; or the open connector's own page; over either the open dialog.
- * Inputs: the page read, the connector the route opened, the open dialog, the picked
+ * Inputs: the page read, the harness rows, the connector the route opened, the open dialog, the picked
  * settings, busy and saving flags, the last failure and save problem, the key field and
  * the actions. Output: the tab. */
-export function ConnectorsSettingsView({ view, open, dialog, native, sizeCap, busy, saving, failure, problem, keyRef, actions }: {
+export function ConnectorsSettingsView({ view, reach, open, dialog, native, sizeCap, busy, saving, failure, problem, keyRef, actions }: {
   view: Loaded<ConnectorsView>;
+  reach: Loaded<string[]>;
   open: string | null;
   dialog: ConnectorDialog;
   native: NativeConnectors | null;
@@ -233,6 +234,11 @@ export function ConnectorsSettingsView({ view, open, dialog, native, sizeCap, bu
         </div>
       </SettingSection>
     </div>
+    {reach.kind === "ok" && reach.value.length > 0 && <div className="pj set-groups">
+      <SettingSection title={CONNECTORS_PAGE.harnesses} about={CONNECTORS_PAGE.harnessesAbout}>
+        <ul className="set-body" aria-label={CONNECTORS_PAGE.harnesses}>{reach.value.map((row) => <li key={row}>{row}</li>)}</ul>
+      </SettingSection>
+    </div>}
     <SettingsForm page={page} native={native} sizeCap={sizeCap} saving={saving} problem={problem} actions={actions} />
     {dialogs}
   </>;
@@ -241,11 +247,13 @@ export function ConnectorsSettingsView({ view, open, dialog, native, sizeCap, bu
 /** Settings, Connectors: reads the page, adds a pasted or picked manifest only after its
  * trust screen is confirmed, reviews a changed file, removes the owner's own, sets and
  * clears each secret's key, and saves the two connector settings at the version read. A
- * change reads the page again, so the version a save names is always the last read.
+ * change reads the page again, so the version a save names is always the last read, and
+ * removing the connector whose page is open goes back to the catalog.
  * Input: the connector whose page the route opened, if any. Output: the tab. */
 export function ConnectorsSettings({ connector }: { connector?: string }) {
   const session = useAppSession();
   const [view, reload] = useLoad(() => loadConnectors(null));
+  const [reach] = useLoad(loadConnectorReach);
   const [dialog, setDialog] = useState<ConnectorDialog>({ kind: "none" });
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
@@ -288,12 +296,19 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
     await check(picked);
   }
 
-  async function changed(work: () => Promise<Result<ConnectorsView>>, words: string) {
+  async function changed(work: () => Promise<Result<ConnectorsView>>, words: string): Promise<boolean> {
     const saved = await attempt(work);
-    if (saved === undefined) return;
+    if (saved === undefined) return false;
     setDialog({ kind: "none" });
     session.showToast(words);
     reload();
+    return true;
+  }
+
+  async function remove() {
+    if (dialog.kind !== "remove") return;
+    const { connector: name, title } = dialog;
+    if (await changed(() => removeConnector(name), `${title} was removed.`) && connector === name) navigate({ name: "settings", tab: "connectors" });
   }
 
   async function confirm() {
@@ -351,7 +366,7 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
     onClose: close,
     onReview: (name) => { if (!busy) void review(name); },
     onRemove: (shown) => { setFailure(""); setDialog({ kind: "remove", connector: shown.name, title: shown.title }); },
-    onConfirmRemove: () => { if (dialog.kind === "remove" && !busy) void changed(() => removeConnector(dialog.connector), `${dialog.title} was removed.`); },
+    onConfirmRemove: () => { if (!busy) void remove(); },
     onSetKey: (shown, secret) => { setFailure(""); setDialog({ kind: "key", connector: shown.name, title: shown.title, hosts: shown.runs.hosts, secret }); },
     onSaveKey: () => { if (!busy) void saveKey(); },
     onClearKey: (name, secret) => { if (!busy) void changed(() => clearConnectorKey(name, secret), `${secret} no longer has a key.`); },
@@ -362,7 +377,7 @@ export function ConnectorsSettings({ connector }: { connector?: string }) {
   };
 
   return <div className="stack">
-    <ConnectorsSettingsView view={view} open={connector ?? null} dialog={dialog} native={native} sizeCap={sizeCap} busy={busy} saving={saving || reading}
+    <ConnectorsSettingsView view={view} reach={reach} open={connector ?? null} dialog={dialog} native={native} sizeCap={sizeCap} busy={busy} saving={saving || reading}
       failure={failure} problem={problem} keyRef={keyRef} actions={actions} />
   </div>;
 }
