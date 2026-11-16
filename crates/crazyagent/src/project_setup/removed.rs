@@ -41,7 +41,11 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 CHECK(returns=0 OR folder IS NOT NULL)
             );
             CREATE UNIQUE INDEX IF NOT EXISTS projects_removed_return
-                ON projects_removed(folder) WHERE returns=1;"
+                ON projects_removed(folder) WHERE returns=1;
+            CREATE TABLE IF NOT EXISTS projects_removed_backfill (
+                only INTEGER PRIMARY KEY CHECK(only=1),
+                done_ms INTEGER NOT NULL
+            );"
         ))
         .map_err(error)?;
     Ok(())
@@ -80,27 +84,56 @@ fn keyed_tables(connection: &Connection) -> Result<Vec<String>, EngineError> {
 
 /// Holds, as not returnable, every id that is not a live project and still has a row in a
 /// table with a `project` column, tables this build does not know included, so no removal
-/// made by an earlier or another line's build gives its id out again. Runs at every engine
-/// open. Input: the engine connection. Output: how many ids it held, or the database's
-/// failure.
+/// made before this record existed gives its id out again. Runs once per database, at its
+/// first open, and never fills the record past `REMOVED_MAX`. Input: the engine connection.
+/// Output: how many ids it held, None when an earlier open already ran it.
 pub(crate) fn hold_left(connection: &Connection) -> Result<Option<usize>, EngineError> {
+    let tx = connection.unchecked_transaction().map_err(error)?;
+    let done: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects_removed_backfill)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if done {
+        return Ok(None);
+    }
     let now = now_ms();
     let mut held = 0;
-    for table in keyed_tables(connection)? {
-        held += connection
+    for table in keyed_tables(&tx)? {
+        let recorded: i64 = tx
+            .query_row("SELECT count(*) FROM projects_removed", [], |row| row.get(0))
+            .map_err(error)?;
+        let room = REMOVED_MAX - recorded;
+        if room <= 0 {
+            eprintln!("projects_removed_backfill_bound held={held}");
+            break;
+        }
+        held += tx
             .execute(
                 &format!(
                     "INSERT OR IGNORE INTO projects_removed(project,folder,returns,removed_ms)
                      SELECT DISTINCT project, NULL, 0, ?1 FROM \"{table}\"
                      WHERE typeof(project)='text'
                      AND length(project) BETWEEN 1 AND {ID_BYTES_MAX}
+                     AND project <> ?3
                      AND lower(project) NOT IN
-                        (SELECT lower(id) FROM projects WHERE id IS NOT NULL)"
+                        (SELECT lower(id) FROM projects WHERE id IS NOT NULL)
+                     AND lower(project) NOT IN (SELECT lower(project) FROM projects_removed)
+                     LIMIT ?2"
                 ),
-                [now],
+                params![now, room, crate::usage::REMOVED_PROJECTS],
             )
             .map_err(error)?;
     }
+    tx.execute(
+        "INSERT INTO projects_removed_backfill(only,done_ms) VALUES (1,?1)",
+        [now],
+    )
+    .map_err(error)?;
+    tx.commit().map_err(error)?;
+    assert!(i64::try_from(held).is_ok_and(|count| count <= REMOVED_MAX));
     Ok(Some(held))
 }
 
@@ -206,9 +239,10 @@ pub(crate) fn claim(
 }
 
 /// The id a folder with no project of its own is onboarded as: its name's id, or the first
-/// of `-2` to `-99` after it that no removal holds. Inputs: the connection and the folder.
-/// Output: the id, `project_exists` when that first id is a live project, or
-/// `onboarding_project_ids_used` when every one is held.
+/// of `-2` to `-99` after it that no removal holds and no project uses. A live id here is
+/// always another folder's, since a folder's own project is answered before an id is
+/// picked. Inputs: the connection and the folder. Output: the id, or
+/// `onboarding_project_ids_used` when every one is taken.
 pub(crate) fn free_id(
     connection: &Connection,
     folder: &Path,
@@ -231,11 +265,9 @@ pub(crate) fn free_id(
                 |row| row.get(0),
             )
             .map_err(error)?;
-        return Ok(if live {
-            Err("project_exists")
-        } else {
-            Ok(candidate)
-        });
+        if !live {
+            return Ok(Ok(candidate));
+        }
     }
     Ok(Err("onboarding_project_ids_used"))
 }
@@ -258,10 +290,12 @@ fn suffixed(base: &ProjectId, n: u32) -> Result<ProjectId, EngineError> {
     ProjectId::new(id).map_err(|problem| failure(&problem.0))
 }
 
-/// Deletes every row of this id in every table keyed by project, its removal record
-/// included, so a demo made again inherits nothing of an earlier one. Inputs: the
-/// transaction and the id. Output: Ok or the database's failure.
+/// Moves this id's token counts to Removed projects, then deletes every other row of it in
+/// every table keyed by project, its removal record included, so a demo made again inherits
+/// nothing of an earlier one and the earlier one's counts stay under Removed projects.
+/// Inputs: the transaction and the id. Output: Ok or the database's failure.
 pub(crate) fn clear(connection: &Connection, project: &ProjectId) -> Result<(), EngineError> {
+    crate::usage::forget_project(connection, project.as_str())?;
     for table in keyed_tables(connection)? {
         connection
             .execute(

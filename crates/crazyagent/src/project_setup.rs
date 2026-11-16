@@ -2987,13 +2987,20 @@ struct Checked {
     folder: PathBuf,
 }
 
+/// Checks a New Project, or Create demo when `demo`, before its folder is built and again
+/// before it is recorded: its pool, that no project or removal holds its id (Create demo
+/// alone makes the demo's id again), its team and the folder it lands in. Inputs: the
+/// transaction, configuration, id, spec, setup and whether the request is Create demo.
+/// Output: the checked plan, or the refusal code.
 fn check_new(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     project_id: &ProjectId,
     spec: &ProjectSpec,
     setup: &ProjectSetup,
+    demo: bool,
 ) -> Result<Result<Checked, String>, EngineError> {
+    assert!(!demo || project_id.as_str() == crate::demo::PROJECT_ID);
     if setup
         .pool
         .as_ref()
@@ -3011,7 +3018,7 @@ fn check_new(
     if exists {
         return Ok(Err("project_exists".into()));
     }
-    if project_id.as_str() != crate::demo::PROJECT_ID && removed::held(tx, project_id)? {
+    if !demo && removed::held(tx, project_id)? {
         return Ok(Err("project_id_removed".into()));
     }
     let team = match setup.team.clone() {
@@ -3082,19 +3089,20 @@ pub(crate) fn check_job(
     else {
         return Err(failure("setup_plan_invalid"));
     };
-    let checked = check_new(tx, config, project_id, spec, setup)?;
+    let checked = check_new(tx, config, project_id, spec, setup, false)?;
     Ok(checked.map(|checked| checked.folder))
 }
 
 /// Plans a New Project before the owner transport builds its folder.
-/// Takes the transaction, configuration, database path and the Create action.
-/// Returns the plan with a fresh staging folder name, or the refusal code the
-/// owner sees; nothing on disk changes.
+/// Takes the transaction, configuration, database path, the Create action and whether the
+/// request is Create demo. Returns the plan with a fresh staging folder name, or the
+/// refusal code the owner sees; nothing on disk changes.
 pub(crate) fn plan_new(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     database: &Path,
     action: &SetupAction,
+    demo: bool,
 ) -> Result<Result<NewProjectPlan, String>, EngineError> {
     action.validate()?;
     let SetupAction::Create {
@@ -3105,7 +3113,7 @@ pub(crate) fn plan_new(
     else {
         return Err(failure("setup_plan_invalid"));
     };
-    let checked = match check_new(tx, config, project_id, spec, setup)? {
+    let checked = match check_new(tx, config, project_id, spec, setup, demo)? {
         Ok(checked) => checked,
         Err(code) => return Ok(Err(code)),
     };
@@ -3152,15 +3160,17 @@ impl NewProjectPlan {
 
 /// Records a New Project whose folder the owner transport built, with a first agent
 /// policy that records the toolchains the owner has installed (F26).
-/// Takes the transaction, configuration, the Create action and the staged
-/// result. Returns Applied once the rows are written, the brief is in place
-/// and the folder is moved into the home, else the refusal; the checks run
-/// again because other changes may have landed while the folder was built.
+/// Takes the transaction, configuration, the Create action, the staged result and whether
+/// the request is Create demo, which clears what an earlier demo left first. Returns
+/// Applied once the rows are written, the brief is in place and the folder is moved into
+/// the home, else the refusal; the checks run again because other changes may have landed
+/// while the folder was built.
 pub(crate) fn record_new(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     action: &SetupAction,
     staged: &Result<Staged, String>,
+    demo: bool,
 ) -> Result<Outcome, EngineError> {
     let SetupAction::Create {
         project_id,
@@ -3174,14 +3184,14 @@ pub(crate) fn record_new(
         Ok(staged) => staged,
         Err(code) => return Ok(rejected(code)),
     };
-    let checked = match check_new(tx, config, project_id, spec, setup)? {
+    let checked = match check_new(tx, config, project_id, spec, setup, demo)? {
         Ok(checked) => checked,
         Err(code) => return Ok(rejected(&code)),
     };
     if checked.folder != staged.folder {
         return Ok(rejected("home_new_project_failed"));
     }
-    if project_id.as_str() == crate::demo::PROJECT_ID {
+    if demo {
         removed::clear(tx, project_id)?;
     }
     let outcome = record(

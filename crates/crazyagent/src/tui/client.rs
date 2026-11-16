@@ -2497,7 +2497,7 @@ fn bounded_problem(problem: &str) -> String {
 /// Output: Ok when the change was made, else the plain code.
 fn stray_outcome(result: OwnerResult) -> Result<(), String> {
     match result {
-        OwnerResult::Applied => Ok(()),
+        OwnerResult::Applied | OwnerResult::OnboardingStarted { .. } => Ok(()),
         OwnerResult::Rejected { code } => Err(bounded_problem(&code)),
         _ => Err("change_outcome_unknown".into()),
     }

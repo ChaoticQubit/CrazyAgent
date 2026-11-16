@@ -895,6 +895,16 @@ impl Storage {
                             let result = settings::ensure_clear(&connection).and_then(|()| {
                                 owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(Effect::NewProject(&staged)))
                             });
+                            if let Ok(applied) = &result
+                                && applied.result == OwnerResult::Applied
+                                && !applied.historical_replay
+                                && let OwnerOperation::Apply {
+                                    mutation: OwnerMutation::CreateDemo { project_id, pool },
+                                } = &request.operation
+                                && let Err(e) = accounts::settle_demo_pool(&mut connection, &mut config, sources.as_ref(), &admission, project_id, pool)
+                            {
+                                eprintln!("demo_pool_not_settled cause={}", e.0);
+                            }
                             let _ = reply.send(result);
                         }
                         Job::OwnerApply(admission, request, reply) => {
@@ -1242,7 +1252,13 @@ fn open_actor_database(
     } else {
         migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
-        crate::project_setup::removed::hold_left(&connection)?;
+        let started = std::time::Instant::now();
+        if let Some(held) = crate::project_setup::removed::hold_left(&connection)? {
+            eprintln!(
+                "projects_removed_backfill held={held} ms={}",
+                started.elapsed().as_millis()
+            );
+        }
     }
     assert!(connection.is_autocommit());
     assert_eq!(
@@ -2596,7 +2612,7 @@ fn setup_plan(
         return Ok(Err("stale_revision".into()));
     }
     let OwnerMutation::CreateDemo { pool, .. } = mutation else {
-        return crate::project_setup::plan_new(&tx, config, path, &action);
+        return crate::project_setup::plan_new(&tx, config, path, &action, false);
     };
     if crate::demo::exists(&tx)? {
         return Ok(Err("demo_exists".into()));
@@ -2604,7 +2620,7 @@ fn setup_plan(
     if let Some(code) = crate::demo::pool_unavailable(&tx, config, pool)? {
         return Ok(Err(code.into()));
     }
-    Ok(crate::project_setup::plan_new(&tx, config, path, &action)?.map_err(crate::demo::refusal))
+    Ok(crate::project_setup::plan_new(&tx, config, path, &action, true)?.map_err(crate::demo::refusal))
 }
 
 /// Applies one owner mutation, optionally with a disk effect already done.
@@ -2654,7 +2670,13 @@ fn owner_apply_with(
             projects_home::record(&tx, path, &request.request_id, &command, effect)?
         }
         (Some(Effect::NewProject(staged)), Command::ProjectSetup { action }) => {
-            let outcome = crate::project_setup::record_new(&tx, config, action, staged)?;
+            let demo = matches!(
+                &request.operation,
+                OwnerOperation::Apply {
+                    mutation: OwnerMutation::CreateDemo { .. }
+                }
+            );
+            let outcome = crate::project_setup::record_new(&tx, config, action, staged, demo)?;
             if let (
                 Outcome::Applied,
                 OwnerOperation::Apply {

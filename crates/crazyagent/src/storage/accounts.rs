@@ -514,6 +514,71 @@ pub(super) fn forget_pool_project(
     Ok(())
 }
 
+/// Gives a demo just made exactly the pool its Create picked, so a pool that still lists an
+/// earlier demo of the same id never serves the new one (rv-sa241 LOW-1); when the picked
+/// pool can't take it, the demo leaves every pool. Inputs: the database, the config, the
+/// settings sources, the owner's admission, the demo and the picked pool. Output: Ok once
+/// only the picked pool lists the demo, else the error, with the demo in no pool.
+pub(super) fn settle_demo_pool(
+    db: &mut Connection,
+    config: &mut EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    admission: &Admission,
+    project: &ProjectId,
+    pool: &CredentialRef,
+) -> Result<(), EngineError> {
+    let reference = CredentialRef::new(project.as_str()).map_err(error)?;
+    let listing = |config: &EffectiveConfig| -> Vec<CredentialRef> {
+        config
+            .settings
+            .model_access
+            .as_ref()
+            .map(|access| {
+                access
+                    .pools
+                    .iter()
+                    .filter(|listed| listed.projects.contains(&reference))
+                    .map(|listed| listed.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if listing(&*config) == [pool.clone()] {
+        return Ok(());
+    }
+    let assigned = publish(
+        db,
+        config,
+        sources,
+        admission,
+        ModelAccessEdit::AssignProjectPool {
+            project: reference.clone(),
+            pool: Some(pool.clone()),
+        },
+    );
+    if let Err(problem) = assigned {
+        if !listing(&*config).is_empty() {
+            publish(
+                db,
+                config,
+                sources,
+                admission,
+                ModelAccessEdit::AssignProjectPool {
+                    project: reference.clone(),
+                    pool: None,
+                },
+            )?;
+        }
+        assert!(
+            listing(&*config).is_empty(),
+            "a refused assign leaves the demo in no pool"
+        );
+        return Err(problem);
+    }
+    assert_eq!(listing(&*config), [pool.clone()]);
+    Ok(())
+}
+
 fn publish(
     db: &mut Connection,
     config: &mut EffectiveConfig,
