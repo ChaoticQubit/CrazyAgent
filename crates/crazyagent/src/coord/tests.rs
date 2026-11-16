@@ -3629,6 +3629,22 @@ fn a_listed_harness_kind_lacks_hooks_the_edit_guard_and_receipts_and_says_why() 
     }
 }
 
+/// rv-code4 T19b F6: a hookless agent of a listed harness shows the harness reason in place
+/// of receipts, the same words its settings sentence ends with; Claude Code started
+/// `--bare` keeps the account-kind reason.
+#[test]
+fn a_hookless_listed_agent_shows_the_harness_reason_in_place_of_receipts() {
+    use super::adoption::{HOOKLESS_WORDS, LISTED_HOOKLESS_WORDS, hookless_words};
+    assert_eq!(hookless_words("standin-acp"), LISTED_HOOKLESS_WORDS);
+    for native in ["claude", "claude-code", "codex", "rcli"] {
+        assert_eq!(hookless_words(native), HOOKLESS_WORDS, "{native}");
+    }
+    assert_eq!(
+        super::settings::LISTED_NO_RECEIPTS,
+        format!("Receipts are {LISTED_HOOKLESS_WORDS}.")
+    );
+}
+
 /// DEC-180 Phase 1: the kind of a harness follows its manifest. A harness that is not one
 /// of the three native ones becomes a listed kind, under its own id, the moment its
 /// manifest names the agent or the master role, and has no kind while it names neither.

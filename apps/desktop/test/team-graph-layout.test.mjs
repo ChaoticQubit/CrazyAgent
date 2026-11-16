@@ -493,6 +493,19 @@ test("a hookless card has no receipt ticks and says only its receipts are unavai
   assert.doesNotMatch(html, /✓/);
 });
 
+test("a hookless card of a listed harness says its receipts are unavailable for its harness", () => {
+  const listed = { ...talk, nodes: talk.nodes.map((item) => item.id === "team-3" ? { ...item, hookless: true, harness: "pi" } : item) };
+  const layout = graph.layoutGraph(listed);
+  const down = layout.links.find((link) => link.to === "team-3");
+  assert.equal(graph.badgeLabel(down), "1 unread message, receipts unavailable for this harness");
+  assert.deepEqual(graph.receiptShown("delivered", true, "pi"), { ticks: "", word: "receipts unavailable for this harness" });
+  assert.deepEqual(graph.receiptShown("delivered", true, "claude"), { ticks: "", word: "receipts unavailable for this account kind" });
+  const tip = graph.cardTip(card(layout, "team-3").node, listed);
+  assert.ok(tip.includes("Receipts unavailable for this harness."), tip.join("\n"));
+  assert.ok(tip.some((line) => /^2 unread messages from .+, receipts unavailable for this harness\.$/.test(line)), tip.join("\n"));
+  assert.equal(view.messageHelper({ hookless: true, harness: "pi" }), "It goes to the agent's mailbox. Its receipts are unavailable for this harness.");
+});
+
 test("a card whose agent the Delivery setting leaves without a channel while it works shows the engine's sentence on the card, in its tip and its Message helper", () => {
   const note = "Messages come as a task of their own once it is idle: Native only never types into a tools-off Codex agent.";
   const quiet = { ...talk, nodes: talk.nodes.map((item) => item.id === "team-2" ? { ...item, message_note: note } : item) };

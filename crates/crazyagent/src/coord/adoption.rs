@@ -25,6 +25,16 @@ pub const COMMAND_BYTES_MAX: usize = 16 * 1024;
 /// What the clients show in place of receipts for an agent whose launch fires no hooks
 /// (DEC-104 bare-hooks), instead of zeros or a blank.
 pub const HOOKLESS_WORDS: &str = "unavailable for this account kind";
+/// What the clients show in place of receipts for an agent of a listed harness, whose
+/// launch writes no hooks on any account (rv-code4 T19b F6).
+pub const LISTED_HOOKLESS_WORDS: &str = "unavailable for this harness";
+
+/// The words a hookless agent shows in place of receipts: the harness reason for a listed
+/// harness, the account-kind reason for Claude Code started `--bare`. Input: the agent's
+/// harness, an id or alias. Output: the words.
+pub fn hookless_words(_harness: &str) -> &'static str {
+    HOOKLESS_WORDS
+}
 /// The most bytes one adoption view takes once encoded. Newer agents are kept first; the
 /// older ones past it are counted in `Adoption::hidden`.
 pub const VIEW_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX / 2;
