@@ -1843,8 +1843,7 @@ async fn desktop_terminal_attach(
     output: Channel<InvokeResponseBody>,
 ) -> Result<u64, BridgeError> {
     terminal_window(&webview)?;
-    let agent = bridge::terminal::agent(&agent)?;
-    let pane = pane.as_deref().map(bridge::terminal::pane).transpose()?;
+    let key = bridge::terminal::view_key(&agent, pane.as_deref())?;
     let id = match webview.label() {
         "main" => None,
         _ => {
@@ -1856,7 +1855,7 @@ async fn desktop_terminal_attach(
     let shows = async {
         if let Some(id) = id {
             let graph = read(&state).await?.team_graph(&id).await?;
-            if !bridge::terminal::graph_shows(&graph, &agent) {
+            if !bridge::terminal::graph_shows(&graph, &key.agent) {
                 return Err(engine_failure("window_denied"));
             }
         }
@@ -1864,15 +1863,19 @@ async fn desktop_terminal_attach(
     };
     let room = terminals
         .0
-        .checked_room(webview.label(), &agent, shows)
+        .checked_room(webview.label(), &key, shows)
         .await?;
-    let session = lock(&state).await?.open_terminal(agent, pane).await?;
+    let session = lock(&state)
+        .await?
+        .open_terminal(key.agent, key.pane)
+        .await?;
     room.attach(session, output)
 }
 
-/// Types a view's keys into an attached agent terminal. Inputs: the window, the terminals,
-/// the terminal name, the bytes and whether the view made them from the owner's mouse
-/// wheel, which never counts as the owner typing. Output: ok once queued, or a bridge error.
+/// Types a view's keys into an attached agent terminal, the view of exactly that pane when
+/// one is named. Inputs: the window, the terminals, the terminal name, the bytes, whether
+/// the view made them from the owner's mouse wheel, which never counts as the owner typing,
+/// and the pane. Output: ok once queued, or a bridge error.
 #[tauri::command]
 async fn desktop_terminal_input(
     webview: Webview,
@@ -1880,28 +1883,36 @@ async fn desktop_terminal_input(
     agent: String,
     bytes: Vec<u8>,
     wheel: Option<bool>,
+    pane: Option<String>,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    let agent = bridge::terminal::agent(&agent)?;
+    let key = bridge::terminal::view_key(&agent, pane.as_deref())?;
     let request = bridge::terminal::input_request(bytes, wheel.unwrap_or(false));
-    terminals.0.send(webview.label(), &agent, request).await
+    terminals.0.send(webview.label(), &key, request).await
 }
 
+/// Sends the owner's prompt to an attached agent terminal, the view of exactly that pane
+/// when one is named. Inputs: the window, the terminals, the terminal name, the text and
+/// the pane. Output: ok once queued, or a bridge error.
 #[tauri::command]
 async fn desktop_terminal_prompt(
     webview: Webview,
     terminals: State<'_, TerminalState>,
     agent: String,
     text: String,
+    pane: Option<String>,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    let agent = bridge::terminal::agent(&agent)?;
+    let key = bridge::terminal::view_key(&agent, pane.as_deref())?;
     terminals
         .0
-        .send(webview.label(), &agent, TerminalRequest::Prompt { text })
+        .send(webview.label(), &key, TerminalRequest::Prompt { text })
         .await
 }
 
+/// Sets an attached agent terminal's size, the view of exactly that pane when one is
+/// named. Inputs: the window, the terminals, the terminal name, columns, rows and the pane.
+/// Output: ok once queued, or a bridge error.
 #[tauri::command]
 async fn desktop_terminal_resize(
     webview: Webview,
@@ -1909,14 +1920,15 @@ async fn desktop_terminal_resize(
     agent: String,
     cols: u16,
     rows: u16,
+    pane: Option<String>,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    let agent = bridge::terminal::agent(&agent)?;
+    let key = bridge::terminal::view_key(&agent, pane.as_deref())?;
     terminals
         .0
         .send(
             webview.label(),
-            &agent,
+            &key,
             TerminalRequest::Resize { cols, rows },
         )
         .await
