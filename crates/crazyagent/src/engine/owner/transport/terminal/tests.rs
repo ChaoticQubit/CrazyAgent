@@ -345,8 +345,12 @@ impl Host for Holding {
     }
 }
 
-/// A grant that always stands and records nothing, so a row drives a view's loop alone.
-struct Open;
+/// A grant that always stands and keeps the prompts recorded as heard, so a row drives a
+/// view's loop alone and reads what it recorded.
+#[derive(Default)]
+struct Open {
+    heard: std::sync::Mutex<Vec<String>>,
+}
 
 impl Viewing for Open {
     fn allows(&self) -> bool {
@@ -359,7 +363,8 @@ impl Viewing for Open {
 
     fn typed(&self, _: &TerminalRequest) {}
 
-    fn heard(&self, _: String) -> impl Future<Output = ()> + Send {
+    fn heard(&self, text: String) -> impl Future<Output = ()> + Send {
+        self.heard.lock().unwrap().push(text);
         async {}
     }
 }
@@ -388,7 +393,9 @@ async fn output_reaches_the_view_while_a_typed_keys_send_is_held() {
     let (requests, mut asked) = tokio::sync::mpsc::channel(REQUESTS_QUEUED);
     let (mut ours, mut theirs) = tokio::io::duplex(1 << 16);
     let pumping =
-        tokio::spawn(async move { pump(&mut ours, viewer, &mut asked, host, &Open).await });
+        tokio::spawn(
+            async move { pump(&mut ours, viewer, &mut asked, host, &Open::default()).await },
+        );
     for key in [b"a", b"b"] {
         let bytes = key.to_vec();
         requests
@@ -434,6 +441,59 @@ async fn output_reaches_the_view_while_a_typed_keys_send_is_held() {
         "the view ends as detached once its requests end"
     );
     drop(feed);
+}
+
+/// v242 typing B fold: a prompt whose send is still held when its view ends is recorded as
+/// heard once the agent took it, as it was while the loop awaited each send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prompt_held_as_its_view_ends_is_still_recorded_as_heard() {
+    let (started, mut sends) = tokio::sync::mpsc::unbounded_channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let host: Arc<dyn Host> = Arc::new(Holding {
+        started,
+        release: std::sync::Mutex::new(released),
+    });
+    let (feed, chunks) = crate::terminal::buffer::buffer();
+    let viewer = TerminalStream {
+        agent: AgentId::team(1).unwrap(),
+        cols: 80,
+        rows: 24,
+        history: Vec::new(),
+        screen: Vec::new(),
+        chunks,
+        at: None,
+    };
+    let (requests, mut asked) = tokio::sync::mpsc::channel(REQUESTS_QUEUED);
+    let (mut ours, _theirs) = tokio::io::duplex(1 << 16);
+    let viewing = Arc::new(Open::default());
+    let pumping = {
+        let viewing = viewing.clone();
+        tokio::spawn(async move { pump(&mut ours, viewer, &mut asked, host, &*viewing).await })
+    };
+    let text = "go".to_owned();
+    requests
+        .send(TerminalRequest::Prompt { text: text.clone() })
+        .await
+        .unwrap();
+    assert!(
+        matches!(tokio::time::timeout(WAIT, sends.recv()).await, Ok(Some(_))),
+        "the prompt's send started"
+    );
+
+    drop(feed);
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(WAIT, pumping).await.map(Result::ok),
+        Ok(Some("terminal_ended")),
+        "the view ends with its terminal"
+    );
+    assert_eq!(
+        *viewing.heard.lock().unwrap(),
+        vec![text],
+        "the prompt the agent took is recorded as heard"
+    );
+    drop(requests);
 }
 
 /// v242 typing timing row (BRIEF-typing-path): 50 keys typed as fast as a view sends them
