@@ -112,6 +112,89 @@ fn a_listed_master_s_instructions_are_the_rcli_master_s() {
     assert_eq!(instruction_text(STARTUP, Given::default()), STARTUP);
 }
 
+/// DEC-180 Task 20 Step 4: a listed master turn runs under the owner's master time limit,
+/// or under the longest run a launch takes when the owner chose none, never the launch's
+/// own ten minute default, with the owner's provider retry and the default stop grace.
+#[test]
+fn a_listed_master_turn_runs_under_the_owner_s_time_limit_or_the_longest_run() {
+    use crate::harnesses::launch::{LaunchLimits, RUN_TIME_MAX};
+    use crate::master_time_limit::TimeLimit;
+    use crate::provider_retry::ProviderRetry;
+    let unlimited = turn_limits(TimeLimit::NoLimit, ProviderRetry::StopAtOnce);
+    assert_eq!(unlimited.run_time, RUN_TIME_MAX);
+    assert_eq!(unlimited.provider_retry, ProviderRetry::StopAtOnce);
+    let limited = turn_limits(TimeLimit::Minutes10, ProviderRetry::HarnessDefault);
+    assert_eq!(limited.run_time, std::time::Duration::from_secs(600));
+    assert_eq!(limited.provider_retry, ProviderRetry::HarnessDefault);
+    assert_eq!(limited.stop_grace, LaunchLimits::default().stop_grace);
+}
+
+/// DEC-180 Task 20 Step 4: every way a listed master turn stops names the reason every
+/// master stops for, and its harness's run clock under an owner's limit names that limit.
+#[test]
+fn a_listed_master_stops_for_the_reasons_every_master_stops_for() {
+    use crate::master_session::MasterReason;
+    use crate::master_time_limit::TimeLimit;
+    let reason = |code: &str| super::super::master_runtime::reason_for_error(&failure(code));
+    for (code, expected) in [
+        (TURN_FAILED, MasterReason::RuntimeUnavailable),
+        (PROCESS_EXITED, MasterReason::RuntimeUnavailable),
+        (NOT_INSTALLED, MasterReason::RuntimeUnavailable),
+        (TOO_OLD, MasterReason::RuntimeUnavailable),
+        ("launch_spawn_failed", MasterReason::RuntimeUnavailable),
+        ("launch_closed", MasterReason::RuntimeUnavailable),
+        ("launch_input_closed", MasterReason::RuntimeUnavailable),
+        ("launch_protocol_failed", MasterReason::ProtocolFault),
+        ("launch_request_failed", MasterReason::ProtocolFault),
+        (
+            "launch_account_unsupported",
+            MasterReason::InvalidAuthentication,
+        ),
+        ("account_key_missing", MasterReason::ReadinessUnknown),
+        ("launch_deadline", MasterReason::TimeLimit),
+    ] {
+        assert_eq!(reason(code), expected, "{code}");
+    }
+    let clock = failure("launch_deadline");
+    let timed = super::super::master_runtime::timed_out(clock, TimeLimit::Minutes10);
+    assert_eq!(timed.0, "master_time_limit_10");
+    assert_eq!(reason(&timed.0), MasterReason::TimeLimit);
+}
+
+/// DEC-180 Task 20 Step 4: a listed master session's turns run in a private home of their
+/// own below the account's slot home, 0700 at each step, apart from every other session's
+/// on the same account, and a home holding a sign-in's record is refused.
+#[cfg(unix)]
+#[test]
+fn a_listed_master_session_runs_in_a_private_home_of_its_own() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = tempfile::Builder::new()
+        .prefix("ca-listed-home-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = folder.path().canonicalize().unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let harness = crate::master_session::listed_master("standin-acp").unwrap();
+    let account = crate::protocol::CredentialRef::new("row-account").unwrap();
+    let session = |id: &str| crate::protocol::SessionId::new(id).unwrap();
+    let first = listed_home(&base, &session("session-a"), harness, &account);
+    assert!(first.is_ok(), "{:?}", first.as_ref().err());
+    let first = first.unwrap();
+    assert_eq!(first, base.join("session-a/standin-acp/row-account"));
+    let steps = [base.join("session-a"), base.join("session-a/standin-acp")];
+    for step in steps.iter().chain([&first]) {
+        let mode = std::fs::metadata(step).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o700, "{}", step.display());
+    }
+    let second = listed_home(&base, &session("session-b"), harness, &account).unwrap();
+    assert_ne!(second, first);
+    let again = listed_home(&base, &session("session-a"), harness, &account);
+    assert_eq!(again, Ok(first.clone()));
+    std::fs::write(first.join(crate::engine::bootstrap::CODEX_RECORD), b"{}").unwrap();
+    let refused = listed_home(&base, &session("session-a"), harness, &account);
+    assert_eq!(refused, Err(failure("launch_account_home_holds_sign_in")));
+}
+
 #[cfg(target_os = "macos")]
 mod launch {
     use super::*;
@@ -350,6 +433,27 @@ mod launch {
         let session = Session::start_listed(turn.request, launch.command, relay, &launch.servers);
         assert!(session.is_ok(), "{:?}", session.as_ref().err());
         (session.unwrap(), state, turn.folder)
+    }
+
+    /// DEC-180 Task 20 Step 4: a harness that keeps working after it was asked to stop its
+    /// turn is waited on only for its stop grace, and the turn ends cancelled, so a stop never
+    /// waits on the harness's whole run clock.
+    #[test]
+    fn a_listed_master_turn_stopped_on_a_harness_that_keeps_working_ends_in_its_grace() {
+        let turn = turn(false);
+        let lines = [chunk("hi"), "@standin sleep 20".into(), chunk("never")];
+        script(&turn, &lines);
+        let (mut session, state, _folder) = started(turn);
+        let working = || state.join("turns").exists();
+        let began = std::time::Instant::now();
+        let driven = drive(&mut session, "keep working", &working);
+        let waited = began.elapsed();
+        assert!(driven.is_ok(), "{:?}", driven.as_ref().err());
+        let collected = driven.unwrap();
+        assert_eq!(collected.ended, Some(Err(CANCELLED)));
+        assert!(!collected.text.contains("never"));
+        assert!(waited < std::time::Duration::from_secs(10), "{waited:?}");
+        assert!(session.stop().is_ok());
     }
 
     /// DEC-180 Task 20 M2 (rv-sa241 ruling t20-q1, conditions 2 to 4 and 6): a keyed listed

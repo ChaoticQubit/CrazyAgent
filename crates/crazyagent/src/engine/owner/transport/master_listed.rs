@@ -24,6 +24,11 @@ pub(super) const TURN_FAILED: &str = "listed_master_turn_failed";
 pub(super) const PROCESS_EXITED: &str = "listed_master_process_exited";
 /// The code of a listed master turn its harness ended as interrupted.
 pub(super) const CANCELLED: &str = "listed_master_cancelled";
+/// The code of a listed master turn whose harness is found nowhere the catalog looks.
+pub(super) const NOT_INSTALLED: &str = "listed_master_not_installed";
+/// The code of a listed master turn whose installed harness is older than its manifest's
+/// `version.minimum`, which a client words as "needs X or newer".
+pub(super) const TOO_OLD: &str = "listed_master_harness_too_old";
 /// The code of a listed master launch whose manifest's render or home block does not read.
 const UNSUPPORTED: &str = "master_runtime_backend_unsupported";
 /// The most reply text one turn gathers; the rest is counted, and the stored reply is cut
@@ -261,4 +266,31 @@ pub(super) fn drive(
     }
     assert!(collected.ended.is_some());
     Ok(collected)
+}
+
+/// The limits one listed master turn's harness runs under: the owner's master time limit, or
+/// the longest run a launch takes when the owner chose none, so the launch's own default
+/// never ends a turn early, and the owner's provider retry. Inputs: the time limit and the
+/// retry. Output: the limits.
+pub(super) fn turn_limits(
+    time: crate::master_time_limit::TimeLimit,
+    retry: crate::provider_retry::ProviderRetry,
+) -> crate::harnesses::launch::LaunchLimits {
+    let _ = (time, retry);
+    crate::harnesses::launch::LaunchLimits::default()
+}
+
+/// Makes the private home one listed master session's turns run in, below its account's
+/// custody slot home: `<slot home>/<session>/<harness id>/<account>`, each folder 0700, so
+/// two sessions on one account never share an instruction file, an MCP file or harness
+/// state, and refuses one that holds a sign-in's record. Inputs: the slot home, the session,
+/// the harness and the account. Output: the home, or the refusal.
+pub(super) fn listed_home(
+    base: &std::path::Path,
+    session: &crate::protocol::SessionId,
+    harness: &Harness,
+    account: &crate::protocol::CredentialRef,
+) -> Result<PathBuf, EngineError> {
+    let _ = (base, session, harness, account);
+    Err(failure(UNSUPPORTED))
 }
