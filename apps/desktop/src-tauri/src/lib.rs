@@ -260,10 +260,16 @@ fn first_replacement(_taken: &AtomicBool) -> bool {
     false
 }
 
+/// Takes a one-shot signal: true once after it was set, then false until it is set again.
+/// Input: the signal. Output: whether it was set.
+fn take_signal(_signal: &AtomicBool) -> bool {
+    false
+}
+
 /// Whether this app replaced an older engine since the last connect reply said so. Reading
 /// it clears it, so the owner is told once. Output: the answer.
 pub(crate) fn engine_update_untold() -> bool {
-    false
+    take_signal(&ENGINE_UPDATE_UNTOLD)
 }
 
 /// Makes sure the default engine runs before the bridge connects: when none answers it
@@ -5724,12 +5730,16 @@ mod tests {
     }
 
     /// DEC-134 addendum 1: a replacement that succeeded is told by the next connect reply
-    /// and by no later one.
+    /// and by no later one. A local signal stands in for the app's, which the bridge rows
+    /// that connect read in parallel.
     #[test]
     fn a_finished_replacement_is_told_by_one_connect_reply() {
-        ENGINE_UPDATE_UNTOLD.store(true, Ordering::SeqCst);
-        assert!(engine_update_untold());
-        assert!(!engine_update_untold());
+        let untold = AtomicBool::new(true);
+        assert!(take_signal(&untold));
+        assert!(!take_signal(&untold));
+        untold.store(true, Ordering::SeqCst);
+        assert!(take_signal(&untold));
+        assert!(!untold.load(Ordering::SeqCst));
     }
 
     /// UI-5-F3: the close walls command refuses a wall of another project and admits the main
