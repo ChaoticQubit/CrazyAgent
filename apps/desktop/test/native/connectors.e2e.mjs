@@ -15,6 +15,7 @@ const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const DAY = 24 * 60 * 60 * 1000;
 const AGES = [3, 10, 45];
 const SETTINGS = { write: "ask_every_time", wait: "minutes10", native: "off", size_cap: "kib256", keep_log: "days30" };
+const LINEAR_KEY = "lin_api_e2e_synthetic_0000";
 
 /** Polls a read until it equals what is wanted, failing with the last value after one step's
  * time. Inputs: what is awaited, the wanted value and the read. Output: none. */
@@ -49,6 +50,23 @@ function heldCalls(runtime) {
   try {
     db.exec("PRAGMA busy_timeout = 5000");
     return db.prepare("SELECT COUNT(*) AS count FROM connector_calls").get().count;
+  } finally {
+    db.close();
+  }
+}
+
+/** The engine's grant row for one connector in one project, or null when there is none
+ * or the grants table is not made yet. Inputs: the engine root, the project and the
+ * connector. Output: the row's switch and Who. */
+function grantRow(runtime, project, connector) {
+  const db = new DatabaseSync(join(runtime, "engine.db"), { readOnly: true });
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    const row = db.prepare("SELECT enabled, who FROM connector_grants WHERE project = ? AND connector = ?").get(project, connector);
+    return row ? { enabled: row.enabled, who: row.who } : null;
+  } catch (error) {
+    if (/no such table/u.test(error.message)) return null;
+    throw error;
   } finally {
     db.close();
   }
@@ -107,7 +125,7 @@ async function onEngine(t, prefix, steps) {
           await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/?visit=${visits}${hash}` });
           await me.waitFor(what, check);
         };
-        await steps({ bridge, me, open, runtime });
+        await steps({ bridge, me, open, runtime, page });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
@@ -152,4 +170,53 @@ test("Connectors: each Activity log keeps option is saved through the page, read
   await t.test("conn keep_log 7 days", () => keep("days30", "7 days", { keep: "days7", ages: [3], held: 1 }));
   await t.test("conn keep_log 30 days", () => keep("days90", "30 days", { keep: "days30", ages: [3, 10], held: 2 }));
   await t.test("conn keep_log 90 days", () => keep("days30", "90 days", { keep: "days90", ages: [3, 10, 45], held: 3 }));
+}));
+
+test("Connectors: turning Linear on for a project shows On and the engine grant row exists, and each Who choice and Off are saved", { timeout: 900000 }, (t) => onEngine(t, "ca-conn-grant-", async ({ bridge, me, open, runtime, page }) => {
+  await value(bridge, "desktop_connector_set_key", { name: "linear", secret: "api_key", key: LINEAR_KEY });
+  const receipt = await value(bridge, "desktop_create_project", { spec: { name: "Connector project", repositories: [] }, generation: 3 });
+  assert.equal(receipt.outcome, "applied", `the project is made: ${JSON.stringify(receipt)}`);
+  const project = receipt.project_id;
+  const section = () => open(`#/projects/${encodeURIComponent(project)}/settings?section=connectors`, "the project's Connectors section",
+    (text) => text.includes("Each is off until you turn it on here.") && text.includes("Linear"));
+  const switched = () => page.evaluate("document.querySelector('#pc-on-linear')?.getAttribute('aria-checked') ?? null");
+  const whoShown = () => page.evaluate("document.querySelector('li[data-connector=\"linear\"] [role=radio][aria-checked=\"true\"]')?.textContent ?? null");
+  const engineHolds = (what, row) => until(what, { row, grants: row === null ? [] : [{ connector: "linear", enabled: row.enabled === 1, who: row.who }] }, async () => ({
+    row: grantRow(runtime, project, "linear"),
+    grants: (await value(bridge, "desktop_connectors", { project })).grants.filter((grant) => grant.connector === "linear"),
+  }));
+
+  await section();
+  assert.equal(await switched(), "false", "Linear starts Off");
+  await engineHolds("no Linear grant yet", null);
+
+  await t.test("conn grant on", async () => {
+    await me.follow("#pc-on-linear");
+    await engineHolds("the Linear grant row", { enabled: 1, who: "both" });
+    await section();
+    assert.equal(await switched(), "true", "the grant reads back On from the engine");
+    assert.equal(await whoShown(), "Master and agents with tools on", "Who starts on the default");
+    await me.capture("conn-grant-on");
+  });
+
+  for (const [label, who] of [["Agents only", "agents"], ["Master and agents with tools on", "both"], ["Master only", "master"]]) {
+    await t.test(`conn who ${label}`, async () => {
+      await me.click(label);
+      await engineHolds(`Who ${label}`, { enabled: 1, who });
+      await section();
+      assert.equal(await whoShown(), label, "the Who reads back from the engine");
+      await me.capture(`conn-who-${who}`);
+    });
+  }
+
+  await t.test("conn grant off", async () => {
+    await me.follow("#pc-on-linear");
+    await engineHolds("the Linear grant turned off, keeping its last Who", { enabled: 0, who: "master" });
+    await section();
+    assert.equal(await switched(), "false");
+    assert.equal(await whoShown(), null, "Who shows only while On");
+    await me.capture("conn-grant-off");
+  });
+
+  assert.ok(!(await me.seen()).includes(LINEAR_KEY), "the key never reaches the page");
 }));

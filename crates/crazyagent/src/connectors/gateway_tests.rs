@@ -1392,6 +1392,9 @@ fn the_engines_gateway_thread_answers_a_launchs_call_and_stops_when_told() {
         text.starts_with("connector_tool_unknown"),
         "the gateway thread answered the call: {text}"
     );
+    let name = launch.folder.file_name().unwrap().to_str().unwrap();
+    end(&bench.case.db, &bench.case.root, name).unwrap();
+    std::thread::sleep(5 * TICK);
     let clock = Instant::now();
     running.stop();
     assert!(
@@ -1400,6 +1403,99 @@ fn the_engines_gateway_thread_answers_a_launchs_call_and_stops_when_told() {
     );
 }
 
+/// A started gateway serves its engine root, under any spelling that resolves to it, until
+/// it is stopped, and never another root, so a master turn in an engine with no gateway is
+/// handed no connector server that nobody answers.
+#[test]
+fn a_gateway_serves_its_root_only_while_it_runs() {
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path().join("engine");
+    let other = folder.path().join("other");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let spelled = folder.path().join("engine-link");
+    std::os::unix::fs::symlink(&root, &spelled).unwrap();
+    assert!(
+        !super::serving(&root),
+        "no gateway serves a root before one starts"
+    );
+    let running = start(&root).unwrap();
+    assert!(super::serving(&root), "a started gateway serves its root");
+    assert!(
+        super::serving(&spelled),
+        "a spelling that resolves to the root is the same root"
+    );
+    assert!(!super::serving(&other), "another root is not served");
+    assert!(!super::serving(&folder.path().join("gone")));
+    running.stop();
+    assert!(!super::serving(&root), "a stopped gateway serves nothing");
+}
+
+#[test]
+fn an_idle_gateway_keeps_one_connection_and_a_new_launch_wakes_it() {
+    let bench = bench();
+    grant(&bench, "board", true);
+    let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let serving = {
+        let (root, opens, stop) = (bench.case.root.clone(), opens.clone(), stop.clone());
+        std::thread::spawn(move || {
+            serve_with(&root, &stop, &|root: &Path| {
+                opens.fetch_add(1, Ordering::SeqCst);
+                crate::storage::versioned::open(root)
+            });
+        })
+    };
+    std::thread::sleep(20 * TICK);
+    assert_eq!(
+        opens.load(Ordering::SeqCst),
+        1,
+        "a gateway with no launch keeps the one connection it opened and reads nothing more"
+    );
+    let launch = launch(&bench);
+    let clock = Instant::now();
+    let input = lines(&[request(
+        1,
+        "tools/call",
+        json!({"name": "nothing", "arguments": {}}),
+    )]);
+    let mut output = Vec::new();
+    shim::serve_with(
+        std::io::Cursor::new(input),
+        &mut output,
+        &launch.folder,
+        WAIT,
+    )
+    .unwrap();
+    let replies = parsed(&output);
+    assert_eq!(replies.len(), 1);
+    let (text, error) = shown(&replies[0]);
+    assert!(
+        error && text.starts_with("connector_tool_unknown"),
+        "{text}"
+    );
+    assert!(
+        clock.elapsed() < Duration::from_secs(5),
+        "a new launch wakes the waiting gateway at once"
+    );
+    assert_eq!(opens.load(Ordering::SeqCst), 1, "on the same connection");
+    let name = launch.folder.file_name().unwrap().to_str().unwrap();
+    end(&bench.case.db, &bench.case.root, name).unwrap();
+    std::thread::sleep(5 * TICK);
+    stop.store(true, Ordering::SeqCst);
+    wake();
+    let clock = Instant::now();
+    serving.join().unwrap();
+    assert!(
+        clock.elapsed() < 10 * TICK + Duration::from_secs(1),
+        "a waiting loop ends as soon as it is told"
+    );
+}
+
+/// Plan row 2, kept as a characterization row: it covers the launch entry and the Task 7
+/// gateway, both written before it, so it passed from its first commit and never ran red.
+/// It guards that a real Codex install with the ca-connectors entry leaves no key in the
+/// agent home while the server it configures still reaches the vendor with the engine's key.
 #[test]
 fn an_agent_home_has_no_connector_key_after_launch_and_the_call_still_reaches_the_vendor() {
     use crate::connectors::launch::{SERVER_NAME, entry};

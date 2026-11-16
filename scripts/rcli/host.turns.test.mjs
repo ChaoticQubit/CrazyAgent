@@ -239,3 +239,23 @@ assert.deepEqual(state.complete("one", "failed"), [expected], message);
 }
 }
 });
+test("a host line goes into the running turn as a finished message of its own, once, and nowhere else", () => {
+const line = "Connector tools are off for this turn.";
+const state = new SdkTurnProjection();
+assert.deepEqual(state.note(line), []);
+state.admit(prompt("one"));
+assert.deepEqual(state.note(line), []);
+start(state, "one");
+assert.deepEqual(state.note(line), [
+{ kind: "message_started", turn_id: "one", message_id: "msg-1" },
+{ kind: "message_delta", turn_id: "one", message_id: "msg-1", text: line },
+{ kind: "message_finished", turn_id: "one", message_id: "msg-1" },
+]);
+assert.throws(() => state.note(line), /host_sdk_event_rejected/);
+assert.deepEqual(state.event({ type: "assistant:message", turnId: "sdk-one", messageId: "sdk-one:assistant:0", text: "done" }).at(0), { kind: "message_started", turn_id: "one", message_id: "msg-2" });
+end(state, "sdk-one");
+assert.deepEqual(state.note(line), []);
+assert.deepEqual(state.complete("one", "completed"), [{ kind: "completed", turn_id: "one", status: "succeeded" }]);
+state.close();
+assert.throws(() => state.note(line), /host_turn_rejected/);
+});
