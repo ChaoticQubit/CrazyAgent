@@ -2188,8 +2188,9 @@ fn a_harness_the_resolver_refuses_as_changeable_is_never_asked_its_version() {
 /// write: in `~/Library/Caches`, since this user's `getconf` cache folder lies in
 /// `/private/var/folders`, a temp folder, and the checkout and its build sit below a project
 /// folder. A HOME without `Library/Caches`, as the gate's own HOME is, gets it private, as
-/// macOS makes it for every user. Input: the folder name's prefix. Output: the folder,
-/// removed when dropped.
+/// macOS makes it for every user. A HOME inside a project, below a `.crazyagent` folder,
+/// leaves no such folder, so the rows stop here naming it rather than on a refusal they did
+/// not test. Input: the folder name's prefix. Output: the folder, removed when dropped.
 #[cfg(target_os = "macos")]
 fn outside_temp(prefix: &str) -> tempfile::TempDir {
     use std::os::unix::fs::DirBuilderExt;
@@ -2211,6 +2212,11 @@ fn outside_temp(prefix: &str) -> tempfile::TempDir {
             .iter()
             .any(|temp| place.starts_with(temp)),
         "HOME lies in a temp folder: {}",
+        place.display()
+    );
+    assert!(
+        !crate::tools::Places::from_environment(None).agent_writable(&place),
+        "HOME lies where agents can write, such as below a project's .crazyagent folder: {}",
         place.display()
     );
     folder
