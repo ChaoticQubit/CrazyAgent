@@ -737,6 +737,71 @@ fn a_journaled_pid_another_user_now_holds_is_gone_and_the_rest_still_thaws() {
     signal("-CONT", app.helper());
 }
 
+/// rv-sec3 T17 r2 F1: a process that runs another program by the time its SIGSTOP lands
+/// is no longer the app's. Freeze reads who runs once more after stopping and lets that
+/// one go on at once, so it never stays stopped under a record that no longer names it.
+#[test]
+fn a_process_that_runs_another_program_by_its_stop_is_let_go_at_once() {
+    let bin = Bin::new();
+    let root = tempfile::tempdir().unwrap();
+    let engine = StandIn::sleep(&bin);
+    let app = StandIn::with_helper(&bin);
+    let helper = app.helper();
+    let mut journal = freeze::journal(root.path()).unwrap();
+    let notes = listed("Notes", app.pid(), &bin.sleep());
+    let reads = std::cell::Cell::new(0_u32);
+    let read = |pids: &[u32]| -> Result<BTreeMap<u32, freeze::Proc>, EngineError> {
+        reads.set(reads.get() + 1);
+        let mut found = BTreeMap::new();
+        for pid in pids {
+            let process = if reads.get() >= 3 && *pid == helper {
+                renamed(*pid)
+            } else {
+                freeze::identity(*pid)?
+            };
+            found.insert(*pid, process);
+        }
+        Ok(found)
+    };
+
+    let frozen =
+        freeze::freeze_with(&mut journal, &notes, engine.pid(), &no_roots(), read).unwrap();
+
+    assert_eq!(reads.get(), 3, "read to journal, before the stop, after it");
+    assert_eq!(frozen.procs.len(), 2);
+    assert!(settles(|| stopped(app.pid())));
+    assert!(
+        settles(|| !stopped(helper)),
+        "the process that runs another program goes on"
+    );
+    drop(journal);
+    assert_eq!(reconcile(root.path()), Leftover::Kinds(Vec::new()));
+    assert!(settles(|| !stopped(app.pid())));
+}
+
+/// rv-sec3 T17 r2 F2: an engine root long enough that its terminal socket is reached
+/// through the short address in /tmp still has its server counted as an agent root.
+#[test]
+fn the_engine_server_on_a_short_address_is_an_agent_root_too() {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = Bin::new();
+    let disk = tempfile::tempdir().unwrap();
+    let root = disk.path().canonicalize().unwrap().join("r".repeat(110));
+    let terminal = root.join(crazyagent::terminal::FOLDER);
+    std::fs::create_dir_all(&terminal).unwrap();
+    std::fs::set_permissions(&terminal, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = terminal.join(crazyagent::terminal::tmux::SOCKET);
+    assert!(
+        socket.as_os_str().len() > 108,
+        "the socket needs the short address"
+    );
+    let server = StandIn::listening(&bin, "crazyagent-tmux", &socket, &[]);
+
+    let roots = freeze::servers(&root).unwrap();
+
+    assert_eq!(roots, BTreeSet::from([server.pid()]));
+}
+
 /// rv-secreview T17 r1 F4, leader 01:57 (2): a descendant that may never be frozen (a
 /// system program, CrazyAgent by name) keeps running together with everything below it;
 /// the app's own processes pause.

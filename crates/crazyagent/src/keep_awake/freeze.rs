@@ -329,7 +329,8 @@ pub use lane::Lane;
 
 #[cfg(unix)]
 pub use unix::{
-    allowed, boot_session, freeze, identity, pickable, running, servers, thaw, thaw_with,
+    allowed, boot_session, freeze, freeze_with, identity, pickable, running, servers, thaw,
+    thaw_with,
 };
 
 #[cfg(unix)]
@@ -337,7 +338,8 @@ pub(super) use unix::run;
 
 #[cfg(not(unix))]
 pub use other::{
-    allowed, boot_session, freeze, identity, pickable, running, servers, thaw, thaw_with,
+    allowed, boot_session, freeze, freeze_with, identity, pickable, running, servers, thaw,
+    thaw_with,
 };
 
 /// The engine read of the apps the owner may pick (Task 17): the running apps less every
@@ -424,6 +426,17 @@ mod other {
         _app: &Running,
         _engine: u32,
         _roots: &BTreeSet<u32>,
+    ) -> Result<Frozen, EngineError> {
+        Err(unavailable())
+    }
+
+    /// Windows has no app freezing. Output: the refusal.
+    pub fn freeze_with(
+        _journal: &mut Journal,
+        _app: &Running,
+        _engine: u32,
+        _roots: &BTreeSet<u32>,
+        _read: impl Fn(&[u32]) -> Result<BTreeMap<u32, Proc>, EngineError>,
     ) -> Result<Frozen, EngineError> {
         Err(unavailable())
     }
@@ -897,6 +910,19 @@ mod unix {
         assert!(!frozen.procs.is_empty() && frozen.procs.len() <= PROCS_MAX);
         assert_eq!(frozen.procs[0].pid, pid);
         Ok(frozen)
+    }
+
+    /// Red stub for rv-sec3 T17 r2 F1: freezes as `freeze` does and never calls the
+    /// reader. Inputs: as `freeze`, and the reader of who runs now. Output: as `freeze`.
+    pub fn freeze_with(
+        journal: &mut Journal,
+        listed: &Running,
+        engine: u32,
+        roots: &BTreeSet<u32>,
+        read: impl Fn(&[u32]) -> Result<BTreeMap<u32, Proc>, EngineError>,
+    ) -> Result<Frozen, EngineError> {
+        let _ = read;
+        freeze(journal, listed, engine, roots)
     }
 
     /// Thaws one journaled app with a given reader of who runs now: in the boot session it
