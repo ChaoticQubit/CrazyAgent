@@ -17,15 +17,18 @@ printf 'answer:%s\n' "$answer" > "$1"
 printf 'thanks\n'
 exec sleep 60
 "#;
-const TICK: &str = r#"printf 'Working on the page\n\n Do you want to proceed?\n \342\235\257 1. Yes\n   2. No\n\n Esc to cancel\n'
+/// A pane stand-in that shows a question, then redraws its first row as `tick N` once the
+/// marker file `<prefix>.N` exists, and prints nothing more between markers, so the row
+/// decides every change to the screen however slow the machine is. Input: the prefix.
+const STEPPED: &str = r#"printf 'Working on the page\n\n Do you want to proceed?\n \342\235\257 1. Yes\n   2. No\n\n Esc to cancel\n'
 i=0
-while [ "$i" -lt 40 ]; do
-  i=$((i+1))
-  printf '\033[1;1Htick %s' "$i"
+while :; do
+  if [ -e "$1.$((i+1))" ]; then
+    i=$((i+1))
+    printf '\033[1;1Htick %s' "$i"
+  fi
   sleep 0.05
 done
-: > "$1"
-exec sleep 60
 "#;
 const LONG: &str = r#"i=0
 while [ "$i" -lt 3000 ]; do
@@ -234,13 +237,17 @@ fn a_question_on_a_screen_that_still_changes_is_recorded_only_once_the_pane_is_i
     let fixture = Fixture::new();
     let host = fixture.host();
     let agent = fixture.agent(PROJECT, "sub", "codex", "working");
-    let script = fixture.base.join("tick.sh");
-    let still = fixture.base.join("still");
-    std::fs::write(&script, TICK).unwrap();
+    let script = fixture.base.join("stepped.sh");
+    let marker = fixture.base.join("redraw");
+    std::fs::write(&script, STEPPED).unwrap();
     fixture.pane(
         &host,
         agent,
-        &["/bin/sh", script.to_str().unwrap(), still.to_str().unwrap()],
+        &[
+            "/bin/sh",
+            script.to_str().unwrap(),
+            marker.to_str().unwrap(),
+        ],
     );
     let watched = [Watched {
         agent,
@@ -249,17 +256,24 @@ fn a_question_on_a_screen_that_still_changes_is_recorded_only_once_the_pane_is_i
     }];
     let name = AgentId::team(agent).unwrap();
     let mut watch = Watch::default();
-    let mut busy = 0;
-    until("the pane to stop changing", || {
+    until("the question on the pane", || {
+        question(&host.screen(&name).unwrap()).is_some()
+    });
+    for redraw in 0..4 {
+        if redraw > 0 {
+            std::fs::write(marker.with_extension(redraw.to_string()), "").unwrap();
+            let shown = format!("tick {redraw}");
+            until("the pane to redraw", || {
+                String::from_utf8_lossy(&host.screen(&name).unwrap()).contains(&shown)
+            });
+        }
         watch
             .scan(&fixture.connection, host.as_ref(), &watched, 10)
             .unwrap();
-        if still.exists() {
-            return true;
-        }
-        if question(&host.screen(&name).unwrap()).is_some() {
-            busy += 1;
-        }
+        assert!(
+            question(&host.screen(&name).unwrap()).is_some(),
+            "the question stays on the screen through redraw {redraw}"
+        );
         assert!(
             events(&fixture.connection, &project(), 10)
                 .unwrap()
@@ -267,23 +281,16 @@ fn a_question_on_a_screen_that_still_changes_is_recorded_only_once_the_pane_is_i
             "a question on a screen that is still changing is not recorded"
         );
         assert!(waiting(&fixture.connection, &project()).unwrap().is_empty());
-        std::thread::sleep(Duration::from_millis(150));
-        false
-    });
-    assert!(
-        busy >= 3,
-        "the question was on the changing screen for {busy} scans"
-    );
-    until("the question event", || {
-        watch
-            .scan(&fixture.connection, host.as_ref(), &watched, 11)
-            .unwrap();
-        !events(&fixture.connection, &project(), 10)
-            .unwrap()
-            .is_empty()
-    });
+    }
+    watch
+        .scan(&fixture.connection, host.as_ref(), &watched, 11)
+        .unwrap();
     let recorded = events(&fixture.connection, &project(), 10).unwrap();
-    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded.len(),
+        1,
+        "the first scan of an unchanged screen records the question"
+    );
     assert_eq!(recorded[0].kind, EventKind::Question);
     assert_eq!(recorded[0].text, "Do you want to proceed? | 1. Yes | 2. No");
 }
