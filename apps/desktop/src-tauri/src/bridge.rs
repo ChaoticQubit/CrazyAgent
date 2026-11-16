@@ -146,6 +146,7 @@ pub struct ConnectionStatus {
     pub connected: bool,
     pub pending: bool,
     pub stuck_sign_in: Option<String>,
+    pub engine_updated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -406,7 +407,10 @@ impl NativeBridge {
         self.ordinary = Some(ordinary);
         assert!(self.controller.is_some());
         assert!(self.ordinary.is_some());
-        Ok(self.status())
+        Ok(ConnectionStatus {
+            engine_updated: crate::engine_update_untold(),
+            ..self.status()
+        })
     }
 
     pub fn status(&self) -> ConnectionStatus {
@@ -420,6 +424,7 @@ impl NativeBridge {
             stuck_sign_in: self
                 .stuck_auth()
                 .map(|connection| connection.id.as_str().to_owned()),
+            engine_updated: false,
         }
     }
 

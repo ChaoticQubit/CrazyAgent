@@ -284,6 +284,7 @@ export interface ConnectionStatus {
   connected: boolean;
   pending: boolean;
   stuck_sign_in: string | null;
+  engine_updated: boolean;
 }
 
 /** Connects this window to the engine. Output: whether it is connected and whether an earlier

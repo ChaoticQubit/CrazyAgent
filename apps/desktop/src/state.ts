@@ -117,6 +117,13 @@ export function engineState(result: Result<api.ConnectionStatus>): EngineState {
   return result.kind === "ok" && result.value.connected ? "running" : "down";
 }
 
+/** The one line the owner sees after this app replaced an older engine on its own at launch
+ * (DEC-134 addendum 1). Input: the connect reply. Output: the line, or null when the reply
+ * says no engine was replaced. */
+export function engineUpdatedLine(result: Result<api.ConnectionStatus>): string | null {
+  return result.kind === "ok" && result.value.engine_updated ? "CrazyAgent's engine was updated to match this app." : null;
+}
+
 /** The refusal codes after which the session reads again whether a sign-in is stuck. */
 export const STUCK_SIGN_IN_CODES = ["native_auth_recovery_required", "native_auth_outcome_unknown_read_same_operation"];
 
@@ -301,6 +308,8 @@ export function useSession(home: boolean): Session {
     if (state !== "running") return;
     setRevision((value) => value + 1);
     await Promise.all([refreshProfile(), refreshProjects()]);
+    const updated = engineUpdatedLine(result);
+    if (updated) showToast(updated);
   }
 
   useEffect(() => {

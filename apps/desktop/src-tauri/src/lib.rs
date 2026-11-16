@@ -76,6 +76,7 @@ use crazyagent::usage::report::UsageReport;
 use crazyagent::usage::spend::SpendChoice;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
@@ -239,9 +240,66 @@ fn start_failure(layout: &crazyagent::paths::Layout) -> &'static str {
     }
 }
 
+/// Set once this app run has taken its one replacement of an older engine, so a swap that
+/// does not end the mismatch never turns into a restart loop (DEC-134 addendum 1).
+static ENGINE_REPLACED: AtomicBool = AtomicBool::new(false);
+
+/// Set when that replacement succeeded and no connect reply has said so yet.
+static ENGINE_UPDATE_UNTOLD: AtomicBool = AtomicBool::new(false);
+
+/// Whether an engine reporting `engine` is older than an app at `app`, so the app may replace
+/// it on its own at launch (DEC-134 addendum 1). Inputs: both versions. Output: true only
+/// when both read as versions and the app's is newer; equal, newer and unreadable give false.
+fn engine_older(engine: &str, app: &str) -> bool {
+    crazyagent::update::is_newer(app, engine).unwrap_or(false)
+}
+
+/// Whether the launch may replace the engine that answered without the owner's confirm: it
+/// is older than this app and the login service is installed and running, so the swap stops
+/// the service's engine and never installs a service beside an engine started by hand
+/// (DEC-134 addendum 1, #111 F1). Inputs: both versions and the service's status. Output:
+/// the answer.
+fn swap_on_launch(engine: &str, app: &str, service: &crazyagent::service::Status) -> bool {
+    service.installed && service.running && engine_older(engine, app)
+}
+
+/// Takes this app run's one replacement of an older engine. Input: the run's flag. Output:
+/// true the first time, false after.
+fn first_replacement(taken: &AtomicBool) -> bool {
+    !taken.swap(true, Ordering::SeqCst)
+}
+
+/// Takes a one-shot signal: true once after it was set, then false until it is set again.
+/// Input: the signal. Output: whether it was set.
+fn take_signal(signal: &AtomicBool) -> bool {
+    signal.swap(false, Ordering::SeqCst)
+}
+
+/// Whether this app replaced an older engine since the last connect reply said so. Reading
+/// it clears it, so the owner is told once. Output: the answer.
+pub(crate) fn engine_update_untold() -> bool {
+    take_signal(&ENGINE_UPDATE_UNTOLD)
+}
+
+/// Checks the default engine's version against this app's within 5 s. Input: the layout.
+/// Output: ready, a mismatch with the engine's version, or unavailable.
+async fn check_default_engine(
+    layout: &crazyagent::paths::Layout,
+) -> crazyagent::service::EngineCheck {
+    crazyagent::service::check_engine(
+        layout.root(),
+        crazyagent::engine::owner::OwnerClientKind::Desktop,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+}
+
 /// Makes sure the default engine runs before the bridge connects: when none answers it
-/// starts the login service, installing it for this app's sidecar on first launch. An
-/// engine of another version is refused with `engine_version_mismatch`. Skipped when
+/// starts the login service, installing it for this app's sidecar on first launch. An engine
+/// older than this app that the running login service runs is replaced once per app run
+/// through Restart engine's path, without its confirm, and once it answers on this app's
+/// version the next connect reply says so (DEC-134 addendum 1); any other version or engine,
+/// or a replacement the service refuses, is `engine_version_mismatch`. Skipped when
 /// `CRAZYAGENT_DESKTOP_SOCKET` names an engine explicitly.
 async fn ensure_default_engine() -> Result<(), BridgeError> {
     if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
@@ -251,19 +309,40 @@ async fn ensure_default_engine() -> Result<(), BridgeError> {
     if !crazyagent::service::answering(&layout.socket()) {
         start_engine(&layout, &service, false).await?;
     }
-    match crazyagent::service::check_engine(
-        layout.root(),
-        crazyagent::engine::owner::OwnerClientKind::Desktop,
-        std::time::Duration::from_secs(5),
-    )
-    .await
+    let crazyagent::service::EngineCheck::Mismatch { version, .. } =
+        check_default_engine(&layout).await
+    else {
+        return Ok(());
+    };
+    let running = service
+        .status()
+        .map_err(|_| engine_failure("engine_version_mismatch"))?;
+    if !swap_on_launch(&version, crazyagent::version::VERSION, &running)
+        || !first_replacement(&ENGINE_REPLACED)
     {
-        crazyagent::service::EngineCheck::Mismatch { .. } => {
-            Err(engine_failure("engine_version_mismatch"))
-        }
-        crazyagent::service::EngineCheck::Ready { .. }
-        | crazyagent::service::EngineCheck::Unavailable { .. } => Ok(()),
+        return Err(engine_failure("engine_version_mismatch"));
     }
+    match start_engine(&layout, &service, true).await {
+        Err(error)
+            if matches!(
+                error.code,
+                "engine_newer_than_app" | "engine_app_not_installed"
+            ) =>
+        {
+            return Err(engine_failure("engine_version_mismatch"));
+        }
+        result => result?,
+    }
+    match check_default_engine(&layout).await {
+        crazyagent::service::EngineCheck::Mismatch { .. } => {
+            return Err(engine_failure("engine_version_mismatch"));
+        }
+        crazyagent::service::EngineCheck::Ready { .. } => {
+            ENGINE_UPDATE_UNTOLD.store(true, Ordering::SeqCst);
+        }
+        crazyagent::service::EngineCheck::Unavailable { .. } => {}
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -5665,6 +5744,77 @@ mod tests {
             },
         )
         .map(|_| ())
+    }
+
+    /// DEC-134 addendum 1: the app replaces an engine on its own only when the engine's
+    /// version is older than the app's. A dev build sorts below its stable; an equal, newer or
+    /// unreadable version is never replaced, so the app never downgrades an engine.
+    #[test]
+    fn only_an_engine_older_than_the_app_is_replaced_on_its_own() {
+        let app = "2.4.1-dev.202611161323";
+        assert!(engine_older("2.4.1-dev.202611150900", app));
+        assert!(engine_older("2.4.0", app));
+        assert!(engine_older(app, "2.4.1"));
+        assert!(!engine_older(app, app));
+        assert!(!engine_older("2.4.1", app));
+        assert!(!engine_older("2.4.1-dev.202611170000", app));
+        for unreadable in ["", "x", "unknown", "2.4.1\n\u{1b}[2J"] {
+            assert!(!engine_older(unreadable, app), "{unreadable:?}");
+            assert!(!engine_older(app, unreadable), "{unreadable:?}");
+        }
+    }
+
+    /// DEC-134 addendum 1: one app run replaces an older engine at most once, so a swap that
+    /// leaves the mismatch shows the restart view instead of restarting the engine again.
+    #[test]
+    fn an_app_run_replaces_an_older_engine_at_most_once() {
+        let taken = AtomicBool::new(false);
+        assert!(first_replacement(&taken));
+        assert!(!first_replacement(&taken));
+        assert!(!first_replacement(&taken));
+        assert!(taken.load(Ordering::SeqCst));
+    }
+
+    /// DEC-134 addendum 1: a replacement that succeeded is told by the next connect reply
+    /// and by no later one. A local signal stands in for the app's, which the bridge rows
+    /// that connect read in parallel.
+    #[test]
+    fn a_finished_replacement_is_told_by_one_connect_reply() {
+        let untold = AtomicBool::new(true);
+        assert!(take_signal(&untold));
+        assert!(!take_signal(&untold));
+        untold.store(true, Ordering::SeqCst);
+        assert!(take_signal(&untold));
+        assert!(!untold.load(Ordering::SeqCst));
+    }
+
+    /// #111 F1: the launch swaps an older engine only while the login service is installed
+    /// and running; an older engine with no service, or with a service that runs nothing,
+    /// keeps today's mismatch view, and an engine of this app's version is never swapped.
+    #[test]
+    fn only_an_older_engine_the_login_service_runs_is_replaced_at_launch() {
+        let app = "2.4.1-dev.202611161323";
+        let older = "2.4.1-dev.202611150900";
+        let service = |installed: bool, running: bool| crazyagent::service::Status {
+            installed,
+            running,
+            pid: running.then_some(4242),
+        };
+        assert!(swap_on_launch(older, app, &service(true, true)));
+        assert!(
+            !swap_on_launch(older, app, &service(false, false)),
+            "an older engine started by hand, with no login service, is left alone"
+        );
+        assert!(
+            !swap_on_launch(older, app, &service(true, false)),
+            "an installed service that runs nothing did not start the engine that answered"
+        );
+        assert!(
+            !swap_on_launch(older, app, &service(false, true)),
+            "a loaded job without its definition cannot be replaced through the service"
+        );
+        assert!(!swap_on_launch(app, app, &service(true, true)));
+        assert!(!swap_on_launch("2.4.2", app, &service(true, true)));
     }
 
     /// UI-5-F3: the close walls command refuses a wall of another project and admits the main

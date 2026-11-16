@@ -110,6 +110,7 @@ export interface ConnectionStatus {
   connected: boolean;
   pending: boolean;
   stuck_sign_in: string | null;
+  engine_updated: boolean;
 }
 
 export interface BaselineRow {
