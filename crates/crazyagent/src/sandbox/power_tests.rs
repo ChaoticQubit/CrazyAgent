@@ -251,8 +251,8 @@ fn a_socket_grant_naming_the_power_helper_is_refused() {
 
 #[test]
 fn a_socket_grant_whose_path_holds_the_power_helper_socket_is_refused() {
-    let case = case(SandboxNetwork::Only(Vec::new()));
-    let root = case._temp.path().canonicalize().unwrap();
+    let rooted = case(SandboxNetwork::Only(Vec::new()));
+    let root = rooted._temp.path().canonicalize().unwrap();
     let inside = root.join("private/var/run");
     let shouted = root.join("PRIVATE/VAR/RUN");
     fs::create_dir_all(&inside).unwrap();
