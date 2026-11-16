@@ -3769,6 +3769,62 @@ fn a_new_project_job_run_in_the_background_finishes_after_its_page_is_gone() {
     assert_eq!(kept_draft(), None, "a made project keeps no draft");
 }
 
+/// DEC-182 S5a, rv-ds241 Note A on a carried page: a New Project sent to the background with
+/// publishing on starts its GitHub publish once its pool is assigned, and the Start's
+/// refusal is said on Home with its reason.
+#[test]
+fn a_new_project_run_in_the_background_says_its_github_publish_refusal() {
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    shell.arrive(Arrival::Pools(Ok(vec![main_pool()])));
+    drain(&mut shell);
+    github_signed_in(&mut shell);
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let (id, project, start) =
+        setup_start(&drain(&mut shell)).expect("Create starts the New Project job");
+    shell.key(Key::Esc);
+    go_to(&mut shell, "home");
+    assert_eq!(shell.depth(), 1, "Home drops the buried wizard");
+    drain(&mut shell);
+    shell.arrive(intake_reply(
+        start,
+        Ok(IntakeView::Job(Some(building(&id, &project)))),
+    ));
+    shell.arrive(job_status(Some(tidepool_job(
+        &id,
+        &project,
+        JobState::Done,
+    ))));
+    drain(&mut shell);
+    shell.arrive(Arrival::PoolEdited(Ok(())));
+    let publish: Vec<IntakeQuery> = intake_asks(&drain(&mut shell))
+        .into_iter()
+        .filter(|query| {
+            matches!(query, IntakeQuery::GitHubPublishStart { project: started, .. } if *started == project)
+        })
+        .collect();
+    assert_eq!(publish.len(), 1, "{publish:?}");
+    shell.arrive(intake_reply(
+        publish[0].clone(),
+        Err("github_not_signed_in".into()),
+    ));
+    let said = shell.ctx.message().expect("the Start's refusal is said");
+    assert_eq!(
+        (said.lead.as_str(), said.rest.as_str()),
+        (
+            "Publishing on GitHub didn't start.",
+            "Sign in with GitHub first."
+        )
+    );
+    assert_eq!(shell.place(), Some(Place::Home));
+}
+
 /// Sends a New Project to the background, drops its page with Home, ends its job done and
 /// answers its pool edit. Takes nothing. Returns the shell, the project and the requests the
 /// pool's answer queued.
