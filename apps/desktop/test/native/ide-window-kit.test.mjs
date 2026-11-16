@@ -81,12 +81,15 @@ test("the realKey guard catches a key line in any quote and a direct osascript k
     "onApp(\"Keystroke \\\"w\\\" using command down\");",
     "spawnSync(\"/usr/bin/osascript\", [\"-e\", 'tell application \"System Events\" to keystroke \"q\" using command down']);",
     "const line = `key  code 53`;\n  onApp(line);",
+    "onApp(\"key down command\");",
+    "onApp('Key Up command');",
   ];
   for (const sample of past) assert.notDeepEqual(keysPastRealKey(sample), [], `caught: ${sample}`);
   const through = [
     "await realKey(`keystroke \"${key}\" using command down`);",
     "await realKey(\"key code 36\");",
     "await realKey('keystroke \"x\"');",
+    "await realKey(\"key down command\");",
     "/** Sends one real System Events keystroke line through realKey. */\nfunction realKey(line) { onApp(line); }",
     "onApp(\"set frontmost to true\");",
   ];
