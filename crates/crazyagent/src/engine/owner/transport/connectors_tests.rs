@@ -239,7 +239,23 @@ fn the_owner_adds_keys_grants_and_removes_a_connector_through_the_protocol() {
         .iter()
         .map(|connector| connector.name.as_str())
         .collect();
-    assert_eq!(names, ["linear", "github", "atlassian", "notion"]);
+    assert_eq!(
+        names,
+        [
+            "linear",
+            "github",
+            "atlassian",
+            "notion",
+            "slack",
+            "asana",
+            "box",
+            "canva",
+            "dropbox",
+            "gmail",
+            "google-drive",
+            "google-calendar"
+        ]
+    );
     assert!(first.grants.is_empty());
     assert_eq!(first.project.as_deref(), Some(PROJECT));
     assert!(
@@ -408,7 +424,23 @@ fn the_connectors_page_never_changes_an_embedding_plugin() {
         .iter()
         .map(|connector| connector.name.as_str())
         .collect();
-    assert_eq!(names, ["linear", "github", "atlassian", "notion"]);
+    assert_eq!(
+        names,
+        [
+            "linear",
+            "github",
+            "atlassian",
+            "notion",
+            "slack",
+            "asana",
+            "box",
+            "canva",
+            "dropbox",
+            "gmail",
+            "google-drive",
+            "google-calendar"
+        ]
+    );
     let all = store::list(&db, &root).unwrap();
     assert!(all.plugins.iter().any(|plugin| plugin.name == "near"));
     assert!(!root.join(crate::storage::accounts::PLUGIN_KEYS).exists());

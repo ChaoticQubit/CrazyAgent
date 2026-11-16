@@ -106,7 +106,15 @@ fn bundled_plugins_list_first_with_only_the_local_one_on() {
             "linear",
             "github",
             "atlassian",
-            "notion"
+            "notion",
+            "slack",
+            "asana",
+            "box",
+            "canva",
+            "dropbox",
+            "gmail",
+            "google-drive",
+            "google-calendar"
         ]
     );
     assert!(!listing.more);

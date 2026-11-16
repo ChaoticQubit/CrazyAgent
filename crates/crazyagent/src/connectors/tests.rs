@@ -149,7 +149,24 @@ fn a_new_connector_reaches_nobody_until_the_owner_turns_it_on_for_a_project() {
         .iter()
         .map(|connector| connector.name.as_str())
         .collect();
-    assert_eq!(names, ["linear", "github", "atlassian", "notion", "board"]);
+    assert_eq!(
+        names,
+        [
+            "linear",
+            "github",
+            "atlassian",
+            "notion",
+            "slack",
+            "asana",
+            "box",
+            "canva",
+            "dropbox",
+            "gmail",
+            "google-drive",
+            "google-calendar",
+            "board"
+        ]
+    );
 
     turn_on(&case, PROJECT, "board", Who::Both).unwrap();
     assert_eq!(reach(&case, PROJECT, Role::Master), ["board"]);
@@ -543,6 +560,14 @@ fn a_refused_connector_file_is_listed_with_its_reason_and_one_whose_kind_cannot_
             ("github", Origin::Bundled),
             ("atlassian", Origin::Bundled),
             ("notion", Origin::Bundled),
+            ("slack", Origin::Bundled),
+            ("asana", Origin::Bundled),
+            ("box", Origin::Bundled),
+            ("canva", Origin::Bundled),
+            ("dropbox", Origin::Bundled),
+            ("gmail", Origin::Bundled),
+            ("google-drive", Origin::Bundled),
+            ("google-calendar", Origin::Bundled),
             ("board", Origin::User),
             ("broken", Origin::User),
             ("linear", Origin::User),

@@ -2028,6 +2028,312 @@ fn a_resource_naming_its_issuer_with_a_trailing_slash_signs_in_and_renews_under_
     assert!(next.is_ok(), "the owner's app stays bound: {next:?}");
 }
 
+/// What the probes of 11-16 found for one Group P connector (PROBES-connectors.md, Group
+/// P): its MCP address and read-only address, its MCP host, its OAuth hosts, the scopes it
+/// asks to read and to write, whether its resource metadata names the issuer with a
+/// trailing slash, whether its server promises the issuer in every answer, and whether
+/// the vendor marks its server as a preview.
+struct OwnApp {
+    name: &'static str,
+    url: &'static str,
+    read_only: Option<&'static str>,
+    host: &'static str,
+    oauth_hosts: &'static [&'static str],
+    scopes_read: &'static [&'static str],
+    scopes_write: &'static [&'static str],
+    slash: bool,
+    iss: bool,
+    preview: bool,
+}
+
+const GOOGLE_HOSTS: &[&str] = &["accounts.google.com", "oauth2.googleapis.com"];
+
+const GROUP_P: [OwnApp; 9] = [
+    OwnApp {
+        name: "slack",
+        url: "https://mcp.slack.com/mcp",
+        read_only: None,
+        host: "mcp.slack.com",
+        oauth_hosts: &["mcp.slack.com", "slack.com"],
+        scopes_read: &[
+            "channels:history",
+            "channels:read",
+            "groups:history",
+            "groups:read",
+            "im:history",
+            "im:read",
+            "mpim:history",
+            "mpim:read",
+            "users:read",
+            "search:read.public",
+            "search:read.private",
+            "search:read.im",
+            "search:read.mpim",
+            "search:read.files",
+            "canvases:read",
+            "files:read",
+        ],
+        scopes_write: &[
+            "chat:write",
+            "canvases:write",
+            "files:write",
+            "reactions:write",
+            "channels:write",
+            "groups:write",
+            "im:write",
+            "mpim:write",
+            "lists:write",
+        ],
+        slash: false,
+        iss: false,
+        preview: false,
+    },
+    OwnApp {
+        name: "asana",
+        url: "https://mcp.asana.com/v2/mcp",
+        read_only: None,
+        host: "mcp.asana.com",
+        oauth_hosts: &["app.asana.com"],
+        scopes_read: &[],
+        scopes_write: &[],
+        slash: false,
+        iss: false,
+        preview: false,
+    },
+    OwnApp {
+        name: "box",
+        url: "https://mcp.box.com/",
+        read_only: None,
+        host: "mcp.box.com",
+        oauth_hosts: &["api.box.com", "account.box.com"],
+        scopes_read: &[],
+        scopes_write: &[],
+        slash: true,
+        iss: false,
+        preview: false,
+    },
+    OwnApp {
+        name: "canva",
+        url: "https://mcp.canva.com/mcp",
+        read_only: None,
+        host: "mcp.canva.com",
+        oauth_hosts: &["mcp.canva.com"],
+        scopes_read: &[
+            "profile:read",
+            "design:meta:read",
+            "design:content:read",
+            "folder:read",
+            "brandtemplate:meta:read",
+            "brandtemplate:content:read",
+            "comment:read",
+            "asset:read",
+            "brandkit:read",
+            "help:answers:read",
+        ],
+        scopes_write: &[
+            "design:content:write",
+            "folder:write",
+            "brandtemplate:content:write",
+            "comment:write",
+            "asset:write",
+        ],
+        slash: false,
+        iss: false,
+        preview: false,
+    },
+    OwnApp {
+        name: "dropbox",
+        url: "https://mcp.dropbox.com/mcp",
+        read_only: None,
+        host: "mcp.dropbox.com",
+        oauth_hosts: &["www.dropbox.com", "api.dropboxapi.com"],
+        scopes_read: &[
+            "account_info.read",
+            "files.metadata.read",
+            "files.content.read",
+            "sharing.read",
+            "file_requests.read",
+        ],
+        scopes_write: &[
+            "files.metadata.write",
+            "files.content.write",
+            "sharing.write",
+            "file_requests.write",
+        ],
+        slash: false,
+        iss: false,
+        preview: false,
+    },
+    OwnApp {
+        name: "github",
+        url: "https://api.githubcopilot.com/mcp/",
+        read_only: Some("https://api.githubcopilot.com/mcp/readonly"),
+        host: "api.githubcopilot.com",
+        oauth_hosts: &["github.com"],
+        scopes_read: &["repo", "read:org", "read:user", "read:project"],
+        scopes_write: &["project", "gist", "notifications"],
+        slash: false,
+        iss: true,
+        preview: false,
+    },
+    OwnApp {
+        name: "gmail",
+        url: "https://gmailmcp.googleapis.com/mcp/v1",
+        read_only: None,
+        host: "gmailmcp.googleapis.com",
+        oauth_hosts: GOOGLE_HOSTS,
+        scopes_read: &["https://www.googleapis.com/auth/gmail.readonly"],
+        scopes_write: &["https://www.googleapis.com/auth/gmail.compose"],
+        slash: true,
+        iss: true,
+        preview: true,
+    },
+    OwnApp {
+        name: "google-drive",
+        url: "https://drivemcp.googleapis.com/mcp/v1",
+        read_only: None,
+        host: "drivemcp.googleapis.com",
+        oauth_hosts: GOOGLE_HOSTS,
+        scopes_read: &["https://www.googleapis.com/auth/drive.readonly"],
+        scopes_write: &["https://www.googleapis.com/auth/drive.file"],
+        slash: true,
+        iss: true,
+        preview: true,
+    },
+    OwnApp {
+        name: "google-calendar",
+        url: "https://calendarmcp.googleapis.com/mcp/v1",
+        read_only: None,
+        host: "calendarmcp.googleapis.com",
+        oauth_hosts: GOOGLE_HOSTS,
+        scopes_read: &["https://www.googleapis.com/auth/calendar.readonly"],
+        scopes_write: &["https://www.googleapis.com/auth/calendar.events"],
+        slash: true,
+        iss: true,
+        preview: true,
+    },
+];
+
+/// Slack, Asana, Box, Canva, Dropbox, GitHub, Gmail, Google Drive and Google Calendar
+/// ship with the addresses, hosts and scopes the probes found, take only the owner's own
+/// app, and say in their description which redirect to register. At a loopback stand-in
+/// that offers a client document and registration, each refuses to begin until the
+/// owner's app is saved, registers nothing meanwhile, then signs in with that app.
+#[test]
+fn every_group_p_connector_asks_for_the_owners_own_app_before_sign_in() {
+    for probe in GROUP_P {
+        let name = probe.name;
+        let manifest = shipped(name);
+        let spec = manifest.connector().unwrap().clone();
+        assert_eq!(spec.mcp.url.as_str(), probe.url, "{name}");
+        assert_eq!(spec.mcp.url.scheme(), "https", "{name}");
+        assert_eq!(spec.mcp.hosts, [probe.host], "{name}");
+        let read_only = match &spec.mcp.read_only {
+            ReadOnly::Url(url) => Some(url.as_str()),
+            _ => None,
+        };
+        assert_eq!(read_only, probe.read_only, "{name}");
+        assert!(spec.oauth.is_some(), "{name} signs in by OAuth");
+        let oauth = spec.oauth.clone().unwrap();
+        assert_eq!(oauth.hosts, probe.oauth_hosts, "{name}");
+        assert_eq!(oauth.registration, [Registration::Own], "{name}");
+        assert_eq!(oauth.scopes_read, probe.scopes_read, "{name}");
+        assert_eq!(oauth.scopes_write, probe.scopes_write, "{name}");
+        assert!(
+            manifest.description.contains("http://127.0.0.1/callback"),
+            "{name} names the redirect to register: {}",
+            manifest.description
+        );
+        assert_eq!(
+            manifest.description.contains("Preview at Google"),
+            probe.preview,
+            "{name}"
+        );
+
+        let stand_in = vendor(Shape {
+            servers: if probe.slash {
+                vec!["{base}/"]
+            } else {
+                vec!["{base}"]
+            },
+            iss: probe.iss,
+            cimd: true,
+            register: Some("{base}/register"),
+            ..shape()
+        });
+        let base = format!("http://127.0.0.1:{}", stand_in.port);
+        let swapped = at_stand_in(&spec, &stand_in);
+        let case = case();
+        let begin = || {
+            begin_with(
+                &case.root,
+                name,
+                &manifest.sha256,
+                &swapped,
+                &redirect(),
+                false,
+                Some(&document()),
+                &no_lookup(),
+            )
+        };
+        assert_eq!(
+            begin().err(),
+            Some(OAuthError("connector_oauth_needs_own_app")),
+            "{name}"
+        );
+        assert!(
+            stand_in
+                .seen()
+                .iter()
+                .all(|seen| seen.path != "/register" && seen.path != "/token"),
+            "{name} registers nothing and redeems nothing"
+        );
+
+        assert_eq!(
+            set_own_client(&case.db, &case.root, name, CLIENT, Some(SECRET)),
+            Ok(()),
+            "{name}"
+        );
+        let begun = begin();
+        assert!(begun.is_ok(), "{name}: {begun:?}");
+        let pending = begun.unwrap();
+        let asked = query(&pending.authorize_url);
+        assert_eq!(asked["client_id"], CLIENT, "{name}");
+        let scope = (!probe.scopes_read.is_empty()).then(|| probe.scopes_read.join(" "));
+        assert_eq!(
+            asked.get("scope"),
+            scope.as_ref(),
+            "{name} asks only to read"
+        );
+        assert_eq!(asked["resource"], format!("{base}/mcp"), "{name}");
+        assert_eq!(
+            finish_with(
+                &case.root,
+                &pending.state,
+                CODE,
+                probe.iss.then_some(base.as_str()),
+                &no_lookup()
+            ),
+            Ok(()),
+            "{name}"
+        );
+        let got = fresh_with(
+            &case.db,
+            &case.root,
+            name,
+            &manifest.title,
+            &manifest.sha256,
+            &swapped,
+            clock(),
+            &no_lookup(),
+        );
+        assert!(
+            matches!(&got, Ok(Credential::OAuth { issuer, .. }) if *issuer == base),
+            "{name}: {got:?}"
+        );
+    }
+}
+
 /// Every sign-in code a page can show is listed once, sorted, and has a plain sentence
 /// with no code words in it.
 #[test]
