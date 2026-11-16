@@ -151,3 +151,29 @@ fn a_context_less_listed_launch_never_locks_through_a_link_planted_at_the_harnes
     );
     untouched(&target);
 }
+
+/// T18-LEAD-GATE (rv-sa241 FINDINGS-02:24 NOTE-2): a context-less launch of a listed
+/// harness with no piped driver holds its private home through the same no-follow walk as
+/// one with a driver, chosen by the registry and not by the driver, so once its harness
+/// folder is swapped for a link the next hold is refused and the folder the link names is
+/// never locked.
+#[test]
+fn a_context_less_launch_of_a_harness_with_no_piped_driver_never_locks_through_a_link() {
+    let (_folder, home) = harness_home("standin-screen");
+    let base = agent_home(&home);
+    assert!(crate::harnesses::drivers::piped("standin-screen").is_err());
+    let held = lock_only(&home, "standin-screen");
+    assert!(held.is_ok(), "{:?}", held.as_ref().err());
+    drop(held);
+    let (_victim, target) = victim();
+    fs::rename(base.join("standin-screen"), base.join("moved")).unwrap();
+    std::os::unix::fs::symlink(&target, base.join("standin-screen")).unwrap();
+
+    let refused = lock_only(&home, "standin-screen");
+
+    assert_eq!(
+        refused.err().map(|problem| problem.0).as_deref(),
+        Some("launch_account_home_unsafe")
+    );
+    untouched(&target);
+}
