@@ -205,6 +205,40 @@ test("a wall tile attaches naming its own project, so the bridge can refuse a te
   assert.match(source("api.ts"), /call<number>\("desktop_terminal_attach", \{ agent, pane, output, id: project \}\)/u);
 });
 
+test("a native teammate's pane view types, prompts and resizes only that pane, never its lead's terminal (DEC-187 S1)", async () => {
+  const api = await import("../src/api.ts");
+  const sent = [];
+  const before = globalThis.window;
+  globalThis.window = { __TAURI_INTERNALS__: { async invoke(command, args) {
+    sent.push([command, args]);
+    return null;
+  } } };
+  try {
+    await api.typeIntoTerminal("team-2", [108, 115], true, "%3");
+    await api.promptTerminal("team-2", "hi", "%3");
+    await api.resizeTerminal("team-2", 80, 24, "%3");
+    await api.typeIntoTerminal("team-2", [108]);
+    await api.promptTerminal("team-2", "hi");
+    await api.resizeTerminal("team-2", 80, 24);
+  } finally {
+    globalThis.window = before;
+  }
+  assert.deepEqual(sent, [
+    ["desktop_terminal_input", { agent: "team-2", bytes: [108, 115], wheel: true, pane: "%3" }],
+    ["desktop_terminal_prompt", { agent: "team-2", text: "hi", pane: "%3" }],
+    ["desktop_terminal_resize", { agent: "team-2", cols: 80, rows: 24, pane: "%3" }],
+    ["desktop_terminal_input", { agent: "team-2", bytes: [108], wheel: false, pane: null }],
+    ["desktop_terminal_prompt", { agent: "team-2", text: "hi", pane: null }],
+    ["desktop_terminal_resize", { agent: "team-2", cols: 80, rows: 24, pane: null }],
+  ], "a pane view names its pane; a whole terminal's view names none");
+  const panel = source("screens/team/terminal-panel.tsx");
+  assert.match(panel, /const pane = teammatePane\(node\);/u);
+  assert.equal(panel.match(/\b(?:typeIntoTerminal|promptTerminal|resizeTerminal)\(/gu)?.length, 3, "the panel sends keys, prompts and sizes in three places");
+  assert.match(panel, /void resizeTerminal\(name, size\.cols, size\.rows, pane\)/u);
+  assert.match(panel, /await typeIntoTerminal\(name, chunk, wheel, pane\)/u);
+  assert.match(panel, /await promptTerminal\(name, text, pane\)/u);
+});
+
 test("removing a project the engine applied closes that project's wall windows, from both Remove project screens", () => {
   const projects = source("api-projects.ts");
   const remove = projects.slice(projects.indexOf("export async function removeProject("));
