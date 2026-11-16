@@ -62,11 +62,10 @@ pub fn check_stdio(
 /// runs `initialize` and `tools/list`, then stops its whole process group and, through the
 /// warden a boundary command gets, every process left in its sandbox. Where `check` follows
 /// its lineage, what it left outside the group is held and named (LINUX-KILL-GROUP r1 F1).
-/// Inputs: the
-/// command with its arguments, environment and folder set, the time bound and what the stop
-/// checks of the processes the server leaves outside its group. Output: the tool names, or a
-/// plain rejection code, `server_cleanup_uncertain` when the warden did not confirm the
-/// sandbox empty.
+/// Inputs: the command with its arguments, environment and folder set, the time bound and
+/// what the stop checks of the processes the server leaves outside its group. Output: the
+/// tool names, or a plain rejection code, `server_cleanup_uncertain` when the warden did not
+/// confirm the sandbox empty.
 #[cfg(unix)]
 pub fn check_command(
     mut process: Command,
