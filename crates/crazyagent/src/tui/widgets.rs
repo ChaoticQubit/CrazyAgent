@@ -243,8 +243,8 @@ impl TextField {
             let dots = self.len().min(inner.saturating_sub(1));
             return (vec![glyphs.dot.repeat(dots)], 0, dots);
         }
-        let before: String = self.value.chars().take(self.cursor).collect();
-        let lines = wrap_keeping(&self.value, inner);
+        let (before, after) = crate::memory::visible_split(&self.value, self.cursor);
+        let lines = wrap_keeping(&format!("{before}{after}"), inner);
         let cursor_lines = wrap_keeping(&before, inner);
         let cursor_row = cursor_lines.len().saturating_sub(1);
         let mut cursor_column = cursor_lines
@@ -521,6 +521,31 @@ mod tests {
         assert_eq!(plain(&lines[1]), "[ For example      ]");
         let (lines, _) = role.lines(20, true, &theme(), &UNICODE);
         assert_eq!(plain(&lines[1]), "[                  ]");
+    }
+
+    #[test]
+    fn pasted_hidden_characters_show_escaped_and_the_cursor_follows() {
+        let mut pasted = TextField::new("Manifest", 1000).multiline();
+        assert!(pasted.key(&Key::Paste("ab\u{202e}cd".into())));
+        assert_eq!(pasted.value(), "ab\u{202e}cd");
+        let (lines, cursor) = pasted.lines(40, true, &theme(), &UNICODE);
+        assert!(plain(&lines[1]).starts_with("[ ab\\u202ecd "));
+        assert!(!plain(&lines[1]).contains('\u{202e}'));
+        assert_eq!(cursor, Some(Position::new(12, 1)));
+        assert!(pasted.key(&Key::Left));
+        assert!(pasted.key(&Key::Left));
+        let (_, cursor) = pasted.lines(40, true, &theme(), &UNICODE);
+        assert_eq!(cursor, Some(Position::new(10, 1)));
+        let mut family = TextField::new("About", 100).multiline();
+        assert!(family.key(&Key::Paste("x\u{202e}\u{1f468}\u{200d}\u{1f469}".into())));
+        assert!(family.key(&Key::Left));
+        let (lines, cursor) = family.lines(40, true, &theme(), &UNICODE);
+        assert!(plain(&lines[1]).starts_with("[ x\\u202e\u{1f468}\u{200d}\u{1f469}"));
+        let column = 2 + 1 + 6 + char_width('\u{1f468}') + char_width('\u{200d}');
+        assert_eq!(
+            cursor,
+            Some(Position::new(u16::try_from(column).unwrap(), 1))
+        );
     }
 
     #[test]

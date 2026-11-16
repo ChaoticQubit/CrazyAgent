@@ -700,6 +700,16 @@ pub fn visible_text(text: &str) -> String {
     out
 }
 
+/// Shows the text the way `visible_text` does, split after its first `at` characters. Each
+/// escape is decided in the whole text, so the part before the split ends where a cursor
+/// after those characters stands. Inputs: the text and a character count at most its length.
+/// Output: the shown text before the split and after it.
+pub(crate) fn visible_split(text: &str, at: usize) -> (String, String) {
+    let chars: Vec<char> = text.chars().collect();
+    assert!(at <= chars.len());
+    (chars[..at].iter().collect(), chars[at..].iter().collect())
+}
+
 fn hidden_at(chars: &[char], at: usize) -> bool {
     hidden_char(chars[at]) && !emoji_part(chars, at)
 }
@@ -1750,6 +1760,30 @@ fn history(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_split_shown_text_decides_each_escape_in_the_whole_text() {
+        assert_eq!(
+            visible_split("ab\u{202e}cd", 3),
+            ("ab\\u202e".to_owned(), "cd".to_owned())
+        );
+        assert_eq!(
+            visible_split("x\u{202e}\u{1f468}\u{200d}\u{1f469}", 4),
+            (
+                "x\\u202e\u{1f468}\u{200d}".to_owned(),
+                "\u{1f469}".to_owned()
+            )
+        );
+        assert_eq!(
+            visible_split("plain\ntext", 5),
+            ("plain".to_owned(), "\ntext".to_owned())
+        );
+        let text = "a\u{200b}b\u{1f468}\u{200d}\u{1f469}\u{202e}";
+        for at in 0..=text.chars().count() {
+            let (before, after) = visible_split(text, at);
+            assert_eq!(format!("{before}{after}"), visible_text(text));
+        }
+    }
 
     #[test]
     fn persisted_knowledge_invariants_are_runtime_assertions() {
