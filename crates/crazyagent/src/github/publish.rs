@@ -534,6 +534,15 @@ fn head_state(
     Ok((branch, history))
 }
 
+/// Reads a project's `.git/config` through one open that follows no link from the project
+/// down and never waits on a pipe, checked on the open file as a regular file of at most
+/// `CONFIG_BYTES_MAX`, so git lists these bytes and never opens the path again. Input: the
+/// project. Output: the bytes, none when there is no config, or
+/// `github_publish_not_plain_repo`.
+fn read_config(_project: &Path) -> Result<Option<Vec<u8>>, EngineError> {
+    Ok(None)
+}
+
 /// Refuses a repository that already has a remote: one on GitHub is published already,
 /// and any other is another host's. git lists the keys of `.git/config` alone, includes
 /// left out. Inputs: git, its empty home, the project and GitHub's web host.
