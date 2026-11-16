@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { SessionContext, useLoad, useSession, type Loaded, type Session } from "./state";
 import { engineVersions, plainError, unconfirmedLine, PROFILE_UNCONFIRMED_LINE, STUCK_SIGN_IN_LINE, type EngineVersions } from "./api";
 import { ideFocus, type IdeFocus } from "./engine-client";
+import { preloadLastIde } from "./api-ide";
 import { loadTeamEvents, teamAttention } from "./api-projects";
 import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPendingQuestions } from "./api-questions";
 import { questionWatch } from "./notify";
@@ -359,9 +360,21 @@ export function pageUnder(route: Route, hash: string, kept: PageUnder): PageUnde
   return { route, hash: hash || undefined };
 }
 
+/** Preloads the last used project's IDE once per launch, after the window's first paint and once
+ * the engine runs, so the app shows first and the IDE loads behind it (DEC-187). Input: whether
+ * the engine runs. */
+function useIdePreload(running: boolean) {
+  const done = useRef(false);
+  useEffect(() => {
+    if (!running || done.current) return;
+    done.current = true;
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => void preloadLastIde()));
+  }, [running]);
+}
+
 /** The desktop app: one engine session, the hash route, the app-wide shortcuts, the team
- * notification and question watch, the new free reset notice and the TUI's "open in IDE"
- * focus. */
+ * notification and question watch, the new free reset notice, the TUI's "open in IDE" focus
+ * and the last used IDE's preload. */
 export function App() {
   const route = useRoute();
   const session = useSession(route.name === "home");
@@ -372,6 +385,7 @@ export function App() {
   const { alerts, working } = useTeamAlerts(session.engine === "running", session.showToast);
   useResetNotice(session.engine === "running", session.showToast);
   useIdeFocus(session.engine === "running");
+  useIdePreload(session.engine === "running");
   useLearningVisits(route, session.engine === "running");
   return <AppView session={session} route={route} alerts={alerts} working={working} under={under.current.route} back={under.current.hash} />;
 }

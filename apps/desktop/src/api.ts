@@ -1638,9 +1638,28 @@ export function focusTerminalWindow(id: string, target: "main" | number): Promis
   return call<void>("desktop_focus_terminal_window", { id, target: String(target) });
 }
 
+/** Where this app keeps the last used project's IDE for the preload at start: the project and
+ * its panel only, never an address or a token (DEC-187). */
+export const LAST_IDE_KEY = "crazyagent.ide.last";
+
+function forgetLastIde(id: string): void {
+  try {
+    const kept = window.localStorage.getItem(LAST_IDE_KEY);
+    if (kept !== null && (JSON.parse(kept) as { project?: unknown }).project === id) window.localStorage.removeItem(LAST_IDE_KEY);
+  } catch {
+    try {
+      window.localStorage.removeItem(LAST_IDE_KEY);
+    } catch {
+      return;
+    }
+  }
+}
+
 /** Closes a removed project's terminal wall windows, for the main window or a wall window of
- * that project. Input: the project id. Output: nothing, not ready, or a plain error. */
+ * that project, and its kept IDE with its server; the project is no longer the one the app
+ * preloads. Input: the project id. Output: nothing, not ready, or a plain error. */
 export function closeProjectWalls(id: string): Promise<Result<void>> {
+  forgetLastIde(id);
   return call<void>("desktop_close_project_walls", { id });
 }
 

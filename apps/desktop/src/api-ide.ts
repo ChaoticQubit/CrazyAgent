@@ -1,4 +1,4 @@
-import { call } from "./api";
+import { LAST_IDE_KEY, call } from "./api";
 import type { Failure, Result } from "./api";
 import { failureCopy } from "./api-projects";
 import type { RunMode } from "./screens/project/run-command";
@@ -13,9 +13,6 @@ export const IDE_NOT_PLACED = "The IDE couldn't move to fit its panel. Resize th
 
 /** What the owner reads when the IDE webview didn't hide, so it may still cover the page. */
 export const IDE_NOT_HIDDEN = "The IDE couldn't be hidden, so it may still cover this page. Restart CrazyAgent if it stays.";
-
-/** What the owner reads when a project's IDE didn't close with its page. */
-export const IDE_NOT_CLOSED = "The IDE didn't close cleanly. Restart CrazyAgent if it stays on screen.";
 
 /** What the owner reads when the IDE couldn't move to a window of its own. */
 export const IDE_NOT_MOVED = "The IDE couldn't open in its own window. Try again.";
@@ -196,8 +193,62 @@ export function sameBounds(box: IdeBounds, last: IdeBounds | null): boolean {
 
 /** Reads what the project page shows for the IDE; with `retry` the engine first starts the
  * build download again. Input: whether to retry. Output: the view. */
-export function ideView(retry = false): Promise<Result<IdeView>> {
-  return call<IdeView>("desktop_ide_state", { retry });
+export async function ideView(retry = false): Promise<Result<IdeView>> {
+  const read = await call<IdeView>("desktop_ide_state", { retry });
+  if (read.kind === "ok") lastIdeView = read;
+  return read;
+}
+
+let lastIdeView: { kind: "ok"; value: IdeView } | undefined;
+
+/** The last IDE state read well, so a page or tab switch shows the IDE tab on its first render
+ * while a new read runs (DEC-187). Output: that read, or undefined before any. */
+export function cachedIdeView(): { kind: "ok"; value: IdeView } | undefined {
+  return lastIdeView;
+}
+
+/** What a show of a kept IDE tells the tab: whether it was shown, and what the project's last
+ * Full access IDE left running after it stopped, named once. */
+export type IdeShown = { shown: boolean; left: string | null };
+
+/** Shows a project's kept IDE over the panel with no engine call. Inputs: the project and the
+ * panel. Output: whether it was shown, false when none is kept, or the refusal. */
+export function showKeptIde(projectId: string, panel: IdeBounds): Promise<Result<IdeShown>> {
+  return call<IdeShown>("desktop_ide_show", { projectId, bounds: panel });
+}
+
+/** Keeps the project whose IDE just showed and its panel, for the preload at the next start.
+ * Inputs: the project and the panel. Output: none; nothing when storage is unavailable. */
+export function saveLastIde(projectId: string, panel: IdeBounds): void {
+  try {
+    window.localStorage.setItem(LAST_IDE_KEY, JSON.stringify({ project: projectId, panel }));
+  } catch {
+    return;
+  }
+}
+
+function lastIde(): { project: string; panel: IdeBounds } | null {
+  try {
+    const kept = JSON.parse(window.localStorage.getItem(LAST_IDE_KEY) ?? "null") as { project?: unknown; panel?: Partial<IdeBounds> } | null;
+    const panel = kept?.panel;
+    const spans = panel ? [panel.x, panel.y, panel.width, panel.height, panel.viewport] : [];
+    if (typeof kept?.project !== "string" || spans.length !== 5 || !spans.every((span) => typeof span === "number" && Number.isFinite(span))) return null;
+    return { project: kept.project, panel: panel as IdeBounds };
+  } catch {
+    return null;
+  }
+}
+
+/** Loads the last used project's IDE hidden, once the app has painted, when its build is ready;
+ * a refusal stays silent, since the owner asked for nothing yet (DEC-187). Output: none when no
+ * IDE was used, not_ready when the build is not ready, else asked. */
+export async function preloadLastIde(): Promise<"none" | "not_ready" | "asked"> {
+  const last = lastIde();
+  if (last === null) return "none";
+  const view = await ideView();
+  if (view.kind !== "ok" || !ideStatus(view.value.state).ready) return "not_ready";
+  await call<boolean>("desktop_ide_preload", { projectId: last.project, bounds: last.panel });
+  return "asked";
 }
 
 /** What an open tells the tab: whether the IDE stays in its own window, and what the
@@ -235,11 +286,6 @@ export function placeIde(projectId: string, panel: IdeBounds): Promise<Result<nu
 /** Hides a project's IDE while its tab is not shown, keeping it loaded. Input: the project. */
 export function hideIde(projectId: string): Promise<Result<null>> {
   return call<null>("desktop_ide_hide", { projectId });
-}
-
-/** Closes a project's IDE when its project page closes. Input: the project. */
-export function closeIde(projectId: string): Promise<Result<null>> {
-  return call<null>("desktop_ide_close", { projectId });
 }
 
 /** Keeps a project's IDE server from stopping for idleness. Input: the project. Output:
