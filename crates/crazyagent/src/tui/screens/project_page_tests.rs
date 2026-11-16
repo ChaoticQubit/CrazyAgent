@@ -1701,6 +1701,165 @@ async fn a_delete_cut_short_shows_on_home_after_a_restart_and_d_keeps_the_projec
     assert!(folder.join(".crazyagent").is_dir(), "{folder:?}");
 }
 
+/// DEC-177 step 3c: while another project's move waits for its agents, Create on New project
+/// starts the engine's New Project job, which the held move refuses; the wizard keeps the
+/// draft and says another job runs, nothing is made and the move still waits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_while_a_move_holds_the_job_is_refused_and_keeps_the_draft() {
+    let mut engine = Engine::start().await;
+    let (notes, origin) = made_in_first_home(&mut engine, "notes-cli", "Notes CLI", 1).await;
+    let next = crate::tui::test_home::projects_home(&mut engine.controller, 2).await;
+    let home = std::fs::canonicalize(next.path()).unwrap();
+    let copy = engine.root.path().join("agent-47");
+    engine_sql(
+        &engine,
+        &format!(
+            "INSERT OR IGNORE INTO team_paused_projects(project,since_ms) VALUES ('notes-cli',1);
+             INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms)
+             VALUES (47,'notes-cli','team','codex',1,'{}','working',0,0);",
+            copy.to_str().unwrap()
+        ),
+    );
+    let held = engine
+        .controller
+        .job_start(
+            RequestId::new("move-held-1").unwrap(),
+            JobSubject::MoveProject {
+                project_id: notes.clone(),
+            },
+            AddMode::Move,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    assert!(super::intake_job::running(&held), "{held:?}");
+
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"job start"), "{sent:?}");
+    assert_eq!(
+        sent.iter().filter(|sent| **sent == "job start").count(),
+        1,
+        "a refused start never starts again: {sent:?}"
+    );
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Could not create the project."), "{shown}");
+    assert!(shown.contains("Another job is running."), "{shown}");
+    assert!(!home.join("tidepool").exists(), "nothing was made");
+    assert!(origin.is_dir(), "the move still waits: {origin:?}");
+    go_to(&mut shell, "home");
+    assert_eq!(
+        kept_draft().as_deref(),
+        Some("Tidepool"),
+        "leaving the refused wizard keeps its draft"
+    );
+    drop(shell);
+    drop(connection);
+
+    let mut connection = engine.connect();
+    let shell = home_shell(&mut connection).await;
+    let shown = shell.ctx.store.intake.clone().expect("the held move");
+    assert_eq!(shown.id, held.id, "the held move is still the engine's job");
+    assert!(super::intake_job::running(&shown), "{shown:?}");
+}
+
+/// DEC-177 step 3c: a New Project an engine stop cut short shows on Home after the next start
+/// as stopped part way and never goes on by itself; Enter opens New project and starts
+/// nothing, and d forgets it. Runs on macOS, where the restart helper runs.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_project_cut_short_shows_on_home_after_a_restart_and_d_forgets_it() {
+    let engine = Engine::start().await;
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let engine = engine
+        .restart(|root| {
+            drop(crate::ledger::open(root).unwrap());
+            rusqlite::Connection::open(root.join("engine.db"))
+                .unwrap()
+                .execute_batch(&format!(
+                    "INSERT INTO ledger_actions(kind,action_key,payload,started_ms)
+                     VALUES ('project_setup','project-cut-tui',
+                             '{{\"project\":\"project-cut-tui\",\"request\":\"setup-cut-tui\",\"name\":\"Cut Short\"}}',{started});"
+                ))
+                .unwrap();
+        })
+        .await;
+    assert_eq!(
+        engine_count(
+            &engine,
+            "SELECT count(*) FROM ledger_actions WHERE kind='project_setup' AND outcome IS NULL"
+        ),
+        0,
+        "the start ends the mark"
+    );
+    let mut connection = engine.connect();
+    let mut shell = home_shell(&mut connection).await;
+    let cut = shell
+        .ctx
+        .store
+        .intake
+        .clone()
+        .expect("the New Project cut short");
+    assert_eq!(cut.kind, JobKind::Setup);
+    assert_eq!(cut.source, "Cut Short");
+    assert_eq!(
+        cut.state,
+        JobState::Failed {
+            code: "home_new_project_interrupted".into(),
+            phase: crate::projects_home::job::Phase::Building,
+        }
+    );
+    let rows = render(&mut shell, 120, 30);
+    assert!(
+        rows.contains("Cut Short: Setting up the project stopped part way."),
+        "{rows}"
+    );
+    shell.key(Key::Home);
+    shell.key(Key::Enter);
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(
+        !sent.contains(&"job start"),
+        "nothing starts in one key: {sent:?}"
+    );
+    drop(shell);
+    drop(connection);
+
+    let mut connection = engine.connect();
+    let mut shell = home_shell(&mut connection).await;
+    assert_eq!(
+        shell.ctx.store.intake.as_ref().map(|job| &job.id),
+        Some(&cut.id)
+    );
+    shell.key(Key::Home);
+    shell.key(Key::Char('d'));
+    pump(&mut shell, &mut connection).await;
+    pump(&mut shell, &mut connection).await;
+    assert_eq!(shell.ctx.store.intake, None, "d forgets the job");
+    assert_eq!(
+        engine_count(
+            &engine,
+            "SELECT count(*) FROM projects WHERE id='project-cut-tui'"
+        ),
+        0,
+        "a cut-short New Project leaves no project"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_settings_pick_a_pool_and_the_engine_assigns_it() {
     let mut engine = Engine::start().await;
