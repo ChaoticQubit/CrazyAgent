@@ -3,6 +3,8 @@ use crate::connectors::approvals::{self, State};
 use crate::connectors::gateway::{GatewayLaunch, end, prepare};
 use crate::connectors::grants::Role;
 use crate::connectors::settings::Wait;
+use std::io::Write;
+use std::sync::{Arc, Mutex};
 
 const OTHER: &str = "beta";
 
@@ -73,9 +75,91 @@ fn by_id(replies: &[Value], id: u64) -> &Value {
         .unwrap_or_else(|| panic!("no reply to {id}: {replies:?}"))
 }
 
+/// A connector server's output, kept where the row reads it while the server runs.
+#[derive(Clone, Default)]
+struct Collected(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Collected {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A connector server on its own thread whose input stays open, as a live harness keeps
+/// it, until the row closes it.
+struct Open {
+    input: Option<std::io::PipeWriter>,
+    output: Collected,
+    server: std::thread::JoinHandle<()>,
+}
+
+impl Open {
+    /// Starts the server on the launch with the read wait given. Output: the server.
+    fn start(launch: &GatewayLaunch, wait: Duration) -> Self {
+        let (reader, writer) = std::io::pipe().unwrap();
+        let output = Collected::default();
+        let folder = launch.folder.clone();
+        let written = output.clone();
+        let server = std::thread::spawn(move || {
+            let input = std::io::BufReader::new(reader);
+            shim::serve_with(input, written, &folder, wait).unwrap();
+        });
+        Self {
+            input: Some(writer),
+            output,
+            server,
+        }
+    }
+
+    fn send(&mut self, requests: &[Value]) {
+        let input = self.input.as_mut().expect("the input is open");
+        input.write_all(&lines(requests)).unwrap();
+    }
+
+    fn replies(&self) -> Vec<Value> {
+        parsed(&self.output.0.lock().unwrap())
+    }
+
+    /// Closes the input and waits at most `within` for the server to end. Input: the most
+    /// to wait. Output: every reply the server wrote.
+    fn finish(mut self, within: Duration) -> Vec<Value> {
+        self.input = None;
+        let deadline = Instant::now() + within;
+        while !self.server.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "the server kept waiting after its input closed"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        self.server.join().unwrap();
+        self.replies()
+    }
+}
+
+/// Answers as the engine until `found` gives a value, within `WAIT`. Inputs: the bench,
+/// what the row waits for and the check. Output: the value.
+fn until<T>(bench: &Bench, what: &str, mut found: impl FnMut(&Bench) -> Option<T>) -> T {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        bench.gateway.answer_pending();
+        if let Some(value) = found(bench) {
+            return value;
+        }
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Runs the connector server over the requests with the read wait given while this thread
 /// answers as the engine, and hands each write that starts waiting for the owner to
-/// `on_waiting` once, by its approval id. Output: the server's replies.
+/// `on_waiting` once, by its approval id. The input closes once every request with an id
+/// has its reply. Output: the server's replies.
 fn talk_with(
     bench: &Bench,
     launch: &GatewayLaunch,
@@ -83,17 +167,19 @@ fn talk_with(
     wait: Duration,
     mut on_waiting: impl FnMut(&Bench, i64),
 ) -> Vec<Value> {
-    let input = lines(requests);
-    let folder = launch.folder.clone();
-    let server = std::thread::spawn(move || {
-        let mut output = Vec::new();
-        shim::serve_with(std::io::Cursor::new(input), &mut output, &folder, wait).unwrap();
-        output
-    });
+    let asked = requests
+        .iter()
+        .filter(|request| request.get("id").is_some())
+        .count();
+    let mut server = Open::start(launch, wait);
+    server.send(requests);
     let mut handed = std::collections::BTreeSet::new();
     let deadline = Instant::now() + 4 * WAIT;
-    while !server.is_finished() {
-        assert!(Instant::now() < deadline, "the server did not finish");
+    while server.replies().len() < asked {
+        assert!(
+            Instant::now() < deadline,
+            "the server did not answer every call"
+        );
         bench.gateway.answer_pending();
         for id in waiting_ids(bench) {
             if handed.insert(id) {
@@ -102,7 +188,7 @@ fn talk_with(
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    parsed(&server.join().unwrap())
+    server.finish(WAIT)
 }
 
 /// DEC-168 Task 12: under Ask every time a write call waits for the owner, the vendor sees
@@ -418,23 +504,11 @@ fn a_held_write_outlasts_the_read_wait_until_the_owner_answers() {
 #[test]
 fn an_ended_launch_expires_its_held_writes() {
     let (vendor, mut bench, launch) = write_bench();
-    let input = lines(&[call(1, "board__create_issue", json!({}))]);
-    let folder = launch.folder.clone();
-    let server = std::thread::spawn(move || {
-        let mut output = Vec::new();
-        let wait = Duration::from_secs(2);
-        shim::serve_with(std::io::Cursor::new(input), &mut output, &folder, wait).unwrap();
-        output
+    let mut server = Open::start(&launch, Duration::from_secs(2));
+    server.send(&[call(1, "board__create_issue", json!({}))]);
+    let id = until(&bench, "the write never waited", |bench| {
+        waiting_ids(bench).first().copied()
     });
-    let deadline = Instant::now() + WAIT;
-    let id = loop {
-        assert!(Instant::now() < deadline, "the write never waited");
-        bench.gateway.answer_pending();
-        if let Some(&id) = waiting_ids(&bench).first() {
-            break id;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    };
     let name = launch
         .folder
         .file_name()
@@ -446,7 +520,12 @@ fn an_ended_launch_expires_its_held_writes() {
     bench.gateway.answer_pending();
     let db = &bench.case.db;
     assert_eq!(approvals::state(db, id).unwrap(), Some(State::Expired));
-    let replies = parsed(&server.join().unwrap());
+    let deadline = Instant::now() + WAIT;
+    while server.replies().is_empty() {
+        assert!(Instant::now() < deadline, "the write was never answered");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let replies = server.finish(WAIT);
     let (text, error) = shown(&replies[0]);
     assert!(error);
     assert!(text.starts_with("connector_gateway_unavailable"), "{text}");
@@ -454,4 +533,116 @@ fn an_ended_launch_expires_its_held_writes() {
     let left = pending_notices(&mut bench);
     let kinds: Vec<&str> = left.iter().map(|notice| notice.0.name()).collect();
     assert!(!kinds.contains(&"connector_write"), "{kinds:?}");
+}
+
+/// Answers as the engine until the approval given has ended as expired.
+fn until_dropped(bench: &Bench, id: i64) {
+    until(bench, "the held write was never dropped", |bench| {
+        let state = approvals::state(&bench.case.db, id).unwrap();
+        (state == Some(State::Expired)).then_some(())
+    });
+}
+
+/// DEC-168 Task 12, leader 20:55: a held write that its client cancels (a timeout or a
+/// stop) is dropped at once. Its approval ends, the server sends no reply for it, and an
+/// Allow after that never reaches the vendor, so the write never runs after the agent was
+/// told it failed.
+#[test]
+fn a_cancelled_held_write_is_dropped_and_a_later_allow_never_reaches_the_vendor() {
+    let (vendor, bench, launch) = write_bench();
+    let mut server = Open::start(&launch, WAIT);
+    server.send(&[call(7, "board__create_issue", json!({"title": "Fix login"}))]);
+    let id = until(&bench, "the write never waited", |bench| {
+        waiting_ids(bench).first().copied()
+    });
+    let cancel = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": {"requestId": 7, "reason": "timed out"},
+    });
+    server.send(&[cancel]);
+    until_dropped(&bench, id);
+    let db = &bench.case.db;
+    let (saved, _) = settings::load(db).unwrap();
+    let now = crate::semantic::now_ms();
+    let late = approvals::answer(db, id, approvals::Answer::Allow, saved.write, now);
+    assert_eq!(late.unwrap_err().0, approvals::CLOSED);
+    for _ in 0..3 {
+        bench.gateway.answer_pending();
+    }
+    assert_eq!(server.finish(WAIT), Vec::<Value>::new());
+    assert!(!sent_to(&vendor, "create_issue"));
+    assert_eq!(writes(&bench, "connector_write_expired", false), 1);
+}
+
+/// DEC-168 Task 12, leader 20:55: when the harness closes the server's input (its turn
+/// ended), a held write is dropped. The server ends at once instead of waiting for the
+/// owner, the approval ends, and the vendor never sees the write.
+#[test]
+fn a_held_write_is_dropped_when_the_server_input_closes_and_the_server_ends_at_once() {
+    let (vendor, bench, launch) = write_bench();
+    let mut server = Open::start(&launch, Duration::from_millis(300));
+    server.send(&[call(3, "board__create_issue", json!({}))]);
+    let id = until(&bench, "the write never waited", |bench| {
+        waiting_ids(bench).first().copied()
+    });
+    let replies = server.finish(Duration::from_secs(5));
+    assert_eq!(replies, Vec::<Value>::new());
+    until_dropped(&bench, id);
+    for _ in 0..3 {
+        bench.gateway.answer_pending();
+    }
+    assert!(!sent_to(&vendor, "create_issue"));
+}
+
+/// Hands the engine one write call as a connector server does, holding the lock on the
+/// call's alive mark, as a server that is still waiting holds it. Inputs: the launch's
+/// mailbox and the call id. Output: the alive mark, whose lock goes when it is dropped.
+fn handed_write(mailbox: &crate::team::tool::Mailbox, id: &str) -> std::fs::File {
+    let alive = mailbox
+        .create(&format!("{id}{}", shim::ALIVE_SUFFIX))
+        .unwrap();
+    alive.lock().unwrap();
+    let ask = json!({"op": "call", "tool": "board__create_issue", "arguments": {}});
+    let part = format!("{id}{}", shim::PART_SUFFIX);
+    let mut file = mailbox.create(&part).unwrap();
+    file.write_all(&lines(&[ask])).unwrap();
+    mailbox
+        .rename(&part, &format!("{id}{}", shim::CALL_SUFFIX))
+        .unwrap();
+    alive
+}
+
+/// DEC-168 Task 12, leader 20:55: a held write whose server died without a word (its lock
+/// on the call's alive mark gone) is dropped while it waits, and also when the owner's Allow
+/// came first, so the engine never runs a write nobody waits for.
+#[test]
+fn a_held_write_whose_server_died_is_dropped_even_after_an_allow() {
+    let (vendor, bench, launch) = write_bench();
+    let mailbox = crate::team::tool::Mailbox::open(&launch.folder.join(shim::MAILBOX)).unwrap();
+    let first = crate::team::tool::call_id().unwrap();
+    let alive = handed_write(&mailbox, &first);
+    let id = until(&bench, "the write never waited", |bench| {
+        waiting_ids(bench).first().copied()
+    });
+    drop(alive);
+    until_dropped(&bench, id);
+
+    let second = crate::team::tool::call_id().unwrap();
+    let alive = handed_write(&mailbox, &second);
+    let later = until(&bench, "the second write never waited", |bench| {
+        waiting_ids(bench).into_iter().find(|found| *found != id)
+    });
+    owner_answers(&bench, later, approvals::Answer::Allow);
+    drop(alive);
+    for _ in 0..5 {
+        bench.gateway.answer_pending();
+    }
+    assert!(!sent_to(&vendor, "create_issue"));
+    assert_eq!(writes(&bench, "connector_write_expired", false), 2);
+    let reply = format!("{second}{}", shim::REPLY_SUFFIX);
+    assert!(
+        mailbox.read(&reply).is_err(),
+        "no answer for a server that is gone"
+    );
 }

@@ -36,6 +36,7 @@ pub(crate) const TAKEN_SUFFIX: &str = ".taken";
 pub(crate) const ANSWER_PART_SUFFIX: &str = ".reply-part";
 pub(crate) const REPLY_SUFFIX: &str = ".reply";
 pub(crate) const HELD_SUFFIX: &str = ".held";
+pub(crate) const ALIVE_SUFFIX: &str = ".alive";
 
 const POLL: Duration = Duration::from_millis(25);
 const NAME_BYTES_MAX: usize = 256;
