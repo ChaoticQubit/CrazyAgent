@@ -2427,3 +2427,69 @@ fn process_says_when_the_project_text_changed_outside_until_a_save_lands() {
     save(&root, Some(project.clone()), "Pulled rule.\n", 0).unwrap();
     assert!(!read(&root, Some(project)).unwrap().outside);
 }
+
+/// H-import: the harness instruction sources travel as two owner read requests, the list and
+/// the read by harness id (never a path), the refusal of a source agents can write is a
+/// public code, and a list as long as the registry can be at the largest names fits a frame.
+#[test]
+fn the_harness_instruction_sources_are_owner_read_requests_that_fit_one_frame() {
+    assert_eq!(read_kind(&Action::Sources), Some("process.sources"));
+    assert_eq!(
+        read_kind(&Action::ReadSource {
+            harness: "standin-pi".into()
+        }),
+        Some("process.read_source")
+    );
+    assert!(PROCESS_CODES.contains(&"process_import_agents_can_write"));
+
+    let envelope = Envelope {
+        process: Action::ReadSource {
+            harness: "standin-pi".into(),
+        },
+        text_bytes: None,
+    };
+    let back: Envelope = serde_json::from_slice(&serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+    assert!(matches!(back.process, Action::ReadSource { harness } if harness == "standin-pi"));
+
+    let largest = InstructionSource {
+        harness: "h".repeat(crate::harnesses::manifest::NAME_BYTES_MAX),
+        name: "n".repeat(crate::harnesses::manifest::SENTENCE_BYTES_MAX),
+        path: "p".repeat(crate::harnesses::manifest::SENTENCE_BYTES_MAX),
+        bytes: u64::MAX,
+    };
+    let reply = Reply::Sources {
+        sources: vec![largest; crate::harnesses::registry::HARNESSES_MAX],
+    };
+
+    assert!(encode_frame(&reply).is_ok());
+}
+
+/// H-import, Q4: through the owner transport the bundled registry offers no harness home
+/// instruction file and refuses a read for Claude Code or Codex, so no request reads a file
+/// in the owner's home until a bundled manifest names one with the owner's yes.
+#[test]
+fn the_bundled_registry_offers_no_harness_instruction_source_through_the_transport() {
+    let (_directory, root) = root();
+
+    let listed = run(&root, Action::Sources, None);
+
+    assert!(
+        matches!(listed, Ok(Answer::Sources(ref sources)) if sources.is_empty()),
+        "{listed:?}"
+    );
+    for harness in ["claude-code", "codex"] {
+        let refused = run(
+            &root,
+            Action::ReadSource {
+                harness: harness.into(),
+            },
+            None,
+        );
+        assert_eq!(
+            refused.err().map(|refused| refused.0),
+            Some("process_request_invalid".to_owned()),
+            "{harness}"
+        );
+    }
+}

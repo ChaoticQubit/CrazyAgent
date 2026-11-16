@@ -4,6 +4,7 @@ pub use crate::coord::adoption::Adoption;
 use crate::engine::native_auth_host::RegisteredNativeAuthHost;
 use crate::instruction_check::{Finding, FindingKind};
 use crate::instruction_cleanup as cleanup;
+pub use crate::instruction_files::sources::Source as InstructionSource;
 pub use crate::instruction_files::{
     AppSettings as AppInstructionSettings, ImportCommit, ImportFile, Mode as InstructionMode,
     Record as InstructionRecord, Settings as InstructionSettings, UncommittedImport,
@@ -121,6 +122,10 @@ enum Action {
     ReadFile {
         path: PathBuf,
     },
+    Sources,
+    ReadSource {
+        harness: String,
+    },
     Default,
     Given {
         project: ProjectId,
@@ -230,6 +235,9 @@ enum Reply {
     },
     Committed {
         commit: ImportCommit,
+    },
+    Sources {
+        sources: Vec<InstructionSource>,
     },
     Rejected {
         code: String,
@@ -378,6 +386,7 @@ enum Answer {
     Imports(Vec<ImportFile>),
     Uncommitted(UncommittedImport),
     Committed(ImportCommit),
+    Sources(Vec<InstructionSource>),
 }
 
 /// Names the requests that only read, for the log of replies this client could not read.
@@ -1137,6 +1146,10 @@ pub(super) async fn serve(
         Ok(Answer::Committed(commit)) => {
             assert!(!commit.files.is_empty());
             (Reply::Committed { commit }, None)
+        }
+        Ok(Answer::Sources(sources)) => {
+            assert!(sources.len() <= crate::harnesses::registry::HARNESSES_MAX);
+            (Reply::Sources { sources }, None)
         }
         Err(error) => (
             Reply::Rejected {

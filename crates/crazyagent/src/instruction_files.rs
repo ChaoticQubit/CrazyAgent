@@ -1635,6 +1635,8 @@ fn real_folder(folder: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+pub mod sources;
+
 #[cfg(all(test, unix))]
 #[path = "instruction_files/tests.rs"]
 mod tests;
