@@ -156,3 +156,23 @@ export function lostStartSince(projectId: string): number | null {
 export function forgetLostStart(projectId: string): void {
   lostStarts.delete(projectId);
 }
+
+/** What the Overview does next about a Start whose reply was lost: nothing, stop waiting
+ * because a publish shows, say none showed, or read again in DRAFT_POLL_MS. */
+export type LostStep = "idle" | "seen" | "over" | "read";
+
+/** Decides the Overview's next step while a Start whose reply was lost may still land
+ * (GSB-1, GSB2-2). Inputs: when the reply was lost, how many reads this mount has
+ * answered, the read kept and now, in epoch milliseconds. Output: the step. */
+export function lostStartStep(since: number | null, answered: number, read: Result<GitHubPublishJob | null> | null, now: number): LostStep {
+  assert(Number.isSafeInteger(answered), "lost Start reads answered is not a count");
+  assert(answered >= 0, "lost Start reads answered is below zero");
+  if (since === null) return "idle";
+  if (publishView(read?.kind === "ok" ? read.value : null).kind !== "none") return "seen";
+  if (lostStartOver(since, now)) return "over";
+  return "read";
+}
+
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}

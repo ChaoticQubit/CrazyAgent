@@ -138,7 +138,7 @@ test("a failed publish read keeps the last job shown with its problem and Try ag
 
 test("a failed Start from the Overview form reads the publish again, so a Start that ran shows where it stands", () => {
   const card = read("src/screens/project/github-publish.tsx");
-  assert.match(card, /if \(!made\) \{\n\s+setProblem\(line\);\n\s+setTick\(\(value\) => value \+ 1\);\n\s+if \(lost\) setLostSince\(Date\.now\(\)\);\n\s+return;/);
+  assert.match(card, /if \(!made\) \{\n\s+setProblem\(line\);\n\s+setTick\(\(value\) => value \+ 1\);\n\s+if \(lost\) \{\n\s+const at = Date\.now\(\);\n\s+noteLostStart\(projectId, at\);\n\s+setLostSince\(at\);\n\s+\}\n\s+return;/, "a lost Start from the form is kept across a remount, as Create's is (GSB2-3)");
   assert.match(card, /\{form && view\.kind === "none" && <PublishForm /, "a job read after the Start closes the form");
 });
 
@@ -156,12 +156,27 @@ test("a Start whose reply was lost keeps the Overview reading every two seconds 
   const card = read("src/screens/project/github-publish.tsx");
   assert.match(card, /useState<number \| null>\(\(\) => lostStartSince\(projectId\)\)/, "a Start Create lost is waited for here");
   assert.match(card, /onStarted\(result\.kind === "ok" \? result\.value : null, publishOutcome\(result\), startReplyLost\(result\)\)/);
-  assert.match(card, /if \(lostStartOver\(lostSince, Date\.now\(\)\)\) \{\n\s+forgetLostStart\(projectId\);\n\s+setLostSince\(null\);\n\s+setProblem\(PUBLISH_NOT_SEEN\);/);
-  assert.match(card, /setTimeout\(\(\) => setTick\(\(value\) => value \+ 1\), DRAFT_POLL_MS\);\n\s+return \(\) => clearTimeout\(timer\);\n\s+\}, \[lostSince, view\.kind, answered\]\);/, "each read schedules the next");
+  assert.match(card, /const step = lostStartStep\(lostSince, answered, read, Date\.now\(\)\);\n\s+if \(step === "idle"\) return;/);
+  assert.match(card, /if \(step === "read"\) \{\n\s+const timer = setTimeout\(\(\) => setTick\(\(value\) => value \+ 1\), DRAFT_POLL_MS\);\n\s+return \(\) => clearTimeout\(timer\);\n\s+\}/, "each read schedules the next");
+  assert.match(card, /forgetLostStart\(projectId\);\n\s+setLostSince\(null\);\n\s+if \(step === "over"\) setProblem\(PUBLISH_NOT_SEEN\);\n\s+\}, \[lostSince, answered, read\]\);/);
   assert.match(card, /if \(!noJob \|\| lostSince !== null\) return;/, "no question while the Start may still land");
   const tui = read("../../crates/crazyagent/src/tui/screens/project_publish.rs");
   assert.match(tui, /"No publish has shown up\."/);
   assert.match(tui, /"Try Publish again\."/);
+});
+
+test("an Overview opened again after a lost Start waits for its own first read and says no publish showed only when a read finds none (GSB2-2)", () => {
+  const none = { kind: "ok", value: null };
+  const drafting = { kind: "ok", value: job({ step: "drafting" }) };
+  const over = 1_000 + publishJob.START_LOST_WAIT_MS;
+  assert.equal(publishJob.lostStartStep(null, 1, none, over), "idle", "no lost Start");
+  assert.equal(publishJob.lostStartStep(1_000, 0, null, over), "idle", "nothing before this mount's first read");
+  assert.equal(publishJob.lostStartStep(1_000, 1, drafting, over), "seen", "the publish shows");
+  assert.equal(publishJob.lostStartStep(1_000, 1, none, over), "over", "a read found no publish after the budget");
+  assert.equal(publishJob.lostStartStep(1_000, 1, none, over - 1), "read", "the Start may still land");
+  assert.equal(publishJob.lostStartStep(1_000, 1, null, over), "read", "a failed read says nothing about the publish");
+  assert.throws(() => publishJob.lostStartStep(1_000, -1, none, over), /below zero/);
+  assert.throws(() => publishJob.lostStartStep(1_000, 0.5, none, over), /not a count/);
 });
 
 test("the Overview asks to publish a project with no publish through two bridge commands, and Publish opens the New Project form", async () => {
