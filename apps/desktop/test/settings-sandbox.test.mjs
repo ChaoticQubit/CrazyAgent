@@ -106,7 +106,19 @@ test("Save sends every Linux setting, each as picked or else as stored", () => {
   assert.deepEqual(sandboxDraft(all, null, null, "off"), { ...all, linux_strict: "off" });
   assert.deepEqual(sandboxDraft(all, "tcp_ports", "off", "off"), { linux_sockets: "tcp_ports", linux_supervisor: "off", linux_strict: "off" });
   const source = readFileSync(new URL("../src/screens/settings/sandbox.tsx", import.meta.url), "utf8");
-  assert.match(source, /saveSandboxSettings\(sandboxDraft\(settings\.value, picked, pickedSupervisor, pickedStrict\)\)/);
+  assert.match(source, /saveSandboxSettings\(sandboxDraft\(read\.value\.settings, picked, pickedSupervisor, pickedStrict\), read\.value\.version\)/);
+});
+
+test("A sandbox save names the version of the read it changes, and a stale save reads again (rv-sec2 F1)", () => {
+  const api = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  assert.match(api, /export interface StoredSandboxSettings \{\n  settings: SandboxSettings;\n  version: number;\n\}/);
+  assert.match(api, /export function getSandboxSettings\(\): Promise<Result<StoredSandboxSettings>>/);
+  assert.match(api, /export function saveSandboxSettings\(settings: SandboxSettings, version: number\): Promise<Result<void>>/);
+  assert.match(api, /change\("desktop_set_sandbox_settings", \{ settings, version, generation: nextGeneration\(\) \}\)/);
+  const source = readFileSync(new URL("../src/screens/settings/sandbox.tsx", import.meta.url), "utf8");
+  assert.match(source, /if \(result\.code === "stale_revision"\) reload\(\);/);
+  assert.match(source, /setPickedStrict\(null\); \}, \[read\]\);/, "the picks reset when a new read arrives, not on every render");
+  assert.equal(knownError("stale_revision"), "This changed since you opened it. Review and save again.");
 });
 
 test("Settings, Sandbox lists Refuse agents without the full Linux sandbox, Off by default, in the TUI's words (DEC-185)", () => {
