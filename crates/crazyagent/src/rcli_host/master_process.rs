@@ -1,5 +1,5 @@
 use super::master_launch::error;
-use crate::harnesses::leftovers::HoldBy;
+use crate::harnesses::leftovers::{self, Follower, HoldBy, LINEAGE_VARIABLE, LineageToken};
 use crate::protocol::{FRAME_BYTES_MAX, ProtocolError};
 use crate::sandbox::LineageCheck;
 use crate::sandbox::warden::{self, Warden};
@@ -30,6 +30,8 @@ pub(super) struct HostProcess {
     status: Option<ExitStatus>,
     group_absent: bool,
     clean: bool,
+    follower: Option<Follower>,
+    by: HoldBy,
 }
 
 impl HostProcess {
@@ -38,11 +40,16 @@ impl HostProcess {
     /// hold those under. Output: the process, or a plain refusal.
     pub(super) fn spawn(
         mut command: Command,
-        _check: LineageCheck,
-        _by: HoldBy,
+        check: LineageCheck,
+        by: HoldBy,
     ) -> Result<Self, ProtocolError> {
+        let token = LineageToken::new().ok_or_else(|| error("rcli_master_spawn_failed"))?;
+        command.env(LINEAGE_VARIABLE, token.as_str());
         let (mut child, warden) =
             warden::spawn(&mut command).map_err(|_| error("rcli_master_spawn_failed"))?;
+        assert!(child.id() > 1);
+        let follower = Follower::start(child.id(), Some(token), check);
+        assert_eq!(follower.is_some(), check != LineageCheck::Unneeded);
         let stdin = child.stdin.take().expect("configured host input pipe");
         let stdout = child.stdout.take().expect("configured host output pipe");
         let stderr = child.stderr.take().expect("configured host error pipe");
@@ -57,6 +64,8 @@ impl HostProcess {
             status: None,
             group_absent: false,
             clean: false,
+            follower,
+            by,
         };
         assert!(process.child.id() > 1);
         assert!(process.pending.is_empty());
@@ -260,10 +269,24 @@ impl HostProcess {
         }
     }
 
+    /// Ends the host and everything it left in its group. At Full access, and under the plain
+    /// Linux Landlock helper, no warden reaches what left the group (LINUX-KILL-GROUP r1 F1),
+    /// so the lineage followed from the start is taken before the kill and settled after it,
+    /// and what still runs is held under the host's project. Input: the process. Output: Ok,
+    /// `rcli_master_cleanup_incomplete`, or the leftover code.
     pub(super) fn cleanup(&mut self) -> Result<(), ProtocolError> {
         if self.clean {
             return Ok(());
         }
+        let lineage = self.follower.take().map(Follower::stop);
+        let ended = self.end_group();
+        let settled = leftovers::settle_and_hold(lineage, self.by.clone()).map_err(error);
+        ended.and(settled)
+    }
+
+    fn end_group(&mut self) -> Result<(), ProtocolError> {
+        assert!(!self.clean);
+        assert!(self.follower.is_none());
         self.stdin = None;
         self.stdout = None;
         self.stderr = None;

@@ -60,7 +60,9 @@ pub fn check_stdio(
 
 /// Starts an already built MCP server command, such as one wrapped in the agent boundary,
 /// runs `initialize` and `tools/list`, then stops its whole process group and, through the
-/// warden a boundary command gets, every process left in its sandbox. Inputs: the
+/// warden a boundary command gets, every process left in its sandbox. Where `check` follows
+/// its lineage, what it left outside the group is held and named (LINUX-KILL-GROUP r1 F1).
+/// Inputs: the
 /// command with its arguments, environment and folder set, the time bound and what the stop
 /// checks of the processes the server leaves outside its group. Output: the tool names, or a
 /// plain rejection code, `server_cleanup_uncertain` when the warden did not confirm the
@@ -69,9 +71,12 @@ pub fn check_stdio(
 pub fn check_command(
     mut process: Command,
     limit: Duration,
-    _check: crate::sandbox::LineageCheck,
+    check: crate::sandbox::LineageCheck,
 ) -> Result<Vec<String>, &'static str> {
+    use crate::harnesses::leftovers::{self, Follower, HoldBy, LINEAGE_VARIABLE, LineageToken};
+    let token = LineageToken::new().ok_or("server_cant_start")?;
     process
+        .env(LINEAGE_VARIABLE, token.as_str())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -93,6 +98,11 @@ pub fn check_command(
             return Err("server_cant_start");
         }
     };
+    let follower = Follower::start(pid, Some(token), check);
+    assert_eq!(
+        follower.is_some(),
+        check != crate::sandbox::LineageCheck::Unneeded
+    );
     let (send, receive) = sync_channel::<Line>(16);
     let reader = std::thread::Builder::new()
         .name("crazyagent-mcp-check".into())
@@ -101,11 +111,18 @@ pub fn check_command(
         Ok(_) => talk(stdin, &receive, Instant::now() + limit),
         Err(_) => Err("server_cant_start"),
     };
+    let lineage = follower.map(Follower::stop);
     stop(pid);
     let _ = child.kill();
     let _ = child.wait();
+    let by = HoldBy {
+        project: None,
+        who: "a plugin server check".to_owned(),
+    };
+    let settled = leftovers::settle_and_hold(lineage, by);
     crate::sandbox::warden::fire_reported(warden, "server_check")
         .map_err(|_| "server_cleanup_uncertain")?;
+    settled?;
     result
 }
 

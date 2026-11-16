@@ -1209,6 +1209,26 @@ impl Follower {
     }
 }
 
+/// Settles a followed run that keeps no account lease, such as an rcli master host or a
+/// boundary server check, once its group is gone (LINUX-KILL-GROUP r1 F1): what still runs
+/// is held under `by` and its project's leftover setting, as a Claude host turn's is.
+/// Inputs: the lineage its follower took, none when it had none, and who left it. Output:
+/// Ok, or the code of what was left or could not be checked.
+pub(crate) fn settle_and_hold(
+    lineage: Option<Result<Lineage, Unstopped>>,
+    by: HoldBy,
+) -> Result<(), &'static str> {
+    let Some(Err(unstopped)) = lineage.map(|lineage| lineage.and_then(Lineage::settle)) else {
+        return Ok(());
+    };
+    let code = unstopped.code();
+    if let Unstopped::Left(left) = unstopped {
+        let mode = mode_of(by.project.as_deref());
+        left.hold(None, (), by, mode);
+    }
+    Err(code)
+}
+
 /// Locks a follower's lineage, also after a panic of the thread that held it. Input: the
 /// lock. Output: the guard.
 fn following(lineage: &Mutex<Following>) -> MutexGuard<'_, Following> {
