@@ -125,17 +125,23 @@ export function QuestionDock({ waiting, shown, now, busy, note, settled, onAnswe
 }
 
 /** The questions pop-up of one project page: reads the project's questions every few seconds
- * and settles them with the Questions tab's own actions, so an answer here closes the
- * question there too. Inputs: the project data and whether the tab shown shows it. Output:
- * the pop-up. */
+ * and once more each time a tab starts showing it, so a question settled on the Questions tab
+ * is gone when it shows again, and settles them with the Questions tab's own actions, so an
+ * answer here closes the question there too. Inputs: the project data and whether the tab
+ * shown shows it. Output: the pop-up. */
 export function QuestionPopup({ data, shown }: { data: ProjectData; shown: boolean }) {
   const [questions, setQuestions] = useState<OwnerQuestion[]>([]);
   const [round, setRound] = useState(0);
   const [settled, setSettled] = useState(0);
+  const wasShown = useRef(shown);
   const { busy, note, answer, askDismiss, dialog } = useQuestionActions(data, () => {
     setSettled((value) => value + 1);
     setRound((value) => value + 1);
   });
+  useEffect(() => {
+    if (shown && !wasShown.current) setRound((value) => value + 1);
+    wasShown.current = shown;
+  }, [shown]);
   useEffect(() => {
     let current = true;
     void loadQuestions(data.id, null).then((result) => {
