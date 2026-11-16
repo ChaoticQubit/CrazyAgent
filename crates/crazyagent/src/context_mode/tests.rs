@@ -323,6 +323,30 @@ fn npm_starts_under_the_install_sandbox_profile() {
     assert!(profile.contains("(remote ip \"*:443\")"));
 }
 
+/// The shared install's npm starts through the launcher its Node check starts through, so
+/// on Linux it never starts `sandbox-exec`, which Linux does not have (RV-DS241-194): both
+/// build with one program, or both refuse with one code.
+#[test]
+fn npm_starts_through_the_same_launcher_as_the_node_check() {
+    let case = case("/usr/bin/false");
+    let prefix = format!("context-mode@{VERSION}");
+    let staged = staging_folder(&case.npm(), &prefix).unwrap();
+    let work = staging_folder(&case.npm(), &format!("{prefix}-work")).unwrap();
+    let scratch = staging_folder(&case.npm(), NODE_CHECK).unwrap();
+    let program = |built: Result<std::process::Command, InstallError>| {
+        built.map(|command| command.get_program().to_owned())
+    };
+    let node = program(node_command(&case.root, &scratch, &case.bin));
+    let npm = program(npm_command(&case.root, &staged, &work, &case.bin, VERSION));
+    assert_eq!(npm, node, "one launcher, or one refusal");
+    if cfg!(target_os = "linux") {
+        assert_ne!(
+            npm.as_deref().ok(),
+            Some(std::ffi::OsStr::new(crate::sandbox::SANDBOX_EXEC))
+        );
+    }
+}
+
 #[cfg(target_os = "macos")]
 const FORGER: &str = r#"const fs = require("node:fs");
 const path = require("node:path");
