@@ -427,11 +427,10 @@ pub fn agent_env_refused(name: &OsStr) -> bool {
 }
 
 /// Tells whether one variable may reach an agent process with this value: a name
-/// [`agent_env_refused`] accepts, one of the fixed [`AGENT_GIT_ENV`] pairs, a model key
-/// name holding the local placeholder, never a real provider key, or the launch's lineage
-/// token in its own variable. No variable may hold a key relay token: any process of the
-/// owner's user can read another's environment, so a harness reads its token from the key
-/// file in its own home. Inputs: the name and value. Output: true when allowed.
+/// [`agent_env_refused`] accepts, a fixed [`AGENT_GIT_ENV`] pair, a model key name holding the
+/// placeholder or the lineage token in its own variable; never a real key or relay token, which
+/// other owner processes can read, save a launch's own token in [`Handed`] names on macOS only
+/// (its profile denies those reads; Linux is refused). Inputs: name, value. Output: allowed.
 pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
     let token = crate::model_gateway::relay::TOKEN_PREFIX.as_bytes();
     if value
@@ -481,7 +480,59 @@ pub fn agent_env<'a>(
     base: &[(&str, &OsStr)],
     harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
 ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
-    built_env(base, harness, &AGENT_HOME_ENV)
+    built_env(base, harness, &AGENT_HOME_ENV, None)
+}
+
+/// One launch's exception to the agent variable guard (DEC-180 Task 20, rv-sa241 ruling
+/// t20-q1): the names a listed master's manifest gives its account key, each allowed to
+/// hold only this launch's own relay token or the keyless placeholder.
+#[derive(Clone, Copy)]
+pub struct Handed<'a> {
+    names: &'a [&'a str],
+    value: &'a str,
+}
+
+impl<'a> Handed<'a> {
+    /// Builds one launch's exception, on macOS only, where the agent profile keeps every
+    /// other sandbox from reading the launch's environment. Inputs: the names, from the
+    /// manifest's accounts entry for the account's wire format, and the one value they may
+    /// hold. Output: the exception, or `Invalid` for a value that is neither a relay token
+    /// nor the keyless placeholder, and off macOS.
+    pub fn new(names: &'a [&'a str], value: &'a str) -> Result<Self, SandboxError> {
+        let handed = crate::model_gateway::relay::is_relay_token(value)
+            || value == crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+        if !cfg!(target_os = "macos") || !handed {
+            return Err(invalid("a launch hands only its own relay token"));
+        }
+        assert!(crate::model_gateway::relay::is_placeholder(value));
+        Ok(Self { names, value })
+    }
+
+    /// Tells whether this launch lets one harness variable hold a value: a name it lists
+    /// holding exactly its one value. Inputs: the name and the value. Output: true when it
+    /// does.
+    fn allows(&self, name: &OsStr, value: &OsStr) -> bool {
+        value == self.value && self.names.iter().any(|known| name == *known)
+    }
+}
+
+/// Builds the environment [`agent_env`] does, letting the harness variables `handed` names
+/// hold its one value; every other variable meets [`agent_variable_allowed`], and the
+/// engine's fixed variables still come last and win. Inputs: the base and harness variables
+/// and the launch's exception. Output: the variables, or `Invalid`.
+pub fn agent_env_handing<'a>(
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+    handed: Handed<'_>,
+) -> Result<Vec<(OsString, OsString)>, SandboxError> {
+    built_env(base, harness, &AGENT_HOME_ENV, Some(handed))
+}
+
+/// Tells whether one variable may reach an agent process of a launch with this exception:
+/// [`agent_variable_allowed`], or a name the exception lists holding its one value. Inputs:
+/// the launch's exception, if any, the name and the value. Output: true when allowed.
+fn handed_allowed(handed: Option<Handed<'_>>, name: &OsStr, value: &OsStr) -> bool {
+    agent_variable_allowed(name, value) || handed.is_some_and(|handed| handed.allows(name, value))
 }
 
 /// Builds the environment of the owner's confined IDE terminal as [`agent_env`] does for an
@@ -493,16 +544,18 @@ pub fn owner_terminal_env<'a>(
     base: &[(&str, &OsStr)],
     terminal: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
 ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
-    built_env(base, terminal, &[])
+    built_env(base, terminal, &[], None)
 }
 
 /// Builds the environment [`agent_env`] describes, setting `home` after the fixed git and
-/// TLS settings. Inputs: the base and harness variables and the home settings. Output: the
-/// variables, or `Invalid` when any one fails [`agent_variable_allowed`].
+/// TLS settings. Inputs: the base and harness variables, the home settings and the launch's
+/// exception, if any. Output: the variables, or `Invalid` when any one fails
+/// [`agent_variable_allowed`] and is no variable the exception lets through.
 fn built_env<'a>(
     base: &[(&str, &OsStr)],
     harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
     home: &[(&'static str, &'static str)],
+    handed: Option<Handed<'_>>,
 ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
     let refused = || invalid("agent environment holds an owner secret");
     let mut env: Vec<(OsString, OsString)> = Vec::new();
@@ -524,7 +577,7 @@ fn built_env<'a>(
         set(&mut env, OsStr::new(name), Some(value));
     }
     for (name, value) in harness {
-        if value.is_some_and(|value| !agent_variable_allowed(name, value)) {
+        if value.is_some_and(|value| !handed_allowed(handed, name, value)) {
             return Err(refused());
         }
         let pinned_cache = TOOL_CACHE_ENV.iter().any(|pinned| name == *pinned)
@@ -553,7 +606,7 @@ fn built_env<'a>(
     }
     assert!(
         env.iter()
-            .all(|(name, value)| agent_variable_allowed(name, value))
+            .all(|(name, value)| handed_allowed(handed, name, value))
     );
     Ok(env)
 }
@@ -721,6 +774,29 @@ pub fn agent_command<'a>(
     harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
 ) -> Result<Command, SandboxError> {
     let env = agent_env(base, harness)?;
+    Ok(confined_command(profile, program, env))
+}
+
+/// Builds the command [`agent_command`] does, with the environment [`agent_env_handing`]
+/// builds for one listed master's launch. Inputs: the installed profile, the absolute
+/// program, the base and harness variables and the launch's exception. Output: the command,
+/// or `Invalid` when a variable is refused.
+#[cfg(unix)]
+pub fn agent_command_handing<'a>(
+    profile: &Path,
+    program: &Path,
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+    handed: Handed<'_>,
+) -> Result<Command, SandboxError> {
+    let env = agent_env_handing(base, harness, handed)?;
+    Ok(confined_command(profile, program, env))
+}
+
+/// The `sandbox-exec` command of [`agent_command`] around a built environment. Inputs: the
+/// installed profile, the absolute program and the checked variables. Output: the command.
+#[cfg(unix)]
+fn confined_command(profile: &Path, program: &Path, env: Vec<(OsString, OsString)>) -> Command {
     let mut command = Command::new(SANDBOX_EXEC);
     command
         .arg("-f")
@@ -736,7 +812,7 @@ pub fn agent_command<'a>(
         Some(program.as_os_str())
     );
     assert_eq!(command.get_envs().count(), env.len());
-    Ok(command)
+    command
 }
 
 /// Builds the command a Full access agent process starts from (DEC-102): the
@@ -4531,6 +4607,74 @@ pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
         return Ok(PathBuf::from(plain));
     }
     Ok(resolved)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod handed_tests {
+    use super::*;
+    use crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+
+    const NAMES: [&str; 1] = ["OPENAI_API_KEY"];
+
+    fn token(fill: char) -> String {
+        format!("crazyagent-relay-{}", fill.to_string().repeat(64))
+    }
+
+    /// Builds one launch's environment with one harness variable, with the launch's
+    /// exception or, as for a teammate, with none. Inputs: the exception, the name and the
+    /// value. Output: the variables, or the refusal.
+    fn with(
+        handed: Option<Handed<'_>>,
+        name: &str,
+        value: &str,
+    ) -> Result<Vec<(OsString, OsString)>, SandboxError> {
+        let base = [("HOME", OsStr::new("/agent/home"))];
+        let harness = [(OsStr::new(name), Some(OsStr::new(value)))];
+        match handed {
+            Some(handed) => agent_env_handing(&base, harness, handed),
+            None => agent_env(&base, harness),
+        }
+    }
+
+    /// DEC-180 Task 20 (rv-sa241 ruling t20-q1, condition 6): a listed master's launch hands
+    /// its harness its own relay token only in the names its manifest lists. Another
+    /// launch's token, any other relay value, an unlisted key name and a launch with no
+    /// exception, such as a teammate's, are refused.
+    #[test]
+    fn a_launch_hands_its_own_relay_token_only_in_the_names_its_manifest_lists() {
+        let (own, other) = (token('a'), token('b'));
+        let handed = Handed::new(&NAMES, &own);
+        assert!(handed.is_ok(), "{:?}", handed.as_ref().err());
+        let handed = handed.unwrap();
+        let given = with(Some(handed), "OPENAI_API_KEY", &own);
+        assert!(given.is_ok(), "{given:?}");
+        let pair = (OsString::from("OPENAI_API_KEY"), OsString::from(&own));
+        assert!(given.unwrap().contains(&pair));
+        let refused = [
+            ("OPENAI_API_KEY", other.as_str()),
+            ("OPENAI_API_KEY", "crazyagent-relay-0"),
+            ("OTHER_API_KEY", own.as_str()),
+        ];
+        for (name, value) in refused {
+            assert!(with(Some(handed), name, value).is_err(), "{name}={value}");
+        }
+        assert!(with(None, "OPENAI_API_KEY", &own).is_err());
+    }
+
+    /// DEC-180 Task 20 (rv-sa241 ruling t20-q1, condition 3): a keyless launch hands only
+    /// the placeholder, and no exception is ever built for a saved key or a relay value that
+    /// is no token.
+    #[test]
+    fn a_keyless_launch_hands_only_the_placeholder_and_never_a_saved_key() {
+        let keyless = Handed::new(&NAMES, LOCAL_PLACEHOLDER);
+        assert!(keyless.is_ok(), "{:?}", keyless.as_ref().err());
+        let given = with(Some(keyless.unwrap()), "OPENAI_API_KEY", LOCAL_PLACEHOLDER);
+        assert!(given.is_ok(), "{given:?}");
+        assert!(with(None, "OPENAI_API_KEY", LOCAL_PLACEHOLDER).is_err());
+        for value in ["sk-saved", "crazyagent-relay-0", ""] {
+            assert!(Handed::new(&NAMES, value).is_err(), "{value}");
+        }
+    }
 }
 
 #[cfg(test)]

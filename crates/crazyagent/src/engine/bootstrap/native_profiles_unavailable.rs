@@ -224,6 +224,28 @@ impl NativeProfileCustody {
         match *self {}
     }
 
+    /// Matches the Unix listed slot prepare. No custody exists here, so this never runs.
+    /// Inputs: the host and connection, unused. Output: none.
+    pub(crate) fn prepare_listed(
+        &mut self,
+        _host: &HostStamp,
+        _connection: &ModelConnection,
+    ) -> Result<(String, String), EngineError> {
+        match *self {}
+    }
+
+    /// Matches the Unix listed slot use. No custody exists here, so this never runs.
+    /// Inputs: the use request, unused. Output: none.
+    pub(crate) fn acquire_listed_use(
+        &mut self,
+        _host: &HostStamp,
+        _binding: &NativeProfileBinding,
+        _operation_id: &RequestId,
+        _generation: u64,
+    ) -> Result<NativeProfileUse, EngineError> {
+        match *self {}
+    }
+
     pub(crate) fn register_configured_rcli_profile(
         &mut self,
         _host: &HostStamp,

@@ -10,11 +10,27 @@ account_kinds:
   - "api_key"
   - "open_ai_compatible_url"
   - "local"
+account_protocols:
+  - "openai-chat"
+accounts:
+  openai-chat:
+    env:
+      OPENAI_BASE_URL: "{relay_url}"
+      OPENAI_API_KEY: "{token}"
+      STANDIN_MODEL: "{model}"
 home:
+  owner_folders:
+    - ".standin-acp"
   env_prefixes:
     - "STANDIN_ACP_"
   env:
     STANDIN_ACP_CONFIG: "{home}/config"
+mcp:
+  render: "json-mcp-servers"
+  path: "{home}/config/mcp.json"
+instructions:
+  render: "file"
+  path: "{home}/config/AGENTS.md"
 roles:
   - "agent"
   - "master"

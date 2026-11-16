@@ -12,7 +12,7 @@ use crate::engine::owner::{
 use crate::master_session::{
     MasterBackend, MasterCursor, MasterOwnerAction, MasterReason, MasterSelection,
     MasterSessionPhase, MasterSessionView, MasterTurnPhase, MasterTurnView,
-    RcliProfileRegistration, RcliProfileRegistrationMetadata,
+    RcliProfileRegistration, RcliProfileRegistrationMetadata, backend_member,
 };
 use crate::master_sessions::{MasterSessionSummary, SessionMessage};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId, SessionId};
@@ -1982,7 +1982,7 @@ impl Catalog {
                         pool.members.contains(&connection.id)
                             && self.approved.contains(&connection.account_ref)
                             && self.models.accounts.contains(&connection.account_ref)
-                            && backend_matches(form.backend, connection)
+                            && backend_member(form.backend, connection)
                     })
             })
             .collect()
@@ -2031,7 +2031,7 @@ impl Catalog {
         let members = self.models.connections.iter().filter(|connection| {
             pool.is_some_and(|pool| pool.members.contains(&connection.id))
                 && Some(&connection.account_ref) == form.account.as_ref()
-                && backend_matches(form.backend, connection)
+                && backend_member(form.backend, connection)
         });
         if form.backend != MasterBackend::Rcli {
             return members
@@ -2069,7 +2069,7 @@ impl Catalog {
             if pool.members.contains(&connection.id)
                 && self.approved.contains(&connection.account_ref)
                 && self.models.accounts.contains(&connection.account_ref)
-                && backend_matches(form.backend, connection)
+                && backend_member(form.backend, connection)
                 && !accounts.contains(&connection.account_ref)
             {
                 accounts.push(connection.account_ref.clone());
@@ -2198,26 +2198,6 @@ fn backend_label(backend: MasterBackend) -> &'static str {
         MasterBackend::Codex => "Native Codex",
         MasterBackend::Claude => "Native Claude",
         MasterBackend::Listed(id) => crate::harnesses::spec(id).map_or(id, |spec| spec.name),
-    }
-}
-
-fn backend_matches(backend: MasterBackend, connection: &ModelConnection) -> bool {
-    match backend {
-        MasterBackend::Rcli => {
-            connection.harness.as_str() == "rcli"
-                && matches!(connection.endpoint, ModelEndpoint::Http { .. })
-        }
-        MasterBackend::Codex => {
-            connection.harness.as_str() == "codex"
-                && connection.protocol.as_str() == "native"
-                && matches!(connection.endpoint, ModelEndpoint::Native {})
-        }
-        MasterBackend::Claude => {
-            matches!(connection.harness.as_str(), "claude" | "claude-code")
-                && connection.protocol.as_str() == "native"
-                && matches!(connection.endpoint, ModelEndpoint::Native {})
-        }
-        MasterBackend::Listed(_) => false,
     }
 }
 

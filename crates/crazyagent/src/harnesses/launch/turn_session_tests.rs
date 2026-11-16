@@ -333,6 +333,37 @@ fn each_turn_checks_its_launch_again_before_its_process_starts() {
     session.stop().unwrap();
 }
 
+/// DEC-180 Task 20 (b6 r2 F1 on the layer): a turn session on an engine key relay starts,
+/// and each turn process holds the engine's lifeline, so its group ends when the engine
+/// dies mid-turn; a keyless turn holds none.
+#[test]
+fn a_turn_on_an_engine_key_relay_holds_the_engine_s_lifeline() {
+    let (_plain, mut plain) = begin();
+    plain.send("wait").unwrap();
+    let running = plain.running.as_ref();
+    assert!(running.is_some_and(|running| running.lifeline.is_none()));
+    let (_relayed, mut relayed) = launch();
+    let token = format!("crazyagent-relay-{}", "0".repeat(64));
+    relayed.account = AccountBinding::ApiKey {
+        home: relayed.account.home().to_path_buf(),
+        key: Secret::new(token).unwrap(),
+        base_url: Some("http://127.0.0.1:9/v1".into()),
+    };
+    let started = TurnSession::start_with(relayed, config());
+    assert!(started.is_ok(), "{:?}", started.as_ref().err());
+    let mut session = started.unwrap();
+    session.send("wait").unwrap();
+    let group = session.turn_group();
+    assert!(group.is_some());
+    let lifeline = session
+        .running
+        .as_mut()
+        .and_then(|running| running.lifeline.as_mut());
+    assert!(lifeline.is_some());
+    lifeline.unwrap().sever();
+    assert!(gone(group.unwrap()));
+}
+
 /// DEC-180 Task 11, macOS only: until the tasks that hand them over land, an account that
 /// carries a key is refused with `launch_key_relay_unsupported` and a run at Full access
 /// with `launch_harness_unsupported`.

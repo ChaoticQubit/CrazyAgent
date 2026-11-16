@@ -10,6 +10,7 @@ mod master_dispatch;
 #[cfg(all(test, unix))]
 mod master_dispatch_tests;
 mod master_host_launch;
+mod master_listed;
 mod master_rcli;
 mod master_rcli_launch;
 #[cfg(all(test, unix))]

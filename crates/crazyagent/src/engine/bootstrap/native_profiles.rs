@@ -1,5 +1,5 @@
 use super::{Anchor, Identity, hex, safe_directory, safe_file};
-use crate::config::{ModelAuthentication, ModelConnection};
+use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::engine::EngineError;
 use crate::engine::owner::{HostStamp, NativeProfileBinding, PreparedNativeProfile};
 use crate::file_lock::HeldLock;
@@ -69,8 +69,38 @@ impl StableBinding {
         })
     }
 
+    /// The stable binding of a listed master's account (DEC-180 T20 Q7): its connection id
+    /// stands for the profile, as a listed harness keeps no sign-in and its key never lands in
+    /// custody. Input: the connection. Output: the binding, or `native_profile_not_listed` for
+    /// a sign-in or an account off HTTP.
+    fn listed(connection: &ModelConnection) -> Result<Self, EngineError> {
+        let keyed = matches!(
+            connection.auth,
+            ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {}
+        );
+        if !keyed || !matches!(connection.endpoint, ModelEndpoint::Http { .. }) {
+            return Err(failure("native_profile_not_listed"));
+        }
+        Ok(Self {
+            profile_ref: connection.id.clone(),
+            account_ref: connection.account_ref.clone(),
+            provider: connection.provider.clone(),
+            harness: connection.harness.clone(),
+            protocol: connection.protocol.clone(),
+        })
+    }
+
     fn key(&self) -> String {
         digest(self.profile_ref.as_str().as_bytes())
+    }
+
+    /// The slot key of a listed account's binding: the digest of `listed/` and its connection
+    /// id, which no profile reference can spell as an identity holds no `/`, so it never
+    /// names a sign-in's or an RCLI profile's slot. Output: the key.
+    fn listed_key(&self) -> String {
+        let named = format!("listed/{}", self.profile_ref.as_str());
+        assert!(CredentialRef::new(named.clone()).is_err());
+        digest(named.as_bytes())
     }
 }
 
@@ -634,42 +664,9 @@ impl NativeProfileCustody {
         purpose: NativeProfileUsePurpose,
         renewal_wait: Option<std::time::Duration>,
     ) -> Result<NativeProfileUse, EngineError> {
-        assert!(generation > 0);
-        assert_eq!(host.db_instance, binding.database_instance);
-        assert_eq!(host.engine_epoch, binding.engine_epoch);
-        let custody = self.retain()?;
-        let (root, root_manifest, root_identity) = self.retained_root(host)?;
         let stable = StableBinding::of(&binding.connection)?;
-        let key = stable.key();
-        let profile = Directory::open(&root.file, OsStr::new(&key))?;
-        let (home, manifest) = prepare_profile(&profile, &root_identity, stable)?;
-        let hash = digest(&manifest.bytes);
-        if binding.custody_id != hash
-            || self
-                .profiles
-                .get(&key)
-                .is_some_and(|pinned| pinned != &hash)
-        {
-            return Err(failure("native_profile_identity_changed"));
-        }
-        let mut guard = NativeProfileUse {
-            custody,
-            root,
-            root_manifest,
-            profile,
-            home,
-            manifest,
-            configured: None,
-            key: key.clone(),
-            host: host.clone(),
-            binding: binding.clone(),
-            operation_id: operation_id.clone(),
-            generation,
-            purpose,
-            renewal: None,
-        };
-        guard.revalidate(host, binding, operation_id, generation, purpose)?;
-        purpose.lock(&guard.manifest.file)?;
+        let slot = (stable.key(), stable);
+        let mut guard = self.open_use(host, binding, slot, operation_id, generation, purpose)?;
         if purpose != NativeProfileUsePurpose::Execution
             && let Some(wait) = renewal_wait
         {
@@ -681,9 +678,89 @@ impl NativeProfileCustody {
             })?;
             guard.renewal = Some(held);
         }
+        self.settle_use(guard)
+    }
+
+    /// Opens one use of a slot and takes its purpose's lock, as every use of a native or
+    /// listed slot starts. Inputs: the host, the binding, the slot's key and stable binding,
+    /// the operation, its generation and the purpose. Output: the use, not yet remembered,
+    /// or the custody refusal.
+    fn open_use(
+        &mut self,
+        host: &HostStamp,
+        binding: &NativeProfileBinding,
+        (key, stable): (String, StableBinding),
+        operation_id: &RequestId,
+        generation: u64,
+        purpose: NativeProfileUsePurpose,
+    ) -> Result<NativeProfileUse, EngineError> {
+        assert!(generation > 0);
+        assert_eq!(host.db_instance, binding.database_instance);
+        assert_eq!(host.engine_epoch, binding.engine_epoch);
+        let custody = self.retain()?;
+        let (root, root_manifest, root_identity) = self.retained_root(host)?;
+        let profile = Directory::open(&root.file, OsStr::new(&key))?;
+        let (home, manifest) = prepare_profile(&profile, &root_identity, stable)?;
+        let hash = digest(&manifest.bytes);
+        if binding.custody_id != hash
+            || self
+                .profiles
+                .get(&key)
+                .is_some_and(|pinned| pinned != &hash)
+        {
+            return Err(failure("native_profile_identity_changed"));
+        }
+        let guard = NativeProfileUse {
+            custody,
+            root,
+            root_manifest,
+            profile,
+            home,
+            manifest,
+            configured: None,
+            key,
+            host: host.clone(),
+            binding: binding.clone(),
+            operation_id: operation_id.clone(),
+            generation,
+            purpose,
+            renewal: None,
+        };
         guard.revalidate(host, binding, operation_id, generation, purpose)?;
+        purpose.lock(&guard.manifest.file)?;
+        Ok(guard)
+    }
+
+    /// Checks an opened use once more and remembers its slot's identity, as every use of a
+    /// native or listed slot ends. Input: the use. Output: the use, or the custody refusal.
+    fn settle_use(&mut self, guard: NativeProfileUse) -> Result<NativeProfileUse, EngineError> {
+        guard.revalidate_retained()?;
+        let hash = digest(&guard.manifest.bytes);
+        assert_eq!(hash, guard.binding.custody_id);
         self.root_hash = Some(digest(&guard.root_manifest.bytes));
-        remember_profile(&mut self.profiles, key, hash);
+        remember_profile(&mut self.profiles, guard.key.clone(), hash);
+        Ok(guard)
+    }
+
+    /// Takes one execution use of a listed master's slot, as [`Self::acquire_use`] does for a
+    /// sign-in, and refuses a slot whose home holds a sign-in's record. Inputs: the host, the
+    /// binding, the turn and its ordinal. Output: the use, `native_profile_not_listed`, or
+    /// `launch_account_home_holds_sign_in`.
+    pub(crate) fn acquire_listed_use(
+        &mut self,
+        host: &HostStamp,
+        binding: &NativeProfileBinding,
+        operation_id: &RequestId,
+        generation: u64,
+    ) -> Result<NativeProfileUse, EngineError> {
+        let stable = StableBinding::listed(&binding.connection)?;
+        let slot = (stable.listed_key(), stable);
+        let execution = NativeProfileUsePurpose::Execution;
+        let guard = self.open_use(host, binding, slot, operation_id, generation, execution)?;
+        crate::harnesses::launch::holds_no_sign_in(&guard.profile_path()?)
+            .map_err(|refused| EngineError(refused.0))?;
+        let guard = self.settle_use(guard)?;
+        assert!(guard.configured.is_none() && guard.renewal.is_none());
         Ok(guard)
     }
 
@@ -823,13 +900,23 @@ impl NativeProfileCustody {
         connection: &ModelConnection,
     ) -> Result<(String, String), EngineError> {
         let binding = StableBinding::of(connection)?;
+        self.prepare_slot(host, (binding.key(), binding))
+    }
+
+    /// Makes or opens one slot, with its empty 0700 home and identity manifest, and checks
+    /// the whole custody root around it. Inputs: this engine's host and the slot's key and
+    /// stable binding. Output: the slot's custody id and key, or the custody refusal.
+    fn prepare_slot(
+        &mut self,
+        host: &HostStamp,
+        (key, binding): (String, StableBinding),
+    ) -> Result<(String, String), EngineError> {
         self.verify()?;
         let (root, root_manifest, root_identity) = self.root(host)?;
         let slots = scan_slots(&root.file)?;
         if self.profiles.keys().any(|key| !slots.contains_key(key)) {
             return Err(failure("native_profile_identity_changed"));
         }
-        let key = binding.key();
         let exists = slots.contains_key(&key);
         if !exists && slots.len() >= MAX_PROFILES {
             return Err(failure("native_profile_capacity"));
@@ -864,6 +951,19 @@ impl NativeProfileCustody {
         self.verify()?;
         remember_profile(&mut self.profiles, key.clone(), hash.clone());
         Ok((hash, key))
+    }
+
+    /// Prepares the custody slot of a listed master's account (DEC-180 T20 Q7), keyed on its
+    /// connection, with an empty 0700 home and no key or sign-in in it. Inputs: this engine's
+    /// host and the connection. Output: the slot's custody id and key, or
+    /// `native_profile_not_listed` for a sign-in or an account off HTTP.
+    pub(crate) fn prepare_listed(
+        &mut self,
+        host: &HostStamp,
+        connection: &ModelConnection,
+    ) -> Result<(String, String), EngineError> {
+        let binding = StableBinding::listed(connection)?;
+        self.prepare_slot(host, (binding.listed_key(), binding))
     }
 
     pub(crate) fn receipt(

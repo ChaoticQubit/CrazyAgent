@@ -90,13 +90,16 @@ impl Turns {
     }
 }
 
-/// The process of the running turn, its sandbox warden, its output lines and when its
-/// process group was asked to stop, if it was.
+/// The process of the running turn, its sandbox warden, its output lines, when its
+/// process group was asked to stop, if it was, and on an engine key relay the engine's
+/// lifeline, which ends the group if the engine dies first.
 struct Running {
     child: Child,
     warden: Option<crate::sandbox::warden::Warden>,
     lines: Receiver<Line>,
     stopping: Option<Instant>,
+    #[cfg(unix)]
+    lifeline: Option<crate::research::runner::Lifeline>,
 }
 
 impl TurnSession {
@@ -125,7 +128,7 @@ impl TurnSession {
 
     /// Starts a conversation with the given jsonl-turn settings. Inputs: the launch request
     /// and the settings. Output: the session, or the launch's own refusals,
-    /// `launch_key_relay_unsupported` for an account that carries a key and
+    /// `launch_key_relay_unsupported` for an account key that is no engine relay token and
     /// `launch_harness_unsupported` for a run at Full access.
     pub fn start_with(request: LaunchRequest, config: Config) -> Result<Self, LaunchError> {
         Self::open(request, |request| {
@@ -162,14 +165,18 @@ impl TurnSession {
 
     /// Checks the launch, refuses what no per-turn driver hands over yet, and starts the
     /// driver. Inputs: the launch request and the driver's start. Output: the session, or
-    /// the launch's own refusals, `launch_key_relay_unsupported`,
-    /// `launch_harness_unsupported` for Full access, and the driver's refusals.
+    /// the launch's own refusals, `launch_key_relay_unsupported` for a key that is no engine
+    /// relay token, `launch_harness_unsupported` for Full access, and the driver's refusals.
     fn open(
         request: LaunchRequest,
         begin: impl FnOnce(&LaunchRequest) -> Result<(Turns, Vec<LaunchEvent>), LaunchError>,
     ) -> Result<Self, LaunchError> {
         validate(&request)?;
-        if request.account.key().is_some() {
+        if request
+            .account
+            .key()
+            .is_some_and(|key| !crate::model_gateway::relay::is_relay_token(key.reveal()))
+        {
             return Err(failure("launch_key_relay_unsupported"));
         }
         if request.unconfined {
@@ -321,7 +328,25 @@ impl TurnSession {
             warden,
             lines,
             stopping: None,
+            #[cfg(unix)]
+            lifeline: None,
         });
+        #[cfg(unix)]
+        if self
+            .request
+            .account
+            .key()
+            .is_some_and(|key| crate::model_gateway::relay::is_relay_token(key.reveal()))
+            && let Some(running) = self.running.as_mut()
+        {
+            match crate::research::runner::Lifeline::watch(running.child.id()) {
+                Ok(lifeline) => running.lifeline = Some(lifeline),
+                Err(_) => {
+                    self.end_turn(true, self.request.limits.stop_grace);
+                    return Err(failure("launch_spawn_failed"));
+                }
+            }
+        }
         let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
             self.end_turn(true, self.request.limits.stop_grace);
             return Err(failure("launch_stdio_unavailable"));
@@ -357,11 +382,10 @@ impl TurnSession {
     }
 
     /// Ends the running turn's process group: TERM first when `term` is set, a wait of at
-    /// most `wait` for its leader to exit, KILL to what is left of the group, then the
-    /// warden. A turn whose output closed gets no TERM and the stop grace, so its leader
-    /// exits by itself with its own code; a turn asked to stop whose stop grace passed gets
-    /// no TERM and no wait. Inputs: whether to send TERM and the longest wait. Output: the
-    /// leader's exit code, none for a signal, a leader that did not exit, or no turn.
+    /// most `wait` for its leader, KILL to the rest of the group, then its lifeline and warden.
+    /// A turn whose output closed gets no TERM and the stop grace, so its leader exits with its
+    /// own code; one asked to stop whose stop grace passed gets no TERM and no wait. Inputs:
+    /// whether to send TERM and the longest wait. Output: the leader's exit code, if any.
     #[cfg(unix)]
     fn end_turn(&mut self, term: bool, wait: Duration) -> Option<i32> {
         let mut running = self.running.take()?;
@@ -373,6 +397,9 @@ impl TurnSession {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         let _ = running.child.kill();
         let status = running.child.wait().ok();
+        if let Some(mut lifeline) = running.lifeline.take() {
+            lifeline.release();
+        }
         self.uncertain |=
             crate::sandbox::warden::fire_reported(running.warden.take(), "harness").is_err();
         assert!(running.warden.is_none());

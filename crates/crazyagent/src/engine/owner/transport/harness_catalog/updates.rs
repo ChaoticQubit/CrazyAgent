@@ -308,6 +308,35 @@ pub(crate) async fn sign_in_version(
     .flatten()
 }
 
+/// The catalog entry a listed master turn runs and its installed version, as Settings,
+/// Harnesses shows them, with the same search the catalog list uses (DEC-180 Task 20).
+/// Inputs: the engine, the engine root, the catalog search and the catalog id. Output: the
+/// entry's file and its installed version, each none when not found or unknown.
+pub(crate) async fn listed_install(
+    engine: &Arc<Engine>,
+    root: PathBuf,
+    search: Search,
+    id: &str,
+) -> (Option<PathBuf>, Option<String>) {
+    let Some(entry) = entry(engine, search, id, false).await.ok() else {
+        return (None, None);
+    };
+    let Some(executable) = entry.executable.clone() else {
+        return (None, None);
+    };
+    let updates = engine.harness_updates.clone();
+    let installed = tokio::task::spawn_blocking(move || {
+        let db = open(&root).ok()?;
+        updates
+            .versions(&db, &entry, &Roots::engine(&root), false)
+            .installed
+    })
+    .await
+    .ok()
+    .flatten();
+    (Some(executable), installed)
+}
+
 /// Runs one blocking piece of harness update work off the request path.
 /// Input: the work. Output: its answer, or `harness_update_unavailable` when it could not
 /// finish.

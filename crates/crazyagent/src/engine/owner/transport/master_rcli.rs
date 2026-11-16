@@ -81,7 +81,7 @@ fn failed_turn_code(failure: Option<crate::rcli_host::RcliProviderFailure>) -> &
 
 /// What an rcli master's instruction file holds. Inputs: the master's startup instruction
 /// and the owner's app and project instructions. Output: the file text.
-fn instruction_file_text(instructions: &str, given: crate::agent_home::Given) -> String {
+pub(super) fn instruction_file_text(instructions: &str, given: crate::agent_home::Given) -> String {
     let fitted = super::master_host_launch::fit_process(
         instructions,
         given,
@@ -473,7 +473,11 @@ impl OwnerRuntimeHandle {
     }
 }
 
-fn validate_turn(
+/// Checks that a master turn read again is still the turn being run: the same turn of the
+/// same session, and unless cancelled still preparing, delivering or running its own attempt
+/// on its own connection. Inputs: the prepared turn, its id and the turn as read. Output: Ok,
+/// or `master_runtime_binding` or `master_runtime_scope_revoked`.
+pub(super) fn validate_turn(
     prepared: &PreparedMasterTurn,
     turn_id: &RequestId,
     current: &MasterTurnView,

@@ -66,11 +66,29 @@ pub(crate) struct RcliConfiguredProfileProof {
     pub(crate) profile_config_sha256: String,
 }
 
+/// What proves a listed master's pool account may run its turns (DEC-180 T20 Q7): the
+/// session, engine run and settings it was proved under, the connection and the custody slot
+/// prepared for it, which holds no key and no sign-in. It never holds the saved key; the
+/// connection names that key only by its reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ListedAccountProof {
+    pub(crate) session_id: SessionId,
+    pub(crate) database_instance: String,
+    pub(crate) engine_epoch: String,
+    pub(crate) config_id: ConfigId,
+    pub(crate) source_hash: String,
+    pub(crate) at_revision: Cursor,
+    pub(crate) connection: ModelConnection,
+    pub(crate) custody_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) enum MasterBootstrapAuth {
     NativeSignIn(NativeAuthFact),
     RcliConfigured(RcliConfiguredProfileProof),
+    Listed(ListedAccountProof),
 }
 
 impl MasterBootstrapAuth {
@@ -78,6 +96,15 @@ impl MasterBootstrapAuth {
         match self {
             Self::NativeSignIn(fact) => fact.binding.clone(),
             Self::RcliConfigured(proof) => NativeProfileBinding {
+                database_instance: proof.database_instance.clone(),
+                engine_epoch: proof.engine_epoch.clone(),
+                config_id: proof.config_id.clone(),
+                source_hash: proof.source_hash.clone(),
+                at_revision: proof.at_revision.clone(),
+                connection: proof.connection.clone(),
+                custody_id: proof.custody_id.clone(),
+            },
+            Self::Listed(proof) => NativeProfileBinding {
                 database_instance: proof.database_instance.clone(),
                 engine_epoch: proof.engine_epoch.clone(),
                 config_id: proof.config_id.clone(),
@@ -737,8 +764,8 @@ pub(crate) fn validate_selection(
     project: &ProjectId,
     selection: &MasterSelection,
 ) -> Result<(), EngineError> {
-    if let MasterBackend::Listed(_) = selection.backend {
-        return Err(error("launch_harness_unsupported"));
+    if let MasterBackend::Listed(id) = selection.backend {
+        listed_master(id)?;
     }
     selection.route.validate().map_err(error)?;
     validate_pool_scope(
@@ -793,10 +820,24 @@ pub(crate) fn validate_selection(
     Ok(())
 }
 
+/// Finds the harness a listed backend runs a master on: one of the registry whose manifest
+/// names the master role and drives it on pipes over ACP, the listed master driver the
+/// engine runs (DEC-180 Task 20). Input: the catalog id. Output: the harness, or
+/// `launch_harness_unsupported` for any other.
+pub(crate) fn listed_master(
+    id: &str,
+) -> Result<&'static crate::harnesses::registry::Harness, EngineError> {
+    let acp = Some(crate::harnesses::manifest::DriverKind::Acp);
+    crate::harnesses::registry::registry()
+        .get(id)
+        .filter(|harness| harness.master() && harness.piped() == acp)
+        .ok_or_else(|| error("launch_harness_unsupported"))
+}
+
 /// Tells whether a connection can run a master of this backend.
-/// Inputs: the backend and the connection. Output: true for an RCLI HTTP connection, or
-/// for a native connection of the Codex or Claude harness the backend names; false for a
-/// listed backend, which no connection runs until the engine hosts a master on it.
+/// Inputs: the backend and the connection. Output: true for an RCLI HTTP connection, for a
+/// native connection of the Codex or Claude harness the backend names, and for an account a
+/// listed master harness fits ([`listed_master`], `Harness::account_fits`).
 pub(crate) fn backend_member(backend: MasterBackend, connection: &ModelConnection) -> bool {
     match backend {
         MasterBackend::Rcli => {
@@ -813,8 +854,20 @@ pub(crate) fn backend_member(backend: MasterBackend, connection: &ModelConnectio
                 && connection.protocol.as_str() == "native"
                 && matches!(connection.endpoint, ModelEndpoint::Native {})
         }
-        MasterBackend::Listed(_) => false,
+        MasterBackend::Listed(id) => {
+            listed_master(id).is_ok_and(|harness| listed_member(harness, connection))
+        }
     }
+}
+
+/// Tells whether a listed master harness runs a master on a connection: an endpoint account
+/// the harness fits, never a sign-in, even a ChatGPT one it takes as an agent (T22), since a
+/// master's hand-over takes none. Inputs: the harness and the connection. Output: the answer.
+fn listed_member(
+    harness: &crate::harnesses::registry::Harness,
+    connection: &ModelConnection,
+) -> bool {
+    matches!(connection.endpoint, ModelEndpoint::Http { .. }) && harness.account_fits(connection)
 }
 
 #[cfg(test)]
@@ -847,7 +900,9 @@ mod cause_code_tests {
 
 #[cfg(test)]
 mod backend_tests {
-    use super::{MasterBackend, MasterSelection, backend_member};
+    use super::{
+        MasterBackend, MasterSelection, backend_member, error, listed_master, listed_member,
+    };
     use crate::config::ModelConnection;
     use crate::protocol::CredentialRef;
     use crate::routing::{ResourceBudget, RouteRequest};
@@ -1033,11 +1088,12 @@ mod backend_tests {
         .unwrap()
     }
 
-    /// DEC-180 Phase 1: no connection runs a master on a listed backend yet, not even a
-    /// connection of that very harness, while RCLI, Codex and Claude keep the connections
-    /// they ran on.
+    /// DEC-180 Task 20: a connection runs a master on a listed backend exactly when the
+    /// harness fits its account: an endpoint account of a wire format it speaks, whatever
+    /// harness stored it, never a sign-in; RCLI, Codex and Claude keep the connections they
+    /// ran on, and a listed harness without the master role runs on none.
     #[test]
-    fn no_connection_runs_a_master_on_a_listed_backend() {
+    fn a_connection_runs_a_master_on_a_listed_backend_when_the_harness_fits_its_account() {
         let connections = [
             connection("rcli", false),
             connection("codex", true),
@@ -1060,6 +1116,47 @@ mod backend_tests {
             runs(MasterBackend::Claude),
             [false, false, true, true, false, false]
         );
+        assert_eq!(
+            runs(MasterBackend::Listed("standin-acp")),
+            [true, false, false, false, false, true]
+        );
         assert_eq!(runs(MasterBackend::Listed("opencode")), [false; 6]);
+        assert_eq!(runs(MasterBackend::Listed("no-such-harness")), [false; 6]);
+    }
+
+    /// DEC-180 Task 20: a listed backend runs a master once its harness's manifest names
+    /// the master role and drives it over ACP; a harness without the role, a terminal
+    /// stand-in with no piped driver, or a name of no registry, is refused with its code.
+    #[test]
+    fn a_listed_backend_runs_a_master_when_its_manifest_names_the_role_and_an_acp_driver() {
+        let found = listed_master("standin-acp").map(|harness| harness.id());
+        assert_eq!(found, Ok("standin-acp"));
+        let refused = Some(error("launch_harness_unsupported"));
+        for id in ["opencode", "standin-screen", "no-such-harness", "codex"] {
+            assert_eq!(listed_master(id).err(), refused, "{id}");
+        }
+        let parsed = MasterBackend::parse("standin-acp");
+        assert_eq!(parsed, Some(MasterBackend::Listed("standin-acp")));
+    }
+
+    /// DEC-180 Task 20 (T22 on the layer): a listed master runs only on an endpoint account,
+    /// never on a ChatGPT sign-in, even one its harness takes as an agent through the ChatGPT
+    /// relay, since a master's hand-over takes no sign-in.
+    #[test]
+    fn a_listed_master_harness_never_runs_a_master_on_a_chatgpt_sign_in() {
+        let text = include_str!("../tests/fixtures/harness/standin-acp.yaml");
+        let chat = "  - \"openai-chat\"\naccounts:\n";
+        assert!(text.contains(chat));
+        let responses = "  - \"openai-chat\"\n  - \"openai-responses\"\naccounts:\n  \
+                         openai-responses:\n    env:\n      OPENAI_API_KEY: \"{token}\"\n";
+        let text = text.replace(chat, responses);
+        let built = crate::harnesses::registry::Registry::build(&[("standin-acp", text.as_str())]);
+        assert!(built.is_ok(), "{:?}", built.as_ref().err());
+        let built = built.unwrap();
+        let harness = built.get("standin-acp").unwrap();
+        let signed_in = connection("codex", true);
+        assert!(harness.account_fits(&signed_in));
+        assert!(!listed_member(harness, &signed_in));
+        assert!(listed_member(harness, &connection("rcli", false)));
     }
 }
