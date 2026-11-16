@@ -250,6 +250,44 @@ fn a_socket_grant_naming_the_power_helper_is_refused() {
 }
 
 #[test]
+fn a_socket_grant_whose_path_holds_the_power_helper_socket_is_refused() {
+    let case = case(SandboxNetwork::Only(Vec::new()));
+    let root = case._temp.path().canonicalize().unwrap();
+    let inside = root.join("private/var/run");
+    let shouted = root.join("PRIVATE/VAR/RUN");
+    fs::create_dir_all(&inside).unwrap();
+    for path in [
+        inside.join("dev.crazyagent.power.sock"),
+        shouted.join("DEV.CRAZYAGENT.POWER.SOCK"),
+    ] {
+        let grant = policy::AccessGrant::Socket { path: path.clone() };
+        let refused = case(SandboxNetwork::Only(Vec::new()))
+            .sandbox
+            .grant_access(&[grant], None)
+            .map(drop);
+        let named = matches!(
+            &refused,
+            Err(SandboxError::Invalid(reason)) if reason.contains("lid helper")
+        );
+        assert!(named, "a grant whose text holds the helper path (rv-code 22:41 F1): {path:?}");
+    }
+}
+
+#[test]
+fn a_profile_with_a_granted_socket_holds_the_helper_deny_line_once() {
+    let Case { _temp: temp, sandbox, .. } = case(SandboxNetwork::Only(Vec::new()));
+    let folder = temp.path().canonicalize().unwrap().join("run");
+    fs::create_dir_all(&folder).unwrap();
+    let grant = policy::AccessGrant::Socket {
+        path: folder.join("dev.sock"),
+    };
+    let text = sandbox.grant_access(&[grant], None).unwrap().profile();
+    assert!(text.ends_with(HELPER_DENY), "{text}");
+    let line = format!("(path-literal \"{POWER_HELPER_SOCKET}\")");
+    assert_eq!(text.matches(&line).count(), 1, "{text}");
+}
+
+#[test]
 fn the_power_helper_deny_comes_after_every_allow_in_every_profile() {
     let open = case(SandboxNetwork::Open);
     let limited = case(SandboxNetwork::Only(Vec::new()));
