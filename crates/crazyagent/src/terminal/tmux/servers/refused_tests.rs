@@ -654,3 +654,41 @@ fn a_stop_of_a_teammate_whose_teammates_server_missed_one_look_looks_again() {
         std::fs::remove_dir_all(folder).unwrap();
     }
 }
+
+/// v242 check-a-open sec r1 F1: once a remembered teammate's teammates' server missed a look,
+/// its Stop looks again only at its own lead's teammates' server, never at another lead's own
+/// server, where that lead may tag a decoy pane with the teammate's name so the Stop ends the
+/// decoy and answers Ok. Lead 9 has no teammates' server and its own socket listens; the Stop
+/// never opens it. No case starts a server.
+#[test]
+fn a_stop_of_a_remembered_teammate_after_a_missed_look_never_opens_another_leads_own_server() {
+    let (_root, host, lead, own_socket) = lead_with_own_socket();
+    let (_, mates_socket) = teammates_lead(&host, 7);
+    let (other, other_socket) = own_lead(&host, 9);
+    let _own = crate::spawn_gate::bind_unix_std(&own_socket).unwrap();
+    let _mates = crate::spawn_gate::bind_unix_std(&mates_socket).unwrap();
+    let _other = crate::spawn_gate::bind_unix_std(&other_socket).unwrap();
+    let ann = AgentId::team(8).unwrap();
+    host.remember(&ann, &lead).unwrap();
+    MATES_MISSES.set(2);
+
+    let killed = host.kill(&ann);
+
+    assert!(
+        !host.leads.lock().unwrap().contains_key(&other),
+        "the Stop opened another lead's own server"
+    );
+    assert_eq!(killed, Err(failure("terminal_agent_unknown")));
+    assert_eq!(
+        MATES_MISSES.get(),
+        0,
+        "the Stop answered on one look at the teammates' server"
+    );
+    for folder in BTreeSet::from([
+        own_socket.parent().unwrap(),
+        mates_socket.parent().unwrap(),
+        other_socket.parent().unwrap(),
+    ]) {
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+}
