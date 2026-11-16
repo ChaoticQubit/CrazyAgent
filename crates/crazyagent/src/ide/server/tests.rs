@@ -174,6 +174,50 @@ fn a_port_a_wildcard_listener_of_this_user_holds_is_not_free() {
     assert!(ports::free(port), "free once it is released");
 }
 
+/// The running launch of a slot and its refused flag, if any. Input: the slot. Output: them.
+fn running_launch(slot: &Slot) -> Option<(u64, Arc<AtomicBool>)> {
+    locked(&slot.state)
+        .as_ref()
+        .map(|running| (running.launch, Arc::clone(&running.refused)))
+}
+
+/// rv-sa241 LOW-1, rv-ds241 N1: a launch its proxy flagged, because no process the open saw
+/// ready held the server port any more, is never handed to a later open, which starts a new
+/// launch, and its watch stops it within a few polls, so a refused request costs the owner a
+/// reload and not the session.
+#[tokio::test]
+async fn a_launch_its_proxy_refused_is_stopped_and_never_reused() {
+    let checkout = scratch();
+    let data = scratch();
+    let build = cached_build();
+    let project = project("refused");
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
+    let slot = servers.slot(&project).unwrap();
+    let (first, refused) = running_launch(&slot).unwrap();
+    assert!(!refused.load(Ordering::SeqCst));
+    refused.store(true, Ordering::SeqCst);
+    servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
+    let (second, refused) = running_launch(&slot).unwrap();
+    assert_ne!(second, first, "a refused launch is not reused");
+    assert!(!refused.load(Ordering::SeqCst));
+    refused.store(true, Ordering::SeqCst);
+    for _ in 0..50 {
+        if running_launch(&slot).is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(running_launch(&slot).is_none(), "the watch stops it");
+    servers.stop_all().await;
+}
+
 #[tokio::test]
 async fn ide_server_listens_only_on_loopback() {
     let checkout = scratch();

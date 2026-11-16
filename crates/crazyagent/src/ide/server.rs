@@ -161,6 +161,9 @@ struct Running {
     /// A Full access launch's processes, followed while it runs and settled after its group
     /// ends ([`finish`]); none below Full.
     followed: Option<Arc<Followed>>,
+    /// Set by the proxy once no process the open saw ready holds the server port
+    /// ([`proxy::Site::refused`]): the watch then stops the launch and no open reuses it.
+    refused: Arc<AtomicBool>,
 }
 
 /// A Full access launch's leader and lineage token, and its lineage once read, under a lock
@@ -418,6 +421,7 @@ impl Servers {
         record_group(&folder, group);
         let launch = self.launches.fetch_add(1, Ordering::SeqCst);
         let served = Arc::new(std::sync::OnceLock::new());
+        let refused = Arc::new(AtomicBool::new(false));
         let proxy = tokio::spawn(proxy::serve(
             listener,
             proxy::Site {
@@ -427,6 +431,7 @@ impl Servers {
                 token,
                 workspace,
                 served: Arc::clone(&served),
+                refused: Arc::clone(&refused),
             },
         ));
         *locked(&slot.state) = Some(Running {
@@ -443,6 +448,7 @@ impl Servers {
             ready: false,
             proxy,
             followed,
+            refused,
         });
         tokio::spawn(watch(Arc::downgrade(&slot), launch, self.idle, self.start));
         let listening = ready(&slot, launch, server_port, group, self.start, &self.closed).await;
