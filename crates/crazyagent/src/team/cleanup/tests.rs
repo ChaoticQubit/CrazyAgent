@@ -1558,6 +1558,90 @@ fn a_folder_that_denies_listing_has_its_acl_cleared_through_its_parents_handle_a
     assert!(!denies(&denied), "the folder kept its ACL");
 }
 
+/// Opens a test folder as a walk holds one: read only, never through a link. Input: the
+/// folder. Output: its handle.
+#[cfg(target_os = "macos")]
+fn walk_handle(folder: &Path) -> std::os::fd::OwnedFd {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    rustix::fs::open(folder, flags, Mode::empty()).unwrap()
+}
+
+/// ds181 N3 r2 (residual 1 of DONE-0219): an entry a walk read by name, which a process an
+/// agent left swaps for a hard link to an owner file before its ACL clear, never costs the
+/// owner file its ACL: an entry that opens is cleared through its own handle, and only when
+/// that handle holds the entry that was read.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_entry_swapped_for_a_link_to_an_owner_file_before_its_acl_clear_leaves_the_owner_acl() {
+    use rustix::fs::AtFlags;
+    use std::os::fd::AsFd;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let owner = root.join("owner/g");
+    write(&owner, b"the owner's\n");
+    let home = root.join("home");
+    let left = home.join("f");
+    write(&left, b"left by a terminal\n");
+    let aside = home.join("aside");
+    let _cleared = [AclCleared(owner.clone()), AclCleared(aside.clone())];
+    add_acl("everyone deny delete", &[owner.clone(), left.clone()]);
+    let parent = walk_handle(&home);
+    let found = rustix::fs::statat(&parent, c"f", AtFlags::SYMLINK_NOFOLLOW).unwrap();
+    let (moved, held, linked) = (left.clone(), aside.clone(), owner.clone());
+    BEFORE_ACL_CLEAR.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            std::fs::rename(&moved, &held).unwrap();
+            std::fs::hard_link(&linked, &moved).unwrap();
+        }));
+    });
+    let mut clears = AclClears::new();
+
+    let taken = clears.add(parent.as_fd(), Some(c"f"), &found);
+
+    assert!(
+        BEFORE_ACL_CLEAR.with(|step| step.borrow().is_none()),
+        "no ACL clear ran"
+    );
+    assert!(!taken, "a clear of another entry counted as taken");
+    assert!(denies(&owner), "the owner's file lost its ACL");
+}
+
+/// ds181 N3 r2 guard: a link with one link that a walk reads by name loses its own ACL
+/// through its own handle, and the owner file it names keeps its ACL.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_link_in_an_agent_tree_loses_its_own_acl_and_its_target_keeps_its_own() {
+    use rustix::fs::AtFlags;
+    use std::os::fd::AsFd;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let owner = root.join("owner/g");
+    write(&owner, b"the owner's\n");
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let link = home.join("l");
+    std::os::unix::fs::symlink(&owner, &link).unwrap();
+    let _cleared = AclCleared(owner.clone());
+    add_acl("everyone deny delete", std::slice::from_ref(&owner));
+    let added = crate::spawn_gate::collected(
+        Command::new("/bin/chmod")
+            .args(["-h", "+a", "everyone deny delete"])
+            .arg(&link),
+    )
+    .unwrap();
+    assert!(added.status.success(), "{added:?}");
+    let parent = walk_handle(&home);
+    let found = rustix::fs::statat(&parent, c"l", AtFlags::SYMLINK_NOFOLLOW).unwrap();
+    let mut clears = AclClears::new();
+
+    let taken = clears.add(parent.as_fd(), Some(c"l"), &found);
+
+    assert!(taken, "the link's clear did not take");
+    assert!(!denies(&link), "the link kept its ACL");
+    assert!(denies(&owner), "the owner's file lost its ACL");
+}
+
 /// ds181 r2 (rv-code4 F2): removing an agent's tree of 300 folders that each hold one folder
 /// whose ACL denies listing never holds more than a few dozen of them waiting for their ACL
 /// clear at once, each with its parent's open handle, and the tree still goes.
