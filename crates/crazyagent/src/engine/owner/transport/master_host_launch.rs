@@ -2526,7 +2526,8 @@ mod tests {
         let root = Root::open(&base).unwrap();
         let engine = root.engine_root().unwrap().to_path_buf();
         let profiles = engine.join("native-profiles");
-        let slot = profiles.join("a".repeat(64)).join("home");
+        let key = crate::engine::bootstrap::listed_slot_key("account-1");
+        let slot = profiles.join(key).join("home");
         let own = slot.join("session-a").join("standin-acp").join("account-1");
         let neighbour = slot.join("session-b").join("standin-acp").join("account-1");
         let other = profiles.join("b".repeat(64)).join("home");
@@ -2602,6 +2603,82 @@ mod tests {
             let listed = run(&format!("ls {}", quoted(folder)));
             assert!(!listed.status.success(), "{listed:?}");
             assert!(!String::from_utf8_lossy(&listed.stdout).contains("session-b"));
+        }
+    }
+
+    /// Only a listed master session's home in its own listed slot, of the exact shape, with
+    /// no sign-in's record in the slot home, is carved out of the native profiles folder: a
+    /// home in a slot with a Codex or Claude Code record, in a slot that is not its account's
+    /// listed one, under a slot folder other than `home`, or one folder too shallow or too
+    /// deep stays inside the secret and is refused. Runs on macOS only, beside the row above.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_listed_master_home_in_a_signed_in_slot_or_of_another_shape_is_not_carved() {
+        use crate::engine::bootstrap::{CLAUDE_RECORD, CODEX_RECORD, listed_slot_key};
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let profiles = root.engine_root().unwrap().join("native-profiles");
+        let session = |key: &str, slot: &str| {
+            profiles
+                .join(key)
+                .join(slot)
+                .join("session-a")
+                .join("standin-acp")
+        };
+        let own = listed_slot_key("account-1");
+        let codex = listed_slot_key("account-2");
+        let claude = listed_slot_key("account-3");
+        let shaped = session(&own, "home").join("account-1");
+        let refused = [
+            session(&codex, "home").join("account-2"),
+            session(&claude, "home").join("account-3"),
+            session(&"e".repeat(64), "home").join("account-1"),
+            session(&own, "home").join("account-5"),
+            session(&own, "profile").join("account-1"),
+            session(&own, "home"),
+            session(&own, "home").join("account-1").join("deeper"),
+            profiles.join(&own).join("home"),
+        ];
+        for home in refused.iter().chain([&shaped]) {
+            private_directory(home);
+        }
+        let record = |key: &str, name: &str| profiles.join(key).join("home").join(name);
+        std::fs::write(record(&codex, CODEX_RECORD), "{}").unwrap();
+        std::fs::write(record(&claude, CLAUDE_RECORD), "{}").unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("standin-acp");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let build = |home: &Path| {
+            let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+            master_sandbox(
+                &root,
+                &runtime_ref,
+                &repository,
+                &worktree,
+                home,
+                &executable,
+                &ModelEndpoint::Native {},
+                &AgentPolicy::default(),
+                &[],
+            )
+        };
+        let carved = build(&shaped);
+        assert!(carved.is_ok(), "{:?}", carved.as_ref().err());
+        for home in &refused {
+            let built = build(home);
+            assert_eq!(
+                built.as_ref().err().map(|error| error.0.as_str()),
+                Some("master_sandbox_unavailable"),
+                "{}",
+                home.display()
+            );
         }
     }
 
