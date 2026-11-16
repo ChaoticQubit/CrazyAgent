@@ -159,11 +159,14 @@ function ideRefusal() {
 
 /** The app's window number while the window server lists the window on screen, found by the
  * app's process. Output: the number as text, or an empty string while the window is off that
- * list; throws when the app has no process. */
+ * list; throws at once, with the window id tool's status and error, when the app has no
+ * process or the tool did not run or did not exit 0, so a broken tool is never waited on. */
 function listedWindow() {
   const found = spawnSync("/usr/bin/pgrep", ["-f", `^${app}`], { encoding: "utf8" }).stdout.trim().split("\n")[0];
   assert.ok(found, "the test app has a process");
   const listed = spawnSync(windowIdTool, [found], { encoding: "utf8" });
+  const why = listed.error ? listed.error.message : (listed.stderr ?? "").trim();
+  assert.ok(!listed.error && listed.status === 0, `the window id tool ${windowIdTool} failed, status ${listed.status}: ${why}`);
   return listed.stdout.trim().split("\n")[0];
 }
 
