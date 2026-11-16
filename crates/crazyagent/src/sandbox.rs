@@ -983,6 +983,11 @@ pub fn linux_unbridged_notice(
 /// has none, and what that leaves open.
 pub const LINUX_UNROUTED_LINE: &str = "On this Linux, this agent has no network of its own: slirp4netns or the nf_tables iptables is missing here, or did not start, so every port it may reach on this computer is open to it on every host.";
 
+/// [`LINUX_UNROUTED_LINE`] for an agent with no loopback port, or one the call supervisor
+/// keeps to this computer (rv-sa241 7b LOW-1 and N1): its ports on any host then reach
+/// this computer too.
+pub const LINUX_UNROUTED_ANY_HOST_LINE: &str = "";
+
 /// What a limited network cannot hold on Linux, shown there only, under the network choice
 /// in the desktop and the TUI (RV-DS241-83): Landlock limits outbound TCP by port, not by
 /// host, so a port an agent may reach on this computer is open to it on every host.

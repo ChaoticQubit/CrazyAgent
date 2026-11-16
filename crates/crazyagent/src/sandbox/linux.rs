@@ -3104,7 +3104,8 @@ mod tests {
         assert_eq!(said(false, &hosted), None, "the page says it without a nest");
         let ports = launched(&[Loopback(8080)]).limit_sockets(LinuxSockets::TcpPorts);
         assert_eq!(said(true, &ports), plain);
-        assert_eq!(said(true, &launched(&[AnyHost(443)])), None, "no port here");
+        let any_host = Some(super::super::LINUX_UNROUTED_ANY_HOST_LINE.to_owned());
+        assert_eq!(said(true, &launched(&[AnyHost(443)])), any_host, "unrouted, any host");
         assert_eq!(said(true, &launched(&[])), None);
         for choice in [AgentNetwork::Https, AgentNetwork::Open] {
             let said = |sandbox| linux_unbridged_notice_on(host(true), choice, sandbox);
@@ -3112,6 +3113,57 @@ mod tests {
             assert_eq!(said(&ports), None, "{choice:?}: the page says it");
             assert_eq!(said(&low), Some(linux_unbridged_line(80)), "{choice:?}");
         }
+    }
+
+    #[test]
+    fn every_unrouted_launch_that_could_route_says_why_and_a_low_port_names_itself() {
+        use super::super::policy::AgentNetwork;
+        use super::super::{LINUX_UNROUTED_ANY_HOST_LINE, LINUX_UNROUTED_LINE, LinuxHost};
+        use super::super::{linux_unbridged_line, linux_unbridged_notice_on};
+        use SandboxRemote::{AnyHost, Loopback};
+        let host = |routed, supervised| {
+            Some(LinuxHost {
+                nested: true,
+                scoped: false,
+                supervised,
+                root: false,
+                armored: false,
+                routed,
+            })
+        };
+        let launched = |remotes: &[SandboxRemote]| {
+            let (_temp, sandbox) = project(SandboxNetwork::Only(remotes.to_vec()));
+            sandbox
+        };
+        let said = |held, sandbox: &ProjectSandbox| {
+            linux_unbridged_notice_on(held, AgentNetwork::Https, sandbox)
+        };
+        let wide = Some(LINUX_UNROUTED_LINE.to_owned());
+        let any_host = Some(LINUX_UNROUTED_ANY_HOST_LINE.to_owned());
+        let model = launched(&[AnyHost(443), Loopback(18080)]);
+        let remote = launched(&[AnyHost(443)]);
+        assert!(model.routed().is_some() && remote.routed().is_some());
+        assert_eq!(said(host(false, false), &model), wide);
+        assert_eq!(said(host(false, true), &model), any_host, "loopback kept by the supervisor");
+        assert_eq!(said(host(false, false), &remote), any_host, "no loopback port");
+        assert_eq!(said(host(false, true), &remote), any_host);
+        for supervised in [false, true] {
+            assert_eq!(said(host(true, supervised), &model), None, "routed");
+            assert_eq!(said(host(true, supervised), &remote), None, "routed");
+        }
+        for line in [LINUX_UNROUTED_LINE, LINUX_UNROUTED_ANY_HOST_LINE] {
+            let why = "On this Linux, this agent has no network of its own: ";
+            assert!(line.starts_with(why), "{line}");
+            assert!(line.contains("AppArmor") && line.contains("as root"), "{line}");
+        }
+        assert!(LINUX_UNROUTED_LINE.contains("on every host, this computer included."));
+        assert!(LINUX_UNROUTED_ANY_HOST_LINE.contains("on any host include this computer"));
+        let low = launched(&[AnyHost(443), Loopback(18080), Loopback(80), Loopback(53)]);
+        assert!(low.routed().is_none());
+        let named = Some(linux_unbridged_line(53));
+        assert_eq!(said(host(true, false), &low), named, "the low port keeps it unrouted");
+        assert_eq!(said(host(true, true), &low), named);
+        assert_eq!(said(host(false, false), &low), None, "the page says it on this host");
     }
 
     #[test]
