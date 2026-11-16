@@ -269,9 +269,10 @@ fn read(kind: &Kind, file: File, budget: u64, bounds: &Bounds) -> Outcome {
 }
 
 /// Reads a record line by line, at most `budget` bytes in all and each line at most
-/// `line_bytes` bytes; a longer line is passed over to its end, a blank line is passed over,
-/// and a last line the budget cut is not kept and marks the record clipped. Inputs: the
-/// file, the budget, the line bound and what to do with each line. Output: what it gave.
+/// `line_bytes` bytes; a longer line is passed over to its end and marks the record clipped,
+/// a blank line is passed over, and a last line the budget cut is not kept and marks it
+/// clipped. Inputs: the file, the budget, the line bound and what to do with each line.
+/// Output: what it gave.
 fn lines_of(
     file: File,
     budget: u64,
@@ -293,6 +294,7 @@ fn lines_of(
         taken.bytes += count as u64;
         let ended = line.last() == Some(&b'\n');
         if !ended && line.len() > line_bytes {
+            taken.clipped = true;
             match reader.skip_until(b'\n') {
                 Ok(skipped) => taken.bytes += skipped as u64,
                 Err(_) => break,
