@@ -73,9 +73,11 @@ test("postinst installs and loads the profile only on configure where AppArmor r
   }
   const steps = ['apparmor_parser -QT "$src"', 'install -m 0644 "$src" "$dst"', 'apparmor_parser -r -T -W "$dst" || true'].map((step) => postinst.indexOf(step));
   assert.ok(steps.every((at) => at >= 0) && steps[0] < steps[1] && steps[1] < steps[2], "checked, then copied, then loaded without failing the install");
+  assert.ok(postinst.includes('if install -m 0644 "$src" "$dst"; then'), "a copy that fails never fails the install");
+  assert.ok(postinst.includes(`{ [ -f "$dst" ] || [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; }`), "an upgrade refreshes a copy already there, wherever the restriction stands now");
   assert.ok(prerm.includes('[ "$1" = remove ]'), "an upgrade keeps the profile loaded");
   assert.ok(prerm.includes('apparmor_parser -R "$dst" || true'));
-  assert.ok(prerm.includes('rm -f "$dst"'));
+  assert.ok(prerm.includes('rm -f "$dst" || true'), "a copy that cannot be deleted never fails the removal");
   assert.ok(!prerm.includes("/usr/share/crazyagent"), "dpkg removes the staged copy itself");
 });
 
