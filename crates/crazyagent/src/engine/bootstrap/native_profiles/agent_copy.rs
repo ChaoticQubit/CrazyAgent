@@ -458,12 +458,34 @@ impl NativeProfileUse {
     /// Input: the Codex executable the renewal runs. Output: the source;
     /// `native_profile_codex_api_key` or `native_profile_codex_token_unreadable` for a
     /// record without usable ChatGPT tokens, or the unavailable refusal.
+    #[allow(
+        dead_code,
+        reason = "the launch that starts a ChatGPT relay is wired by the listed-launch task (T22 Q1)"
+    )]
     pub(crate) fn chatgpt_source(
         &self,
         executable: &Path,
     ) -> Result<crate::model_gateway::relay::chatgpt::ChatGptSource, EngineError> {
-        let _ = executable;
-        Err(unavailable())
+        use crate::model_gateway::relay::chatgpt::{ChatGptSource, Renew};
+        self.revalidate_retained()?;
+        if self.configured.is_some()
+            || crate::harnesses::spec(self.binding.connection.harness.as_str()).map(|spec| spec.id)
+                != Some("codex")
+        {
+            return Err(unavailable());
+        }
+        let mut record = account_record(Harness::Codex, &self.home.file, &self.profile_path()?)?;
+        let tokens = chatgpt_tokens(&record.copy);
+        record.copy.fill(0);
+        let tokens = tokens?;
+        let renewal = self.renewal(Harness::Codex, executable)?;
+        let renew: Renew = Box::new(move |stale: Duration, halted: &dyn Fn() -> bool| {
+            let mut record = renewal.renew_unless(stale, halted)?;
+            let tokens = chatgpt_tokens(&record.copy);
+            record.copy.fill(0);
+            tokens
+        });
+        Ok(ChatGptSource::new(tokens, renew))
     }
 }
 

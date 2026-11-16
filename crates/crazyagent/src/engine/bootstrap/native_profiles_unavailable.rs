@@ -150,6 +150,10 @@ impl NativeProfileUse {
 impl NativeProfileUse {
     /// Matches the Unix ChatGPT sign-in source for a ChatGPT relay. No value is ever made
     /// here. Input: the Codex executable, unused. Output: none.
+    #[allow(
+        dead_code,
+        reason = "the launch that starts a ChatGPT relay is wired by the listed-launch task (T22 Q1)"
+    )]
     pub(crate) fn chatgpt_source(
         &self,
         _executable: &Path,

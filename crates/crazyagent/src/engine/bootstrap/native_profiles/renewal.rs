@@ -177,7 +177,7 @@ impl Renewal {
     /// and shares the renewal lock, so a run left behind by an engine that exits keeps the
     /// lock until it ends. Inputs: the expiry the caller saw and the stop test. Output: the
     /// record after renewal, or the refusal.
-    fn renew_unless(
+    pub(super) fn renew_unless(
         &self,
         stale: Duration,
         halted: &dyn Fn() -> bool,
