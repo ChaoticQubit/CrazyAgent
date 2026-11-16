@@ -5397,8 +5397,12 @@ fn connectors_allowed_writes_revoke() {
     pty.until("the page lists Linear under Allowed writes", |screen| {
         header_row(screen).contains(&format!("{PROJECT}  /  Connectors"))
             && screen.contains("Allowed writes")
+            && !screen.contains("Reading allowed writes")
             && screen
-                .contains("Connectors that may change things in this project without asking again.")
+                .split_once(
+                    "Connectors that may change things in this project without asking again.",
+                )
+                .is_some_and(|(_, below)| below.contains("Linear"))
     });
     pty.keys(&["End"]);
     pty.until("Linear's allowed write offers x", |screen| {
