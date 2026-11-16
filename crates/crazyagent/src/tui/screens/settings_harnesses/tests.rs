@@ -529,6 +529,38 @@ fn a_harness_limited_only_by_its_tools_names_that_reason_once_in_the_control_sen
     );
 }
 
+/// T21-1 (rv-code2 addendum): a harness that starts but runs without tools gives that one
+/// reason as its status and as its tools, and the Control sentence names it once, so the
+/// sentence's dedupe is reached. No bundled manifest limits its tools without
+/// `cannot_start`, hence the stand-in.
+#[test]
+fn a_startable_harness_limited_only_in_its_tools_names_that_reason_once() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-th-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let path = root.path().join("standin-limited-tools");
+    std::fs::write(&path, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let search = Search::new(vec![root.path().to_path_buf()], None, Vec::new());
+    let harness = crate::harnesses::registry::registry().get("standin-limited-tools");
+
+    let entry = crate::harnesses::entry(harness.unwrap(), &search);
+
+    let reason = "runs without tools.";
+    let status = HarnessStatus::Limited {
+        reason: reason.into(),
+    };
+    let tools = ToolControl::Limited {
+        reason: reason.into(),
+    };
+    assert_eq!((entry.status.clone(), entry.tools.clone()), (status, tools));
+    assert_eq!(
+        control_sentence(&entry),
+        "Limited control: runs without tools."
+    );
+}
+
 #[test]
 fn u_shows_the_exact_command_and_updates_only_after_y() {
     let found = found();
