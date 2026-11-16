@@ -196,6 +196,7 @@ fn attach_failure(code: &str) -> BridgeError {
         "terminal_unavailable" => "terminal_unavailable",
         "terminal_pane_unknown" => "terminal_pane_unknown",
         "terminal_agent_unknown" => "terminal_agent_unknown",
+        "terminal_teammates_server_ended" => "terminal_teammates_server_ended",
         "terminal_agent_invalid" => "terminal_agent_invalid",
         "terminal_viewers_full" => "terminal_viewers_full",
         "terminal_attach_timeout" => "terminal_attach_timeout",
