@@ -898,7 +898,13 @@ impl<'a> Pass<'a> {
         match (wanted, ours) {
             (true, None) => self.make_ruleset(rule, &body),
             (true, Some(id)) => {
-                self.send(Verb::Put, &format!("rulesets/{id}"), Some(&body), &[200])
+                let path = format!("rulesets/{id}");
+                let live = self.get(&path)?;
+                if live.status != 200 {
+                    return Ok(refused(&live));
+                }
+                let live: Value = api::json(&live)?;
+                self.send(Verb::Put, &path, Some(&kept(&live, &body)), &[200])
             }
             (false, Some(id)) => self.drop_ruleset(rule, id),
             (false, None) => Ok(GitHubRuleState::Applied),
@@ -1196,6 +1202,59 @@ fn fields(rule: GitHubRule, wanted: bool) -> Value {
 /// The body of the CrazyAgent ruleset for one rule: active and with no bypass, on the
 /// default branch, or on every tag for release tags. Inputs: the rule, its ruleset name,
 /// the rules on and the CI's check names. Output: the JSON body.
+/// The body that puts CrazyAgent's rule into its ruleset as GitHub holds it now, so what
+/// the owner set on github.com stays (rv-secreview gh-s7 F1): the name, bypass list,
+/// branches and every rule there are kept, a rule type CrazyAgent's body lists is added
+/// when missing, and only the parameters CrazyAgent's switches decide change. Enforcement
+/// is active, the switch's own meaning. Inputs: the live ruleset and CrazyAgent's body.
+fn kept(live: &Value, ours: &Value) -> Value {
+    const OWN: [&str; 2] = [
+        "required_review_thread_resolution",
+        "required_status_checks",
+    ];
+    let mut body = ours.clone();
+    for key in ["name", "bypass_actors", "conditions"] {
+        if let Some(value) = live.get(key) {
+            body[key] = value.clone();
+        }
+    }
+    let mut rules: Vec<Value> = live
+        .get("rules")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let wanted = ours["rules"]
+        .as_array()
+        .expect("CrazyAgent's ruleset body lists its rules");
+    for want in wanted {
+        let Some(held) = rules
+            .iter_mut()
+            .find(|held| held.get("type") == want.get("type"))
+        else {
+            rules.push(want.clone());
+            continue;
+        };
+        let Some(parameters) = want.get("parameters").and_then(Value::as_object) else {
+            continue;
+        };
+        if held.get("parameters").and_then(Value::as_object).is_none() {
+            held["parameters"] = Value::Object(parameters.clone());
+            continue;
+        }
+        let theirs = held["parameters"]
+            .as_object_mut()
+            .expect("the parameters were checked above");
+        for key in OWN {
+            if let Some(value) = parameters.get(key) {
+                theirs.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    assert!(rules.len() >= wanted.len());
+    body["rules"] = Value::Array(rules);
+    body
+}
+
 fn ruleset_body(
     rule: GitHubRule,
     name: &str,

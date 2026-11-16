@@ -447,6 +447,9 @@ pub(crate) fn propose_reply(
     }
 }
 
+const _: () = assert!(crate::github::proposals::OPEN_PER_PROJECT_MAX == 4);
+const _: () = assert!(crate::questions::PENDING_PER_PROJECT_MAX == 64);
+
 /// The plain reason an agent reads when its GitHub rule proposal was not raised. Input:
 /// the refusal code. Output: the sentence.
 fn propose_refusal(code: &str) -> &'static str {

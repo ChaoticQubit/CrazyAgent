@@ -5,6 +5,7 @@ use crate::questions::{Ask, Asker, EngineSource, QuestionKind};
 use crate::team::{MessageAuthor, MessageState};
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 #[cfg(all(test, target_os = "macos"))]
 mod proposals_tests;
@@ -216,6 +217,11 @@ pub(crate) fn decide(
     Ok(())
 }
 
+/// Held by one apply pass at a time in the engine (rv-code gh-s7 N2): two answers that
+/// settle together each start one, and a rule change reads the repository before it
+/// writes the repository's record, so two at once could lose one's record.
+static APPLYING: Mutex<()> = Mutex::new(());
+
 /// Applies every approved proposal, each with the rule, the on value and the repository
 /// kept at ask time, and tells each agent how it ended. A proposal is claimed before its
 /// change is sent, so two passes never send one twice, and no transaction is open while
@@ -226,6 +232,7 @@ pub fn apply_approved(
     db: &Connection,
     set: &mut dyn FnMut(&Path, &str, GitHubRule, bool) -> Result<GitHubRepoRules, EngineError>,
 ) -> Result<usize, EngineError> {
+    let _one = APPLYING.lock().unwrap_or_else(PoisonError::into_inner);
     table(db).map_err(|_| failure(UNAVAILABLE))?;
     let root = crate::sandbox::grants::data_root(db).ok_or_else(|| failure(UNAVAILABLE))?;
     let approved = rows(db, "status='approved'")?;
