@@ -2,7 +2,7 @@ use super::hold::{Held, Hold, HoldError, wanted};
 use super::power::{LID_REFUSED, LidAsk, LidReader};
 use super::state::{LidSupport, Want};
 use crazyagent_mac_power::client::{self, CallError};
-use crazyagent_mac_power::protocol::{FloorView, PinView, Reply, Request, View};
+use crazyagent_mac_power::protocol::{FloorView, PinView, Refusal, Reply, Request, View};
 use crazyagent_mac_power::service::{Daemon, PLIST_NAME, Service, Status};
 use std::io;
 use std::os::unix::net::UnixStream;
@@ -75,11 +75,13 @@ pub(super) struct LidPlatform {
 
 impl LidPlatform {
     /// Reads this Mac: `sw_vers -productVersion`, and the helper and its plist where the
-    /// app bundle puts them next to the running engine. Output: what it found.
+    /// app bundle puts them next to the running engine, its path resolved through any
+    /// link. Output: what it found.
     pub(super) fn this_mac() -> Self {
         let macos = super::power_macos::run(SW_VERS, &["-productVersion"])
             .and_then(|text| macos_major(&text));
         let folder = std::env::current_exe()
+            .and_then(std::fs::canonicalize)
             .ok()
             .and_then(|engine| engine.parent().map(Path::to_path_buf));
         let bundled = folder.is_some_and(|folder| {
@@ -143,13 +145,14 @@ pub(super) fn gate(connect: &mut dyn FnMut() -> io::Result<UnixStream>) -> io::R
 /// each reading it reads the daemon's status. While the daemon is enabled it renews the
 /// helper's lease when the lid is wanted, releases it once it is not, and otherwise reads
 /// the helper at most every `READ_EVERY_MS`, and at once after an approval. It never
-/// connects while the lid rule is Off or the daemon is not enabled.
+/// connects while the lid rule is Off or the daemon is not enabled. `lease_until_ms` is
+/// when the last lease the helper granted runs out at the latest, none with no lease.
 #[derive(Debug)]
 pub(super) struct LidLine {
     service: Box<dyn Service>,
     helper: Box<dyn HelperLine>,
     platform: LidPlatform,
-    holding: bool,
+    lease_until_ms: Option<i64>,
     read_ms: Option<i64>,
     last: Option<LidSupport>,
 }
@@ -168,7 +171,7 @@ impl LidLine {
             service,
             helper,
             platform,
-            holding: false,
+            lease_until_ms: None,
             read_ms: None,
             last: None,
         }
@@ -180,13 +183,13 @@ impl LidLine {
         assert!(now_ms > 0);
         assert!(ask.rule_on || !ask.wanted);
         if let Some(refused) = self.platform.refusal() {
-            assert!(!self.holding);
+            assert!(self.lease_until_ms.is_none());
             return refused;
         }
         let status = self.service.status();
         let enabled = status == Some(Status::Enabled);
         if !enabled {
-            self.holding = false;
+            self.lease_until_ms = None;
             self.read_ms = None;
             self.last = None;
         }
@@ -197,22 +200,25 @@ impl LidLine {
             Some(Status::RequiresApproval) => LidSupport::NeedsApproval,
             Some(Status::Enabled) => self.enabled(ask, now_ms),
         };
-        assert!(enabled || !self.holding);
+        assert!(enabled || self.lease_until_ms.is_none());
         assert!(!matches!(support, LidSupport::Off | LidSupport::IdleOnlyOnBattery));
         support
     }
 
-    /// The step while the daemon is enabled: holds when the lid is wanted, else lets go
-    /// of a lease and reads when a read is due and the rule is on. Inputs: the ask and the
-    /// time. Output: the lid support.
+    /// The step while the daemon is enabled: forgets a lease that ran out, holds when the
+    /// lid is wanted, else lets go of a lease and reads when a read is due and the rule is
+    /// on. Inputs: the ask and the time. Output: the lid support.
     fn enabled(&mut self, ask: LidAsk, now_ms: i64) -> LidSupport {
+        if self.lease_until_ms.is_some_and(|until| now_ms >= until) {
+            self.lease_until_ms = None;
+        }
         if ask.wanted {
             return self.hold(now_ms);
         }
-        if self.holding {
+        if self.lease_until_ms.is_some() {
             self.release();
         }
-        assert!(!self.holding);
+        assert!(self.lease_until_ms.is_none());
         if !ask.rule_on {
             return self.last.clone().unwrap_or_else(|| not_available(LID_UNREAD));
         }
@@ -225,31 +231,41 @@ impl LidLine {
         }
     }
 
-    /// Asks the helper for a lease of `LEASE_S`; a lease it gave counts as a read. A
-    /// refused hold reads the helper once and says why: the view's reason, or the refusal
-    /// when the view shows none. A lease that may still run stays marked for release.
-    /// Input: the time. Output: the lid support.
+    /// Asks the helper for a lease of `LEASE_S`; a lease it gave counts as a read. While
+    /// the last lease still runs, a renewal refused for `pmset` or with no answer keeps
+    /// the lid held, and the next reading tries again (threat model sections 9 and 10).
+    /// Any other refusal, or one once the lease ran out, reads the helper once and says
+    /// why: the view's reason, or the refusal when the view shows none. A first hold with
+    /// no answer counts as the last read. Input: the time. Output: the lid support.
     fn hold(&mut self, now_ms: i64) -> LidSupport {
+        let running = self.lease_until_ms.is_some_and(|until| now_ms < until);
         let support = match self.helper.call(&Request::Hold { lease_s: LEASE_S }) {
-            Ok(Reply::Held { .. }) => {
-                self.holding = true;
+            Ok(Reply::Held { lease_left_s }) if lease_left_s > 0 => {
+                let left_ms = i64::from(lease_left_s.min(LEASE_S)) * 1000;
+                self.lease_until_ms = Some(now_ms + left_ms);
                 self.read_ms = Some(now_ms);
                 LidSupport::Held
             }
-            Ok(Reply::Refused { reason }) => {
+            Ok(Reply::Refused { reason }) if reason != Refusal::Pmset || !running => {
                 eprintln!("keep awake: the lid helper refused the hold: {reason:?}");
                 match self.read(now_ms) {
                     LidSupport::Held => not_available(LID_REFUSED),
                     other => other,
                 }
             }
+            other if running => {
+                eprintln!("keep awake: a lid lease renewal failed, the lease runs: {other:?}");
+                LidSupport::Held
+            }
             other => {
                 eprintln!("keep awake: the lid helper's hold answer: {other:?}");
+                self.read_ms = Some(now_ms);
                 not_available(HELPER_UNANSWERED)
             }
         };
         self.last = Some(support.clone());
-        assert!(support != LidSupport::Held || self.holding);
+        let live = self.lease_until_ms.is_some_and(|until| now_ms < until);
+        assert!(support != LidSupport::Held || live);
         support
     }
 
@@ -272,8 +288,8 @@ impl LidLine {
     /// Ends this engine's lease. A release the helper did not accept is logged; the lease
     /// then runs out by itself within `LEASE_S`.
     fn release(&mut self) {
-        assert!(self.holding);
-        self.holding = false;
+        assert!(self.lease_until_ms.is_some());
+        self.lease_until_ms = None;
         match self.helper.call(&Request::Release) {
             Ok(Reply::Released) => {}
             other => eprintln!("keep awake: the lid helper's release answer: {other:?}"),
@@ -283,7 +299,7 @@ impl LidLine {
 
 impl Drop for LidLine {
     fn drop(&mut self) {
-        if self.holding {
+        if self.lease_until_ms.is_some() {
             self.release();
         }
     }
