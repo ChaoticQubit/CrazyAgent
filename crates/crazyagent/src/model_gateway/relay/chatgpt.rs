@@ -21,6 +21,11 @@ pub const RENEW_BACKOFF: Duration = Duration::from_secs(30);
 /// The code a run gets once its ChatGPT sign-in can no longer be renewed.
 pub const SIGN_IN_EXPIRED: &str = "chatgpt_sign_in_expired";
 
+/// The plain sentence for [`SIGN_IN_EXPIRED`], shown to the owner and put in the error the
+/// relay answers the harness with.
+pub const SIGN_IN_EXPIRED_LINE: &str =
+    "This ChatGPT sign-in has expired. Sign in again in Settings, Accounts.";
+
 const _: () = assert!(USABLE_MIN.as_secs() < RENEW_MARGIN.as_secs());
 
 /// One reading of a ChatGPT sign-in, held only in engine memory: the access token, the
