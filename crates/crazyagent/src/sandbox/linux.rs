@@ -971,7 +971,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    let (routes, bridge, _started, request) = match read_request(args) {
+    let (routes, bridge, started, request) = match read_request(args) {
         Ok(asked) => asked,
         Err(reason) => {
             eprintln!("crazyagent-landlock: {reason}");
@@ -1007,7 +1007,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             args,
         } => (policy, Some((program, args))),
     };
-    hold(&policy, launch, bridge.as_ref())
+    hold(&policy, launch, bridge.as_ref(), started)
 }
 
 /// Reads what the helper was asked: the route flags first ([`egress::leading`]), then the
@@ -1025,8 +1025,9 @@ fn read_request(args: Vec<OsString>) -> Result<Asked, String> {
     if routes.is_empty() || bridge.is_some() {
         Bridge::fits(bridge.as_ref(), &request)?;
     }
-    egress::fits(&routes, &request)?;
+    egress::fits(&routes, started, &request)?;
     assert!(routes.len() <= REMOTES_MAX);
+    assert!(started.is_none() || routes.is_empty());
     Ok((routes, bridge, started, request))
 }
 
@@ -1035,16 +1036,24 @@ fn read_request(args: Vec<OsString>) -> Result<Asked, String> {
 type Asked = (Vec<u16>, Option<Bridge>, Option<RawFd>, HelperRequest);
 
 /// Holds a policy on this process, then becomes the harness, or with a guard stays as its
-/// parent ([`supervise`]); for a probe it only tells
-/// whether this kernel held it. Under a bridge it first hands the bridged listeners to the
-/// broker, before any rule; the ports it would keep free are then ports of a network of
-/// its own, so the picked range is not asked. Inputs: the policy, the harness if any, and
-/// the bridge. Output: the exit code as [`helper_main`] gives it.
+/// parent ([`supervise`]); for a probe it only tells whether this kernel held it. In a
+/// routed nest it first waits for the go byte and refuses without it
+/// ([`egress::started`]). Under a bridge it then hands the bridged listeners to the broker,
+/// before any rule; the ports it would keep free are then ports of a network of its own, so
+/// the picked range is not asked. Inputs: the policy, the harness if any, the bridge and
+/// the go descriptor. Output: the exit code as [`helper_main`] gives it.
 fn hold(
     policy: &LandlockPolicy,
     launch: Option<(PathBuf, Vec<OsString>)>,
     bridge: Option<&Bridge>,
+    started: Option<RawFd>,
 ) -> ExitCode {
+    if let Some(fd) = started
+        && let Err(reason) = egress::started(fd)
+    {
+        eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
+    }
     if let Some(parent) = policy.die_with
         && let Err(reason) = die_with_parent(parent)
     {
@@ -1743,8 +1752,9 @@ fn nests(bwrap: &Path, helper: &Path, flags: &[OsString]) -> bool {
 /// Tells whether this machine gives a nested agent a network of its own that leaves only
 /// through its route ports: slirp4netns and the `iptables` programs are at their fixed
 /// places, and the widest routed nest a launch asks for, one route port and one bridged
-/// port, starts the helper's probe inside it within [`ROUTE_PROBE_TIME_MAX`]. Inputs:
-/// bubblewrap and the helper. Output: true only when that probe exits 0.
+/// port, starts the helper's probe inside it within [`ROUTE_PROBE_TIME_MAX`]; that probe
+/// passes only on the setup child's go byte ([`egress::started`]). Inputs: bubblewrap and
+/// the helper. Output: true only when that probe exits 0.
 fn routes(bwrap: &Path, helper: &Path) -> bool {
     let tools = SLIRP_PATHS
         .iter()

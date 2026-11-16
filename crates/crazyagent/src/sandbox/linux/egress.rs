@@ -123,12 +123,24 @@ pub(super) fn leading(args: Vec<OsString>) -> Result<(Vec<u16>, Vec<OsString>), 
     Ok((ports, rest.collect()))
 }
 
-/// Tells whether a request may come with these route ports: only a nest whose bubblewrap
-/// unshares the network right after its fixed arguments takes them, so no agent is routed
-/// on this computer's network. Inputs: the ports, empty for none, and the request. Output:
-/// Ok, or the reason.
-pub(super) fn fits(routes: &[u16], request: &HelperRequest) -> Result<(), String> {
+/// Tells whether a request may come with these route ports and this go descriptor: only a
+/// nest whose bubblewrap unshares the network right after its fixed arguments takes ports,
+/// so no agent is routed on this computer's network, and only a probe or a nested run
+/// inside one takes the descriptor. Inputs: the ports, empty for none, the descriptor and
+/// the request. Output: Ok, or the reason.
+pub(super) fn fits(
+    routes: &[u16],
+    started: Option<RawFd>,
+    request: &HelperRequest,
+) -> Result<(), String> {
     assert!(routes.len() <= REMOTES_MAX);
+    if started.is_some() {
+        return match request {
+            HelperRequest::Probe { .. } => Ok(()),
+            HelperRequest::Run { policy, .. } if policy.nested => Ok(()),
+            _ => Err(format!("{ROUTE_FD} leads only a probe or a nested run in a routed nest")),
+        };
+    }
     if routes.is_empty() {
         return Ok(());
     }
@@ -176,20 +188,28 @@ pub(super) fn request(args: Vec<OsString>) -> Result<HelperRequest, String> {
 }
 
 /// What stage 1 keeps open for bubblewrap until it becomes it: the write end bubblewrap
-/// writes its info to, the read end its child blocks on, and the read end of the resolver
-/// file. Each closes on exec until [`Ends::hand_over`].
+/// writes its info to, the read end its child blocks on, a second read end of that pipe
+/// for stage 2's go byte, and the read end of the resolver file. Each closes on exec until
+/// [`Ends::hand_over`].
 pub(super) struct Ends {
     info: PipeWriter,
     block: PipeReader,
+    go: PipeReader,
     resolver: PipeReader,
 }
 
 impl Ends {
-    /// Lets bubblewrap inherit the three ends, right before stage 1 becomes it and after
+    /// Lets bubblewrap inherit the four ends, right before stage 1 becomes it and after
     /// every child stage 1 starts, so no other process holds them. Output: Ok, or the
     /// reason.
     pub(super) fn hand_over(&self) -> Result<(), String> {
-        for end in [self.info.as_fd(), self.block.as_fd(), self.resolver.as_fd()] {
+        let ends = [
+            self.info.as_fd(),
+            self.block.as_fd(),
+            self.go.as_fd(),
+            self.resolver.as_fd(),
+        ];
+        for end in ends {
             rustix::io::fcntl_setfd(end, rustix::io::FdFlags::empty())
                 .map_err(|error| format!("the agent's network: {error}"))?;
         }
@@ -198,25 +218,27 @@ impl Ends {
 }
 
 /// Opens the routed network from stage 1: the info, block and resolver pipes, the resolver
-/// file written whole into its pipe, and the setup child started on the other two ends
-/// with this process as the one it dies with. Inputs: the route ports and the nest's
-/// arguments. Output: the ends and the arguments with the descriptor flags ([`insert`]);
-/// or the reason.
+/// file written whole into its pipe, the arguments with the descriptor flags ([`insert`])
+/// and the go flag for this helper ([`inner`]), then the setup child started on the other
+/// two ends with this process as the one it dies with. Inputs: the route ports and the
+/// nest's arguments. Output: the ends and the arguments; or the reason.
 pub(super) fn open(ports: &[u16], args: &[OsString]) -> Result<(Ends, Vec<OsString>), String> {
     assert!(!ports.is_empty() && ports.len() <= REMOTES_MAX);
     let failed = |error: std::io::Error| format!("the agent's network: {error}");
     let (info_read, info) = std::io::pipe().map_err(failed)?;
     let (block, block_write) = std::io::pipe().map_err(failed)?;
+    let go = block.try_clone().map_err(failed)?;
     let (resolver, mut resolver_write) = std::io::pipe().map_err(failed)?;
     let text = resolver_text(&host_resolver());
     assert!(text.len() <= RESOLVER_TEXT_BYTES_MAX);
     resolver_write.write_all(text.as_bytes()).map_err(failed)?;
     drop(resolver_write);
     let fds = [info.as_raw_fd(), block.as_raw_fd(), resolver.as_raw_fd()];
-    if fds.iter().any(|fd| *fd <= 2) {
+    if fds.iter().any(|fd| *fd <= 2) || go.as_raw_fd() <= 2 {
         return Err("the agent's network: a standard descriptor was closed".into());
     }
     let helper = std::env::current_exe().map_err(failed)?;
+    let args = inner(&insert(args, fds), go.as_raw_fd(), &helper)?;
     let mut setup = Command::new(&helper);
     setup
         .arg(EGRESS)
@@ -228,11 +250,11 @@ pub(super) fn open(ports: &[u16], args: &[OsString]) -> Result<(Ends, Vec<OsStri
         .stderr(Stdio::inherit());
     crate::spawn_gate::spawn(&mut setup).map_err(failed)?;
     drop(setup);
-    let args = insert(args, fds);
     Ok((
         Ends {
             info,
             block,
+            go,
             resolver,
         },
         args,
@@ -253,10 +275,11 @@ fn host_resolver() -> String {
 }
 
 /// The setup child's work, outside the sandbox: it joins the agent's namespaces, starts
-/// slirp4netns, applies the rules and reads them back, and only then lets bubblewrap start
-/// the agent; a refused or failed setup writes no block byte and kills the waiting agent
-/// ([`stop`]). Inputs: the stage-1 process id and the route ports. Output: the exit code,
-/// 3 when the network could not be built, which leaves the agent unstarted.
+/// slirp4netns, applies the rules and reads them back, drops its capabilities, and only
+/// then writes two bytes, one for bubblewrap's block and the go byte stage 2 waits on
+/// ([`started`]); a refused or failed setup writes neither, so stage 2 refuses, and a
+/// failed one also kills the waiting agent ([`stop`]). Inputs: the stage-1 process id and
+/// the route ports. Output: the exit code, 3 when the network could not be built.
 pub(super) fn setup(parent: u32, ports: &[u16]) -> ExitCode {
     assert!(parent > 1 && !ports.is_empty() && ports.len() <= REMOTES_MAX);
     let child = match nest_child(parent) {
@@ -269,7 +292,7 @@ pub(super) fn setup(parent: u32, ports: &[u16]) -> ExitCode {
     let built = build(child, ports).and_then(|network| {
         let mut block = std::io::stdout().lock();
         block
-            .write_all(&[BLOCK])
+            .write_all(&[BLOCK, GO])
             .and_then(|()| block.flush())
             .map_err(|error| format!("the block pipe: {error}"))?;
         Ok(network)
@@ -290,8 +313,9 @@ pub(super) fn setup(parent: u32, ports: &[u16]) -> ExitCode {
 
 /// Checks that the setup child runs as stage 1's child for stage 1's own bubblewrap: its
 /// input and output are pipes, it dies with `parent`, bubblewrap's info names a child of
-/// `parent`, and `parent` runs one of the fixed bubblewraps. A refusal kills nothing.
-/// Input: the stage-1 process id. Output: bubblewrap's child, or the reason.
+/// `parent`, and `parent` runs one of the fixed bubblewraps. A refusal kills nothing and
+/// writes no go byte, so stage 2 starts no agent. Input: the stage-1 process id. Output:
+/// bubblewrap's child, or the reason.
 fn nest_child(parent: u32) -> Result<u32, String> {
     let fifo = |stat: rustix::io::Result<rustix::fs::Stat>| {
         stat.is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Fifo)
@@ -779,8 +803,17 @@ pub(super) fn placed(args: &[OsString]) -> Result<(), String> {
 /// starts there without the go byte. Inputs: the nest's arguments, the descriptor and this
 /// helper. Output: the arguments with the flag, or the reason.
 pub(super) fn inner(args: &[OsString], fd: RawFd, helper: &Path) -> Result<Vec<OsString>, String> {
-    let _ = (args, fd, helper);
-    Err(format!("{ROUTE_FD} is not written yet"))
+    assert!(fd > 2);
+    let Some(at) = super::bridge::own_command(args, helper) else {
+        return Err(format!("{ROUTE_FD} needs this helper as the nest's command"));
+    };
+    let mut written = args[..=at].to_vec();
+    written.push(ROUTE_FD.into());
+    written.push(fd.to_string().into());
+    written.extend_from_slice(&args[at + 1..]);
+    assert_eq!(written.len(), args.len() + 2);
+    assert_eq!(written[at + 1], ROUTE_FD);
+    Ok(written)
 }
 
 /// Splits the route flag that may follow the bridge flags at the head of stage 2's
@@ -788,7 +821,18 @@ pub(super) fn inner(args: &[OsString], fd: RawFd, helper: &Path) -> Result<Vec<O
 /// Output: the descriptor, none when no such flag leads, and the arguments after it; or the
 /// reason it is refused.
 pub(super) fn handed(args: Vec<OsString>) -> Result<(Option<RawFd>, Vec<OsString>), String> {
-    Ok((None, args))
+    let mut rest = args.into_iter().peekable();
+    if rest.next_if(|flag| flag == ROUTE_FD).is_none() {
+        return Ok((None, rest.collect()));
+    }
+    let fd = rest
+        .next()
+        .as_deref()
+        .and_then(OsStr::to_str)
+        .and_then(number::<RawFd>)
+        .filter(|fd| *fd > 2)
+        .ok_or_else(|| format!("{ROUTE_FD} needs a descriptor above 2"))?;
+    Ok((Some(fd), rest.collect()))
 }
 
 /// Waits inside the nest for the go byte, which the setup child writes only once the
@@ -796,8 +840,19 @@ pub(super) fn handed(args: Vec<OsString>) -> Result<(Option<RawFd>, Vec<OsString
 /// the harness never holds it. Input: the descriptor `--route-fd` names. Output: Ok on the
 /// go byte; [`ROUTE_NOT_BUILT`] on end of file, an error or any other byte.
 pub(super) fn started(fd: RawFd) -> Result<(), String> {
-    let _ = fd;
-    Ok(())
+    assert!(fd > 2);
+    let mut byte = [0u8; 1];
+    let read = loop {
+        match nix::unistd::read(fd, &mut byte) {
+            Err(nix::errno::Errno::EINTR) => {}
+            read => break read,
+        }
+    };
+    let closed = nix::unistd::close(fd);
+    match (read, closed) {
+        (Ok(1), Ok(())) if byte[0] == GO => Ok(()),
+        _ => Err(ROUTE_NOT_BUILT.into()),
+    }
 }
 
 #[cfg(test)]
