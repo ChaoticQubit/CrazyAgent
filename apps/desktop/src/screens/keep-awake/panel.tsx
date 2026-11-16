@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
-import { MINUTES_MAX, MINUTES_MIN, sendKeepAwake, type KeepAwakeAction, type KeepAwakeMode, type KeepAwakeView, type LidAction } from "../../api-keep-awake";
+import type { Result } from "../../api";
+import { MINUTES_MAX, MINUTES_MIN, saveKeepAwake, sendKeepAwake, type KeepAwakeAction, type KeepAwakeMode, type KeepAwakeView, type LidAction } from "../../api-keep-awake";
 import type { Loaded } from "../../state";
 import { Button, LoadError, NotReady, Skeleton, formatRoute } from "../../ui";
 import { APPROVAL_LINE, canEnd, canExtend, canStart, customMinutes, endsByItself, lidClosedLine, lidOffers, lidReason, panelLine, type LidPlace } from "./model";
@@ -124,29 +125,33 @@ export function KeepAwakePanelView({ view, now, custom, typed, busy, problem, on
   </section>;
 }
 
-/** The Keep awake panel: sends each action and the mode to the engine, one at a time, and
- * says what the engine refused. Inputs: the view the control read, now in milliseconds, the
- * retry of that read and the close action. Output: the panel. */
+/** The Keep awake panel: sends each action to the engine, one at a time, lays the picked mode
+ * over the settings the engine holds at that moment, and says what the engine refused.
+ * Inputs: the view the control read, now in milliseconds, the retry of that read and the
+ * close action. Output: the panel. */
 export function KeepAwakePanel({ view, now, onRetry, onClose }: { view: Loaded<KeepAwakeView>; now: number; onRetry: () => void; onClose: () => void }) {
   const [custom, setCustom] = useState(false);
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
-  async function send(action: KeepAwakeAction): Promise<boolean> {
+  async function run(change: () => Promise<Result<void>>): Promise<boolean> {
     if (busy) return false;
     setBusy(true);
     setProblem("");
-    const result = await sendKeepAwake(action);
+    const result = await change();
     setBusy(false);
     if (result.kind === "error") setProblem(result.message);
     if (result.kind === "not_ready") setProblem("The engine is not ready yet. Try again.");
     return result.kind === "ok";
   }
+  function send(action: KeepAwakeAction): Promise<boolean> {
+    return run(() => sendKeepAwake(action));
+  }
   async function start(minutes: number) {
     if (await send({ start: { minutes } })) { setCustom(false); setTyped(""); }
   }
   function mode(picked: KeepAwakeMode) {
-    if (view.kind === "ok" && picked !== view.value.settings.mode) void send({ set: { settings: { ...view.value.settings, mode: picked } } });
+    if (view.kind === "ok" && picked !== view.value.settings.mode) void run(() => saveKeepAwake((stored) => ({ ...stored, mode: picked })));
   }
   return <KeepAwakePanelView view={view} now={now} custom={custom} typed={typed} busy={busy} problem={problem}
     onStart={(minutes) => void start(minutes)} onCustom={() => setCustom(!custom)} onType={(text) => { setTyped(text); setProblem(""); }}

@@ -83,6 +83,8 @@ export const SAVE_ATTEMPTS = 3;
 /** The engine's sentence once another window saved first on every attempt, as the TUI says it. */
 export const KEEP_AWAKE_STALE = "Keep awake changed in another window meanwhile. Try again.";
 
+const STALE = "stale_revision";
+
 /** The window event that says Keep awake changed here, so the control reads at once. */
 export const KEEP_AWAKE_CHANGED = "crazyagent:keep-awake-changed";
 
@@ -158,7 +160,12 @@ export async function sendKeepAwake(action: KeepAwakeAction): Promise<Result<voi
  * most `SAVE_ATTEMPTS` times, then says so. Input: the lay from the read settings to the sent
  * ones. Output: nothing, or why it was not saved. */
 export async function saveKeepAwake(lay: (stored: KeepAwakeSettings) => KeepAwakeSettings): Promise<Result<void>> {
-  const fresh = await loadKeepAwake();
-  if (fresh.kind !== "ok") return fresh;
-  return sendKeepAwake({ set: { settings: lay(fresh.value.settings), version: 0 } });
+  for (let attempt = 1; attempt <= SAVE_ATTEMPTS; attempt += 1) {
+    const fresh = await loadKeepAwake();
+    if (fresh.kind !== "ok") return fresh;
+    const settings = { ...fresh.value.settings, ...lay(fresh.value.settings) };
+    const result = await sendKeepAwake({ set: { settings, version: fresh.value.version } });
+    if (result.kind !== "error" || result.code !== STALE) return result;
+  }
+  return { kind: "error", code: STALE, message: KEEP_AWAKE_STALE };
 }

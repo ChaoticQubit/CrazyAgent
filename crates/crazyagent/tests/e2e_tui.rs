@@ -2621,7 +2621,11 @@ mod keep_awake {
     /// settings after the save; panics when the page or the save never shows.
     fn saved_after(seed: KeepAwakeSettings, row: usize) -> KeepAwakeSettings {
         assert!(row < 9);
-        let after = on_screen(&[KeepAwakeAction::Set { settings: seed }], |pty, _, _| {
+        let first = KeepAwakeAction::Set {
+            settings: seed,
+            version: 0,
+        };
+        let after = on_screen(&[first], |pty, _, _| {
             pty.keys(&["s"]);
             pty.until("s opens Settings / Keep awake", |screen| {
                 header_row(screen).contains("Settings  /  Keep awake")
@@ -3070,7 +3074,12 @@ mod keep_awake {
             pty.until("the pick waits for Enter", |screen| {
                 screen.contains("Save changes")
             });
-            change(runtime, engine, KeepAwakeAction::Set { settings: theirs });
+            let version = view(runtime, engine).version;
+            let action = KeepAwakeAction::Set {
+                settings: theirs,
+                version,
+            };
+            change(runtime, engine, action);
             pty.keys(&["Enter"]);
             pty.until("the save is confirmed", |screen| {
                 screen.contains("Keep awake settings saved.")

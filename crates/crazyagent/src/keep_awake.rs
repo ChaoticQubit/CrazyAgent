@@ -38,6 +38,7 @@ use crate::engine::EngineError;
 use crate::engine::owner::OwnerData;
 use crate::paths::Platform;
 use crate::protocol::Outcome;
+use crate::storage::versioned;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -107,6 +108,7 @@ pub fn refusal_words(code: &str) -> Option<&'static str> {
         "keep_awake_not_holding" => Some("Nothing is held right now."),
         "keep_awake_minutes_invalid" => Some("Enter whole minutes from 1 to 1440."),
         "keep_awake_no_lid_helper" => Some("Lid-closed hold is set up only on macOS."),
+        versioned::STALE_CODE => Some("Keep awake changed in another window meanwhile. Try again."),
         _ => None,
     }
 }
@@ -351,11 +353,11 @@ fn change(
     None
 }
 
-/// Builds the owner's view from the settings and the run state.
-fn view_of(settings: KeepAwakeSettings, stored: &Stored) -> KeepAwakeView {
+/// Builds the owner's view from the settings, their version and the run state.
+fn view_of(settings: KeepAwakeSettings, version: u64, stored: &Stored) -> KeepAwakeView {
     KeepAwakeView {
         settings,
-        version: 0,
+        version,
         state: stored.decision,
         lid_support: lid_status(&settings, &stored.sensors),
         lid_platform: stored.sensors.lid_support.clone(),
@@ -388,6 +390,7 @@ fn evaluated(
     assert!(connection.is_autocommit());
     let tx =
         Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)?;
+    let version = settings_version(&tx)?;
     let settings = settings::load(&tx)?;
     let (mut stored, dirty) = load_state(&tx)?;
     let before = stored.clone();
@@ -402,42 +405,59 @@ fn evaluated(
     }
     tx.commit().map_err(error)?;
     assert!(stored.lid_order.is_none_or(|order| order.number > 0));
-    Ok((view_of(settings, &stored), stored.lid_order))
+    Ok((view_of(settings, version, &stored), stored.lid_order))
 }
 
 /// Applies one owner change (DEC-167): a timer start, a timer move, End, or new settings,
 /// then evaluates at once so the next read shows it, and marks the state for the keeper.
-/// Inputs: the open transaction, the change and the time. Output: `Applied`, a rejection
-/// with its plain code, or `keep_awake_minutes_invalid` for minutes out of bounds.
+/// A settings save names the settings version its client read and is refused as stale when
+/// another save landed since, before anything is written (KA25). Inputs: the open
+/// transaction, the change and the time. Output: `Applied`, a rejection with its plain code,
+/// or `keep_awake_minutes_invalid` for minutes out of bounds.
 pub(crate) fn apply(
-    connection: &Connection,
+    tx: &Transaction<'_>,
     action: &KeepAwakeAction,
     now_ms: i64,
 ) -> Result<Outcome, EngineError> {
     assert!(now_ms > 0);
     action.validate()?;
-    let mut settings = settings::load(connection)?;
-    let (mut stored, _) = load_state(connection)?;
+    let mut settings = settings::load(tx)?;
+    let (mut stored, _) = load_state(tx)?;
     let before = stored.clone();
     if let Some(code) = change(action, &mut settings, &mut stored, now_ms) {
         return Ok(Outcome::Rejected { code: code.into() });
     }
-    if matches!(action, KeepAwakeAction::Set { .. }) {
-        settings::save(connection, &settings)?;
+    if let KeepAwakeAction::Set { version, .. } = action {
+        let item = versioned::keep_awake_settings_item();
+        if versioned::owner_write(tx, &item, *version)?.is_err() {
+            return Ok(Outcome::Rejected {
+                code: versioned::STALE_CODE.into(),
+            });
+        }
+        settings::save(tx, &settings)?;
     }
-    let work = work::count(connection)?;
+    let work = work::count(tx)?;
     advance(&settings, &mut stored, work, now_ms);
-    save_state(connection, &stored, true)?;
-    noted(connection, &settings, &before, &stored, now_ms);
+    save_state(tx, &stored, true)?;
+    noted(tx, &settings, &before, &stored, now_ms);
     Ok(Outcome::Applied)
 }
 
-/// Reads the owner's view without evaluating: the settings and the last stored run state.
-/// Input: the engine database, writable or read-only. Output: the view.
+/// Reads the version of the owner's Keep awake settings, 0 before the first save. Read
+/// before the settings themselves, so a save racing the read can only make the next save
+/// stale, never let it pass over settings it did not see. Input: the engine database.
+/// Output: the version.
+fn settings_version(connection: &Connection) -> Result<u64, EngineError> {
+    Ok(versioned::current(connection, &versioned::keep_awake_settings_item())?.version)
+}
+
+/// Reads the owner's view without evaluating: the settings, their version and the last
+/// stored run state. Input: the engine database, writable or read-only. Output: the view.
 pub fn view(connection: &Connection) -> Result<KeepAwakeView, EngineError> {
+    let version = settings_version(connection)?;
     let settings = settings::load(connection)?;
     let (stored, _) = load_state(connection)?;
-    Ok(view_of(settings, &stored))
+    Ok(view_of(settings, version, &stored))
 }
 
 /// The owner read of Keep awake. Input: the open transaction. Output: the view as owner
@@ -458,6 +478,7 @@ fn hold_failed(connection: &Connection, now_ms: i64) -> Result<KeepAwakeView, En
     assert!(now_ms > 0);
     let tx =
         Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)?;
+    let version = settings_version(&tx)?;
     let settings = settings::load(&tx)?;
     let (mut stored, dirty) = load_state(&tx)?;
     let before = stored.clone();
@@ -473,7 +494,7 @@ fn hold_failed(connection: &Connection, now_ms: i64) -> Result<KeepAwakeView, En
     noted(&tx, &settings, &before, &stored, now_ms);
     tx.commit().map_err(error)?;
     assert_eq!(stored.decision.want, Want::Nothing);
-    Ok(view_of(settings, &stored))
+    Ok(view_of(settings, version, &stored))
 }
 
 /// Undoes one persistent change an earlier engine recorded. No kind of change exists yet,

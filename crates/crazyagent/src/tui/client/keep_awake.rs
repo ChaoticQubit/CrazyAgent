@@ -4,6 +4,7 @@ use crate::keep_awake::{
     BatteryFloor, Cap, DisplayAwake, Grace, HeatEnd, HeatNotice, KeepAwakeAction,
     KeepAwakeSettings, KeepAwakeView, LidDisplay, LidRule, Mode,
 };
+use crate::storage::versioned::STALE_CODE;
 
 /// The options picked on a screen and not saved yet, one per setting; none leaves a
 /// setting as the engine holds it. A save lays them over the settings read at that moment,
@@ -47,7 +48,7 @@ impl Picks {
     pub(in crate::tui) fn save(&self, view: &KeepAwakeView) -> KeepAwakeAction {
         KeepAwakeAction::Set {
             settings: self.over(view.settings),
-            version: 0,
+            version: view.version,
         }
     }
 }
@@ -56,13 +57,15 @@ impl Picks {
 /// client keeps saving first.
 pub(in crate::tui) const SAVE_ATTEMPTS: usize = 3;
 
+const OUTCOME_UNKNOWN: &str = "keep_awake_action_outcome_unknown";
+
 /// Whether a save reads and lays its picks again: only after the engine refused it because
 /// another save landed first, and while attempts remain. Inputs: the attempt's result and
 /// how many attempts ran. Output: true to read again.
 pub(in crate::tui) fn again(result: &Result<(), String>, attempts: usize) -> bool {
     assert!((1..=SAVE_ATTEMPTS).contains(&attempts));
-    let _ = result;
-    false
+    let beaten = matches!(result, Err(code) if code == STALE_CODE);
+    beaten && attempts < SAVE_ATTEMPTS
 }
 
 /// One Keep awake request a screen or the shell sends (DEC-167): read the view, make one
@@ -142,7 +145,7 @@ impl NativeOwner {
         lost: &mut bool,
     ) -> Result<KeepAwakeReply, String> {
         let controller = self.settings_controller()?;
-        let (action, generation) = match query {
+        let (picks, generation) = match query {
             KeepAwakeQuery::Read => {
                 return controller
                     .keep_awake()
@@ -150,24 +153,33 @@ impl NativeOwner {
                     .map(|view| KeepAwakeReply::View(Box::new(view)))
                     .map_err(|error| problem(&error, lost));
             }
-            KeepAwakeQuery::Act { action, generation } => (action, generation),
-            KeepAwakeQuery::Save { picks, generation } => {
-                let view = controller
-                    .keep_awake()
-                    .await
-                    .map_err(|error| problem(&error, lost))?;
-                (picks.save(&view), generation)
+            KeepAwakeQuery::Act { action, generation } => {
+                let reply = controller.keep_awake_action(action, generation).await;
+                return applied(reply, OUTCOME_UNKNOWN, lost).map(|()| KeepAwakeReply::Done);
             }
+            KeepAwakeQuery::Save { picks, generation } => (picks, generation),
         };
-        let reply = controller.keep_awake_action(action, generation).await;
-        applied(reply, "keep_awake_action_outcome_unknown", lost).map(|()| KeepAwakeReply::Done)
+        let mut attempts = 0;
+        loop {
+            let view = controller
+                .keep_awake()
+                .await
+                .map_err(|error| problem(&error, lost))?;
+            let reply = controller
+                .keep_awake_action(picks.save(&view), generation)
+                .await;
+            let result = applied(reply, OUTCOME_UNKNOWN, lost);
+            attempts += 1;
+            if !again(&result, attempts) {
+                return result.map(|()| KeepAwakeReply::Done);
+            }
+        }
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::storage::versioned::STALE_CODE;
     use crate::tui::screens::keep_awake::tests::resting;
 
     #[test]

@@ -147,6 +147,12 @@ pub fn account_schedule_item() -> Item {
     named("account-schedule".to_owned())
 }
 
+/// Names the versioned item of the owner's Keep awake settings, so a save from an older read
+/// is refused instead of writing back what another client changed (KA25).
+pub fn keep_awake_settings_item() -> Item {
+    named("keep-awake-settings".to_owned())
+}
+
 fn named(name: String) -> Item {
     assert!(Item::new(&name).is_ok());
     Item(name)
