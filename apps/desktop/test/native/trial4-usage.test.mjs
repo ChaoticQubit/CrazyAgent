@@ -41,6 +41,18 @@ test("a reset reads as the Metrics card words it, a time on the clock and a coun
     /account 1 of 1 Weekly: shows "Resets at 14:30", not when it resets/);
 });
 
+test("a card read over 5 h ago is not exercised and names its age, and a page of only such cards is not exercised (N-D16, leader 03:00)", () => {
+  const read = (age) => `Read from the provider ${age} ago`;
+  const stale = { ...card({ used: "0% used", reset: "Last read 14 h ago, so the next reset is not known" }), read: read("14 h") };
+  assert.equal(limitsVerdict([{ ...card(), read: read("6 min") }, stale]),
+    "1 accounts each show their 5-hour and weekly use and reset time; not exercised, read over 5 h ago: account 2 of 2 read 14 h ago");
+  assert.equal(limitsVerdict([card(), { ...card({ reset: "Next reset not known yet" }), read: read("10 d") }, { ...card(), read: read("5 h") }]),
+    "1 accounts each show their 5-hour and weekly use and reset time; not exercised, read over 5 h ago: account 2 of 3 read 10 d ago, account 3 of 3 read 5 h ago");
+  assert.throws(() => limitsVerdict([{ ...card({ reset: "Next reset not known yet" }), read: read("4 h") }]),
+    /account 1 of 1 5-hour: shows "Next reset not known yet", not when it resets/);
+  assert.throws(() => limitsVerdict([stale]), /not exercised: every account was read over 5 h ago: account 1 of 1 read 14 h ago/);
+});
+
 test("an API-key account's card is a valid reading, while an unreadable sign-in or only API-key accounts are not", async () => {
   const client = await import("../../src/api-usage.ts");
   const unread = { used: "Not reported", meter: false, reset: "The provider hasn't reported this window." };

@@ -469,6 +469,77 @@ fn a_passed_manual_reset_is_not_marked_as_the_owners_time() {
     assert!(!five_hour.contains("(your time)"), "{all}");
 }
 
+/// N-D16 (leader 03:00): an account read over 5 h ago, whose 5-hour window has reset since,
+/// says on that line when it was last read, not that the next reset is unknown; a read 4 h
+/// old keeps the old words, a reset the owner set still shows, and the weekly line is as
+/// before.
+#[test]
+fn a_five_hour_line_read_over_five_hours_ago_says_when_it_was_read() {
+    let ctx = ctx(100, 40);
+    let line = |limits: AccountLimits, label: &str| {
+        let shown = UsageReport {
+            limits: vec![limits],
+            ..report()
+        };
+        let all = text(&summary(
+            &shown,
+            UsageRange::Today,
+            &names(),
+            NOW,
+            0,
+            96,
+            &ctx,
+        ))
+        .join("\n");
+        all.lines()
+            .find(|line| line.trim_start().starts_with(label))
+            .map(str::to_owned)
+            .unwrap_or_else(|| panic!("the {label} line shows: {all}"))
+    };
+    let lapsed = LimitWindow {
+        used_percent: 34.4,
+        resets_at_ms: Some(NOW - 12 * HOUR),
+    };
+    let mut stale = limits(None);
+    stale.observed_ms = Some(NOW - 14 * HOUR);
+    stale.five_hour = Some(lapsed);
+    stale.weekly = Some(LimitWindow {
+        used_percent: 30.0,
+        resets_at_ms: None,
+    });
+    let read = ago(NOW - 14 * HOUR, NOW, 0);
+    let five_hour = line(stale.clone(), "5-hour");
+    assert!(
+        five_hour.ends_with(&format!(
+            "0% used  Last read {read}, so the next reset is not known"
+        )),
+        "{five_hour}"
+    );
+    assert!(
+        line(stale.clone(), "Weekly").ends_with("30% used  Next reset not known yet"),
+        "only the 5-hour line names when it was read"
+    );
+
+    let mut fresh = limits(None);
+    fresh.observed_ms = Some(NOW - 4 * HOUR);
+    fresh.five_hour = Some(LimitWindow {
+        used_percent: 12.0,
+        resets_at_ms: None,
+    });
+    assert!(
+        line(fresh, "5-hour").ends_with("12% used  Next reset not known yet"),
+        "a read under 5 h old keeps the words"
+    );
+
+    let mut owned = stale;
+    owned.five_hour_reset_override_ms = Some(NOW + 45 * MINUTE);
+    let five_hour = line(owned, "5-hour");
+    assert!(
+        five_hour.ends_with("Resets in 45 min (your time)"),
+        "{five_hour}"
+    );
+}
+
 /// R4 N-D16 follow-up: an account whose read failed before any window was read shows its
 /// cause first and each window as not read, pointing at that cause, never as a window the
 /// provider left out.
