@@ -486,6 +486,42 @@ impl Drop for StopOnDrop {
     }
 }
 
+/// One listed master turn's process on a blocking thread of its own, with the start report,
+/// the go signal and the stop flag its async side talks to it by. Dropping it, as when the
+/// turn's future is dropped at engine shutdown, sets the stop flag, so the guard lives as
+/// long as anything can still wait on the thread (T20 r1 code F3).
+struct ListedThread {
+    running: tokio::task::JoinHandle<ListedRun>,
+    opened: tokio::sync::oneshot::Receiver<Result<(u32, String), EngineError>>,
+    go: std::sync::mpsc::Sender<bool>,
+    stop: Arc<AtomicBool>,
+    _stopping: StopOnDrop,
+}
+
+impl ListedThread {
+    /// Starts one listed master turn's process on a blocking thread, which waits for the go
+    /// signal before the prompt. Input: the turn. Output: the thread and its signals.
+    fn start(turn: ListedTurn) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = StopOnDrop(Arc::clone(&stop));
+        let (started, opened) = tokio::sync::oneshot::channel();
+        let (go, going) = std::sync::mpsc::channel();
+        let signals = Signals {
+            stop: Arc::clone(&stop),
+            started,
+            go: going,
+        };
+        let running = tokio::task::spawn_blocking(move || run_listed(turn, signals));
+        Self {
+            running,
+            opened,
+            go,
+            stop,
+            _stopping: stopping,
+        }
+    }
+}
+
 /// Opens one listed master turn's process: takes the private home's lock, writes the
 /// turn's files there under it, reads the program's digest and starts the harness holding
 /// the relay. Inputs: the harness, the request, the hand-over, the relay and the instruction
@@ -725,17 +761,9 @@ impl OwnerRuntimeHandle {
         turn: ListedTurn,
         (runtime_ref, capture_ref): (RequestId, RequestId),
     ) -> Result<MasterRuntimeObservation, EngineError> {
-        let stop = Arc::new(AtomicBool::new(false));
-        let _stopping = StopOnDrop(Arc::clone(&stop));
-        let (started, opened) = tokio::sync::oneshot::channel();
-        let (go, going) = std::sync::mpsc::channel();
-        let signals = Signals {
-            stop: Arc::clone(&stop),
-            started,
-            go: going,
-        };
-        let mut running = tokio::task::spawn_blocking(move || run_listed(turn, signals));
-        let opened = opened.await.unwrap_or_else(|_| Err(failure(THREAD_LOST)));
+        let mut thread = ListedThread::start(turn);
+        let opened = (&mut thread.opened).await;
+        let opened = opened.unwrap_or_else(|_| Err(failure(THREAD_LOST)));
         let begun = match &opened {
             Ok((group, artifact)) => {
                 let runtime = MasterRuntimeView {
@@ -747,12 +775,13 @@ impl OwnerRuntimeHandle {
             }
             Err(_) => Ok(false),
         };
-        let _ = go.send(matches!(begun, Ok(true)));
+        let _ = thread.go.send(matches!(begun, Ok(true)));
+        let stop = &thread.stop;
         let mut cancelled = matches!(begun, Ok(false));
         let mut scope = None;
         let joined = loop {
             tokio::select! {
-                joined = &mut running => break joined,
+                joined = &mut thread.running => break joined,
                 () = tokio::time::sleep(INSPECT_INTERVAL), if !stop.load(Ordering::SeqCst) => {
                     let read = self.inspect_listed(prepared, turn_id, generation, custody);
                     match read.await {

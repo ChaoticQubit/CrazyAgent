@@ -808,4 +808,50 @@ exec /bin/sleep 60
         assert!(waited < Duration::from_secs(8), "{waited:?}");
         assert!(session.stop().is_ok());
     }
+
+    /// T20 r1 code F3: a listed master turn whose thread is dropped mid-turn, as its future
+    /// is at engine shutdown, stops its harness within the stop grace, as the guard the thread
+    /// holds sets its stop flag. Without that guard the stand-in sleeps on for 30 seconds and
+    /// the row fails; the go signal went first, so a closed channel cannot stand in for it.
+    #[tokio::test]
+    async fn a_listed_master_turn_dropped_mid_turn_stops_its_harness_in_its_grace() {
+        let turn = turn(false);
+        let lines = [chunk("hi"), "@standin sleep 30".into(), chunk("never")];
+        script(&turn, &lines);
+        let (folder, request) = (turn.folder, turn.request);
+        let state = request.account.home().join("standin");
+        let grace = request.limits.stop_grace;
+        let (handover, relay) = hand_over(standin(), &connection(false), None).unwrap();
+        let file = tempfile::tempfile_in(folder.path()).unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let listed = ListedTurn {
+            harness: standin(),
+            request,
+            handover,
+            relay,
+            instructions: STARTUP.into(),
+            prompt: "keep working".into(),
+            capture: Capture::new(file, 8192).unwrap(),
+        };
+        let mut thread = ListedThread::start(listed);
+        let opened = (&mut thread.opened).await.unwrap();
+        assert!(opened.is_ok(), "{:?}", opened.as_ref().err());
+        let (group, _) = opened.unwrap();
+        thread.go.send(true).unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while !state.join("turns").exists() {
+            assert!(Instant::now() < until, "the stand-in never began its turn");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        drop(thread);
+
+        let group = rustix::process::Pid::from_raw(i32::try_from(group).unwrap()).unwrap();
+        let until = Instant::now() + grace + Duration::from_secs(5);
+        while rustix::process::test_kill_process_group(group).is_ok() {
+            assert!(Instant::now() < until, "it outlived its dropped turn");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 }
