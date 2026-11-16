@@ -56,7 +56,8 @@ export function gatewayConfig(gateway: Gateway): McpConfig {
 /**
  * The gateway's tools in one host's registry: connected once, at the first turn start, and
  * closed with the host. A gateway that does not answer within `GATEWAY_CONNECT_MS`, or lists
- * more than `GATEWAY_TOOLS_MAX` tools, leaves the turn without its tools.
+ * more than `GATEWAY_TOOLS_MAX` tools, leaves the turn without its tools, and the turn says
+ * why once unless the turn itself was cancelled.
  */
 export class GatewayTools {
   names: readonly string[] = [];
@@ -66,6 +67,7 @@ export class GatewayTools {
   private readonly bus: EventBus;
   private manager: McpClientManager | null = null;
   private started = false;
+  private notice: string | null = null;
 
   constructor(gateway: Gateway, cwd: string, registry: ToolRegistry, bus: EventBus) {
     assert(isAbsolute(cwd), "host_gateway_invariant");
@@ -79,7 +81,8 @@ export class GatewayTools {
   async sync(signal: AbortSignal): Promise<void> {
     if (this.started) return;
     this.started = true;
-    assert(this.names.length === 0 && this.manager === null, "host_gateway_invariant");
+    assert(this.names.length === 0 && this.manager === null && this.notice === null, "host_gateway_invariant");
+    let notice: string | null = null;
     try {
       const [{ McpClientManager }, { McpToolRegistrar }] = await Promise.all([
         import("../../.local-state/tools/rcli-source/src/core/mcp/MCPClientManager.ts"),
@@ -87,19 +90,28 @@ export class GatewayTools {
       ]);
       this.manager = new McpClientManager(gatewayConfig(this.gateway), this.cwd);
       const result = await this.manager.initialize(AbortSignal.any([signal, AbortSignal.timeout(GATEWAY_CONNECT_MS)]));
+      const connected = this.manager.listServerStatuses().some((status) => status.name === GATEWAY_SERVER && status.status === "connected");
       const tools = result.tools.filter((tool) => tool.serverName === GATEWAY_SERVER);
-      if (tools.length !== result.tools.length || tools.length > GATEWAY_TOOLS_MAX) throw new Error("host_gateway_rejected");
+      if (tools.length > GATEWAY_TOOLS_MAX) notice = GATEWAY_TOOLS_LINE;
+      if (!connected || tools.length !== result.tools.length || tools.length > GATEWAY_TOOLS_MAX) throw new Error("host_gateway_rejected");
       this.names = new McpToolRegistrar(this.registry, this.bus).register({ tools, warnings: [] }).toolNames;
     } catch {
       this.names = [];
+      notice ??= GATEWAY_OFF_LINE;
     }
+    this.notice = signal.aborted ? null : notice;
     assert(this.names.length <= GATEWAY_TOOLS_MAX, "host_gateway_invariant");
+    assert(this.notice === null || this.names.length === 0, "host_gateway_invariant");
   }
 
   /** The line to say once in the turn when the gateway left it without its tools, read once.
    * A cancelled turn and a turn with the tools get none. Output: the line, or null. */
   takeNotice(): string | null {
-    return null;
+    const notice = this.notice;
+    this.notice = null;
+    assert(notice === null || notice === GATEWAY_OFF_LINE || notice === GATEWAY_TOOLS_LINE, "host_gateway_invariant");
+    assert(notice === null || this.started, "host_gateway_invariant");
+    return notice;
   }
 
   async close(): Promise<void> {

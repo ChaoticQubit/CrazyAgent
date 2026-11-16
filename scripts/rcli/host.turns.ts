@@ -21,6 +21,7 @@ messages: SdkMessageProjection | null;
 input: PendingInput | null;
 failure: ProviderFailure | null;
 };
+const HOST_NOTE_ID = "ca-host-note";
 const SDK_PROVIDER_ERROR = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63} request failed(?: \(HTTP (\d{3})\)|: HTTP (\d{3}))(?:: ([\s\S]*))?$/;
 /** Names the provider failure in an SDK turn error: the exact message the SDK's provider
  * clients write for an HTTP refusal, never text that only contains one. Input: the error
@@ -216,9 +217,17 @@ return [completed];
 /** Says one plain line of the host's own in the running turn, as a finished message of its
  * own beside the model's. Input: the line. Output: the message frames, or none when no
  * single turn is running. */
-note(_text: string): EventBody[] {
+note(text: string): EventBody[] {
 this.check();
-return [];
+if (this.disposed) reject();
+bounded(text, 4096);
+const live = [...this.turns.values()].filter((turn) => turn.sdkId !== null && !turn.ended);
+if (live.length !== 1) return [];
+const turn = live[0]!;
+assert(turn.messages !== null && turn.sdkId !== null, "host_turn_state_invariant");
+const frames = turn.messages.accept({ type: "assistant:message", turnId: turn.sdkId, messageId: HOST_NOTE_ID, text });
+assert(frames.length >= 3 && frames[0]?.kind === "message_started" && frames.at(-1)?.kind === "message_finished", "host_turn_state_invariant");
+return frames;
 }
 stop(): void {
 this.check();

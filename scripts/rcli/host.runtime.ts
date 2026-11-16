@@ -168,7 +168,13 @@ export class HostChannel {
 
   /** Writes one plain line of the host's own into the running turn's reply. Input: the line.
    * Output: none; a refused line fails the channel as a refused observation does. */
-  note(_text: string): void {}
+  note(text: string): void {
+    if (this.closed || this.signal.aborted) return;
+    try {
+      this.check();
+      this.publish(this.turns.note(text));
+    } catch { this.fail("host_callback_failed"); }
+  }
 
   complete(turnId: string, status: TurnStatus): void {
     if (this.closed || this.signal.aborted) return;
@@ -261,7 +267,7 @@ export async function runExecutable(argv: string[]): Promise<void> {
   const client = createAgentClient(config);
   const permissions = buildPermissionContext(config.cwd, "manual", false);
   if (permissions.mode !== "manual" || permissions.interactive || permissions.rules.allow.length !== 0) throw new Error("host_startup_failed");
-  const { controller, bus, gateway } = assembleClosedController({ config, client, permissions, sessionId: launch.sessionId, cwd: launch.cwd, homeDir: launch.homeDir, startupEnvironmentPrompt, ...(launch.gateway === undefined ? {} : { gateway: launch.gateway }) });
+  const { controller, bus, gateway } = assembleClosedController({ config, client, permissions, sessionId: launch.sessionId, cwd: launch.cwd, homeDir: launch.homeDir, startupEnvironmentPrompt, ...(launch.gateway === undefined ? {} : { gateway: launch.gateway, notice: (text: string) => channel.note(text) }) });
   assert((gateway === null) === (launch.gateway === undefined), "host_gateway_invariant");
   const channel = new HostChannel(process.stdout, launch.sessionId, launch.instanceId);
   const runs = new Set<Promise<void>>();
