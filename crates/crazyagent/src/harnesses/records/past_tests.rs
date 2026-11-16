@@ -655,3 +655,67 @@ fn a_relay_token_in_an_imported_message_is_redacted() {
         ]]
     );
 }
+
+/// DEC-180 Task 25a: a relay token is redacted before a record rule clips the text that
+/// holds it, so a token at the clip edge keeps none of its hex digits, in a jsonl-append
+/// line and in a json-rewrite document alike.
+#[test]
+fn a_relay_token_at_a_record_rule_clip_edge_keeps_none_of_its_digits() {
+    let home = Home::new();
+    let token = format!("crazyagent-relay-{}", "a1".repeat(32));
+    let content = format!("{token} ").repeat(800);
+    assert!(content.len() > crate::adapters::FIELD_BYTES_MAX);
+    let turn = [json!({"role": "user", "content": content})];
+    home.write(".standin/lines/s1.jsonl", &lines(&turn), OLD);
+    let document = serde_json::to_string(&turn).unwrap();
+    home.write(".standin/docs/s1.json", &document, OLD);
+
+    let appended = import(
+        &ruled("jsonl-append", ".standin/lines/*.jsonl"),
+        &home.path(),
+    )
+    .unwrap();
+    let rewritten = import(&ruled("json-rewrite", ".standin/docs/*.json"), &home.path()).unwrap();
+    for imported in [&appended, &rewritten] {
+        let kept = &imported.conversations[0].messages[0].text;
+        assert!(kept.contains(RELAY_REDACTED));
+        for (at, _) in kept.match_indices(TOKEN_PREFIX) {
+            let after = &kept[at + TOKEN_PREFIX.len()..];
+            assert!(!after.starts_with(|c: char| c.is_ascii_hexdigit()));
+        }
+    }
+}
+
+/// DEC-180 Task 25a: a record read up to its byte bound never keeps the line the bound cut,
+/// so a relay token at that edge keeps none of its hex digits; the lines before it are kept
+/// and the conversation says it was clipped.
+#[test]
+fn a_line_cut_by_the_byte_bound_is_not_kept_so_no_relay_token_is_half_kept() {
+    let home = Home::new();
+    let token = format!("crazyagent-relay-{}", "a1".repeat(32));
+    let kept = "#### first\n\nreply one\n";
+    let history = format!("{kept}#### key {token}\n");
+    home.write(".standin/cut.md", &history, OLD);
+    let manifest = manifest_of(
+        "markdown-history",
+        &conversations(".standin/cut.md"),
+        "",
+        "",
+    );
+    let edge = format!("{kept}#### key crazyagent-relay-a1a1a").len() as u64;
+
+    let imported = import_within(
+        &manifest,
+        &home.path(),
+        &Bounds {
+            record_bytes: edge,
+            ..Bounds::DEFAULT
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        said(&imported),
+        [vec![(Speaker::Input, "first"), (Speaker::Agent, "reply one")]]
+    );
+    assert!(imported.conversations[0].clipped);
+}
