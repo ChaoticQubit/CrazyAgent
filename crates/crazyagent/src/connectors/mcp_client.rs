@@ -265,4 +265,4 @@ impl McpSession {
 
 #[cfg(all(test, unix))]
 #[path = "mcp_client_tests.rs"]
-pub(super) mod tests;
+pub(crate) mod tests;

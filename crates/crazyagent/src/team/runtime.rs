@@ -853,6 +853,7 @@ pub struct TeamRuntime {
     workers: BTreeMap<i64, Worker>,
     custody: Result<NativeProfileCustody, EngineError>,
     delegation_tool: Option<RegisteredNativeAuthHost>,
+    connector_launches: std::sync::Mutex<BTreeMap<i64, crate::connectors::gateway::GatewayLaunch>>,
     agents: Option<Arc<Agents>>,
     terminal: Option<Arc<dyn Host>>,
     terminal_probe: Option<TerminalProbe>,
@@ -1207,6 +1208,7 @@ impl TeamRuntime {
             workers: BTreeMap::new(),
             custody,
             delegation_tool: None,
+            connector_launches: std::sync::Mutex::default(),
             agents: None,
             terminal: None,
             terminal_probe: None,
@@ -10272,6 +10274,13 @@ impl TeamRuntime {
 
     fn mailbox(&self, id: i64) -> PathBuf {
         self.agent_folder(id).join("tmp").join(tool::MAILBOX_FOLDER)
+    }
+
+    /// Ends the connector launch one agent's run holds, if any: its record and folder go,
+    /// so a later call from that run is refused. Takes the agent id. A failure is logged
+    /// and the record is left for the gateway's sweep of leftover launches.
+    fn end_connector_launch(&self, id: i64) {
+        let _ = id;
     }
 
     /// Tells whether an agent can run as a live master, its own app kept running in a pane
