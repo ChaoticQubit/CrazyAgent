@@ -1649,6 +1649,77 @@ mod tests {
     }
 
     #[test]
+    fn an_ide_back_from_its_own_window_is_placed_on_its_panel_again() {
+        let views = IdeViews::default();
+        let alpha = ProjectId::new("alpha").unwrap();
+        views.lock().loaded.insert(
+            "alpha".to_owned(),
+            kept_view("ide-616c706861-1", "http://127.0.0.1:41000/", PANEL),
+        );
+        assert!(!views.lock().kept(&alpha, PANEL).unwrap().resize);
+        views
+            .lock()
+            .went_out(&alpha, "ide-window-616c706861".to_owned());
+        assert!(
+            views.lock().kept(&alpha, PANEL).is_none(),
+            "in its own window it is not shown over the panel"
+        );
+        views.lock().out.remove("alpha");
+        assert!(
+            views.lock().kept(&alpha, PANEL).unwrap().resize,
+            "its own window gave it the whole frame, so the panel is placed again (#144 F1)"
+        );
+    }
+
+    #[test]
+    fn an_ide_back_from_its_own_window_leaves_one_other_in_panel_ide_to_drop() {
+        let views = IdeViews::default();
+        let alpha = ProjectId::new("alpha").unwrap();
+        let beta = ProjectId::new("beta").unwrap();
+        {
+            let mut held = views.lock();
+            held.loaded.insert(
+                "alpha".to_owned(),
+                kept_view("ide-616c706861-1", "http://127.0.0.1:41000/", PANEL),
+            );
+            held.loaded.insert(
+                "beta".to_owned(),
+                kept_view("ide-62657461-1", "http://127.0.0.1:41001/", PANEL),
+            );
+            held.out
+                .insert("alpha".to_owned(), own_window("ide-window-616c706861"));
+        }
+        assert!(
+            views.others(&beta).is_empty(),
+            "an IDE in its own window is left alone"
+        );
+        views.lock().out.remove("alpha");
+        let names: Vec<String> = views
+            .others(&alpha)
+            .iter()
+            .map(|project| project.as_str().to_owned())
+            .collect();
+        assert_eq!(
+            names,
+            ["beta"],
+            "back home, showing it drops the other in-panel IDE (#144 F3)"
+        );
+    }
+
+    #[test]
+    fn a_left_note_a_preload_gave_up_on_is_handed_to_the_next_show() {
+        let views = IdeViews::default();
+        let alpha = ProjectId::new("alpha").unwrap();
+        views.lock().keep_left(&alpha, "node".to_owned());
+        assert_eq!(
+            views.take_left(&alpha).as_deref(),
+            Some("node"),
+            "the engine named it once, to the preload, so the next show names it (#144 F4)"
+        );
+        assert_eq!(views.take_left(&alpha), None, "and only once");
+    }
+
+    #[test]
     fn a_left_note_kept_by_a_preload_is_handed_out_once() {
         let views = IdeViews::default();
         let alpha = ProjectId::new("alpha").unwrap();

@@ -542,12 +542,15 @@ test("showing a kept IDE asks the engine nothing, and a preload takes no focus a
   const show = command(lib, "desktop_ide_show");
   assert.match(show, /main_window\(&webview\)\?/, "only the main window may show it");
   assert.match(show, /ide::show_kept\(/);
+  assert.ok(show.indexOf("ide::show_kept(") < show.indexOf("drop_others("), "a kept show drops every other in-panel IDE, after the reveal (#144 F3)");
   assert.doesNotMatch(show, /read\(&state\)|lock\(&state\)|ide_open|workbench\(/, "no engine call and no token read on a show");
   const preload = command(lib, "desktop_ide_preload");
   assert.match(preload, /main_window\(&webview\)\?/, "only the main window may preload");
   assert.match(preload, /let Some\(\(ticket, turn\)\) = views\.begin_preload\(&project\) else \{\s*return Ok\(false\);\s*\};/, "a preload is an open, same ticket and turn, but none begins while an IDE is loaded or opening");
   assert.ok(preload.indexOf("views.begin_preload(&project)") < preload.indexOf("ide_open(project"), "the guard comes before any engine call");
   assert.ok(preload.indexOf("ide::preload(") >= 0 && preload.indexOf("ide::preload(") < preload.lastIndexOf("close_ide("), "a refused preload stops the server it started");
+  const open = command(lib, "desktop_ide_open");
+  assert.match(open, /views\.take_left\(&project\)/, "an open names a note a preload gave up on (#144 F4)");
   const build = read("src-tauri/build.rs");
   for (const name of ["desktop_ide_show", "desktop_ide_preload"]) assert.match(build, new RegExp(`"${name}"`), `${name} is listed`);
   assert.doesNotMatch(build, /"desktop_ide_close"/, "the page close is gone");
@@ -556,6 +559,7 @@ test("showing a kept IDE asks the engine nothing, and a preload takes no focus a
   const loading = body("pub fn preload(");
   assert.match(loading, /\.focused\(false\)/, "the preloaded webview never takes the focus");
   assert.doesNotMatch(loading, /set_focus|set_menu/, "nor the window's focus or the app menu");
+  assert.match(loading, /keep_left\(/, "a preload that gives way keeps the engine's one-shot note (#144 F4)");
   assert.ok(loading.indexOf("add_child(") >= 0 && loading.indexOf("add_child(") < loading.indexOf(".hide()"), "it is hidden as soon as it exists");
   const kept = body("pub fn show_kept");
   assert.ok(kept.indexOf("if kept.resize") >= 0 && kept.indexOf("if kept.resize") < kept.indexOf("set_bounds("), "a show resizes only when the panel moved");
