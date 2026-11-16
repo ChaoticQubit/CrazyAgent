@@ -19,6 +19,7 @@ const question = (extra = {}) => ({
 });
 const TABS = [...page.TABS.map((tab) => tab.id), "ide"];
 const FIXTURE = new URL("./fixtures/question-dock.mjs", import.meta.url).pathname;
+const READS = new URL("./fixtures/question-popup-reads.mjs", import.meta.url).pathname;
 const view = (extra = {}) => renderToStaticMarkup(createElement(popup.QuestionDock, {
   waiting: [question(), question({ id: 22, question: "Should checkout keep a guest option?", created_ms: NOW - 1_000 })],
   shown: true, now: NOW, busy: false, note: "", settled: 0, onAnswer: () => {}, onDismiss: () => {}, onOpenTab: () => {},
@@ -174,6 +175,22 @@ test("after an answer the keyboard goes to the next card's title, and after the 
   assert.deepEqual(seen.last.seen.answered, [1, 2]);
   assert.equal(seen.last.focus.id, "terminal", "with none left the keyboard returns to where the owner was");
   assert.equal(seen.last.seen.live, "");
+});
+
+test("a question answered on the Questions tab is gone from the pop-up as its tab shows again, not up to 5 s later", { timeout: 120_000 }, async () => {
+  const fixture = await bundle(READS);
+  const seen = await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    await evaluate("Fixture.mount()");
+    const before = await evaluate("Fixture.seen()");
+    await evaluate("Fixture.answerOnTheTab()");
+    return { before, after: await evaluate("Fixture.seen()") };
+  });
+  assert.deepEqual([seen.before.open, seen.before.title, seen.before.reads], [true, "A question for you", 1],
+    "one read at mount offers the waiting question");
+  assert.equal(seen.after.reads, 2, "the pop-up reads the questions once more as it shows again");
+  assert.equal(seen.after.open, false, "the question answered on the tab is not offered as waiting");
+  assert.equal(seen.after.live, "", "nothing is announced as waiting");
 });
 
 test("the pop-up and the Questions tab answer through one path: the same read, answer and dismiss commands", () => {
