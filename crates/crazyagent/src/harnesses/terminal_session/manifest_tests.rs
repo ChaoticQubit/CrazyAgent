@@ -294,7 +294,10 @@ fn a_stand_in_that_picks_its_own_session_id_is_named_by_its_record_and_resumed_b
     let agent = AgentId::new("manifest-own-id").unwrap();
     let until = Instant::now() + TURN_WAIT;
     while standin.host.alive().unwrap_or_default().contains(&agent) {
-        assert!(Instant::now() < until, "a pane with no record was left running");
+        assert!(
+            Instant::now() < until,
+            "a pane with no record was left running"
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
     let mut second = standin.start("manifest-own-id-again", Some(&conversation));
