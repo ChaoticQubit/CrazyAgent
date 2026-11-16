@@ -42,6 +42,40 @@ fn imp1035_claude_commands_use_only_official_auth_subcommands() {
     }
 }
 
+/// RV-DS241-205 N1: the renewal print turn runs with auto-memory off by both switches, as
+/// every other engine Claude Code launch does, and the sign-in commands carry neither.
+#[test]
+fn the_claude_renewal_turn_runs_with_auto_memory_off() {
+    let home = Path::new("/private/tmp/imp1035-profile");
+    let words: Vec<std::ffi::OsString> = vec!["/bin/sh".into(), "/private/tmp/cli.js".into()];
+    for action in [
+        ClaudeAuthCommand::Login,
+        ClaudeAuthCommand::Status,
+        ClaudeAuthCommand::Logout,
+        ClaudeAuthCommand::Renew,
+    ] {
+        let command = auth_command(&words, home, action).unwrap();
+        let renew = action == ClaudeAuthCommand::Renew;
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            args.windows(2).any(|pair| pair
+                == [
+                    std::ffi::OsStr::new("--settings"),
+                    std::ffi::OsStr::new("{\"autoMemoryEnabled\":false,\"disableAllHooks\":true}"),
+                ]),
+            renew,
+            "{action:?}"
+        );
+        let off = command.get_envs().any(|pair| {
+            pair == (
+                std::ffi::OsStr::new("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+                Some(std::ffi::OsStr::new("1")),
+            )
+        });
+        assert_eq!(off, renew, "{action:?}");
+    }
+}
+
 /// Every Claude Code auth child starts the launch words its custodian was handed, an
 /// interpreter and its first-line words before the script, never resolving a name itself.
 #[test]
