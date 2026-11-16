@@ -73,8 +73,9 @@ fn replying_standin(text: &str) -> String {
 }
 
 /// A git project `alpha` with one start commit, a queued research job on the stand-in ACP
-/// harness, and a runner that finds the stand-in script. Inputs: the engine root and the
-/// script. Output: the project folder, the runner, the jobs and the job.
+/// harness, and a runner that finds the stand-in script and reads the local provider as
+/// reached, as the stand-in replays its replies and never dials it. Inputs: the engine root
+/// and the script. Output: the project folder, the runner, the jobs and the job.
 fn listed_job(root: &EngineRoot, script: &str) -> (PathBuf, ResearchRunner, ResearchJobs, i64) {
     let folder = root.base.join("repo");
     fs::create_dir(&folder).unwrap();
@@ -96,6 +97,7 @@ fn listed_job(root: &EngineRoot, script: &str) -> (PathBuf, ResearchRunner, Rese
         },
     )
     .unwrap()
+    .with_reach(ProviderReach::new(|_, _| Ok(Vec::new()), |_| Ok(())))
     .with_harness_lookup(Arc::new(move |id: &str| {
         (id == "standin-acp").then(|| standin.clone())
     }));
