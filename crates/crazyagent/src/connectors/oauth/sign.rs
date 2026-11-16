@@ -1,4 +1,6 @@
-use super::{OAuthError, Pending, key_store, not_offered, own_ref, visible};
+use super::{
+    OAuthError, OWN_ID_BYTES_MAX, Pending, key_store, not_offered, own_ref, own_secret_ref, visible,
+};
 use crate::app_plugins::connector::{ConnectorSpec, OAuthSpec, Registration};
 use crate::app_plugins::http::{self, Config, Ended};
 use crate::app_plugins::store;
@@ -9,7 +11,7 @@ use crate::provider_reach::ProviderReach;
 use crate::storage::accounts::{self, PLUGIN_KEYS};
 use base64::Engine;
 use rusqlite::Connection;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -71,11 +73,19 @@ struct Flow {
     iss_promised: bool,
     token: url::Url,
     hosts: Vec<String>,
-    client_id: String,
+    client: Client,
     redirect: String,
     resource: String,
     verifier: SecretString,
     started: Instant,
+}
+
+/// The client a sign-in uses: its id, where its secret is saved when it has one, and
+/// whether the token endpoint takes that secret in the body rather than a Basic header.
+struct Client {
+    id: String,
+    secret: Option<CredentialRef>,
+    post: bool,
 }
 
 static FLOWS: Mutex<Vec<Flow>> = Mutex::new(Vec::new());
@@ -168,12 +178,14 @@ impl Reply {
 /// Sends one request through curl after the address check: the URL must be https to a
 /// declared host (the rows' stand-in is plain http to `127.0.0.1`), and curl is pinned to
 /// the public addresses looked up for it. A body goes only into the wiped config on
-/// curl's stdin, never to disk. Blocking. Inputs: the URL, its allowed hosts, the verb and
+/// curl's stdin, never to disk, and so does a client's Basic sign-in. Blocking. Inputs:
+/// the URL, its allowed hosts, the verb, the client id and secret for a Basic header, and
 /// the lookup. Output: the reply; a redirect, an oversized reply and a timeout are errors.
 fn request(
     url: &url::Url,
     hosts: &[String],
     verb: Verb<'_>,
+    basic: Option<(&str, &str)>,
     reach: &ProviderReach,
 ) -> Result<Reply, OAuthError> {
     let loopback = guard::checked(url, hosts).map_err(from_mcp)?;
@@ -206,6 +218,18 @@ fn request(
     ));
     if let Some(pins) = &pins {
         http::push_line(&mut config, "resolve", pins).map_err(|_| failed())?;
+    }
+    if let Some((id, secret)) = basic {
+        let mut user = String::with_capacity(3 * id.len());
+        user.extend(url::form_urlencoded::byte_serialize(id.as_bytes()));
+        let mut key = String::with_capacity(3 * secret.len());
+        key.extend(url::form_urlencoded::byte_serialize(secret.as_bytes()));
+        config.push("header = \"Authorization: Basic ");
+        let pushed = http::push_basic(&mut config, &user, &key);
+        let mut key = key.into_bytes();
+        key.fill(0);
+        pushed.map_err(|_| failed())?;
+        config.push("\"\n");
     }
     if let Verb::Json(body) | Verb::Form(body) = verb {
         http::push_line(&mut config, "data-raw", body).map_err(|_| failed())?;
@@ -321,7 +345,7 @@ fn protected_resource(
             declared.push(host.clone());
         }
     }
-    let probe = request(&mcp.url, &mcp.hosts, Verb::Json(PROBE), reach)?;
+    let probe = request(&mcp.url, &mcp.hosts, Verb::Json(PROBE), None, reach)?;
     let hint = (probe.status == 401)
         .then(|| {
             probe
@@ -352,7 +376,7 @@ fn protected_resource(
     };
     let mut found = None;
     for place in &places {
-        let reply = request(place, &declared, Verb::Get, reach)?;
+        let reply = request(place, &declared, Verb::Get, None, reach)?;
         if reply.status == 200
             && let Some(object) = reply.object()
         {
@@ -375,12 +399,17 @@ fn protected_resource(
     Ok((resource.to_owned(), issuer.to_owned()))
 }
 
-/// What a sign-in uses of the authorization server's metadata.
+/// What a sign-in uses of the authorization server's metadata: its issuer, whether answers
+/// carry `iss`, both endpoints, whether it takes client metadata documents, its
+/// registration endpoint, and whether its token endpoint takes a secret only in the body.
 struct Server {
     issuer: String,
     iss_promised: bool,
     authorize: url::Url,
     token: url::Url,
+    cimd: bool,
+    registration: Option<url::Url>,
+    post_only: bool,
 }
 
 /// Reads the authorization server's metadata (RFC 8414, then OpenID) on a declared OAuth
@@ -406,7 +435,7 @@ fn server(issuer: &str, oauth: &OAuthSpec, reach: &ProviderReach) -> Result<Serv
     }
     let mut found = None;
     for place in &places {
-        let reply = request(place, &oauth.hosts, Verb::Get, reach)?;
+        let reply = request(place, &oauth.hosts, Verb::Get, None, reach)?;
         if reply.status == 200
             && let Some(object) = reply.object()
         {
@@ -436,26 +465,143 @@ fn server(issuer: &str, oauth: &OAuthSpec, reach: &ProviderReach) -> Result<Serv
     if !s256 {
         return Err(OAuthError("connector_oauth_pkce_unsupported"));
     }
+    let registration = match metadata.get("registration_endpoint") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let text = value.as_str().ok_or_else(metadata_invalid)?;
+            Some(url::Url::parse(text).map_err(|_| metadata_invalid())?)
+        }
+    };
+    let methods: Vec<&str> = metadata
+        .get("token_endpoint_auth_methods_supported")
+        .and_then(Value::as_array)
+        .map(|methods| methods.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let yes = |key: &str| metadata.get(key) == Some(&Value::Bool(true));
     Ok(Server {
         issuer: issuer.to_owned(),
-        iss_promised: metadata.get("authorization_response_iss_parameter_supported")
-            == Some(&Value::Bool(true)),
+        iss_promised: yes("authorization_response_iss_parameter_supported"),
         authorize,
         token,
+        cimd: yes("client_id_metadata_document_supported"),
+        registration,
+        post_only: methods.contains(&"client_secret_post")
+            && !methods.contains(&"client_secret_basic"),
     })
 }
 
-/// The client id a sign-in uses: the owner's own OAuth app where the file lets the owner
-/// bring one and one is saved. Inputs: the engine root, connector and OAuth block.
-/// Output: the id, or `connector_oauth_needs_own_app`.
-fn client(root: &Path, name: &str, oauth: &OAuthSpec) -> Result<String, OAuthError> {
-    if oauth.registration.contains(&Registration::Own)
-        && let Some(id) =
-            accounts::read_key_in(root, PLUGIN_KEYS, &own_ref(name)?).map_err(|_| key_store())?
+fn saved(root: &Path, reference: &CredentialRef) -> Result<Option<SecretString>, OAuthError> {
+    accounts::read_key_in(root, PLUGIN_KEYS, reference).map_err(|_| key_store())
+}
+
+/// The client a sign-in uses, in this order where the file allows each: the owner's own
+/// OAuth app when saved, the app's client metadata document where the server takes one and
+/// the build has its address, then a client registered at this issuer (RFC 7591).
+/// Inputs: root, connector, OAuth block, server, document address, redirect and lookup.
+/// Output: the client, or `connector_oauth_needs_own_app`.
+fn client(
+    root: &Path,
+    name: &str,
+    oauth: &OAuthSpec,
+    server: &Server,
+    document: Option<&url::Url>,
+    redirect: &url::Url,
+    reach: &ProviderReach,
+) -> Result<Client, OAuthError> {
+    let allows = |way: Registration| oauth.registration.contains(&way);
+    if allows(Registration::Own)
+        && let Some(id) = saved(root, &own_ref(name)?)?
     {
-        return Ok(id.expose().to_owned());
+        let secret = own_secret_ref(name)?;
+        let has_secret = saved(root, &secret)?.is_some();
+        return Ok(Client {
+            id: id.expose().to_owned(),
+            secret: has_secret.then_some(secret),
+            post: server.post_only,
+        });
+    }
+    if allows(Registration::Cimd)
+        && server.cimd
+        && let Some(document) = document
+    {
+        return Ok(Client {
+            id: document.as_str().to_owned(),
+            secret: None,
+            post: false,
+        });
+    }
+    if allows(Registration::Dcr)
+        && let Some(endpoint) = &server.registration
+    {
+        return registered(root, name, oauth, server, endpoint, redirect, reach);
     }
     Err(OAuthError("connector_oauth_needs_own_app"))
+}
+
+/// The client registered for this connector at this issuer: the one saved, or a new
+/// public client registered once (RFC 7591) and saved, its secret too when the server
+/// gives one. Inputs: root, connector, OAuth block, server, registration endpoint,
+/// redirect and lookup. Output: the client, or why it could not be registered.
+fn registered(
+    root: &Path,
+    name: &str,
+    oauth: &OAuthSpec,
+    server: &Server,
+    endpoint: &url::Url,
+    redirect: &url::Url,
+    reach: &ProviderReach,
+) -> Result<Client, OAuthError> {
+    let id_ref = token_ref("client", name, &server.issuer)?;
+    let secret_ref = token_ref("secret", name, &server.issuer)?;
+    if let Some(id) = saved(root, &id_ref)? {
+        let has_secret = saved(root, &secret_ref)?.is_some();
+        return Ok(Client {
+            id: id.expose().to_owned(),
+            secret: has_secret.then_some(secret_ref),
+            post: server.post_only,
+        });
+    }
+    let body = json!({
+        "client_name": "CrazyAgent",
+        "redirect_uris": [redirect.as_str()],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    })
+    .to_string();
+    let reply = request(endpoint, &oauth.hosts, Verb::Json(&body), None, reach)?;
+    if !matches!(reply.status, 200 | 201) {
+        return Err(OAuthError("connector_oauth_refused"));
+    }
+    let made = reply.object().ok_or_else(metadata_invalid)?;
+    let id = made
+        .get("client_id")
+        .and_then(Value::as_str)
+        .filter(|id| visible(id, OWN_ID_BYTES_MAX))
+        .ok_or_else(metadata_invalid)?;
+    let secret = match made.get("client_secret") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .filter(|secret| visible(secret, crate::credentials::SECRET_BYTES_MAX))
+                .ok_or_else(metadata_invalid)?,
+        ),
+    };
+    match secret {
+        Some(secret) => {
+            accounts::replace_key_in(root, PLUGIN_KEYS, &secret_ref, secret.as_bytes().to_vec())
+        }
+        None => accounts::remove_key_in(root, PLUGIN_KEYS, secret_ref.as_str()),
+    }
+    .map_err(|_| key_store())?;
+    accounts::replace_key_in(root, PLUGIN_KEYS, &id_ref, id.as_bytes().to_vec())
+        .map_err(|_| key_store())?;
+    Ok(Client {
+        id: id.to_owned(),
+        secret: secret.is_some().then_some(secret_ref),
+        post: server.post_only,
+    })
 }
 
 /// Starts a sign-in with the connector's file given, as [`super::begin`] does for a trusted
@@ -473,14 +619,13 @@ pub(crate) fn begin_with(
     cimd: Option<&url::Url>,
     reach: &ProviderReach,
 ) -> Result<Pending, OAuthError> {
-    let _ = cimd;
     let oauth = spec.oauth.as_ref().ok_or_else(not_offered)?;
     if !loopback_redirect(redirect) {
         return Err(OAuthError("connector_oauth_redirect_invalid"));
     }
     let (resource, issuer) = protected_resource(spec, oauth, reach)?;
     let server = server(&issuer, oauth, reach)?;
-    let client_id = client(root, name, oauth)?;
+    let client = client(root, name, oauth, &server, cimd, redirect, reach)?;
     let mut scopes: Vec<&str> = oauth.scopes_read.iter().map(String::as_str).collect();
     if writes {
         for scope in &oauth.scopes_write {
@@ -498,7 +643,7 @@ pub(crate) fn begin_with(
         let mut query = authorize_url.query_pairs_mut();
         query
             .append_pair("response_type", "code")
-            .append_pair("client_id", &client_id)
+            .append_pair("client_id", &client.id)
             .append_pair("redirect_uri", redirect.as_str());
         if !scopes.is_empty() {
             query.append_pair("scope", &scopes.join(" "));
@@ -519,7 +664,7 @@ pub(crate) fn begin_with(
         iss_promised: server.iss_promised,
         token: server.token,
         hosts: oauth.hosts.clone(),
-        client_id,
+        client,
         redirect: redirect.as_str().to_owned(),
         resource,
         verifier,
@@ -606,16 +751,30 @@ fn redeem(
     if !visible(code, CODE_BYTES_MAX) {
         return Err(OAuthError("connector_oauth_code_invalid"));
     }
-    let body = url::form_urlencoded::Serializer::new(String::with_capacity(FORM_BYTES))
-        .append_pair("grant_type", "authorization_code")
+    let secret = match &flow.client.secret {
+        Some(reference) => {
+            Some(saved(root, reference)?.ok_or(OAuthError("connector_oauth_client_invalid"))?)
+        }
+        None => None,
+    };
+    let basic = secret.as_ref().filter(|_| !flow.client.post);
+    let mut form = url::form_urlencoded::Serializer::new(String::with_capacity(FORM_BYTES));
+    form.append_pair("grant_type", "authorization_code")
         .append_pair("code", code)
         .append_pair("redirect_uri", &flow.redirect)
-        .append_pair("code_verifier", flow.verifier.expose())
-        .append_pair("client_id", &flow.client_id)
-        .append_pair("resource", &flow.resource)
-        .finish();
+        .append_pair("code_verifier", flow.verifier.expose());
+    if basic.is_none() {
+        form.append_pair("client_id", &flow.client.id);
+    }
+    if flow.client.post
+        && let Some(secret) = &secret
+    {
+        form.append_pair("client_secret", secret.expose());
+    }
+    let body = form.append_pair("resource", &flow.resource).finish();
     let sent = if body.len() <= FORM_BYTES {
-        request(&flow.token, &flow.hosts, Verb::Form(&body), reach)
+        let basic = basic.map(|secret| (flow.client.id.as_str(), secret.expose()));
+        request(&flow.token, &flow.hosts, Verb::Form(&body), basic, reach)
     } else {
         Err(OAuthError("connector_oauth_code_invalid"))
     };

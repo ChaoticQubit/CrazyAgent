@@ -39,8 +39,13 @@ pub const OAUTH_CODES: [&str; 13] = [
     "connector_oauth_trust_changed",
 ];
 
-/// The longest client id of the owner's own OAuth app.
+/// The longest client id of the owner's own OAuth app or of a registered client.
 const OWN_ID_BYTES_MAX: usize = 255;
+
+/// Where the app's client metadata document is served, its client id where a server takes
+/// one. None until the owner's domain exists, and CIMD is skipped meanwhile (DEC-168
+/// addendum 23); Task 10 sets it.
+pub const CLIENT_METADATA_URL: Option<&str> = None;
 
 /// One sign-in waiting for the browser: the authorization server's address to open, with
 /// every parameter in its query, and the `state` the answer must carry back.
@@ -76,10 +81,15 @@ fn own_ref(name: &str) -> Result<CredentialRef, OAuthError> {
     CredentialRef::new(format!("connector-client-{name}-own")).map_err(|_| key_store())
 }
 
-/// Saves the client id of the owner's own OAuth app for a trusted connector that lets the
-/// owner bring one, replacing the one saved before. Inputs: database, engine root,
-/// connector and client id. Output: Ok, or `connector_oauth_not_offered`,
-/// `connector_oauth_client_invalid`, `connector_oauth_key_store_unavailable`.
+/// Where the client secret of the owner's own OAuth app for one connector is saved.
+fn own_secret_ref(name: &str) -> Result<CredentialRef, OAuthError> {
+    CredentialRef::new(format!("connector-secret-{name}-own")).map_err(|_| key_store())
+}
+
+/// Saves the owner's own OAuth app for a trusted connector that lets the owner bring one:
+/// its client id and, for a confidential app, its secret, replacing what was saved before.
+/// Inputs: database, engine root, connector, client id and secret. Output: Ok, or
+/// `connector_oauth_not_offered`, `_client_invalid`, `_key_store_unavailable`.
 pub fn set_own_client(
     db: &Connection,
     root: &Path,
@@ -87,7 +97,6 @@ pub fn set_own_client(
     id: &str,
     secret: Option<&str>,
 ) -> Result<(), OAuthError> {
-    let _ = secret;
     let manifest = store::trusted_connector(db, root, name).map_err(|_| not_offered())?;
     let declared = manifest
         .connector()
@@ -96,11 +105,21 @@ pub fn set_own_client(
     if !declared {
         return Err(not_offered());
     }
-    if !visible(id, OWN_ID_BYTES_MAX) {
+    let secret_fits =
+        secret.is_none_or(|secret| visible(secret, crate::credentials::SECRET_BYTES_MAX));
+    if !visible(id, OWN_ID_BYTES_MAX) || !secret_fits {
         return Err(OAuthError("connector_oauth_client_invalid"));
     }
     accounts::replace_key_in(root, PLUGIN_KEYS, &own_ref(name)?, id.as_bytes().to_vec())
-        .map_err(|_| key_store())
+        .map_err(|_| key_store())?;
+    let secret_ref = own_secret_ref(name)?;
+    match secret {
+        Some(secret) => {
+            accounts::replace_key_in(root, PLUGIN_KEYS, &secret_ref, secret.as_bytes().to_vec())
+        }
+        None => accounts::remove_key_in(root, PLUGIN_KEYS, secret_ref.as_str()),
+    }
+    .map_err(|_| key_store())
 }
 
 /// Starts a sign-in to a trusted connector: finds its authorization server, picks the
@@ -116,6 +135,10 @@ pub fn begin(
 ) -> Result<Pending, OAuthError> {
     let manifest = store::trusted_connector(db, root, name).map_err(|_| not_offered())?;
     let spec = manifest.connector().ok_or_else(not_offered)?;
+    let document = CLIENT_METADATA_URL
+        .map(url::Url::parse)
+        .transpose()
+        .map_err(|_| OAuthError("connector_oauth_metadata_invalid"))?;
     begin_with(
         root,
         name,
@@ -123,7 +146,7 @@ pub fn begin(
         spec,
         redirect,
         writes,
-        None,
+        document.as_ref(),
         &ProviderReach::system(),
     )
 }
