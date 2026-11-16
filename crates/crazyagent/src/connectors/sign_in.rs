@@ -94,6 +94,13 @@ pub fn start(db: &Connection, root: &Path, name: &str) -> Result<url::Url, Engin
     start_with(root, name, CALLBACK_WAIT, begin, finish)
 }
 
+/// How a sign-in of a connector begins now: whether the owner's setting allows writes, and
+/// the scope its server last asked for, when one did. Inputs: the engine database and the
+/// connector. Output: the two, or the refusal.
+fn asked(_db: &Connection, _name: &str) -> Result<(bool, Option<String>), EngineError> {
+    Err(EngineError("asked_not_built".into()))
+}
+
 /// Starts a sign-in with the given start and redeem steps: opens the callback, runs `begin`
 /// with its address, and waits on a thread of its own, which redeems the browser's answer
 /// with `finish` unless a cancel came first. The connector's earlier sign-in is cancelled

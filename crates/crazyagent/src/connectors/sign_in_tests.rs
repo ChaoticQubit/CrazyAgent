@@ -60,9 +60,11 @@ fn started(
         *seen.lock().unwrap() = Some(redirect.clone());
         Ok(pending)
     };
-    let opened = start_with(root, name, limit, begin, finish).unwrap();
-    let redirect = given.lock().unwrap().clone().unwrap();
-    (opened, redirect)
+    let opened = start_with(root, name, limit, begin, finish);
+    assert!(opened.is_ok(), "the sign-in starts: {opened:?}");
+    let redirect = given.lock().unwrap().clone();
+    assert!(redirect.is_some(), "begin is given the loopback address");
+    (opened.unwrap(), redirect.unwrap())
 }
 
 /// Sends the browser's answer to a loopback address. Inputs: the address and the query.
@@ -304,4 +306,86 @@ fn at_most_eight_sign_ins_wait_per_root_and_the_oldest_is_cancelled() {
     until("every callback closed", || {
         redirects.iter().all(closed) && closed(&elsewhere)
     });
+}
+
+/// rv-code F1: while a sign-in's answer is being redeemed, a new sign-in of that connector
+/// is refused at once, before a callback opens or the vendor is asked, so the one being
+/// redeemed stays the one its page reads; once it ends, a new one starts.
+#[test]
+fn a_new_sign_in_is_refused_while_the_last_answer_is_being_redeemed() {
+    let (_tmp, root) = engine_root();
+    let (enter, entered) = mpsc::channel::<()>();
+    let (release, hold) = mpsc::channel::<()>();
+    let finish = move |_: &str, _: &str, _: Option<&str>| {
+        enter.send(()).unwrap();
+        hold.recv().unwrap();
+        Ok(())
+    };
+    let (_, redirect) = started(&root, "board", STATE, WAIT, finish);
+    let query = format!("state={STATE}&code=c4");
+    assert_eq!(answered(&redirect, &query).0, 200);
+    entered.recv_timeout(WAIT).unwrap();
+    let begun = Arc::new(Mutex::new(false));
+    let asked = begun.clone();
+    let second = Pending {
+        authorize_url: url::Url::parse(AUTHORIZE).unwrap(),
+        state: "Sx8-second".to_owned(),
+    };
+    let begin = move |_: &url::Url| {
+        *asked.lock().unwrap() = true;
+        Ok(second)
+    };
+    let (_, finish) = redeeming(Ok(()));
+    let again = start_with(&root, "board", WAIT, begin, finish);
+    let code = again.err().map(|refusal| refusal.0);
+    assert_eq!(code.as_deref(), Some("connector_oauth_sign_in_finishing"));
+    assert!(!*begun.lock().unwrap(), "the vendor is not asked");
+    assert_eq!(state_of(&root, "board"), SignInState::Waiting);
+    release.send(()).unwrap();
+    until("signed in", || state_of(&root, "board") == SIGNED_IN);
+    let (_, finish) = redeeming(Ok(()));
+    let (opened, _) = started(&root, "board", "Sx9-third", WAIT, finish);
+    assert_eq!(opened.as_str(), AUTHORIZE);
+    assert_eq!(state_of(&root, "board"), SignInState::Waiting);
+}
+
+/// rv-code note 2: once a connector signs out, or its own app is saved or removed, a
+/// sign-in that already ended is forgotten, so the page never reads signed in for tokens
+/// that are gone.
+#[test]
+fn an_ended_sign_in_is_forgotten_once_the_connector_signs_out() {
+    let (_tmp, root) = engine_root();
+    let (_, finish) = redeeming(Ok(()));
+    let (_, redirect) = started(&root, "board", STATE, WAIT, finish);
+    let query = format!("state={STATE}&code=c5");
+    assert_eq!(answered(&redirect, &query).0, 200);
+    until("signed in", || state_of(&root, "board") == SIGNED_IN);
+    let db = crate::questions::open(&root).unwrap();
+    sign_out(&db, &root, "board").unwrap();
+    assert_eq!(state_of(&root, "board"), SignInState::Idle);
+}
+
+/// rv-code F2: a browser sign-in asks for writes only while the owner's connector setting
+/// allows them, and steps up for the scope the server last named once it named one.
+#[test]
+fn a_sign_in_asks_for_writes_by_the_setting_and_steps_up_once_scope_was_named() {
+    let (_tmp, root) = engine_root();
+    let db = crate::questions::open(&root).unwrap();
+    let (mut saved, version) = settings::load(&db).unwrap();
+    saved.write = WritePolicy::AskEveryTime;
+    settings::save(&db, &saved, version).unwrap().unwrap();
+    assert_eq!(asked(&db, "board").unwrap(), (true, None));
+    let (mut saved, version) = settings::load(&db).unwrap();
+    saved.write = WritePolicy::ReadOnly;
+    settings::save(&db, &saved, version).unwrap().unwrap();
+    assert_eq!(asked(&db, "board").unwrap(), (false, None));
+    db.execute(
+        "INSERT INTO connector_sign_ins(connector,title,wanted,since_ms) VALUES(?1,?2,?3,?4)",
+        rusqlite::params!["board", "Board", "write", 1],
+    )
+    .unwrap();
+    assert_eq!(
+        asked(&db, "board").unwrap(),
+        (false, Some("write".to_owned()))
+    );
 }

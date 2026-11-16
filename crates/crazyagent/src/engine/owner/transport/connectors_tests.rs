@@ -910,6 +910,30 @@ fn the_owner_signs_a_connector_out_through_the_protocol() {
     }
 }
 
+/// rv-code note 6: a connector file changed since the owner trusted it waits for review,
+/// and each sign-in step names that, not a missing sign-in.
+#[test]
+fn a_sign_in_step_on_a_file_that_needs_review_names_the_review() {
+    let (_tmp, root) = engine();
+    let sha256 = sha(BOARD_OAUTH);
+    ask(
+        &root,
+        json!({"kind": "add", "yaml": BOARD_OAUTH, "sha256": sha256, "replace": false}),
+    );
+    let file = root.join(crate::app_plugins::FOLDER).join("board.yaml");
+    let changed = BOARD_OAUTH.replace("version: 1", "version: 2");
+    std::fs::write(&file, changed).unwrap();
+    for action in [
+        json!({"kind": "sign_in", "name": "board"}),
+        json!({"kind": "clear_own_app", "name": "board"}),
+    ] {
+        let code = refused(&root, action.clone());
+        assert_eq!(code, "app_plugin_needs_review", "{action}");
+    }
+    let saved = own_app(&root, "app-0005", None).unwrap_err().0;
+    assert_eq!(saved, "app_plugin_needs_review");
+}
+
 /// fix10 on T12: the owner's read of a write whose wait ran out answers expired, with no
 /// arguments and the wait's end as its answer time, though no gateway tick marked it yet,
 /// so the desktop, the terminal and the notice's page never offer Allow on it; an answer
