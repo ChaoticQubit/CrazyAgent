@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 pub const CALLBACK_PATH: &str = "/callback";
 /// How long a sign-in waits for the browser.
 pub const CALLBACK_WAIT: Duration = Duration::from_secs(5 * 60);
-/// How many refused requests close a callback before its answer came.
+/// How many refused requests close a callback before its answer came; a connection that
+/// sends nothing counts as one.
 pub const REFUSED_MAX: usize = 32;
 /// The page the browser shows once the answer came.
 pub const DONE_PAGE: &str = "You can close this tab.";
@@ -147,9 +148,10 @@ fn head(stream: &mut TcpStream, bytes: &mut Vec<u8>) -> Option<String> {
     std::str::from_utf8(bytes).ok().map(str::to_owned)
 }
 
-/// How a request head ends the wait: only a GET of `CALLBACK_PATH` whose query names each
-/// field once and carries the sign-in's state, then an `error`, or a code and the issuer
-/// when sent. Inputs: the head and the state. Output: how the wait ended, or none.
+/// How a request head ends the wait: only a GET whose target is visible ASCII, exactly
+/// `CALLBACK_PATH` and a query naming each field once and carrying the sign-in's state, then
+/// an `error`, or a code and the issuer when sent. Inputs: the head and the state. Output:
+/// how the wait ended, or none.
 fn ended(head: &str, state: &str) -> Option<Waited> {
     let line = head.split("\r\n").next()?;
     let mut parts = line.split(' ');
@@ -158,10 +160,14 @@ fn ended(head: &str, state: &str) -> Option<Waited> {
     else {
         return None;
     };
-    if !version.starts_with("HTTP/1.") || !target.starts_with('/') {
+    if !version.starts_with("HTTP/1.") || !target.bytes().all(|byte| byte.is_ascii_graphic()) {
         return None;
     }
-    let text = format!("http://127.0.0.1{target}");
+    let (path, query) = target.split_once('?')?;
+    if path != CALLBACK_PATH || query.contains('#') {
+        return None;
+    }
+    let text = format!("http://127.0.0.1{CALLBACK_PATH}?{query}");
     let address = url::Url::parse(&text).ok()?;
     if address.path() != CALLBACK_PATH {
         return None;
