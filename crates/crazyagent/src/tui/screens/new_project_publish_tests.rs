@@ -1,7 +1,8 @@
-use super::new_project::{Control, Reply, Wizard};
+use super::new_project::{Control, Reply, Step, Wizard};
 use super::new_project_frames::compose;
+use super::new_project_input::TextInput;
 use super::new_project_publish::*;
-use super::new_project_tests::{control, key, type_text, wizard};
+use super::new_project_tests::{control, key, load_catalog, type_text, wizard};
 use super::new_project_view::{Look, wizard_screen};
 use super::settings_accounts::tests::ctx;
 use super::{Place, open};
@@ -284,4 +285,66 @@ fn the_page_reads_the_sign_in_then_the_accounts_and_sign_in_opens_the_github_tab
     shell.key(Key::Tab);
     shell.key(Key::Enter);
     assert_eq!(shell.place(), Some(Place::CloneRepo));
+}
+
+fn at_review(github: GitHub) -> Wizard {
+    let mut wizard = wizard();
+    type_text(&mut wizard, "Tidepool");
+    load_catalog(&mut wizard, &["c-codex"]);
+    wizard.publish.set_github(github);
+    if wizard.publish.github == GitHub::SignedIn {
+        wizard.publish.set_owners(owners());
+    }
+    wizard.go(Step::Review);
+    wizard
+}
+
+fn note_text(wizard: &Wizard) -> Option<&str> {
+    wizard.note.as_ref().map(|note| note.text.as_str())
+}
+
+#[test]
+fn create_waits_for_the_github_sign_in_until_publishing_is_turned_off() {
+    let mut wizard = at_review(GitHub::SignedOut);
+    assert_eq!(wizard.key(key(KeyCode::Enter)), Reply::Handled);
+    assert_eq!(wizard.step, Step::About);
+    assert_eq!(wizard.focused(), Control::Publish);
+    assert_eq!(note_text(&wizard), Some(SIGN_IN_WAIT));
+    assert!(wizard.note.as_ref().is_some_and(|note| note.error));
+
+    let mut checking = at_review(GitHub::Checking);
+    assert_eq!(checking.key(key(KeyCode::Enter)), Reply::Handled);
+    assert_eq!(checking.step, Step::About);
+    assert!(
+        note_text(&checking).is_some_and(|text| text.starts_with("Checking your GitHub sign-in")),
+        "{:?}",
+        checking.note
+    );
+
+    let mut failed = at_review(GitHub::Failed("GitHub could not be reached.".into()));
+    assert_eq!(failed.key(key(KeyCode::Enter)), Reply::Handled);
+    assert_eq!(note_text(&failed), Some(SIGN_IN_WAIT));
+
+    wizard.key(key(KeyCode::Char(' ')));
+    assert!(!wizard.publish.on);
+    wizard.go(Step::Review);
+    assert!(matches!(wizard.key(key(KeyCode::Enter)), Reply::Create(_)));
+}
+
+#[test]
+fn signed_in_create_waits_on_the_row_a_publish_start_would_refuse_and_then_goes_on() {
+    let mut wizard = at_review(GitHub::SignedIn);
+    let mut bad = TextInput::single(100);
+    bad.set("bad name");
+    wizard.publish.name = Some(bad);
+    let refused = wizard.publish.problem("Tidepool", "").map(|(_, text)| text);
+    assert!(refused.is_some());
+    assert_eq!(wizard.key(key(KeyCode::Enter)), Reply::Handled);
+    assert_eq!(wizard.step, Step::About);
+    assert_eq!(wizard.focused(), Control::Publish);
+    assert_eq!(note_text(&wizard), refused);
+
+    wizard.publish.name = None;
+    wizard.go(Step::Review);
+    assert!(matches!(wizard.key(key(KeyCode::Enter)), Reply::Create(_)));
 }

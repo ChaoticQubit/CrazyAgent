@@ -1,9 +1,12 @@
-import type { GitHubOwner, GitHubPublishPlan } from "../../engine-client";
+import type { Result } from "../../api";
+import type { GitHubOwner, GitHubPublishJob, GitHubPublishPlan } from "../../engine-client";
 
 export const PUBLISH_TOGGLE = "Publish this project on GitHub";
 export const PUBLISH_LINE = "Standard secure setup; agents can propose changes later.";
 export const PUBLISH_DOCS = "Also publish the docs folder (plans, research)";
 export const SIGN_IN_WAIT = "Sign in to GitHub, or turn publishing off.";
+export const DETAILS_WAIT = "Fix the GitHub details in Basics first.";
+export const PUBLISH_STARTED = "Publishing on GitHub has started.";
 export const REPO_NAME_BYTES_MAX = 100;
 export const OWNER_BYTES_MAX = 39;
 export const DESCRIPTION_CHARS_MAX = 350;
@@ -130,4 +133,19 @@ export function publishPlan(publish: PublishDraft, projectName: string, about: s
   const shown = publishShown(publish, projectName, about, owners);
   assert(ownerValid(shown.owner) && nameValid(shown.name) && descriptionValid(shown.description), "publishPlan built an invalid plan");
   return { owner: shown.owner, name: shown.name, description: shown.description, private: publish.private, docs: publish.docs };
+}
+
+/** Says why Create project waits on the publish block: no GitHub sign-in, or a field the
+ * engine would refuse. Inputs: the block, the project name, its about text, the accounts
+ * offered and whether CrazyAgent is signed in to GitHub. Output: the sentence, or null
+ * while publishing is off or the block is valid. */
+export function createWait(publish: PublishDraft, projectName: string, about: string, owners: GitHubOwner[], signedIn: boolean): string | null {
+  return null;
+}
+
+/** Starts publishing a made project on GitHub with the block's plan. Inputs: the project
+ * id, the block, the project name, its about text and the accounts offered. Output: the
+ * start's result, or null when publishing is off or the block is not valid. */
+export function startPublish(projectId: string, publish: PublishDraft, projectName: string, about: string, owners: GitHubOwner[]): Promise<Result<GitHubPublishJob>> | null {
+  return null;
 }

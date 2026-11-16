@@ -109,3 +109,27 @@ test("Basics shows the publish block", () => {
   assert.ok(fields.includes("export function PublishFields"), "fields.tsx has no PublishFields");
   for (const name of ["PUBLISH_TOGGLE", "PUBLISH_LINE", "PUBLISH_DOCS", "SIGN_IN_WAIT"]) assert.ok(fields.includes(name), name);
 });
+
+test("Create project waits on the publish block until it is off or valid", () => {
+  assert.equal(publish.DETAILS_WAIT, "Fix the GitHub details in Basics first.");
+  assert.equal(publish.createWait(block({ on: false }), "", "", [], false), null);
+  assert.equal(publish.createWait(block(), "My Project", "", owners, false), publish.SIGN_IN_WAIT);
+  assert.equal(publish.createWait(block({ name: "bad name" }), "My Project", "", owners, true), publish.DETAILS_WAIT);
+  assert.equal(publish.createWait(block(), "My Project", "", [], true), publish.DETAILS_WAIT);
+  assert.equal(publish.createWait(block(), "My Project", "A tool", owners, true), null);
+  const page = read("src/screens/new-project/index.tsx");
+  assert.match(page, /const publishWait = createWait\(/);
+  assert.match(page, /const canCreate = [^\n]*!publishWait/);
+});
+
+test("a made project starts its publish with the block's plan, and nothing starts while publishing is off", async () => {
+  assert.equal(publish.PUBLISH_STARTED, "Publishing on GitHub has started.");
+  assert.equal(publish.startPublish("project-1", block({ on: false }), "My Project", "", owners), null);
+  assert.equal(publish.startPublish("project-1", block({ name: "bad name" }), "My Project", "", owners), null);
+  const started = publish.startPublish("project-1", block(), "My Project", "", owners);
+  assert.ok(started, "a valid block starts the publish");
+  const unreachable = { kind: "error", code: "engine_unreachable", message: "CrazyAgent's engine isn't running." };
+  assert.deepEqual(await started, unreachable);
+  const page = read("src/screens/new-project/index.tsx");
+  assert.match(page, /startPublish\(id, /);
+});

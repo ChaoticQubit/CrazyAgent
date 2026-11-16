@@ -10,6 +10,7 @@ use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::OwnerMutation;
 use crate::engine::owner::{OwnerClientKind, OwnerData, OwnerRead, OwnerResponse};
+use crate::github::{GitHubMethod, GitHubOwner, GitHubOwners, GitHubStatus};
 use crate::master_session::{
     MasterOwnerAction, MasterSessionPhase, MasterSessionView, MasterTurnView,
 };
@@ -18,7 +19,7 @@ use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, Set
 use crate::projects_home::AddMode;
 use crate::projects_home::job::{JobKind, JobState, JobSubject, JobView};
 use crate::protocol::{ConfigId, CredentialRef, ProjectId, ProjectSpec, RequestId, SessionId};
-use crate::tui::client::intake::IntakeQuery;
+use crate::tui::client::intake::{IntakeEvent, IntakeQuery, IntakeView};
 use crate::tui::client::process::ProcessQuery;
 use crate::tui::client::questions::QuestionsQuery;
 use crate::tui::client::settings::SettingsJob;
@@ -161,6 +162,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         IntakeQuery::JobStart { .. } => "job start",
                         IntakeQuery::JobStatus => "job status",
                         IntakeQuery::Found => "found",
+                        IntakeQuery::GitHubPublishStart { .. } => "github publish",
                         _ => "intake",
                     });
                     connection.intake(*job).unwrap();
@@ -3071,6 +3073,7 @@ async fn the_wizard_creates_a_real_project_assigns_its_pool_and_opens_it() {
     for character in "Tidepool".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     assert!(shell.ctx.next_request().is_none());
     shell.key(Key::ShiftRight);
     let shown = render(&mut shell, 80, 24);
@@ -3131,6 +3134,7 @@ async fn a_creation_run_in_the_background_finishes_after_its_page_is_gone() {
     for character in "Tidepool".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("New project  /  Review"), "{shown}");
@@ -3180,6 +3184,7 @@ async fn a_creation_run_in_the_background_finishes_after_its_page_is_gone() {
     for character in "Tidepool".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     shell.key(Key::Enter);
     shell.key(Key::Esc);
@@ -3213,6 +3218,7 @@ async fn a_draft_refused_while_another_wizard_is_open_is_kept_ahead_of_that_wiza
     for character in "Tidepool".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     shell.key(Key::Enter);
     shell.key(Key::Esc);
@@ -3228,6 +3234,7 @@ async fn a_draft_refused_while_another_wizard_is_open_is_kept_ahead_of_that_wiza
     for character in "Tidepool".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     shell.key(Key::Enter);
     shell.key(Key::Esc);
@@ -3468,6 +3475,7 @@ async fn a_project_folder_the_engine_cannot_make_says_why_in_the_wizard() {
     for character in "Tidepool".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Tidepool"), "{shown}");
@@ -5841,6 +5849,7 @@ async fn a_creation_reconcile_the_full_queue_refuses_keeps_the_submission_and_re
     for character in "Tidepool".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     shell.key(Key::Enter);
     let submission = std::iter::from_fn(|| shell.ctx.next_request())
@@ -5915,6 +5924,7 @@ async fn submitted_creation(
     for character in "Tidepool".chars() {
         shell.key(Key::Char(character));
     }
+    publishing_off(&mut shell);
     shell.key(Key::ShiftLeft);
     shell.key(Key::Enter);
     let submission = std::iter::from_fn(|| shell.ctx.next_request())
@@ -5925,6 +5935,86 @@ async fn submitted_creation(
         .expect("Enter sends the creation");
     while shell.ctx.next_request().is_some() {}
     (shell, connection, submission)
+}
+
+/// Turns the New project publish block off from the About step, so Create goes on without
+/// a GitHub sign-in. Takes the shell with the project name typed. Returns nothing.
+fn publishing_off(shell: &mut Shell) {
+    shell.key(Key::Tab);
+    shell.key(Key::Tab);
+    shell.key(Key::Char(' '));
+    let shown = render(shell, 80, 24);
+    assert!(
+        shown.contains("[ ] Publish this project on GitHub"),
+        "{shown}"
+    );
+}
+
+/// Hands the New project page a GitHub sign-in and then the personal account, as the
+/// engine answers a signed-in owner. Takes the shell. Returns nothing.
+fn github_signed_in(shell: &mut Shell) {
+    shell.arrive(owner_arrival(OwnerEvent::Intake(Box::new(IntakeEvent {
+        query: IntakeQuery::GitHubStatus,
+        result: Ok(IntakeView::GitHub(GitHubStatus {
+            signed_in: true,
+            login: Some("me".into()),
+            method: GitHubMethod::Token,
+            waiting: false,
+            problem: None,
+        })),
+    }))));
+    let asked: Vec<IntakeQuery> = std::iter::from_fn(|| shell.ctx.next_request())
+        .filter_map(|request| match request {
+            Request::Intake(job) => Some(job.query()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked, [IntakeQuery::GitHubOwners]);
+    shell.arrive(owner_arrival(OwnerEvent::Intake(Box::new(IntakeEvent {
+        query: IntakeQuery::GitHubOwners,
+        result: Ok(IntakeView::Owners(GitHubOwners {
+            owners: vec![GitHubOwner {
+                login: "me".into(),
+                personal: true,
+            }],
+            problem: None,
+        })),
+    }))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_made_project_starts_its_github_publish_once_its_pool_is_assigned() {
+    let engine = Engine::start().await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    github_signed_in(&mut shell);
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    let at = |label: &str| sent.iter().position(|sent| *sent == label);
+    assert!(
+        at("create").is_some()
+            && at("create") < at("edit pool")
+            && at("edit pool") < at("github publish"),
+        "{sent:?}"
+    );
+    assert_eq!(
+        sent.iter()
+            .filter(|label| **label == "github publish")
+            .count(),
+        1,
+        "{sent:?}"
+    );
+    let message = shell.ctx.message().expect("the made project is announced");
+    assert_eq!(message.lead, "Tidepool is ready.");
+    assert_eq!(message.rest, "Publishing on GitHub has started.");
 }
 
 /// Hands the page one creation reply from the engine worker. Takes the shell, the

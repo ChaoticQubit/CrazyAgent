@@ -1,7 +1,10 @@
 use super::settings::connection_lost;
 use super::*;
 use crate::engine::owner::{AccountSecret, OwnerResult};
-use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubRepoPage, GitHubStatus};
+use crate::github::{
+    CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishPlan,
+    GitHubRepoPage, GitHubStatus,
+};
 use crate::onboarding::OnboardingView;
 use crate::projects_home::job::{JobSubject, JobView};
 use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
@@ -40,6 +43,10 @@ pub(in crate::tui) enum IntakeQuery {
         page: u32,
     },
     GitHubOwners,
+    GitHubPublishStart {
+        project: ProjectId,
+        plan: GitHubPublishPlan,
+    },
     CloneRepo {
         full_name: String,
     },
@@ -89,6 +96,7 @@ pub(in crate::tui) enum IntakeView {
     DeviceCode(GitHubDeviceCode),
     Repos(GitHubRepoPage),
     Owners(GitHubOwners),
+    Publish(Box<GitHubPublishJob>),
     Cloned(CloneReceipt),
     Changed(OwnerResult),
     Job(Option<JobView>),
@@ -234,6 +242,12 @@ impl NativeOwner {
             IntakeQuery::GitHubOwners => {
                 IntakeView::Owners(controller.github_owners().await.map_err(problem)?)
             }
+            IntakeQuery::GitHubPublishStart { project, plan } => IntakeView::Publish(Box::new(
+                controller
+                    .github_publish_start(project, plan)
+                    .await
+                    .map_err(problem)?,
+            )),
             IntakeQuery::CloneRepo { full_name } => {
                 IntakeView::Cloned(controller.clone_repo(full_name).await.map_err(problem)?)
             }
