@@ -217,7 +217,10 @@ export class Engine implements Disposable {
       return Buffer.from(stored, "hex");
     }
     const reply = await this.#exchange<{ token?: unknown }>(readCapability(this.#capability), "ide.session", {});
-    if (reply.kind === "rejected" && reply.code === "ide_session_taken" && this.#told) this.#taken?.();
+    if (reply.kind === "rejected" && reply.code === "ide_session_taken" && !this.#told) {
+      this.#told = true;
+      this.#taken?.();
+    }
     if (reply.kind === "rejected") throw new Error(reply.code);
     const token = reply.kind === "ok" ? reply.data?.token : undefined;
     if (typeof token !== "string" || !HEX_TOKEN.test(token)) throw new Error("ide_session_invalid");

@@ -73,6 +73,7 @@ class Engine {
     #socket;
     #capability;
     #store;
+    #taken;
     #handlers = new Map();
     #session;
     #taking = false;
@@ -80,16 +81,18 @@ class Engine {
     #subscription;
     #retry;
     #closed = false;
-    constructor(socket, capability, store) {
+    #told = false;
+    constructor(socket, capability, store, taken) {
         this.#socket = socket;
         this.#capability = capability;
         this.#store = store;
+        this.#taken = taken;
         this.project = (0, node_path_1.basename)((0, node_path_1.dirname)(capability));
     }
-    static fromEnv(env, store) {
+    static fromEnv(env, store, taken) {
         const capability = env[exports.CAPABILITY_ENV];
         const socket = env[exports.SOCKET_ENV];
-        return capability && socket ? new Engine(socket, capability, store) : undefined;
+        return capability && socket ? new Engine(socket, capability, store, taken) : undefined;
     }
     request(name, args = {}, timeMs = REQUEST_TIME_MS) {
         return this.#token().then((token) => this.#exchange(token, name, args, timeMs));
@@ -120,6 +123,10 @@ class Engine {
             return Buffer.from(stored, "hex");
         }
         const reply = await this.#exchange(readCapability(this.#capability), "ide.session", {});
+        if (reply.kind === "rejected" && reply.code === "ide_session_taken" && !this.#told) {
+            this.#told = true;
+            this.#taken?.();
+        }
         if (reply.kind === "rejected")
             throw new Error(reply.code);
         const token = reply.kind === "ok" ? reply.data?.token : undefined;
