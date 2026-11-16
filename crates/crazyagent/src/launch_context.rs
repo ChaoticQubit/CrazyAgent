@@ -234,6 +234,7 @@ pub struct Installed {
     terminal_display: TerminalDisplay,
     settings: Applied,
     native_connectors_off: bool,
+    native_connectors_on: bool,
     _lock: File,
 }
 
@@ -1204,6 +1205,9 @@ impl AgentContext {
             terminal_display: self.terminal_display,
             settings: self.settings.clone(),
             native_connectors_off: native_switch.claude_ai_off,
+            native_connectors_on: tools
+                && self.plugins.native_connectors
+                    == Some(crate::connectors::settings::NativeConnectors::On),
             _lock: lock,
         };
         remove(&state);
@@ -1507,6 +1511,13 @@ impl Installed {
         self.native_connectors_off
     }
 
+    /// Tells whether this launch has tools on and read the owner's Native setting as On, the
+    /// one case a Codex launch leaves its fixed apps switch out (DEC-168 addendum 12); an
+    /// unread setting counts as not On.
+    pub fn native_connectors_on(&self) -> bool {
+        self.native_connectors_on
+    }
+
     /// Names the display this launch's terminal draws with (N-D9, DEC-141).
     pub fn terminal_display(&self) -> TerminalDisplay {
         self.terminal_display
@@ -1540,6 +1551,7 @@ impl Installed {
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             native_connectors_off: false,
+            native_connectors_on: false,
             _lock: lock,
         })
     }
@@ -2480,6 +2492,7 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         native_connectors_off: false,
+        native_connectors_on: false,
         _lock: lock,
     })
 }
