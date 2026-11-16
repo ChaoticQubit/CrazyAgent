@@ -2674,13 +2674,18 @@ fn verify_record(record: &LeaseRecord) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Checks that an Uncertain lease's worktree is whole: its Git index exists, and the
-/// worktree holds what that index records, the checkout or what its agent or a turn end
-/// staged. A checkout that failed after its folder was pinned has no index, or misses or
-/// cuts short a file. Read only. Input: the record. Output: success, or the refusal code.
+/// Checks that an Uncertain lease's worktree is whole: no cut-off Git writer left its index
+/// lock, its index exists, and no tracked file differs from that index; staged changes are
+/// its agent's or a turn end's. Read only: `status` honours `--no-optional-locks`, unlike
+/// `diff`, which refreshes the index. Input: the record. Output: success, or the refusal.
 #[cfg(unix)]
 fn worktree_matches_index(record: &LeaseRecord) -> Result<(), EngineError> {
     let metadata = worktree_metadata(record)?;
+    match std::fs::symlink_metadata(metadata.join("index.lock")) {
+        Ok(_) => return Err(error("worktree_index_locked")),
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {}
+        Err(problem) => return Err(error(problem)),
+    }
     if !std::fs::symlink_metadata(metadata.join("index"))
         .map_err(error)?
         .is_file()
@@ -2688,7 +2693,7 @@ fn worktree_matches_index(record: &LeaseRecord) -> Result<(), EngineError> {
         return Err(error("worktree_index_missing"));
     }
     let gitdir = metadata.to_str().ok_or_else(|| error("non_utf8_gitdir"))?;
-    let changed = git(
+    let entries = git(
         Path::new(&record.lease.repository),
         &[
             "-c",
@@ -2701,16 +2706,19 @@ fn worktree_matches_index(record: &LeaseRecord) -> Result<(), EngineError> {
             &record.lease.path,
             "-C",
             &record.lease.path,
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--ignore-submodules=all",
-            "--name-only",
+            "status",
+            "--porcelain=v1",
             "-z",
+            "--no-branch",
+            "--no-renames",
+            "--untracked-files=no",
+            "--ignore-submodules=all",
         ],
     )?;
-    if !changed.is_empty() {
+    let unstaged = entries
+        .split(|byte| *byte == 0)
+        .any(|entry| !entry.is_empty() && entry.get(1) != Some(&b' '));
+    if unstaged {
         return Err(error("worktree_content_differs_from_index"));
     }
     Ok(())
