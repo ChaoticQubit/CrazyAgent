@@ -687,14 +687,7 @@ pub fn visible_text(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len() + 16);
     for at in 0..chars.len() {
-        let point = u32::from(chars[at]);
-        if !hidden_at(&chars, at) {
-            out.push(chars[at]);
-        } else if point > 0xffff {
-            out.push_str(&format!("\\u{{{point:x}}}"));
-        } else {
-            out.push_str(&format!("\\u{point:04x}"));
-        }
+        push_visible(&mut out, &chars, at);
     }
     assert!(!hidden_text(&out));
     out
@@ -707,7 +700,28 @@ pub fn visible_text(text: &str) -> String {
 pub(crate) fn visible_split(text: &str, at: usize) -> (String, String) {
     let chars: Vec<char> = text.chars().collect();
     assert!(at <= chars.len());
-    (chars[..at].iter().collect(), chars[at..].iter().collect())
+    if !hidden_text(text) {
+        return (chars[..at].iter().collect(), chars[at..].iter().collect());
+    }
+    let mut before = String::with_capacity(text.len() + 16);
+    let mut after = String::with_capacity(text.len() + 16);
+    for index in 0..chars.len() {
+        let out = if index < at { &mut before } else { &mut after };
+        push_visible(out, &chars, index);
+    }
+    assert!(!hidden_text(&format!("{before}{after}")));
+    (before, after)
+}
+
+fn push_visible(out: &mut String, chars: &[char], at: usize) {
+    let point = u32::from(chars[at]);
+    if !hidden_at(chars, at) {
+        out.push(chars[at]);
+    } else if point > 0xffff {
+        out.push_str(&format!("\\u{{{point:x}}}"));
+    } else {
+        out.push_str(&format!("\\u{point:04x}"));
+    }
 }
 
 fn hidden_at(chars: &[char], at: usize) -> bool {
