@@ -391,13 +391,16 @@ fn node_command(
     .map_err(refused)?;
     let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
     #[cfg(target_os = "linux")]
-    let calls = crate::sandbox_settings::stored(root)
-        .map_err(refused)?
-        .linux_supervisor;
+    let (calls, strict) = {
+        let settings = crate::sandbox_settings::stored(root).map_err(refused)?;
+        (settings.linux_supervisor, settings.linux_strict)
+    };
     #[cfg(not(target_os = "linux"))]
-    let calls = crate::sandbox::LinuxSupervisor::On;
+    let (calls, strict) = (
+        crate::sandbox::LinuxSupervisor::On,
+        crate::sandbox::LinuxStrict::Off,
+    );
     let profile = scratch.join("node.sb");
-    let strict = crate::sandbox::LinuxStrict::Off;
     let sandbox = InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(refused)?;
     let mut node = std::process::Command::new(bin.join("node"));
     node.arg("--version").current_dir(&folders[0]);
@@ -680,7 +683,7 @@ fn npm_command(
         let settings = crate::sandbox_settings::stored(root).map_err(refused)?;
         let sandbox = sandbox.limit_sockets(settings.linux_sockets);
         let calls = settings.linux_supervisor;
-        let strict = crate::sandbox::LinuxStrict::Off;
+        let strict = settings.linux_strict;
         let sandbox = crate::sandbox::InstalledSandbox::install(sandbox, &profile, calls, strict)
             .map_err(refused)?;
         let mut npm = std::process::Command::new(bin.join("npm"));

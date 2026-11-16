@@ -10,10 +10,13 @@ use serde::{Deserialize, Serialize};
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS sandbox_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     linux_sockets TEXT NOT NULL CHECK(linux_sockets IN ('tcp_only', 'refuse', 'tcp_ports')),
-    linux_supervisor TEXT NOT NULL DEFAULT 'on' CHECK(linux_supervisor IN ('on', 'off'))
+    linux_supervisor TEXT NOT NULL DEFAULT 'on' CHECK(linux_supervisor IN ('on', 'off')),
+    linux_strict TEXT NOT NULL DEFAULT 'off' CHECK(linux_strict IN ('off', 'on'))
 )";
 #[cfg(any(unix, test))]
 const SUPERVISOR_COLUMN: &str = "ALTER TABLE sandbox_settings ADD COLUMN linux_supervisor TEXT NOT NULL DEFAULT 'on' CHECK(linux_supervisor IN ('on', 'off'))";
+#[cfg(any(unix, test))]
+const STRICT_COLUMN: &str = "ALTER TABLE sandbox_settings ADD COLUMN linux_strict TEXT NOT NULL DEFAULT 'off' CHECK(linux_strict IN ('off', 'on'))";
 
 /// The owner's app-wide sandbox settings: how a limited-network agent's sockets are held
 /// on Linux ("Linux limited-network sockets"), whether Linux agents run under the call
@@ -50,22 +53,28 @@ fn value<T: DeserializeOwned>(word: String) -> Result<T, EngineError> {
         .map_err(|_| error("sandbox_settings_invalid"))
 }
 
-/// Creates the settings table when it is missing and adds the call supervisor column to a
-/// table made before it, holding `on` for a row already saved, so the owner's sockets
-/// choice stays. Input: the engine database. Output: Ok, or the database error.
+/// Creates the settings table when it is missing and adds the call supervisor and strict
+/// columns to a table made before them, holding `on` and `off` for a row already saved, so
+/// the owner's other choices stay. Input: the engine database. Output: Ok, or the database
+/// error.
 #[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)?;
-    let columns: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM pragma_table_info('sandbox_settings') WHERE name='linux_supervisor'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(error)?;
-    assert!((0..=1).contains(&columns));
-    if columns == 0 {
-        connection.execute_batch(SUPERVISOR_COLUMN).map_err(error)?;
+    for (name, column) in [
+        ("linux_supervisor", SUPERVISOR_COLUMN),
+        ("linux_strict", STRICT_COLUMN),
+    ] {
+        let columns: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('sandbox_settings') WHERE name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        assert!((0..=1).contains(&columns));
+        if columns == 0 {
+            connection.execute_batch(column).map_err(error)?;
+        }
     }
     Ok(())
 }
@@ -79,10 +88,11 @@ pub(crate) fn save(
     let words = [
         word(settings.linux_sockets)?,
         word(settings.linux_supervisor)?,
+        word(settings.linux_strict)?,
     ];
     let changed = connection
         .execute(
-            "INSERT INTO sandbox_settings(singleton,linux_sockets,linux_supervisor) VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET linux_sockets=excluded.linux_sockets, linux_supervisor=excluded.linux_supervisor",
+            "INSERT INTO sandbox_settings(singleton,linux_sockets,linux_supervisor,linux_strict) VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET linux_sockets=excluded.linux_sockets, linux_supervisor=excluded.linux_supervisor, linux_strict=excluded.linux_strict",
             words,
         )
         .map_err(error)?;
@@ -95,21 +105,21 @@ pub(crate) fn save(
 /// `sandbox_settings_invalid` for a stored value this engine does not know, so a launch
 /// that needs the setting fails closed.
 pub fn load(connection: &Connection) -> Result<SandboxSettings, EngineError> {
-    let words: Option<(String, String)> = connection
+    let words: Option<(String, String, String)> = connection
         .query_row(
-            "SELECT linux_sockets, linux_supervisor FROM sandbox_settings WHERE singleton=1",
+            "SELECT linux_sockets, linux_supervisor, linux_strict FROM sandbox_settings WHERE singleton=1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(error)?;
-    let Some((sockets, supervisor)) = words else {
+    let Some((sockets, supervisor, strict)) = words else {
         return Ok(SandboxSettings::default());
     };
     Ok(SandboxSettings {
         linux_sockets: value(sockets)?,
         linux_supervisor: value(supervisor)?,
-        linux_strict: LinuxStrict::default(),
+        linux_strict: value(strict)?,
     })
 }
 

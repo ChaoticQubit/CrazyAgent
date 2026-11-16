@@ -913,16 +913,30 @@ pub fn linux_holds_fully(
     routed: bool,
     sandbox: &ProjectSandbox,
 ) -> bool {
-    let _ = (nested, supervised, routed, sandbox);
-    true
+    assert!(
+        !routed || nested,
+        "only a nested launch has a network of its own"
+    );
+    if !nested || !supervised {
+        return false;
+    }
+    let SandboxNetwork::Only(remotes) = &sandbox.network else {
+        return true;
+    };
+    if sandbox.linux_sockets != LinuxSockets::TcpOnly {
+        return false;
+    }
+    remotes.iter().all(|remote| match remote {
+        SandboxRemote::Loopback(port) => *port >= BRIDGE_PORT_MIN,
+        SandboxRemote::AnyHost(_) => routed,
+    })
 }
 
 /// Tells whether a launch refusal is the strict setting's ([`LINUX_NOT_FULL_LINE`]), so a
 /// caller can give it its own code ([`LINUX_NOT_FULL`]). Input: the refusal. Output: the
 /// answer.
 pub fn linux_not_full(error: &SandboxError) -> bool {
-    let _ = error;
-    false
+    matches!(error, SandboxError::Unavailable(reason) if reason == LINUX_NOT_FULL_LINE)
 }
 
 /// The launch refusal when the Linux sockets setting starts no limited-network agent.
@@ -3795,6 +3809,7 @@ impl InstalledSandbox {
         calls: LinuxSupervisor,
         strict: LinuxStrict,
     ) -> Result<Self, SandboxError> {
+        #[cfg(not(target_os = "linux"))]
         let _ = strict;
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some()
@@ -3841,6 +3856,10 @@ impl InstalledSandbox {
                 let data = crate::tools::engine_root();
                 linux::LinuxSandbox::detect(sandbox.clone(), &helper)?.supervise(calls, data)
             };
+            #[cfg(target_os = "linux")]
+            if strict == LinuxStrict::On && !linux.holds_fully() {
+                return Err(SandboxError::Unavailable(LINUX_NOT_FULL_LINE.into()));
+            }
             Ok(Self {
                 sandbox,
                 profile: profile.to_path_buf(),

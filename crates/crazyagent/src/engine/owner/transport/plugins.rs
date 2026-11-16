@@ -1608,12 +1608,15 @@ fn boundary_check(
         .map_err(|error| refused(&error))?;
     let reads = program.parent().ok_or("server_command_not_runnable")?;
     #[cfg(target_os = "linux")]
-    let calls = crate::sandbox_settings::stored(root)
-        .map_err(|error| refused(&error.0))?
-        .linux_supervisor;
+    let (calls, strict) = {
+        let settings = crate::sandbox_settings::stored(root).map_err(|error| refused(&error.0))?;
+        (settings.linux_supervisor, settings.linux_strict)
+    };
     #[cfg(not(target_os = "linux"))]
-    let calls = crate::sandbox::LinuxSupervisor::On;
-    let strict = crate::sandbox::LinuxStrict::Off;
+    let (calls, strict) = (
+        crate::sandbox::LinuxSupervisor::On,
+        crate::sandbox::LinuxStrict::Off,
+    );
     let profile = check_profile(&checks, id);
     let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network)
         .and_then(|sandbox| sandbox.keep_ports(kept))

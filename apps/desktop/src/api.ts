@@ -54,6 +54,7 @@ const COPY: Record<string, string> = {
   linux_limited_network_off: "The Linux limited-network sockets setting is 'Do not start limited-network agents', so this master does not start. Pick another Linux limited-network sockets option in Settings.",
   linux_resolver_needs_udp: "This harness cannot look up names over TCP, which the Linux setting 'TCP only' needs. Choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
   linux_harness_unchecked: "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
+  linux_sandbox_not_full: "This Linux cannot give this agent the full sandbox and the setting 'Refuse agents without the full Linux sandbox' is on, so it does not start. The lines under Agent access say what this Linux lacks. Turn the setting off in Settings to start agents with what this Linux holds.",
   pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
   pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
@@ -477,10 +478,14 @@ export type LinuxSockets = "tcp_only" | "refuse" | "tcp_ports";
 /** Whether the call supervisor guards agents on Linux, the engine's `LinuxSupervisor`. */
 export type LinuxSupervisor = "on" | "off";
 
+/** Whether a Linux launch without the full Linux sandbox is refused, the engine's `LinuxStrict`. */
+export type LinuxStrict = "off" | "on";
+
 /** The owner's app-wide sandbox settings, the engine's `SandboxSettings`. */
 export interface SandboxSettings {
   linux_sockets: LinuxSockets;
   linux_supervisor: LinuxSupervisor;
+  linux_strict: LinuxStrict;
 }
 
 /** Reads the owner's sandbox settings. Output: the stored settings, or the defaults before the first save. */

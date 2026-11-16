@@ -1620,6 +1620,17 @@ impl LinuxSandbox {
         self.routed.as_ref()
     }
 
+    /// Tells whether this launch holds the full Linux sandbox ([`super::linux_holds_fully`]):
+    /// the nested backend, the call supervisor this launch starts, and its network limits
+    /// held, a port on any host through the network of its own detection found. No input.
+    /// Output: the answer.
+    pub fn holds_fully(&self) -> bool {
+        let nested = matches!(self.backend, LinuxBackend::Nested { .. });
+        assert!(self.routed.is_none() || nested);
+        let supervised = self.supervision.is_some();
+        super::linux_holds_fully(nested, supervised, self.routed.is_some(), &self.sandbox)
+    }
+
     /// The program every wrapped command starts: the Landlock helper or bwrap.
     pub fn launcher(&self) -> &Path {
         match &self.backend {
