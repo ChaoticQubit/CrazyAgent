@@ -389,3 +389,23 @@ fn a_sign_in_asks_for_writes_by_the_setting_and_steps_up_once_scope_was_named() 
         (false, Some("write".to_owned()))
     );
 }
+
+/// rv-code T11 note 3: a file that declares no scope the server named refuses the step-up
+/// as undeclared, so the sign-in falls back to a plain one and the owner can sign in again;
+/// any other answer of the step-up stands.
+#[test]
+fn a_step_up_for_an_undeclared_scope_falls_back_to_a_plain_sign_in() {
+    let pending = |state: &str| Pending {
+        authorize_url: url::Url::parse(AUTHORIZE).unwrap(),
+        state: state.to_owned(),
+    };
+    let undeclared = Err(OAuthError("connector_oauth_scope_undeclared"));
+    let plain = stepped(undeclared, || Ok(pending("plain")));
+    assert_eq!(plain.map(|begun| begun.state), Ok("plain".to_owned()));
+    let limit = Err(OAuthError("connector_oauth_step_up_limit"));
+    let kept = stepped(limit, || Ok(pending("plain")));
+    let code = kept.err().map(|refusal| refusal.0);
+    assert_eq!(code, Some("connector_oauth_step_up_limit"));
+    let stepped_up = stepped(Ok(pending("step")), || Ok(pending("plain")));
+    assert_eq!(stepped_up.map(|begun| begun.state), Ok("step".to_owned()));
+}

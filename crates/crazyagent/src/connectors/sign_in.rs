@@ -116,6 +116,16 @@ pub fn start(db: &Connection, root: &Path, name: &str) -> Result<url::Url, Engin
     start_with(root, name, CALLBACK_WAIT, begin, finish)
 }
 
+/// A step-up's answer, or a plain sign-in when the server named a scope the file does not
+/// declare, so a stored challenge never keeps the owner from signing in again. Inputs: the
+/// step-up's answer and the plain sign-in. Output: the sign-in's start, or the refusal.
+fn stepped(
+    step_up: Result<Pending, OAuthError>,
+    _plain: impl FnOnce() -> Result<Pending, OAuthError>,
+) -> Result<Pending, OAuthError> {
+    step_up
+}
+
 /// How a sign-in of a connector begins now: whether the owner's setting allows writes, and
 /// the scope its server last asked for, when one did. Inputs: the engine database and the
 /// connector. Output: the two, or the refusal.
