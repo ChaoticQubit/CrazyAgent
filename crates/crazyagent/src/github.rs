@@ -26,7 +26,8 @@ mod tests;
 
 pub use api::Endpoints;
 pub use job::{
-    GitHubIgnoreDraft, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan, GitHubPublishStep,
+    GitHubDraft, GitHubIgnoreDraft, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan,
+    GitHubPublishStep,
 };
 pub use plan::{GitHubPlanField, default_description, default_repo_name, plan_problem};
 pub use publish::{
