@@ -54,8 +54,15 @@ pub fn digest_plain(text: &str) -> bool {
 /// recorded no hidden folders, as a pane from before the engine kept them, hides none.
 /// Inputs: the digests its launch recorded and the saved folders. Output: the answer.
 pub fn covers(built: Option<&[String]>, saved: &[PathBuf]) -> bool {
-    let _ = (built, saved);
-    true
+    assert!(saved.len() <= HIDDEN_PATHS_MAX);
+    assert!(built.is_none_or(|built| built.len() <= HIDDEN_PATHS_MAX));
+    saved.iter().all(|folder| {
+        built.is_some_and(|built| {
+            folder
+                .ancestors()
+                .any(|above| built.contains(&digest(above)))
+        })
+    })
 }
 
 /// Replaces the running agents of one project that can still open a folder hidden after
@@ -67,31 +74,86 @@ pub fn set_seers(
     project: &str,
     agents: &BTreeSet<i64>,
 ) -> rusqlite::Result<()> {
-    let _ = (connection, project, agents, SEERS, SEERS_TABLE);
+    let listed = seers(connection, project)?;
+    if &listed == agents {
+        return Ok(());
+    }
+    let tx = connection.unchecked_transaction()?;
+    tx.execute(SEERS_TABLE, [])?;
+    for gone in listed.difference(agents) {
+        tx.execute(
+            "DELETE FROM team_hidden_seers WHERE agent=?1 AND project=?2",
+            params![gone, project],
+        )?;
+    }
+    for agent in agents.difference(&listed) {
+        tx.execute(
+            "INSERT OR REPLACE INTO team_hidden_seers(agent, project, restart) VALUES (?1, ?2, 0)",
+            params![agent, project],
+        )?;
+    }
+    tx.commit()
+}
+
+/// Drops one project's list of agents that can still open a hidden folder, as removing
+/// the project does. Inputs: the open transaction and the project id. Output: done, or the
+/// database error.
+pub fn forget_seers(connection: &Connection, project: &str) -> rusqlite::Result<()> {
+    if present(connection)? {
+        connection.execute("DELETE FROM team_hidden_seers WHERE project=?1", [project])?;
+    }
     Ok(())
+}
+
+/// Tells whether the engine ever kept a list of agents that can still open a hidden
+/// folder. Input: the connection. Output: the answer, or the database error.
+fn present(connection: &Connection) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+        [SEERS],
+        |row| row.get(0),
+    )
+}
+
+/// Reads one project's listed agents, only those the owner asked to restart when `asked`
+/// holds. Inputs: the connection, the project id and the choice. Output: their ids, none
+/// without a list, or the database error.
+fn listed(connection: &Connection, project: &str, asked: bool) -> rusqlite::Result<BTreeSet<i64>> {
+    if !present(connection)? {
+        return Ok(BTreeSet::new());
+    }
+    let mut statement = connection.prepare(if asked {
+        "SELECT agent FROM team_hidden_seers WHERE project=?1 AND restart=1"
+    } else {
+        "SELECT agent FROM team_hidden_seers WHERE project=?1"
+    })?;
+    statement.query_map([project], |row| row.get(0))?.collect()
 }
 
 /// Reads the agents of one project listed as able to open a folder hidden after they
 /// started; a database without the list has none. Inputs: the connection and the project
 /// id. Output: their ids.
 pub fn seers(connection: &Connection, project: &str) -> rusqlite::Result<BTreeSet<i64>> {
-    let _ = (connection, project);
-    Ok(BTreeSet::new())
+    listed(connection, project, false)
 }
 
 /// Asks every listed agent of one project to restart, as the owner's Restart them does.
 /// Inputs: the open transaction and the project id. Output: how many listed agents were
 /// asked, none for a project with none listed, or the database error.
 pub fn ask_restart(connection: &Connection, project: &str) -> rusqlite::Result<usize> {
-    let _ = (connection, project);
-    Ok(0)
+    if !present(connection)? {
+        return Ok(0);
+    }
+    connection.execute(
+        "UPDATE team_hidden_seers SET restart=1 WHERE project=?1",
+        [project],
+    )
 }
 
 /// Reads the listed agents of one project the owner asked to restart. Inputs: the
 /// connection and the project id. Output: their ids.
 pub fn restarts(connection: &Connection, project: &str) -> rusqlite::Result<BTreeSet<i64>> {
-    let _ = (connection, project);
-    Ok(BTreeSet::new())
+    listed(connection, project, true)
 }
 
 /// Checks one folder the owner wants this project's agents kept out of: an absolute existing

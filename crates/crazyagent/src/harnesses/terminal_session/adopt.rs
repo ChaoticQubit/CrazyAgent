@@ -155,8 +155,9 @@ impl PaneRecord {
     }
 
     /// Reads a stored record. Takes the JSON.
-    /// Returns the record, or none for anything malformed, long, with relative paths or with
-    /// a toolchain listed twice.
+    /// Returns the record, or none for anything malformed, long, with relative paths, with
+    /// a toolchain listed twice or with more hidden folders, or other digests, than a launch
+    /// records.
     pub fn decode(text: &str) -> Option<Self> {
         if text.len() > RECORD_BYTES_MAX {
             return None;
@@ -190,6 +191,12 @@ impl PaneRecord {
                     .enumerate()
                     .all(|(at, toolchain)| !toolchains[..at].contains(toolchain))
         });
+        let hidden = record.hidden.as_ref().is_none_or(|hidden| {
+            hidden.len() <= crate::sandbox::hidden_paths::HIDDEN_PATHS_MAX
+                && hidden
+                    .iter()
+                    .all(|digest| crate::sandbox::hidden_paths::digest_plain(digest))
+        });
         let keepers = record.keepers.as_ref().is_none_or(|keepers| {
             keepers.len() <= KEEPERS_MAX
                 && keepers.iter().all(|keeper| {
@@ -211,6 +218,7 @@ impl PaneRecord {
             && toolchains
             && grants
             && keepers
+            && hidden
             && record.proxy != Some(0))
         .then_some(record)
     }

@@ -2871,6 +2871,7 @@ fn remove(
     crate::storage::agent_text::forget_project(tx, project_id)?;
     crate::questions::forget_project(tx, project_id)?;
     crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
+    crate::sandbox::hidden_paths::forget_seers(tx, project_id.as_str()).map_err(error)?;
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
     crate::sandbox::grants::forget_project(tx, project_id.as_str()).map_err(error)?;
     crate::github::proposals::forget_project(tx, project_id)?;
