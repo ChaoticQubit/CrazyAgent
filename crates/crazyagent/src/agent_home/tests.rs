@@ -2974,3 +2974,118 @@ fn project_text_the_engine_never_wrote_reaches_agents_labelled_and_the_file_stay
     assert!(given.ends_with(&label), "{given}");
     assert_eq!(fs::read_to_string(&file).unwrap(), "# Rules\nDo X.\n");
 }
+
+/// Makes the folder `name` in `root` holding `files` empty files and opens it as a reset
+/// does. Inputs: the root, the name and how many files. Output: its path and its handle.
+#[cfg(unix)]
+fn walk_folder(root: &Path, name: &str, files: usize) -> (PathBuf, std::os::fd::OwnedFd) {
+    let at = root.join(name);
+    fs::create_dir_all(&at).unwrap();
+    for file in 0..files {
+        fs::write(at.join(file.to_string()), b"").unwrap();
+    }
+    let opened = open_real_folder(&at).unwrap();
+    (at, opened)
+}
+
+/// Makes a `projects` folder in `root` whose projects `p1` and `p2` each hold an auto-memory
+/// folder of two files, so one pass of [`clear_memory`] lists two projects and walks two
+/// listings of two names, six names in all. Input: the root. Output: its path and handle.
+#[cfg(unix)]
+fn memory_folder(root: &Path) -> (PathBuf, std::os::fd::OwnedFd) {
+    for project in ["p1", "p2"] {
+        let memory = root.join("projects").join(project).join(CLAUDE_MEMORY);
+        fs::create_dir_all(&memory).unwrap();
+        for file in ["1", "2"] {
+            fs::write(memory.join(file), b"").unwrap();
+        }
+    }
+    walk_folder(root, "projects", 0)
+}
+
+/// How many of the projects [`memory_folder`] made still hold their auto-memory. Input: the
+/// projects folder. Output: the count.
+#[cfg(unix)]
+fn memories_left(projects: &Path) -> usize {
+    ["p1", "p2"]
+        .iter()
+        .filter(|project| projects.join(project).join(CLAUDE_MEMORY).exists())
+        .count()
+}
+
+/// RESET-WALK-N1: one pass of a home reset spends one walk budget, a unit per name it lists,
+/// so a pass over more unwanted names than its budget refuses with a name left, though no
+/// name alone needs any walk, and a process adding names at the home root cannot stretch
+/// one pass past it.
+#[cfg(unix)]
+#[test]
+fn a_home_pass_listing_more_names_than_its_walk_budget_refuses_with_one_left() {
+    use std::os::fd::AsFd;
+    let (_directory, root) = folder();
+    let (home, opened) = walk_folder(&root, "home", 4);
+    let kept = [("kept", Kept::File)];
+
+    let reset = keep_in(opened.as_fd(), &home, &kept, &mut Vec::new(), 0, 3);
+
+    assert_eq!(reset, Err(AgentHomeError("agent_home_unwritable".into())));
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 1);
+}
+
+/// RESET-WALK-N1: one pass of [`clear_memory`] spends one walk budget across the projects
+/// it lists and the auto-memory walks it makes, so two memory walks that each fit the
+/// budget alone refuse together with one memory left, instead of each walk getting a
+/// fresh budget.
+#[cfg(unix)]
+#[test]
+fn a_memory_pass_whose_walks_together_pass_its_budget_refuses_though_each_fits_alone() {
+    use std::os::fd::AsFd;
+    let (_directory, root) = folder();
+    let (projects, opened) = memory_folder(&root);
+
+    let cleared = clear_memory(opened.as_fd(), &projects, 5);
+
+    assert_eq!(cleared, Err(AgentHomeError("agent_home_unwritable".into())));
+    assert_eq!(memories_left(&projects), 1);
+}
+
+/// RESET-WALK-N1 code r1 F1: the removals one home pass makes spend its budget too, so two
+/// unwanted folders whose walks each fit the budget alone refuse together with one folder
+/// left, instead of each removal getting a fresh budget.
+#[cfg(unix)]
+#[test]
+fn a_home_pass_whose_folder_walks_together_pass_its_budget_refuses_though_each_fits_alone() {
+    use std::os::fd::AsFd;
+    let (_directory, root) = folder();
+    let (home, opened) = walk_folder(&root, "home", 0);
+    for name in ["a", "b"] {
+        walk_folder(&home, name, 2);
+    }
+    let kept = [("kept", Kept::File)];
+
+    let reset = keep_in(opened.as_fd(), &home, &kept, &mut Vec::new(), 0, 5);
+
+    assert_eq!(reset, Err(AgentHomeError("agent_home_unwritable".into())));
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 1);
+}
+
+/// RESET-WALK-N1 guard: a pass spends exactly a unit per name it lists and per name its
+/// walks list, so a budget of exactly those clears a home pass and a memory pass, and the
+/// next pass of each starts from a fresh budget.
+#[cfg(unix)]
+#[test]
+fn a_walk_budget_of_exactly_what_a_pass_lists_clears_a_home_pass_and_a_memory_pass() {
+    use std::os::fd::AsFd;
+    let (_directory, root) = folder();
+    let (home, opened) = walk_folder(&root, "home", 4);
+    let (projects, listed) = memory_folder(&root);
+    let kept = [("kept", Kept::File)];
+
+    let reset = keep_in(opened.as_fd(), &home, &kept, &mut Vec::new(), 0, 4);
+    let cleared = clear_memory(listed.as_fd(), &projects, 6);
+
+    assert_eq!(reset, Ok(()));
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+    assert_eq!(cleared, Ok(()));
+    assert_eq!(memories_left(&projects), 0);
+    assert!(projects.join("p1").is_dir() && projects.join("p2").is_dir());
+}
