@@ -28,13 +28,46 @@ pub use settings::{ConnectorSettings, KeepLog, NativeConnectors, SizeCap, Wait, 
 /// The refusal for a project id that names no project.
 pub const PROJECT_UNKNOWN: &str = "connector_project_unknown";
 
-/// How the owner signs a connector in today: with a key, or not yet, for a connector whose
-/// only way in is an OAuth sign-in this build does not have.
+/// How the owner signs a connector in: with a key, through the browser, either one by the
+/// owner's choice, or not yet, for a file whose only way in this build cannot use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignIn {
     Key,
+    Browser,
+    Both,
     NotYet,
+}
+
+/// The way a connector whose file offers a key and a browser sign-in signs in, by the
+/// owner's choice, Key until the owner chooses; a file that offers one way always uses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignInWith {
+    Key,
+    Browser,
+}
+
+/// The owner's own OAuth app saved for a connector, as its page shows it: the client id,
+/// and whether a client secret is saved, never the secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnAppView {
+    pub client_id: String,
+    pub secret_saved: bool,
+}
+
+/// A connector's browser sign-in as its page shows it: whether it is signed in, whether its
+/// file lets the owner bring an own app and the one saved, the address to register for that
+/// app, and the way the connector signs in now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthView {
+    pub signed_in: bool,
+    pub own_app_allowed: bool,
+    pub own_app: Option<OwnAppView>,
+    pub redirect: String,
+    pub using: SignInWith,
 }
 
 /// One connector as the owner's page lists it: what it is, where it came from, whether it
@@ -50,6 +83,7 @@ pub struct ConnectorView {
     pub origin: Origin,
     pub status: PluginStatus,
     pub sign_in: SignIn,
+    pub oauth: Option<OAuthView>,
     pub runs: Option<RunsView>,
     pub secrets: Vec<SecretView>,
     pub sha256: String,
@@ -328,6 +362,7 @@ pub fn view(
                 } else {
                     SignIn::Key
                 },
+                oauth: None,
                 runs: plugin.runs,
                 name: plugin.name,
                 title: plugin.title,

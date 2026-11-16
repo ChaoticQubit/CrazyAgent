@@ -5,6 +5,7 @@
 
 use crate::connectors::callback::{CALLBACK_WAIT, Callback, Waited};
 use crate::connectors::oauth::{self, OAuthError, Pending};
+use crate::connectors::SignInWith;
 use crate::connectors::settings::{self, WritePolicy};
 use crate::engine::EngineError;
 use rusqlite::Connection;
@@ -364,6 +365,25 @@ pub fn clear_own_app(db: &Connection, root: &Path, name: &str) -> Result<(), Eng
 pub fn sign_out(db: &Connection, root: &Path, name: &str) -> Result<(), EngineError> {
     replaced(root, name);
     oauth::sign_out(db, root, name).map_err(refusal)
+}
+
+/// The way a connector whose file offers a key and a browser sign-in signs in, as the owner
+/// chose it; Key until the owner chooses. Inputs: the engine database and the connector.
+/// Output: the way, or `connectors_unavailable`.
+pub(crate) fn chosen(_db: &Connection, _name: &str) -> Result<SignInWith, EngineError> {
+    Ok(SignInWith::Key)
+}
+
+/// Chooses how a connector whose file offers a key and a browser sign-in signs in. Inputs:
+/// the engine database and root, the connector and the way. Output: Ok, or
+/// `connector_sign_in_one_way` for a file that offers one way only, or the store's refusal.
+pub fn choose(
+    _db: &Connection,
+    _root: &Path,
+    _name: &str,
+    _way: SignInWith,
+) -> Result<(), EngineError> {
+    Err(EngineError("sign_in_with_not_built".into()))
 }
 
 #[cfg(test)]

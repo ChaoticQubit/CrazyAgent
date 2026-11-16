@@ -52,6 +52,7 @@ fn loaded(text: &str) -> Loaded {
         manifest: manifest::parse(text).unwrap(),
         origin: Origin::User,
         bindings: Vec::new(),
+        browser: false,
     }
 }
 

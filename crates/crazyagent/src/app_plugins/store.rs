@@ -72,13 +72,15 @@ pub fn bundled() -> &'static [(&'static str, &'static str)] {
     &BUNDLED
 }
 
-/// A plugin ready to run: its manifest, where it came from, and where the key behind each
-/// declared secret is saved, in declaration order. It holds references only, never a key.
+/// A plugin ready to run: its manifest, where it came from, where the key behind each
+/// declared secret is saved, in declaration order, and whether a connector that also has a
+/// key signs in through the browser instead, with no binding. It holds no key.
 #[derive(Debug)]
 pub struct Loaded {
     pub manifest: Manifest,
     pub origin: Origin,
     pub bindings: Vec<Bound>,
+    pub browser: bool,
 }
 
 /// Where one bound secret's key is saved: an API-key account's saved key, or a key the
@@ -911,6 +913,7 @@ fn load(db: &Connection, root: &Path, name: &str, launch: bool) -> Result<Loaded
         manifest,
         origin: found.origin,
         bindings,
+        browser: false,
     })
 }
 

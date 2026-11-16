@@ -47,6 +47,7 @@ fn connector(
         origin,
         status,
         sign_in: SignIn::Key,
+        oauth: None,
         runs: Some(RunsView::Connector {
             url: format!("https://{host}/mcp"),
             hosts: vec![host.into()],
@@ -205,6 +206,7 @@ fn refused_file(name: &str, problem: Problem) -> ConnectorView {
         origin: Origin::User,
         status: PluginStatus::Refused { problem },
         sign_in: SignIn::NotYet,
+        oauth: None,
         runs: None,
         secrets: Vec::new(),
         sha256: SHA.into(),

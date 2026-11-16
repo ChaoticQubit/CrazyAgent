@@ -3,7 +3,7 @@ use crate::app_plugins::{PluginKind, Preview, store};
 use crate::connectors::approvals::{self, AllowedWrites, ApprovalView};
 use crate::connectors::audit::{self, ActivityView};
 use crate::connectors::sign_in::{self, SignInState};
-use crate::connectors::{ConnectorSettings, ConnectorsView, Who};
+use crate::connectors::{ConnectorSettings, ConnectorsView, SignInWith, Who};
 use crate::engine::owner::AccountSecret;
 use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
@@ -90,13 +90,10 @@ pub const CONNECTORS_CODES: &[&str] = &[
     "questions_unavailable",
 ];
 
-/// One Connectors request. Reads: the page, a manifest's trust screen, the activity log,
-/// one write approval, a project's standing write allows and where a sign-in stands.
-/// Changes: add, trust, remove, save a key sent in the frame after the request, clear a key,
-/// turn a connector on or off for a project, save the settings, answer a waiting write, take
-/// back a standing allow, start or cancel a sign-in through the owner's browser, and save
-/// or remove the owner's own OAuth app, whose client secret, when it has one, comes in the
-/// frame after the request.
+/// One Connectors request: a read of the page, a trust screen, the activity log, a write
+/// approval, a project's standing allows or a sign-in; or a change to files, keys, project
+/// switches, settings, write answers, browser sign-ins, own OAuth apps, sign-out or the way
+/// a connector signs in. A key or an own app's secret comes in the frame after the request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
@@ -175,6 +172,10 @@ enum Action {
     },
     SignOut {
         name: String,
+    },
+    SetSignInWith {
+        name: String,
+        way: SignInWith,
     },
 }
 
@@ -422,6 +423,17 @@ impl OwnerClient {
         self.connectors_view(Action::SignOut { name }, None).await
     }
 
+    /// Chooses how a connector whose file offers a key and a browser sign-in signs in.
+    /// Inputs: the connector and the way. Output: the page.
+    pub async fn connector_set_sign_in_with(
+        &self,
+        name: String,
+        way: SignInWith,
+    ) -> Result<ConnectorsView, EngineError> {
+        self.connectors_view(Action::SetSignInWith { name, way }, None)
+            .await
+    }
+
     /// Reads where a connector's sign-in stands. Input: the connector. Output: its state.
     pub async fn connector_sign_in_state(&self, name: String) -> Result<SignInState, EngineError> {
         self.sign_in_reply(Action::SignInState { name }).await
@@ -618,7 +630,8 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         | Action::CancelSignIn { name }
         | Action::SetOwnApp { name, .. }
         | Action::ClearOwnApp { name }
-        | Action::SignOut { name } => &[name.as_str()],
+        | Action::SignOut { name }
+        | Action::SetSignInWith { name, .. } => &[name.as_str()],
         Action::SetKey { name, secret } | Action::ClearKey { name, secret } => {
             &[name.as_str(), secret.as_str()]
         }
@@ -659,7 +672,8 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         | Action::CancelSignIn { .. }
         | Action::SetOwnApp { .. }
         | Action::ClearOwnApp { .. }
-        | Action::SignOut { .. } => None,
+        | Action::SignOut { .. }
+        | Action::SetSignInWith { .. } => None,
     };
     let id_invalid = matches!(
         connectors,
@@ -851,6 +865,11 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
         Action::SignOut { name } => {
             connector(root, &name)?;
             sign_in::sign_out(&db, root, &name)?;
+            page(&db, None)
+        }
+        Action::SetSignInWith { name, way } => {
+            connector(root, &name)?;
+            sign_in::choose(&db, root, &name, way)?;
             page(&db, None)
         }
     }

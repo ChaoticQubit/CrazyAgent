@@ -2121,6 +2121,58 @@ fn shelf_vendor(taken: Arc<Mutex<String>>) -> Vendor {
     })
 }
 
+const SHELF_BOTH: &str = "schema: 1
+kind: connector
+name: shelf
+title: Shelf
+version: 1
+mcp:
+  url: https://mcp.shelf.example/mcp
+  hosts: [mcp.shelf.example]
+key:
+  secret: api_key
+  header: Authorization
+  scheme: Bearer
+oauth:
+  hosts: [auth.shelf.example]
+  registration: [own]
+  scopes_read: [read]
+  scopes_write: [write]
+";
+
+/// DEC-168 addendum 30, 23:36 Q1 A: a connector whose file offers a key and a browser
+/// sign-in calls with the way the owner chose: its key until Browser is chosen, then its
+/// sign-in's token though the key stays saved, and its key again once Key is chosen.
+#[test]
+fn a_connector_with_a_key_and_a_sign_in_calls_the_way_the_owner_chose() {
+    let taken = Arc::new(Mutex::new("at-shelf-1".to_owned()));
+    let vendor = shelf_vendor(taken);
+    let bench = bench();
+    add(&bench.case, SHELF_BOTH, false);
+    save_keys(&bench.case, "shelf", &[("api_key", "sk-shelf-key-0001")]);
+    shelf_signed_in(&bench, &vendor);
+    bench.gateway.stand_in("shelf", vendor.endpoint());
+    grant(&bench, "shelf", true);
+    let launch = launch(&bench);
+    let keyed = "Bearer sk-shelf-key-0001";
+    called(&bench, &launch, "shelf__echo_token", json!({}));
+    assert_eq!(bearers(&vendor).last().map(String::as_str), Some(keyed));
+
+    let choose = |way: crate::connectors::SignInWith| {
+        crate::connectors::sign_in::choose(&bench.case.db, &bench.case.root, "shelf", way)
+    };
+    choose(crate::connectors::SignInWith::Browser).unwrap();
+    let (text, error) = called(&bench, &launch, "shelf__echo_token", json!({}));
+    assert!(!error && text.contains("you sent at-shelf-1"), "{text}");
+    assert_eq!(
+        bearers(&vendor).last().map(String::as_str),
+        Some("Bearer at-shelf-1")
+    );
+    choose(crate::connectors::SignInWith::Key).unwrap();
+    called(&bench, &launch, "shelf__echo_token", json!({}));
+    assert_eq!(bearers(&vendor).last().map(String::as_str), Some(keyed));
+}
+
 /// The sha256 of the `shelf` file the bench trusted.
 fn shelf_sha(bench: &Bench) -> String {
     store::trusted_connector(&bench.case.db, &bench.case.root, "shelf")
