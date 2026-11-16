@@ -1,4 +1,5 @@
 import { call, knownError, namedFailure, type Result } from "./api";
+import { displayText } from "./screens/conversation";
 import type { Tone } from "./ui";
 
 export type PluginKind = "embedding";
@@ -166,61 +167,83 @@ export function choiceValue(choice: SearchChoice): string {
 }
 
 /** Reads every app plugin, built-in first. Output: the listing. */
+/** An engine answer as the plugin pages may show it: every string in it, at any depth, goes
+ * through `displayText`, so a manifest's, a file name's or a vendor's hidden characters show
+ * as escapes. Input: the answer. Output: the same shape. */
+export function shown<T>(value: T): T {
+  if (typeof value === "string") return displayText(value) as T;
+  if (Array.isArray(value)) return value.map(shown) as T;
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, shown(item)])) as T;
+}
+
+/** A listing as the App plugins page shows it: every string escaped, except each plugin's
+ * name, which the page's actions send back, so a refused file named with a hidden character
+ * can still be removed. Input: the answer. Output: the same shape. */
+function shownListing(result: Result<Listing>): Result<Listing> {
+  if (result.kind !== "ok") return result;
+  return { kind: "ok", value: { ...result.value, plugins: result.value.plugins.map((plugin) => ({ ...shown(plugin), name: plugin.name })) } };
+}
+
+function shownPreview(result: Result<Preview>): Result<Preview> {
+  return result.kind === "ok" ? { kind: "ok", value: shown(result.value) } : result;
+}
+
 export function loadAppPlugins(): Promise<Result<Listing>> {
-  return call<Listing>("desktop_app_plugins");
+  return call<Listing>("desktop_app_plugins").then(shownListing);
 }
 
 /** Reads the trust screen of a manifest without saving it. Input: the manifest text. Output:
  * ready with its trust screen, or refused with its problem. */
 export function previewAppPlugin(yaml: string): Promise<Result<Preview>> {
-  return call<Preview>("desktop_app_plugin_preview", { yaml });
+  return call<Preview>("desktop_app_plugin_preview", { yaml }).then(shownPreview);
 }
 
 /** Reads the trust screen of a file in the owner's plugins folder. Input: the plugin name.
  * Output: ready or refused. */
 export function reviewAppPlugin(name: string): Promise<Result<Preview>> {
-  return call<Preview>("desktop_app_plugin_review", { name });
+  return call<Preview>("desktop_app_plugin_review", { name }).then(shownPreview);
 }
 
 /** Adds a manifest the owner confirmed. Inputs: the same text the trust screen was read from,
  * its SHA-256 and whether it replaces the owner's plugin of that name. Output: the listing. */
 export function addAppPlugin(yaml: string, sha256: string, replace: boolean): Promise<Result<Listing>> {
-  return call<Listing>("desktop_app_plugin_add", { yaml, sha256, replace });
+  return call<Listing>("desktop_app_plugin_add", { yaml, sha256, replace }).then(shownListing);
 }
 
 /** Trusts a reviewed file in the owner's plugins folder. Inputs: the name and the SHA-256 its
  * trust screen showed. Output: the listing. */
 export function trustAppPlugin(name: string, sha256: string): Promise<Result<Listing>> {
-  return call<Listing>("desktop_app_plugin_trust", { name, sha256 });
+  return call<Listing>("desktop_app_plugin_trust", { name, sha256 }).then(shownListing);
 }
 
 /** Turns a plugin on or off. Inputs: the name and the switch. Output: the listing. */
 export function setAppPluginEnabled(name: string, enabled: boolean): Promise<Result<Listing>> {
-  return call<Listing>("desktop_app_plugin_set_enabled", { name, enabled });
+  return call<Listing>("desktop_app_plugin_set_enabled", { name, enabled }).then(shownListing);
 }
 
 /** Removes one of the owner's plugins. Input: the name. Output: the listing. */
 export function removeAppPlugin(name: string): Promise<Result<Listing>> {
-  return call<Listing>("desktop_app_plugin_remove", { name });
+  return call<Listing>("desktop_app_plugin_remove", { name }).then(shownListing);
 }
 
 /** Lets a secret use an API-key account's saved key. Inputs: the plugin, the secret and the
  * account id. Output: the listing. */
 export function bindAppPluginAccount(name: string, secret: string, account: string): Promise<Result<Listing>> {
-  return call<Listing>("desktop_app_plugin_bind_account", { name, secret, account });
+  return call<Listing>("desktop_app_plugin_bind_account", { name, secret, account }).then(shownListing);
 }
 
 /** Saves a key the owner entered for a secret. The key goes to the engine in this one call
  * and is never kept by the page. Inputs: the plugin, the secret and the key. Output: the
  * listing. */
 export function setAppPluginKey(name: string, secret: string, key: string): Promise<Result<Listing>> {
-  return call<Listing>("desktop_app_plugin_set_key", { name, secret, key });
+  return call<Listing>("desktop_app_plugin_set_key", { name, secret, key }).then(shownListing);
 }
 
 /** Clears where a secret's key comes from and deletes a key entered for it. Inputs: the plugin
  * and the secret. Output: the listing. */
 export function unbindAppPlugin(name: string, secret: string): Promise<Result<Listing>> {
-  return call<Listing>("desktop_app_plugin_unbind", { name, secret });
+  return call<Listing>("desktop_app_plugin_unbind", { name, secret }).then(shownListing);
 }
 
 /** Opens the native chooser for one .yaml manifest and reads it, at most 16 KB of UTF-8.

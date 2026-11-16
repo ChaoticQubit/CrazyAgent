@@ -535,6 +535,14 @@ mod tests {
     }
 
     #[test]
+    fn the_owners_own_fields_draw_a_typed_joiner_as_typed() {
+        let form = ProfileForm::new(None, None);
+        for field in [&form.name, &form.role, &form.bio, &form.stack] {
+            assert!(!field.escaped, "{}", field.label);
+        }
+    }
+
+    #[test]
     fn name_is_required_on_leave_and_on_submit() {
         let mut form = ProfileForm::new(None, None);
         assert!(form.typing());

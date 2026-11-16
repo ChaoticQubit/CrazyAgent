@@ -1,5 +1,5 @@
 import { call, knownError, namedFailure, type Result } from "./api";
-import { problemText, type Origin, type PluginStatus, type Preview, type Problem, type SecretView } from "./api-app-plugins";
+import { problemText, shown, type Origin, type PluginStatus, type Preview, type Problem, type SecretView } from "./api-app-plugins";
 import { displayText } from "./screens/conversation";
 import type { Tone } from "./ui";
 
@@ -351,17 +351,6 @@ export function connectorProblem(refusal: { code: string; cause?: string; messag
   if (Object.hasOwn(CONNECTOR_REFUSALS, refusal.code)) return namedFailure(CONNECTOR_REFUSALS[refusal.code], refusal.code, refusal.cause);
   if (Object.hasOwn(CONNECTOR_PAGE_REFUSALS, refusal.code)) return namedFailure(CONNECTOR_PAGE_REFUSALS[refusal.code], refusal.code, refusal.cause);
   return refusal.message ?? namedFailure(knownError(refusal.code), refusal.code, refusal.cause);
-}
-
-/** An engine answer as the Connectors pages may show it: every string in it, at any depth,
- * goes through `displayText`, so a manifest's or vendor's hidden characters show as
- * escapes. Names, ids and hashes are plain ASCII and come back as sent. Input: the answer.
- * Output: the same shape. */
-function shown<T>(value: T): T {
-  if (typeof value === "string") return displayText(value) as T;
-  if (Array.isArray(value)) return value.map(shown) as T;
-  if (value === null || typeof value !== "object") return value;
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, shown(item)])) as T;
 }
 
 /** One agent- or vendor-supplied name or text as the approval page shows it: each typed

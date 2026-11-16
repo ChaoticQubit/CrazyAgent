@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, STEP_MS, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { INTERNALS, POLL_MS, STEP_MS, flushed, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const DAY = 24 * 60 * 60 * 1000;
@@ -197,6 +197,9 @@ async function onEngine(t, prefix, steps, keys = []) {
     site?.server.close();
     await stop(bridgeProcess);
     await stop(engine);
+  }
+  if (keys.length > 0) {
+    for (const [name, child] of [["bridge", bridgeProcess], ["engine", engine]]) assert.ok(await flushed(child), `the ${name}'s output files closed before the key scan`);
   }
   for (const key of keys) assert.deepEqual(holdingKey(root, runtime, evidence, key), [], "no file of the run outside the engine's key folders holds the key");
   if (!process.env.E2E_EVIDENCE) rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });

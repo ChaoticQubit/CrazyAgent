@@ -59,6 +59,23 @@ fn imp1035_secret_bounds_and_debug_are_explicit() {
 }
 
 #[test]
+fn an_account_secret_is_wiped_in_place_and_handed_over_whole() {
+    let typed = b"account-wipe-fixture";
+    let mut secret = AccountSecret::new(typed.to_vec()).unwrap();
+    secret.wipe();
+    assert_eq!(secret.0.len(), typed.len());
+    assert!(
+        secret.0.iter().all(|byte| *byte == 0),
+        "wipe zeroes every byte where it lies"
+    );
+    let kept = b"account-kept-fixture";
+    assert_eq!(
+        AccountSecret::new(kept.to_vec()).unwrap().into_bytes(),
+        kept
+    );
+}
+
+#[test]
 fn imp1035_scope_admits_actual_api_key_and_none_connections() {
     for api_key in [false, true] {
         let connection = configured_connection(api_key);

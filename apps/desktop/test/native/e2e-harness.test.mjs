@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { connect, createServer } from "node:net";
-import { closedPort, freeLowPort, refusingPort } from "./e2e-harness.mjs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { closedPort, flushed, freeLowPort, refusingPort, start, stop } from "./e2e-harness.mjs";
 
 /** The processes lsof names for a local TCP port in one state, either end of a connection
  * included. Input: the port and the TCP state. Output: the distinct pids. */
@@ -72,5 +75,20 @@ test("a low free port lies below every port the system hands out and the proxy b
     });
     assert.equal(server.address().port, port);
     await new Promise((done) => server.close(done));
+  }
+});
+
+test("once a child is stopped and its output files are flushed, the lines it wrote as it stopped are in its .err and .out files", async () => {
+  const evidence = mkdtempSync(join(tmpdir(), "ca-flush-"));
+  try {
+    const script = "process.stdout.write('ready\\n'); process.on('SIGTERM', () => { process.stderr.write('marker-err\\n'); process.stdout.write('marker-out\\n'); process.exit(0); }); setInterval(() => {}, 1000);";
+    const { child } = await start(process.execPath, ["-e", script], { PATH: process.env.PATH }, evidence, "marker", /^ready$/m);
+    await stop(child);
+    assert.equal(await flushed(child), true, "both output files closed in time");
+    assert.match(readFileSync(join(evidence, "marker.err"), "utf8"), /marker-err/u);
+    assert.match(readFileSync(join(evidence, "marker.out"), "utf8"), /marker-out/u);
+    assert.equal(await flushed(null), true, "a child the harness never started has nothing to wait for");
+  } finally {
+    rmSync(evidence, { recursive: true, force: true });
   }
 });

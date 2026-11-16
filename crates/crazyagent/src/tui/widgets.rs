@@ -17,6 +17,7 @@ pub struct TextField {
     cursor: usize,
     pub masked: bool,
     pub multiline: bool,
+    pub escaped: bool,
     pub counter: bool,
     pub max_chars: usize,
     pub placeholder: String,
@@ -32,6 +33,7 @@ impl std::fmt::Debug for TextField {
             .field("label", &self.label)
             .field("chars", &self.value.chars().count())
             .field("masked", &self.masked)
+            .field("escaped", &self.escaped)
             .finish_non_exhaustive()
     }
 }
@@ -61,6 +63,7 @@ impl TextField {
             cursor: 0,
             masked: false,
             multiline: false,
+            escaped: false,
             counter: false,
             max_chars,
             placeholder: String::new(),
@@ -105,6 +108,14 @@ impl TextField {
     /// Input: none. Output: the field.
     pub fn multiline(mut self) -> Self {
         self.multiline = true;
+        self
+    }
+
+    /// Draws hidden and direction-changing characters as escapes, for a paste box whose text
+    /// comes from elsewhere, such as a manifest; text the owner types keeps them as typed.
+    /// Input: none. Output: the field.
+    pub fn escaped(mut self) -> Self {
+        self.escaped = true;
         self
     }
 
@@ -243,8 +254,13 @@ impl TextField {
             let dots = self.len().min(inner.saturating_sub(1));
             return (vec![glyphs.dot.repeat(dots)], 0, dots);
         }
-        let before: String = self.value.chars().take(self.cursor).collect();
-        let lines = wrap_keeping(&self.value, inner);
+        let (before, after) = if self.escaped {
+            crate::memory::visible_split(&self.value, self.cursor)
+        } else {
+            let at = self.byte_at(self.cursor);
+            (self.value[..at].to_owned(), self.value[at..].to_owned())
+        };
+        let lines = wrap_keeping(&format!("{before}{after}"), inner);
         let cursor_lines = wrap_keeping(&before, inner);
         let cursor_row = cursor_lines.len().saturating_sub(1);
         let mut cursor_column = cursor_lines
@@ -521,6 +537,55 @@ mod tests {
         assert_eq!(plain(&lines[1]), "[ For example      ]");
         let (lines, _) = role.lines(20, true, &theme(), &UNICODE);
         assert_eq!(plain(&lines[1]), "[                  ]");
+    }
+
+    #[test]
+    fn pasted_hidden_characters_show_escaped_and_the_cursor_follows() {
+        let mut pasted = TextField::new("Manifest", 1000).multiline().escaped();
+        assert!(pasted.key(&Key::Paste("ab\u{202e}cd".into())));
+        assert_eq!(pasted.value(), "ab\u{202e}cd");
+        let (lines, cursor) = pasted.lines(40, true, &theme(), &UNICODE);
+        assert!(plain(&lines[1]).starts_with("[ ab\\u202ecd "));
+        assert!(!plain(&lines[1]).contains('\u{202e}'));
+        assert_eq!(cursor, Some(Position::new(12, 1)));
+        assert!(pasted.key(&Key::Left));
+        assert!(pasted.key(&Key::Left));
+        let (_, cursor) = pasted.lines(40, true, &theme(), &UNICODE);
+        assert_eq!(cursor, Some(Position::new(10, 1)));
+        let mut family = TextField::new("Manifest", 100).multiline().escaped();
+        assert!(family.key(&Key::Paste("x\u{202e}\u{1f468}\u{200d}\u{1f469}".into())));
+        assert!(family.key(&Key::Left));
+        let (lines, cursor) = family.lines(40, true, &theme(), &UNICODE);
+        assert!(plain(&lines[1]).starts_with("[ x\\u202e\u{1f468}\u{200d}\u{1f469}"));
+        let column = 2 + 1 + 6 + char_width('\u{1f468}') + char_width('\u{200d}');
+        assert_eq!(
+            cursor,
+            Some(Position::new(u16::try_from(column).unwrap(), 1))
+        );
+    }
+
+    #[test]
+    fn a_typed_joiner_stays_in_a_name_and_a_bio_and_the_paste_box_shows_it_escaped() {
+        let typed = "\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}";
+        let mut name = TextField::new("Name", 100);
+        assert!(name.key(&Key::Paste(typed.into())));
+        let (lines, cursor) = name.lines(40, true, &theme(), &UNICODE);
+        assert!(plain(&lines[1]).starts_with(&format!("[ {typed}")));
+        assert!(!plain(&lines[1]).contains("\\u200c"));
+        let column = 2 + typed.chars().map(char_width).sum::<usize>();
+        assert_eq!(
+            cursor,
+            Some(Position::new(u16::try_from(column).unwrap(), 1))
+        );
+        let mut bio = TextField::new("Short bio", 1000).multiline();
+        assert!(bio.key(&Key::Paste(typed.into())));
+        let (lines, _) = bio.lines(40, true, &theme(), &UNICODE);
+        assert!(plain(&lines[1]).starts_with(&format!("[ {typed}")));
+        assert!(!plain(&lines[1]).contains("\\u200c"));
+        let mut pasted = TextField::new("Manifest", 1000).multiline().escaped();
+        assert!(pasted.key(&Key::Paste(typed.into())));
+        let (lines, _) = pasted.lines(40, true, &theme(), &UNICODE);
+        assert!(plain(&lines[1]).starts_with("[ \u{645}\u{6cc}\\u200c\u{62e}"));
     }
 
     #[test]
