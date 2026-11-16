@@ -5,6 +5,7 @@ mod tests;
 #[cfg(all(test, unix))]
 #[path = "master_rcli_capture_tests.rs"]
 mod capture_tests;
+use super::master_host_launch::{ConnectorTurn, MasterConnector};
 use super::master_runtime::{Capture, timed_out};
 use super::{EngineError, OwnerRuntimeHandle, failure};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
@@ -15,7 +16,7 @@ use crate::master_session::{
 };
 use crate::master_time_limit::minutes_of_cause;
 use crate::protocol::RequestId;
-use crate::rcli_host::RcliMasterStatus;
+use crate::rcli_host::{RcliGateway, RcliMasterStatus};
 use crate::storage::{MasterRuntimeObservation, PreparedMasterTurn};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -191,91 +192,28 @@ fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
     }
 }
 
-/// The name an RCLI master turn's connector launch shows in the activity log, the name a
-/// team master's launch has.
-const CONNECTOR_AGENT: &str = "Master";
-
-/// Ends one connector launch when dropped: its record and folder go, so a call its shim
-/// makes later is refused. A failed end is logged and left to the gateway's sweep of
-/// leftover launches.
-struct ConnectorLaunchEnd {
-    root: std::path::PathBuf,
-    folder: std::path::PathBuf,
-}
-
-impl Drop for ConnectorLaunchEnd {
-    fn drop(&mut self) {
-        let ended = self
-            .folder
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .ok_or_else(|| EngineError("connector_request_invalid".into()))
-            .and_then(|launch| {
-                let db = crate::questions::open(&self.root)?;
-                crate::connectors::gateway::end(&db, &self.root, launch)
-            });
-        if let Err(problem) = ended {
-            eprintln!(
-                "rcli_connector_launch_not_ended code={}",
-                crate::protocol::plain_code(&problem.0)
-            );
-        }
-    }
-}
-
-/// One RCLI master turn's connector launch (Connectors Task 14): the gateway the turn's host
-/// names as its one MCP server, ended when the turn drops it.
-struct RcliConnectors {
-    gateway: crate::rcli_host::RcliGateway,
-    end: ConnectorLaunchEnd,
-}
-
-impl RcliConnectors {
-    /// The turn boundary's grant: run the engine as the connector server and use only this
-    /// launch folder. Takes the launch. Returns the grant `master_sandbox` takes.
-    fn turn(&self) -> super::master_host_launch::ConnectorTurn<'_> {
-        assert!(self.gateway.engine.is_absolute());
-        assert_eq!(self.gateway.folder, self.end.folder);
-        super::master_host_launch::ConnectorTurn {
-            engine: &self.gateway.engine,
-            folder: &self.gateway.folder,
-        }
-    }
-}
-
 impl OwnerRuntimeHandle {
-    /// Readies the connector launch of one RCLI master turn: a project with a connector
-    /// granted to its master gets one launch, run by the registered engine executable,
-    /// which the turn's host names as its one MCP server. Input: the prepared turn.
-    /// Output: the launch, none without a grant, or the refusal; a refused launch is ended.
-    async fn open_rcli_connectors(
+    /// Readies the connector launch of one RCLI master turn (Connectors Task 14): a project
+    /// with a connector granted to its master gets one launch, ended when the turn drops it,
+    /// and the gateway its host names as its one MCP server, run by the registered engine
+    /// executable. Input: the prepared turn. Output: the launch and its gateway, none
+    /// without a grant, or the refusal.
+    fn open_rcli_connector(
         &self,
         prepared: &PreparedMasterTurn,
-    ) -> Result<Option<RcliConnectors>, EngineError> {
-        let root = super::changes::engine_root(&self.authority)?;
-        let project = prepared.session.project_id.as_str().to_owned();
-        let made = tokio::task::spawn_blocking(move || {
-            let db = crate::questions::open(&root)?;
-            let role = crate::connectors::grants::Role::Master;
-            let launch =
-                crate::connectors::gateway::prepare(&db, &root, &project, role, CONNECTOR_AGENT)?;
-            Ok::<_, EngineError>(launch.map(|launch| {
-                let folder = launch.folder.clone();
-                (ConnectorLaunchEnd { root, folder }, launch)
-            }))
-        })
-        .await
-        .map_err(|_| failure("connectors_unavailable"))??;
-        let Some((end, launch)) = made else {
+    ) -> Result<Option<(MasterConnector, RcliGateway)>, EngineError> {
+        let root = self.authority.root.engine_root()?;
+        let Some(connector) = MasterConnector::open(root, &prepared.session.project_id)? else {
             return Ok(None);
         };
         let registered = self.registered_engine_executable()?;
-        let server = crate::connectors::launch::entry(registered.verified_path()?, &launch)?;
-        let gateway = crate::rcli_host::RcliGateway::from_entry(&server)
-            .map_err(|problem| EngineError(problem.0))?;
-        assert_eq!(gateway.folder, end.folder);
+        let gateway = RcliGateway {
+            engine: registered.verified_path()?.to_path_buf(),
+            folder: connector.folder().to_path_buf(),
+        };
         assert!(gateway.engine.is_absolute());
-        Ok(Some(RcliConnectors { gateway, end }))
+        assert!(gateway.folder.starts_with(root));
+        Ok(Some((connector, gateway)))
     }
 
     pub(super) async fn launch_rcli_master_turn(
@@ -357,8 +295,8 @@ impl OwnerRuntimeHandle {
         {
             return Err(failure("master_runtime_binding"));
         }
-        let connectors = self.open_rcli_connectors(prepared).await?;
-        launch.gateway = connectors.as_ref().map(|held| held.gateway.clone());
+        let (_connector, gateway) = self.open_rcli_connector(prepared)?.unzip();
+        launch.gateway = gateway;
         let text = turn_instruction_text(&prepared.instructions, &prepared.agent_project)?;
         launch.command().map_err(|error| EngineError(error.0))?;
         let (runtime_ref, capture_ref, file) = self.allocate_master_capture()?;
@@ -375,7 +313,10 @@ impl OwnerRuntimeHandle {
             &prepared.agent_policy,
             prepared.agent_project.trust,
             &prepared.hidden_paths,
-            connectors.as_ref().map(RcliConnectors::turn),
+            launch.gateway.as_ref().map(|gateway| ConnectorTurn {
+                engine: &gateway.engine,
+                folder: &gateway.folder,
+            }),
         )?;
         if !text.is_empty() {
             launch.instructions = Some(super::master_host_launch::write_master_instructions(

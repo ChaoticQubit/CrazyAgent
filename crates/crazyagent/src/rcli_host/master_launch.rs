@@ -1,5 +1,4 @@
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
-use crate::plugins::{LaunchServer, ServerSpec};
 use crate::protocol::{CredentialRef, ProjectId, ProtocolError, RequestId, SessionId};
 #[cfg(unix)]
 use rustix::fs::{Mode, OFlags, open};
@@ -60,41 +59,11 @@ pub struct RcliMasterLaunch {
 
 /// The one connector server a granted rcli master turn names (`ca-connectors`): the engine
 /// executable the host starts as `connector-mcp <folder>` and the turn's own launch folder
-/// in the engine root's launches folder. Read only from the entry
-/// `connectors::launch::entry` made for the turn.
+/// in the engine root's launches folder. `command` checks both before they reach the argv.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RcliGateway {
     pub engine: PathBuf,
     pub folder: PathBuf,
-}
-
-impl RcliGateway {
-    /// Reads a turn's one connector server from the entry the engine built for it. Input:
-    /// the entry. Output: the gateway, or `rcli_master_gateway_rejected` for an entry that
-    /// is not exactly the `ca-connectors` stdio server with no secret.
-    pub fn from_entry(server: &LaunchServer) -> Result<Self, ProtocolError> {
-        let code = "rcli_master_gateway_rejected";
-        let ServerSpec::Stdio { command, args } = &server.spec else {
-            return Err(error(code));
-        };
-        if server.name != crate::connectors::launch::SERVER_NAME
-            || !server.secrets.is_empty()
-            || args.len() != 2
-            || args[0] != crate::connectors::shim::SERVER_COMMAND
-        {
-            return Err(error(code));
-        }
-        let gateway = Self {
-            engine: PathBuf::from(command),
-            folder: PathBuf::from(&args[1]),
-        };
-        if !gateway.engine.is_absolute() || !gateway.folder.is_absolute() {
-            return Err(error(code));
-        }
-        assert_eq!(server.name, crate::connectors::shim::SERVER_NAME);
-        assert!(server.secrets.is_empty());
-        Ok(gateway)
-    }
 }
 
 #[derive(Deserialize)]
