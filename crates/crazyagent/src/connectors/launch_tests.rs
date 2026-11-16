@@ -351,6 +351,14 @@ fn a_launch_in_an_engine_with_no_gateway_gets_no_connector_and_a_served_one_does
         !case.root.join(gateway::LAUNCHES_FOLDER).exists(),
         "and no launch folder is made"
     );
+    assert_eq!(
+        gateway::unserved_line(AGENT_ROLE),
+        "connectors are not available to this agent run: this engine runs no connector gateway"
+    );
+    assert_eq!(
+        gateway::unserved_line(Role::Master),
+        "connectors are not available to this master turn: this engine runs no connector gateway"
+    );
     let running = gateway::start(&case.root).unwrap();
     let launch = gateway::prepare_if_served(&case.db, &case.root, PROJECT, AGENT_ROLE, AGENT)
         .unwrap()

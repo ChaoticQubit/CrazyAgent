@@ -271,6 +271,12 @@ pub fn prepare(
     }))
 }
 
+/// The plain line the engine prints when a launch granted a connector gets none because no
+/// gateway serves its engine. Input: the launch's role. Output: the line.
+pub fn unserved_line(_role: Role) -> &'static str {
+    ""
+}
+
 /// [`prepare`] for a real launch: none while no gateway serves `root` in this process, with
 /// one plain line on the engine's log when a connector is granted to it, so no harness is
 /// handed a connector server that nobody answers. Inputs and output: as [`prepare`].
