@@ -412,13 +412,15 @@ mod tests {
     /// LINUX-KILL-GROUP r1 F1: an rcli master host whose boundary leaves a process in a
     /// session of its own running, as the plain Linux Landlock helper's does, has its lineage
     /// followed from its start, so the process it left outside its group is named as a
-    /// sandboxed run's leftover once the group is gone, and the stop ends with that code.
+    /// sandboxed run's leftover once the group is gone, and the stop ends with that code. Its
+    /// leader leaves the group it was started in and leads a session of its own, as the Linux
+    /// helper's `own_session` makes a wrapped harness, so the lineage admits its children.
     #[test]
     fn a_followed_rcli_master_names_what_it_left_outside_its_group() {
         let folder = tempfile::tempdir().unwrap();
-        let mut command = Command::new("/bin/sh");
+        let mut command = Command::new("/usr/bin/perl");
         command
-            .arg("-c")
+            .args(["-mPOSIX", "-e", "POSIX::setpgid(0, getpgrp(getppid())) or exit 1; POSIX::setsid() > 0 or exit 1; exec '/bin/sh', '-c', $ARGV[0] or exit 1"])
             .arg("/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"child.pid\") or exit 1; print $file \"$$\\n\"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 & exec /bin/sleep 30")
             .current_dir(folder.path())
             .stdin(Stdio::piped())

@@ -2638,13 +2638,14 @@ pub(crate) mod tests {
     /// LINUX-KILL-GROUP: a headless run whose boundary leaves a process in a session of its
     /// own running, as the plain Linux Landlock helper's does, follows a sandboxed lineage, so
     /// the process its harness left outside the group is found once the harness is gone and
-    /// is named as a sandboxed run's leftover, never as a Full access one's.
+    /// is named as a sandboxed run's leftover, never as a Full access one's. Its leader leads
+    /// a session of its own, as the Linux helper's `own_session` makes a wrapped harness.
     #[test]
     fn a_sandboxed_follower_names_what_its_run_left_outside_its_group_as_sandboxed() {
         let folder = tempfile::tempdir().unwrap();
         let mut leader = crate::spawn_gate::spawn(
-            std::process::Command::new("/bin/sh")
-                .arg("-c")
+            std::process::Command::new("/usr/bin/perl")
+                .args(["-mPOSIX", "-e", "POSIX::setsid() > 0 or exit 1; exec '/bin/sh', '-c', $ARGV[0] or exit 1"])
                 .arg(
                     "/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"child.pid\") or exit 1; print $file \"$$\\n\"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 & exec /bin/sleep 30",
                 )

@@ -471,13 +471,15 @@ mod tests {
     /// LINUX-KILL-GROUP r1 F1: a server checked in a boundary that leaves a process in a
     /// session of its own running, as the plain Linux Landlock helper's does, has its lineage
     /// followed, so what it left outside its group is held and the check answers with the
-    /// sandboxed leftover code in place of what the server itself did.
+    /// sandboxed leftover code in place of what the server itself did. Its leader leaves the
+    /// group the check starts it in and leads a session of its own, as the Linux helper's
+    /// `own_session` makes a wrapped server, so the lineage admits its children.
     #[test]
     fn a_followed_server_check_names_what_the_server_left_outside_its_group() {
         let folder = tempfile::tempdir().unwrap();
-        let mut command = Command::new("/bin/sh");
+        let mut command = Command::new("/usr/bin/perl");
         command
-            .arg("-c")
+            .args(["-mPOSIX", "-e", "POSIX::setpgid(0, getpgrp(getppid())) or exit 1; POSIX::setsid() > 0 or exit 1; exec '/bin/sh', '-c', $ARGV[0] or exit 1"])
             .arg("/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"child.pid\") or exit 1; print $file \"$$\\n\"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 & exec /bin/sleep 30")
             .current_dir(folder.path());
 
