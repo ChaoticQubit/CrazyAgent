@@ -1508,11 +1508,13 @@ fn removing_a_recorded_temp_folder_never_follows_a_link_in_it() {
     record_server_tmp(&folder, &left);
     let started = server_command(&servers, &id, &root, &folder).map(|built| server_tmp(&built));
     let gone = fs::symlink_metadata(&left).is_err();
+    let removed = aside_removed(&left);
     for made in [Some(&left), started.as_ref().ok()].into_iter().flatten() {
         let _ = fs::remove_dir_all(made);
     }
     assert!(started.is_ok());
     assert!(gone, "the recorded temp folder was kept");
+    assert!(removed, "the background removal left the moved temp folder");
     assert!(
         file.is_file(),
         "a file a link in the temp folder named was removed"
@@ -1521,6 +1523,29 @@ fn removing_a_recorded_temp_folder_never_follows_a_link_in_it() {
         inner.is_file(),
         "a folder a link in the temp folder named was emptied"
     );
+}
+
+/// Waits, at most ten seconds, until no folder moved aside from a temp folder is left in the
+/// system temp folder, so a row reads what the background removal did, not a race with it.
+/// Input: the temp folder as it was recorded. Output: whether every moved copy is gone.
+fn aside_removed(tmp: &Path) -> bool {
+    let prefix = format!("{}{TMP_GONE}", tmp.file_name().unwrap().to_str().unwrap());
+    let left = || {
+        fs::read_dir(tmp.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(&prefix))
+            })
+    };
+    let wait = Instant::now() + Duration::from_secs(10);
+    while left() && Instant::now() < wait {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    !left()
 }
 
 /// Runs git as a built IDE server starts it: the engine's shim under the server's installed
@@ -3114,7 +3139,7 @@ fn the_start_sweep_removes_only_temp_folders_an_earlier_engine_moved_aside() {
         "2123456789abcdef",
     );
     std::os::unix::fs::symlink(outside.path(), &link).unwrap();
-    let swept = sweep_retired(usize::MAX)
+    sweep_retired(usize::MAX)
         .expect("the sweep starts")
         .join()
         .unwrap();
@@ -3129,7 +3154,6 @@ fn the_start_sweep_removes_only_temp_folders_an_earlier_engine_moved_aside() {
         removed,
         "the folder an earlier engine moved aside is still there"
     );
-    assert!(swept >= 1, "the sweep counted no removal");
     assert_eq!(kept, [true; 3], "open to others, named otherwise, link");
     assert!(outside_kept, "a file behind the link was removed");
 }
