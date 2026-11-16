@@ -1602,6 +1602,63 @@ fn o_saves_an_own_app_and_its_secret_leaves_only_inside_the_job() {
     );
 }
 
+/// rv-code2 F1 (slice B r1): once a typed secret left the form, a Save after a refusal with
+/// the secret field empty sends nothing and asks for the secret again, so a confidential app
+/// is never saved as a public one in its place, which would remove its saved secret; a
+/// typed secret then goes as before, and a form opened again saves a public app on purpose.
+#[test]
+fn a_save_after_a_refusal_asks_for_the_secret_again_instead_of_saving_a_public_app() {
+    let mut shell = page(both(SignInWith::Browser));
+    keys(&mut shell, &[Key::Down, Key::Enter, Key::Char('o')]);
+    typed(&mut shell, "Iv1.app");
+    keys(&mut shell, &[Key::Tab]);
+    typed(&mut shell, APP_SECRET);
+    keys(&mut shell, &[Key::Enter]);
+    assert!(matches!(
+        one(&mut shell),
+        ConnectorsJob::SetOwnApp {
+            secret: Some(_),
+            ..
+        }
+    ));
+    let invalid = "connector_oauth_client_invalid";
+    arrive(&mut shell, ConnectorsEvent::Page(Err(invalid.into())));
+    assert!(tall(&mut shell, &refusal(invalid)), "the form says why");
+    keys(&mut shell, &[Key::Enter]);
+    assert!(
+        requests(&mut shell).is_empty(),
+        "no public app is saved in its place"
+    );
+    assert!(
+        tall(&mut shell, "Type the client secret again."),
+        "the form asks for the secret"
+    );
+    typed(&mut shell, APP_SECRET);
+    keys(&mut shell, &[Key::Enter]);
+    assert!(
+        matches!(
+            one(&mut shell),
+            ConnectorsJob::SetOwnApp {
+                secret: Some(_),
+                ..
+            }
+        ),
+        "a typed secret goes as before"
+    );
+    let finishing = "connector_oauth_sign_in_finishing";
+    arrive(&mut shell, ConnectorsEvent::Page(Err(finishing.into())));
+    keys(&mut shell, &[Key::Esc, Key::Char('o')]);
+    typed(&mut shell, "Iv1.public");
+    keys(&mut shell, &[Key::Enter]);
+    assert!(
+        matches!(
+            one(&mut shell),
+            ConnectorsJob::SetOwnApp { secret: None, .. }
+        ),
+        "a form opened again saves a public app on purpose"
+    );
+}
+
 /// Task 10 pages slice B: `d` removes a saved own app whichever way the connector signs in,
 /// also where its file no longer offers one, so a stale secret can always go (addendum 30);
 /// such a file sets none up, a connector with none has no section, and a finishing sign-in

@@ -820,7 +820,7 @@ test("A connector whose file offers an own app shows its section with the redire
   assert.equal(api.ownAppSavedLine?.("Board"), "Board signs in with your own app.");
   assert.equal(api.ownAppRemovedLine?.("Board"), "Board no longer uses your own app.");
   const tui = source("../../../crates/crazyagent/src/tui/screens/settings/connectors/words.rs");
-  const keys = ["ownApp", "ownAppHelp", "ownAppNone", "clientId", "clientSecret", "clientSecretHelp", "enterClientId", "useOwnApp", "removeOwnApp"];
+  const keys = ["ownApp", "ownAppHelp", "ownAppNone", "clientId", "clientSecret", "clientSecretHelp", "enterClientId", "retypeSecret", "useOwnApp", "removeOwnApp"];
   for (const said of keys.map((key) => api.CONNECTORS_PAGE[key])) assert.ok(typeof said === "string" && tui.includes(`"${said}"`), `the TUI says ${said}`);
   for (const format of ["Redirect: {} (any port)", "{} signs in with your own app.", "{} no longer uses your own app.", "Your own OAuth app for {}", "Client id: {}"]) {
     assert.ok(tui.includes(`"${format}"`), `the TUI says ${format}`);
@@ -854,4 +854,23 @@ test("Save app sends the name, the client id and the secret once, Remove my app 
   assert.equal(source("../src/api-connectors.ts").split("clientId, secret }").length, 2, "only Save app carries a client secret");
   const routes = source("../src-tauri/e2e_bridge/routes.rs");
   assert.ok(routes.includes("\"desktop_connector_set_own_app\" =>") && routes.includes("\"desktop_connector_clear_own_app\" =>"));
+});
+
+test("After a refusal the own app dialog asks for the secret again instead of saving a public app, which would remove the saved secret; a dialog opened again saves a public app on purpose (rv-code2 F1)", () => {
+  assert.equal(api.CONNECTORS_PAGE.retypeSecret, "Type the client secret again.");
+  const screen = source("../src/screens/settings/connectors.tsx");
+  assert.match(screen, /kind: "own_app"; connector: string; title: string; redirect: string; clientId: string; secretSent: boolean \}/u, "the dialog remembers a sent secret");
+  assert.match(screen, /setDialog\(\{ kind: "own_app", [^}]*clientId: "", secretSent: false \}\)/u, "a dialog opened again starts with none sent");
+  const start = screen.indexOf("async function saveApp()");
+  const end = screen.indexOf("\n  }\n", start);
+  assert.ok(start > 0 && end > start, "saveApp is found");
+  const saveApp = screen.slice(start, end);
+  const cleared = saveApp.indexOf("keyRef.current.value = \"\";");
+  const refused = saveApp.indexOf("if (secret === \"\" && dialog.secretSent) {");
+  const said = saveApp.indexOf("setFailure(CONNECTORS_PAGE.retypeSecret);", refused);
+  const marked = saveApp.indexOf("secretSent: true");
+  const sent = saveApp.indexOf("setConnectorOwnApp(");
+  assert.ok(cleared > 0 && refused > cleared && said > refused, "an empty field after a sent secret is refused with the line");
+  assert.ok(saveApp.slice(said, sent).includes("return;"), "and nothing is sent");
+  assert.ok(marked > refused && sent > marked, "a typed secret is marked sent before it goes");
 });
