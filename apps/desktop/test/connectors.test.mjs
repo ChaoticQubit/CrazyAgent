@@ -337,7 +337,6 @@ test("Every refusal the Connectors protocol answers, past the owner codes, has a
   const words = {
     app_plugin_bundled: "Built-in connectors can't be removed or replaced.",
     app_plugin_changed: "The manifest changed after you checked it. Check it again before you trust it.",
-    app_plugin_connector_oauth_not_yet: "This connector signs in with OAuth, which this build does not have.",
     app_plugin_folder_unavailable: "CrazyAgent couldn't open your plugins folder. Try again.",
     app_plugin_folder_unsafe: "Your plugins folder isn't private to you, so CrazyAgent won't read it. Make it yours alone and try again.",
     app_plugin_key_invalid: "That key can't be used: it is empty, too long or has spaces or control characters.",
