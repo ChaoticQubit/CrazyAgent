@@ -30,10 +30,9 @@ fn each_driver_kind_has_its_own_answer() {
     assert_eq!(of(DriverKind::ClaudeStreamJson), Ok(Piped::Claude));
     assert_eq!(of(DriverKind::Acp), Ok(Piped::Acp));
     assert_eq!(of(DriverKind::JsonlTurn), Ok(Piped::JsonlTurn));
+    assert_eq!(of(DriverKind::JsonlRpc), Ok(Piped::JsonlRpc));
     assert_eq!(of(DriverKind::TextTurn), Ok(Piped::TextTurn));
-    for kind in [DriverKind::Rcli, DriverKind::JsonlRpc] {
-        assert_eq!(of(kind), unsupported(), "{kind:?}");
-    }
+    assert_eq!(of(DriverKind::Rcli), unsupported());
 }
 
 #[test]

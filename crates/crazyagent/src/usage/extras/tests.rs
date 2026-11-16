@@ -1268,3 +1268,72 @@ fn the_contract_says_unread_only_where_free_resets_are_read_and_an_older_reply_r
     let older: LimitExtras = serde_json::from_value(wire).unwrap();
     assert_eq!(older.resets_unread, None);
 }
+
+/// Harness layer Task 19: a listed harness's account limits are read by the account's
+/// provider, as an RCLI account's are: a saved key on OpenRouter, DeepSeek or Moonshot reads
+/// that provider's balance with its own place to spend, any other host, a URL without a key
+/// and a managed sign-in read not reported, named after the listed harness.
+#[test]
+fn a_listed_harness_account_reads_its_limits_by_its_provider() {
+    let stored = StoredExtras {
+        credits: Some("3.10 USD left".into()),
+        ..StoredExtras::default()
+    };
+    let listed: Vec<&str> = crate::harnesses::registry::registry()
+        .all()
+        .iter()
+        .map(|harness| harness.id())
+        .filter(|id| !matches!(*id, "codex" | "claude-code" | "rcli"))
+        .collect();
+    assert_eq!(listed.len(), 15);
+    for harness in listed {
+        let on = |url: &str, key: bool| ModelConnection {
+            harness: reference(harness),
+            ..keyed(url, key)
+        };
+        for (url, adapter, place) in [
+            (
+                "https://openrouter.ai/api/v1",
+                Adapter::OpenRouter,
+                OPENROUTER_PLACE,
+            ),
+            (
+                "https://api.deepseek.com/v1",
+                Adapter::DeepSeek,
+                "platform.deepseek.com",
+            ),
+            (
+                "https://api.moonshot.ai/v1",
+                Adapter::Moonshot,
+                "platform.moonshot.ai",
+            ),
+        ] {
+            let contract = limit_extras(&on(url, true), &stored, ResetsSource::ThroughClaudeCode);
+            assert_eq!(contract.adapter, adapter, "{harness} on {url}");
+            assert_eq!(contract.credits, stored.credits, "{harness} on {url}");
+            assert_eq!(
+                contract.spend,
+                Spend::Elsewhere {
+                    place: place.into()
+                },
+                "{harness} on {url}"
+            );
+            assert_eq!(contract.resets, None, "{harness}: a key has no free resets");
+        }
+        for connection in [
+            on("https://api.openai.com/v1", true),
+            on("https://openrouter.ai/api/v1", false),
+            managed(harness),
+        ] {
+            let contract = limit_extras(&connection, &stored, ResetsSource::ThroughClaudeCode);
+            assert_eq!(contract.adapter, Adapter::NotReported, "{harness}");
+            assert_eq!(contract.credits, None, "{harness}");
+            assert_eq!(contract.spend, Spend::NotReported, "{harness}");
+            assert_eq!(contract.harness, name(harness), "{harness}");
+            assert_eq!(
+                contract.not_reported,
+                format!("not reported by {}", name(harness))
+            );
+        }
+    }
+}

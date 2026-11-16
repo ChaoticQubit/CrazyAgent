@@ -36,6 +36,7 @@ fn of(entries: &[PackManifestEntry], source: &Path) -> String {
         Path::new(SETUP),
         Some(Path::new(HOME)),
         entries,
+        ImportFrom::all(),
         &source.display().to_string(),
     )
 }
@@ -144,6 +145,7 @@ fn imports_name_the_harness_folder_they_came_from() {
         Path::new(SETUP),
         None,
         &[],
+        ImportFrom::all(),
         &home.join(".claude/skills/notes").display().to_string(),
     );
     assert_eq!(unknown_home, ADDED_BY_YOU);
@@ -161,6 +163,7 @@ fn a_pack_folder_wins_over_an_import_folder() {
         &setup,
         Some(Path::new(HOME)),
         &entries,
+        ImportFrom::all(),
         &source.display().to_string(),
     );
     assert_eq!(named, "Default pack: superpowers");

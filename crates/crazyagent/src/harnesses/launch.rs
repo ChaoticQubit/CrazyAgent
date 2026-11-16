@@ -580,7 +580,7 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
     let default = match drivers::piped(&request.harness) {
         Ok(Piped::Codex) => CODEX_DEFAULT_BASE_URL,
         Ok(Piped::Claude) => CLAUDE_DEFAULT_BASE_URL,
-        Ok(Piped::Acp | Piped::JsonlTurn | Piped::TextTurn) | Err(_) => {
+        Ok(Piped::Acp | Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn) | Err(_) => {
             return Err(failure("launch_key_relay_unsupported"));
         }
     };
@@ -686,7 +686,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     let (arguments, environment) = match drivers::piped(&request.harness)? {
         Piped::Codex => codex_invocation(request, installed, key_file.as_deref())?,
         Piped::Claude => claude_invocation(request, installed, key_file.as_deref()),
-        Piped::Acp | Piped::JsonlTurn | Piped::TextTurn => {
+        Piped::Acp | Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => {
             return Err(failure("launch_harness_unsupported"));
         }
     };
@@ -1108,8 +1108,9 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
 }
 
 /// Checks that an account home is safe to launch in: an absolute 0700 directory owned by
-/// this user that is neither the owner's HOME nor their real `~/.codex` or `~/.claude`.
-/// Input: the home. Output: Ok, or a plain `launch_account_home_*` refusal code.
+/// this user that is neither the owner's HOME nor a folder any harness manifest names as
+/// the owner's own (`home.owner_folders`, such as `~/.codex`). Input: the home. Output: Ok,
+/// or a plain `launch_account_home_*` refusal code.
 #[cfg(unix)]
 pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
     let metadata =
@@ -1124,7 +1125,8 @@ pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
     let canonical =
         std::fs::canonicalize(home).map_err(|_| failure("launch_account_home_unavailable"))?;
     if let Some(owner) = std::env::var_os("HOME").map(PathBuf::from) {
-        for forbidden in [owner.clone(), owner.join(".codex"), owner.join(".claude")] {
+        let folders = crate::sandbox::harness_folders().map(|folder| owner.join(folder));
+        for forbidden in std::iter::once(owner.clone()).chain(folders) {
             if std::fs::canonicalize(&forbidden).is_ok_and(|forbidden| forbidden == canonical)
                 || forbidden == home
             {
@@ -1235,7 +1237,9 @@ impl Driver {
                 };
                 Ok((driver, vec![start]))
             }
-            Piped::JsonlTurn | Piped::TextTurn => Err(failure("launch_harness_unsupported")),
+            Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => {
+                Err(failure("launch_harness_unsupported"))
+            }
         }
     }
 
