@@ -53,11 +53,12 @@ const KEPT_DEPTH_MAX: usize = 2;
 /// What a launch keeps in an agent home (RV-DS241-137), every other entry going: the
 /// engine's launch state, lock, relay plugin and key file; both harnesses' instruction and
 /// Codex config files, which the launch rewrites, and a Codex home's skills ([`kept_in`]);
-/// Claude Code's sign-in, transcripts and team, task, todo and plan state; Codex's sign-in
-/// and sessions; the per-agent keychain; the download caches, unless the launch's caches
-/// choice clears them ([`clears_caches`]); and `.config` with nothing in it, which every
-/// agent sandbox makes and keeps in place, so no folder built elsewhere takes its name
-/// (RV-DS241-186). No entry kept holds config a tool runs.
+/// Claude Code's sign-in, transcripts without their auto-memory ([`Kept::Transcripts`]) and
+/// team, task, todo and plan state; Codex's sign-in and sessions; the per-agent keychain; the
+/// download caches, unless the launch's caches choice clears them ([`clears_caches`]); and
+/// `.config` with nothing in it, which every agent sandbox makes and keeps in place, so no
+/// folder built elsewhere takes its name (RV-DS241-186). No entry kept holds config a tool
+/// runs.
 const HOME_KEPT: &[(&str, Kept)] = &[
     (crate::launch_context::STATE, Kept::Folder),
     (crate::launch_context::LOCK, Kept::Lock),
@@ -69,7 +70,7 @@ const HOME_KEPT: &[(&str, Kept)] = &[
     (CODEX_SKILLS, Kept::Folder),
     (".claude.json", Kept::File),
     (".credentials.json", Kept::File),
-    ("projects", Kept::Folder),
+    ("projects", Kept::Transcripts),
     ("teams", Kept::Folder),
     ("tasks", Kept::Folder),
     ("todos", Kept::Folder),
@@ -197,6 +198,11 @@ enum Kept {
     Link,
     /// A real folder holding only the entries its list keeps, none when the list is empty.
     Only(&'static [(&'static str, Kept)]),
+    /// Claude Code's `projects` folder of per-project transcript folders, kept with all it
+    /// holds but the `memory` auto-memory entry each project folder may hold and any link
+    /// directly in it, which a harness would follow to such a folder elsewhere, so no build
+    /// that ignores the auto-memory switches loads a past run's memory (B20).
+    Transcripts,
 }
 
 /// The CrazyAgent default process the owner can seed the Process page with: the owner's
@@ -1466,7 +1472,9 @@ fn keep_in(
                 Some(Kept::Lock) if crate::launch_context::lock_kept(&found) => {
                     unpin_at(folder, name)
                 }
-                Some(Kept::Folder | Kept::Cache) if form == FileType::Directory => {
+                Some(Kept::Folder | Kept::Cache | Kept::Transcripts)
+                    if form == FileType::Directory =>
+                {
                     unpin_at(folder, name)
                 }
                 Some(Kept::Link) if form == FileType::Symlink => unpin_at(folder, name),
@@ -1537,7 +1545,7 @@ fn keep_only(
             match wanted {
                 Some(Kept::File) if metadata.is_file() && sole_own_link(&metadata) => {}
                 Some(Kept::Lock) if crate::launch_context::lock_kept(&metadata) => {}
-                Some(Kept::Folder | Kept::Cache) if metadata.is_dir() => {}
+                Some(Kept::Folder | Kept::Cache | Kept::Transcripts) if metadata.is_dir() => {}
                 Some(Kept::Link) if link => {}
                 Some(Kept::Only(inner)) if metadata.is_dir() => {
                     keep_only(&path, inner, held)?;
@@ -1694,7 +1702,7 @@ fn pin_below(prefix: &str, kept: &[(&str, Kept)], pinned: &mut Vec<String>) {
                 pin_below(&path, inner, pinned);
             }
             Kept::Link => pinned.push(path),
-            Kept::File | Kept::Lock | Kept::Folder | Kept::Cache => {}
+            Kept::File | Kept::Lock | Kept::Folder | Kept::Cache | Kept::Transcripts => {}
         }
     }
 }
@@ -1718,7 +1726,7 @@ fn keep_below(prefix: &str, list: &[(&str, Kept)], kept: &mut Vec<String>) {
         let path = below(prefix, name);
         match kind {
             Kept::Only(inner) => keep_below(&path, inner, kept),
-            Kept::File | Kept::Lock | Kept::Folder => kept.push(path),
+            Kept::File | Kept::Lock | Kept::Folder | Kept::Transcripts => kept.push(path),
             Kept::Cache | Kept::Link => {}
         }
     }
