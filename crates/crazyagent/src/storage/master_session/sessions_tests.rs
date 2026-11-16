@@ -189,10 +189,8 @@ impl Case {
 
     async fn basis_for(&self, backend: MasterBackend) -> (ConfigId, String, Box<MasterSelection>) {
         let (pool, account) = match backend {
-            MasterBackend::Rcli => ("session-pool", "session-account"),
-            MasterBackend::Codex | MasterBackend::Claude | MasterBackend::Listed(_) => {
-                ("native-pool", "native-account")
-            }
+            MasterBackend::Rcli | MasterBackend::Listed(_) => ("session-pool", "session-account"),
+            MasterBackend::Codex | MasterBackend::Claude => ("native-pool", "native-account"),
         };
         let basis = self
             .read(OwnerRead::ModelAccessPage {
@@ -991,6 +989,43 @@ async fn resume_refuses_a_session_the_current_settings_or_engine_run_no_longer_a
         );
         assert_eq!(snapshot(&case), before, "a refused Resume changes nothing");
     }
+    case.close().await;
+}
+
+/// DEC-180 Task 20: a master on a listed harness whose manifest names the master role opens
+/// on the pool's keyless endpoint account, which that harness fits whatever harness stored
+/// it, and its turns run under that member's own connection.
+#[tokio::test]
+async fn a_master_on_a_listed_master_harness_opens_on_a_fitting_account_and_runs_under_it() {
+    let case = Case::new().await;
+    let listed = MasterBackend::Listed("standin-acp");
+    let (expected_config_id, expected_source_hash, selection) = case.basis_for(listed).await;
+    let opened = case
+        .master(
+            "open-standin",
+            MasterOwnerAction::Open {
+                project_id: case.project.clone(),
+                expected_config_id,
+                expected_source_hash,
+                selection,
+            },
+        )
+        .await;
+    assert_eq!(opened, OwnerResult::Applied);
+    let shown = case.shown().await;
+    assert_eq!(shown.selection.backend, listed);
+    let member: ModelConnection = serde_json::from_value(serde_json::json!({
+        "id": "session-connection",
+        "provider": "local-provider",
+        "harness": "rcli",
+        "protocol": "openai-chat",
+        "account_ref": "session-account",
+        "endpoint": {"kind": "http", "url": "http://127.0.0.1:11434/v1"},
+        "model": {"id": "local-model", "author": "local-author"},
+        "auth": {"method": "none"},
+    }))
+    .unwrap();
+    assert_eq!(master_target(&shown, &member), Some(member.id.clone()));
     case.close().await;
 }
 

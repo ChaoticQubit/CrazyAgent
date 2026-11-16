@@ -793,6 +793,17 @@ pub(crate) fn validate_selection(
     Ok(())
 }
 
+/// Finds the harness a listed backend runs a master on: one of the registry whose manifest
+/// names the master role and drives it on pipes over ACP, the listed master driver the
+/// engine runs (DEC-180 Task 20). Input: the catalog id. Output: the harness, or
+/// `launch_harness_unsupported` for any other.
+pub(crate) fn listed_master(
+    id: &str,
+) -> Result<&'static crate::harnesses::registry::Harness, EngineError> {
+    let _ = id;
+    Err(error("launch_harness_unsupported"))
+}
+
 /// Tells whether a connection can run a master of this backend.
 /// Inputs: the backend and the connection. Output: true for an RCLI HTTP connection, or
 /// for a native connection of the Codex or Claude harness the backend names; false for a
@@ -847,7 +858,7 @@ mod cause_code_tests {
 
 #[cfg(test)]
 mod backend_tests {
-    use super::{MasterBackend, MasterSelection, backend_member};
+    use super::{MasterBackend, MasterSelection, backend_member, error, listed_master};
     use crate::config::ModelConnection;
     use crate::protocol::CredentialRef;
     use crate::routing::{ResourceBudget, RouteRequest};
@@ -1033,11 +1044,12 @@ mod backend_tests {
         .unwrap()
     }
 
-    /// DEC-180 Phase 1: no connection runs a master on a listed backend yet, not even a
-    /// connection of that very harness, while RCLI, Codex and Claude keep the connections
-    /// they ran on.
+    /// DEC-180 Task 20: a connection runs a master on a listed backend exactly when the
+    /// harness fits its account: an endpoint account of a wire format it speaks, whatever
+    /// harness stored it, never a sign-in; RCLI, Codex and Claude keep the connections they
+    /// ran on, and a listed harness without the master role runs on none.
     #[test]
-    fn no_connection_runs_a_master_on_a_listed_backend() {
+    fn a_connection_runs_a_master_on_a_listed_backend_when_the_harness_fits_its_account() {
         let connections = [
             connection("rcli", false),
             connection("codex", true),
@@ -1060,6 +1072,26 @@ mod backend_tests {
             runs(MasterBackend::Claude),
             [false, false, true, true, false, false]
         );
+        assert_eq!(
+            runs(MasterBackend::Listed("standin-acp")),
+            [true, false, false, false, false, true]
+        );
         assert_eq!(runs(MasterBackend::Listed("opencode")), [false; 6]);
+        assert_eq!(runs(MasterBackend::Listed("no-such-harness")), [false; 6]);
+    }
+
+    /// DEC-180 Task 20: a listed backend runs a master once its harness's manifest names
+    /// the master role and drives it over ACP; a harness without the role, a terminal
+    /// stand-in with no piped driver, or a name of no registry, is refused with its code.
+    #[test]
+    fn a_listed_backend_runs_a_master_when_its_manifest_names_the_role_and_an_acp_driver() {
+        let found = listed_master("standin-acp").map(|harness| harness.id());
+        assert_eq!(found, Ok("standin-acp"));
+        let refused = Some(error("launch_harness_unsupported"));
+        for id in ["opencode", "standin-screen", "no-such-harness", "codex"] {
+            assert_eq!(listed_master(id).err(), refused, "{id}");
+        }
+        let parsed = MasterBackend::parse("standin-acp");
+        assert_eq!(parsed, Some(MasterBackend::Listed("standin-acp")));
     }
 }
