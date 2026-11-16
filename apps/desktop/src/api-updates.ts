@@ -18,10 +18,13 @@ export type UpdateProgress =
   | { kind: "downloading"; downloaded: number; total: number | null }
   | { kind: "verifying" }
   | { kind: "stopping_engine" }
-  | { kind: "installing" };
+  | { kind: "installing" }
+  | { kind: "starting_engine"; waited_s: number; answering: boolean };
+
+export type EngineAfterUpdate = "ready" | "starting" | "failed";
 
 export interface InstallOutcome {
-  engine_started: boolean;
+  engine: EngineAfterUpdate;
 }
 
 /** Reads this app's version and the saved update channel. Output: the settings, not ready, or

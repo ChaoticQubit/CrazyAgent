@@ -28,7 +28,7 @@ const PHASES = {
   current: [{ kind: "check_done", update: null, at: 1 }],
   available: [CHECKED],
   installing: INSTALLING,
-  installed: [...INSTALLING, { kind: "install_done", engineStarted: false }],
+  installed: [...INSTALLING, { kind: "install_done", engine: "starting" }],
   failed: [{ kind: "check_started" }, { kind: "check_failed", code: "update_download_failed" }],
 };
 let root = null;

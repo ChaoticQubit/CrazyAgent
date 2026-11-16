@@ -2,7 +2,7 @@ use crate::bridge::BridgeError;
 use crazyagent::update::{self, Channel, UpdateError};
 use serde::Serialize;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::ipc::Channel as Events;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -11,6 +11,7 @@ use tokio::sync::{Mutex, MutexGuard, Notify};
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const PROGRESS_STEP_BYTES: u64 = 512 * 1024;
+const STARTING_TICK: Duration = Duration::from_secs(5);
 const NOTES_CHARS_MAX: usize = 4000;
 
 /// The update the owner last checked for, kept until they install it or check again.
@@ -40,13 +41,14 @@ pub enum UpdateProgress {
     Verifying,
     StoppingEngine,
     Installing,
+    StartingEngine { waited_s: u64, answering: bool },
 }
 
-/// The result of an install: whether the engine service came back on the new version
-/// before the restart.
+/// The result of an install: where the engine service stands on the new version before
+/// the restart.
 #[derive(Debug, Serialize)]
 pub struct InstallOutcome {
-    pub engine_started: bool,
+    pub engine: EngineAfterUpdate,
 }
 
 /// Where the engine stands when an install returns: answering on the new version, still
@@ -61,12 +63,12 @@ pub enum EngineAfterUpdate {
 
 /// Names where the engine stands after an install's wait. Inputs: whether the wait saw it
 /// answer and whether its service manager still runs it. Output: Ready when it answered,
-/// else Failed.
-fn engine_after(answered: bool, _running: bool) -> EngineAfterUpdate {
-    if answered {
-        EngineAfterUpdate::Ready
-    } else {
-        EngineAfterUpdate::Failed
+/// Starting while the manager still runs it past the wait, else Failed.
+fn engine_after(answered: bool, running: bool) -> EngineAfterUpdate {
+    match (answered, running) {
+        (true, _) => EngineAfterUpdate::Ready,
+        (false, true) => EngineAfterUpdate::Starting,
+        (false, false) => EngineAfterUpdate::Failed,
     }
 }
 
@@ -208,7 +210,7 @@ fn download_failure(error: tauri_plugin_updater::Error) -> BridgeError {
 /// through the bundled `crazyagent`, installs, and starts the service on the new engine,
 /// which migrates its data on start. Nothing changes when the download or signature fails;
 /// a failed install starts the old engine again. Inputs: the state and the progress channel.
-/// Output: whether the engine started, or the failure code.
+/// Output: where the engine stands, or the failure code.
 pub async fn install(
     state: &UpdateState,
     events: Events<UpdateProgress>,
@@ -251,8 +253,57 @@ pub async fn install(
         return Err(refused("update_install_failed"));
     }
     Ok(InstallOutcome {
-        engine_started: service(sidecar, "start").await.is_ok(),
+        engine: start_engine(sidecar, &events).await,
     })
+}
+
+/// Starts the engine service through the new `crazyagent`, then waits for the engine as app
+/// launch does, past that tool's own wait, while its service manager still runs the process
+/// it started, telling the window the time waited every `STARTING_TICK`. Inputs: the new
+/// sidecar and the progress channel. Output: where the engine stands.
+async fn start_engine(sidecar: PathBuf, events: &Events<UpdateProgress>) -> EngineAfterUpdate {
+    let watched = crazyagent::paths::Layout::current()
+        .ok()
+        .and_then(|layout| {
+            crazyagent::service::Service::current_user(
+                crazyagent::paths::Platform::CURRENT,
+                sidecar.clone(),
+                &layout,
+            )
+            .ok()
+            .map(|engine| (layout, engine))
+        });
+    let Some((layout, engine)) = watched else {
+        return engine_after(service(sidecar, "start").await.is_ok(), false);
+    };
+    let since = crazyagent::service::log_length(&layout);
+    let begun = Instant::now();
+    let started = async {
+        let _ = service(sidecar, "start").await;
+        crazyagent::service::wait_started(
+            &layout,
+            &engine,
+            crazyagent::service::READY_TIMEOUT,
+            since,
+        )
+        .await
+        .is_ok()
+    };
+    tokio::pin!(started);
+    let mut tick = tokio::time::interval(STARTING_TICK);
+    let answered = loop {
+        tokio::select! {
+            answered = &mut started => break answered,
+            _ = tick.tick() => {
+                let _ = events.send(UpdateProgress::StartingEngine {
+                    waited_s: begun.elapsed().as_secs(),
+                    answering: crazyagent::service::answering(&layout.socket()),
+                });
+            }
+        }
+    };
+    let running = engine.status().is_ok_and(|status| status.running);
+    engine_after(answered, running)
 }
 
 /// Links the bundled `crazyagent`, or its private copy when the app runs from an AppImage
@@ -286,5 +337,24 @@ mod tests {
         assert_eq!(engine_after(true, false), EngineAfterUpdate::Ready);
         assert_eq!(engine_after(false, true), EngineAfterUpdate::Starting);
         assert_eq!(engine_after(false, false), EngineAfterUpdate::Failed);
+    }
+
+    #[test]
+    fn the_install_outcome_and_the_starting_step_read_as_the_window_expects() {
+        let outcome = InstallOutcome {
+            engine: EngineAfterUpdate::Starting,
+        };
+        assert_eq!(
+            serde_json::to_value(&outcome).unwrap(),
+            serde_json::json!({ "engine": "starting" })
+        );
+        let step = UpdateProgress::StartingEngine {
+            waited_s: 65,
+            answering: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&step).unwrap(),
+            serde_json::json!({ "kind": "starting_engine", "waited_s": 65, "answering": true })
+        );
     }
 }
