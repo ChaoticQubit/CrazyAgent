@@ -1583,6 +1583,7 @@ async fn a_running_turn_reads_the_saved_agent_policy_and_an_unreadable_one_as_no
         }],
         ide_git_hooks: false,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         network: crate::sandbox::policy::AgentNetwork::default(),
@@ -2610,8 +2611,13 @@ async fn a_console_master_turn_with_tools_is_told_its_memory_tools() {
         );
         assert_eq!(
             tools_off,
-            off.map(str::to_owned).into_iter().collect::<Vec<_>>(),
+            crate::team::tool::console_off(off.map(str::to_owned).into_iter().collect()),
             "{account}"
+        );
+        assert!(
+            tools_off
+                .iter()
+                .any(|tool| tool == crate::team::tool::PROPOSE_RULE_TOOL)
         );
     }
 }

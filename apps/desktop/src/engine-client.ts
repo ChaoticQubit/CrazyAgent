@@ -515,7 +515,7 @@ export interface ProjectCatalog {
   document_bytes_max: number;
   project_document_bytes_max: number;
   default_team: TeamPlan;
-  agent_access?: { access: "sandboxed" | "own_branch" | "full"; label: string; unavailable: string | null }[];
+  agent_access?: { access: "sandboxed" | "own_branch" | "full"; label: string; unavailable: string | null; gaps?: string[] }[];
 }
 
 export interface StoredSetup {
@@ -569,10 +569,6 @@ export interface ContextChunk {
 
 export function projectCatalog(pool: string | null, research: ResearchKind[]): Promise<ProjectCatalog> {
   return invoke<ProjectCatalog>("desktop_project_catalog", { pool, research });
-}
-
-export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_setup_project", { spec, setup, generation });
 }
 
 export function projectSetup(id: string): Promise<StoredSetup | null> {
@@ -1364,6 +1360,12 @@ export function deleteProjectJob(id: string, name: string): Promise<IntakeJob> {
   return invoke<IntakeJob>("desktop_delete_project_job", { id, name });
 }
 
+/** Starts the engine's job that sets up a New Project: its folder, documents, team plan and
+ * research jobs (DEC-177 add.2). Inputs: the name spec and the setup. Output: the started job. */
+export function setupProjectJob(spec: ProjectSpec, setup: ProjectSetup): Promise<IntakeJob> {
+  return invoke<IntakeJob>("desktop_setup_project_job", { spec, setup });
+}
+
 /** Stops one research job; a running agent's whole process group stops.
  * Inputs: project id, job id and a generation. Output: the engine receipt. */
 export function cancelResearch(id: string, job: number, generation: number): Promise<IntentReceipt> {
@@ -1540,6 +1542,82 @@ export interface CloneReceipt {
   path: string;
 }
 
+export interface GitHubOwner {
+  login: string;
+  personal: boolean;
+}
+
+export interface GitHubOwners {
+  owners: GitHubOwner[];
+  problem: string | null;
+}
+
+export interface GitHubPublishPlan {
+  owner: string;
+  name: string;
+  description: string;
+  private: boolean;
+  docs: boolean;
+}
+
+export type GitHubIgnoreDraft = { by: "agent" } | { by: "baseline"; reason: string };
+
+export interface GitHubCommitted {
+  branch: string;
+  commit: string;
+  left_out: number;
+}
+
+export interface GitHubSecretFinding {
+  path: string;
+  line: number;
+  kind: "token" | "private_key" | "named_value";
+}
+
+export type GitHubRuleState =
+  | { state: "applied" }
+  | { state: "refused"; status: number; message: string }
+  | { state: "not_applicable"; reason: string }
+  | { state: "waiting"; reason: string };
+
+export interface GitHubRuleOutcome {
+  rule: string;
+  on: boolean;
+  state: GitHubRuleState;
+}
+
+export type GitHubPublishStep =
+  | { step: "drafting" }
+  | { step: "lines"; lines: string[]; draft: GitHubIgnoreDraft }
+  | { step: "blocked"; scan: { findings: GitHubSecretFinding[]; truncated: boolean } }
+  | { step: "checked" }
+  | { step: "committed"; committed: GitHubCommitted }
+  | { step: "creating"; committed: GitHubCommitted; sent_at: number }
+  | { step: "created"; committed: GitHubCommitted; full_name: string; private: boolean }
+  | { step: "pushed"; full_name: string; private: boolean; workflows: boolean }
+  | { step: "done"; full_name: string; outcomes: GitHubRuleOutcome[] };
+
+/** A repository a discarded publish leaves on GitHub: one it made, or one it may have made. */
+export type GitHubPublishLeft = { left: "made" | "maybe"; full_name: string };
+
+export interface GitHubPublishJob {
+  project: string;
+  plan: GitHubPublishPlan;
+  lines: string[];
+  written: string[];
+  step: GitHubPublishStep;
+  stopped: string | null;
+  made: string | null;
+  rules?: string[];
+}
+
+export interface GitHubRepoRules {
+  full_name: string;
+  private: boolean;
+  checks: string[];
+  rules: GitHubRuleOutcome[];
+}
+
 /** Starts "Sign in with GitHub". Output: the code to type at the GitHub page and its
  * address; the engine waits for approval in the background, so poll githubStatus. */
 export function githubSignIn(): Promise<GitHubDeviceCode> {
@@ -1571,6 +1649,96 @@ export function githubRepos(page = 1): Promise<GitHubRepoPage> {
 /** Clones one repository, as "owner/name", into the projects home. Output: where it landed. */
 export function cloneRepo(fullName: string): Promise<CloneReceipt> {
   return invoke<CloneReceipt>("desktop_clone_repo", { fullName });
+}
+
+/** Lists the GitHub accounts a published project's repository can go under, the personal
+ * account first. Output: the accounts and a plain problem, such as organizations that
+ * could not be listed. */
+export function githubOwners(): Promise<GitHubOwners> {
+  return invoke<GitHubOwners>("desktop_github_owners");
+}
+
+/** Reads where a project's GitHub publish stands. Input: the project id. Output: the job,
+ * or null when the project has no publish. */
+export function githubPublishStatus(project: string): Promise<GitHubPublishJob | null> {
+  return invoke<GitHubPublishJob | null>("desktop_github_publish_status", { project });
+}
+
+/** Approves a project's .gitignore lines and runs its publish as far as it goes. Inputs:
+ * the project id and the lines. Output: the job where it stands. */
+export function githubPublishApprove(project: string, lines: string[]): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_approve", { project, lines });
+}
+
+/** Leaves a file that holds a secret out of a project's publish and runs on. Inputs: the
+ * project id and the file's path as the check named it. Output: the job where it stands. */
+export function githubPublishExclude(project: string, path: string): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_exclude", { project, path });
+}
+
+/** Checks a project's files for secrets again after the owner fixed them. Input: the
+ * project id. Output: the job where it stands. */
+export function githubPublishRecheck(project: string): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_recheck", { project });
+}
+
+/** Runs a stopped publish on from the step it reached. Input: the project id. Output:
+ * the job where it stands. */
+export function githubPublishContinue(project: string): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_continue", { project });
+}
+
+/** The owner's answer to the Overview's publish prompt: Not now asks again in 7 days. */
+export type GitHubPromptAnswer = "not_now" | "never";
+
+/** Tells whether a project's Overview asks to publish it on GitHub. Input: the project id.
+ * Output: true to ask. */
+export function githubPublishPrompt(project: string): Promise<boolean> {
+  return invoke<boolean>("desktop_github_publish_prompt", { project });
+}
+
+/** Keeps the owner's answer to a project's publish prompt. Inputs: the project id and the
+ * answer. Output: null once kept. */
+export function githubPublishPromptSet(project: string, answer: GitHubPromptAnswer): Promise<null> {
+  return invoke<null>("desktop_github_publish_prompt_set", { project, answer });
+}
+
+/** Discards a project's publish record; the files it wrote and a repository it made stay.
+ * Input: the project id. Output: the repository GitHub made or may have made, or null. */
+export function githubPublishDiscard(project: string): Promise<GitHubPublishLeft | null> {
+  return invoke<GitHubPublishLeft | null>("desktop_github_publish_discard", { project });
+}
+
+/** Starts publishing a project on GitHub: the engine checks the plan, the sign-in and the
+ * project's git, answers, and drafts the .gitignore lines to show first after. Inputs: the
+ * project id and the plan. Output: the job at Drafting. */
+export function githubPublishStart(project: string, plan: GitHubPublishPlan): Promise<GitHubPublishJob> {
+  return invoke<GitHubPublishJob>("desktop_github_publish_start", { project, plan });
+}
+
+/** Reads the rules a new repository starts with, as Settings > GitHub shows them: DEC-182's
+ * standard setup while none are saved. Output: the rules on, by the engine's names. */
+export function githubRuleDefaults(): Promise<string[]> {
+  return invoke<string[]>("desktop_github_rule_defaults");
+}
+
+/** Saves the rules a new repository starts with. Input: the rules on. Output: the rules the
+ * engine read back after saving. */
+export function githubRuleDefaultsSet(rules: string[]): Promise<string[]> {
+  return invoke<string[]>("desktop_github_rule_defaults_set", { rules });
+}
+
+/** Reads the live rules of the repository CrazyAgent published a project to, with GET calls
+ * only. Input: the project id. Output: the repository, its CI check names and every rule. */
+export function githubRules(project: string): Promise<GitHubRepoRules> {
+  return invoke<GitHubRepoRules>("desktop_github_rules", { project });
+}
+
+/** Turns one rule on or off on that repository with the owner's sign-in, then reads it again.
+ * Inputs: the project id, the `owner/name` the page showed, the rule and whether it is on.
+ * Output: the fresh page. */
+export function githubRuleSet(project: string, repo: string, rule: string, on: boolean): Promise<GitHubRepoRules> {
+  return invoke<GitHubRepoRules>("desktop_github_rule_set", { project, repo, rule, on });
 }
 
 export type DependencyName = "tmux" | "uv" | "graphify" | "node";
@@ -1675,14 +1843,15 @@ export function icloudCancel(): Promise<boolean> {
 }
 
 /** The part of a job that was running when it ended. */
-export type IntakePhase = "downloading" | "stopping" | "copying" | "clearing" | "trashing";
+export type IntakePhase = "downloading" | "stopping" | "copying" | "clearing" | "trashing" | "building";
 
 /** What the engine's job is doing, or how it ended. A project move or a delete waits for its
  * agents to stop first; copying counts the files copied, then the files checked; clearing
  * removes a moved folder's old place, or a deleted project's records, and never stops; a delete
  * moves its folders to the Trash in trashing, with no stop once the first one moves, and
  * cut_short is a delete an engine stop cut short, with how many of its folders reached the
- * Trash. */
+ * Trash; a New Project builds its folder in building, with how many of its documents it copied
+ * once it counted them. */
 export type IntakeJobState =
   | { state: "downloading"; progress: IcloudProgress }
   | { state: "stopping"; agents_left: number }
@@ -1693,11 +1862,13 @@ export type IntakeJobState =
   | { state: "failed"; code: string; phase: IntakePhase }
   | { state: "cancelled"; phase: IntakePhase }
   | { state: "needs_answer"; code: string }
-  | { state: "cut_short"; trashed: number; total: number };
+  | { state: "cut_short"; trashed: number; total: number }
+  | { state: "building"; done: number; total: number };
 
-/** What a job does: adds a folder, moves a project kept elsewhere into the projects folder, or
- * deletes a project, its folders to the Trash (DEC-177 add.1). */
-export type ProjectJobKind = "add" | "move_project" | "delete";
+/** What a job does: adds a folder, moves a project kept elsewhere into the projects folder,
+ * deletes a project, its folders to the Trash (DEC-177 add.1), or sets up a New Project, its
+ * name in place of the folder (add.2). */
+export type ProjectJobKind = "add" | "move_project" | "delete" | "setup";
 
 /** The engine's one job, which adds a folder or moves a project into the projects folder apart
  * from the window: its id, its kind, the project a move takes, the folder, move or copy, the

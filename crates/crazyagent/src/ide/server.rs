@@ -58,6 +58,11 @@ const EXTENSIONS: &str = "extensions";
 const LAUNCHER: &str = "bin/codium-server";
 const SERVER_MAIN: &str = "out/server-main.js";
 const PROJECTS_MAX: usize = 256;
+/// How many random bytes name a temp folder moved aside ([`retire`]).
+const GONE_BYTES: usize = 8;
+/// How many entries of the system temp folder the engine-start sweep looks at
+/// ([`sweep_retired`]).
+const GONE_SCAN_MAX: usize = 4096;
 /// How long in all the engine's stop waits for start locks. A blocking call left by a
 /// timed-out open can hold one for as long as its lookup hangs.
 const STOP_LEFTOVER_WAIT: Duration = Duration::from_secs(10);
@@ -253,7 +258,8 @@ impl Servers {
 
     /// Ends every server a previous engine recorded and left running, across the project
     /// folders in `<data>/ide` (at most [`PROJECTS_MAX`]), so a crashed engine leaves no
-    /// server behind for a project that is never opened again. The owner server runs it
+    /// server behind for a project that is never opened again, and starts removing the temp
+    /// folders an earlier engine moved aside ([`sweep_retired`]). The owner server runs it
     /// once at start, before any open. A folder others could write is reported and left
     /// alone. Input: the register. Output: none.
     pub async fn sweep_left(&self) {
@@ -263,6 +269,7 @@ impl Servers {
                 found.file_type().is_dir() && found.uid() == user && found.mode() & 0o022 == 0
             })
         };
+        drop(sweep_retired(GONE_SCAN_MAX));
         if !self.folder.exists() {
             return;
         }
@@ -1215,20 +1222,110 @@ fn record_tmp(folder: &Path, tmp: &Path) {
     }
 }
 
-/// Removes the temp folder a project's last confined start recorded, with all it holds,
-/// never following a link, then the record. Only one short temp folder this user owns
-/// privately is removed ([`crate::sandbox::toolchains::own_short_tmp`]); any other recorded
-/// path, the server data folder or a link included, is left as it is. A folder that cannot
-/// be removed is logged and never stops a start. Input: the IDE folder.
+/// Moves the temp folder a project's last confined start recorded aside with one rename and
+/// removes it on a thread of its own, then the record, so no stop or start waits on it
+/// (RV-DS241-189). Only an own short temp folder is touched, never another recorded path; one
+/// that cannot be moved is logged. Input: the IDE folder.
 fn remove_recorded_tmp(folder: &Path) {
     let record = folder.join(TMP_RECORD);
     if let Some(tmp) = recorded_tmp(&record)
         && crate::sandbox::toolchains::own_short_tmp(&tmp)
-        && fs::remove_dir_all(&tmp).is_err()
     {
-        eprintln!("ide_server_tmp_left");
+        match retire(&tmp) {
+            Some(gone) => remove_in_background(gone),
+            None => eprintln!("ide_server_tmp_left"),
+        }
     }
     let _ = fs::remove_file(&record);
+}
+
+/// Moves one short temp folder aside in the system temp folder, under its own name,
+/// [`TMP_GONE`] and fresh random hex, never following a link. Input: the folder. Output:
+/// the new path, or none when no random name or no rename was had.
+fn retire(tmp: &Path) -> Option<PathBuf> {
+    let mut bytes = [0u8; GONE_BYTES];
+    getrandom::fill(&mut bytes).ok()?;
+    let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut name = tmp.file_name()?.to_os_string();
+    name.push(TMP_GONE);
+    name.push(suffix);
+    let gone = tmp.with_file_name(name);
+    assert_ne!(gone, tmp);
+    fs::rename(tmp, &gone).ok()?;
+    Some(gone)
+}
+
+/// Removes one folder [`retire`] moved aside, with all it holds and never following a link,
+/// on a thread of its own; one that is no longer such a folder is left, and one that cannot
+/// be removed is logged and left for the next engine-start sweep ([`sweep_retired`]).
+/// Input: the folder.
+fn remove_in_background(gone: PathBuf) {
+    let spawned = std::thread::Builder::new()
+        .name("ide-tmp-gone".into())
+        .spawn(move || {
+            if retired(&gone) && fs::remove_dir_all(&gone).is_err() {
+                eprintln!("ide_server_tmp_left");
+            }
+        });
+    if spawned.is_err() {
+        eprintln!("ide_server_tmp_left");
+    }
+}
+
+/// What a temp folder's name gains when [`remove_recorded_tmp`] moves it aside.
+const TMP_GONE: &str = "-gone-";
+
+/// Whether a path is a folder [`retire`] moved aside: in the system temp folder, named a
+/// short temp folder's name, [`TMP_GONE`] and [`GONE_BYTES`] of lowercase hex, and a private
+/// folder of this user, never a link. Input: the path. Output: the answer.
+fn retired(path: &Path) -> bool {
+    let parent = Path::new(crate::sandbox::toolchains::TMP_PARENT);
+    let hex = |text: &str| {
+        text.len() == 2 * GONE_BYTES
+            && text
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    };
+    let Some((short, suffix)) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.split_once(TMP_GONE))
+    else {
+        return false;
+    };
+    path.parent() == Some(parent)
+        && crate::sandbox::toolchains::in_agent_tmp(&parent.join(short))
+        && hex(suffix)
+        && crate::sandbox::toolchains::private_folder_pin(path).is_some()
+}
+
+/// Removes, on a thread of its own, the folders [`retire`] moved aside that an earlier
+/// engine left when it stopped before their removal ended, looking at no more than `limit`
+/// entries of the system temp folder. The owner server starts it once at engine start
+/// ([`Servers::sweep_left`]). Input: the limit. Output: the sweep's thread, whose result
+/// is how many it removed, or none when no thread could start.
+fn sweep_retired(limit: usize) -> Option<std::thread::JoinHandle<usize>> {
+    std::thread::Builder::new()
+        .name("ide-tmp-sweep".into())
+        .spawn(move || {
+            let Ok(entries) = fs::read_dir(crate::sandbox::toolchains::TMP_PARENT) else {
+                return 0;
+            };
+            let mut removed = 0;
+            for entry in entries.flatten().take(limit) {
+                let path = entry.path();
+                if !retired(&path) {
+                    continue;
+                }
+                match fs::remove_dir_all(&path) {
+                    Ok(()) => removed += 1,
+                    Err(_) => eprintln!("ide_server_tmp_left"),
+                }
+            }
+            assert!(removed <= limit);
+            removed
+        })
+        .ok()
 }
 
 /// The temp folder a [`TMP_RECORD`] names, read only from a plain UTF-8 file of at most

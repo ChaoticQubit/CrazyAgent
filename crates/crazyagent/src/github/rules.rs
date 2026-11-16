@@ -24,6 +24,13 @@ const WAITING_KEPT: &str =
     "waiting for the first CI run to name its checks; the checks named before stay required";
 const ID_UNSAID: &str =
     "GitHub made the ruleset but did not say its id, so CrazyAgent will not change it later";
+const FILE: &str = "a file in the project, written when it is published";
+const NEEDS_PULL_REQUESTS: &str = "needs pull requests";
+const PUBLIC_ONLY: &str = "public repositories only";
+const NO_OUTSIDE: &str = "a private repository runs no outside pull request workflows";
+const UNSHOWN: &str = "GitHub's answer did not show this setting";
+const BRANCH_BYTES_MAX: usize = 255;
+const CHECK_RUNS_PER_PAGE: usize = 100;
 
 /// One rule of CrazyAgent's standard secure setup for a published repository (DEC-182).
 /// Each is a switch on the GitHub settings page, and all start on except signed commits.
@@ -99,7 +106,7 @@ impl GitHubRule {
     /// Tells whether GitHub's settings hold the rule. Dependabot version updates and the
     /// security policy are files the publish writes into the project instead.
     /// Output: true for a rule set through GitHub's API.
-    fn on_github(self) -> bool {
+    pub(super) fn on_github(self) -> bool {
         !matches!(self, Self::DependabotVersionUpdates | Self::SecurityPolicy)
     }
 
@@ -158,13 +165,28 @@ pub struct GitHubRepoFacts {
     pub ci: GitHubCi,
 }
 
+/// What the per-repository GitHub settings page shows: `owner/name`, whether it is
+/// private, the check names the first CI run reported, escaped and bounded, and one entry
+/// per rule in `ALL`'s order with its live switch and state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubRepoRules {
+    pub full_name: String,
+    pub private: bool,
+    pub checks: Vec<String>,
+    pub rules: Vec<GitHubRuleOutcome>,
+}
+
 /// What CrazyAgent remembers about one repository it set rules on: the id of each ruleset
-/// it made, by the rule the ruleset holds, so a pass only ever changes CrazyAgent's own.
+/// it made, by the rule the ruleset holds, so a pass only ever changes CrazyAgent's own,
+/// and the rules the owner wants on, which a later switch sends for the other rules.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RepoRecord {
     #[serde(default)]
     pub(super) rulesets: BTreeMap<GitHubRule, u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) on: Option<BTreeSet<GitHubRule>>,
 }
 
 impl RepoRecord {
@@ -235,6 +257,7 @@ pub(super) fn apply(
     facts: &GitHubRepoFacts,
     made: &mut RepoRecord,
 ) -> Result<Vec<GitHubRuleOutcome>, EngineError> {
+    made.on = Some(on.clone());
     let mut pass = Pass::new(endpoints, token, full_name, on, facts, made)?;
     let mut outcomes: Vec<GitHubRuleOutcome> = Vec::new();
     for rule in GitHubRule::ALL.into_iter().filter(|rule| rule.on_github()) {
@@ -264,9 +287,11 @@ pub(super) fn apply(
     Ok(outcomes)
 }
 
-/// Sets one rule on one repository, as `apply` does for each. Inputs: endpoints, token,
-/// `owner/name`, the rule, the rules on, the facts and the repository's record.
-/// Output: the rule's outcome, or `github_token_refused`, `github_unreachable`.
+/// Sets one rule on one repository, as `apply` does for each. The record keeps the rules
+/// on only once GitHub applied this rule, so a refused or failed change leaves the wanted
+/// rules as GitHub still holds them. Inputs: endpoints, token, `owner/name`, the rule, the
+/// rules on, the facts and the repository's record. Output: the rule's outcome, or
+/// `github_token_refused`, `github_unreachable`.
 pub(super) fn set(
     endpoints: &Endpoints,
     token: &SecretString,
@@ -276,12 +301,202 @@ pub(super) fn set(
     facts: &GitHubRepoFacts,
     made: &mut RepoRecord,
 ) -> Result<GitHubRuleOutcome, EngineError> {
-    let mut pass = Pass::new(endpoints, token, full_name, on, facts, made)?;
+    let state = Pass::new(endpoints, token, full_name, on, facts, made)?.state(rule)?;
+    if state == GitHubRuleState::Applied {
+        made.on = Some(on.clone());
+    }
     Ok(GitHubRuleOutcome {
         rule,
         on: on.contains(&rule),
-        state: pass.state(rule)?,
+        state,
     })
+}
+
+/// Reads one repository's live settings for the GitHub settings page, one GET per
+/// setting, and sends nothing that changes it. One refused read never stops the rest.
+/// Inputs: endpoints, token, `owner/name` and the repository's record. Output: the page
+/// and the facts a switch needs, or `github_repo_unreadable`, `github_token_refused`,
+/// `github_unreachable`, `github_reply_invalid`.
+pub(super) fn read(
+    endpoints: &Endpoints,
+    token: &SecretString,
+    full_name: &str,
+    made: &RepoRecord,
+) -> Result<(GitHubRepoRules, GitHubRepoFacts), EngineError> {
+    super::clone::full_name(full_name)?;
+    let reply = fetch(
+        endpoints,
+        token,
+        endpoints.api(&format!("repos/{full_name}"))?,
+    )?;
+    if reply.status != 200 {
+        return Err(failure("github_repo_unreadable"));
+    }
+    let repository: Value = api::json(&reply)?;
+    let private = repository
+        .get("private")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| failure("github_reply_invalid"))?;
+    let branch = repository
+        .get("default_branch")
+        .and_then(Value::as_str)
+        .filter(|branch| {
+            !branch.is_empty()
+                && branch.len() <= BRANCH_BYTES_MAX
+                && !branch.chars().any(char::is_control)
+        })
+        .ok_or_else(|| failure("github_reply_invalid"))?;
+    let ci = ci(endpoints, token, full_name, branch)?;
+    let (facts, checks, ci_refused) = match ci {
+        Ok((ci, checks)) => (GitHubRepoFacts { private, ci }, checks, None),
+        Err(refusal) => (
+            GitHubRepoFacts {
+                private,
+                ci: GitHubCi::Waiting,
+            },
+            Vec::new(),
+            Some(refusal),
+        ),
+    };
+    let none = BTreeSet::new();
+    let mut record = made.clone();
+    let mut pass = Pass::new(endpoints, token, full_name, &none, &facts, &mut record)?;
+    let mut rules: Vec<GitHubRuleOutcome> = Vec::with_capacity(GitHubRule::ALL.len());
+    for rule in GitHubRule::ALL {
+        let (on, state) = match rules.last().cloned() {
+            Some(pull) if rule == GitHubRule::ConversationResolution => {
+                assert_eq!(pull.rule, GitHubRule::PullRequest);
+                pass.resolution(&pull)?
+            }
+            _ => pass.live(rule, &repository, ci_refused.as_ref())?,
+        };
+        rules.push(GitHubRuleOutcome { rule, on, state });
+    }
+    assert_eq!(rules.len(), GitHubRule::ALL.len());
+    assert!(
+        rules
+            .iter()
+            .all(|outcome| !outcome.on || outcome.state == GitHubRuleState::Applied)
+    );
+    let page = GitHubRepoRules {
+        full_name: full_name.to_owned(),
+        private,
+        checks,
+        rules,
+    };
+    Ok((page, facts))
+}
+
+/// Sends one GET with the owner's token. Inputs: endpoints, token and the address.
+/// Output: the reply, or `github_token_refused` on a 401, `github_unreachable`.
+fn fetch(endpoints: &Endpoints, token: &SecretString, url: url::Url) -> Result<Reply, EngineError> {
+    let reply = endpoints
+        .request(url, api::API_JSON, Some(token), None)
+        .send()?;
+    if reply.status == 401 {
+        return Err(failure("github_token_refused"));
+    }
+    Ok(reply)
+}
+
+/// The refused state for a reply GitHub sent in a shape CrazyAgent cannot read.
+/// Input: the reply's status. Output: the state.
+fn unshown(status: u16) -> GitHubRuleState {
+    GitHubRuleState::Refused {
+        status,
+        message: UNSHOWN.into(),
+    }
+}
+
+/// Reads a repository's CI for the required-checks rule: no workflows, workflows whose
+/// first run named no checks yet, or the check names the default branch's last commit
+/// reported, sorted and once each, with the same names escaped and bounded to show.
+/// Inputs: endpoints, token, `owner/name` and the default branch. Output: the CI and the
+/// names to show, or GitHub's refusal to say, or `github_token_refused`,
+/// `github_reply_invalid`.
+fn ci(
+    endpoints: &Endpoints,
+    token: &SecretString,
+    full_name: &str,
+    branch: &str,
+) -> Result<Result<(GitHubCi, Vec<String>), GitHubRuleState>, EngineError> {
+    #[derive(Deserialize)]
+    struct Workflows {
+        total_count: u64,
+    }
+    #[derive(Deserialize)]
+    struct Run {
+        name: String,
+    }
+    #[derive(Deserialize)]
+    struct Runs {
+        check_runs: Vec<Run>,
+    }
+    let mut url = endpoints.api(&format!("repos/{full_name}/actions/workflows"))?;
+    url.query_pairs_mut().append_pair("per_page", "1");
+    let reply = fetch(endpoints, token, url)?;
+    if reply.status != 200 {
+        return Ok(Err(refused(&reply)));
+    }
+    let Ok(workflows) = serde_json::from_slice::<Workflows>(&reply.body) else {
+        return Ok(Err(unshown(reply.status)));
+    };
+    if workflows.total_count == 0 {
+        return Ok(Ok((GitHubCi::None, Vec::new())));
+    }
+    let mut url = endpoints.api(&format!("repos/{full_name}/commits/"))?;
+    url.path_segments_mut()
+        .map_err(|_| failure("github_request_invalid"))?
+        .pop_if_empty()
+        .push(branch)
+        .push("check-runs");
+    url.query_pairs_mut()
+        .append_pair("per_page", &CHECK_RUNS_PER_PAGE.to_string());
+    let reply = fetch(endpoints, token, url)?;
+    if reply.status != 200 {
+        return Ok(Err(refused(&reply)));
+    }
+    let Ok(runs) = serde_json::from_slice::<Runs>(&reply.body) else {
+        return Ok(Err(unshown(reply.status)));
+    };
+    if runs.check_runs.len() > CHECK_RUNS_PER_PAGE {
+        return Err(failure("github_reply_invalid"));
+    }
+    let names: BTreeSet<String> = runs.check_runs.into_iter().map(|run| run.name).collect();
+    let names: Vec<String> = names.into_iter().collect();
+    let shown: Vec<String> = names
+        .iter()
+        .map(|name| api::shown(name, CHECK_NAME_BYTES_MAX))
+        .collect();
+    assert_eq!(shown.len(), names.len());
+    Ok(Ok(if names.is_empty() {
+        (GitHubCi::Waiting, shown)
+    } else {
+        (GitHubCi::Checks(names), shown)
+    }))
+}
+
+/// Reads one repository flag from GitHub's answer for the repository and tells whether
+/// the rule holds: the flag is `holds` when the rule is on. Inputs: the repository, the
+/// field and the value that means on. Output: the switch and its state.
+fn flag(repository: &Value, field: &str, holds: bool) -> (bool, GitHubRuleState) {
+    match repository.get(field).and_then(Value::as_bool) {
+        Some(value) => (value == holds, GitHubRuleState::Applied),
+        None => (false, unshown(200)),
+    }
+}
+
+/// Reads one security and analysis feature from GitHub's answer for the repository.
+/// Inputs: the repository and the feature. Output: the switch and its state.
+fn feature(repository: &Value, feature: &str) -> (bool, GitHubRuleState) {
+    let status = repository
+        .pointer(&format!("/security_and_analysis/{feature}/status"))
+        .and_then(Value::as_str);
+    match status {
+        Some("enabled") => (true, GitHubRuleState::Applied),
+        Some("disabled") => (false, GitHubRuleState::Applied),
+        _ => (false, unshown(200)),
+    }
 }
 
 /// One of the repository's own rulesets, as GitHub lists it.
@@ -291,6 +506,8 @@ struct Listed {
     name: String,
     #[serde(default)]
     source_type: Option<String>,
+    #[serde(default)]
+    enforcement: Option<String>,
 }
 
 /// One pass of setting rules on one repository, which reads its rulesets at most once and
@@ -344,7 +561,7 @@ impl<'a> Pass<'a> {
             | R::ProjectsOff
             | R::AutoMergeOff => self.fields(&fields(rule, wanted)),
             R::ConversationResolution if !on.contains(&R::PullRequest) => Ok(if wanted {
-                not_applicable("needs pull requests")
+                not_applicable(NEEDS_PULL_REQUESTS)
             } else {
                 GitHubRuleState::Applied
             }),
@@ -366,12 +583,8 @@ impl<'a> Pass<'a> {
                 Ok(not_applicable("needs secret scanning"))
             }
             R::PushProtection => self.security("secret_scanning_push_protection", wanted),
-            R::PrivateVulnerabilityReporting if private => {
-                Ok(not_applicable("public repositories only"))
-            }
-            R::ActionsOutsidePrApproval if private => Ok(not_applicable(
-                "a private repository runs no outside pull request workflows",
-            )),
+            R::PrivateVulnerabilityReporting if private => Ok(not_applicable(PUBLIC_ONLY)),
+            R::ActionsOutsidePrApproval if private => Ok(not_applicable(NO_OUTSIDE)),
             R::PrivateVulnerabilityReporting => {
                 self.toggle("private-vulnerability-reporting", wanted)
             }
@@ -417,9 +630,7 @@ impl<'a> Pass<'a> {
                     &[200, 202],
                 )
             }
-            R::DependabotVersionUpdates | R::SecurityPolicy => Ok(not_applicable(
-                "a file in the project, written when it is published",
-            )),
+            R::DependabotVersionUpdates | R::SecurityPolicy => Ok(not_applicable(FILE)),
         }
     }
 
@@ -687,7 +898,13 @@ impl<'a> Pass<'a> {
         match (wanted, ours) {
             (true, None) => self.make_ruleset(rule, &body),
             (true, Some(id)) => {
-                self.send(Verb::Put, &format!("rulesets/{id}"), Some(&body), &[200])
+                let path = format!("rulesets/{id}");
+                let live = self.get(&path)?;
+                if live.status != 200 {
+                    return Ok(refused(&live));
+                }
+                let live: Value = api::json(&live)?;
+                self.send(Verb::Put, &path, Some(&kept(&live, &body)), &[200])
             }
             (false, Some(id)) => self.drop_ruleset(rule, id),
             (false, None) => Ok(GitHubRuleState::Applied),
@@ -737,6 +954,230 @@ impl<'a> Pass<'a> {
     }
 }
 
+impl Pass<'_> {
+    /// Reads one rule's live state for the settings page, from GitHub's answer for the
+    /// repository or from the rule's own GET. Conversation resolution is read by
+    /// `resolution`. Inputs: the rule, the repository and GitHub's refusal to show the
+    /// CI, if it refused. Output: the switch and its state.
+    fn live(
+        &mut self,
+        rule: GitHubRule,
+        repository: &Value,
+        ci_refused: Option<&GitHubRuleState>,
+    ) -> Result<(bool, GitHubRuleState), EngineError> {
+        use GitHubRule as R;
+        let private = self.facts.private;
+        Ok(match rule {
+            R::SquashOnly => match (
+                repository
+                    .get("allow_squash_merge")
+                    .and_then(Value::as_bool),
+                repository
+                    .get("allow_merge_commit")
+                    .and_then(Value::as_bool),
+                repository
+                    .get("allow_rebase_merge")
+                    .and_then(Value::as_bool),
+            ) {
+                (Some(squash), Some(merge), Some(rebase)) => {
+                    (squash && !merge && !rebase, GitHubRuleState::Applied)
+                }
+                _ => (false, unshown(200)),
+            },
+            R::DeleteHeadBranches => flag(repository, "delete_branch_on_merge", true),
+            R::IssuesOn => flag(repository, "has_issues", true),
+            R::WikiOff => flag(repository, "has_wiki", false),
+            R::ProjectsOff => flag(repository, "has_projects", false),
+            R::AutoMergeOff => flag(repository, "allow_auto_merge", false),
+            R::RequiredChecks => self.checks_live(ci_refused)?,
+            R::PullRequest
+            | R::NoForcePush
+            | R::NoDeletion
+            | R::LinearHistory
+            | R::SignedCommits
+            | R::TagProtection => self.ruleset_live(rule)?,
+            R::DependabotAlerts => {
+                let reply = self.get("vulnerability-alerts")?;
+                match reply.status {
+                    204 => (true, GitHubRuleState::Applied),
+                    404 => (false, GitHubRuleState::Applied),
+                    _ => (false, refused(&reply)),
+                }
+            }
+            R::DependabotSecurityUpdates => {
+                let reply = self.get("automated-security-fixes")?;
+                match reply.status {
+                    404 => (false, GitHubRuleState::Applied),
+                    _ => said(&reply, |body| body.get("enabled")?.as_bool()),
+                }
+            }
+            R::SecretScanning => feature(repository, "secret_scanning"),
+            R::PushProtection => feature(repository, "secret_scanning_push_protection"),
+            R::PrivateVulnerabilityReporting if private => (false, not_applicable(PUBLIC_ONLY)),
+            R::PrivateVulnerabilityReporting => {
+                let reply = self.get("private-vulnerability-reporting")?;
+                said(&reply, |body| body.get("enabled")?.as_bool())
+            }
+            R::ActionsVerifiedOnly => self.verified_live()?,
+            R::ActionsReadOnlyToken => {
+                let reply = self.get("actions/permissions/workflow")?;
+                said(&reply, |body| {
+                    let permissions = body.get("default_workflow_permissions")?.as_str()?;
+                    let approve = body.get("can_approve_pull_request_reviews")?.as_bool()?;
+                    Some(permissions == "read" && !approve)
+                })
+            }
+            R::ActionsOutsidePrApproval if private => (false, not_applicable(NO_OUTSIDE)),
+            R::ActionsOutsidePrApproval => {
+                let reply = self.get("actions/permissions/fork-pr-contributor-approval")?;
+                said(&reply, |body| {
+                    Some(body.get("approval_policy")?.as_str()? == "all_external_contributors")
+                })
+            }
+            R::CodeqlDefaultSetup => {
+                let reply = self.get("code-scanning/default-setup")?;
+                said(&reply, |body| {
+                    Some(body.get("state")?.as_str()? == "configured")
+                })
+            }
+            R::DependabotVersionUpdates | R::SecurityPolicy => (false, not_applicable(FILE)),
+            R::ConversationResolution => {
+                unreachable!("conversation resolution is read by resolution")
+            }
+        })
+    }
+
+    /// Sends one GET for this repository. Input: the path below the repository.
+    /// Output: the reply, or `github_token_refused`, `github_unreachable`.
+    fn get(&self, tail: &str) -> Result<Reply, EngineError> {
+        fetch(
+            self.endpoints,
+            self.token,
+            self.endpoints.api(&self.path(tail))?,
+        )
+    }
+
+    /// Reads a CrazyAgent ruleset's live state: on while GitHub lists the one the record
+    /// names and enforces it; a ruleset of the same name with another id is someone
+    /// else's and reported. Input: the rule. Output: the switch and its state.
+    fn ruleset_live(&mut self, rule: GitHubRule) -> Result<(bool, GitHubRuleState), EngineError> {
+        let name = rule.ruleset().expect("a rule a ruleset holds");
+        let recorded = self.made.rulesets.get(&rule).copied();
+        Ok(match self.listed()? {
+            Err(refusal) => (false, refusal),
+            Ok(listed) => {
+                match recorded.and_then(|id| listed.iter().find(|listed| listed.id == id)) {
+                    Some(ours) => (
+                        ours.enforcement
+                            .as_deref()
+                            .is_none_or(|enforcement| enforcement == "active"),
+                        GitHubRuleState::Applied,
+                    ),
+                    None if listed.iter().any(|listed| listed.name == name) => {
+                        (false, not_sent(FOREIGN))
+                    }
+                    None => (false, GitHubRuleState::Applied),
+                }
+            }
+        })
+    }
+
+    /// Reads the required-checks rule: on while CrazyAgent's ruleset is enforced, else
+    /// what it waits for. With check names in, it reads off and the owner's switch
+    /// requires them; a read never makes the ruleset. Input: GitHub's refusal to show the
+    /// CI, if it refused. Output: the switch and its state.
+    fn checks_live(
+        &mut self,
+        ci_refused: Option<&GitHubRuleState>,
+    ) -> Result<(bool, GitHubRuleState), EngineError> {
+        let (on, state) = self.ruleset_live(GitHubRule::RequiredChecks)?;
+        if on || state != GitHubRuleState::Applied {
+            return Ok((on, state));
+        }
+        Ok(match (ci_refused, &self.facts.ci) {
+            (Some(refusal), _) => (false, refusal.clone()),
+            (None, GitHubCi::None) => (false, not_applicable(NO_CI)),
+            (None, GitHubCi::Waiting) => (
+                false,
+                GitHubRuleState::Waiting {
+                    reason: WAITING.into(),
+                },
+            ),
+            (None, GitHubCi::Checks(_)) => (false, GitHubRuleState::Applied),
+        })
+    }
+
+    /// Reads conversation resolution from CrazyAgent's pull request ruleset: not
+    /// applicable while pull requests are off, and GitHub's refusal when the pull request
+    /// rule could not be read. Input: the pull request rule as read. Output: the switch
+    /// and its state.
+    fn resolution(
+        &mut self,
+        pull: &GitHubRuleOutcome,
+    ) -> Result<(bool, GitHubRuleState), EngineError> {
+        assert_eq!(pull.rule, GitHubRule::PullRequest);
+        if matches!(pull.state, GitHubRuleState::Refused { .. }) {
+            return Ok((false, pull.state.clone()));
+        }
+        if !pull.on {
+            return Ok((false, not_applicable(NEEDS_PULL_REQUESTS)));
+        }
+        let id = *self
+            .made
+            .rulesets
+            .get(&GitHubRule::PullRequest)
+            .expect("a pull request rule read on is CrazyAgent's ruleset");
+        let reply = self.get(&format!("rulesets/{id}"))?;
+        Ok(said(&reply, |body| {
+            body.get("rules")?
+                .as_array()?
+                .iter()
+                .find(|rule| rule.get("type").and_then(Value::as_str) == Some("pull_request"))?
+                .pointer("/parameters/required_review_thread_resolution")?
+                .as_bool()
+        }))
+    }
+
+    /// Reads whether only GitHub-made and verified actions may run: on when Actions are
+    /// on with selected actions that allow exactly those and no patterns.
+    /// Output: the switch and its state.
+    fn verified_live(&self) -> Result<(bool, GitHubRuleState), EngineError> {
+        let reply = self.get("actions/permissions")?;
+        let (selected, state) = said(&reply, |body| {
+            let enabled = body.get("enabled")?.as_bool()?;
+            let allowed = body.get("allowed_actions")?.as_str()?;
+            Some(enabled && allowed == "selected")
+        });
+        if !selected {
+            return Ok((false, state));
+        }
+        let reply = self.get("actions/permissions/selected-actions")?;
+        Ok(said(&reply, |body| {
+            let owned = body.get("github_owned_allowed")?.as_bool()?;
+            let verified = body.get("verified_allowed")?.as_bool()?;
+            let patterns = body.get("patterns_allowed")?.as_array()?;
+            Some(owned && verified && patterns.is_empty())
+        }))
+    }
+}
+
+/// Reads a setting from a 200 answer's JSON body. Inputs: the reply and how to pick
+/// the switch from the body. Output: the switch and applied, GitHub's refusal for any
+/// other status, or the refusal for a body that does not say.
+fn said(reply: &Reply, pick: impl FnOnce(&Value) -> Option<bool>) -> (bool, GitHubRuleState) {
+    if reply.status != 200 {
+        return (false, refused(reply));
+    }
+    match serde_json::from_slice::<Value>(&reply.body)
+        .ok()
+        .as_ref()
+        .and_then(pick)
+    {
+        Some(on) => (on, GitHubRuleState::Applied),
+        None => (false, unshown(reply.status)),
+    }
+}
+
 /// The repository fields a repository rule sets: DEC-182's value when on, the opposite
 /// when off, except squash-only, which allows every merge method when off.
 /// Inputs: the rule and whether it is on. Output: the fields.
@@ -761,6 +1202,59 @@ fn fields(rule: GitHubRule, wanted: bool) -> Value {
 /// The body of the CrazyAgent ruleset for one rule: active and with no bypass, on the
 /// default branch, or on every tag for release tags. Inputs: the rule, its ruleset name,
 /// the rules on and the CI's check names. Output: the JSON body.
+/// The body that puts CrazyAgent's rule into its ruleset as GitHub holds it now, so what
+/// the owner set on github.com stays (rv-secreview gh-s7 F1): the bypass list, branches
+/// and every rule there are kept, a rule type CrazyAgent's body lists is added when
+/// missing, and only the parameters CrazyAgent's switches decide change. The name stays
+/// CrazyAgent's and enforcement active. Inputs: the live ruleset and CrazyAgent's body.
+fn kept(live: &Value, ours: &Value) -> Value {
+    const OWN: [&str; 2] = [
+        "required_review_thread_resolution",
+        "required_status_checks",
+    ];
+    let mut body = ours.clone();
+    for key in ["bypass_actors", "conditions"] {
+        if let Some(value) = live.get(key) {
+            body[key] = value.clone();
+        }
+    }
+    let mut rules: Vec<Value> = live
+        .get("rules")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let wanted = ours["rules"]
+        .as_array()
+        .expect("CrazyAgent's ruleset body lists its rules");
+    for want in wanted {
+        let Some(held) = rules
+            .iter_mut()
+            .find(|held| held.get("type") == want.get("type"))
+        else {
+            rules.push(want.clone());
+            continue;
+        };
+        let Some(parameters) = want.get("parameters").and_then(Value::as_object) else {
+            continue;
+        };
+        if held.get("parameters").and_then(Value::as_object).is_none() {
+            held["parameters"] = Value::Object(parameters.clone());
+            continue;
+        }
+        let theirs = held["parameters"]
+            .as_object_mut()
+            .expect("the parameters were checked above");
+        for key in OWN {
+            if let Some(value) = parameters.get(key) {
+                theirs.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    assert!(rules.len() >= wanted.len());
+    body["rules"] = Value::Array(rules);
+    body
+}
+
 fn ruleset_body(
     rule: GitHubRule,
     name: &str,

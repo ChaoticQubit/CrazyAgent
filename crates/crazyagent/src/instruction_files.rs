@@ -1170,11 +1170,12 @@ pub fn carried_in(folder: &Path) -> bool {
 /// written any: a non-empty `.crazyagent/instructions.md`, git or not, is saved under
 /// [`CARRIED_HEADING`] ([`carried`]), the whole file moved aside into
 /// `.crazyagent/imported/` first when the heading leaves it no room or a line is demoted.
-/// Text that cannot be read is left as it is, since no agent launch reads it either. Input:
-/// the project folder.
-/// Output: unit, or a plain code when the label cannot be saved, so the start is refused
-/// rather than giving agents the text unlabelled.
-pub fn label_arrived(folder: &Path) -> Result<(), EngineError> {
+/// Input: the project folder. Output: the text the file holds once labelled, which the start
+/// records as the engine's own without reading the file again, or a plain code so the start
+/// is refused rather than giving agents the text unlabelled: the save's code, or
+/// `onboarding_instructions_unreadable` for a file that cannot be read (a link, over the limit
+/// or not UTF-8), left as it is so it never passes as the owner's once readable (RV-DS241-202).
+pub fn label_arrived(folder: &Path) -> Result<String, EngineError> {
     assert_eq!(
         CARRIED_PATH,
         format!(
@@ -1189,12 +1190,11 @@ pub fn label_arrived(folder: &Path) -> Result<(), EngineError> {
     let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
     let state = crate::projects_home::prepare_layout(&root)
         .map_err(|_| failure("process_folder_unsafe"))?;
-    let Ok(existing) = crate::agent_home::read_project(&root) else {
-        return Ok(());
-    };
+    let existing = crate::agent_home::read_project(&root)
+        .map_err(|_| failure("onboarding_instructions_unreadable"))?;
     let (kept, aside) = carried(&existing);
     if kept == existing {
-        return Ok(());
+        return Ok(existing);
     }
     assert!(kept.starts_with(CARRIED_HEADING) && kept.len() <= crate::agent_home::TEXT_BYTES_MAX);
     if aside {
@@ -1202,7 +1202,7 @@ pub fn label_arrived(folder: &Path) -> Result<(), EngineError> {
     }
     crate::agent_home::save_project(&root, &kept)
         .map_err(|problem: crate::agent_home::AgentHomeError| EngineError(problem.0))?;
-    Ok(())
+    Ok(kept)
 }
 
 /// Copies the project's own instruction files into its project instructions, each text

@@ -2,8 +2,8 @@ use super::super::drivers::jsonl_turn::ARG_BYTES_MAX;
 use super::super::drivers::rules;
 use super::super::launch::{LaunchError, failure};
 use super::super::manifest::{self, Manifest, RecordKind, Refused, Rule};
-use super::super::records::{self, Reader, Records};
 use super::super::records::json_files::Pattern;
+use super::super::records::{self, Reader, Records};
 use crate::app_plugins::yaml::Value as Yaml;
 use std::path::Path;
 

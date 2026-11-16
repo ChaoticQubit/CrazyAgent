@@ -1397,6 +1397,14 @@ fn answer(
             &grant,
             &reason,
         ),
+        Call::ProposeGitHubRule { rule, on, why } => tool::questions::propose_reply(
+            connection,
+            project,
+            &crate::questions::Asker::Master(master),
+            rule,
+            on,
+            &why,
+        ),
         Call::RelayAnswer {
             question,
             version,
@@ -1443,7 +1451,8 @@ pub(super) fn answer_sub(
         | Call::RecordAnswer { .. }
         | Call::RelayAnswer { .. }
         | Call::Withdraw { .. }
-        | Call::RequestAccess { .. }) => {
+        | Call::RequestAccess { .. }
+        | Call::ProposeGitHubRule { .. }) => {
             tool::questions::agent_ask(connection, &answering.stored.project_id, agent, call)
         }
         Call::Sessions { .. }

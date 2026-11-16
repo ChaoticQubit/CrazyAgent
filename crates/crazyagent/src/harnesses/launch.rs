@@ -116,7 +116,13 @@ const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROU
 /// context-mode from the engine's shared install answers in about 1 s; the margin covers a
 /// machine busy with builds, and a server that never answers delays the start by 60 s only.
 pub(super) const CLAUDE_MCP_CONNECT_LIMIT: (&str, &str) = ("MCP_TIMEOUT", "60000");
-const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
+/// Turns Claude Code's auto-memory off for every agent launch, beside `autoMemoryEnabled`
+/// false in its settings (RV-DS241-205): the home reset keeps `projects` for transcripts and
+/// clears each `projects/<key>/memory` only at the next reset (B20), so a `MEMORY.md` one
+/// session wrote would otherwise load into every later session of that launch, teammates
+/// included, as standing instructions.
+pub(crate) const CLAUDE_AUTO_MEMORY_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
+const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"autoMemoryEnabled\":false,\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
     "--verbose",
@@ -1229,6 +1235,10 @@ fn claude_invocation(
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
             OsString::from("1"),
         ),
+        (
+            CLAUDE_AUTO_MEMORY_OFF.0,
+            OsString::from(CLAUDE_AUTO_MEMORY_OFF.1),
+        ),
     ];
     if let Some((name, value)) = request.limits.provider_retry.claude_env() {
         environment.push((name, OsString::from(value)));
@@ -1865,9 +1875,7 @@ impl Session {
         assert!(context.is_none() || listed.is_empty());
         assert!(durable.is_none() || logs.is_none());
         let native_threads = context.as_ref().is_some_and(Installed::native_threads);
-        let servers = context
-            .as_ref()
-            .map_or(listed, Installed::engine_servers);
+        let servers = context.as_ref().map_or(listed, Installed::engine_servers);
         let (driver, startup) = Driver::new(&request, native_threads, servers)?;
         let token = LineageToken::new().ok_or_else(|| failure("launch_spawn_failed"))?;
         command.env(LINEAGE_VARIABLE, token.as_str());
@@ -2351,8 +2359,7 @@ pub fn trim_unread_output(output: &Path, probe: &File) -> bool {
 fn never_waits(input: &File) -> Result<(), LaunchError> {
     let unavailable = |_: rustix::io::Errno| failure("launch_stdio_unavailable");
     let flags = rustix::fs::fcntl_getfl(input).map_err(unavailable)?;
-    rustix::fs::fcntl_setfl(input, flags | OFlags::NONBLOCK)
-        .map_err(unavailable)
+    rustix::fs::fcntl_setfl(input, flags | OFlags::NONBLOCK).map_err(unavailable)
 }
 
 /// Turns a child's stdin pipe into the file the session writes prompts to.

@@ -1843,6 +1843,7 @@ fn an_acp_harness_starts_headless_with_its_manifest_arguments_and_its_tools_off_
             "--no-tools".into()
         ])
     );
+}
 
 /// rv-secreview b6 r2 F1: a headless agent on pipes whose harness reaches its model through
 /// an engine key relay ends when that engine dies, a crash included, as a keyed pane does,
@@ -1992,4 +1993,58 @@ fn a_run_log_keeps_output_up_to_its_cap_and_drops_the_rest() {
     log.write(b"ghij");
 
     assert_eq!(std::fs::read(&path).unwrap(), b"0123456789".to_vec());
+}
+
+/// RV-DS241-205: a piped Claude Code agent runs with auto-memory off, in its settings and in
+/// its environment, with tools on or off, so a memory file one run left in its home is never
+/// loaded by a later run as standing instructions.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_piped_claude_agent_runs_with_auto_memory_off() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::Builder::new()
+        .prefix("ca-memory-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let [home, work] = ["home", "work"].map(|name| base.join(name));
+    for folder in [&home, &work] {
+        std::fs::create_dir(folder).unwrap();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let profile = base.join("project.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+
+    for tools in [true, false] {
+        let request = LaunchRequest {
+            harness: "claude-code".into(),
+            executable: PathBuf::from("/usr/bin/true"),
+            working_dir: work.clone(),
+            account: AccountBinding::Subscription { home: home.clone() },
+            model: None,
+            tools,
+            sandbox_profile: Some(profile.clone()),
+            unconfined: false,
+            git_identity: None,
+            limits: LaunchLimits::default(),
+        };
+        let command = super::command(&request).unwrap();
+        let arguments: Vec<String> = command
+            .get_args()
+            .map(|argument| argument.to_str().unwrap().to_owned())
+            .collect();
+        let at = arguments
+            .iter()
+            .position(|argument| argument == "--settings")
+            .unwrap();
+        let settings: Value = serde_json::from_str(&arguments[at + 1]).unwrap();
+        let memory: Vec<Option<&std::ffi::OsStr>> = command
+            .get_envs()
+            .filter(|(name, _)| *name == "CLAUDE_CODE_DISABLE_AUTO_MEMORY")
+            .map(|(_, value)| value)
+            .collect();
+
+        assert_eq!(settings["autoMemoryEnabled"], json!(false), "tools {tools}");
+        assert_eq!(memory, [Some(std::ffi::OsStr::new("1"))], "tools {tools}");
+    }
 }

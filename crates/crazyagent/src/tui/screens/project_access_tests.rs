@@ -7,7 +7,8 @@ use super::project_access::{
     SHARED_SECRETS_LINE, TOOLCHAIN_OFF_STOPS_AGENTS, agent_files_help, network_help, summary,
 };
 use crate::sandbox::policy::{
-    AgentAccess, AgentNetwork, IdeAgentFiles, LevelView, NetworkView, PolicyView, ToolchainView,
+    AgentAccess, AgentNetwork, HomeCaches, IdeAgentFiles, LevelView, NetworkView, PolicyView,
+    ToolchainView,
 };
 use crate::sandbox::shared_folders::{
     CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope, UNREACHABLE_SECRETS_LINE,
@@ -30,6 +31,7 @@ fn view() -> PolicyView {
                 access,
                 label: access.label().to_owned(),
                 unavailable: access.unavailable().map(str::to_owned),
+                gaps: Vec::new(),
             })
             .collect(),
         networks: AgentNetwork::ALL
@@ -37,6 +39,7 @@ fn view() -> PolicyView {
             .map(|network| NetworkView {
                 network,
                 label: network.label().to_owned(),
+                gap: None,
             })
             .collect(),
         toolchains: vec![
@@ -57,7 +60,9 @@ fn view() -> PolicyView {
         ],
         ide_git_hooks: false,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         tool_caches: Vec::new(),
+        home_cache_choices: Vec::new(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         local_folders: Vec::new(),
@@ -290,6 +295,64 @@ fn the_access_box_keeps_the_tool_cache_choice_when_it_saves() {
     assert_eq!(edit.policy().tool_cache, scope);
 }
 
+/// DEC-173 add.1: the Tool caches in agent homes choice has the box's last row under its own
+/// heading, starts on the saved choice, cycles through the three choices with the engine's
+/// words and each one's help, the same in the desktop app, and is what Save sends.
+#[test]
+fn the_access_box_saves_the_home_caches_choice_on_its_last_row_with_its_help() {
+    let kept = AccessEdit::of(&PolicyView {
+        home_caches: HomeCaches::Keep,
+        ..view()
+    });
+    assert_eq!(kept.home_caches, HomeCaches::Keep);
+    assert_eq!(kept.policy().home_caches, HomeCaches::Keep);
+    let mut edit = AccessEdit::of(&view());
+    assert_eq!(edit.home_caches, HomeCaches::ClearWhenRaised);
+    for _ in 0..40 {
+        assert_eq!(edit.key(key(KeyCode::Down)), AccessKey::Handled);
+    }
+    assert_eq!(
+        edit.cursor, 8,
+        "the caches row follows the shared access row"
+    );
+    let help = [
+        (
+            HomeCaches::ClearWhenRaised,
+            "An agent home loses its .cache and npm cache when its agent starts at a wider access level than its last start, so nothing a narrower run left there reaches a wider one.",
+        ),
+        (
+            HomeCaches::ClearEveryLaunch,
+            "An agent home loses its .cache and npm cache at every start; tools download what they need again.",
+        ),
+        (
+            HomeCaches::Keep,
+            "An agent home keeps its .cache and npm cache from start to start, whatever level wrote them, so tools download less.",
+        ),
+    ];
+    for (choice, line) in help {
+        assert_eq!(edit.home_caches, choice);
+        let rows = shown_rows(&edit);
+        assert!(
+            rows.iter().any(|row| row == "Tool caches in agent homes"),
+            "{rows:?}"
+        );
+        let row = rows
+            .iter()
+            .position(|row| row.contains(&format!("< {} >", choice.label())))
+            .expect("the caches row");
+        assert!(rows[row].starts_with("> Caches"), "{}", rows[row]);
+        assert!(shown_words(&edit).contains(line), "{rows:?}");
+        let AccessKey::Save(policy) = edit.clone().key(key(KeyCode::Enter)) else {
+            panic!("Enter saves");
+        };
+        assert_eq!(policy.home_caches, choice);
+        assert_eq!(edit.key(key(KeyCode::Right)), AccessKey::Handled);
+    }
+    assert_eq!(edit.home_caches, HomeCaches::ClearWhenRaised);
+    assert_eq!(edit.key(key(KeyCode::Left)), AccessKey::Handled);
+    assert_eq!(edit.home_caches, HomeCaches::Keep);
+}
+
 /// DEC-124: the agent folders choice has its own row after the IDE hooks switch, cycles
 /// through its three choices with each one's help, says it does not apply at Full access and
 /// is what Save sends.
@@ -471,9 +534,11 @@ fn the_access_box_saves_every_shared_folders_choice_and_access_with_its_help() {
                 .expect("the shared folders row");
             assert!(rows[row].starts_with("> "), "{}", rows[row]);
             assert!(shown_words(&edit).contains(scope.help()), "{rows:?}");
-            for _ in 0..12 {
+            let folders = if scope == SharedScope::Chosen { 2 } else { 0 };
+            for _ in 0..=folders {
                 assert_eq!(edit.key(key(KeyCode::Down)), AccessKey::Handled);
             }
+            assert_eq!(edit.cursor, 7 + folders, "the shared access row");
             if access == SharedAccess::ReadWrite {
                 assert_eq!(edit.key(key(KeyCode::Right)), AccessKey::Handled);
             }
@@ -613,19 +678,52 @@ fn the_access_box_keeps_shared_back_secrets_and_says_what_stays_closed() {
 }
 
 #[test]
-fn only_on_linux_does_the_box_say_ports_hold_no_host_and_nested_git_is_not_blocked() {
-    let mut edit = AccessEdit::of(&view());
-    assert_eq!(edit.linux, cfg!(target_os = "linux"));
-    edit.linux = false;
+fn the_box_shows_the_ports_line_the_engine_sends_for_the_chosen_network() {
+    let told = "a line the engine sends for None";
+    let mut view = view();
+    for choice in &mut view.networks {
+        choice.gap = (choice.network == AgentNetwork::None).then(|| told.to_owned());
+    }
+    let mut edit = AccessEdit::of(&view);
+    edit.network = AgentNetwork::None;
     let words = shown_words(&edit);
+    assert!(words.contains(told), "{words}");
     assert!(!words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
-    assert!(!words.contains(LINUX_NESTED_GIT_LINE), "{words}");
-    edit.linux = true;
+    assert!(!words.contains(LINUX_NESTED_GIT_LINE), "only the engine names it: {words}");
+    edit.network = AgentNetwork::Open;
     let words = shown_words(&edit);
-    assert!(words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
-    assert!(words.contains(LINUX_NESTED_GIT_LINE), "{words}");
+    assert!(!words.contains(told), "{words}");
+    assert!(!words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
+    edit.network = AgentNetwork::None;
     edit.access = AgentAccess::Full;
     let words = shown_words(&edit);
-    assert!(!words.contains(LINUX_PORTS_ANY_HOST_LINE), "{words}");
-    assert!(!words.contains(LINUX_NESTED_GIT_LINE), "{words}");
+    assert!(!words.contains(told), "{words}");
+}
+
+#[test]
+fn the_box_names_nested_git_once_and_only_as_the_engine_sends_it_for_the_level() {
+    let mut told = view();
+    assert_eq!(told.levels[0].access, AgentAccess::Sandboxed);
+    told.levels[0].gaps.clear();
+    let quiet = shown_words(&AccessEdit::of(&told));
+    assert!(!quiet.contains(LINUX_NESTED_GIT_LINE), "{quiet}");
+    told.levels[0].gaps = vec![LINUX_NESTED_GIT_LINE.to_owned()];
+    let words = shown_words(&AccessEdit::of(&told));
+    assert_eq!(words.matches(LINUX_NESTED_GIT_LINE).count(), 1, "{words}");
+}
+
+#[test]
+fn the_box_shows_what_the_engine_says_this_linux_cannot_hold_for_the_level() {
+    use crate::sandbox::LINUX_SIGNALS_LINE;
+    let mut told = view();
+    assert_eq!(told.levels[0].access, AgentAccess::Sandboxed);
+    told.levels[0].gaps = vec![LINUX_SIGNALS_LINE.to_owned()];
+    let mut edit = AccessEdit::of(&told);
+    let words = shown_words(&edit);
+    assert!(words.contains(LINUX_SIGNALS_LINE), "{words}");
+    edit.access = AgentAccess::Full;
+    let words = shown_words(&edit);
+    assert!(!words.contains(LINUX_SIGNALS_LINE), "{words}");
+    let words = shown_words(&AccessEdit::of(&view()));
+    assert!(!words.contains(LINUX_SIGNALS_LINE), "{words}");
 }

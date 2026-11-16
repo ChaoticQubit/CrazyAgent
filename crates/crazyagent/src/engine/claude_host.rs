@@ -175,9 +175,10 @@ impl ClaudeHostLimits {
     }
 }
 
-/// Builds the tools-off Claude Code master command for one turn.
-/// Input: the registered executable, the leased project directory, the private profile
-/// home, the model and, when given, the engine's 0600 startup instruction file.
+/// Builds the tools-off Claude Code master command for one turn, hooks and auto-memory off
+/// (RV-DS241-205). Input: the registered executable, the leased project directory, the
+/// private profile home, the model and, when given, the engine's 0600 startup instruction
+/// file.
 /// Output: the command, or a plain refusal for an unsafe path, model or file.
 #[cfg(unix)]
 pub(in crate::engine) fn launch_command(
@@ -198,8 +199,9 @@ pub(in crate::engine) fn launch_command(
 }
 
 /// Builds the Claude Code master command for one turn whose tools are on (DEC-093): the team
-/// agents' tool flags, hooks and setting sources off, only the engine's team MCP server, and
-/// no step count, since the host's run time and output limits bound the turn (OB-5).
+/// agents' tool flags, hooks, auto-memory (RV-DS241-205) and setting sources off, only the
+/// engine's team MCP server, and no step count, since the host's run time and output
+/// limits bound the turn (OB-5).
 /// Input: as `launch_command`, plus the engine executable, drop file, mailbox and tools
 /// switched off. Output: the command, or a plain refusal for an unsafe input.
 #[cfg(unix)]
@@ -377,7 +379,7 @@ fn command_for(
         "--setting-sources",
         "",
         "--settings",
-        "{\"disableAllHooks\":true}",
+        "{\"autoMemoryEnabled\":false,\"disableAllHooks\":true}",
         "--disable-slash-commands",
         "--no-session-persistence",
     ]);
@@ -393,6 +395,10 @@ fn command_for(
         .env("HOME", profile_home)
         .env("CLAUDE_CONFIG_DIR", profile_home)
         .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", profile_home)
+        .env(
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.0,
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.1,
+        )
         .env("TERM", "dumb");
     if tools.is_some() {
         command

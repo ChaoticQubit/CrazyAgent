@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, setUpProject, start as launch, stop, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const NAME = "Larkspur Booking";
@@ -114,13 +114,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     assert.equal((await value(bridge, "desktop_connect")).connected, true, "the bridge connects to the test engine");
     assert.equal((await value(bridge, "desktop_save_owner_profile", { profile: { name: "E2E Owner" }, generation: 1 })).outcome, "applied");
     assert.equal((await value(bridge, "desktop_set_projects_home", { path: projects, generation: 2 })).outcome, "applied");
-    const receipt = await value(bridge, "desktop_setup_project", {
-      spec: { name: NAME, repositories: [] },
-      setup: { about: ABOUT, tech_stack: [], platforms: ["website"], research: [], pool: "local-pool", team: null, documents: [] },
-      generation: 3,
+    const project = await setUpProject(bridge, { name: NAME, repositories: [] }, {
+      about: ABOUT, tech_stack: [], platforms: ["website"], research: [], pool: "local-pool", team: null, documents: [],
     });
-    assert.equal(receipt.outcome, "applied", `the project is made: ${JSON.stringify(receipt)}`);
-    const project = receipt.project_id;
     const pools = await value(bridge, "desktop_model_access_page", { collection: "pools", next: false });
     assert.equal(pools.writable, true, "the test engine's settings are writable");
     const assigned = await value(bridge, "desktop_edit_model_access", { ticket: pools.ticket, edit: { kind: "assign_project_pool", project, pool: "local-pool" }, generation: 4 });

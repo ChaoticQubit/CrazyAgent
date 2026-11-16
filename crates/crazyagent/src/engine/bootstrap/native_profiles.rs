@@ -350,6 +350,9 @@ pub(crate) struct NativeProfileCustody {
     database_identity: Identity,
     root_hash: Option<String>,
     profiles: BTreeMap<String, String>,
+    /// The config each undone account save put back this engine run, by generated SDK home,
+    /// the one times-only change a master turn may re-pin (rv-sec3 G4 r2 F1).
+    undone: BTreeMap<std::path::PathBuf, generated_configured_rcli::PutBack>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -440,6 +443,13 @@ impl NativeProfileUse {
     /// account's connection id.
     pub(crate) fn account(&self) -> &crate::protocol::CredentialRef {
         &self.binding.connection.id
+    }
+
+    /// Names the engine's data root this lease's custody is anchored at, the canonical
+    /// folder of `engine.db`: a profile home the engine made lies below it, while one the
+    /// owner chose may lie anywhere. Input: the lease. Output: the folder.
+    pub(crate) fn engine_root(&self) -> &std::path::Path {
+        &self.custody.anchor.path
     }
 
     pub(crate) fn profile_path(&self) -> Result<std::path::PathBuf, EngineError> {
@@ -554,6 +564,7 @@ impl NativeProfileCustody {
             database_identity: Identity::of(opened),
             root_hash: None,
             profiles: BTreeMap::new(),
+            undone: BTreeMap::new(),
         };
         custody.verify()?;
         Ok(custody)
@@ -596,6 +607,7 @@ impl NativeProfileCustody {
             database_identity: self.database_identity,
             root_hash: self.root_hash.clone(),
             profiles: self.profiles.clone(),
+            undone: self.undone.clone(),
         };
         retained.verify()?;
         Ok(retained)

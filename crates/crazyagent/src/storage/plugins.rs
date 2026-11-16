@@ -691,8 +691,10 @@ pub(crate) fn remove_secrets(root: &Path, references: &[String]) -> Result<(), E
 /// Deletes every plugin item and switch scoped to one project, and trashes each project MCP
 /// server's secret files and check folder and, when the project has skills, its skill store
 /// folder, all swept after commit. A new project that reuses the removed project's id inherits
-/// none of its MCP servers, secrets, skills or per-project switches, and a rolled back removal
-/// keeps every file. Safe to call for an id with no scoped rows, where it changes nothing.
+/// none of its MCP servers, secrets, skills or per-project switches, nor a switch the default
+/// pack keeps for a hook it adds again ([`super::setup::forget_project`], RV-DS241-195), and a
+/// rolled back removal keeps every file. Safe to call for an id with no scoped rows, where it
+/// changes nothing.
 /// Inputs: the transaction and the project. Output: any SQLite failure.
 pub(crate) fn remove_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
     let scope = Scope::Project {
@@ -729,6 +731,7 @@ pub(crate) fn remove_project(tx: &Transaction<'_>, project: &ProjectId) -> Resul
         [project.as_str()],
     )
     .map_err(error)?;
+    super::setup::forget_project(tx, project)?;
     let removed_items = tx
         .execute("DELETE FROM plugin_items WHERE scope=?1", [&key])
         .map_err(error)?;
@@ -1078,32 +1081,33 @@ fn add_hooks(
 
 /// Lists the hooks agents launched for a project run: each hook that is on, from global
 /// settings unless the project switched it off or from the project itself, whose followed
-/// skill or MCP server is on there too and, for a server, not one this launch left out
-/// (RV-DS241-156), with its stored folder copy. Inputs: the open transaction, the engine
-/// root, the project and the launch set's `left_out` names. Output: the ordered hooks.
+/// skill or MCP server is one this launch gives, from the same decision as the launch set
+/// ([`kept_items`]) and by name in `launch`, the set as the launch gives it: no hook of a
+/// skill a project skill replaces, a skill refused for its SKILL.md, a skill a team role
+/// left out (RV-DS241-196) or a server the launch left out (RV-DS241-156); with its stored
+/// folder copy. Inputs: the open transaction, the engine root, the project and the launch
+/// set. Output: the ordered hooks.
 pub(crate) fn effective_hooks(
     tx: &Transaction<'_>,
     root: &Path,
     project: &ProjectId,
-    left_out: &[String],
+    launch: &LaunchPlugins,
 ) -> Result<Vec<EffectiveHook>, EngineError> {
     let off = switched_off(tx, project)?;
     let usable = |scope: &Scope, id: &str| match scope {
         Scope::Global => !off.iter().any(|item| item == id),
         Scope::Project { project_id } => project_id == project,
     };
-    let mut on: Vec<String> = all::<SkillRecord>(tx, "skill")?
+    let (skills, servers) = kept_items(tx, root, project)?;
+    let mut on: Vec<String> = skills
         .into_iter()
-        .filter(|skill| skill.enabled && usable(&skill.scope, &skill.id))
+        .filter(|skill| launch.skills.iter().any(|given| given.name == skill.name))
         .map(|skill| skill.id)
         .collect();
     on.extend(
-        all::<ServerRecord>(tx, "server")?
+        servers
             .into_iter()
-            .filter(|server| {
-                status(server) == ServerStatus::Approved && usable(&server.scope, &server.id)
-            })
-            .filter(|server| !left_out.contains(&server.name))
+            .filter(|server| launch.servers.iter().any(|given| given.name == server.name))
             .map(|server| server.id),
     );
     let mut hooks: Vec<(String, EffectiveHook)> = all::<HookRecord>(tx, "hook")?
@@ -1130,6 +1134,11 @@ pub(crate) fn effective_hooks(
     Ok(hooks.into_iter().map(|(_, hook)| hook).collect())
 }
 
+/// The status one MCP server shows and launches by: off, waiting while its spec is not the
+/// one approved, can't start when its last check of that spec failed or the spec fails
+/// today's checks, as one approved before hidden or control characters were refused does
+/// (RV-DS241-197), else approved, the only status that launches. Input: the record.
+/// Output: the status.
 fn status(record: &ServerRecord) -> ServerStatus {
     let digest = record.spec.digest();
     let failed = record
@@ -1140,7 +1149,7 @@ fn status(record: &ServerRecord) -> ServerStatus {
         ServerStatus::Off
     } else if record.approved.as_deref() != Some(digest.as_str()) {
         ServerStatus::WaitingForApproval
-    } else if failed {
+    } else if failed || record.spec.validate().is_err() {
         ServerStatus::CantStart
     } else {
         ServerStatus::Approved
@@ -1161,6 +1170,12 @@ fn server_view(
     let status = status(record);
     let digest = record.spec.digest();
     let current = record.check.as_ref().filter(|check| check.digest == digest);
+    let invalid = record
+        .spec
+        .validate()
+        .is_err()
+        .then_some("server_stored_spec_invalid")
+        .filter(|_| status == ServerStatus::CantStart);
     Ok(ServerView {
         id: record.id.clone(),
         name: record.name.clone(),
@@ -1171,8 +1186,8 @@ fn server_view(
         enabled: record.enabled,
         status,
         status_label: status.label().into(),
-        problem: current
-            .and_then(|check| check.problem.as_deref())
+        problem: invalid
+            .or_else(|| current.and_then(|check| check.problem.as_deref()))
             .map(crate::plugins::check_problem),
         tools: current.map(|check| check.tools.clone()).unwrap_or_default(),
         checks: record.checks,
@@ -1399,15 +1414,18 @@ fn valid_tools(tools: Vec<String>) -> Result<Vec<String>, String> {
     Ok(tools)
 }
 
-/// Lists exactly what agents launched for a project receive: approved global items that the
-/// project did not switch off, plus the project's own enabled items, where a project item
-/// replaces a global one with the same name. Inputs: the open transaction, the engine root
-/// and the project. Output: skill folder paths and MCP servers with secret references.
-pub(crate) fn effective(
+/// Picks the skill and MCP server records agents launched for a project receive: approved
+/// global items that the project did not switch off, plus the project's own enabled items,
+/// where a project item replaces a global one with the same name and a skill whose stored
+/// SKILL.md fails its checks is left out. The launch set ([`effective`]) and the hooks that
+/// follow its items ([`effective_hooks`]) both take this one decision (RV-DS241-196).
+/// Inputs: the open transaction, the engine root and the project. Output: the skills and
+/// the servers kept.
+fn kept_items(
     tx: &Transaction<'_>,
     root: &Path,
     project: &ProjectId,
-) -> Result<EffectivePlugins, EngineError> {
+) -> Result<(Vec<SkillRecord>, Vec<ServerRecord>), EngineError> {
     let off = switched_off(tx, project)?;
     let usable = |scope: &Scope, id: &str| match scope {
         Scope::Global => !off.iter().any(|item| item == id),
@@ -1424,34 +1442,54 @@ pub(crate) fn effective(
         })
         .collect();
     let local = |scope: &Scope| matches!(scope, Scope::Project { .. });
+    let kept_skills: Vec<SkillRecord> = skills
+        .iter()
+        .filter(|skill| {
+            let shadowed = !local(&skill.scope)
+                && skills
+                    .iter()
+                    .any(|other| local(&other.scope) && other.name == skill.name);
+            let skill_md = root.join(&skill.folder).join("SKILL.md");
+            !shadowed && crate::plugins::skill_folder::stored_description(&skill_md).is_ok()
+        })
+        .cloned()
+        .collect();
+    let kept_servers: Vec<ServerRecord> = servers
+        .iter()
+        .filter(|server| {
+            local(&server.scope)
+                || !servers
+                    .iter()
+                    .any(|other| local(&other.scope) && other.name == server.name)
+        })
+        .cloned()
+        .collect();
+    assert!(kept_skills.len() <= skills.len() && kept_servers.len() <= servers.len());
+    Ok((kept_skills, kept_servers))
+}
+
+/// Lists exactly what agents launched for a project receive, as [`kept_items`] picks it.
+/// Inputs: the open transaction, the engine root and the project. Output: skill folder
+/// paths and MCP servers with secret references.
+pub(crate) fn effective(
+    tx: &Transaction<'_>,
+    root: &Path,
+    project: &ProjectId,
+) -> Result<EffectivePlugins, EngineError> {
+    let (skills, servers) = kept_items(tx, root, project)?;
     let mut plugins = EffectivePlugins::default();
-    for skill in &skills {
-        let shadowed = !local(&skill.scope)
-            && skills
-                .iter()
-                .any(|other| local(&other.scope) && other.name == skill.name);
-        let folder = root.join(&skill.folder);
-        let described =
-            crate::plugins::skill_folder::stored_description(&folder.join("SKILL.md")).is_ok();
-        if !shadowed && described {
-            plugins.skills.push(EffectiveSkill {
-                name: skill.name.clone(),
-                folder,
-            });
-        }
+    for skill in skills {
+        plugins.skills.push(EffectiveSkill {
+            folder: root.join(&skill.folder),
+            name: skill.name,
+        });
     }
-    for server in &servers {
-        let shadowed = !local(&server.scope)
-            && servers
-                .iter()
-                .any(|other| local(&other.scope) && other.name == server.name);
-        if !shadowed {
-            plugins.servers.push(EffectiveServer {
-                name: server.name.clone(),
-                spec: server.spec.clone(),
-                secrets: server.secrets.clone(),
-            });
-        }
+    for server in servers {
+        plugins.servers.push(EffectiveServer {
+            name: server.name,
+            spec: server.spec,
+            secrets: server.secrets,
+        });
     }
     plugins.skills.sort_by(|a, b| a.name.cmp(&b.name));
     plugins.servers.sort_by(|a, b| a.name.cmp(&b.name));

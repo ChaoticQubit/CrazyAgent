@@ -190,8 +190,18 @@ impl OwnerRuntimeHandle {
         } else {
             crate::agent_home::Harness::Codex
         };
-        crate::agent_home::prepare(&turn.home, harness, &prepared.agent_project, &process)
-            .map_err(|problem| EngineError(problem.0))?;
+        let caches = crate::agent_home::Caches {
+            choice: policy.home_caches,
+            level: Some(policy.access),
+        };
+        crate::agent_home::prepare(
+            &turn.home,
+            harness,
+            &prepared.agent_project,
+            &process,
+            caches,
+        )
+        .map_err(|problem| EngineError(problem.0))?;
         let MasterTurnLaunch {
             command,
             sandbox,
@@ -995,6 +1005,7 @@ fn turn_sandbox(
     let runtime = Root::open(&root.path.join(&name))?;
     verify_master_runtime(root, &runtime, &name)?;
     let engine_root = root.engine_root()?;
+    let anchor = std::fs::canonicalize(engine_root).map_err(io_error)?;
     let tmp = runtime.path.join(MASTER_TMP);
     std::fs::DirBuilder::new()
         .mode(0o700)
@@ -1027,6 +1038,7 @@ fn turn_sandbox(
     .and_then(|sandbox| sandbox.allow_tools(&tools))
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
     .and_then(|sandbox| sandbox.guard_engine_around(engine_root, &root.path))
+    .map(|sandbox| sandbox.anchor_home(&anchor))
     .map_err(refused)?;
     #[cfg(target_os = "macos")]
     let sandbox = crate::sandbox::tool_cache::grant(
@@ -1048,15 +1060,18 @@ fn turn_sandbox(
             .map_err(failure)?
     };
     #[cfg(target_os = "linux")]
-    let sandbox = {
-        let sandbox = sandbox.limit_sockets(stored_sandbox_settings(root)?.linux_sockets);
+    let (sandbox, calls) = {
+        let settings = stored_sandbox_settings(root)?;
+        let sandbox = sandbox.limit_sockets(settings.linux_sockets);
         if let Some(code) = sandbox.linux_refusal(executable) {
             return Err(failure(code));
         }
-        sandbox
+        (sandbox, settings.linux_supervisor)
     };
-    let installed =
-        InstalledSandbox::install(sandbox, &runtime.path.join(MASTER_PROFILE)).map_err(refused)?;
+    #[cfg(not(target_os = "linux"))]
+    let calls = crate::sandbox::LinuxSupervisor::On;
+    let profile = runtime.path.join(MASTER_PROFILE);
+    let installed = InstalledSandbox::install(sandbox, &profile, calls).map_err(refused)?;
     let installed = if policy.access == AgentAccess::Full {
         installed.unconfined()
     } else {
@@ -1090,17 +1105,7 @@ fn stored_sandbox_settings(
     let engine = root
         .engine_root()
         .map_err(|_| failure("master_sandbox_unavailable"))?;
-    let connection = rusqlite::Connection::open_with_flags(
-        engine.join("engine.db"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|_| failure("master_sandbox_unavailable"))?;
-    connection
-        .busy_timeout(Duration::from_secs(5))
-        .map_err(|_| failure("master_sandbox_unavailable"))?;
-    crate::sandbox_settings::load(&connection).map_err(|_| failure("master_sandbox_unavailable"))
+    crate::sandbox_settings::stored(engine).map_err(|_| failure("master_sandbox_unavailable"))
 }
 
 /// Refuses the master turn boundary where the owner-only turn directory cannot be made.
@@ -1332,6 +1337,7 @@ mod tests {
             &connection,
             &crate::sandbox_settings::SandboxSettings {
                 linux_sockets: crate::sandbox::LinuxSockets::TcpPorts,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1393,6 +1399,147 @@ mod tests {
             crate::sandbox::LinuxSockets::TcpPorts
         );
         assert!(!base.join("engine.db").exists());
+    }
+
+    /// rv-code2 b8 F1: a master turn whose home the owner chose outside the engine's data
+    /// root, as a configured RCLI home may be one of the owner's own folders, keeps the links
+    /// a dotfile manager made at `.config` and `.cargo` and what they name, while a turn home
+    /// below the data root still gets both as real folders.
+    #[test]
+    fn a_master_turn_keeps_the_config_links_of_a_home_outside_the_engine_root() {
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let owner_folder = private_root();
+        let owner = owner_folder.path().canonicalize().unwrap();
+        let home = owner.join("home");
+        let dotfiles = owner.join("dotfiles");
+        private_directory(&home);
+        for name in ["config", "cargo"] {
+            private_directory(&dotfiles.join(name));
+            std::fs::write(dotfiles.join(name).join("kept"), name).unwrap();
+            std::os::unix::fs::symlink(dotfiles.join(name), home.join(format!(".{name}")))
+                .unwrap();
+        }
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _, _capture) = allocate_master_capture(&root).unwrap();
+
+        let outside = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+            &[],
+        );
+
+        assert!(outside.is_ok(), "the turn on the owner's home was refused");
+        for name in ["config", "cargo"] {
+            assert_eq!(
+                std::fs::read_link(home.join(format!(".{name}"))).ok(),
+                Some(dotfiles.join(name)),
+                "the owner's .{name} link was replaced"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dotfiles.join(name).join("kept")).ok(),
+                Some(name.to_owned())
+            );
+        }
+        drop(outside);
+        let second = private_root();
+        let below_base = owner_generation(&second);
+        let below = master_in_generation(&below_base);
+        assert!(below.is_ok(), "the turn below the data root was refused");
+        for name in [".config", ".cargo"] {
+            let made = std::fs::symlink_metadata(below_base.join("profile-home").join(name));
+            assert!(made.is_ok_and(|made| made.is_dir()), "{name}");
+        }
+    }
+
+    /// rv-code2 b8 R2-1: the engine root a turn names decides what install does to the config
+    /// folders, so this row fails if that anchor is dropped or turned around: an owner-chosen
+    /// home outside the data root with no `.config` or `.cargo` gets neither made in it, and a
+    /// turn home below the root with a link planted at each name gets real folders, while
+    /// what the links named stays as it was.
+    #[test]
+    fn a_master_turn_makes_no_config_folder_outside_the_root_and_clears_planted_links_below() {
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let owner_folder = private_root();
+        let home = owner_folder.path().canonicalize().unwrap().join("home");
+        private_directory(&home);
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _, _capture) = allocate_master_capture(&root).unwrap();
+
+        let outside = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+            &[],
+        );
+
+        assert!(outside.is_ok(), "the turn on the owner's home was refused");
+        for name in [".config", ".cargo"] {
+            let made = std::fs::symlink_metadata(home.join(name));
+            assert_eq!(
+                made.err().map(|error| error.kind()),
+                Some(std::io::ErrorKind::NotFound),
+                "{name} was made in the owner's home"
+            );
+        }
+        drop(outside);
+        let second = private_root();
+        let below_base = owner_generation(&second);
+        let turn_home = below_base.join("profile-home");
+        private_directory(&turn_home);
+        let planted_folder = private_root();
+        let planted = planted_folder.path().canonicalize().unwrap();
+        for name in ["config", "cargo"] {
+            private_directory(&planted.join(name));
+            std::fs::write(planted.join(name).join("kept"), name).unwrap();
+            std::os::unix::fs::symlink(planted.join(name), turn_home.join(format!(".{name}")))
+                .unwrap();
+        }
+
+        let below = master_in_generation(&below_base);
+
+        assert!(below.is_ok(), "the turn below the data root was refused");
+        for name in ["config", "cargo"] {
+            let made = std::fs::symlink_metadata(turn_home.join(format!(".{name}")));
+            assert!(
+                made.is_ok_and(|made| made.is_dir()),
+                "the planted .{name} link was kept"
+            );
+            assert_eq!(
+                std::fs::read_to_string(planted.join(name).join("kept")).ok(),
+                Some(name.to_owned())
+            );
+        }
     }
 
     /// T8: a master's tool cache is the project's cache in the engine root, where the team
@@ -2123,6 +2270,7 @@ mod tests {
             "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
         );
         let mut expected_claude = BTreeMap::from([
+            ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
             ("CLAUDE_CONFIG_DIR", home.to_str().unwrap()),
             ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home.to_str().unwrap()),
             ("HOME", home.to_str().unwrap()),

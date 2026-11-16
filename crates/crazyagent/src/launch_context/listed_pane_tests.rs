@@ -122,6 +122,100 @@ fn a_listed_pane_is_handed_its_keyless_account_and_refuses_one_for_another_addre
     assert_eq!(refused.err(), Some(mismatch));
 }
 
+/// DEC-180 T20 M8 (a): a live master's pane on a terminal-only listed harness on a keyed
+/// account is handed the engine relay's loopback address, and its bridge reads the relay's
+/// token from the key file into the name its manifest lists; the token is in no argument or
+/// pane variable, the saved key in none and in no file of the pane's home. Without a
+/// hand-over a key is refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_keyed_listed_pane_is_handed_its_relay_and_token_and_never_the_key() {
+    use crate::credentials::SecretString;
+    use crate::harnesses::launch::Secret;
+    use crate::model_gateway::relay::Relay;
+    use std::ffi::OsStr;
+    let (_folder, home) = harness_home("standin-jsonl-append");
+    let scratch = tempfile::tempdir().unwrap();
+    let work = scratch.path().canonicalize().unwrap();
+    let profile = work.join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let saved = SecretString::new(SAVED_KEY.as_bytes().to_vec()).unwrap();
+    let relay = Relay::start(KEYED_URL, saved).unwrap();
+    let registry = crate::harnesses::registry::registry();
+    let harness = registry.get("standin-jsonl-append").unwrap();
+    let connection = openai_chat(KEYED_URL, true);
+    let handover = crate::harnesses::accounts::handover(harness, &connection, Some(&relay));
+    assert!(handover.is_ok(), "{:?}", handover.as_ref().err());
+    let appended = parse(APPEND.as_bytes()).unwrap();
+    let settings = TerminalSettings::read(&appended).unwrap();
+    let context = context().with_handover(handover.unwrap());
+    let installed = context.install_listed(&appended, &home, true).unwrap();
+    let token = Secret::new(relay.token().to_owned()).unwrap();
+    let key_file = crate::harnesses::interactive::write_key(&home, &token).unwrap();
+    let mut request = pane_request("standin-jsonl-append", &home, &work, &profile);
+    request.account = AccountBinding::Url {
+        home: home.clone(),
+        base_url: relay.base_url(),
+        key: Some(token),
+    };
+    let run = Run {
+        session_id: "standin-1",
+        key_file: Some(&key_file),
+        resume: false,
+    };
+
+    let built = command_with(&request, Some(&installed), &run, Some(&settings));
+
+    assert!(built.is_ok(), "{:?}", built.as_ref().err());
+    let built = built.unwrap();
+    let address = built.env.iter().find(|pair| pair.0 == "OPENAI_BASE_URL");
+    assert_eq!(address.map(|pair| &pair.1), Some(&relay.base_url()));
+    for (name, value) in &built.env {
+        assert!(!value.contains(relay.token()), "{name}");
+        let (name, value) = (OsStr::new(name), OsStr::new(value));
+        let allowed = crate::sandbox::agent_variable_allowed(name, value);
+        assert!(allowed, "{name:?}");
+    }
+    let at = built.argv.iter().position(|word| word == "-c").unwrap();
+    let bridge = &built.argv[at + 1..at + 6];
+    let file = key_file.to_str().unwrap();
+    assert_eq!(bridge[2..], ["file", file, "OPENAI_API_KEY"]);
+    let shown = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .args(bridge)
+        .args(["/usr/bin/printenv", "OPENAI_API_KEY"])
+        .env_clear()
+        .output()
+        .unwrap();
+    assert!(shown.status.success(), "{shown:?}");
+    let printed = String::from_utf8_lossy(&shown.stdout);
+    assert_eq!(printed.trim(), relay.token());
+    let values = built.env.iter().flat_map(|(name, value)| [name, value]);
+    for part in built.argv.iter().chain(values) {
+        assert!(!part.contains(SAVED_KEY), "{part}");
+        assert!(!part.contains(KEYED_URL), "{part}");
+    }
+    assert!(built.argv.iter().all(|part| !part.contains(relay.token())));
+    let mut folders = vec![home.clone()];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                folders.push(entry.path());
+            } else if kind.is_file() {
+                let bytes = fs::read(entry.path()).unwrap();
+                let shown = String::from_utf8_lossy(&bytes);
+                assert!(!shown.contains(SAVED_KEY), "{}", entry.path().display());
+            }
+        }
+    }
+    let (_other, bare) = harness_home("standin-jsonl-append");
+    let plain = context().install_listed(&appended, &bare, true).unwrap();
+    let refused = command_with(&request, Some(&plain), &run, Some(&settings));
+    assert_eq!(refused.err(), Some(failure("launch_key_relay_unsupported")));
+}
+
 /// rv-ds241 N1 (T20 M8): a pane is given its account hand-over only inside the project
 /// sandbox, as the piped launch is, so a hand-over to a pane at Full access is refused as
 /// the piped launch refuses it, before any other check of the pane.
@@ -237,10 +331,10 @@ fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
     let (sandbox, place) = (crate::sandbox::SANDBOX_EXEC, profile.to_str().unwrap());
     assert_eq!(built.argv[..3], [sandbox, "-f", place]);
     assert_eq!(built.argv[3..5], ["/bin/sh", "-c"]);
-    let words = ["handed", LOCAL_PLACEHOLDER, "OPENAI_API_KEY"];
-    assert_eq!(built.argv[6..9], words);
-    assert_eq!(built.argv[9..11], ["/usr/bin/true", "--home"]);
-    let bridge = &built.argv[5..9];
+    let words = ["handed", "word", LOCAL_PLACEHOLDER, "OPENAI_API_KEY"];
+    assert_eq!(built.argv[6..10], words);
+    assert_eq!(built.argv[10..12], ["/usr/bin/true", "--home"]);
+    let bridge = &built.argv[5..10];
     let shown = std::process::Command::new("/bin/sh")
         .arg("-c")
         .args(bridge)

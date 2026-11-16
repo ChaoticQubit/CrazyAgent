@@ -150,7 +150,8 @@ fn a_server_told_to_leave_wake_out_neither_lists_nor_records_it() {
             ASK_TOOL,
             RECORD_TOOL,
             WITHDRAW_TOOL,
-            REQUEST_ACCESS_TOOL
+            REQUEST_ACCESS_TOOL,
+            PROPOSE_RULE_TOOL
         ]
     );
     assert_eq!(answers["2"]["error"]["code"], -32602, "{}", answers["2"]);
@@ -263,14 +264,15 @@ fn the_delegate_tool_records_proposals_that_the_engine_takes_once() {
     assert_eq!(answers["1"]["result"]["serverInfo"]["name"], SERVER_NAME);
     assert!(answers["1"]["result"]["capabilities"]["tools"].is_object());
     let tools = answers["2"]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 7);
     assert_eq!(tools[0]["name"], TOOL_NAME);
     assert_eq!(tools[0]["inputSchema"]["required"], json!(["task"]));
     assert_eq!(tools[1], ask_tool());
     assert_eq!(tools[2], record_tool());
     assert_eq!(tools[3], withdraw_tool());
     assert_eq!(tools[4], request_access_tool());
-    assert_eq!(tools[5]["name"], WAKE_TOOL);
+    assert_eq!(tools[5], propose_rule_tool());
+    assert_eq!(tools[6]["name"], WAKE_TOOL);
     for id in ["3", "4"] {
         assert_eq!(answers[id]["result"]["isError"], false, "{id}");
         assert_eq!(answers[id]["result"]["content"][0]["text"], RECORDED);
@@ -1808,4 +1810,77 @@ fn a_discard_call_needs_a_harness_name_and_a_one_line_reason() {
         json!({"agent": "@docs", "reason": "Not needed\u{200b}"})
     ));
     assert!(TEAM_TOOLS.contains(&DISCARD_TOOL) && !LEAD_TOOLS.contains(&DISCARD_TOOL));
+}
+
+/// DEC-182 S7: a `propose_github_rule` call reads one rule GitHub's settings hold, on as a
+/// boolean and a plain reason of up to 300 bytes, and nothing else, such as a repository.
+#[test]
+fn a_propose_github_rule_call_reads_one_switchable_rule_on_and_a_short_plain_why() {
+    let read = |arguments: Value| live_call("propose_github_rule", Some(&arguments));
+    let call =
+        read(json!({"rule": "conversation_resolution", "on": true, "why": "Threads stay open."}));
+    assert!(matches!(call, Some(Ok(_))), "{call:?}");
+    let call = call.unwrap().unwrap();
+    assert_eq!(call.name(), "propose_github_rule");
+    assert_eq!(
+        serde_json::to_value(&call).unwrap(),
+        json!({"tool": "propose_github_rule", "rule": "conversation_resolution", "on": true, "why": "Threads stay open."})
+    );
+    for refused in [
+        json!({"rule": "make_admin", "on": true, "why": "x"}),
+        json!({"rule": "security_policy", "on": true, "why": "x"}),
+        json!({"rule": "dependabot_version_updates", "on": true, "why": "x"}),
+        json!({"rule": "wiki_off", "why": "x"}),
+        json!({"rule": "wiki_off", "on": "yes", "why": "x"}),
+        json!({"rule": "wiki_off", "on": true, "why": "  "}),
+        json!({"rule": "wiki_off", "on": true, "why": "x".repeat(301)}),
+        json!({"rule": "wiki_off", "on": true, "why": "Docs\u{202E}txt"}),
+        json!({"rule": "wiki_off", "on": true, "why": "Docs\u{200B} live here"}),
+        json!({"rule": "wiki_off", "on": true, "why": "x", "repo": "octo-cat/tool"}),
+    ] {
+        assert!(matches!(read(refused.clone()), Some(Err(_))), "{refused}");
+    }
+}
+
+/// DEC-182 S7: every team server that lists the questions tools lists `propose_github_rule`,
+/// a sub-agent's too, offering only the 23 rules GitHub's settings hold, while a console
+/// master's server leaves it out, since a proposal's outcome reaches only the team
+/// conversation.
+#[test]
+fn propose_github_rule_is_listed_for_team_masters_and_sub_agents_but_not_console_masters() {
+    let entry = |off: &[String]| {
+        team_tools(off)["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "propose_github_rule")
+            .cloned()
+    };
+    let listed = entry(&[]);
+    assert!(listed.is_some(), "{}", team_tools(&[]));
+    let listed = listed.unwrap();
+    let rules: Vec<&str> = listed["inputSchema"]["properties"]["rule"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|rule| rule.as_str().unwrap())
+        .collect();
+    assert!(rules.contains(&"wiki_off") && rules.contains(&"conversation_resolution"));
+    assert!(!rules.contains(&"security_policy") && !rules.contains(&"dependabot_version_updates"));
+    assert_eq!(rules.len(), 23);
+    assert_eq!(listed["inputSchema"]["properties"]["why"]["maxLength"], 300);
+    let description = listed["description"].as_str().unwrap();
+    assert!(
+        description.contains("your master gets it when you are a sub-agent"),
+        "{description}"
+    );
+    let sub_agent = MASTER_QUESTION_TOOLS.map(str::to_owned);
+    assert!(entry(&sub_agent).is_some());
+    let console = console_off(Vec::new());
+    assert!(
+        console.iter().any(|tool| tool == "propose_github_rule"),
+        "{console:?}"
+    );
+    assert!(entry(&console).is_none());
+    assert!(known_tools(&console));
 }

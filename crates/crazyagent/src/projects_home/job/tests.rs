@@ -368,3 +368,129 @@ fn a_delete_cut_short_reads_its_trash_count_and_offers_no_subject_to_restart() {
     };
     assert_eq!(started.kind(), JobKind::Delete);
 }
+
+fn setup_job() -> IntakeJob {
+    IntakeJob::new(
+        id_of("setup-1"),
+        JobKind::Setup,
+        Some(ProjectId::new("meals").unwrap()),
+        "Meal planner".into(),
+        AddMode::Move,
+        Vec::new(),
+    )
+}
+
+/// DEC-177 add.2: a New Project job reads Building from its start, then how many of its
+/// documents it copied once it counted them, and refuses a stop once its record starts, so a
+/// stop never leaves a half-recorded project; it ends done naming the project.
+#[test]
+fn a_setup_job_reads_building_with_its_documents_counted_and_refuses_a_stop_once_recording() {
+    let job = setup_job();
+    job.copying();
+    assert_eq!(job.view().state, JobState::Building { done: 0, total: 0 });
+    job.tally().documents(2).unwrap();
+    assert_eq!(job.view().state, JobState::Building { done: 0, total: 2 });
+    job.tally().document_copied();
+    assert_eq!(job.view().state, JobState::Building { done: 1, total: 2 });
+    job.tally().document_copied();
+    job.tally().commit_record().unwrap();
+    assert!(job.tally().recording());
+    assert!(!job.stop(), "a stop once the record started is refused");
+    assert!(!job.view().stopping);
+    assert_eq!(job.view().state, JobState::Building { done: 2, total: 2 });
+    job.end(Ok(()));
+    let view = job.view();
+    assert_eq!(view.state, JobState::Done);
+    assert_eq!(view.kind, JobKind::Setup);
+    assert_eq!(view.project_id, Some(ProjectId::new("meals").unwrap()));
+    assert_eq!(view.source, "Meal planner", "the name labels the end line");
+    assert_eq!(job.interrupted(), "home_new_project_interrupted");
+}
+
+/// A stop while a New Project builds wins over its record: the record is refused and the job
+/// ends cancelled while building.
+#[test]
+fn a_setup_stopped_while_building_ends_cancelled_while_building() {
+    let job = setup_job();
+    job.copying();
+    job.tally().documents(3).unwrap();
+    job.tally().document_copied();
+    assert!(job.stop());
+    assert_eq!(
+        job.tally().commit_record().unwrap_err().0,
+        "home_add_cancelled"
+    );
+    assert!(!job.tally().recording(), "nothing was recorded");
+    assert_eq!(
+        job.tally().documents(1).unwrap_err().0,
+        "home_add_cancelled",
+        "a stopped build counts nothing more"
+    );
+    job.end(failure("home_add_cancelled"));
+    assert_eq!(
+        job.view().state,
+        JobState::Cancelled {
+            phase: Phase::Building
+        }
+    );
+}
+
+/// A New Project's failure ends it failed while building, whatever step failed.
+#[test]
+fn a_setup_failure_keeps_the_building_phase() {
+    let job = setup_job();
+    job.copying();
+    job.tally().documents(1).unwrap();
+    job.end(failure("home_new_project_failed"));
+    assert_eq!(
+        job.view().state,
+        JobState::Failed {
+            code: "home_new_project_failed".into(),
+            phase: Phase::Building
+        }
+    );
+}
+
+/// A New Project an engine stop cut short restores as failed while building with the
+/// interrupted code, naming the project; it starts again only from New Project, whose answers
+/// are not kept (DEC-177 add.2 Q3 A), so its view offers no subject to restart from.
+#[test]
+fn a_setup_cut_short_restores_failed_interrupted_with_no_subject_to_restart() {
+    let job = IntakeJob::setup_interrupted(
+        id_of("setup-7"),
+        ProjectId::new("meals").unwrap(),
+        "Meal planner".into(),
+    );
+    assert!(job.ended());
+    let view = job.view();
+    assert_eq!(
+        view.state,
+        JobState::Failed {
+            code: "home_new_project_interrupted".into(),
+            phase: Phase::Building
+        }
+    );
+    assert_eq!(view.kind, JobKind::Setup);
+    assert_eq!(view.source, "Meal planner");
+    assert_eq!(view.subject(), None);
+    let text = serde_json::to_string(&view).unwrap();
+    assert!(text.contains(r#""kind":"setup""#), "{text}");
+    assert!(text.contains(r#""phase":"building""#), "{text}");
+    let started = JobSubject::Setup {
+        project_id: ProjectId::new("meals").unwrap(),
+        spec: crate::protocol::ProjectSpec {
+            name: "Meal planner".into(),
+            repositories: vec![],
+        },
+        setup: crate::project_setup::ProjectSetup {
+            about: String::new(),
+            tech_stack: vec![],
+            platforms: vec![],
+            research: vec![],
+            pool: None,
+            team: None,
+            documents: vec![],
+        },
+    };
+    assert_eq!(started.kind(), JobKind::Setup);
+}

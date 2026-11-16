@@ -107,14 +107,26 @@ pub const ASK_TOOL: &str = "ask";
 pub const RECORD_TOOL: &str = "record_answer";
 pub const WITHDRAW_TOOL: &str = "withdraw_question";
 pub const REQUEST_ACCESS_TOOL: &str = "request_access";
-/// The owner's questions tools (DEC-099 A, F12, F08) a server lists after `TEAM_TOOLS`:
-/// `ask` logs a question for the owner, `record_answer` records the owner's answer from chat
-/// or the master's own terminal, `withdraw_question` takes a question the master no longer
-/// needs off the owner's list and `request_access` asks the owner for one narrow extra the
-/// sandbox blocks. A sub-agent's server leaves `MASTER_QUESTION_TOOLS` out.
-pub const QUESTION_TOOLS: [&str; 4] = [ASK_TOOL, RECORD_TOOL, WITHDRAW_TOOL, REQUEST_ACCESS_TOOL];
+pub const PROPOSE_RULE_TOOL: &str = "propose_github_rule";
+/// The owner's questions tools (DEC-099 A, F12, F08, DEC-182 S7) a server lists after
+/// `TEAM_TOOLS`: `ask` logs a question for the owner, `record_answer` records the owner's
+/// answer from chat or the master's own terminal, `withdraw_question` takes a question the
+/// master no longer needs off the owner's list, `request_access` asks the owner for one
+/// narrow extra the sandbox blocks and `propose_github_rule` asks the owner to change one
+/// rule of the project's published GitHub repository. A sub-agent's server leaves
+/// `MASTER_QUESTION_TOOLS` out; a console master's leaves `CONSOLE_OFF_TOOLS` out.
+pub const QUESTION_TOOLS: [&str; 5] = [
+    ASK_TOOL,
+    RECORD_TOOL,
+    WITHDRAW_TOOL,
+    REQUEST_ACCESS_TOOL,
+    PROPOSE_RULE_TOOL,
+];
 /// The questions tools only a master is given, left out of every sub-agent's server.
 pub const MASTER_QUESTION_TOOLS: [&str; 2] = [RECORD_TOOL, WITHDRAW_TOOL];
+/// The questions tools a console master's server leaves out, since their outcome reaches
+/// only the project's team conversation, which a console master does not read.
+pub const CONSOLE_OFF_TOOLS: [&str; 1] = [PROPOSE_RULE_TOOL];
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
 pub const CALLS_PENDING_MAX: usize = 16;
@@ -179,6 +191,8 @@ const WITHDRAW_KEYS: [&str; 2] = ["question", "version"];
 const REQUEST_INVALID: &str = "Not requested: give kind socket with the socket's full path, kind port with one port from 1 to 49151, or kind temp_folder, and a reason in plain words of up to 2048 bytes.";
 const REQUEST_KEYS: [&str; 4] = ["kind", "path", "port", "reason"];
 const REQUEST_REASON_BYTES_MAX: usize = 2048;
+const PROPOSE_INVALID: &str = "Not proposed: give rule as one of the listed GitHub rules, on as true or false, and why in plain words of up to 300 bytes.";
+const PROPOSE_KEYS: [&str; 3] = ["rule", "on", "why"];
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
 const NOT_TAKEN: &str =
@@ -191,6 +205,7 @@ const NOT_ANSWERED: &str = "The engine took the call but did not answer within a
 const _: () = assert!(REPLY_BYTES_MAX < REQUEST_BYTES_MAX as u64);
 const _: () = assert!(CALLS_PER_TICK_MAX <= CALLS_PENDING_MAX);
 const _: () = assert!(crate::coord::KEY_BYTES_MAX == 128);
+const _: () = assert!(crate::github::proposals::WHY_BYTES_MAX == 300);
 const _: () = {
     let builtin = crate::coord::tool_switches::BUILTIN_TOOLS;
     assert!(builtin.len() == TEAM_TOOLS.len());
@@ -329,6 +344,12 @@ pub enum Call {
         grant: crate::sandbox::policy::AccessGrant,
         reason: String,
     },
+    #[serde(rename = "propose_github_rule")]
+    ProposeGitHubRule {
+        rule: crate::github::GitHubRule,
+        on: bool,
+        why: String,
+    },
 }
 
 impl Call {
@@ -354,6 +375,7 @@ impl Call {
             Self::RecordAnswer { .. } | Self::RelayAnswer { .. } => RECORD_TOOL,
             Self::Withdraw { .. } => WITHDRAW_TOOL,
             Self::RequestAccess { .. } => REQUEST_ACCESS_TOOL,
+            Self::ProposeGitHubRule { .. } => PROPOSE_RULE_TOOL,
         };
         assert!(TEAM_TOOLS.contains(&name) || QUESTION_TOOLS.contains(&name));
         name
@@ -483,6 +505,23 @@ pub fn serve_live(
     rpc(input, output, |request| answer_live(request, mailbox, off))
 }
 
+/// The tools a console master's team server leaves out: the owner's switched-off tools
+/// and `CONSOLE_OFF_TOOLS`, whose outcome reaches only a team conversation (DEC-182 S7).
+/// Takes the switched-off tools. Returns the tools left out, each once.
+pub fn console_off(mut off: Vec<String>) -> Vec<String> {
+    for tool in CONSOLE_OFF_TOOLS {
+        if !off.iter().any(|name| name == tool) {
+            off.push(tool.to_owned());
+        }
+    }
+    assert!(
+        CONSOLE_OFF_TOOLS
+            .iter()
+            .all(|tool| off.iter().any(|name| name == tool))
+    );
+    off
+}
+
 /// Says whether every name is one of the team tools or the configured master's `wake`, as
 /// the engine subcommands check the tools they are told to leave out. Takes the names.
 /// Returns the answer.
@@ -585,12 +624,17 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                     "additionalProperties": false,
                 },
             })];
-            tools.extend([
-                questions::ask_listing(),
-                questions::record_listing(),
-                questions::withdraw_listing(),
-                questions::request_listing(),
-            ]);
+            tools.extend(
+                [
+                    questions::ask_listing(),
+                    questions::record_listing(),
+                    questions::withdraw_listing(),
+                    questions::request_listing(),
+                    questions::propose_listing(),
+                ]
+                .into_iter()
+                .filter(|tool| !off.iter().any(|name| tool["name"] == name.as_str())),
+            );
             if waking {
                 tools.push(wake_listing());
             }
@@ -602,7 +646,7 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                         .map(|name| spec(name)),
                 );
             }
-            assert!(tools.len() <= 6 + MEMORY_TOOLS.len());
+            assert!(tools.len() <= 7 + MEMORY_TOOLS.len());
             json!({ "tools": tools })
         }
         Some("tools/call") => match (mailbox, name) {
@@ -615,8 +659,12 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
             _ => match call(params, drop)
                 .or_else(|| waking.then(|| wake_call(params, drop)).flatten())
                 .map(|(text, error)| (text.to_owned(), error))
-                .or_else(|| questions::drop_call(params, drop))
-            {
+                .or_else(|| {
+                    let left_out = name.is_some_and(|name| off.iter().any(|tool| tool == name));
+                    (!left_out)
+                        .then(|| questions::drop_call(params, drop))
+                        .flatten()
+                }) {
                 Some((text, error)) => tool_result(&text, error),
                 None => return Some(failure(id, -32602, "Unknown tool")),
             },
@@ -664,6 +712,9 @@ fn team_tools(off: &[String]) -> Value {
     }
     if on(REQUEST_ACCESS_TOOL) {
         tools.push(request_access_tool());
+    }
+    if on(PROPOSE_RULE_TOOL) {
+        tools.push(propose_rule_tool());
     }
     assert!(tools.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len());
     json!({ "tools": tools })
@@ -827,6 +878,33 @@ pub fn request_access_tool() -> Value {
                 "reason": {"type": "string", "description": "Why you need it, in one or two plain sentences the owner reads."},
             },
             "required": ["kind", "reason"],
+            "additionalProperties": false,
+        },
+    })
+}
+
+/// The MCP entry of the `propose_github_rule` tool (DEC-182 S7), the same for every master
+/// and agent given it: one rule GitHub's settings hold for the project's published
+/// repository, on or off, with the reason the owner reads. Output: the tool's name,
+/// description and input schema.
+pub fn propose_rule_tool() -> Value {
+    let rules: Vec<String> = crate::github::GitHubRule::ALL
+        .into_iter()
+        .filter(|rule| crate::github::proposals::proposable(*rule))
+        .map(crate::github::proposals::rule_name)
+        .collect();
+    assert!(!rules.is_empty() && rules.len() < crate::github::GitHubRule::ALL.len());
+    json!({
+        "name": PROPOSE_RULE_TOOL,
+        "description": "Propose that the owner turn one GitHub rule on or off for the repository this project was published to, such as requiring resolved review threads before a merge. The engine raises a question the owner answers in the Questions view; if approved, the engine changes that one rule with the owner's GitHub sign-in. You never get the sign-in, and one message says only whether it was approved and applied, refused or declined; your master gets it when you are a sub-agent. A project that has not been published to GitHub cannot take a proposal.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "rule": {"type": "string", "enum": rules, "description": "The rule, by its name."},
+                "on": {"type": "boolean", "description": "true to turn the rule on, false to turn it off."},
+                "why": {"type": "string", "maxLength": crate::github::proposals::WHY_BYTES_MAX, "description": "Why, in one or two plain sentences the owner reads."},
+            },
+            "required": ["rule", "on", "why"],
             "additionalProperties": false,
         },
     })
@@ -1165,6 +1243,7 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
         RECORD_TOOL => record_call(arguments).ok_or(RECORD_INVALID),
         WITHDRAW_TOOL => withdraw_call(arguments).ok_or(WITHDRAW_INVALID),
         REQUEST_ACCESS_TOOL => request_call(arguments).ok_or(REQUEST_INVALID),
+        PROPOSE_RULE_TOOL => propose_call(arguments).ok_or(PROPOSE_INVALID),
         _ => return None,
     })
 }
@@ -1256,6 +1335,33 @@ fn request_call(arguments: Option<&Value>) -> Option<Call> {
     Some(Call::RequestAccess {
         grant,
         reason: reason.to_owned(),
+    })
+}
+
+/// Reads one `propose_github_rule` call (DEC-182 S7): one rule GitHub's settings hold, by
+/// its name, whether it is to be on, and a plain reason of up to `WHY_BYTES_MAX` bytes,
+/// with no other key, so the agent never names a repository. Takes the arguments. Returns
+/// the call, or none when a part is missing, extra or outside its bounds.
+fn propose_call(arguments: Option<&Value>) -> Option<Call> {
+    let arguments = arguments?.as_object()?;
+    if arguments
+        .keys()
+        .any(|key| !PROPOSE_KEYS.contains(&key.as_str()))
+    {
+        return None;
+    }
+    let rule: crate::github::GitHubRule =
+        serde_json::from_value(arguments.get("rule")?.clone()).ok()?;
+    let on = arguments.get("on")?.as_bool()?;
+    let why = arguments.get("why")?.as_str()?.trim();
+    let plain = crate::github::proposals::plain_why(why).is_some_and(|plain| plain == why);
+    if !plain || !crate::github::proposals::proposable(rule) {
+        return None;
+    }
+    Some(Call::ProposeGitHubRule {
+        rule,
+        on,
+        why: why.to_owned(),
     })
 }
 
@@ -1389,6 +1495,9 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
             let mut arguments = serde_json::to_value(grant).map_err(|_| CALL_INVALID)?;
             arguments["reason"] = json!(reason);
             arguments
+        }
+        Call::ProposeGitHubRule { rule, on, why } => {
+            json!({"rule": rule, "on": on, "why": why})
         }
     };
     let again = live_call(call.name(), Some(&arguments)).expect("every call names a team tool")?;

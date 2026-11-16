@@ -679,7 +679,7 @@ async fn watch(
                                 break VIEWER_GONE;
                             }
                         }
-                        Err(error) if error.0 == "terminal_agent_unknown" => break "terminal_ended",
+                        Err(error) if crate::terminal::ended_code(&error.0) => break "terminal_ended",
                         Err(_) => break "terminal_unavailable",
                     },
                     None => break "terminal_ended",
@@ -705,7 +705,7 @@ async fn watch(
                         match request {
                             TerminalRequest::Prompt { text } => {
                                 let typed = prompt(&host, &agent, text.clone()).await;
-                                if typed.as_ref().is_err_and(|error| error.0 == "terminal_agent_unknown") {
+                                if typed.as_ref().is_err_and(|error| crate::terminal::ended_code(&error.0)) {
                                     break "terminal_ended";
                                 }
                                 if let (Ok(true), Some(member), Some(database)) = (typed, member, &database) {
@@ -713,7 +713,7 @@ async fn watch(
                                 }
                             }
                             request => {
-                                if act(&host, &agent, request).await.is_err_and(|error| error.0 == "terminal_agent_unknown") {
+                                if act(&host, &agent, request).await.is_err_and(|error| crate::terminal::ended_code(&error.0)) {
                                     break "terminal_ended";
                                 }
                             }

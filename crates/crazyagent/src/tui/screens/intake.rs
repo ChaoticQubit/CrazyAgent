@@ -181,6 +181,9 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "onboarding_instructions_unwritable" => {
             "This folder came with a .crazyagent/instructions.md that CrazyAgent can't label as Imported. Make that file and its .crazyagent folder writable, then start again."
         }
+        "onboarding_instructions_unreadable" => {
+            "This folder came with a .crazyagent/instructions.md that CrazyAgent can't read: it is a link, too large or not plain text. Move or fix that file, then start again."
+        }
         "onboarding_layout_incomplete" => {
             "The project's .crazyagent folder is incomplete. Check it and start again."
         }
@@ -248,6 +251,93 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "github_git_missing" => {
             "Git isn't installed on this computer, so the repository can't be cloned."
         }
+        "github_publish_detached" => {
+            "The project's git isn't on a branch. Check out a branch, then try again."
+        }
+        "github_publish_draft_not_asked" => {
+            "No agent drafted these lines, so CrazyAgent's standard lines are shown."
+        }
+        "github_publish_exclude_invalid" => "That file can't be left out. Check again.",
+        "github_publish_failed" => "Publishing on GitHub failed. Try again.",
+        "github_publish_file_invalid" => {
+            "A file publishing writes (.gitignore, SECURITY.md or the .github folder) is a link or not a plain file. Fix it, then try again."
+        }
+        "github_publish_gitignore_invalid" => {
+            "The project's .gitignore can't be read or changed safely. Fix it, then try again."
+        }
+        "github_publish_head_moved" => {
+            "The project's git changed while it was being published. Try again."
+        }
+        "github_publish_hooks_set" => {
+            "The project's git runs hooks, so CrazyAgent won't commit or push it. Remove the hooks, then try again."
+        }
+        "github_publish_ignore_invalid" => {
+            "These lines can't go into .gitignore. Keep one pattern per line, without control characters."
+        }
+        "github_publish_in_progress" => {
+            "This project already has a publish. Finish or discard it first."
+        }
+        "github_publish_not_plain_repo" => {
+            "The project's .git is a link or a file, not a plain folder, so CrazyAgent won't publish it."
+        }
+        "github_publish_not_started" => {
+            "This project has no publish to go on with. Start it again."
+        }
+        "github_publish_on_github" => "This project is already on GitHub.",
+        "github_publish_other_host" => {
+            "This project's git already points at another host, so CrazyAgent won't publish it on GitHub."
+        }
+        "github_publish_project_unknown" => "This project isn't in CrazyAgent anymore.",
+        "github_publish_push_failed" => "Git couldn't push to GitHub. Try again.",
+        "github_publish_push_timed_out" => {
+            "Pushing to GitHub took too long and was stopped. Try again."
+        }
+        "github_publish_running" => {
+            "This project is being published right now. Wait for it to finish."
+        }
+        "github_publish_secret_in_history" => {
+            "The secret is already in the project's git history, so leaving the file out doesn't remove it. Remove it from the history, then check again."
+        }
+        "github_publish_step_invalid" => {
+            "The publish moved on since this was shown. Look at it again."
+        }
+        "github_publish_too_large" => {
+            "This project is too large to publish from CrazyAgent: over 20,000 files or 200 MB."
+        }
+        "github_publish_unavailable" => "Publishing on GitHub can't be used right now. Try again.",
+        "github_publish_workflow_scope" => {
+            "The GitHub sign-in can't push workflow files. Sign in to GitHub again, then try again."
+        }
+        "github_repo_name_taken" => {
+            "That repository name is taken on this GitHub account. Pick another name."
+        }
+        "github_repo_create_refused" => {
+            "GitHub refused to make the repository. Check that this account may create repositories."
+        }
+        "github_repo_visibility_mismatch" => {
+            "GitHub made the repository with a different visibility than asked. Check it on GitHub."
+        }
+        "github_repo_description_invalid" => {
+            "GitHub refused the repository description. Use at most 350 characters on one line."
+        }
+        "github_store_unavailable" => {
+            "CrazyAgent's GitHub records can't be read or written right now. Try again."
+        }
+        "github_rules_not_published" => super::project_github::RULES_NOT_PUBLISHED,
+        "github_rule_invalid" => {
+            "This rule is a file in the project, so it can't be switched on GitHub."
+        }
+        "github_rules_repo_mismatch" => {
+            "This project is now published to another GitHub repository, so nothing was changed. Check its rules again."
+        }
+        "github_repo_unreadable" => {
+            "GitHub didn't show this repository. Check that it still exists and that your GitHub sign-in can see it."
+        }
+        "github_request_bounds" => "That request was too large for the engine. Try again.",
+        "github_reply_bounds" => "GitHub's reply was too large to show. Try again.",
+        "github_request_invalid" => "The engine couldn't read that request. Reload and try again.",
+        "github_rule_busy" => "Another GitHub rule is still changing. Try again when it's done.",
+        "github_rule_unstarted" => "CrazyAgent couldn't start the change. Try again.",
         "trusted_connection_unavailable" | "trusted_connection_lost" => {
             "The engine connection dropped. CrazyAgent reconnects on its own."
         }

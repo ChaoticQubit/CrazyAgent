@@ -32,7 +32,11 @@ use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountCheck, AccountExtras, AccountPage, AccountSecret,
     ModelAccessCollection, NativeAuthMethod,
 };
-use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
+use crazyagent::github::{
+    CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
+    GitHubPublishPlan, GitHubRepoPage, GitHubStatus,
+};
+use crazyagent::github::{GitHubRepoRules, GitHubRule};
 use crazyagent::harnesses::HarnessEntry;
 use crazyagent::harnesses::update::HarnessVersions;
 use crazyagent::ide::bridge::run_command::RunMode;
@@ -68,6 +72,7 @@ use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::money::MoneyChoice;
 use crazyagent::usage::report::UsageReport;
 use crazyagent::usage::spend::SpendChoice;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
@@ -552,21 +557,6 @@ async fn desktop_project_catalog(
 ) -> Result<ProjectCatalog, BridgeError> {
     main_window(&webview)?;
     lock(&state).await?.project_catalog(pool, research).await
-}
-
-#[tauri::command]
-async fn desktop_setup_project(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    spec: ProjectSpec,
-    setup: ProjectSetup,
-    generation: u64,
-) -> Result<IntentReceipt, BridgeError> {
-    main_window(&webview)?;
-    lock(&state)
-        .await?
-        .setup_project(spec, setup, generation)
-        .await
 }
 
 #[tauri::command]
@@ -2242,6 +2232,18 @@ async fn desktop_delete_project_job(
 }
 
 #[tauri::command]
+async fn desktop_setup_project_job(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    spec: ProjectSpec,
+    setup: ProjectSetup,
+) -> Result<crazyagent::projects_home::job::JobView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.setup_project_job(spec, setup)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_remove_project(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -2525,6 +2527,169 @@ async fn desktop_github_repos(
 ) -> Result<GitHubRepoPage, BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.github_repos(page)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_owners(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<GitHubOwners, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_owners()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_status(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<Option<GitHubPublishJob>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_status(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_approve(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    lines: Vec<String>,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .github_publish_approve(&project, lines)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_exclude(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    path: String,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_exclude(&project, path)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_recheck(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_recheck(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_continue(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_continue(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_prompt(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_prompt(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_prompt_set(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    answer: crazyagent::github::GitHubPromptAnswer,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .github_publish_prompt_set(&project, answer)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_discard(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<Option<GitHubPublishLeft>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_discard(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_start(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    plan: GitHubPublishPlan,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_start(&project, plan)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_rule_defaults(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<BTreeSet<GitHubRule>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_rule_defaults()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_rule_defaults_set(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    rules: BTreeSet<GitHubRule>,
+) -> Result<BTreeSet<GitHubRule>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_rule_defaults_set(rules)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_rules(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<GitHubRepoRules, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_rules(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_rule_set(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    repo: String,
+    rule: GitHubRule,
+    on: bool,
+) -> Result<GitHubRepoRules, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_rule_set(&project, repo, rule, on)?;
     call.await
 }
 
@@ -5058,7 +5223,6 @@ native_commands! {
     desktop_project_list,
     desktop_create_project,
     desktop_project_catalog,
-    desktop_setup_project,
     desktop_project_setup,
     desktop_research_jobs,
     desktop_project_activity,
@@ -5144,6 +5308,7 @@ native_commands! {
     desktop_create_demo,
     desktop_move_project_home,
     desktop_delete_project_job,
+    desktop_setup_project_job,
     desktop_cancel_research,
     desktop_retry_research,
     desktop_plan_roadmap,
@@ -5165,6 +5330,20 @@ native_commands! {
     desktop_github_use_cli,
     desktop_github_sign_out,
     desktop_github_repos,
+    desktop_github_owners,
+    desktop_github_publish_status,
+    desktop_github_publish_approve,
+    desktop_github_publish_exclude,
+    desktop_github_publish_recheck,
+    desktop_github_publish_continue,
+    desktop_github_publish_prompt,
+    desktop_github_publish_prompt_set,
+    desktop_github_publish_discard,
+    desktop_github_publish_start,
+    desktop_github_rule_defaults,
+    desktop_github_rule_defaults_set,
+    desktop_github_rules,
+    desktop_github_rule_set,
     desktop_clone_repo,
     desktop_icloud_download,
     desktop_icloud_progress,

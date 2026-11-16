@@ -332,6 +332,48 @@ fn native_auth_custodian_cli_rejects_malformed_launch_words_before_bootstrap() {
     }
 }
 
+/// The custodian arguments for a pinned Codex and `files` launch files, each named by its
+/// path and hash as the engine writes them (RV-DS241-52). Inputs: the root and the count.
+/// Output: the arguments.
+fn launch_files(root: &Path, files: usize) -> Vec<OsString> {
+    let mut args = arguments(root);
+    args.extend([
+        OsString::from("--codex-executable"),
+        root.join("codex-not-opened").into_os_string(),
+        OsString::from("--codex-sha256"),
+        OsString::from("0".repeat(64)),
+    ]);
+    for index in 0..files {
+        args.extend([
+            OsString::from("--launch-file"),
+            root.join(format!("launch-{index}")).into_os_string(),
+            OsString::from("--launch-sha256"),
+            OsString::from("a".repeat(64)),
+        ]);
+    }
+    args
+}
+
+/// RV-DS241-52: a launch of twelve files, the most the engine hands a custodian, reaches the
+/// bootstrap read whole, and one word past that bound is refused under its own code.
+#[test]
+fn native_auth_custodian_cli_takes_the_longest_launch_and_names_a_longer_one() {
+    let root = private_root();
+    let longest = launch_files(root.path(), 12);
+    assert_eq!(longest.len(), 54);
+    assert_rejection(
+        observe(root.path(), &longest, &[], true),
+        "native_auth_bootstrap_truncated",
+    );
+    let mut longer = launch_files(root.path(), 12);
+    longer.extend([OsString::from("--launch-argument"), OsString::from("x")]);
+    assert_rejection(
+        observe(root.path(), &longer, &[], true),
+        "native_auth_host_launch_too_long",
+    );
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
 #[test]
 fn native_auth_custodian_cli_whose_error_stream_nobody_reads_still_exits_with_its_failure() {
     let root = private_root();

@@ -226,3 +226,40 @@ fn a_jsonl_append_record_gives_the_words_its_turn_started_rule_reads_as_typed() 
     let typed = vec![(end, "continue".to_owned())];
     assert_eq!(read, Some((typed, end)));
 }
+
+/// DEC-180 T20 (b): a delivery check reads a jsonl-append record as a live master's turn
+/// does: past the offset, the text of each line its `turn_started` rule matches is typed,
+/// and a reply, a start with no text and a line before the offset are not.
+#[test]
+fn a_jsonl_append_record_gives_typed_after_the_words_its_turn_started_rule_reads() {
+    let home = Home::new();
+    let lines = [
+        json!({"type": "started", "prompt": "before"}),
+        json!({"type": "text", "delta": "On it"}),
+        json!({"type": "started"}),
+        json!({"type": "started", "prompt": "[team] message 7"}),
+    ];
+    let record = home.write(&below("jsonl"), &jsonl(&lines), NEW);
+    let offset = jsonl(&lines[..1]).len() as u64;
+
+    let read = typed_after("standin-jsonl-append", &record, offset);
+
+    assert_eq!(read, Some(vec!["[team] message 7".to_owned()]));
+}
+
+/// DEC-180 T20 (b): the session search reads a jsonl-append record line through its
+/// manifest's rules: a `turn_started` text is typed, a `text` fact's text the agent's, and
+/// a start with no text or any other line is no message.
+#[test]
+fn a_jsonl_append_record_line_reads_as_typed_or_the_agent_s_through_its_rules() {
+    let read = |value: Value| {
+        let line = serde_json::to_vec(&value).unwrap();
+        record_message("standin-jsonl-append", &line)
+    };
+    let typed = read(json!({"type": "started", "prompt": "go on"}));
+    assert_eq!(typed, Some(("typed", "go on".to_owned())));
+    let said = read(json!({"type": "text", "delta": "Done"}));
+    assert_eq!(said, Some(("agent", "Done".to_owned())));
+    assert_eq!(read(json!({"type": "started"})), None);
+    assert_eq!(read(json!({"type": "done", "ok": true})), None);
+}

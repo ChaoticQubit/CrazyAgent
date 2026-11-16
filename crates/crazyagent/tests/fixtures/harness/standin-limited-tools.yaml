@@ -1,0 +1,11 @@
+schema: 1
+kind: harness
+id: "standin-limited-tools"
+name: "Stand-in limited tools"
+binaries:
+  - "standin-limited-tools"
+headless: "standin-limited-tools -p: one prompt, plain text reply"
+model_selection: true
+account_kinds:
+  - "api_key"
+tools_limited: "runs without tools."

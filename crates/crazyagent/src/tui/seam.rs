@@ -1,4 +1,4 @@
-use super::client::{ConversationJob, CreationJob, OwnerEvent, SetupQuery};
+use super::client::{ConversationJob, OwnerEvent, SetupQuery};
 use super::master_session;
 use crate::config::ProviderQuotaPolicy;
 use crate::engine::bootstrap::OwnerConnectionIdentity;
@@ -139,7 +139,6 @@ pub enum Request {
         change: PoolChange,
     },
     Setup(SetupQuery),
-    Creation(Box<CreationJob>),
     Conversation(Box<ConversationJob>),
     Master(Box<master_session::Job>),
     Wire {
@@ -212,7 +211,6 @@ impl std::fmt::Debug for Request {
             Self::Projects => "Projects",
             Self::EditPool { .. } => "EditPool",
             Self::Setup(_) => "Setup",
-            Self::Creation(_) => "Creation",
             Self::Conversation(_) => "Conversation",
             Self::Master(_) => "Master",
             Self::Wire { .. } => "Wire",

@@ -289,6 +289,69 @@ fn checking_a_stored_spec_with_hidden_characters_is_refused_before_it_runs() {
     assert_eq!(*spec, valid);
 }
 
+/// RV-DS241-197: a server approved before its spec's hidden or control characters were
+/// refused, so its approval digest still matches, never launches: the launch set leaves it
+/// out and its view says it can't start and why, while a valid approved server still
+/// launches.
+#[test]
+fn an_approved_server_whose_stored_spec_fails_the_checks_never_launches() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let valid = ServerSpec::Stdio {
+        command: "/usr/bin/true".into(),
+        args: vec!["--stdio".into()],
+    };
+    let kept = server(&mut connection, root, "kept", &valid);
+    execute(
+        &mut connection,
+        root,
+        Command::Approve {
+            id: kept,
+            spec: valid.clone(),
+        },
+    )
+    .unwrap();
+    let old = server(&mut connection, root, "old", &valid);
+    let stored = ServerSpec::Stdio {
+        command: "/usr/bin/tr\u{202e}ue".into(),
+        args: vec!["--stdio".into()],
+    };
+    {
+        let tx = connection.transaction().unwrap();
+        let mut record: ServerRecord = load(&tx, "server", &old).unwrap();
+        record.spec = stored.clone();
+        record.approved = Some(stored.digest());
+        put_server(&tx, &record).unwrap();
+        tx.commit().unwrap();
+    }
+
+    let launch = execute(
+        &mut connection,
+        root,
+        Command::Launch {
+            project: ProjectId::new("app").unwrap(),
+        },
+    );
+
+    let Ok(ResultValue::Launch(launch)) = launch else {
+        panic!("launch set required");
+    };
+    let launched: Vec<&str> = launch
+        .servers
+        .iter()
+        .map(|server| server.name.as_str())
+        .collect();
+    assert_eq!(launched, ["kept"], "a spec that fails the checks never launches");
+    let Ok(ResultValue::Server(view)) =
+        execute(&mut connection, root, Command::Server { id: old })
+    else {
+        panic!("server view required");
+    };
+    let sentence = "This server's command or address holds hidden or control characters, so it can't start. Remove it, then add it again.";
+    assert_eq!(view.status, ServerStatus::CantStart);
+    assert_eq!(view.problem.as_deref(), Some(sentence));
+}
+
 #[test]
 fn a_stored_skill_description_or_source_with_hidden_characters_is_shown_escaped() {
     let record = SkillRecord {
