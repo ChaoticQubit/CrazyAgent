@@ -1,13 +1,15 @@
 import { Channel } from "@tauri-apps/api/core";
+import type { FitAddon } from "@xterm/addon-fit";
 import type { IDisposable, ITerminalOptions, Terminal } from "@xterm/xterm";
-import { useEffect, useLayoutEffect, useRef, useState, type Ref } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type Ref } from "react";
 import { attachTerminal, detachTerminal, promptTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
 import type { GraphNode, TerminalMessage } from "../../engine-client";
 import type { InputChoice } from "./terminal-io";
-import { readTerminalInput } from "../../state";
+import { readTerminalInput, type Loaded, type ProjectRow } from "../../state";
 import { Button, Icon, NotReady, StatusBadge, isMac, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeRole, nodeRunning, nodeStatus } from "./graph";
+import { HIDDEN_FLUSH_MS, HiddenOutput, KEPT_MAX, KeptSet, keyId, type Held, type KeptKey } from "./kept-terminals";
 import { connectingLine, copyKey, encodeBinary, encodeTyped, endCopy, followTry, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, selectNote, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
 
 const COPIED_MS = 2000;
@@ -18,6 +20,14 @@ const SCROLLBACK_LINES = 5000;
 const STOPPED_TYPING = "Typing stopped reaching this agent. Open the terminal again to reconnect.";
 
 type View = { kind: "connecting"; reason?: string; tries?: number } | { kind: "live" } | { kind: "ended"; copy: string } | { kind: "not_ready" };
+type ViewState = { view: View; behind: boolean; mouse: boolean };
+type Link = { live: boolean; openedAt: number | null; serial: number | null; closed: boolean; wrote: () => () => void; release: () => void };
+
+const IDLE: ViewState = { view: { kind: "connecting" }, behind: false, mouse: false };
+
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
 
 function token(name: string, fallback: string): string {
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -366,18 +376,408 @@ function TerminalHead({ node, harness, tile, message, boxed, onMessage, onStop, 
   </div>;
 }
 
+let parked: HTMLDivElement | null = null;
+
+/** The box hidden terminal views wait in (DEC-187): laid out on screen at the size each had
+ * in its panel, so xterm keeps drawing it and showing it again needs no fit, but invisible,
+ * inert and hidden from assistive technology, so it never takes a click or the focus.
+ * Output: the box, made on first use. */
+function parking(): HTMLDivElement {
+  if (parked?.isConnected) return parked;
+  const box = document.createElement("div");
+  box.className = "tg-terminal-parking";
+  box.inert = true;
+  box.setAttribute("aria-hidden", "true");
+  document.body.appendChild(box);
+  parked = box;
+  return box;
+}
+
+const views = new Set<KeptView>();
+let themed = false;
+
+/** Repaints every open terminal view in the app's colors once the owner's appearance or the
+ * system's changes, since a kept view outlives the panel that read them. Output: none. */
+function followTheme(): void {
+  if (themed) return;
+  themed = true;
+  const apply = () => {
+    const theme = terminalOptions().theme;
+    for (const view of views) if (view.terminal) view.terminal.options.theme = theme;
+  };
+  new MutationObserver(apply).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", apply);
+}
+
+/** One agent terminal view that outlives its panel (DEC-187): an xterm made once in an element
+ * of its own and attached once. Showing moves that element into a panel's screen and hiding
+ * moves it to the parking box, so neither rebuilds the screen nor calls the bridge. While
+ * hidden, output is written in one batch per `HIDDEN_FLUSH_MS`. The view fits and sends its
+ * size only once it knows its panel's size, from a show or the size its panel last had, so a
+ * view loaded before any panel never sizes the agent's terminal. Follow and Open again connect
+ * again in place. A wall tile makes one per tile and drops it with the tile. Inputs: the key
+ * and the size its panel last had, if known. */
+export class KeptView implements Held {
+  readonly key: KeptKey;
+  readonly id: string;
+  readonly host: HTMLDivElement;
+  shown = false;
+  follow = false;
+  keys = true;
+  terminal: Terminal | null = null;
+  prompt: ((text: string) => boolean) | null = null;
+  private state: ViewState = IDLE;
+  private readonly heard = new Set<() => void>();
+  private readonly hidden = new HiddenOutput();
+  private link: Link | null = null;
+  private fit: FitAddon | null = null;
+  private size: { width: number; height: number } | null = null;
+  private fitted = false;
+  private tries = 0;
+  private dropped = false;
+  private flushTimer = 0;
+  private againTimer = 0;
+  private resizeTimer = 0;
+  private fitFrame = 0;
+  private focusFrame = 0;
+  private release = () => {};
+
+  constructor(key: KeptKey, size: { width: number; height: number } | null = null) {
+    assert(size === null || (size.width > 0 && size.height > 0), "a parked size is never empty");
+    this.key = key;
+    this.id = keyId(key);
+    this.size = size;
+    this.host = document.createElement("div");
+    this.host.className = "tg-terminal-host";
+    views.add(this);
+    followTheme();
+    this.park();
+    void this.open();
+  }
+
+  /** Whether the view was let go. Output: the answer. */
+  get gone(): boolean {
+    return this.dropped;
+  }
+
+  /** Hears every change of what the view shows, for `useSyncExternalStore`. Input: the
+   * listener. Output: the call that stops it. */
+  readonly subscribe = (listener: () => void): (() => void) => {
+    this.heard.add(listener);
+    return () => {
+      this.heard.delete(listener);
+    };
+  };
+
+  /** What the view shows now: its state, whether the owner reads above the live screen and
+   * whether the app reads the mouse. Output: the same object until one of them changes. */
+  readonly snapshot = (): ViewState => this.state;
+
+  /** Shows the view in a panel's screen: writes the output held while hidden in one write,
+   * then moves its element in. Nothing here waits or measures: no bridge call and no fit. The
+   * element's size watch fits after the frame only when the screen's size differs from the
+   * parked one, and sends the new size only when the columns or rows changed. A live view
+   * takes the focus after the frame. Input: the screen element. Output: none. */
+  show(screen: HTMLElement): void {
+    assert(!this.dropped, "a view let go is never shown");
+    this.shown = true;
+    this.flush();
+    this.host.style.width = "";
+    this.host.style.height = "";
+    screen.appendChild(this.host);
+    window.cancelAnimationFrame(this.focusFrame);
+    this.focusFrame = window.requestAnimationFrame(() => {
+      if (this.shown && this.link?.live) this.terminal?.focus();
+    });
+  }
+
+  /** Hides the view: moves its element to the parking box at the size it had, keeping its
+   * screen, scrollback and connection. Output: none. */
+  hide(): void {
+    this.shown = false;
+    window.cancelAnimationFrame(this.focusFrame);
+    if (!this.dropped) this.park();
+  }
+
+  /** Scrolls to the latest output and puts the cursor in the terminal. Output: none. */
+  latest(): void {
+    this.terminal?.scrollToBottom();
+    this.terminal?.focus();
+  }
+
+  /** Connects again after the owner's Open again, with the follow count started afresh.
+   * Output: none. */
+  reopen(): void {
+    this.tries = 0;
+    this.reconnect();
+  }
+
+  /** Lets the view go: ends its connection with a detach, frees its terminal and removes its
+   * element. The agent keeps running. Output: none. */
+  drop(): void {
+    if (this.dropped) return;
+    this.dropped = true;
+    this.shown = false;
+    views.delete(this);
+    window.clearTimeout(this.flushTimer);
+    window.clearTimeout(this.againTimer);
+    window.clearTimeout(this.resizeTimer);
+    window.cancelAnimationFrame(this.fitFrame);
+    window.cancelAnimationFrame(this.focusFrame);
+    this.link?.release();
+    this.link = null;
+    this.hidden.take();
+    this.release();
+    this.terminal = null;
+    this.fit = null;
+    this.host.remove();
+    this.heard.clear();
+  }
+
+  private set(next: Partial<ViewState>): void {
+    const state = { ...this.state, ...next };
+    if (state.view === this.state.view && state.behind === this.state.behind && state.mouse === this.state.mouse) return;
+    this.state = state;
+    for (const listener of [...this.heard]) listener();
+  }
+
+  private park(): void {
+    if (this.size) {
+      this.host.style.width = `${this.size.width}px`;
+      this.host.style.height = `${this.size.height}px`;
+    }
+    parking().appendChild(this.host);
+  }
+
+  private async open(): Promise<void> {
+    const [{ Terminal }, { FitAddon }] = await Promise.all([
+      import("@xterm/xterm"),
+      import("@xterm/addon-fit"),
+      import("@xterm/xterm/css/xterm.css"),
+    ]);
+    if (this.dropped) return;
+    const terminal = new Terminal(terminalOptions());
+    muteQueries(terminal);
+    const fit = new FitAddon();
+    terminal.loadAddon(fit);
+    terminal.open(this.host);
+    this.terminal = terminal;
+    this.fit = fit;
+    const scrolled = followScroll(terminal, (behind) => this.set({ behind }));
+    const moused = followMouse(terminal, (mouse) => this.set({ mouse }));
+    const selected = keepSelection(terminal, this.host);
+    const resized = terminal.onResize(() => {
+      window.clearTimeout(this.resizeTimer);
+      this.resizeTimer = window.setTimeout(() => this.sendSize(), RESIZE_PAUSE_MS);
+    });
+    const observer = new ResizeObserver(() => {
+      const width = this.host.offsetWidth;
+      const height = this.host.offsetHeight;
+      if (this.shown && width > 0 && height > 0) this.size = { width, height };
+      this.refit();
+    });
+    observer.observe(this.host);
+    this.release = () => {
+      observer.disconnect();
+      resized.dispose();
+      scrolled.dispose();
+      moused.dispose();
+      selected.dispose();
+      terminal.dispose();
+    };
+    this.connect();
+  }
+
+  private refit(): void {
+    window.cancelAnimationFrame(this.fitFrame);
+    this.fitFrame = window.requestAnimationFrame(() => {
+      if (this.fitted && !this.dropped && this.size && this.host.offsetWidth > 0 && this.host.offsetHeight > 0) this.fit?.fit();
+    });
+  }
+
+  private sendSize(): void {
+    const terminal = this.terminal;
+    if (!terminal || !this.link?.live || !this.size) return;
+    const size = terminalSize(terminal.cols, terminal.rows);
+    if (size) void resizeTerminal(this.key.terminal, size.cols, size.rows, this.key.pane);
+  }
+
+  private output(bytes: Uint8Array): void {
+    const terminal = this.terminal;
+    const link = this.link;
+    if (!terminal || !link) return;
+    if (this.shown) {
+      terminal.write(bytes, link.wrote());
+      return;
+    }
+    if (this.hidden.push(bytes)) {
+      this.flush();
+      return;
+    }
+    if (this.flushTimer === 0) this.flushTimer = window.setTimeout(() => this.flush(), HIDDEN_FLUSH_MS);
+  }
+
+  private flush(): void {
+    window.clearTimeout(this.flushTimer);
+    this.flushTimer = 0;
+    const bytes = this.hidden.take();
+    if (bytes && this.terminal && this.link) this.terminal.write(bytes, this.link.wrote());
+  }
+
+  private end(link: Link, copy: string): void {
+    link.live = false;
+    if (link.closed || this.dropped) return;
+    const next = this.follow ? followTry(this.tries, link.openedAt, performance.now()) : null;
+    if (next !== null) {
+      this.tries = next;
+      this.hidden.take();
+      this.terminal?.reset();
+      this.set({ view: { kind: "connecting", reason: copy, tries: next } });
+      window.clearTimeout(this.againTimer);
+      this.againTimer = window.setTimeout(() => this.reconnect(), FOLLOW_MS);
+      return;
+    }
+    this.set({ view: { kind: "ended", copy } });
+  }
+
+  private reconnect(): void {
+    window.clearTimeout(this.againTimer);
+    if (this.dropped || !this.terminal) return;
+    this.link?.release();
+    this.link = null;
+    this.hidden.take();
+    window.clearTimeout(this.flushTimer);
+    this.flushTimer = 0;
+    this.fitted = false;
+    this.terminal.reset();
+    if (this.state.view.kind !== "connecting") this.set({ view: { kind: "connecting" } });
+    this.connect();
+  }
+
+  private connect(): void {
+    const terminal = this.terminal;
+    assert(terminal !== null && this.link === null, "a view connects with its terminal open and no link held");
+    const { terminal: name, pane, project } = this.key;
+    let unsettle = () => {};
+    const link: Link = { live: false, openedAt: null, serial: null, closed: false, wrote: () => () => {}, release: () => {} };
+    link.wrote = settleAfterWrites((run) => {
+      const id = window.requestAnimationFrame(run);
+      unsettle = () => window.cancelAnimationFrame(id);
+      return unsettle;
+    }, () => {
+      if (link.closed || this.dropped) return;
+      this.fitted = true;
+      if (!this.size) return;
+      this.fit?.fit();
+      this.sendSize();
+    });
+    const run = jobQueue(() => this.end(link, STOPPED_TYPING));
+    const typing = connectInput(terminal, run, async (chunk, wheel) => (await typeIntoTerminal(name, chunk, wheel, pane)).kind === "ok", () => link.live, () => this.keys);
+    const prompt = (text: string) => {
+      if (!link.live || !run(async () => (await promptTerminal(name, text, pane)).kind === "ok")) return false;
+      terminal.focus();
+      return true;
+    };
+    this.prompt = prompt;
+    const channel = new Channel<TerminalMessage>((message) => {
+      if (link.closed) return;
+      const event = terminalEvent(message);
+      if (event.kind === "output") {
+        this.output(event.bytes);
+      } else if (event.kind === "attached") {
+        const size = terminalSize(event.cols, event.rows);
+        if (size) terminal.resize(size.cols, size.rows);
+        link.openedAt = performance.now();
+        link.live = true;
+        this.set({ view: { kind: "live" } });
+        if (this.shown) terminal.focus();
+      } else {
+        this.end(link, event.copy);
+      }
+    });
+    link.release = () => {
+      link.closed = true;
+      link.live = false;
+      if (this.prompt === prompt) this.prompt = null;
+      channel.onmessage = () => {};
+      typing.dispose();
+      unsettle();
+      if (link.serial !== null) void detachTerminal(name, link.serial);
+    };
+    this.link = link;
+    void attachTerminal(name, channel, pane, project).then((result) => {
+      if (link.closed) {
+        if (result.kind === "ok") void detachTerminal(name, result.value);
+        return;
+      }
+      if (result.kind === "ok") link.serial = result.value;
+      else if (result.kind === "not_ready") this.set({ view: { kind: "not_ready" } });
+      else if (result.kind === "error") this.end(link, result.code.startsWith("terminal_") ? endCopy(result.code) : result.message);
+    });
+  }
+}
+
+const kept = new KeptSet<KeptView>(KEPT_MAX);
+
+function letGo(dropped: KeptView[]): void {
+  for (const view of dropped) view.drop();
+}
+
+/** The main window's kept view for a key, marked most recently used, or a new one made,
+ * attached and kept, which drops the least recently used hidden view past `KEPT_MAX`.
+ * Input: the key. Output: the view. */
+function keptView(key: KeptKey): KeptView {
+  const found = kept.get(key);
+  if (found) {
+    kept.touch(key);
+    return found;
+  }
+  const view = new KeptView(key);
+  letGo(kept.add(view));
+  return view;
+}
+
+/** Lets go of the kept terminal views whose project is no longer open: one removed or closed,
+ * or every view when the session starts again (DEC-187: nothing kept after sign-out or project
+ * close). Input: whether a project stays open. Output: none. */
+export function keepTerminalsOf(open: (project: string | null) => boolean): void {
+  letGo(kept.dropWhere((key) => !open(key.project)));
+}
+
+/** Keeps the main window's kept terminal views to open projects (DEC-187): once the project
+ * list reads complete, the views of a project it no longer lists go, and when the session
+ * starts again, as after an engine reconnect or a profile change, every view goes. A list
+ * with more projects than it holds drops nothing. Inputs: the session's projects and whether
+ * more are unlisted. Output: none. */
+export function useKeptTerminalProjects(projects: Loaded<ProjectRow[]>, more: boolean): void {
+  useEffect(() => {
+    if (projects.kind === "loading") {
+      keepTerminalsOf(() => false);
+    } else if (projects.kind === "ok" && !more) {
+      const open = new Set(projects.value.map((project) => project.id));
+      keepTerminalsOf((project) => project !== null && open.has(project));
+    }
+  }, [projects, more]);
+}
+
+const still = () => () => {};
+const idle = () => IDLE;
+
 /** One agent's live terminal beside the graph: the screen at attach, live output, and every
  * key typed straight into the agent's real terminal, sized to the panel, with a way back to
  * the latest output once scrolled up, and Copy and Copy output on right-click and in its
  * status line, which also says how to select text while the app in the terminal reads the
- * mouse; that selection stays until the owner copies it or clicks. Closing it detaches the
- * view; the agent keeps running.
+ * mouse; that selection stays until the owner copies it or clicks. In the main window the
+ * view stays loaded and attached after the panel closes, among the two most recently used
+ * (DEC-187), so showing it again only moves it back; a wall tile's view detaches with the
+ * tile. The agent keeps running either way.
  * Inputs: the graph node, a harness name lookup, the close action when the panel can be
  * closed, the stop action when the agent can be stopped, `embedded` when a console around
  * it owns the head, `tile` for a terminal wall tile, `swaps` for the one panel a graph click
  * replaces, `follow` when an ended terminal opens again on its own, cleared, for an agent
  * that restarts in a new pane, and the one-line report of what the agent's harness loaded and
- * invoked, shown in the head, the project id a wall window attaches for, and what hears the
+ * invoked, shown in the head, the project the view is kept under and a wall window attaches
+ * for, and what hears the
  * terminal open at its first frame and close, so the live master's wait ends only then. Where the owner
  * types (the terminal, the message box under it, or both) is the one Terminal input in
  * Settings, for every agent on every screen. Output: the panel. */
@@ -401,21 +801,25 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
   const box = useRef<HTMLTextAreaElement>(null);
   const following = useRef(follow);
   following.current = follow;
-  const tries = useRef(0);
   const keys = useRef(mode.keys);
   keys.current = mode.keys;
   const screen = useRef<HTMLDivElement>(null);
-  const prompt = useRef<((text: string) => boolean) | null>(null);
-  const latest = useRef<(() => void) | null>(null);
-  const term = useRef<Terminal | null>(null);
-  const [view, setView] = useState<View>({ kind: "connecting" });
+  const name = node.terminal;
+  const pane = teammatePane(node);
+  const key: KeptKey | null = name ? { project: projectId ?? null, terminal: name, pane } : null;
+  const id = key ? keyId(key) : null;
+  const [made, setMade] = useState<KeptView | null>(null);
+  const found = key && !tile ? kept.get(key) ?? null : null;
+  const entry = found ?? (made && made.id === id && !made.gone ? made : null);
+  const current = useRef(entry);
+  current.current = entry;
+  const state = useSyncExternalStore(entry?.subscribe ?? still, entry?.snapshot ?? idle, entry?.snapshot ?? idle);
+  const view = state.view;
   const opened = useRef(onOpened);
   opened.current = onOpened;
   const open = view.kind === "live";
   useEffect(() => { opened.current?.(open); }, [open]);
   useEffect(() => () => opened.current?.(false), []);
-  const [behind, setBehind] = useState(false);
-  const [mouse, setMouse] = useState(false);
   const [menu, setMenu] = useState<MenuAt | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 
@@ -425,145 +829,40 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
     return () => window.clearTimeout(timer);
   }, [copied]);
 
+  useEffect(() => {
+    if (view.kind === "connecting") setMenu(null);
+  }, [view.kind]);
+
   const copy = async (text: string, done: string) => setCopied(await copyText(text) ? done : COPY_REFUSED);
   const closeMenu = useRef((note: string | null) => {
     setMenu(null);
     if (note) setCopied(note);
   }).current;
-  const [round, setRound] = useState(0);
-  const name = node.terminal;
-  const pane = teammatePane(node);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (!entry) return;
+    entry.follow = following.current;
+    entry.keys = keys.current;
+  });
+
+  useLayoutEffect(() => {
     const element = screen.current;
-    if (!name || !element) return;
-    setView((prior) => prior.kind === "connecting" ? prior : { kind: "connecting" });
+    if (!key || !element) return;
     setMenu(null);
-    let disposed = false;
-    let serial: number | null = null;
-    let again = 0;
-    let release = () => {};
-    void (async () => {
-      const [{ Terminal }, { FitAddon }] = await Promise.all([
-        import("@xterm/xterm"),
-        import("@xterm/addon-fit"),
-        import("@xterm/xterm/css/xterm.css"),
-      ]);
-      if (disposed) return;
-      const terminal = new Terminal(terminalOptions());
-      muteQueries(terminal);
-      const fit = new FitAddon();
-      terminal.loadAddon(fit);
-      terminal.open(element);
-      let live = false;
-      let openedAt: number | null = null;
-      let fitted = false;
-      let timer = 0;
-      let frame = 0;
-      const end = (copy: string) => {
-        live = false;
-        if (disposed) return;
-        const next = following.current ? followTry(tries.current, openedAt, performance.now()) : null;
-        if (next !== null) {
-          tries.current = next;
-          terminal.reset();
-          setView({ kind: "connecting", reason: copy, tries: next });
-          window.clearTimeout(again);
-          again = window.setTimeout(() => setRound((value) => value + 1), FOLLOW_MS);
-          return;
-        }
-        setView({ kind: "ended", copy });
-      };
-      const sendSize = () => {
-        const size = terminalSize(terminal.cols, terminal.rows);
-        if (live && size) void resizeTerminal(name, size.cols, size.rows);
-      };
-      const refit = () => {
-        window.cancelAnimationFrame(frame);
-        frame = window.requestAnimationFrame(() => { if (fitted && !disposed) fit.fit(); });
-      };
-      let unsettle = () => {};
-      const wrote = settleAfterWrites((run) => {
-        const id = window.requestAnimationFrame(run);
-        unsettle = () => window.cancelAnimationFrame(id);
-        return unsettle;
-      }, () => {
-        if (disposed) return;
-        fitted = true;
-        fit.fit();
-        sendSize();
-      });
-      const run = jobQueue(() => end(STOPPED_TYPING));
-      const typing = connectInput(terminal, run, async (chunk, wheel) => (await typeIntoTerminal(name, chunk, wheel)).kind === "ok", () => live, () => keys.current);
-      prompt.current = (text) => {
-        if (!live || !run(async () => (await promptTerminal(name, text)).kind === "ok")) return false;
-        terminal.focus();
-        return true;
-      };
-      const scrolled = followScroll(terminal, setBehind);
-      const moused = followMouse(terminal, setMouse);
-      const selected = keepSelection(terminal, element);
-      latest.current = () => {
-        terminal.scrollToBottom();
-        terminal.focus();
-      };
-      term.current = terminal;
-      const resized = terminal.onResize(() => {
-        window.clearTimeout(timer);
-        timer = window.setTimeout(sendSize, RESIZE_PAUSE_MS);
-      });
-      const observer = new ResizeObserver(refit);
-      observer.observe(element);
-      const channel = new Channel<TerminalMessage>((message) => {
-        if (disposed) return;
-        const event = terminalEvent(message);
-        if (event.kind === "output") {
-          terminal.write(event.bytes, wrote());
-        } else if (event.kind === "attached") {
-          const size = terminalSize(event.cols, event.rows);
-          if (size) terminal.resize(size.cols, size.rows);
-          openedAt = performance.now();
-          live = true;
-          setView({ kind: "live" });
-          terminal.focus();
-        } else {
-          end(event.copy);
-        }
-      });
-      release = () => {
-        prompt.current = null;
-        latest.current = null;
-        term.current = null;
-        channel.onmessage = () => {};
-        observer.disconnect();
-        typing.dispose();
-        resized.dispose();
-        scrolled.dispose();
-        moused.dispose();
-        selected.dispose();
-        window.clearTimeout(timer);
-        window.cancelAnimationFrame(frame);
-        unsettle();
-        terminal.dispose();
-      };
-      const result = await attachTerminal(name, channel, pane, projectId ?? null);
-      if (disposed) {
-        if (result.kind === "ok") void detachTerminal(name, result.value);
-        return;
-      }
-      if (result.kind === "ok") serial = result.value;
-      else if (result.kind === "not_ready") setView({ kind: "not_ready" });
-      else if (result.kind === "error") end(result.code.startsWith("terminal_") ? endCopy(result.code) : result.message);
-    })();
+    const shown = tile ? new KeptView(key) : keptView(key);
+    shown.follow = following.current;
+    shown.keys = keys.current;
+    shown.show(element);
+    if (shown !== current.current) setMade(shown);
     return () => {
-      disposed = true;
-      window.clearTimeout(again);
-      release();
-      if (serial !== null) void detachTerminal(name, serial);
+      shown.hide();
+      if (tile) shown.drop();
+      else letGo(kept.trim());
     };
-  }, [name, pane, projectId, round]);
+  }, [id, tile]);
 
   const boxed = mode.box && Boolean(name) && view.kind !== "not_ready";
+  const terminal = entry?.terminal ?? null;
   return <section className={embedded ? "tg-terminal embedded" : tile ? "tg-terminal wall-tile" : "tg-terminal"} aria-label={`${node.label} terminal`}>
     {!embedded && <TerminalHead node={node} harness={harness} tile={tile} message={mode.box} boxed={boxed} onMessage={() => box.current?.focus()}
       onStop={onStop} onClose={onClose} reported={reported} swaps={swaps} />}
@@ -572,19 +871,20 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
     {view.kind === "connecting" && name && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />{displayText(connectingLine(view.reason ?? null, view.tries ?? 0))}</p>}
     {view.kind === "ended" && <div className="tg-terminal-state" role="alert">
       <span>{view.copy}</span>
-      <Button size="small" icon="refresh-cw" onClick={() => { tries.current = 0; setRound((value) => value + 1); }}>Open again</Button>
+      <Button size="small" icon="refresh-cw" onClick={() => entry?.reopen()}>Open again</Button>
     </div>}
     <div className="tg-terminal-screen" ref={screen} hidden={!name || view.kind === "not_ready"} onContextMenu={(event) => {
-      if (!term.current) return;
+      const clicked = entry?.terminal;
+      if (!clicked) return;
       event.preventDefault();
-      setMenu({ x: event.clientX, y: event.clientY, selection: term.current.getSelection() });
+      setMenu({ x: event.clientX, y: event.clientY, selection: clicked.getSelection() });
     }} />
-    {menu && term.current && <TerminalMenu terminal={term.current} at={menu} onDone={closeMenu} />}
+    {menu && terminal && <TerminalMenu terminal={terminal} at={menu} onDone={closeMenu} />}
     {view.kind === "live" && <div className="tg-terminal-note">
-      <span role="status">{copied ?? liveNote(node, input, mouse)}</span>
-      {behind && <Button variant="quiet" size="small" icon="chevron-down" onClick={() => latest.current?.()}>Jump to latest</Button>}
-      <Button variant="quiet" size="small" icon="copy" onClick={() => void copy(term.current ? terminalOutput(term.current) : "", "Copied the output.")}>Copy output</Button>
+      <span role="status">{copied ?? liveNote(node, input, state.mouse)}</span>
+      {state.behind && <Button variant="quiet" size="small" icon="chevron-down" onClick={() => entry?.latest()}>Jump to latest</Button>}
+      <Button variant="quiet" size="small" icon="copy" onClick={() => void copy(terminal ? terminalOutput(terminal) : "", "Copied the output.")}>Copy output</Button>
     </div>}
-    {boxed && <Composer node={node} live={view.kind === "live"} onSend={(text) => prompt.current?.(text) ?? false} compact={!embedded} box={box} />}
+    {boxed && <Composer node={node} live={view.kind === "live"} onSend={(text) => entry?.prompt?.(text) ?? false} compact={!embedded} box={box} />}
   </section>;
 }

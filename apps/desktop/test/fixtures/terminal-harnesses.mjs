@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import styles from "../../src/style.css?inline";
 import projectStyles from "../../src/screens/project/projects.css?inline";
 import teamStyles from "../../src/screens/team/team-graph.css?inline";
-import { TerminalPanel } from "../../src/screens/team/terminal-panel.tsx";
+import { keepTerminalsOf, TerminalPanel } from "../../src/screens/team/terminal-panel.tsx";
 
 let root = null;
 const engine = { callbacks: new Map(), channel: null, next: 0, typed: [] };
@@ -22,9 +22,11 @@ function deliver(message) {
 
 /** Mounts the real terminal panel for one agent on a fresh page, over a stand-in engine that
  * attaches its terminal at 80 by 24 and keeps every chunk the panel types into it, mouse
- * reports included. Inputs: the agent's role, "master" or "sub", and its harness id. */
+ * reports included. The views the window kept go first, as when the session starts again,
+ * so the panel attaches anew. Inputs: the agent's role, "master" or "sub", and its harness id. */
 export function open(role, harness) {
   root?.unmount();
+  keepTerminalsOf(() => false);
   Object.assign(engine, { callbacks: new Map(), channel: null, next: 0, typed: [] });
   window.__TAURI_INTERNALS__ = {
     invoke: async (command, args) => {
