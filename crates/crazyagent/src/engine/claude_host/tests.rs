@@ -2112,28 +2112,38 @@ async fn a_claude_master_the_sandbox_stopped_for_a_held_name_says_so() {
 }
 
 /// A stand-in Claude Code that leaves a descendant in its own group holding its output,
-/// waits until that descendant has left, then exits with the Linux call supervisor's
-/// held-stop code.
+/// waits until that descendant has left and the row has seen the host start, then exits
+/// with the Linux call supervisor's held-stop code.
 #[cfg(target_os = "linux")]
 const HELD_STOP_LEAVING_HARNESS: &str = r#"#!/bin/sh
 /usr/bin/perl -e 'setpgrp(0, 0) or exit 1; open(my $file, ">", "run/descendant.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' &
 echo $$ > run/leader.pid
-while [ ! -s run/descendant.pid ]; do /bin/sleep 0.01; done
+while [ ! -s run/descendant.pid ] || [ ! -e run/go ]; do /bin/sleep 0.01; done
 exit 122
 "#;
 
 /// #101 r1 (rv-sec3 N1): a held stop that leaves a process holding the harness's output
-/// ends the host on its own, without waiting on that output, and still closes with the
-/// cleanup's own fault, so a run that left something behind stays uncertain; the held
-/// cause outranks only what the run itself reported.
+/// ends the host on its own, without waiting on that output. Where the backend leaves such
+/// a process running (plain Landlock), close keeps the cleanup's own fault, so the run
+/// stays uncertain; where a process namespace ends it (bubblewrap), close is clean.
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn a_claude_master_held_stop_that_left_a_process_closes_uncertain() {
-    use crate::engine::master_host_fixture::{HarnessProcesses, MasterFixture};
+async fn a_claude_master_held_stop_that_left_a_process_closes_by_backend() {
+    use crate::engine::master_host_fixture::{HarnessProcesses, MasterFixture, RUN_FOLDER};
+    use crate::sandbox::LineageCheck;
 
     let mut fixture = MasterFixture::new("claude");
+    let check = {
+        let profile = fixture.lease("claude-group-turn", 1).unwrap();
+        let home = profile.profile_path().unwrap();
+        let harness = fixture.stand_in("claude", HELD_STOP_LEAVING_HARNESS);
+        fixture
+            .sandbox(&home, harness.parent().unwrap())
+            .lineage_check()
+    };
+    assert_ne!(check, LineageCheck::FullAccess);
     let mut claude = stand_in_master(&mut fixture, HELD_STOP_LEAVING_HARNESS).await;
-    let processes = HarnessProcesses::wait(&fixture.project);
+    fs::write(fixture.project.join(RUN_FOLDER).join("go"), "").unwrap();
     let own_end = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if !matches!(
@@ -2153,9 +2163,13 @@ async fn a_claude_master_held_stop_that_left_a_process_closes_uncertain() {
         "the host did not end on the held exit by itself: {own_end:?}"
     );
     let closed = claude.close().await.map_err(|error| error.0);
-    assert!(closed.is_err(), "{closed:?}");
-    assert_ne!(closed, Err(crate::sandbox::HELD_STOP_CAUSE.to_owned()));
-    let _ = rustix::process::kill_process(processes.descendant, rustix::process::Signal::KILL);
+    if check == LineageCheck::Sandboxed {
+        let _processes = HarnessProcesses::wait(&fixture.project);
+        assert!(closed.is_err(), "{closed:?}");
+        assert_ne!(closed, Err(crate::sandbox::HELD_STOP_CAUSE.to_owned()));
+    } else {
+        assert_eq!(closed, Ok(()));
+    }
 }
 
 const EARLY_ASSISTANT_HARNESS: &str = r#"#!/bin/sh
