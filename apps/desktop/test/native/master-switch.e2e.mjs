@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import { shownView } from "./agents-cards.mjs";
-import { TURN_S, home } from "./master-switch.wdio.conf.mjs";
+import { TURN_S, WINDOW_LEVELS, home } from "./master-switch.wdio.conf.mjs";
 import { click, shown, toasts, unfold } from "./settings-steps.mjs";
 import { go, paste, pick, reopen, run, segment, tab, terminalTyping, until, waitFor } from "./trial-kit.mjs";
 import { KEYS, TERMINAL, masterRows, sendToMaster, startIfPaused, teamNodes, terminalLive } from "./trial4/n-d8-master-reply.mjs";
@@ -302,6 +302,16 @@ describe("A saved master harness change reaches the live master as the owner's A
     assert.equal(homed.outcome, "applied", `the projects home is set: ${JSON.stringify(homed)}`);
     await browser.execute(() => location.reload());
     await until(() => browser.execute(() => document.readyState === "complete" && Boolean(window.__TAURI_INTERNALS__)), 60000, "the app window never loaded again");
+  });
+
+  it("A test build keeps every app window above other apps' windows, so the owner's windows never cover it and stop its drawing", async () => {
+    await waitFor(async () => {
+      const rows = existsSync(WINDOW_LEVELS) ? readFileSync(WINDOW_LEVELS, "utf8").trim().split("\n").filter(Boolean) : [];
+      const last = rows.at(-1);
+      if (!last) return { done: false, seen: "no window levels written" };
+      const { windows } = JSON.parse(last);
+      return { done: windows.some((level) => level.label === "main") && windows.every((level) => level.on_top === true), seen: last };
+    }, UI_MS, "every app window floats above other apps' windows");
   });
 
   it("When the master is idle (default): Save while the master is in a turn, the turn ends, then the divider and a Codex turn", async () => {
