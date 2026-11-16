@@ -6968,10 +6968,13 @@ mod overview_tabs {
     };
     use crate::protocol::{CredentialRef, ProjectId};
     use crate::roadmap_status::Refresh;
+    use crate::tui::frame::{Hint, footer, hint};
+    use crate::tui::glyphs::UNICODE;
     use crate::tui::screens::new_project_view::{Look, Row};
     use crate::tui::screens::project::{
         OVERVIEW_TAB_LABELS, PoolInfo, ProjectReply, ProjectScreen,
     };
+    use crate::tui::screens::project_publish::PROMPT_LINE;
     use crate::tui::screens::project_view::project_screen;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -7281,6 +7284,55 @@ mod overview_tabs {
         let help = project_screen(&mut page, 100, 40, &Look::plain()).help;
         assert!(help.iter().any(|(_, what)| *what == "Overview tab"));
         assert!(help.iter().any(|(_, what)| *what == "Scroll"));
+    }
+
+    #[test]
+    fn an_80_by_24_overview_keeps_the_publish_question_and_the_keys_it_had_before() {
+        let text: String = (1..=12).map(|line| format!("- Point {line}\n")).collect();
+        let mut overview = overview_with(Tab::QuickInfo, &text);
+        overview.failure = Some(
+            "The agent stopped before it wrote the tabs, so they show what they said the last time they were read. "
+                .repeat(3),
+        );
+        let mut page = page_with_overview(overview);
+        page.pool = Some(PoolInfo {
+            id: CredentialRef::new("pool-main").unwrap(),
+            name: "Main".into(),
+            accounts: 1,
+            assigned: true,
+        });
+        page.github_notice = true;
+        let drawn = project_screen(&mut page, 80, 24, &Look::plain());
+        let shown = drawn
+            .rows
+            .iter()
+            .map(Row::text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(shown.contains("Main  1 account"), "pooled: {shown}");
+        let notice = shown.find(PROMPT_LINE);
+        let strip = shown.find(&marked("Quick info"));
+        assert!(notice.is_some(), "the question shows at 80x24: {shown}");
+        assert!(strip.is_some(), "{shown}");
+        assert!(
+            notice < strip,
+            "the question sits above the tabs, so their rows can't push it off: {shown}"
+        );
+        assert!(
+            shown.contains("G Publish on GitHub"),
+            "the body line names G: {shown}"
+        );
+        let hints: Vec<Hint> = drawn
+            .help
+            .iter()
+            .map(|(key, label)| hint(key, label))
+            .collect();
+        let ctx = super::ctx(80, 24);
+        let bar = footer(80, &hints, 0, &ctx.theme, &UNICODE);
+        let bar: String = bar.spans.iter().map(|span| span.content.as_ref()).collect();
+        for key in ["Enter Open", "o Open folder", "PgUp/PgDn Scroll"] {
+            assert!(bar.contains(key), "{key} stays in the bar: {bar}");
+        }
     }
 
     #[test]
@@ -7929,6 +7981,12 @@ fn a_refused_publish_from_the_question_says_why_and_asks_again_at_once() {
         },
     };
     assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    shell.key(Key::Esc);
+    assert!(
+        matches!(shell.place(), Some(Place::Project { .. })),
+        "Esc closes the form the Start went from, not the page: {:?}",
+        shell.place()
+    );
     publish_reply(&mut shell, start, Err("github_publish_in_progress".into()));
     let message = shell.ctx.message().expect("the refusal is said");
     assert_eq!(
@@ -7951,6 +8009,81 @@ fn a_refused_publish_from_the_question_says_why_and_asks_again_at_once() {
     assert!(
         shown.contains(super::project_publish::PROMPT_LINE),
         "the question is back: {shown}"
+    );
+}
+
+#[test]
+fn a_refused_publish_from_the_question_keeps_the_form_with_what_was_typed_and_says_why_in_it() {
+    let (mut shell, project) = offered();
+    shell.key(Key::Char('G'));
+    shell.key(Key::Enter);
+    assert_eq!(publish_asks(&mut shell), [IntakeQuery::GitHubStatus]);
+    github_signed_in(&mut shell);
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    shell.key(Key::Paste("-2".into()));
+    for _ in 0..3 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let name = format!("{}-2", crate::github::default_repo_name("Notes"));
+    let start = IntakeQuery::GitHubPublishStart {
+        project: project.clone(),
+        plan: GitHubPublishPlan {
+            owner: "me".into(),
+            name: name.clone(),
+            description: crate::github::default_description(""),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(publish_asks(&mut shell), [start.clone()]);
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains("Starting the publish..."),
+        "the form waits on the Start: {shown}"
+    );
+    shell.key(Key::Enter);
+    assert!(publish_asks(&mut shell).is_empty(), "one Start at a time");
+    publish_reply(
+        &mut shell,
+        start.clone(),
+        Err("github_repo_name_taken".into()),
+    );
+    let shown = render(&mut shell, 100, 30);
+    assert!(shown.contains("[ Publish ]"), "the form stays: {shown}");
+    assert!(shown.contains(&name), "the typed name stays: {shown}");
+    assert!(
+        shown.contains("Pick another name."),
+        "the form says why: {shown}"
+    );
+    assert!(
+        !shown.contains("Sending your answer..."),
+        "the read after the refusal sends no answer: {shown}"
+    );
+    assert!(
+        shell.ctx.message().is_none(),
+        "the form says why, so the message line stays quiet"
+    );
+    let status = IntakeQuery::GitHubPublishStatus {
+        project: project.clone(),
+    };
+    assert_eq!(publish_asks(&mut shell), [status.clone()]);
+    publish_reply(&mut shell, status, Ok(IntakeView::PublishStatus(None)));
+    let prompt = IntakeQuery::GitHubPublishPrompt { project };
+    assert_eq!(publish_asks(&mut shell), [prompt.clone()]);
+    publish_reply(&mut shell, prompt, Ok(IntakeView::Prompt(false)));
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        shown.contains("[ Publish ]") && shown.contains(&name),
+        "a form the owner opened stays when the engine stops asking: {shown}"
+    );
+    assert!(shown.contains("Pick another name."), "{shown}");
+    shell.key(Key::Enter);
+    assert_eq!(
+        publish_asks(&mut shell),
+        [start],
+        "Publish again sends the kept plan"
     );
 }
 
