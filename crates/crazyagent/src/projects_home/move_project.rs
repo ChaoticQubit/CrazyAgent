@@ -676,7 +676,10 @@ pub(crate) enum Finished {
 /// after this record. Without that report a Move counts only when the old folder is gone
 /// (a rename), since a copy cut short looks the same on disk; a Copy counts only when
 /// verified. A finished move re-points the project's agent copies and rewrites every
-/// stored path of the folder in the caller's write. Inputs: the transaction, which pending
+/// stored path of the folder in the caller's write; a verified Move whose old folder is
+/// still there went by copy, so the same write marks that folder as still to clear under
+/// the move's request (`projects_home_project_move_left`, B17 -66), replacing an older
+/// mark, until the clear forgets it. Inputs: the transaction, which pending
 /// move to finish and whether its disk work reported success. Output: None when no such
 /// move is pending, else what was found.
 pub(crate) fn finish(
@@ -707,6 +710,17 @@ pub(crate) fn finish(
     }
     let repointed = repoint(tx, &pending.origin, &pending.target)?;
     rewrite(tx, &pending.project, &pending.origin, &pending.target)?;
+    if verified && left && matches!(pending.mode, AddMode::Move) {
+        tx.execute(
+            "INSERT OR REPLACE INTO projects_home_project_move_left VALUES (1,?1,?2,?3)",
+            params![
+                pending.request,
+                pending.project.as_str(),
+                text(&pending.origin)?
+            ],
+        )
+        .map_err(sql)?;
+    }
     Ok(Some(Finished::Moved { repointed }))
 }
 
