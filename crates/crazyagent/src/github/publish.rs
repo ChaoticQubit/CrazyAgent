@@ -1524,15 +1524,17 @@ fn commit_within(
         GitHubHistory::Empty => None,
         GitHubHistory::EngineStart | GitHubHistory::Owner => Some(head_commit(git, home, project)?),
     };
-    if let (Some(base), GitHubHistory::Owner) = (&base, history)
-        && paths.is_empty()
-    {
-        return Ok(GitHubCommitted {
-            branch,
-            commit: base.clone(),
-            left_out,
-        });
-    }
+    let kept = match (&base, history) {
+        (Some(base), GitHubHistory::Owner) => {
+            Some(object_id(&run(project_git(git, home, project).args([
+                "rev-parse",
+                "-q",
+                "--verify",
+                &format!("{base}^{{tree}}"),
+            ]))?)?)
+        }
+        _ => None,
+    };
     #[cfg(test)]
     commit_step(project, "add");
     let index = home.join(PRIVATE_INDEX);
@@ -1542,32 +1544,19 @@ fn commit_within(
         command.env("GIT_INDEX_FILE", &index);
         command
     };
-    match (&base, history) {
-        (Some(base), GitHubHistory::Owner) => {
+    let tree = match (&base, &kept) {
+        (Some(_), Some(kept)) if paths.is_empty() => kept.clone(),
+        (Some(base), Some(_)) => {
             succeeded(indexed().args(["read-tree", base.as_str()]))?;
             succeeded(indexed().args(["add", "-f", "--"]).args(&paths))?;
+            object_id(&work(indexed().arg("write-tree"))?)?
         }
         _ => {
             seed_index(project, &index)?;
             succeeded(indexed().args(["add", "-A"]))?;
+            object_id(&work(indexed().arg("write-tree"))?)?
         }
-    }
-    let tree = object_id(&work(indexed().arg("write-tree"))?)?;
-    if let (Some(base), GitHubHistory::Owner) = (&base, history) {
-        let kept = object_id(&run(project_git(git, home, project).args([
-            "rev-parse",
-            "-q",
-            "--verify",
-            &format!("{base}^{{tree}}"),
-        ]))?)?;
-        if kept == tree {
-            return Ok(GitHubCommitted {
-                branch,
-                commit: base.clone(),
-                left_out,
-            });
-        }
-    }
+    };
     let scan = tree_findings(
         git,
         home,
@@ -1579,6 +1568,15 @@ fn commit_within(
     )?;
     if !scan.findings.is_empty() {
         return Err(failure("github_publish_secret_found"));
+    }
+    if let (Some(base), Some(kept)) = (&base, &kept)
+        && *kept == tree
+    {
+        return Ok(GitHubCommitted {
+            branch,
+            commit: base.clone(),
+            left_out,
+        });
     }
     let mut making = project_git(git, home, project);
     making

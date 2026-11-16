@@ -1203,3 +1203,34 @@ fn a_head_that_moves_while_the_commit_runs_is_never_undone() {
     assert_eq!(refused.unwrap_err().0, "github_publish_head_moved");
     assert_eq!(owned.lines(&["log", "--format=%s"]), ["owner", "first"]);
 }
+
+/// rv-ds241 s2c N3 code r1 L1: on owner history a commit with nothing new to take still
+/// checks the tree it hands back, so a HEAD that moved since the check to a commit holding
+/// a secret is never answered as the commit to push, whether publish wrote files or not.
+#[test]
+fn an_unchanged_owner_head_is_checked_before_it_is_handed_back_to_push() {
+    let owned = fixture();
+    let project = owned.path();
+    git(&["init", "-q", "-b", "trunk"], &project);
+    owned.write("a.txt", "a\n");
+    git(&["add", "-A"], &project);
+    git(&["commit", "-q", "-m", "first"], &project);
+    let local = owned.inspect().unwrap();
+    let written = owned.prepare(&local, true, false, &[]).unwrap();
+    let written: Vec<&str> = written.iter().map(String::as_str).collect();
+    let committed = owned.commit(&written).unwrap();
+    assert_eq!(owned.commit(&[]).unwrap(), committed);
+    owned.write("deploy.txt", &format!("token {TOKEN}\n"));
+    git(&["add", "deploy.txt"], &project);
+    git(&["commit", "-q", "-m", "owner"], &project);
+    let head = owned.lines(&["rev-parse", "HEAD"]);
+    assert_eq!(
+        owned.commit(&written).unwrap_err().0,
+        "github_publish_secret_found"
+    );
+    assert_eq!(
+        owned.commit(&[]).unwrap_err().0,
+        "github_publish_secret_found"
+    );
+    assert_eq!(owned.lines(&["rev-parse", "HEAD"]), head);
+}
