@@ -3121,6 +3121,30 @@ fn a_missing_codex_hook_key_list_is_told_apart_from_a_linked_oversized_or_malfor
     );
 }
 
+/// KEYLIST-OPEN-NONBLOCK (#168 F1): a FIFO an agent put in the hook key list's place is
+/// unreadable at once. Opening it never waits for a writer, so the team tick that asks for
+/// the keys is never held by an agent's home.
+#[test]
+fn a_fifo_in_the_codex_hook_key_list_s_place_is_unreadable_without_waiting_for_a_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = private_home(&root, "codex");
+    fs::create_dir(home.join(STATE)).unwrap();
+    let made = crate::spawn_gate::collected(
+        std::process::Command::new("/usr/bin/mkfifo").arg(home.join(STATE).join(CODEX_HOOK_KEYS)),
+    )
+    .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let asked = home.clone();
+    std::thread::spawn(move || sender.send(codex_pinned_keys(&asked)));
+    assert_eq!(
+        receiver.recv_timeout(Duration::from_secs(5)),
+        Ok(Err(HookKeysUnread::Unreadable)),
+        "a FIFO with no writer never holds the caller"
+    );
+}
+
 #[test]
 fn a_native_lead_gives_its_teammates_its_instructions_and_the_lead_graph() {
     let directory = tempfile::tempdir().unwrap();
