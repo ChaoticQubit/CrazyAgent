@@ -274,8 +274,9 @@ async fn a_rule_switch_is_answered_at_once_and_its_result_comes_after() {
 }
 
 /// One rule switch at a time: while one runs, the next is refused at once with
-/// `github_rule_busy` and sends nothing later; once it ends, the next one starts and its
-/// result comes as an unfinished event.
+/// `github_rule_busy` as the worker's answer and sends nothing more; once it ends, the next
+/// is answered as changing before it starts, and its result comes after as an unfinished
+/// event.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_rule_switch_while_one_runs_is_refused_at_once() {
     let root = private_root("ca-tlane2-");
@@ -291,21 +292,35 @@ async fn a_second_rule_switch_while_one_runs_is_refused_at_once() {
     let (_, access) = native.attach().await;
     assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
     let (replies, receiver) = std::sync::mpsc::sync_channel(1);
+    let next = || {
+        let reply = tokio::task::block_in_place(|| {
+            receiver.recv_timeout(std::time::Duration::from_secs(20))
+        })
+        .unwrap();
+        let OwnerEvent::Intake(event) = reply.event else {
+            panic!("a rule switch answers with intake events");
+        };
+        (reply.finished, *event)
+    };
     let (release, held) = std::sync::mpsc::channel::<()>();
     native.rule_lane = Some(std::thread::spawn(move || {
         let _ = held.recv();
     }));
     let set = rule_set();
+    assert!(native.rule_lane(IntakeJob::Query(set.clone()), &replies));
     assert_eq!(
-        native.rule_lane(IntakeJob::Query(set.clone()), &replies),
-        IntakeEvent {
-            query: set.clone(),
-            result: Err("github_rule_busy".into()),
-        }
+        next(),
+        (
+            true,
+            IntakeEvent {
+                query: set.clone(),
+                result: Err("github_rule_busy".into()),
+            }
+        )
     );
     assert!(
         receiver.try_recv().is_err(),
-        "a refused switch sends nothing"
+        "a refused switch sends nothing more"
     );
     release.send(()).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -313,20 +328,19 @@ async fn a_second_rule_switch_while_one_runs_is_refused_at_once() {
         assert!(std::time::Instant::now() < deadline, "the held lane ends");
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+    assert!(native.rule_lane(IntakeJob::Query(set.clone()), &replies));
     assert_eq!(
-        native.rule_lane(IntakeJob::Query(set.clone()), &replies),
-        IntakeEvent {
-            query: set.clone(),
-            result: Ok(IntakeView::RuleChanging),
-        }
+        next(),
+        (
+            true,
+            IntakeEvent {
+                query: set.clone(),
+                result: Ok(IntakeView::RuleChanging),
+            }
+        )
     );
-    let reply =
-        tokio::task::block_in_place(|| receiver.recv_timeout(std::time::Duration::from_secs(20)))
-            .unwrap();
-    assert!(!reply.finished, "the result is not the worker's answer");
-    let OwnerEvent::Intake(event) = reply.event else {
-        panic!("the switch's result is an intake event");
-    };
+    let (finished, event) = next();
+    assert!(!finished, "the result is not the worker's answer");
     assert_eq!(event.query, set);
     assert!(event.result.is_err(), "{:?}", event.result);
     service.shutdown().await.unwrap();

@@ -208,17 +208,20 @@ impl NativeOwner {
     }
 
     /// Starts one GitHub rule switch on a lane thread of its own, so the worker takes other
-    /// requests while GitHub answers, which can take minutes; the switch's result comes
-    /// later as an unfinished owner event. One switch runs at a time. Takes the switch job
-    /// and the reply sender. Returns the answer the worker gives at once: `RuleChanging`,
-    /// or the refusal, `github_rule_busy` while a switch still runs.
-    pub(super) fn rule_lane(
-        &mut self,
-        job: IntakeJob,
-        replies: &std::sync::mpsc::SyncSender<OwnerReply>,
-    ) -> IntakeEvent {
-        let _ = replies;
-        IntakeEvent::failed(&job, "github_rule_unstarted")
+    /// requests while GitHub answers, which can take minutes. It first sends the worker's
+    /// finished answer, `RuleChanging` or the refusal, `github_rule_busy` while a switch
+    /// still runs; the switch's result comes after as an unfinished owner event. Takes the
+    /// switch job and the reply sender. Returns false once nobody reads the replies.
+    pub(super) fn rule_lane(&mut self, job: IntakeJob, replies: &SyncSender<OwnerReply>) -> bool {
+        replies
+            .send(OwnerReply {
+                finished: true,
+                event: OwnerEvent::Intake(Box::new(IntakeEvent::failed(
+                    &job,
+                    "github_rule_unstarted",
+                ))),
+            })
+            .is_ok()
     }
 
     async fn intake_view(&mut self, job: IntakeJob, lost: &mut bool) -> Result<IntakeView, String> {
