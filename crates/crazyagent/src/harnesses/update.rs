@@ -58,6 +58,9 @@ const ADMIN_GROUP: u32 = 80;
 /// while a named `brew upgrade` of the same cask does upgrade it.
 const GREEDY: &str = "--greedy-auto-updates";
 const MODULES: &str = "node_modules";
+const UPDATE_SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
+const SHELL_FLAGS: &str = "eupx";
+const NODE_FLAGS: [&str; 3] = ["--no-warnings", "--no-deprecation", "--enable-source-maps"];
 
 const _: () = assert!(3 + NPM_FLAGS_MAX <= ARGS_MAX);
 const _: () = assert!(VERSION_PARTS_MAX * 2 <= VERSION_BYTES_MAX);
@@ -824,8 +827,10 @@ fn checked(fixed: Fixed, places: &crate::tools::Places) -> Result<Fixed, &'stati
 /// copy must resolve, a link whose target is not there yet included, and the walk goes on
 /// from it; a copy behind it never runs. Each of those folders that exists must be one a
 /// lookup would trust ([`crate::tools::Places::kept_for_children`]), so no copy can appear
-/// there before the run (RV-DS241-203). Inputs: the command and the resolver's places.
-/// Output: the real file the resolver resolved the program to and checked, or `TOOL_UNSAFE`.
+/// there before the run (RV-DS241-203). Every interpreter on the way must run the script it
+/// is given and nothing it looks up ([`runs_its_script`]). Inputs: the command and the
+/// resolver's places. Output: the real file the resolver resolved the program to and
+/// checked, or `TOOL_UNSAFE`.
 fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<PathBuf, &'static str> {
     let kept = fixed.search.iter().all(|folder| {
         std::fs::symlink_metadata(folder).is_err() || places.kept_for_children(folder)
@@ -839,8 +844,8 @@ fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<PathBuf, &'sta
     for _ in 0..=crate::tools::INTERPRETER_DEPTH_MAX {
         let crate::tools::Kind::Script {
             interpreter,
+            arguments,
             by_name,
-            ..
         } = at.kind
         else {
             return Ok(program);
@@ -850,15 +855,45 @@ fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<PathBuf, &'sta
         } else {
             *interpreter
         };
+        if !runs_its_script(&at.program, &arguments) {
+            return Err(TOOL_UNSAFE);
+        }
     }
     Err(TOOL_UNSAFE)
 }
 
+/// Whether an interpreter an update command's script names runs that script and nothing it
+/// looks up by name, read by its real file: a shell given only `-e`, `-u`, `-p` and `-x`
+/// flags, as stock Homebrew's `#!/bin/bash -pu` (privileged mode reads no startup or
+/// environment files, so it only narrows), or Node given only flags that change no code it
+/// runs. Any other program, such as a launcher
+/// that runs a later word (`lockf`, `xargs`, `perl -S`), a shell given `-c` or another word,
+/// and Node given `-e`, is refused, so no shipped update command needs more (rv-sec3 B18 F2).
+/// Inputs: the interpreter's real file and the first line's words before the script.
+/// Output: the answer.
+fn runs_its_script(interpreter: &Path, arguments: &[String]) -> bool {
+    let name = interpreter.file_name().and_then(std::ffi::OsStr::to_str);
+    match name {
+        Some(name) if UPDATE_SHELLS.contains(&name) => arguments.iter().all(|word| {
+            word.strip_prefix('-').is_some_and(|flags| {
+                !flags.is_empty() && flags.chars().all(|flag| SHELL_FLAGS.contains(flag))
+            })
+        }),
+        Some("node" | "nodejs") => arguments
+            .iter()
+            .all(|word| NODE_FLAGS.contains(&word.as_str())),
+        _ => false,
+    }
+}
+
 /// The copy of an interpreter named by name that `env` takes in a command's run: the first
 /// entry of that name in the command's search folders, a dangling link included, since an
-/// agent could fill its target before the run. Inputs: the command, the interpreter the
-/// resolver found and the places. Output: that copy resolved, none when no search folder
-/// holds the name, or `TOOL_UNSAFE` when the first copy does not resolve.
+/// agent could fill its target before the run. A first copy the run's user cannot start,
+/// which `env` would pass over, does not resolve ([`crate::tools::resolve_entry`]), so the
+/// command fails closed rather than judging the copy behind it (rv-sec3 B18 F1). Inputs:
+/// the command, the interpreter the resolver found and the places. Output: that copy
+/// resolved, none when no search folder holds the name, or `TOOL_UNSAFE` when the first
+/// copy does not resolve.
 fn taken_copy(
     fixed: &Fixed,
     found: &Path,
