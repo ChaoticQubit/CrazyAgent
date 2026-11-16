@@ -106,9 +106,10 @@ const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROU
 /// machine busy with builds, and a server that never answers delays the start by 60 s only.
 pub(super) const CLAUDE_MCP_CONNECT_LIMIT: (&str, &str) = ("MCP_TIMEOUT", "60000");
 /// Turns Claude Code's auto-memory off for every agent launch, beside `autoMemoryEnabled`
-/// false in its settings (RV-DS241-205): the home reset keeps `projects` for transcripts,
-/// and a `projects/<key>/memory/MEMORY.md` one run wrote would otherwise load into every
-/// later session in that home, teammates included, as standing instructions.
+/// false in its settings (RV-DS241-205): the home reset keeps `projects` for transcripts and
+/// clears each `projects/<key>/memory` only at the next reset (B20), so a `MEMORY.md` one
+/// session wrote would otherwise load into every later session of that launch, teammates
+/// included, as standing instructions.
 pub(crate) const CLAUDE_AUTO_MEMORY_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
 const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"autoMemoryEnabled\":false,\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
 const CLAUDE_COMMON: [&str; 12] = [
