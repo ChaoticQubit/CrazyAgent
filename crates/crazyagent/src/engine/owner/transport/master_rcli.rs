@@ -473,7 +473,11 @@ impl OwnerRuntimeHandle {
     }
 }
 
-fn validate_turn(
+/// Checks that a master turn read again is still the turn being run: the same turn of the
+/// same session, and unless cancelled still preparing, delivering or running its own attempt
+/// on its own connection. Inputs: the prepared turn, its id and the turn as read. Output: Ok,
+/// or `master_runtime_binding` or `master_runtime_scope_revoked`.
+pub(super) fn validate_turn(
     prepared: &PreparedMasterTurn,
     turn_id: &RequestId,
     current: &MasterTurnView,

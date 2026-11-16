@@ -2,24 +2,34 @@
 #[path = "master_listed_tests.rs"]
 mod tests;
 
-use super::{EngineError, failure};
+use super::harness_catalog::listed_install;
+use super::master_runtime::{Capture, timed_out};
+use super::{EngineError, OwnerRuntimeHandle, failure};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::credentials::SecretString;
+use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::claude_host::MasterTools;
 use crate::harnesses::accounts::Handover;
 use crate::harnesses::launch::{
-    LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, RUN_TIME_MAX, Session, listed_command,
+    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, RUN_TIME_MAX, Session,
+    listed_command,
 };
 use crate::harnesses::registry::Harness;
 use crate::launch_context::EngineServer;
-use crate::master_session::{MasterReply, MasterReplyProvenance, fitted_reply};
+use crate::master_session::{
+    MasterBackend, MasterReply, MasterReplyProvenance, MasterRuntimeView, MasterTurnPhase,
+    MasterTurnView, fitted_reply,
+};
 use crate::model_gateway::relay::Relay;
 use crate::plugins::LaunchServer;
-use crate::storage::MasterRuntimeObservation;
+use crate::protocol::RequestId;
+use crate::storage::{MasterRuntimeObservation, PreparedMasterTurn};
 use crate::usage::capture::Tokens;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// The code of a listed master turn its harness ended as failed, without a rate limit.
@@ -41,6 +51,15 @@ const GATHERED_BYTES_MAX: usize = 4 * crate::master_session::REPLY_BYTES_MAX;
 /// How long one wait for a listed master's next event lasts before the turn reads its stop
 /// check again.
 const EVENT_WAIT: Duration = Duration::from_millis(100);
+/// How often a running listed master turn reads its stored turn again, for an owner's stop
+/// and a revoked scope.
+const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
+/// The cause of a listed master turn whose harness the engine could not be sure it stopped,
+/// which stores the turn as disconnected.
+const STOP_UNCERTAIN: &str = "master_runtime_cleanup_uncertain:listed_master_stop";
+/// The cause of a listed master turn whose process thread ended without handing back what
+/// its harness left, which stores the turn as disconnected.
+const THREAD_LOST: &str = "master_runtime_cleanup_uncertain:listed_master_thread";
 
 /// Carries a launch refusal over as the engine's error with the same code. Input: the
 /// refusal. Output: the error.
@@ -391,5 +410,436 @@ pub(super) fn turn_outcome(
         }
         Err(CANCELLED) => Ok(MasterRuntimeObservation::Cancelled),
         Err(code) => Err(failure(code)),
+    }
+}
+
+/// What a listed master turn stores for the error that ended it: disconnected when the
+/// engine could not be sure its harness stopped, else failed for the reason every master
+/// stops for. Input: the error. Output: the observation.
+fn failure_observation(error: &EngineError) -> MasterRuntimeObservation {
+    if error.0.starts_with("master_runtime_cleanup_uncertain:") {
+        return MasterRuntimeObservation::Disconnected;
+    }
+    MasterRuntimeObservation::Failed {
+        reason: super::master_runtime::reason_for_error(error),
+        cause: error.0.clone(),
+    }
+}
+
+/// The SHA-256 of the program a listed master turn runs, the artifact its stored run names,
+/// read as a stream just before the harness starts. Input: the program. Output: 64
+/// lowercase hex characters, or [`NOT_INSTALLED`] for a file that cannot be read.
+#[cfg(unix)]
+fn program_digest(program: &std::path::Path) -> Result<String, EngineError> {
+    crate::setup::process::file_sha256(program).map_err(|_| failure(NOT_INSTALLED))
+}
+
+/// Refuses the digest of a listed master's program where no listed master runs, as a
+/// listed master's home and launch need a Unix owner and mode to check. Takes the program,
+/// unused. Returns [`UNSUPPORTED`].
+#[cfg(not(unix))]
+fn program_digest(_program: &std::path::Path) -> Result<String, EngineError> {
+    Err(failure(UNSUPPORTED))
+}
+
+/// Everything one listed master turn's process needs once its account is handed over and
+/// its sandbox is set: the harness, the checked request whose home is the session's private
+/// home, the hand-over and its relay, if keyed, the instruction text, the prompt and the
+/// turn's capture.
+struct ListedTurn {
+    harness: &'static Harness,
+    request: LaunchRequest,
+    handover: Handover,
+    relay: Option<Relay>,
+    instructions: String,
+    prompt: String,
+    capture: Capture,
+}
+
+/// What one listed master turn's process left once its thread stopped it: what the turn
+/// gathered or why it ended without, how the stop went, [`STOP_UNCERTAIN`] when the engine
+/// could not be sure, and the turn's capture with every event recorded.
+struct ListedRun {
+    driven: Result<Collected, EngineError>,
+    stopped: Result<(), EngineError>,
+    capture: Capture,
+}
+
+/// How a listed master turn's thread and its async side talk: the stop flag the async side
+/// sets for an owner's stop or a revoked scope, the start report the thread sends once its
+/// harness runs, with its process group and program digest, and the go signal it waits on
+/// before the prompt.
+struct Signals {
+    stop: Arc<AtomicBool>,
+    started: tokio::sync::oneshot::Sender<Result<(u32, String), EngineError>>,
+    go: std::sync::mpsc::Receiver<bool>,
+}
+
+/// Opens one listed master turn's process: takes the private home's lock, writes the
+/// turn's files there under it, reads the program's digest and starts the harness holding
+/// the relay. Inputs: the harness, the request, the hand-over, the relay and the instruction
+/// text. Output: the lock, the running session and the digest, or the refusal.
+fn open_listed(
+    harness: &'static Harness,
+    request: LaunchRequest,
+    handover: &Handover,
+    relay: Option<Relay>,
+    instructions: &str,
+) -> Result<(crate::launch_context::Installed, Session, String), EngineError> {
+    let home = request.account.home();
+    let lock = crate::launch_context::lock_only(home, &harness.manifest().id)
+        .map_err(engine_error)?;
+    let launch = listed_launch(&ListedSpec {
+        harness,
+        request: &request,
+        handover,
+        tools: None,
+        instructions,
+    })?;
+    let artifact = program_digest(&request.executable)?;
+    let session = Session::start_listed(request, launch.command, relay, &launch.servers)
+        .map_err(engine_error)?;
+    assert!(crate::engine::owner::is_hex_id(&artifact));
+    Ok((lock, session, artifact))
+}
+
+/// Runs one listed master turn's process from start to stop on the thread it is called on,
+/// so the harness never outlives the turn: opens it, reports its process group and digest,
+/// drives the prompt once told to go, recording every event, then stops the harness whatever
+/// happened. Inputs: the turn and the signals. Output: what the process left.
+fn run_listed(turn: ListedTurn, signals: Signals) -> ListedRun {
+    let ListedTurn {
+        harness,
+        request,
+        handover,
+        relay,
+        instructions,
+        prompt,
+        mut capture,
+    } = turn;
+    let opened = open_listed(harness, request, &handover, relay, &instructions);
+    let (_lock, mut session, artifact) = match opened {
+        Ok(opened) => opened,
+        Err(error) => {
+            let _ = signals.started.send(Err(error.clone()));
+            return ListedRun {
+                driven: Err(error),
+                stopped: Ok(()),
+                capture,
+            };
+        }
+    };
+    let _ = signals.started.send(Ok((session.process_group(), artifact)));
+    let driven = match signals.go.recv() {
+        Ok(true) => {
+            let stop = || signals.stop.load(Ordering::SeqCst);
+            let mut record = |event: &LaunchEvent| capture.record(event);
+            drive_with(&mut session, &prompt, &stop, &mut record)
+        }
+        Ok(false) | Err(_) => Err(failure(CANCELLED)),
+    };
+    let stopped = session
+        .stop()
+        .map(|_| ())
+        .map_err(|_| failure(STOP_UNCERTAIN));
+    ListedRun {
+        driven,
+        stopped,
+        capture,
+    }
+}
+
+impl OwnerRuntimeHandle {
+    /// Runs one prepared listed master turn and stores how it ended (DEC-180 Task 20): its
+    /// reply, cancelled, or the reason it failed, a harness the engine could not be sure it
+    /// stopped stored as disconnected. Inputs: the prepared turn and its id. Output: the
+    /// stored turn, or the error that ended it.
+    pub(super) async fn launch_listed_master_turn(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+    ) -> Result<MasterTurnView, EngineError> {
+        match self.run_listed_master_turn(prepared, turn_id).await {
+            Ok(observation) => {
+                self.observe_master_turn(prepared, turn_id, observation)
+                    .await
+            }
+            Err(error) if error.0 == "master_runtime_profile_not_acquired" => {
+                self.inspect_master_turn(
+                    &prepared.session.project_id,
+                    &prepared.session.session_id,
+                    turn_id,
+                )
+                .await
+            }
+            Err(error) => {
+                let error = timed_out(error, prepared.time);
+                self.observe_master_turn(prepared, turn_id, failure_observation(&error))
+                    .await?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Sets up one listed master turn on this side: its binding, budget and program, its
+    /// account's custody use, the session's private home, the hand-over with the relay of a
+    /// keyed account, the capture and the sandbox, which reaches only the hand-over's address.
+    /// Inputs: the prepared turn and its id. Output: the observation to store, or the code.
+    async fn run_listed_master_turn(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+    ) -> Result<MasterRuntimeObservation, EngineError> {
+        let backend = prepared.session.selection.backend;
+        let connection = &prepared.attempt.connection;
+        let MasterBackend::Listed(listed) = backend else {
+            return Err(failure("master_runtime_binding"));
+        };
+        if prepared.session.current_turn.as_ref() != Some(turn_id)
+            || prepared.attempt.request.project_id != prepared.session.project_id
+            || !prepared.attempt_on_current_turn()
+            || *connection != prepared.profile.binding().connection
+            || !crate::master_session::backend_member(backend, connection)
+            || prepared.tools
+        {
+            return Err(failure("master_runtime_binding"));
+        }
+        let harness = crate::master_session::listed_master(listed)?;
+        let resources = &prepared.attempt.request.route.resources;
+        resources
+            .validate()
+            .map_err(|_| failure("master_runtime_budget_exhausted"))?;
+        let root = super::changes::engine_root(&self.authority)?;
+        let id = harness.manifest().id.as_str();
+        let search = self.harness_search()?;
+        let (entry, installed) = listed_install(&self.engine, root.clone(), search, id)
+            .await;
+        let program = listed_program(harness, entry.as_deref(), installed.as_deref())?;
+        let (custody, _hold) = self.acquire_master_profile(prepared, turn_id).await?;
+        let current = self
+            .inspect_master_turn(
+                &prepared.session.project_id,
+                &prepared.session.session_id,
+                turn_id,
+            )
+            .await?;
+        super::master_rcli::validate_turn(prepared, turn_id, &current)?;
+        if current.phase == MasterTurnPhase::Cancelled {
+            return Ok(MasterRuntimeObservation::Cancelled);
+        }
+        let generation = current.ordinal;
+        custody.revalidate(
+            &self.identity(),
+            prepared.profile.binding(),
+            turn_id,
+            generation,
+            NativeProfileUsePurpose::Execution,
+        )?;
+        let slot = custody.profile_path()?;
+        let session_id = &prepared.session.session_id;
+        let home = listed_home(&slot, session_id, harness, &connection.id)?;
+        let key = match &connection.auth {
+            ModelAuthentication::ApiKey { credential_ref } => Some(
+                crate::storage::accounts::read_key_file(&root, credential_ref)?
+                    .ok_or_else(|| failure("account_key_missing"))?,
+            ),
+            _ => None,
+        };
+        let (handover, relay) = hand_over(harness, connection, key)?;
+        let given = crate::agent_home::text(&prepared.agent_project)
+            .map_err(|problem| EngineError(problem.0))?;
+        let instructions = instruction_text(&prepared.instructions, given);
+        let (runtime_ref, capture_ref, file) = self.allocate_master_capture()?;
+        let _folder =
+            super::master_host_launch::MasterRuntimeFolder::new(&self.authority.root, &runtime_ref);
+        let endpoint = ModelEndpoint::Http {
+            url: handover.base_url().to_owned(),
+        };
+        let sandbox = super::master_host_launch::master_sandbox(
+            &self.authority.root,
+            &runtime_ref,
+            &prepared.repository,
+            &prepared.cwd,
+            &home,
+            &program,
+            &endpoint,
+            &prepared.agent_policy,
+            &prepared.hidden_paths,
+        )?;
+        if sandbox.is_unconfined() {
+            return Err(failure("launch_environment_refused"));
+        }
+        let capture = Capture::new(file, resources.output_bytes)?;
+        let request = LaunchRequest {
+            harness: id.to_owned(),
+            executable: program,
+            working_dir: prepared.cwd.clone(),
+            account: AccountBinding::Url {
+                home,
+                base_url: handover.base_url().to_owned(),
+                key: None,
+            },
+            model: Some(handover.model().to_owned()),
+            tools: false,
+            sandbox_profile: Some(sandbox.profile().to_path_buf()),
+            unconfined: false,
+            git_identity: None,
+            limits: turn_limits(prepared.time, prepared.provider_retry),
+        };
+        let turn = ListedTurn {
+            harness,
+            request,
+            handover,
+            relay,
+            instructions,
+            prompt: prepared.text.clone(),
+            capture,
+        };
+        let refs = (runtime_ref, capture_ref);
+        self.drive_listed(prepared, turn_id, &custody, generation, turn, refs)
+            .await
+    }
+
+    /// Runs one listed master turn's process on a thread of its own and waits for it: once
+    /// the harness runs, its group and the turn as running are stored and the prompt goes,
+    /// and while it works the stored turn is read again, telling the thread to stop for an
+    /// owner's stop or a revoked scope. Every path waits for the thread to end. Inputs: the
+    /// turn's parts. Output: the observation to store, or the stop code.
+    async fn drive_listed(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        custody: &NativeProfileUse,
+        generation: u64,
+        turn: ListedTurn,
+        (runtime_ref, capture_ref): (RequestId, RequestId),
+    ) -> Result<MasterRuntimeObservation, EngineError> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (started, opened) = tokio::sync::oneshot::channel();
+        let (go, going) = std::sync::mpsc::channel();
+        let signals = Signals {
+            stop: Arc::clone(&stop),
+            started,
+            go: going,
+        };
+        let mut running = tokio::task::spawn_blocking(move || run_listed(turn, signals));
+        let opened = opened.await.unwrap_or_else(|_| Err(failure(THREAD_LOST)));
+        let begun = match &opened {
+            Ok((group, artifact)) => {
+                let runtime = MasterRuntimeView {
+                    runtime_ref: runtime_ref.clone(),
+                    artifact_sha256: artifact.clone(),
+                    native_session_id: None,
+                };
+                self.begin_listed(prepared, turn_id, *group, runtime).await
+            }
+            Err(_) => Ok(false),
+        };
+        let _ = go.send(matches!(begun, Ok(true)));
+        let mut cancelled = matches!(begun, Ok(false));
+        let mut scope = None;
+        let joined = loop {
+            tokio::select! {
+                joined = &mut running => break joined,
+                () = tokio::time::sleep(INSPECT_INTERVAL), if !stop.load(Ordering::SeqCst) => {
+                    let read = self.inspect_listed(prepared, turn_id, generation, custody);
+                    match read.await {
+                        Ok(current) => cancelled |= current.phase == MasterTurnPhase::Cancelled,
+                        Err(error) => scope = Some(error),
+                    }
+                    stop.store(cancelled || scope.is_some(), Ordering::SeqCst);
+                }
+            }
+        };
+        let run = joined.map_err(|_| failure(THREAD_LOST))?;
+        opened?;
+        let ListedRun {
+            driven,
+            stopped,
+            capture,
+        } = run;
+        let tokens = driven.as_ref().ok().and_then(|collected| collected.tokens);
+        self.count_master_usage(prepared, None, tokens.unwrap_or_default())
+            .await;
+        let finished = if capture.sequence() > 0 {
+            capture.finish()
+        } else {
+            Ok(())
+        };
+        stopped?;
+        begun?;
+        if let Some(error) = scope {
+            return Err(error);
+        }
+        finished?;
+        if cancelled {
+            return Ok(MasterRuntimeObservation::Cancelled);
+        }
+        let provenance = MasterReplyProvenance {
+            attempt_id: prepared.attempt.request.id.clone(),
+            runtime_ref,
+            capture_ref,
+            capture_sequence: capture.sequence(),
+        };
+        let outcome = turn_outcome(driven?, provenance)?;
+        let replied = matches!(outcome, MasterRuntimeObservation::Response { .. });
+        assert!(!replied || capture.sequence() > 0);
+        Ok(outcome)
+    }
+
+    /// Stores one listed master turn as running once its harness runs: its process group
+    /// first, then its runtime. Inputs: the prepared turn, its id, the group and the runtime.
+    /// Output: true to send the prompt, false for a turn the owner stopped first, or the
+    /// refusal that ends the turn.
+    async fn begin_listed(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        group: u32,
+        runtime: MasterRuntimeView,
+    ) -> Result<bool, EngineError> {
+        self.record_master_child(prepared, turn_id, Some(group))
+            .await?;
+        let running = self
+            .observe_master_turn(
+                prepared,
+                turn_id,
+                MasterRuntimeObservation::Running { runtime },
+            )
+            .await?;
+        Ok(running.phase != MasterTurnPhase::Cancelled)
+    }
+
+    /// Reads one running listed master turn again, refused once its turn, attempt or
+    /// generation changed or its custody use no longer holds. Inputs: the prepared turn, its
+    /// id, the generation and the custody use. Output: the stored turn, or the refusal.
+    async fn inspect_listed(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        generation: u64,
+        custody: &NativeProfileUse,
+    ) -> Result<MasterTurnView, EngineError> {
+        let current = self
+            .inspect_master_turn(
+                &prepared.session.project_id,
+                &prepared.session.session_id,
+                turn_id,
+            )
+            .await?;
+        super::master_rcli::validate_turn(prepared, turn_id, &current)?;
+        if current.ordinal != generation {
+            return Err(failure("master_runtime_scope_revoked"));
+        }
+        if current.phase != MasterTurnPhase::Cancelled {
+            custody.revalidate(
+                &self.identity(),
+                prepared.profile.binding(),
+                turn_id,
+                generation,
+                NativeProfileUsePurpose::Execution,
+            )?;
+        }
+        Ok(current)
     }
 }

@@ -763,6 +763,9 @@ impl OwnerRuntimeHandle {
             Ok(()) if prepared.session.selection.backend == MasterBackend::Rcli => {
                 return self.launch_rcli_master_turn(&prepared, turn_id).await;
             }
+            Ok(()) if matches!(prepared.session.selection.backend, MasterBackend::Listed(_)) => {
+                return self.launch_listed_master_turn(&prepared, turn_id).await;
+            }
             Ok(()) => self.launch_master_turn(&prepared, turn_id).await,
             Err(error) => Err(error),
         };
