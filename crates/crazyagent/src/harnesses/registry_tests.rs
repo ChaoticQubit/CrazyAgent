@@ -273,7 +273,8 @@ fn a_harness_speaks_the_wire_formats_its_manifest_lists_and_a_star_ends_a_prefix
     assert!(!speaks("codex", "native"));
     assert!(!speaks("codex", "open"));
     assert!(speaks("rcli", "anthropic-messages"));
-    assert!(speaks("rcli", ""));
+    assert!(!speaks("rcli", ""));
+    assert!(!speaks("rcli", "gemini"));
     let mut silent = 0;
     for harness in registry().all() {
         if harness.account_protocols().is_empty() {
