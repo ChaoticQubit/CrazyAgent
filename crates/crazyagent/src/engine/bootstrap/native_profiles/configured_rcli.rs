@@ -468,9 +468,10 @@ impl NativeProfileCustody {
     /// undid put that very config back: same file, same change time (rv-sec3 G4 r2 F1). A
     /// config written and restored any other way, as a confined master can, stays refused,
     /// with rcli_profile_changed_in_conversation when only the times moved under the same
-    /// connection, which a new conversation's register clears, else
-    /// rcli_profile_identity_changed (rv-code4 B22 F3). Inputs: host, connection, profile
-    /// reference and the home the slot pins. Output: the slot metadata, or that refusal.
+    /// connection, which a new conversation's register clears (rv-code4 B22 F3), else as
+    /// the owner's register names it: rcli_profile_config_changed for other bytes, else
+    /// rcli_profile_identity_changed (R2-F1). Inputs: host, connection, profile reference
+    /// and the home the slot pins. Output: the slot metadata, or that refusal.
     pub(crate) fn register_undone_configured_rcli_profile(
         &mut self,
         host: &HostStamp,
@@ -487,6 +488,8 @@ impl NativeProfileCustody {
             return Err(failure(
                 if pinned.connection == *connection && times_only(&pinned.configured, live) {
                     "rcli_profile_changed_in_conversation"
+                } else if pinned.configured.config_sha256 != live.config_sha256 {
+                    "rcli_profile_config_changed"
                 } else {
                     "rcli_profile_identity_changed"
                 },

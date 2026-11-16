@@ -3987,8 +3987,9 @@ fn register_rcli_profile(
 /// save put back with a new change time this engine run (rv-sec3 G4 r2 F1, rv-code4 B22
 /// F2). Inputs: the actor database, settings, custody, host and the session. Output: Ok; a
 /// member that cannot register is left for its turn check to name, except the owner's
-/// chosen member, whose failure stops the preparation: any failure with an unchanged home,
-/// and rcli_profile_changed_in_conversation on its pinned home (rv-code4 B22 F3).
+/// chosen member, whose failure stops the preparation: any failure with an unchanged home
+/// or on a pinned home a stale registration led to, whose turn check would only say stale
+/// (rv-code4 B22 R2-F1), and rcli_profile_changed_in_conversation on any pinned home (F3).
 fn register_generated_rcli_profile(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -4041,7 +4042,8 @@ fn register_generated_rcli_profile(
                     }) else {
                         continue;
                     };
-                    (Some(record), Some(pinned))
+                    let rebound = failure.0 == "master_configured_receipt_stale";
+                    (Some(record), Some((pinned, rebound)))
                 }
                 Ok(()) | Err(_) => continue,
             },
@@ -4052,9 +4054,10 @@ fn register_generated_rcli_profile(
     drop(tx);
     assert!(pending.len() <= crate::config::POOL_MEMBERS_MAX);
     for (member, account, stale, chosen, pinned) in pending {
+        let rebound = pinned.as_ref().is_some_and(|(_, rebound)| *rebound);
         let undone = pinned.is_some();
         let home = match pinned {
-            Some(pinned) => pinned,
+            Some((pinned, _)) => pinned,
             None => custody
                 .as_ref()
                 .map_err(|failure| failure.clone())?
@@ -4083,7 +4086,7 @@ fn register_generated_rcli_profile(
         };
         if let Err(failure) = registered
             && chosen
-            && (!undone || failure.0 == "rcli_profile_changed_in_conversation")
+            && (!undone || rebound || failure.0 == "rcli_profile_changed_in_conversation")
         {
             return Err(failure);
         }
