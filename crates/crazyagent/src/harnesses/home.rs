@@ -403,6 +403,25 @@ pub(crate) fn listed_folder(
     walk(home, below, step)
 }
 
+/// Opens one file of a listed private home to read: the folder it sits in reached by the
+/// no-follow walk of [`listed_folder`], the file opened in that folder without following a
+/// link or waiting on a FIFO, so a link planted at the harness or account folder is
+/// refused, never read through (T18 LEAD-1). Inputs: the home, the plain folders below it
+/// and the file's plain name. Output: the open folder and file, or none.
+#[cfg(unix)]
+pub(crate) fn open_listed(
+    home: &Path,
+    folders: &[&str],
+    name: &str,
+) -> Option<(std::os::fd::OwnedFd, std::fs::File)> {
+    use rustix::fs::{Mode, OFlags};
+    assert!(!name.is_empty() && name != "." && name != ".." && !name.contains('/'));
+    let folder = listed_folder(home, None, folders, Walk::Open).ok()?;
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let file = rustix::fs::openat(&folder, name, flags, Mode::empty()).ok()?;
+    Some((folder, std::fs::File::from(file)))
+}
+
 /// Refuses a private home where its Unix owner and 0700 mode cannot be checked. Inputs:
 /// unused. Output: `launch_account_home_unavailable`.
 #[cfg(not(unix))]

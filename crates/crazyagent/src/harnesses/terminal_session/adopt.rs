@@ -279,13 +279,42 @@ impl PaneRecord {
 
     /// Guards the key file the record names, as the pane's launch wrote it. The file sits in
     /// the agent-writable account home, so it is read through one open that follows no link
-    /// and waits on no FIFO, and taken only as a regular file of at most
-    /// `KEY_FILE_BYTES_MAX` bytes. Input: the record. Output: the guard, or none.
+    /// and waits on no FIFO, a listed pane's only through [`listed_key_file`], and taken
+    /// only as a regular file of at most `KEY_FILE_BYTES_MAX` bytes. Input: the record.
+    /// Output: the guard, or none.
     fn key_file(&self) -> Option<KeyFile> {
         let path = self.key.as_ref()?;
+        if let Some(files) = self.context.as_ref().filter(|files| files.listed) {
+            return listed_key_file(&files.home, path);
+        }
         let content = crate::platform::read_plain_file(path, KEY_FILE_BYTES_MAX)?;
         Some(KeyFile::new(path.clone(), content.as_bytes()))
     }
+}
+
+/// Guards a listed pane's key file, read only through the no-follow walk from the agent
+/// home ([`crate::harnesses::home::open_listed`], T18 LEAD-1), when the record names the
+/// key file of the pane's own private home. Inputs: the private home and the path the
+/// record names. Output: the guard, or none for another path, a link on the way or a file
+/// that is not plain.
+#[cfg(unix)]
+fn listed_key_file(home: &Path, path: &Path) -> Option<KeyFile> {
+    let name = path.file_name().and_then(|name| name.to_str());
+    let name = name.filter(|name| *name == interactive::KEY_FILE)?;
+    if path.parent() != Some(home) {
+        return None;
+    }
+    let (_, file) = crate::harnesses::home::open_listed(home, &[], name)?;
+    let content = crate::platform::read_plain(file, KEY_FILE_BYTES_MAX)?;
+    Some(KeyFile::listed(path.to_path_buf(), content.as_bytes()))
+}
+
+/// Takes no listed key file where none is ever written, as `put_key` refuses every listed
+/// key file there. Inputs: the private home and the path, both unused. Output: none.
+#[cfg(not(unix))]
+fn listed_key_file(home: &Path, path: &Path) -> Option<KeyFile> {
+    let _ = (home, path);
+    None
 }
 
 /// What an adoption's read of a pane's record learned of the turn at the record's end.

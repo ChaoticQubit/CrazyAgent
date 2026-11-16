@@ -278,7 +278,10 @@ fn put_in(home: &Path, folders: &[&str], name: &str, bytes: &[u8]) -> Result<(),
         .and_then(|()| file.sync_all())
         .map_err(unwritable)?;
     let metadata = file.metadata().map_err(unwritable)?;
-    assert!(metadata.len() == bytes.len() as u64 && metadata.mode() & 0o077 == 0);
+    if metadata.mode() & 0o077 != 0 {
+        return Err(failure("launch_account_home_unsafe"));
+    }
+    assert_eq!(metadata.len(), bytes.len() as u64);
     Ok(())
 }
 
